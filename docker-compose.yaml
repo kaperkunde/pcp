@@ -1,0 +1,23 @@
+# Runs PCP on port 3000 with its data in a named volume. No environment
+# variables are needed: open http://localhost:3000 and set up the owner.
+#
+#   docker compose up -d
+#
+# Put a TLS-terminating proxy in front of it for anything beyond a LAN:
+# the session cookie is only marked Secure when requests arrive over https
+# (X-Forwarded-Proto), and OAuth servers generally require https redirect
+# URLs. If PCP guesses its public address wrong behind the proxy, pin it
+# under Settings.
+services:
+  pcp:
+    # Built from this checkout. No image is published yet; once one is,
+    # replace `build: .` with its `image:` reference.
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - pcp-data:/data
+
+volumes:
+  pcp-data:

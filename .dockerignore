@@ -1,0 +1,16 @@
+.git
+.gitignore
+.next
+node_modules
+data
+npm-debug.log*
+pnpm-debug.log*
+.env
+.env.*
+README.md
+.husky
+e2e/.artifacts
+e2e/.auth
+e2e/.state
+test-results
+playwright-report
