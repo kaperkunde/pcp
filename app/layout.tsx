@@ -1,4 +1,4 @@
-import type { Metadata } from "next"
+import type { Metadata, Viewport } from "next"
 import { Inter, JetBrains_Mono } from "next/font/google"
 
 import "./globals.css"
@@ -12,6 +12,8 @@ export const metadata: Metadata = {
     "A self-hosted gateway to your MCP servers, with the secrets they need kept encrypted.",
   robots: { index: false, follow: false },
 }
+
+export const viewport: Viewport = { themeColor: "#131720" }
 
 export default function RootLayout({
   children,

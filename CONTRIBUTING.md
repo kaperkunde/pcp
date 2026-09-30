@@ -77,6 +77,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `app/mcp/route.ts`                 | The gateway endpoint                                         |
 | `app/api/servers/[id]/oauth/`      | OAuth start and callback routes                              |
 | `e2e/fixtures/upstream.ts`         | The fake MCP + OAuth server the e2e suite talks to           |
+| `app/manifest.ts`, `public/icons/` | The manifest and icon set; `assets/icon.png` is the master   |
 
 ## Licence
 
