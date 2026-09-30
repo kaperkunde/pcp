@@ -1,0 +1,358 @@
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http"
+import { randomBytes, createHash } from "node:crypto"
+import type { AddressInfo } from "node:net"
+
+import {
+  createMcpHandler,
+  McpServer,
+  type McpHttpHandler,
+} from "@modelcontextprotocol/server"
+import { z } from "zod"
+
+/**
+ * A stand-in for the MCP servers PCP proxies to, for the e2e suite:
+ *
+ * - `/mcp` — an MCP server with a few tools, protected by a bearer token
+ *   (`expectedToken`) when one is set. `echo_auth` returns the Authorization
+ *   header it received, which is how the tests prove the secret PCP holds
+ *   reached the upstream and nothing else did.
+ * - `/oauth/mcp` — the same server behind OAuth: an authorization server
+ *   with metadata, dynamic client registration, an authorize page that
+ *   approves at once, and a token endpoint. Enough for the real SDK flow
+ *   PCP runs, nothing more.
+ *
+ * Everything is in memory. Start one per test file.
+ */
+
+type Registered = { client_id: string; redirect_uris: string[] }
+type Code = { client_id: string; redirect_uri: string; challenge: string }
+
+export type Upstream = {
+  origin: string
+  mcpUrl: string
+  oauthMcpUrl: string
+  expectedToken: string
+  /** Tokens the fake authorization server has issued. */
+  issuedTokens: Set<string>
+  /** Every tools/call the server handled, in order. */
+  calls: Array<{
+    tool: string
+    args: Record<string, unknown>
+    authorization: string | null
+  }>
+  close: () => Promise<void>
+}
+
+function buildServer(
+  calls: Upstream["calls"],
+  authorization: () => string | null,
+): McpServer {
+  const server = new McpServer(
+    { name: "fake-upstream", version: "1.0.0" },
+    {
+      instructions: "A pretend service with a few tools, used to test PCP.",
+    },
+  )
+
+  server.registerTool(
+    "echo_auth",
+    {
+      title: "Echo authorization",
+      description:
+        "Returns the Authorization header this server received, to prove which credential reached it.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      calls.push({
+        tool: "echo_auth",
+        args: {},
+        authorization: authorization(),
+      })
+      return {
+        content: [{ type: "text", text: authorization() ?? "(none)" }],
+      }
+    },
+  )
+
+  server.registerTool(
+    "add_numbers",
+    {
+      title: "Add numbers",
+      description: "Adds two numbers together and returns the sum.",
+      inputSchema: z.object({
+        a: z.number().describe("First number"),
+        b: z.number().describe("Second number"),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ a, b }) => {
+      calls.push({
+        tool: "add_numbers",
+        args: { a, b },
+        authorization: authorization(),
+      })
+      return { content: [{ type: "text", text: String(a + b) }] }
+    },
+  )
+
+  server.registerTool(
+    "send_postcard",
+    {
+      title: "Send a postcard",
+      description:
+        "Mails a postcard with a message to an address. Irreversible.",
+      inputSchema: z.object({
+        to: z.string().describe("Recipient"),
+        message: z.string().describe("What to write"),
+      }),
+      annotations: { destructiveHint: true },
+    },
+    async ({ to, message }) => {
+      calls.push({
+        tool: "send_postcard",
+        args: { to, message },
+        authorization: authorization(),
+      })
+      return { content: [{ type: "text", text: `Sent to ${to}: ${message}` }] }
+    },
+  )
+
+  return server
+}
+
+async function readBody(request: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = []
+  for await (const chunk of request) {
+    chunks.push(chunk as Buffer)
+  }
+  return Buffer.concat(chunks).toString("utf8")
+}
+
+function toWebRequest(
+  request: IncomingMessage,
+  origin: string,
+  body: string,
+): Request {
+  const headers = new Headers()
+  for (const [key, value] of Object.entries(request.headers)) {
+    if (typeof value === "string") headers.set(key, value)
+    else if (Array.isArray(value)) headers.set(key, value.join(", "))
+  }
+  const method = request.method ?? "GET"
+  return new Request(new URL(request.url ?? "/", origin), {
+    method,
+    headers,
+    body: method === "GET" || method === "HEAD" ? undefined : body,
+  })
+}
+
+async function sendWebResponse(response: Response, res: ServerResponse) {
+  res.statusCode = response.status
+  response.headers.forEach((value, key) => res.setHeader(key, value))
+  if (!response.body) {
+    res.end()
+    return
+  }
+  const reader = response.body.getReader()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    res.write(value)
+  }
+  res.end()
+}
+
+function json(res: ServerResponse, status: number, body: unknown) {
+  res.statusCode = status
+  res.setHeader("content-type", "application/json")
+  res.end(JSON.stringify(body))
+}
+
+export async function startUpstream({
+  expectedToken = `upstream-secret-${randomBytes(6).toString("hex")}`,
+}: { expectedToken?: string } = {}): Promise<Upstream> {
+  const calls: Upstream["calls"] = []
+  const issuedTokens = new Set<string>()
+  const clients = new Map<string, Registered>()
+  const codes = new Map<string, Code>()
+  let origin = ""
+
+  // The Authorization header of the request being served, read by the
+  // tools above. One request is served at a time in these tests.
+  let currentAuthorization: string | null = null
+
+  const handlers: Record<string, McpHttpHandler> = {
+    "/mcp": createMcpHandler(
+      () => buildServer(calls, () => currentAuthorization),
+      {
+        legacy: "stateless",
+      },
+    ),
+    "/oauth/mcp": createMcpHandler(
+      () => buildServer(calls, () => currentAuthorization),
+      {
+        legacy: "stateless",
+      },
+    ),
+  }
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", origin)
+    const body = await readBody(req)
+    const authorization = req.headers.authorization ?? null
+
+    try {
+      if (url.pathname === "/mcp") {
+        if (authorization !== `Bearer ${expectedToken}`) {
+          return json(res, 401, { error: "unauthorized" })
+        }
+        currentAuthorization = authorization
+        return await sendWebResponse(
+          await handlers["/mcp"].fetch(toWebRequest(req, origin, body)),
+          res,
+        )
+      }
+
+      if (url.pathname === "/oauth/mcp") {
+        const token = authorization?.replace(/^Bearer\s+/i, "")
+        if (!token || !issuedTokens.has(token)) {
+          res.setHeader(
+            "WWW-Authenticate",
+            `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/oauth/mcp"`,
+          )
+          return json(res, 401, { error: "unauthorized" })
+        }
+        currentAuthorization = authorization
+        return await sendWebResponse(
+          await handlers["/oauth/mcp"].fetch(toWebRequest(req, origin, body)),
+          res,
+        )
+      }
+
+      if (url.pathname === "/.well-known/oauth-protected-resource/oauth/mcp") {
+        return json(res, 200, {
+          resource: `${origin}/oauth/mcp`,
+          authorization_servers: [origin],
+        })
+      }
+
+      if (url.pathname === "/.well-known/oauth-authorization-server") {
+        return json(res, 200, {
+          issuer: origin,
+          authorization_endpoint: `${origin}/authorize`,
+          token_endpoint: `${origin}/token`,
+          registration_endpoint: `${origin}/register`,
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code", "refresh_token"],
+          code_challenge_methods_supported: ["S256"],
+          token_endpoint_auth_methods_supported: ["none"],
+          scopes_supported: ["postcards"],
+        })
+      }
+
+      if (url.pathname === "/register" && req.method === "POST") {
+        const metadata = JSON.parse(body) as { redirect_uris?: string[] }
+        const client_id = `client-${randomBytes(4).toString("hex")}`
+        clients.set(client_id, {
+          client_id,
+          redirect_uris: metadata.redirect_uris ?? [],
+        })
+        return json(res, 201, {
+          client_id,
+          redirect_uris: metadata.redirect_uris ?? [],
+          token_endpoint_auth_method: "none",
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+        })
+      }
+
+      if (url.pathname === "/authorize") {
+        const clientId = url.searchParams.get("client_id") ?? ""
+        const redirectUri = url.searchParams.get("redirect_uri") ?? ""
+        const client = clients.get(clientId)
+        if (!client || !client.redirect_uris.includes(redirectUri)) {
+          return json(res, 400, { error: "invalid_client" })
+        }
+        // A real server shows a consent screen; this one says yes.
+        const code = `code-${randomBytes(8).toString("hex")}`
+        codes.set(code, {
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          challenge: url.searchParams.get("code_challenge") ?? "",
+        })
+        const back = new URL(redirectUri)
+        back.searchParams.set("code", code)
+        back.searchParams.set("state", url.searchParams.get("state") ?? "")
+        back.searchParams.set("iss", origin)
+        res.statusCode = 302
+        res.setHeader("location", back.toString())
+        return res.end()
+      }
+
+      if (url.pathname === "/token" && req.method === "POST") {
+        const form = new URLSearchParams(body)
+        if (form.get("grant_type") === "authorization_code") {
+          const code = codes.get(form.get("code") ?? "")
+          const verifier = form.get("code_verifier") ?? ""
+          const expected = createHash("sha256")
+            .update(verifier)
+            .digest("base64url")
+          if (
+            !code ||
+            code.client_id !== form.get("client_id") ||
+            code.challenge !== expected
+          ) {
+            return json(res, 400, { error: "invalid_grant" })
+          }
+          codes.delete(form.get("code") ?? "")
+        } else if (form.get("grant_type") === "refresh_token") {
+          if (!issuedTokens.has(`refresh:${form.get("refresh_token")}`)) {
+            return json(res, 400, { error: "invalid_grant" })
+          }
+        } else {
+          return json(res, 400, { error: "unsupported_grant_type" })
+        }
+        const access = `access-${randomBytes(8).toString("hex")}`
+        const refresh = `refresh-${randomBytes(8).toString("hex")}`
+        issuedTokens.add(access)
+        issuedTokens.add(`refresh:${refresh}`)
+        return json(res, 200, {
+          access_token: access,
+          token_type: "Bearer",
+          expires_in: 3600,
+          refresh_token: refresh,
+          scope: "postcards",
+        })
+      }
+
+      json(res, 404, { error: "not_found" })
+    } catch (error) {
+      console.error("[fake-upstream]", error)
+      if (!res.headersSent) json(res, 500, { error: "internal" })
+      else res.end()
+    }
+  })
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const { port } = server.address() as AddressInfo
+  origin = `http://127.0.0.1:${port}`
+
+  return {
+    origin,
+    mcpUrl: `${origin}/mcp`,
+    oauthMcpUrl: `${origin}/oauth/mcp`,
+    expectedToken,
+    issuedTokens,
+    calls,
+    close: () =>
+      new Promise((resolve, reject) => {
+        for (const handler of Object.values(handlers)) void handler.close()
+        server.close((error) => (error ? reject(error) : resolve()))
+      }),
+  }
+}
