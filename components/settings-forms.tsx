@@ -1,11 +1,10 @@
 "use client"
 
-import { useActionState, useState, useTransition } from "react"
+import { useActionState, type FormEvent } from "react"
 
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -13,8 +12,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Checkbox, Input } from "@/components/ui/input"
+import { Field, Label } from "@/components/ui/label"
 import {
   changePasswordAction,
   rotateRecoveryKeyAction,
@@ -129,19 +128,17 @@ export function ChangePasswordForm() {
 }
 
 export function RecoveryKeyCard() {
-  const [pending, startTransition] = useTransition()
-  const [result, setResult] = useState<SettingsResult>({ status: "idle" })
+  const [state, action] = useActionState<SettingsResult, FormData>(
+    rotateRecoveryKeyAction,
+    { status: "idle" },
+  )
 
-  function rotate() {
+  function confirmRotation(event: FormEvent<HTMLFormElement>) {
     if (
       !window.confirm("Make a new recovery key? The current one stops working.")
     ) {
-      return
+      event.preventDefault()
     }
-
-    startTransition(async () => {
-      setResult(await rotateRecoveryKeyAction())
-    })
   }
 
   return (
@@ -150,40 +147,82 @@ export function RecoveryKeyCard() {
         <CardTitle>Recovery key</CardTitle>
         <CardDescription>
           The key from setup. Make a new one if you did not save it, or think
-          someone else has it.
+          someone else has it. It opens the vault without the password, so PCP
+          asks for your password before it makes one.
         </CardDescription>
       </CardHeader>
-      <CardContent className="items-start">
-        {result.status === "ok" && result.recoveryKey ? (
+      <CardContent>
+        {state.status === "ok" && state.recoveryKey ? (
           <>
-            <CopyableValue value={result.recoveryKey} testId="recovery-key" />
+            <CopyableValue value={state.recoveryKey} testId="recovery-key" />
             <FormNote message="Save it now; it is not stored anywhere." />
           </>
         ) : null}
-        <FormError error={result.status === "error" ? result.error : null} />
-        <Button variant="outline" disabled={pending} onClick={rotate}>
-          {pending ? "Making a new key…" : "Make a new recovery key"}
-        </Button>
+        <form
+          action={action}
+          onSubmit={confirmRotation}
+          className="flex flex-col gap-4"
+        >
+          <Field label="Your password" htmlFor="settings-recovery-password">
+            <Input
+              id="settings-recovery-password"
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              required
+            />
+          </Field>
+          <FormError error={state.status === "error" ? state.error : null} />
+          <div>
+            <SubmitButton variant="outline" pendingText="Making a new key…">
+              Make a new recovery key
+            </SubmitButton>
+          </div>
+        </form>
       </CardContent>
     </Card>
   )
 }
 
 export function SessionsCard() {
+  function confirmRevocation(event: FormEvent<HTMLFormElement>) {
+    const revoking = new FormData(event.currentTarget).get("revokeTokens")
+
+    if (
+      revoking &&
+      !window.confirm(
+        "Revoke every API token too? Assistants using them stop working at once.",
+      )
+    ) {
+      event.preventDefault()
+    }
+  }
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Sessions</CardTitle>
         <CardDescription>
-          Sign every browser out, including this one. API tokens are separate:
-          revoke those under API tokens.
+          Sign every browser out, including this one. If you think someone else
+          has had your password or a token, revoke every API token as well; your
+          assistants will need new ones.
         </CardDescription>
       </CardHeader>
       <CardContent className="items-start">
-        <form action={signOutEverywhereAction}>
-          <SubmitButton variant="outline" pendingText="Signing out…">
-            Sign out everywhere
-          </SubmitButton>
+        <form
+          action={signOutEverywhereAction}
+          onSubmit={confirmRevocation}
+          className="flex flex-col gap-4"
+        >
+          <Label className="font-normal">
+            <Checkbox name="revokeTokens" />
+            Also revoke every API token
+          </Label>
+          <div>
+            <SubmitButton variant="outline" pendingText="Signing out…">
+              Sign out everywhere
+            </SubmitButton>
+          </div>
         </form>
       </CardContent>
     </Card>

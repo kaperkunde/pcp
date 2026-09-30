@@ -178,6 +178,19 @@ function CreateTokenForm({
               </div>
             ) : null}
           </fieldset>
+          <Field
+            label="Your password"
+            htmlFor="token-password"
+            hint="A token is a lasting way into your vault, so PCP asks for your password before it makes one."
+          >
+            <Input
+              id="token-password"
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              required
+            />
+          </Field>
           <FormError error={state.status === "error" ? state.error : null} />
           <div>
             <SubmitButton pendingText="Creating…">Create token</SubmitButton>

@@ -6,8 +6,8 @@ import { useActionState } from "react"
 import { FormError } from "@/components/form-status"
 import { SubmitButton } from "@/components/submit-button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Checkbox, Input } from "@/components/ui/input"
+import { Field, Label } from "@/components/ui/label"
 import { recoverAction, type RecoverResult } from "@/lib/actions/auth"
 import { MIN_PASSWORD_LENGTH } from "@/lib/core/constants"
 
@@ -51,6 +51,16 @@ export function RecoverForm() {
               minLength={MIN_PASSWORD_LENGTH}
             />
           </Field>
+          <div className="flex flex-col gap-1.5">
+            <Label className="font-normal">
+              <Checkbox name="revokeTokens" />
+              Also revoke every API token
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              Do this if you think someone else has had your password or a
+              token. Your assistants will need new tokens.
+            </p>
+          </div>
           <FormError error={state.status === "error" ? state.error : null} />
           <SubmitButton size="lg" pendingText="Recovering…">
             Set the new password

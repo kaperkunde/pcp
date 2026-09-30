@@ -25,8 +25,16 @@ presented one.
 token reaches. It never receives a stored secret, an OAuth token, or another
 vault's data. Revoking the token ends its access at once.
 
-**Password guessing** is rate-limited per address (10 attempts per 15
-minutes) and made expensive by scrypt.
+**Someone with your session cookie but not your password** can use PCP as
+you while the session lasts. They cannot make an API token or a new recovery
+key, because both ask for the password again, so they cannot keep a way in
+once the session ends. **Sign out everywhere** (Settings) ends every session
+and can revoke every API token with it; recovery can do the same. Rotate any
+secret they could have seen.
+
+**Password guessing** is rate-limited: 10 attempts per 15 minutes per address
+on the sign-in page and per session inside PCP, 60 in all. scrypt makes each
+guess expensive.
 
 Not defended against:
 

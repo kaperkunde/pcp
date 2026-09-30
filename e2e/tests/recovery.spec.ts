@@ -1,17 +1,28 @@
 import { expect, test } from "@playwright/test"
 
 import { OWNER_PASSWORD, unlock } from "../lib/auth"
-import { loadState, type SetupState } from "../lib/state"
+import { mcpRequest } from "../lib/mcp"
+import { loadState, saveState, type SetupState } from "../lib/state"
+import { createToken } from "../lib/ui"
 
 // Losing the password: the recovery key from setup sets a new one, every
-// browser is signed out, and the vault's contents are intact. Ends by
-// putting the original password back so the suite stays re-runnable.
+// browser is signed out (and, when asked, every API token revoked), and the
+// vault's contents are intact. Then the ways to end someone else's access:
+// a new recovery key, which takes the password, and signing out
+// everywhere. Puts the original password back and saves the new recovery
+// key so the suite stays re-runnable.
 test.describe.configure({ mode: "serial" })
 
+const RUN = Date.now().toString(36)
 const TEMPORARY_PASSWORD = "e2e-temporary-password-2!"
 
-test("resets the password with the recovery key", async ({ page }) => {
+test("resets the password with the recovery key", async ({ page, baseURL }) => {
   const { recoveryKey } = loadState<SetupState>("setup")
+
+  // A token made before recovery, to see it revoked.
+  await unlock(page)
+  const token = await createToken(page, `Before recovery ${RUN}`)
+  expect((await mcpRequest(baseURL!, token, "tools/list")).status).toBe(200)
 
   await page.goto("/recover")
   await page.getByLabel("Recovery key").fill("pcp_recovery_wrong")
@@ -28,8 +39,11 @@ test("resets the password with the recovery key", async ({ page }) => {
     .getByLabel("New password", { exact: true })
     .fill(TEMPORARY_PASSWORD)
   await page.getByLabel("Repeat new password").fill(TEMPORARY_PASSWORD)
+  await page.getByLabel("Also revoke every API token").check()
   await page.getByRole("button", { name: "Set the new password" }).click()
   await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
+
+  expect((await mcpRequest(baseURL!, token, "tools/list")).status).toBe(401)
 
   // Everything is still there: the key never changed, only its wrapping.
   await page.goto("/secrets")
@@ -57,4 +71,45 @@ test("the old password no longer works and the new one does", async ({
   await expect(
     page.getByRole("status").filter({ hasText: "Password changed." }),
   ).toBeVisible()
+})
+
+test("a new recovery key takes the password", async ({ page }) => {
+  const setup = loadState<SetupState>("setup")
+  await unlock(page)
+  await page.goto("/settings")
+
+  const card = page.locator("[data-slot=card]").filter({
+    has: page.getByText("Recovery key", { exact: true }),
+  })
+  await card.getByLabel("Your password").fill("not the password")
+  page.once("dialog", (dialog) => dialog.accept())
+  await card.getByRole("button", { name: "Make a new recovery key" }).click()
+  await expect(card.locator("p[role=alert]")).toHaveText(/not right/)
+  await expect(card.getByTestId("recovery-key")).toHaveCount(0)
+
+  await card.getByLabel("Your password").fill(OWNER_PASSWORD)
+  page.once("dialog", (dialog) => dialog.accept())
+  await card.getByRole("button", { name: "Make a new recovery key" }).click()
+  const fresh = await card.getByTestId("recovery-key").textContent()
+  expect(fresh).toMatch(/^pcp_recovery_/)
+  expect(fresh).not.toBe(setup.recoveryKey)
+  // The next run recovers with this one.
+  saveState("setup", { ...setup, recoveryKey: fresh! } satisfies SetupState)
+})
+
+test("signing out everywhere can revoke every API token", async ({
+  page,
+  baseURL,
+}) => {
+  await unlock(page)
+  const token = await createToken(page, `Before signing out ${RUN}`)
+  expect((await mcpRequest(baseURL!, token, "tools/list")).status).toBe(200)
+
+  await page.goto("/settings")
+  await page.getByLabel("Also revoke every API token").check()
+  page.once("dialog", (dialog) => dialog.accept())
+  await page.getByRole("button", { name: "Sign out everywhere" }).click()
+  await expect(page).toHaveURL(/\/login$/)
+
+  expect((await mcpRequest(baseURL!, token, "tools/list")).status).toBe(401)
 })

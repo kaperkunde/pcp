@@ -1,5 +1,7 @@
 import { expect, type Page } from "@playwright/test"
 
+import { OWNER_PASSWORD } from "./auth"
+
 /** Adds a text secret through the Secrets page. */
 export async function addSecret(
   page: Page,
@@ -22,9 +24,14 @@ export async function addSecret(
 }
 
 /** Creates an API token for every server and returns it. */
-export async function createToken(page: Page, name: string): Promise<string> {
+export async function createToken(
+  page: Page,
+  name: string,
+  password = OWNER_PASSWORD,
+): Promise<string> {
   await page.goto("/tokens")
   await page.getByLabel("Name").fill(name)
+  await page.getByLabel("Your password").fill(password)
   await page.getByRole("button", { name: "Create token" }).click()
   await expect(page.getByText("Your new token")).toBeVisible()
   const token = await page.getByTestId("new-token").textContent()

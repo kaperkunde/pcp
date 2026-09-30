@@ -63,9 +63,9 @@ required.
    and keeps the tokens as a managed secret. PCP reads each server's tool
    list; you can rewrite any tool's description so an assistant picks it
    correctly.
-3. **API tokens.** Create a token per assistant or machine. A token can reach
-   every server or only the ones you pick, and can expire. Revoking it
-   destroys its copy of the vault key.
+3. **API tokens.** Create a token per assistant or machine; PCP asks for your
+   password to make one. A token can reach every server or only the ones you
+   pick, and can expire. Revoking it destroys its copy of the vault key.
 4. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
    bearer token. For Claude Code:
 
@@ -100,7 +100,10 @@ a problem.
 Consequences worth knowing:
 
 - Changing the password re-wraps the key; sessions and API tokens keep
-  working. Using the recovery key signs every browser out.
+  working. Using the recovery key signs every browser out and can revoke
+  every API token.
+- A stolen session cannot make an API token or a recovery key: both ask for
+  the password again.
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
 - The gateway never returns a secret to an assistant, only what the upstream
