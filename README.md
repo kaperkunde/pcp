@@ -1,4 +1,29 @@
-# PCP - Primary Control Provider
+<p align="center">
+  <img src="public/icons/icon-512.png" alt="The PCP logo: a lightning-blue letter P with coloured data streams flowing into it" width="200" height="200">
+</p>
+
+<h1 align="center">PCP - Primary Control Provider</h1>
+
+<p align="center">
+  <strong>One endpoint for every MCP server you use.</strong><br>
+  Self-hosted, with your secrets kept encrypted on your side.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-5ed3c3?style=flat-square&labelColor=131720"></a>
+  <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-docker%20compose-5ed3c3?style=flat-square&labelColor=131720">
+  <img alt="Single user" src="https://img.shields.io/badge/vault-single%20user-5ed3c3?style=flat-square&labelColor=131720">
+</p>
+
+<p align="center">
+  <a href="#run-it">Run it</a> ·
+  <a href="#use-it">Use it</a> ·
+  <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
+
+---
 
 A self-hosted gateway between your AI assistant and the MCP servers you use.
 PCP keeps the credentials those servers need in an encrypted store, signs in
