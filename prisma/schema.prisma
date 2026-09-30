@@ -32,6 +32,8 @@ model Vault {
   servers  McpServer[]
   settings Setting[]
 
+  permissionRequests PermissionRequest[]
+
   @@map("vault")
 }
 
@@ -96,7 +98,9 @@ model ApiToken {
   createdAt       DateTime  @default(now()) @map("created_at")
   lastUsedAt      DateTime? @map("last_used_at")
 
-  servers ApiTokenServer[]
+  servers            ApiTokenServer[]
+  toolAccess         ApiTokenToolAccess[]
+  permissionRequests PermissionRequest[]
 
   @@index([vaultId])
   @@map("api_token")
@@ -110,6 +114,62 @@ model ApiTokenServer {
 
   @@id([tokenId, serverId])
   @@map("api_token_server")
+}
+
+/// What one token may do with one tool. Only allowed and blocked are stored;
+/// no row means the owner is asked first. Keyed by tool name, not by the
+/// catalogue row, so a tool that drops out of a refresh and comes back keeps
+/// its setting.
+model ApiTokenToolAccess {
+  tokenId   String    @map("token_id")
+  token     ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  serverId  String    @map("server_id")
+  server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  toolName  String    @map("tool_name")
+  /// allowed | blocked
+  access    String
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@id([tokenId, serverId, toolName])
+  @@map("api_token_tool_access")
+}
+
+/// A tool call (or a new server) an assistant asked for that waits for the
+/// owner's answer (lib/core/permissions.ts). Answerable for a day; it runs at
+/// most once, whichever way the owner answers.
+model PermissionRequest {
+  id               String     @id
+  vaultId          String     @map("vault_id")
+  vault            Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId          String     @map("token_id")
+  token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  /// call | register
+  kind             String
+  serverId         String?    @map("server_id")
+  server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The upstream tool for a call; "register_server" for a new server.
+  toolName         String     @map("tool_name")
+  /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
+  /// the vault's data key with "permission_request:<id>" as associated data.
+  argsCiphertext   Bytes      @map("args_ciphertext")
+  /// sha256 of the kind, the target and the canonical arguments, so the same
+  /// request asked twice finds the row it already has.
+  argsHash         String     @map("args_hash")
+  /// pending | running | executed | failed | declined
+  status           String     @default("pending")
+  /// Where the owner answered: app | form | url | web
+  via              String?
+  /// The result text, clipped, encrypted with "permission_request:<id>:result".
+  resultCiphertext Bytes?     @map("result_ciphertext")
+  resultIsError    Boolean    @default(false) @map("result_is_error")
+  createdAt        DateTime   @default(now()) @map("created_at")
+  expiresAt        DateTime   @map("expires_at")
+  decidedAt        DateTime?  @map("decided_at")
+
+  @@index([tokenId, argsHash])
+  @@index([vaultId, status])
+  @@index([expiresAt])
+  @@map("permission_request")
 }
 
 /// One encrypted value. `text` secrets are entered by the owner; `oauth`
@@ -185,9 +245,11 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  tools  McpTool[]
-  tokens ApiTokenServer[]
-  oauthStates OAuthState[]
+  tools              McpTool[]
+  tokens             ApiTokenServer[]
+  oauthStates        OAuthState[]
+  toolAccess         ApiTokenToolAccess[]
+  permissionRequests PermissionRequest[]
 
   @@unique([vaultId, slug])
   @@map("mcp_server")

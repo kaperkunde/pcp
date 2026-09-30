@@ -31,3 +31,41 @@ export async function createToken(page: Page, name: string): Promise<string> {
   expect(token).toMatch(/^pcp_/)
   return token!
 }
+
+/** Opens a token's page from the token list; returns the token's id. */
+export async function openToken(page: Page, name: string): Promise<string> {
+  await page.goto("/tokens")
+  await page.getByRole("link", { name, exact: true }).click()
+  await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
+  return page.url().split("/").pop()!
+}
+
+/**
+ * Lets a token run every tool on one server without asking the owner
+ * first (tools ask by default).
+ */
+export async function allowAllTools(
+  page: Page,
+  tokenName: string,
+  slug: string,
+) {
+  await openToken(page, tokenName)
+  await page
+    .getByLabel(`All tools on ${slug}`, { exact: true })
+    .selectOption("allowed")
+  await page
+    .getByRole("button", { name: `Set all tools on ${slug}`, exact: true })
+    .click()
+
+  // Slugs are lower-case letters, digits and dashes: safe in a pattern.
+  const tools = page.getByRole("combobox", {
+    name: new RegExp(`^Access to ${slug}/`),
+  })
+  await expect(async () => {
+    const values = await tools.evaluateAll((selects) =>
+      selects.map((select) => (select as HTMLSelectElement).value),
+    )
+    expect(values.length).toBeGreaterThan(0)
+    expect(values.every((value) => value === "allowed")).toBe(true)
+  }).toPass()
+}

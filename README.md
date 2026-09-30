@@ -2,9 +2,11 @@
 
 A self-hosted gateway between your AI assistant and the MCP servers you use.
 PCP keeps the credentials those servers need in an encrypted store, signs in
-to the ones that use OAuth, and exposes a single MCP endpoint with three tools
-— `search_tools`, `describe_tool` and `call_tool` — so an assistant can reach
-dozens of servers without carrying every tool definition in its context.
+to the ones that use OAuth, and exposes a single MCP endpoint built around
+three tools — `search_tools`, `describe_tool` and `call_tool` — so an
+assistant can reach dozens of servers without carrying every tool definition
+in its context. You decide, per token and per tool, what an assistant may run
+on its own, what it has to ask you about first, and what it cannot touch.
 
 - **One endpoint for every server.** Add servers in the web UI; an assistant
   connects once, with an API token, and finds tools by describing what it
@@ -65,7 +67,9 @@ required.
    correctly.
 3. **API tokens.** Create a token per assistant or machine. A token can reach
    every server or only the ones you pick, and can expire. Revoking it
-   destroys its copy of the vault key.
+   destroys its copy of the vault key. A token's page sets each tool to
+   **Allowed**, **Ask you first** (the default) or **Blocked**, a whole
+   server at once, or copies all of it from another token.
 4. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
    bearer token. For Claude Code:
 
@@ -78,13 +82,24 @@ required.
    works the same way.
 
 The assistant then sees a short description of the servers behind the token
-and three tools:
+and these tools:
 
-| Tool            | What it does                                                               |
-| --------------- | -------------------------------------------------------------------------- |
-| `search_tools`  | Finds tools across servers from a few words ("create a github issue").     |
-| `describe_tool` | Returns one tool's full description and JSON Schema.                       |
-| `call_tool`     | Runs it, with PCP adding the server's credentials to the upstream request. |
+| Tool               | What it does                                                                    |
+| ------------------ | ------------------------------------------------------------------------------- |
+| `search_tools`     | Finds tools across servers from a few words ("create a github issue").          |
+| `describe_tool`    | Returns one tool's full description, JSON Schema and whether it asks you first. |
+| `call_tool`        | Runs it, with PCP adding the server's credentials to the upstream request.      |
+| `check_permission` | Says whether you answered a request that was waiting for you, and how it went.  |
+| `check_server`     | Says whether a server is connected; offers you a Connect button where it can.   |
+| `register_server`  | Proposes a new server (no auth, OAuth, or a secret you stored, named by name).  |
+
+A tool you have not decided about answers "Not done yet" and asks you. Where
+the assistant's app can show it, the question appears in the conversation:
+as PCP's panel (an MCP App) or as the app's own prompt. Otherwise the
+assistant hands you a link to PCP. **Allow once** runs that one call,
+**Always allow** and **Block** also decide the calls after it, and **Not
+now** runs nothing. A server an assistant proposes is only added once you
+agree; an OAuth one is then connected from a link that opens in your browser.
 
 ## How it is secured
 

@@ -46,6 +46,21 @@ export function managedSecretName(server: Pick<McpServer, "id">): string {
   return `oauth/${server.id}`
 }
 
+/**
+ * An OAuth server without a live token set: never connected, disconnected,
+ * or its refresh failed (the provider clears oauthConnectedAt then).
+ */
+export function needsConnecting(
+  server: Pick<McpServer, "authType" | "oauthConnectedAt">,
+): boolean {
+  return server.authType === "oauth" && server.oauthConnectedAt === null
+}
+
+/** Where the owner's browser starts connecting an OAuth server. */
+export function oauthStartUrl(publicUrl: string, serverId: string): string {
+  return `${publicUrl.replace(/\/+$/, "")}/api/servers/${serverId}/oauth/start`
+}
+
 /** What an authorization in flight needs on the callback leg. */
 type FlowState = {
   verifier?: string
@@ -511,7 +526,12 @@ export async function callServerTool(
     const failure = describeFailure(server, error)
     await setServerStatus(server.id, failure.status, failure.message)
 
-    throw new PcpError("upstream", failure.message)
+    // "unauthorized" tells the gateway the server needs connecting (or its
+    // credential was refused), not that it could not be reached.
+    throw new PcpError(
+      failure.status === "auth_required" ? "unauthorized" : "upstream",
+      failure.message,
+    )
   } finally {
     await connection?.close()
   }

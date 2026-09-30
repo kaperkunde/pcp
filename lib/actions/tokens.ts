@@ -6,7 +6,14 @@ import {
   createApiToken,
   deleteApiToken,
   revokeApiToken,
+  updateApiToken,
 } from "@/lib/core/api-tokens"
+import {
+  copyTokenAccess,
+  parseToolAccess,
+  setServerToolAccess,
+  setToolAccess,
+} from "@/lib/core/tool-access"
 import {
   type ActionState,
   field,
@@ -16,6 +23,15 @@ import {
 import { requireContext } from "@/lib/server/session"
 
 export type CreateTokenResult = ActionState<{ token: string; id: string }>
+
+export type UpdateTokenResult = ActionState<{ message: string }>
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function revalidateToken(id: string) {
+  revalidatePath("/tokens")
+  revalidatePath(`/tokens/${id}`)
+}
 
 export async function createTokenAction(
   _previous: CreateTokenResult,
@@ -62,6 +78,94 @@ export async function deleteTokenAction(id: string): Promise<ActionState> {
   })
 
   revalidatePath("/tokens")
+
+  return result
+}
+
+/** Name, servers and expiry of an existing token. */
+export async function updateTokenAction(
+  _previous: UpdateTokenResult,
+  formData: FormData,
+): Promise<UpdateTokenResult> {
+  const ctx = await requireContext()
+  const id = field(formData, "id")
+  const expiresIn = field(formData, "expiresIn")
+  const days = Number(expiresIn)
+
+  const result = await guarded(async () => {
+    await updateApiToken(ctx, id, {
+      name: field(formData, "name"),
+      allowAllServers: field(formData, "access") !== "selected",
+      serverIds: fields(formData, "serverIds"),
+      expiresAt:
+        expiresIn === "keep"
+          ? undefined
+          : days > 0
+            ? new Date(Date.now() + days * DAY_MS)
+            : null,
+    })
+
+    return { message: "Saved." }
+  })
+
+  revalidateToken(id)
+
+  return result
+}
+
+export async function setToolAccessAction(
+  tokenId: string,
+  serverId: string,
+  toolName: string,
+  access: string,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await setToolAccess(
+      ctx,
+      tokenId,
+      serverId,
+      toolName,
+      parseToolAccess(access),
+    )
+    return {}
+  })
+
+  revalidateToken(tokenId)
+
+  return result
+}
+
+export async function setServerToolAccessAction(
+  tokenId: string,
+  serverId: string,
+  access: string,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await setServerToolAccess(ctx, tokenId, serverId, parseToolAccess(access))
+    return {}
+  })
+
+  revalidateToken(tokenId)
+
+  return result
+}
+
+export async function copyTokenAccessAction(
+  tokenId: string,
+  sourceTokenId: string,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await copyTokenAccess(ctx, tokenId, sourceTokenId)
+    return {}
+  })
+
+  revalidateToken(tokenId)
 
   return result
 }

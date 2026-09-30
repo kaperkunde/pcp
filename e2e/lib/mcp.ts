@@ -10,7 +10,29 @@ export type McpResponse = {
         title?: string
         description?: string
         annotations?: { readOnlyHint?: boolean }
+        _meta?: { ui?: { resourceUri?: string; visibility?: string[] } }
       }>
+      contents?: Array<{ uri: string; mimeType?: string; text?: string }>
+      // PCP's panel reads these (lib/core/panel.ts).
+      structuredContent?: {
+        kind?: string
+        permission?: {
+          id: string
+          status: string
+          url: string
+          decisions: Array<{ value: string; label: string }>
+        }
+        connect?: {
+          serverId: string
+          slug: string
+          startUrl: string
+        }
+        server?: { connected: boolean; toolCount: number }
+      }
+      // A prompt for the owner (2026-07-28 multi-round-trip results).
+      resultType?: string
+      requestState?: string
+      inputRequests?: Record<string, { method: string; params: unknown }>
     } & Record<string, unknown>
     error?: { message: string }
   }
@@ -34,6 +56,10 @@ export async function mcpRequest(
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   })
 
+  return parseResponse(response)
+}
+
+async function parseResponse(response: Response): Promise<McpResponse> {
   const text = await response.text()
   const json = text.trimStart().startsWith("{")
     ? text
@@ -78,4 +104,56 @@ export async function initialize(
     instructions: String(init.body.result?.instructions ?? ""),
     tools: (list.body.result?.tools ?? []).map((tool) => tool.name),
   }
+}
+
+/**
+ * One tools/call on the stateless 2026-07-28 revision: the client's
+ * capabilities travel with the request, which is what lets PCP ask the owner
+ * in a prompt or a panel (lib/core/permissions.ts). Ported from plekje's
+ * e2e helpers.
+ */
+export async function mcpToolCall2026(
+  baseURL: string,
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+  {
+    capabilities = {},
+    inputResponses,
+    requestState,
+  }: {
+    capabilities?: Record<string, unknown>
+    inputResponses?: Record<string, unknown>
+    requestState?: string
+  } = {},
+): Promise<McpResponse> {
+  const response = await fetch(`${baseURL}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "tools/call",
+      "mcp-name": name,
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name,
+        arguments: args,
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": capabilities,
+          "io.modelcontextprotocol/clientInfo": { name: "e2e", version: "0" },
+        },
+        ...(inputResponses ? { inputResponses } : {}),
+        ...(requestState ? { requestState } : {}),
+      },
+    }),
+  })
+
+  return parseResponse(response)
 }

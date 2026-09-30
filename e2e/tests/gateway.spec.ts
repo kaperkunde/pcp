@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, initialize, mcpRequest, toolText } from "../lib/mcp"
-import { addSecret, createToken } from "../lib/ui"
+import { addSecret, allowAllTools, createToken } from "../lib/ui"
 
 // The whole point of PCP in one flow: a secret goes in, a server is added
 // that needs it, an assistant with an API token finds and calls the
@@ -85,10 +85,22 @@ test("issues an API token and describes the servers behind it", async ({
   token = await createToken(page, `Assistant ${RUN}`)
 
   const { instructions, tools } = await initialize(baseURL!, token)
-  expect(tools).toEqual(["search_tools", "describe_tool", "call_tool"])
+  expect(tools).toEqual([
+    "search_tools",
+    "describe_tool",
+    "call_tool",
+    "check_permission",
+    "answer_permission",
+    "check_server",
+    "register_server",
+  ])
   expect(instructions).toContain(
     `${SLUG}: Sends postcards and adds numbers. (3 tools)`,
   )
+
+  // Tools ask the owner first by default (permissions.spec.ts covers that);
+  // this spec is about the gateway, so let the token run them.
+  await allowAllTools(page, `Assistant ${RUN}`, SLUG)
 })
 
 test("finds, describes and calls an upstream tool with the secret added by PCP", async ({

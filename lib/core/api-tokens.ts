@@ -1,7 +1,7 @@
 import type { VaultContext } from "./context"
 import { randomSecret } from "./crypto"
 import { db } from "./db"
-import { invalid, notFound } from "./errors"
+import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { createCredentialGrant, unlockWithCredential } from "./keys"
 
@@ -26,6 +26,15 @@ export type ApiTokenSummary = {
   revokedAt: Date | null
   createdAt: Date
   lastUsedAt: Date | null
+  /** Requests from this token still waiting for the owner's answer. */
+  openPermissions: number
+}
+
+export type TokenInput = {
+  name: string
+  allowAllServers: boolean
+  serverIds?: string[]
+  expiresAt?: Date | null
 }
 
 export type ResolvedToken = {
@@ -36,18 +45,34 @@ export type ResolvedToken = {
   serverIds: string[] | null
 }
 
-export async function listApiTokens(
-  ctx: VaultContext,
-): Promise<ApiTokenSummary[]> {
-  const rows = await db().apiToken.findMany({
-    where: { vaultId: ctx.vaultId },
-    include: {
-      servers: { include: { server: { select: { id: true, name: true } } } },
+function summaryInclude(now: Date) {
+  return {
+    servers: { include: { server: { select: { id: true, name: true } } } },
+    _count: {
+      select: {
+        permissionRequests: {
+          where: { status: "pending", expiresAt: { gt: now } },
+        },
+      },
     },
-    orderBy: { createdAt: "desc" },
-  })
+  } as const
+}
 
-  return rows.map((row) => ({
+type SummaryRow = {
+  id: string
+  name: string
+  prefix: string
+  allowAllServers: boolean
+  expiresAt: Date | null
+  revokedAt: Date | null
+  createdAt: Date
+  lastUsedAt: Date | null
+  servers: Array<{ server: { id: string; name: string } }>
+  _count: { permissionRequests: number }
+}
+
+function toSummary(row: SummaryRow): ApiTokenSummary {
+  return {
     id: row.id,
     name: row.name,
     prefix: row.prefix,
@@ -57,18 +82,67 @@ export async function listApiTokens(
     revokedAt: row.revokedAt,
     createdAt: row.createdAt,
     lastUsedAt: row.lastUsedAt,
-  }))
+    openPermissions: row._count.permissionRequests,
+  }
 }
 
-export async function createApiToken(
+export async function listApiTokens(
   ctx: VaultContext,
-  input: {
-    name: string
-    allowAllServers: boolean
-    serverIds?: string[]
-    expiresAt?: Date | null
-  },
-): Promise<{ id: string; token: string }> {
+): Promise<ApiTokenSummary[]> {
+  const rows = await db().apiToken.findMany({
+    where: { vaultId: ctx.vaultId },
+    include: summaryInclude(new Date()),
+    orderBy: { createdAt: "desc" },
+  })
+
+  return rows.map(toSummary)
+}
+
+export async function getApiToken(
+  ctx: VaultContext,
+  id: string,
+): Promise<ApiTokenSummary> {
+  const row = await db().apiToken.findFirst({
+    where: { id, vaultId: ctx.vaultId },
+    include: summaryInclude(new Date()),
+  })
+
+  if (!row) {
+    throw notFound("That token")
+  }
+
+  return toSummary(row)
+}
+
+/** The token row, when it belongs to this vault. */
+export async function requireToken(ctx: VaultContext, id: string) {
+  const token = await db().apiToken.findFirst({
+    where: { id, vaultId: ctx.vaultId },
+  })
+
+  if (!token) {
+    throw notFound("That token")
+  }
+
+  return token
+}
+
+/** A revoked token keeps its row as history; nothing about it changes. */
+export async function requireLiveToken(ctx: VaultContext, id: string) {
+  const token = await requireToken(ctx, id)
+
+  if (token.revokedAt) {
+    throw new PcpError("state", "A revoked token cannot be changed.")
+  }
+
+  return token
+}
+
+/** Checks a token's name, servers and expiry; returns them cleaned up. */
+async function validateTokenInput(
+  ctx: VaultContext,
+  input: TokenInput,
+): Promise<{ name: string; serverIds: string[] }> {
   const name = input.name.trim()
 
   if (!name) {
@@ -99,6 +173,15 @@ export async function createApiToken(
     throw invalid("The expiry must be in the future.")
   }
 
+  return { name, serverIds }
+}
+
+export async function createApiToken(
+  ctx: VaultContext,
+  input: TokenInput,
+): Promise<{ id: string; token: string }> {
+  const { name, serverIds } = await validateTokenInput(ctx, input)
+
   const token = `${TOKEN_PREFIX}${randomSecret()}`
   const grant = await createCredentialGrant(
     ctx.vaultId,
@@ -122,6 +205,41 @@ export async function createApiToken(
   })
 
   return { id, token }
+}
+
+/**
+ * Changes a token after the fact: its name, the servers it reaches and its
+ * expiry (left alone when `expiresAt` is undefined). The token itself, and
+ * the key it unwraps, stay the same.
+ */
+export async function updateApiToken(
+  ctx: VaultContext,
+  id: string,
+  input: TokenInput,
+): Promise<void> {
+  await requireLiveToken(ctx, id)
+  const { name, serverIds } = await validateTokenInput(ctx, input)
+
+  await db().$transaction([
+    db().apiToken.update({
+      where: { id },
+      data: {
+        name,
+        allowAllServers: input.allowAllServers,
+        ...(input.expiresAt !== undefined
+          ? { expiresAt: input.expiresAt }
+          : {}),
+      },
+    }),
+    db().apiTokenServer.deleteMany({ where: { tokenId: id } }),
+    ...(serverIds.length > 0
+      ? [
+          db().apiTokenServer.createMany({
+            data: serverIds.map((serverId) => ({ tokenId: id, serverId })),
+          }),
+        ]
+      : []),
+  ])
 }
 
 /**
