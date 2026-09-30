@@ -1,0 +1,243 @@
+// PCP data model.
+//
+// Every row that belongs to a person hangs off a Vault. The single-user
+// product creates exactly one vault at setup; nothing else in the schema
+// assumes that, which is what lets a multi-tenant host reuse it unchanged
+// (see ARCHITECTURE.md, "One vault per user").
+//
+// Nothing sensitive is stored in the clear. Secret values, OAuth tokens and
+// the vault's data key itself are AES-256-GCM ciphertext; the key needed to
+// read them only ever exists in the memory of a request that presented a
+// password, a session cookie or an API token (lib/core/crypto.ts).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Vault {
+  id        String   @id
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  grants   KeyGrant[]
+  sessions Session[]
+  tokens   ApiToken[]
+  secrets  Secret[]
+  servers  McpServer[]
+  settings Setting[]
+
+  @@map("vault")
+}
+
+/// A copy of the vault's data encryption key, wrapped under a key derived
+/// from one credential. `password` and `recovery` grants are the ones a
+/// person types; `session` and `api_token` grants are minted for a browser
+/// cookie or a bearer token. Deleting a grant revokes that credential.
+model KeyGrant {
+  id      String @id
+  vaultId String @map("vault_id")
+  vault   Vault  @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// password | recovery | session | api_token
+  kind    String
+  /// SHA-256 of the credential, for grants looked up by it (everything but
+  /// password, of which a vault has exactly one).
+  lookupHash String? @unique @map("lookup_hash")
+  /// scrypt | hkdf
+  kdf       String
+  /// JSON: the salt and, for scrypt, its cost parameters.
+  kdfParams String @map("kdf_params")
+  /// nonce || ciphertext || tag of the wrapped data key.
+  wrappedDek Bytes    @map("wrapped_dek")
+  createdAt  DateTime @default(now()) @map("created_at")
+  lastUsedAt DateTime? @map("last_used_at")
+
+  session Session?
+  token   ApiToken?
+
+  @@index([vaultId, kind])
+  @@map("key_grant")
+}
+
+model Session {
+  id        String   @id
+  vaultId   String   @map("vault_id")
+  vault     Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  grantId   String   @unique @map("grant_id")
+  grant     KeyGrant @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  userAgent String?  @map("user_agent")
+
+  @@index([vaultId])
+  @@map("session")
+}
+
+/// A bearer token an MCP client presents to /mcp. It reaches the servers
+/// listed in ApiTokenServer, or every server when allowAllServers is set.
+model ApiToken {
+  id              String    @id
+  vaultId         String    @map("vault_id")
+  vault           Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  grantId         String    @unique @map("grant_id")
+  grant           KeyGrant  @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  name            String
+  /// The first characters of the token, so the owner can tell them apart.
+  prefix          String
+  allowAllServers Boolean   @default(true) @map("allow_all_servers")
+  expiresAt       DateTime? @map("expires_at")
+  revokedAt       DateTime? @map("revoked_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  lastUsedAt      DateTime? @map("last_used_at")
+
+  servers ApiTokenServer[]
+
+  @@index([vaultId])
+  @@map("api_token")
+}
+
+model ApiTokenServer {
+  tokenId  String    @map("token_id")
+  token    ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  serverId String    @map("server_id")
+  server   McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@id([tokenId, serverId])
+  @@map("api_token_server")
+}
+
+/// One encrypted value. `text` secrets are entered by the owner; `oauth`
+/// secrets hold the token set (and registered client) PCP obtained for an
+/// MCP server and are managed by the server that owns them.
+model Secret {
+  id          String   @id
+  vaultId     String   @map("vault_id")
+  vault       Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  name        String
+  description String   @default("")
+  /// text | oauth
+  kind        String   @default("text")
+  /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
+  /// with the secret id as associated data.
+  ciphertext  Bytes
+  keyVersion  Int      @default(1) @map("key_version")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  lastUsedAt  DateTime? @map("last_used_at")
+
+  authFor       McpServer[] @relation("ServerAuthSecret")
+  oauthClientFor McpServer[] @relation("ServerOAuthClientSecret")
+  oauthTokensFor McpServer[] @relation("ServerOAuthTokens")
+
+  @@unique([vaultId, name])
+  @@map("secret")
+}
+
+/// A remote MCP server (Streamable HTTP) the gateway can reach on the
+/// owner's behalf, with how to authenticate to it.
+model McpServer {
+  id          String @id
+  vaultId     String @map("vault_id")
+  vault       Vault  @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// Shown to people.
+  name        String
+  /// What an assistant uses to name the server in tool calls: lowercase,
+  /// unique within the vault.
+  slug        String
+  /// What an assistant is told the server is for. Editable, because the
+  /// upstream's own description is often missing or written for developers.
+  description String @default("")
+  url         String
+  enabled     Boolean @default(true)
+
+  /// none | header | oauth
+  authType String @default("none") @map("auth_type")
+  /// header auth: the header to send and how the secret goes into it.
+  authHeaderName    String? @map("auth_header_name")
+  authValueTemplate String? @map("auth_value_template")
+  authSecretId      String? @map("auth_secret_id")
+  authSecret        Secret? @relation("ServerAuthSecret", fields: [authSecretId], references: [id], onDelete: SetNull)
+
+  /// oauth: an optional pre-registered client. Without one PCP registers
+  /// itself dynamically (RFC 7591) when the server allows it.
+  oauthClientId       String? @map("oauth_client_id")
+  oauthClientSecretId String? @map("oauth_client_secret_id")
+  oauthClientSecret   Secret? @relation("ServerOAuthClientSecret", fields: [oauthClientSecretId], references: [id], onDelete: SetNull)
+  oauthScope          String? @map("oauth_scope")
+  /// oauth: the managed secret holding PCP's registration with the server
+  /// and, once connected, its token set.
+  oauthTokensId       String? @map("oauth_tokens_id")
+  oauthTokens         Secret? @relation("ServerOAuthTokens", fields: [oauthTokensId], references: [id], onDelete: SetNull)
+  /// oauth: when the current token set was obtained; null until connected.
+  oauthConnectedAt    DateTime? @map("oauth_connected_at")
+
+  /// What the last contact with the server found: unknown | ok |
+  /// auth_required | error.
+  status        String    @default("unknown")
+  statusMessage String    @default("") @map("status_message")
+  lastSyncedAt  DateTime? @map("last_synced_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  tools  McpTool[]
+  tokens ApiTokenServer[]
+  oauthStates OAuthState[]
+
+  @@unique([vaultId, slug])
+  @@map("mcp_server")
+}
+
+/// The catalogue of one server's tools, as last read from it. search_tools
+/// runs over these rows, so an assistant never needs the full list.
+model McpTool {
+  id          String    @id
+  serverId    String    @map("server_id")
+  server      McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  name        String
+  title       String?
+  description String    @default("")
+  /// The owner's wording, when the upstream description is not good enough.
+  descriptionOverride String? @map("description_override")
+  /// JSON Schema, as JSON text.
+  inputSchema String    @map("input_schema")
+  /// JSON, when the server sent annotations (readOnlyHint and friends).
+  annotations String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@unique([serverId, name])
+  @@map("mcp_tool")
+}
+
+/// An OAuth authorization in flight: the state parameter sent to the
+/// authorization server and the PKCE verifier to redeem the code with.
+model OAuthState {
+  id           String    @id
+  serverId     String    @map("server_id")
+  server       McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The PKCE verifier and the discovery result, as encrypted JSON under
+  /// the vault's data key.
+  codeVerifier Bytes     @map("code_verifier")
+  redirectUri  String    @map("redirect_uri")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  expiresAt    DateTime  @map("expires_at")
+
+  @@map("oauth_state")
+}
+
+/// Per-vault key/value settings (the public URL, for one).
+model Setting {
+  vaultId String @map("vault_id")
+  vault   Vault  @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  key     String
+  value   String
+
+  @@id([vaultId, key])
+  @@map("setting")
+}
