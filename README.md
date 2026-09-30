@@ -1,4 +1,4 @@
-# PCP
+# PCP - Primary Control Provider
 
 A self-hosted gateway between your AI assistant and the MCP servers you use.
 PCP keeps the credentials those servers need in an encrypted store, signs in
