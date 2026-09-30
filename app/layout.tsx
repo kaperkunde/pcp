@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next"
 import { Inter, JetBrains_Mono } from "next/font/google"
 
+import { SiteFooter } from "@/components/site-footer"
+
 import "./globals.css"
 
 const inter = Inter({ variable: "--font-sans", subsets: ["latin"] })
@@ -20,7 +22,10 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className={`${inter.variable} ${mono.variable}`}>
-      <body className="min-h-screen antialiased">{children}</body>
+      <body className="flex min-h-screen flex-col antialiased">
+        {children}
+        <SiteFooter />
+      </body>
     </html>
   )
 }
