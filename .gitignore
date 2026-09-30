@@ -1,0 +1,49 @@
+# dependencies
+/node_modules
+/.pnpm-store
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+pnpm-debug.log*
+
+# env files (none are required; a local override is still private)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# prisma generated client
+/lib/generated
+
+# the SQLite database, request logs and anything else the app writes
+/data
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# tests
+/coverage
+/e2e/.auth
+/e2e/.artifacts
+/e2e/.state
+/test-results
+/playwright-report
+/blob-report
+/playwright/.cache
+
+# claude code (machine-local)
+/.claude/launch.json
+/.claude/worktrees/
+/.claude/settings.local.json

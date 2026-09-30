@@ -1,0 +1,11 @@
+# lint-staged fixes and lints the files being committed. The two checks after
+# it read the whole working tree on purpose: a file nobody has staged since it
+# was written is invisible to lint-staged.
+#
+# A failure here is not something to step around. `pnpm format` fixes every
+# formatting complaint in one command; `--no-verify` fixes nothing.
+set -e
+
+pnpm exec lint-staged
+pnpm typecheck
+pnpm format:check

@@ -1,0 +1,10 @@
+node_modules
+.next
+out
+build
+pnpm-lock.yaml
+lib/generated
+data
+e2e/.artifacts
+e2e/.auth
+e2e/.state

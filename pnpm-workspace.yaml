@@ -1,0 +1,11 @@
+packages:
+  - .
+
+# Delay installs of packages published within the last 24 hours (supply-chain
+# guard: a hijacked release is usually pulled within a day).
+minimumReleaseAge: 1440
+
+allowBuilds:
+  "@prisma/engines": true
+  better-sqlite3: true
+  prisma: true
