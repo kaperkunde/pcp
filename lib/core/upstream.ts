@@ -12,9 +12,11 @@ import {
 
 import type { McpServer } from "@/lib/generated/prisma/client"
 
+import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { PcpError } from "./errors"
 import {
   deleteManagedSecret,
@@ -25,8 +27,10 @@ import {
 import { renderAuthValue, setServerStatus } from "./servers"
 
 /**
- * Talking to the MCP servers in the registry: opening a connection with the
- * right credentials, reading their tool lists and calling their tools.
+ * Talking to the servers in the registry: opening a connection with the
+ * right credentials, reading their tool lists and calling their tools. API
+ * endpoints (kind "openapi") branch off to lib/core/endpoints.ts, which
+ * makes plain HTTP calls with the header this module builds.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -345,8 +349,20 @@ async function authHeaders(
   ctx: VaultContext,
   server: McpServer,
 ): Promise<Record<string, string>> {
+  return (await credential(ctx, server)).headers
+}
+
+/**
+ * The header a server's secret goes in, and the values that would give the
+ * secret away if an answer repeated them (the secret itself, and the header
+ * as sent).
+ */
+async function credential(
+  ctx: VaultContext,
+  server: McpServer,
+): Promise<{ headers: Record<string, string>; redact: string[] }> {
   if (server.authType !== "header") {
-    return {}
+    return { headers: {}, redact: [] }
   }
 
   if (!server.authSecretId || !server.authHeaderName) {
@@ -354,12 +370,14 @@ async function authHeaders(
   }
 
   const secret = await readSecretValue(ctx, server.authSecretId)
+  const value = renderAuthValue(
+    server.authValueTemplate ?? "{{secret}}",
+    secret,
+  )
 
   return {
-    [server.authHeaderName]: renderAuthValue(
-      server.authValueTemplate ?? "{{secret}}",
-      secret,
-    ),
+    headers: { [server.authHeaderName]: value },
+    redact: [secret, value],
   }
 }
 
@@ -414,11 +432,7 @@ export async function openUpstream(
   }
 }
 
-export type SyncResult = {
-  status: "ok" | "auth_required" | "error"
-  message: string
-  toolCount: number
-}
+export type { SyncResult }
 
 /**
  * Reads the server's tool list into the catalogue. Tools that disappeared
@@ -429,6 +443,10 @@ export async function syncServerTools(
   server: McpServer,
   { publicUrl }: { publicUrl: string },
 ): Promise<SyncResult> {
+  if (server.kind === "openapi") {
+    return syncEndpointTools(server)
+  }
+
   let connection: UpstreamConnection | null = null
 
   try {
@@ -436,37 +454,16 @@ export async function syncServerTools(
     const { tools } = await connection.client.listTools(undefined, {
       timeout: CONNECT_TIMEOUT_MS,
     })
-    const names = new Set<string>()
-
-    for (const tool of tools) {
-      names.add(tool.name)
-      await db().mcpTool.upsert({
-        where: { serverId_name: { serverId: server.id, name: tool.name } },
-        create: {
-          id: crypto.randomUUID(),
-          serverId: server.id,
-          name: tool.name,
-          title: tool.title ?? null,
-          description: tool.description ?? "",
-          inputSchema: JSON.stringify(tool.inputSchema ?? { type: "object" }),
-          annotations: tool.annotations
-            ? JSON.stringify(tool.annotations)
-            : null,
-        },
-        update: {
-          title: tool.title ?? null,
-          description: tool.description ?? "",
-          inputSchema: JSON.stringify(tool.inputSchema ?? { type: "object" }),
-          annotations: tool.annotations
-            ? JSON.stringify(tool.annotations)
-            : null,
-        },
-      })
-    }
-
-    await db().mcpTool.deleteMany({
-      where: { serverId: server.id, name: { notIn: [...names] } },
-    })
+    const toolCount = await storeTools(
+      server.id,
+      tools.map((tool) => ({
+        name: tool.name,
+        title: tool.title,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        annotations: tool.annotations,
+      })),
+    )
 
     // The upstream's own description is a fallback for a server the owner
     // has not described yet.
@@ -480,7 +477,7 @@ export async function syncServerTools(
 
     await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
 
-    return { status: "ok", message: "", toolCount: names.size }
+    return { status: "ok", message: "", toolCount }
   } catch (error) {
     const result = describeFailure(server, error)
     await setServerStatus(server.id, result.status, result.message)
@@ -498,6 +495,14 @@ export async function callServerTool(
   args: Record<string, unknown>,
   { publicUrl }: { publicUrl: string },
 ): Promise<CallToolResult> {
+  if (server.kind === "openapi") {
+    const { headers, redact } = await credential(ctx, server)
+    return callEndpointTool(server, toolName, args, {
+      authHeaders: headers,
+      redact,
+    })
+  }
+
   let connection: UpstreamConnection | null = null
 
   try {

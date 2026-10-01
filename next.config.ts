@@ -10,6 +10,12 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   // Native module: must be required at runtime, not bundled.
   serverExternalPackages: ["better-sqlite3", "@prisma/adapter-better-sqlite3"],
+  experimental: {
+    // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) travels in a
+    // Server Action's body; Next's default limit is 1 MB. This applies to
+    // every action, and is checked again per file in lib/actions/endpoints.
+    serverActions: { bodySizeLimit: "6mb" },
+  },
   async headers() {
     return [
       {

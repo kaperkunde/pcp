@@ -88,6 +88,17 @@ export default defineConfig({
       },
     },
     {
+      // An API described by an OpenAPI schema: added from a URL and from a
+      // file, its operations found and called through the gateway.
+      name: "endpoints",
+      testMatch: /endpoints\.spec\.ts/,
+      dependencies: ["setup"],
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: "e2e/.auth/owner.json",
+      },
+    },
+    {
       // Signs every browser out, so it comes last and signs in on its own.
       name: "recovery",
       testMatch: /recovery\.spec\.ts/,

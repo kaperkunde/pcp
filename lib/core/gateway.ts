@@ -52,7 +52,7 @@ export function buildInstructions(servers: GatewayServer[]): string {
   })
 
   return [
-    "PCP is a gateway to the owner's MCP servers. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
+    "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
     "Servers:",
     ...lines,
   ].join("\n")

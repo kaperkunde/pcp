@@ -59,25 +59,28 @@ A bug that regressed gets a test that fails before the fix and passes after
 
 ## Key files
 
-| Path                               | Purpose                                                      |
-| ---------------------------------- | ------------------------------------------------------------ |
-| `lib/core/crypto.ts`               | Envelope encryption, KEK derivation, wrapping the data key   |
-| `lib/core/keys.ts`                 | Key grants: password, recovery, session, API token           |
-| `lib/core/vault.ts`                | Setup, sign-in, password change, recovery                    |
-| `lib/core/sessions.ts`             | Browser sessions (cookie secret → grant)                     |
-| `lib/core/api-tokens.ts`           | Bearer tokens for the gateway and their scope                |
-| `lib/core/secrets.ts`              | The secret store; the only place values are decrypted        |
-| `lib/core/servers.ts`              | The MCP server registry and its auth configuration           |
-| `lib/core/upstream.ts`             | Connecting to upstreams; the OAuth client provider           |
-| `lib/core/oauth.ts`                | The authorization flow (start, callback, disconnect)         |
-| `lib/core/search.ts`, `gateway.ts` | Ranking tools; the three-tool MCP server the gateway serves  |
-| `lib/core/migrate.ts`              | Boot-time migrations                                         |
-| `lib/server/`                      | Next-specific glue: session cookie, public URL, action state |
-| `lib/actions/`                     | Server Actions the forms call                                |
-| `app/mcp/route.ts`                 | The gateway endpoint                                         |
-| `app/api/servers/[id]/oauth/`      | OAuth start and callback routes                              |
-| `e2e/fixtures/upstream.ts`         | The fake MCP + OAuth server the e2e suite talks to           |
-| `app/manifest.ts`, `public/icons/` | The manifest and icon set; `assets/icon.png` is the master   |
+| Path                               | Purpose                                                       |
+| ---------------------------------- | ------------------------------------------------------------- |
+| `lib/core/crypto.ts`               | Envelope encryption, KEK derivation, wrapping the data key    |
+| `lib/core/keys.ts`                 | Key grants: password, recovery, session, API token            |
+| `lib/core/vault.ts`                | Setup, sign-in, password change, recovery                     |
+| `lib/core/sessions.ts`             | Browser sessions (cookie secret → grant)                      |
+| `lib/core/api-tokens.ts`           | Bearer tokens for the gateway and their scope                 |
+| `lib/core/secrets.ts`              | The secret store; the only place values are decrypted         |
+| `lib/core/servers.ts`              | The MCP server registry and its auth configuration            |
+| `lib/core/upstream.ts`             | Connecting to upstreams; the OAuth client provider            |
+| `lib/core/oauth.ts`                | The authorization flow (start, callback, disconnect)          |
+| `lib/core/endpoints.ts`            | API endpoints: reading a schema, creating them, calling them  |
+| `lib/core/openapi/`                | OpenAPI → tools and call plans; building and sending requests |
+| `lib/core/catalogue.ts`            | Writing a server's tool list into the catalogue               |
+| `lib/core/search.ts`, `gateway.ts` | Ranking tools; the three-tool MCP server the gateway serves   |
+| `lib/core/migrate.ts`              | Boot-time migrations                                          |
+| `lib/server/`                      | Next-specific glue: session cookie, public URL, action state  |
+| `lib/actions/`                     | Server Actions the forms call                                 |
+| `app/mcp/route.ts`                 | The gateway endpoint                                          |
+| `app/api/servers/[id]/oauth/`      | OAuth start and callback routes                               |
+| `e2e/fixtures/upstream.ts`         | The fake MCP + OAuth server the e2e suite talks to            |
+| `app/manifest.ts`, `public/icons/` | The manifest and icon set; `assets/icon.png` is the master    |
 
 ## Licence
 

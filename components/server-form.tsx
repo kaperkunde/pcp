@@ -3,6 +3,10 @@
 import { useActionState, useState } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
+import {
+  HeaderAuthFields,
+  type SecretOption,
+} from "@/components/header-auth-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input, Select, Textarea } from "@/components/ui/input"
@@ -18,7 +22,7 @@ import {
   DEFAULT_VALUE_TEMPLATE,
 } from "@/lib/core/constants"
 
-export type SecretOption = { id: string; name: string }
+export type { SecretOption }
 
 export type ServerFormValues = {
   id?: string
@@ -150,54 +154,11 @@ export function ServerForm({
           </Field>
 
           {authType === "header" ? (
-            <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
-              <Field
-                label="Secret"
-                htmlFor={`${prefix}-secret`}
-                hint={
-                  secrets.length === 0
-                    ? "Add the key under Secrets first, then pick it here."
-                    : "Stored encrypted; PCP sends it, the assistant never sees it."
-                }
-              >
-                <Select
-                  id={`${prefix}-secret`}
-                  name="authSecretId"
-                  defaultValue={initial.authSecretId}
-                  required
-                >
-                  <option value="">Choose a secret…</option>
-                  {secrets.map((secret) => (
-                    <option key={secret.id} value={secret.id}>
-                      {secret.name}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field label="Header" htmlFor={`${prefix}-header`}>
-                  <Input
-                    id={`${prefix}-header`}
-                    name="authHeaderName"
-                    defaultValue={initial.authHeaderName}
-                    pattern="[A-Za-z0-9-]+"
-                    required
-                  />
-                </Field>
-                <Field
-                  label="Value"
-                  htmlFor={`${prefix}-template`}
-                  hint="{{secret}} is replaced by the secret."
-                >
-                  <Input
-                    id={`${prefix}-template`}
-                    name="authValueTemplate"
-                    defaultValue={initial.authValueTemplate}
-                    required
-                  />
-                </Field>
-              </div>
-            </div>
+            <HeaderAuthFields
+              prefix={prefix}
+              secrets={secrets}
+              initial={initial}
+            />
           ) : null}
 
           {authType === "oauth" ? (

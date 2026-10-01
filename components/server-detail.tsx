@@ -14,6 +14,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/input"
 import {
   deleteServerAction,
@@ -23,15 +24,19 @@ import {
   setToolDescriptionAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
-import type { AuthType, ServerStatus } from "@/lib/core/servers"
+import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
 
 export type ServerDetailProps = {
   server: {
     id: string
+    kind: ServerKind
     name: string
     slug: string
     url: string
     enabled: boolean
+    readOnly: boolean
+    specSource: "url" | "upload" | null
+    specUrl: string | null
     authType: AuthType
     status: ServerStatus
     statusMessage: string
@@ -43,11 +48,14 @@ export type ServerDetailProps = {
     title: string | null
     description: string
     descriptionOverride: string | null
+    /** An API endpoint's tool: the request it makes. */
+    operation: { method: string; path: string } | null
   }>
   notice: { kind: "ok" | "error"; message: string } | null
 }
 
 export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
+  const endpoint = server.kind === "openapi"
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
 
@@ -68,7 +76,11 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
                 status={server.status}
                 connected={server.connected}
                 enabled={server.enabled}
+                kind={server.kind}
               />
+              {endpoint && server.readOnly ? (
+                <Badge variant="outline">Read-only</Badge>
+              ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
               {server.authType === "oauth" ? (
@@ -96,14 +108,24 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
                   ) : null}
                 </>
               ) : null}
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={pending}
-                onClick={() => run(() => refreshToolsAction(server.id))}
-              >
-                {pending ? "Checking…" : "Refresh tools"}
-              </Button>
+              {/* An uploaded schema has nothing to download again; replace
+                  it in the settings below. */}
+              {!endpoint || server.specSource === "url" ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={pending}
+                  onClick={() => run(() => refreshToolsAction(server.id))}
+                >
+                  {pending
+                    ? endpoint
+                      ? "Reading…"
+                      : "Checking…"
+                    : endpoint
+                      ? "Re-read schema"
+                      : "Refresh tools"}
+                </Button>
+              ) : null}
               <Button
                 variant="outline"
                 size="sm"
@@ -117,8 +139,27 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
             </div>
           </div>
           <CardDescription>
-            <code className="text-xs">{server.url}</code> · last checked{" "}
-            <LocalDate value={server.lastSyncedAt} />
+            {endpoint ? "Requests go to " : null}
+            <code className="text-xs">{server.url}</code>
+            {endpoint ? (
+              <>
+                {" "}
+                · schema{" "}
+                {server.specSource === "url" && server.specUrl ? (
+                  <>
+                    from <code className="text-xs">{server.specUrl}</code>
+                  </>
+                ) : (
+                  "uploaded"
+                )}{" "}
+                · read <LocalDate value={server.lastSyncedAt} />
+              </>
+            ) : (
+              <>
+                {" "}
+                · last checked <LocalDate value={server.lastSyncedAt} />
+              </>
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -149,14 +190,17 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
         <CardHeader>
           <CardTitle>Tools ({tools.length})</CardTitle>
           <CardDescription>
-            What an assistant can find with search_tools. Rewrite a description
-            when the server&apos;s own wording would not help it choose.
+            {endpoint
+              ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
+              : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
           </CardDescription>
         </CardHeader>
         <CardContent>
           {tools.length === 0 ? (
             <p className="text-muted-foreground">
-              No tools known yet. Connect the server, or refresh its tools.
+              {endpoint
+                ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
+                : "No tools known yet. Connect the server, or refresh its tools."}
             </p>
           ) : (
             <ul className="flex flex-col divide-y divide-border">
@@ -172,8 +216,9 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
         <CardHeader>
           <CardTitle>Remove</CardTitle>
           <CardDescription>
-            Deletes the server, its tool list and any OAuth tokens PCP holds for
-            it. Secrets you added stay.
+            {endpoint
+              ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."
+              : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
           </CardDescription>
         </CardHeader>
         <CardContent className="items-start">
@@ -216,6 +261,11 @@ function ToolRow({
           {tool.title ? (
             <span className="text-xs text-muted-foreground">{tool.title}</span>
           ) : null}
+          {tool.operation ? (
+            <code className="text-xs text-muted-foreground">
+              {tool.operation.method} {tool.operation.path}
+            </code>
+          ) : null}
           {tool.descriptionOverride ? (
             <span className="text-xs text-primary">edited</span>
           ) : null}
@@ -239,7 +289,7 @@ function ToolRow({
             maxLength={2000}
           />
           <p className="text-xs text-muted-foreground">
-            Leave it empty to go back to the server&apos;s own description.
+            Leave it empty to go back to the original description.
           </p>
           <FormError error={state.status === "error" ? state.error : null} />
           <div>

@@ -25,6 +25,15 @@ presented one.
 token reaches. It never receives a stored secret, an OAuth token, or another
 vault's data. Revoking the token ends its access at once.
 
+**An assistant with an API token and an API endpoint** can call the operations
+the schema lists, with your secret in the header, and nothing else. It cannot
+choose the address (PCP sends to the base URL saved on the endpoint and never
+follows a redirect), cannot add a header PCP owns, cannot leave the path of
+the operation, and never receives the secret: PCP removes it from the API's
+answer before reading it, in case the API echoes it back. Read-only keeps an
+endpoint to GET operations, and a token scoped to other servers does not see
+it.
+
 **Someone with your session cookie but not your password** can use PCP as
 you while the session lasts. They cannot make an API token or a new recovery
 key, because both ask for the password again, so they cannot keep a way in
@@ -49,6 +58,18 @@ Not defended against:
 - **Malicious upstream servers.** PCP passes what a server answers to the
   assistant. A server you add can lie in its tool descriptions or results
   (prompt injection); add servers you trust.
+- **A schema you add is someone else's text.** PCP bounds it (size, nesting,
+  aliases, no remote references), but its operation names and descriptions
+  reach the assistant, and every operation it lists can be called with your
+  credential, destructive ones included. Use a key with only the access the
+  assistant needs, turn on Read-only, and scope the token. Read-only trusts
+  the HTTP method: a GET that changes something is the API's doing.
+- **Addresses on your own network.** PCP does not stop a schema URL or a base
+  URL from pointing at a private address; only you can set one, and that is
+  often the point. A host that lets anyone else do it needs an address
+  policy first (see [ARCHITECTURE.md](ARCHITECTURE.md#api-endpoints)).
+- **A key an API alters before echoing it.** PCP removes the secret as sent;
+  an API that hashes or truncates it first is not caught.
 
 ## Operational notes
 

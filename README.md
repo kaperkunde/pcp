@@ -9,6 +9,9 @@ dozens of servers without carrying every tool definition in its context.
 - **One endpoint for every server.** Add servers in the web UI; an assistant
   connects once, with an API token, and finds tools by describing what it
   needs.
+- **APIs without an MCP server.** Give PCP an OpenAPI schema, as a URL or a
+  file, and each operation becomes a tool. PCP makes the HTTP calls itself,
+  with your secret in a header, and hands the assistant the answer.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
@@ -63,10 +66,18 @@ required.
    and keeps the tokens as a managed secret. PCP reads each server's tool
    list; you can rewrite any tool's description so an assistant picks it
    correctly.
-3. **API tokens.** Create a token per assistant or machine; PCP asks for your
-   password to make one. A token can reach every server or only the ones you
-   pick, and can expire. Revoking it destroys its copy of the vault key.
-4. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
+3. **API endpoints.** Add an API by giving PCP its OpenAPI 3 schema, as a URL
+   or an uploaded JSON or YAML file. PCP turns each operation into a tool,
+   with the arguments the schema describes, and tells you what it left out
+   (file uploads, cookies). Choose a secret to send in a header, and
+   **Read-only** to offer only GET operations. Requests go to the base URL
+   saved on the endpoint, which PCP never changes on its own when the schema
+   does.
+4. **API tokens.** Create a token per assistant or machine; PCP asks for your
+   password to make one. A token can reach every server and endpoint or only
+   the ones you pick, and can expire. Revoking it destroys its copy of the
+   vault key.
+5. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
    bearer token. For Claude Code:
 
    ```bash
@@ -80,11 +91,11 @@ required.
 The assistant then sees a short description of the servers behind the token
 and three tools:
 
-| Tool            | What it does                                                               |
-| --------------- | -------------------------------------------------------------------------- |
-| `search_tools`  | Finds tools across servers from a few words ("create a github issue").     |
-| `describe_tool` | Returns one tool's full description and JSON Schema.                       |
-| `call_tool`     | Runs it, with PCP adding the server's credentials to the upstream request. |
+| Tool            | What it does                                                           |
+| --------------- | ---------------------------------------------------------------------- |
+| `search_tools`  | Finds tools across servers from a few words ("create a github issue"). |
+| `describe_tool` | Returns one tool's full description and JSON Schema.                   |
+| `call_tool`     | Runs it: PCP adds the credentials, then calls the server or the API.   |
 
 ## How it is secured
 
@@ -107,7 +118,8 @@ Consequences worth knowing:
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
 - The gateway never returns a secret to an assistant, only what the upstream
-  server answered.
+  server answered. An API's answer is scrubbed of the secret first, in case it
+  echoes the key back in an error.
 
 ## Development
 

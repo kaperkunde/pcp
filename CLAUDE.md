@@ -31,7 +31,13 @@ pull request, and nothing runs on a push.
   the browser bundle and the build fails in webpack, not in the dev server.
 - Secrets are decrypted in `lib/core/secrets.ts` and used in
   `lib/core/upstream.ts`. Nothing returns a secret value to an assistant;
-  `revealSecret` is for the owner's own screen.
+  `revealSecret` is for the owner's own screen. An API endpoint's calls
+  (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
+  header by `upstream.ts` and never read a secret; `openapi/call.ts` scrubs
+  the secret from what the API answers.
+- `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
+  on a call, and never lets an argument set a header or leave the base URL.
+  A schema is untrusted input: new limits go in `openapi/limits.ts`.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
@@ -60,7 +66,8 @@ check refuses to start).
   The core is tested against a scratch database (`lib/core/test-db.ts`).
 - E2E specs are Playwright projects; a new spec gets a project in
   `playwright.config.ts` and a line in `e2e/README.md`. The fake upstream in
-  `e2e/fixtures/upstream.ts` is the MCP server the suite talks to; extend it
+  `e2e/fixtures/upstream.ts` is the MCP server the suite talks to, and the
+  pet store (a REST API with its OpenAPI schema) for API endpoints; extend it
   rather than reaching for a real service.
 - Bar for new tests: high for new code (one when there is logic to pin
   down), low for regressions (red, then green, always).
@@ -68,5 +75,7 @@ check refuses to start).
 ## Copy
 
 The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
-a "secret", the server it talks to is a "server". No operator vocabulary in
-the UI: no "DEK", "grant", "KEK" outside code comments and ARCHITECTURE.md.
+a "secret", the server it talks to is a "server", and an API added from an
+OpenAPI schema is an "endpoint" ("API endpoints" in the UI). No operator
+vocabulary in the UI: no "DEK", "grant", "KEK" outside code comments and
+ARCHITECTURE.md.

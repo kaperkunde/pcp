@@ -15,6 +15,7 @@ components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
+  openapi/           OpenAPI schema → tools and call plans; building and sending the request
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
 ```
@@ -119,6 +120,65 @@ exposing any of it in this repository:
 5. **Never expose the seams here.** No admin API, no "create vault"
    endpoint, no tenant switch in the UI: the public product stays
    single-user.
+
+## API endpoints
+
+An API with an OpenAPI schema is added like a server and reached the same way.
+It is an `mcp_server` row with `kind = "openapi"`; its `url` is the API's base
+URL, and each operation in the schema is an `mcp_tool` row. Because it is a
+server row, token scoping, `search_tools`, `describe_tool`, description
+overrides, the "used by" list on a secret and the request log all work on it
+unchanged. Two functions in `lib/core/upstream.ts` branch on the kind:
+`syncServerTools` re-reads the schema, `callServerTool` makes the request.
+
+**Reading a schema** (`lib/core/openapi/`, no database, no secrets):
+
+- `parse.ts` reads JSON or YAML into plain values. YAML uses the core schema
+  with no custom tags and a cap on aliases, so a document cannot build
+  anything but data or expand without bound.
+- `refs.ts` follows only references into the same document (`#/…`). It never
+  fetches a remote or relative one: that would let a schema make the server
+  request any address it names. Inlining is bounded in depth and in nodes per
+  operation, and a reference back into itself becomes a placeholder.
+- `generate.ts` makes one tool per GET, PUT, POST, PATCH or DELETE operation,
+  with a JSON Schema for its arguments and a **call plan**: the method, the
+  path, which argument goes in which path, query or header parameter, and how
+  the body is encoded. The plan is stored beside the tool
+  (`mcp_tool.operation`) and validated when read. What PCP cannot send is
+  dropped when optional and skips the operation when required, with a reason
+  the owner sees (file uploads, cookies, a reference into another document).
+- The schema text is kept in `openapi_spec`, apart from the server row so
+  neither the server list nor the gateway loads it. An uploaded schema is
+  regenerated from that copy when the owner changes a setting.
+
+**Making a call** (`call.ts`, `request.ts`): `buildRequest` turns the
+assistant's arguments into a request following the plan. Arguments the plan
+does not name are refused. Path values are percent-encoded and never `.` or
+`..`. Only declared header parameters are sent, never the ones PCP owns
+(Authorization, Cookie, Host, hop-by-hop headers), and a header value cannot
+carry a line break. The credential is added last, so no argument can replace
+it, and the finished URL must still be under the base URL. `executeCall`
+sends it with a timeout and a cap on the answer, **without following
+redirects** (`fetch` would repeat a custom header such as `X-API-Key` on the
+next host), turns the answer into a tool result (JSON pretty-printed and,
+when small, as `structuredContent`; text as it is; other types described, not
+dumped; an error status as an error result), and removes the credential from
+it before parsing, because an API that echoes a key back (in an error, say)
+must not hand it to the assistant.
+
+**Where requests go** is the owner's choice, made once. The base URL is the
+owner's own field when filled, otherwise the schema's first server, resolved
+against the address the schema was downloaded from. A refresh never changes
+it; it says in the status message when the schema now names another server.
+When a secret is attached, a schema downloaded from one origin that names
+another is refused until the owner types the address, so a schema cannot aim
+the secret somewhere the owner did not choose.
+
+Private addresses are allowed, as they are for MCP servers: only the owner
+sets a schema URL or base URL, and a self-hosted PCP often talks to services
+on its own network. A multi-tenant host must add an address policy before it
+lets anyone else set one: resolve the name, refuse loopback, private,
+link-local and metadata ranges, and connect to the address it checked.
 
 ## Data on disk
 

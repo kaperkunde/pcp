@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -69,6 +69,59 @@ describe("applyMigrations", () => {
         expect.arrayContaining(["vault", "secret", "mcp_server", "api_token"]),
       )
       expect(sqlite.pragma("journal_mode", { simple: true })).toBe("wal")
+    } finally {
+      sqlite.close()
+    }
+  })
+
+  it("keeps existing servers, tools and token scopes through every migration", () => {
+    // A migration that rebuilds a table (Prisma's CREATE new_…, copy, DROP)
+    // deletes the rows that reference it: applyMigrations runs inside a
+    // transaction, where PRAGMA foreign_keys=OFF does nothing, so the DROP
+    // cascades. Seed data under the first migration and apply the rest.
+    scratch = mkdtempSync(path.join(tmpdir(), "pcp-migrate-"))
+    const file = path.join(scratch, "pcp.db")
+    const names = listMigrations()
+    const first = path.join(scratch, "first")
+    cpSync(path.join(migrationsDir(), names[0]!), path.join(first, names[0]!), {
+      recursive: true,
+    })
+    applyMigrations({ file, dir: first })
+
+    const seed = new Database(file)
+    try {
+      seed.exec(`
+        INSERT INTO vault (id, name, updated_at) VALUES ('v', 'Ada', 0);
+        INSERT INTO mcp_server (id, vault_id, name, slug, url, updated_at)
+          VALUES ('s', 'v', 'GitHub', 'github', 'https://mcp.example.com', 0);
+        INSERT INTO mcp_tool (id, server_id, name, input_schema, updated_at)
+          VALUES ('t', 's', 'create_issue', '{}', 0);
+        INSERT INTO key_grant (id, vault_id, kind, kdf, kdf_params, wrapped_dek)
+          VALUES ('g', 'v', 'api_token', 'hkdf', '{}', x'00');
+        INSERT INTO api_token (id, vault_id, grant_id, name, prefix, allow_all_servers)
+          VALUES ('k', 'v', 'g', 'Assistant', 'pcp_x', 0);
+        INSERT INTO api_token_server (token_id, server_id) VALUES ('k', 's');
+      `)
+    } finally {
+      seed.close()
+    }
+
+    expect(applyMigrations({ file }).applied).toEqual(names.slice(1))
+
+    const sqlite = new Database(file, { readonly: true })
+    try {
+      const count = (table: string) =>
+        (
+          sqlite.prepare(`SELECT count(*) AS n FROM ${table}`).get() as {
+            n: number
+          }
+        ).n
+      expect(count("mcp_server")).toBe(1)
+      expect(count("mcp_tool")).toBe(1)
+      expect(count("api_token_server")).toBe(1)
+      expect(
+        sqlite.prepare(`SELECT kind FROM mcp_server WHERE id = 's'`).get(),
+      ).toEqual({ kind: "mcp" })
     } finally {
       sqlite.close()
     }

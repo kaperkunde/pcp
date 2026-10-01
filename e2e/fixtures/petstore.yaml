@@ -1,0 +1,61 @@
+# The pet store as an uploaded file, for the e2e suite. The server is a
+# relative address on purpose: a file does not say where it was served
+# from, so adding it asks for the base URL.
+openapi: 3.0.3
+info:
+  title: Pet store
+  description: Pets for sale.
+  version: "1"
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Pet:
+      type: object
+      required: [name]
+      properties:
+        id: { type: integer, readOnly: true }
+        name: { type: string }
+        status: { type: string, enum: [available, sold] }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      summary: List pets
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [available, sold] }
+      responses:
+        "200": { description: The pets }
+    post:
+      operationId: createPet
+      summary: Add a pet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Pet" }
+      responses:
+        "201": { description: The new pet }
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      summary: Get a pet
+      parameters:
+        - { name: petId, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: The pet }
+  /session:
+    get:
+      operationId: getSession
+      parameters:
+        - { name: sid, in: cookie, required: true, schema: { type: string } }
+      responses:
+        "200": { description: The session }

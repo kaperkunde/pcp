@@ -15,7 +15,7 @@ export default async function SecretsPage() {
     <>
       <PageHeader
         title="Secrets"
-        description="The credentials PCP sends to your MCP servers. They never reach an assistant: the gateway adds them to each upstream call itself."
+        description="The credentials PCP sends to your servers and APIs. They never reach an assistant: the gateway adds them to each upstream call itself."
       />
       <SecretsManager secrets={secrets} />
     </>

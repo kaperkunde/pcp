@@ -153,6 +153,8 @@ model McpServer {
   /// What an assistant is told the server is for. Editable, because the
   /// upstream's own description is often missing or written for developers.
   description String @default("")
+  /// mcp: the Streamable HTTP endpoint. openapi: the API's base URL, which
+  /// every operation's path is appended to.
   url         String
   enabled     Boolean @default(true)
 
@@ -185,9 +187,21 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
+  /// mcp | openapi. An openapi server is an HTTP API described by an
+  /// OpenAPI schema; its tools are the schema's operations and PCP calls
+  /// them directly (lib/core/endpoints.ts).
+  kind       String  @default("mcp")
+  /// openapi: where the schema came from, url | upload.
+  specSource String? @map("spec_source")
+  /// openapi: the schema's address, when it came from one.
+  specUrl    String? @map("spec_url")
+  /// openapi: offer GET operations only.
+  readOnly   Boolean @default(false) @map("read_only")
+
   tools  McpTool[]
   tokens ApiTokenServer[]
   oauthStates OAuthState[]
+  spec   OpenApiSpec?
 
   @@unique([vaultId, slug])
   @@map("mcp_server")
@@ -208,11 +222,29 @@ model McpTool {
   inputSchema String    @map("input_schema")
   /// JSON, when the server sent annotations (readOnlyHint and friends).
   annotations String?
+  /// openapi: the call plan (JSON) that turns the tool's arguments into an
+  /// HTTP request. Null for MCP tools.
+  operation   String?
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
   @@unique([serverId, name])
   @@map("mcp_tool")
+}
+
+/// openapi: the schema an endpoint's tools were generated from, kept apart
+/// from the server row so listing servers and serving the gateway never
+/// load it. Refreshing an uploaded schema regenerates from this copy.
+model OpenApiSpec {
+  serverId  String    @id @map("server_id")
+  server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The JSON or YAML text as read.
+  text      String
+  /// SHA-256 of text, hex.
+  hash      String
+  fetchedAt DateTime  @map("fetched_at")
+
+  @@map("openapi_spec")
 }
 
 /// An OAuth authorization in flight: the state parameter sent to the

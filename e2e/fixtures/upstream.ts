@@ -25,6 +25,12 @@ import { z } from "zod"
  *   approves at once, and a token endpoint. Enough for the real SDK flow
  *   PCP runs, nothing more.
  *
+ * - `/openapi.json` and `/api/*` — a small REST API (a pet store) with its
+ *   OpenAPI document, for PCP's API endpoints. `/api/*` wants the same
+ *   bearer token as `/mcp` and records every request in `requests`, which is
+ *   how the tests assert what PCP actually sent. `/openapi.json` is open,
+ *   like most published schemas, and its server is `${origin}/api`.
+ *
  * Everything is in memory. Start one per test file.
  */
 
@@ -44,7 +50,123 @@ export type Upstream = {
     args: Record<string, unknown>
     authorization: string | null
   }>
+  /** The OpenAPI document of the pet store. */
+  openapiUrl: string
+  /** Every request to /api/*, in order, whether or not it was allowed. */
+  requests: Array<{
+    method: string
+    path: string
+    query: Record<string, string>
+    authorization: string | null
+    contentType: string | null
+    body: string
+  }>
   close: () => Promise<void>
+}
+
+type Pet = { id: number; name: string; status: string }
+
+/**
+ * The pet store's OpenAPI document. Two operations are there to be left out:
+ * one needs a cookie and one uploads a file, neither of which PCP sends.
+ */
+function petstoreSpec(origin: string) {
+  const petId = {
+    name: "petId",
+    in: "path",
+    required: true,
+    schema: { type: "integer" },
+  }
+  const pet = {
+    type: "object",
+    required: ["name"],
+    properties: {
+      id: { type: "integer", readOnly: true },
+      name: { type: "string" },
+      status: { type: "string", enum: ["available", "sold"] },
+    },
+  }
+
+  return {
+    openapi: "3.0.3",
+    info: { title: "Pet store", description: "Pets for sale.", version: "1" },
+    servers: [{ url: `${origin}/api` }],
+    security: [{ bearerAuth: [] }],
+    components: {
+      securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } },
+      schemas: { Pet: pet },
+    },
+    paths: {
+      "/pets": {
+        get: {
+          operationId: "listPets",
+          summary: "List pets",
+          description: "Pets in the store, optionally only one status.",
+          parameters: [
+            {
+              name: "status",
+              in: "query",
+              schema: { type: "string", enum: ["available", "sold"] },
+            },
+            { name: "limit", in: "query", schema: { type: "integer" } },
+          ],
+          responses: { "200": { description: "The pets" } },
+        },
+        post: {
+          operationId: "createPet",
+          summary: "Add a pet",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Pet" },
+              },
+            },
+          },
+          responses: { "201": { description: "The new pet" } },
+        },
+      },
+      "/pets/{petId}": {
+        get: {
+          operationId: "getPet",
+          summary: "Get a pet",
+          parameters: [petId],
+          responses: { "200": { description: "The pet" } },
+        },
+        delete: {
+          operationId: "deletePet",
+          summary: "Remove a pet",
+          parameters: [petId],
+          responses: { "204": { description: "Removed" } },
+        },
+      },
+      "/pets/{petId}/photo": {
+        post: {
+          operationId: "uploadPhoto",
+          parameters: [petId],
+          requestBody: {
+            required: true,
+            content: { "multipart/form-data": { schema: { type: "object" } } },
+          },
+          responses: { "200": { description: "Stored" } },
+        },
+      },
+      "/session": {
+        get: {
+          operationId: "getSession",
+          parameters: [
+            {
+              name: "sid",
+              in: "cookie",
+              required: true,
+              schema: { type: "string" },
+            },
+          ],
+          responses: { "200": { description: "The session" } },
+        },
+      },
+    },
+  }
 }
 
 function buildServer(
@@ -177,6 +299,11 @@ export async function startUpstream({
   expectedToken = `upstream-secret-${randomBytes(6).toString("hex")}`,
 }: { expectedToken?: string } = {}): Promise<Upstream> {
   const calls: Upstream["calls"] = []
+  const requests: Upstream["requests"] = []
+  const pets: Pet[] = [
+    { id: 1, name: "Fido", status: "available" },
+    { id: 2, name: "Tom", status: "sold" },
+  ]
   const issuedTokens = new Set<string>()
   const clients = new Map<string, Registered>()
   const codes = new Map<string, Code>()
@@ -232,6 +359,67 @@ export async function startUpstream({
           await handlers["/oauth/mcp"].fetch(toWebRequest(req, origin, body)),
           res,
         )
+      }
+
+      if (url.pathname === "/openapi.json") {
+        return json(res, 200, petstoreSpec(origin))
+      }
+
+      if (url.pathname.startsWith("/api/")) {
+        requests.push({
+          method: req.method ?? "GET",
+          path: url.pathname,
+          query: Object.fromEntries(url.searchParams),
+          authorization,
+          contentType: req.headers["content-type"] ?? null,
+          body,
+        })
+
+        if (authorization !== `Bearer ${expectedToken}`) {
+          return json(res, 401, { error: "unauthorized" })
+        }
+
+        const one = /^\/api\/pets\/(\d+)$/.exec(url.pathname)
+
+        if (url.pathname === "/api/pets" && req.method === "GET") {
+          const status = url.searchParams.get("status")
+          const limit = Number(url.searchParams.get("limit") ?? pets.length)
+          return json(
+            res,
+            200,
+            pets
+              .filter((pet) => !status || pet.status === status)
+              .slice(0, limit),
+          )
+        }
+
+        if (url.pathname === "/api/pets" && req.method === "POST") {
+          const input = JSON.parse(body || "{}") as Partial<Pet>
+          const pet = {
+            id: Math.max(0, ...pets.map((entry) => entry.id)) + 1,
+            name: String(input.name ?? ""),
+            status: String(input.status ?? "available"),
+          }
+          pets.push(pet)
+          return json(res, 201, pet)
+        }
+
+        if (one && req.method === "GET") {
+          const pet = pets.find((entry) => entry.id === Number(one[1]))
+          return pet
+            ? json(res, 200, pet)
+            : json(res, 404, { error: "no such pet" })
+        }
+
+        if (one && req.method === "DELETE") {
+          const index = pets.findIndex((entry) => entry.id === Number(one[1]))
+          if (index < 0) return json(res, 404, { error: "no such pet" })
+          pets.splice(index, 1)
+          res.statusCode = 204
+          return res.end()
+        }
+
+        return json(res, 404, { error: "not_found" })
       }
 
       if (url.pathname === "/.well-known/oauth-protected-resource/oauth/mcp") {
@@ -346,9 +534,11 @@ export async function startUpstream({
     origin,
     mcpUrl: `${origin}/mcp`,
     oauthMcpUrl: `${origin}/oauth/mcp`,
+    openapiUrl: `${origin}/openapi.json`,
     expectedToken,
     issuedTokens,
     calls,
+    requests,
     close: () =>
       new Promise((resolve, reject) => {
         for (const handler of Object.values(handlers)) void handler.close()

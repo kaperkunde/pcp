@@ -42,3 +42,9 @@ export function fields(formData: FormData, name: string): string[] {
     .getAll(name)
     .filter((value): value is string => typeof value === "string")
 }
+
+/** An uploaded file, or null when the input was left empty. */
+export function file(formData: FormData, name: string): File | null {
+  const value = formData.get(name)
+  return value instanceof File && value.size > 0 ? value : null
+}

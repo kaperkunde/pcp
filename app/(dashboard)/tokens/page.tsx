@@ -21,11 +21,11 @@ export default async function TokensPage() {
     <>
       <PageHeader
         title="API tokens"
-        description="What an assistant presents to the gateway. Each token can reach every server or a chosen few."
+        description="What an assistant presents to the gateway. Each token can reach every server and endpoint, or a chosen few."
       />
       <TokenManager
         tokens={tokens}
-        servers={servers.map(({ id, name }) => ({ id, name }))}
+        servers={servers.map(({ id, name, kind }) => ({ id, name, kind }))}
         endpointUrl={`${publicUrl}/mcp`}
       />
     </>

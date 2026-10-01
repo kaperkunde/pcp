@@ -24,6 +24,7 @@ import {
   type CreateTokenResult,
 } from "@/lib/actions/tokens"
 import type { ApiTokenSummary } from "@/lib/core/api-tokens"
+import type { ServerKind } from "@/lib/core/servers"
 
 export function TokenManager({
   tokens,
@@ -31,7 +32,7 @@ export function TokenManager({
   endpointUrl,
 }: {
   tokens: ApiTokenSummary[]
-  servers: Array<{ id: string; name: string }>
+  servers: Array<{ id: string; name: string; kind: ServerKind }>
   endpointUrl: string
 }) {
   return (
@@ -65,7 +66,7 @@ function CreateTokenForm({
   servers,
   endpointUrl,
 }: {
-  servers: Array<{ id: string; name: string }>
+  servers: Array<{ id: string; name: string; kind: ServerKind }>
   endpointUrl: string
 }) {
   const [state, action] = useActionState<CreateTokenResult, FormData>(
@@ -148,7 +149,7 @@ function CreateTokenForm({
                 onChange={() => setAccess("all")}
                 className="accent-primary"
               />
-              Every server, including ones added later
+              Every server and endpoint, including ones added later
             </Label>
             <Label className="font-normal">
               <input
@@ -165,13 +166,16 @@ function CreateTokenForm({
               <div className="ml-6 flex flex-col gap-2 pt-1">
                 {servers.length === 0 ? (
                   <p className="text-muted-foreground">
-                    No servers to choose from yet.
+                    No servers or endpoints to choose from yet.
                   </p>
                 ) : (
                   servers.map((server) => (
                     <Label key={server.id} className="font-normal">
                       <Checkbox name="serverIds" value={server.id} />
                       {server.name}
+                      {server.kind === "openapi" ? (
+                        <Badge variant="outline">API</Badge>
+                      ) : null}
                     </Label>
                   ))
                 )}

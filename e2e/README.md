@@ -48,13 +48,14 @@ Where Playwright cannot download its browser, point it at an installed one:
 Each spec is a project; dependents declare `dependencies: ["setup"]` and
 reuse the signed-in `e2e/.auth/owner.json` it writes.
 
-| Project    | Covers                                                                                                                                                                                                                             |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `setup`    | First visit → setup, the recovery key (saved to `e2e/.state/setup.json`), lock, unlock.                                                                                                                                            |
-| `secrets`  | Add, reveal, duplicate name refused, rotate and rename, delete.                                                                                                                                                                    |
-| `gateway`  | Secret → header-authenticated server → tool list → description edit → API token (refused without the password) → `/mcp`: search, describe, call; the upstream sees the secret; scoped tokens; revocation.                          |
-| `oauth`    | An OAuth upstream: discovery, dynamic registration, the browser round trip, tokens as a managed secret, a gateway call with the OAuth token, disconnect.                                                                           |
-| `recovery` | Wrong key refused; the recovery key sets a new password, signs everyone out and revokes every API token; the original password is put back; a new recovery key takes the password; signing out everywhere revokes every API token. |
+| Project     | Covers                                                                                                                                                                                                                                                                                                                                       |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `setup`     | First visit → setup, the recovery key (saved to `e2e/.state/setup.json`), lock, unlock.                                                                                                                                                                                                                                                      |
+| `secrets`   | Add, reveal, duplicate name refused, rotate and rename, delete.                                                                                                                                                                                                                                                                              |
+| `gateway`   | Secret → header-authenticated server → tool list → description edit → API token (refused without the password) → `/mcp`: search, describe, call; the upstream sees the secret; scoped tokens; revocation.                                                                                                                                    |
+| `oauth`     | An OAuth upstream: discovery, dynamic registration, the browser round trip, tokens as a managed secret, a gateway call with the OAuth token, disconnect.                                                                                                                                                                                     |
+| `endpoints` | An API from an OpenAPI schema: added by URL with a stored secret, then by file (read-only, base URL typed in); search, describe and call through `/mcp`; the upstream sees the right method, path, query, body and secret; bad arguments and `..` never leave PCP; a schema that 404s is refused and the form keeps what was typed; removal. |
+| `recovery`  | Wrong key refused; the recovery key sets a new password, signs everyone out and revokes every API token; the original password is put back; a new recovery key takes the password; signing out everywhere revokes every API token.                                                                                                           |
 
 `recovery` runs last: it invalidates the shared session.
 
@@ -71,6 +72,13 @@ reuse the signed-in `e2e/.auth/owner.json` it writes.
 
 It records every tool call in `calls`, which is how the tests assert what
 reached the upstream.
+
+- `/openapi.json` and `/api/*` — a small pet store and its OpenAPI document
+  (the server is `${origin}/api`; two operations are there to be left out, one
+  needing a cookie and one a file upload). `/api/*` wants the same bearer
+  token and records every request in `requests` (method, path, query, headers
+  that matter, body). `e2e/fixtures/petstore.yaml` is the same API as a file,
+  with a relative server address, for the upload path.
 
 ## Writing a new spec
 

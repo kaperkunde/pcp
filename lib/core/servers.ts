@@ -10,11 +10,15 @@ import { newId } from "./ids"
 import { deleteManagedSecret } from "./secrets"
 
 /**
- * The registry of MCP servers a vault can reach, and how each one is
- * authenticated to. Talking to them is lib/core/upstream.ts.
+ * The registry of servers a vault can reach, and how each one is
+ * authenticated to. A server is either an MCP server or an API endpoint
+ * (kind "openapi", lib/core/endpoints.ts). Talking to them is
+ * lib/core/upstream.ts.
  */
 
 export type AuthType = "none" | "header" | "oauth"
+
+export type ServerKind = "mcp" | "openapi"
 
 export type ServerStatus = "unknown" | "ok" | "auth_required" | "error"
 
@@ -33,11 +37,15 @@ export type ServerInput = {
 
 export type ServerSummary = {
   id: string
+  kind: ServerKind
   name: string
   slug: string
   description: string
   url: string
   enabled: boolean
+  readOnly: boolean
+  specSource: "url" | "upload" | null
+  specUrl: string | null
   authType: AuthType
   status: ServerStatus
   statusMessage: string
@@ -92,7 +100,10 @@ function validateHeaderName(name: string): string {
   return trimmed
 }
 
-async function normalizeInput(ctx: VaultContext, input: ServerInput) {
+export function normalizeNameAndDescription(input: {
+  name: string
+  description?: string
+}): { name: string; description: string } {
   const name = input.name.trim()
 
   if (!name) {
@@ -103,8 +114,49 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
     throw invalid("Keep the name under 80 characters.")
   }
 
+  return { name, description: (input.description ?? "").trim().slice(0, 1000) }
+}
+
+/** Header authentication: which secret, in which header, in what form. */
+export async function normalizeHeaderAuth(
+  ctx: VaultContext,
+  input: Pick<
+    ServerInput,
+    "authSecretId" | "authHeaderName" | "authValueTemplate"
+  >,
+): Promise<{
+  authSecretId: string
+  authHeaderName: string
+  authValueTemplate: string
+}> {
+  if (!input.authSecretId) {
+    throw invalid("Choose the secret to send.")
+  }
+
+  await requireTextSecret(ctx, input.authSecretId)
+  const authHeaderName = validateHeaderName(
+    input.authHeaderName?.trim() || DEFAULT_HEADER_NAME,
+  )
+  const template = input.authValueTemplate?.trim() || DEFAULT_VALUE_TEMPLATE
+
+  if (!template.includes(SECRET_PLACEHOLDER)) {
+    throw invalid(`The header value must contain ${SECRET_PLACEHOLDER}.`)
+  }
+
+  if (/[\r\n]/.test(template)) {
+    throw invalid("The header value cannot span lines.")
+  }
+
+  return {
+    authSecretId: input.authSecretId,
+    authHeaderName,
+    authValueTemplate: template,
+  }
+}
+
+async function normalizeInput(ctx: VaultContext, input: ServerInput) {
+  const { name, description } = normalizeNameAndDescription(input)
   const url = validateServerUrl(input.url)
-  const description = (input.description ?? "").trim().slice(0, 1000)
 
   const data = {
     name,
@@ -122,29 +174,9 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
   switch (input.authType) {
     case "none":
       break
-    case "header": {
-      if (!input.authSecretId) {
-        throw invalid("Choose the secret to send.")
-      }
-
-      await requireTextSecret(ctx, input.authSecretId)
-      data.authSecretId = input.authSecretId
-      data.authHeaderName = validateHeaderName(
-        input.authHeaderName?.trim() || DEFAULT_HEADER_NAME,
-      )
-      const template = input.authValueTemplate?.trim() || DEFAULT_VALUE_TEMPLATE
-
-      if (!template.includes(SECRET_PLACEHOLDER)) {
-        throw invalid(`The header value must contain ${SECRET_PLACEHOLDER}.`)
-      }
-
-      if (/[\r\n]/.test(template)) {
-        throw invalid("The header value cannot span lines.")
-      }
-
-      data.authValueTemplate = template
+    case "header":
+      Object.assign(data, await normalizeHeaderAuth(ctx, input))
       break
-    }
     case "oauth": {
       data.oauthClientId = input.oauthClientId?.trim() || null
       data.oauthScope = input.oauthScope?.trim() || null
@@ -177,7 +209,11 @@ async function requireTextSecret(ctx: VaultContext, id: string) {
   }
 }
 
-async function uniqueSlug(vaultId: string, base: string, exceptId?: string) {
+export async function uniqueSlug(
+  vaultId: string,
+  base: string,
+  exceptId?: string,
+) {
   let slug = base
 
   for (let n = 2; ; n++) {
@@ -196,11 +232,15 @@ async function uniqueSlug(vaultId: string, base: string, exceptId?: string) {
 
 function summarize(row: {
   id: string
+  kind: string
   name: string
   slug: string
   description: string
   url: string
   enabled: boolean
+  readOnly: boolean
+  specSource: string | null
+  specUrl: string | null
   authType: string
   status: string
   statusMessage: string
@@ -210,11 +250,18 @@ function summarize(row: {
 }): ServerSummary {
   return {
     id: row.id,
+    kind: row.kind === "openapi" ? "openapi" : "mcp",
     name: row.name,
     slug: row.slug,
     description: row.description,
     url: row.url,
     enabled: row.enabled,
+    readOnly: row.readOnly,
+    specSource:
+      row.specSource === "url" || row.specSource === "upload"
+        ? row.specSource
+        : null,
+    specUrl: row.specUrl,
     authType: row.authType as AuthType,
     status: row.status as ServerStatus,
     statusMessage: row.statusMessage,
@@ -281,6 +328,14 @@ export async function updateServer(
   input: ServerInput,
 ): Promise<void> {
   const existing = await getServer(ctx, id)
+
+  if (existing.kind !== "mcp") {
+    throw new PcpError(
+      "state",
+      "This is an API endpoint; change it in its own settings.",
+    )
+  }
+
   const data = await normalizeInput(ctx, input)
 
   // Switching away from OAuth, or to a different client, drops the tokens
