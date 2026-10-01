@@ -71,6 +71,7 @@ export default async function ServerPage({
           url: server.url,
           enabled: server.enabled,
           readOnly: server.readOnly,
+          publicOnly: server.publicOnly,
           specSource:
             server.specSource === "url" || server.specSource === "upload"
               ? server.specSource
@@ -111,6 +112,7 @@ export default async function ServerPage({
             // the owner see, and change, where their secret is sent.
             baseUrl: server.url,
             readOnly: server.readOnly,
+            publicOnly: server.publicOnly,
             authType: server.authType === "header" ? "header" : "none",
             authHeaderName: server.authHeaderName ?? "Authorization",
             authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",

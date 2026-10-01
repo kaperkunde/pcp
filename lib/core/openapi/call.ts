@@ -3,6 +3,7 @@ import { STATUS_CODES } from "node:http"
 import type { CallToolResult } from "@modelcontextprotocol/client"
 
 import { PcpError } from "../errors"
+import { AddressBlockedError } from "./address"
 import { describeFetchError, discard, readCapped } from "./http"
 import { isObject } from "./json"
 import {
@@ -12,6 +13,7 @@ import {
   MAX_STRUCTURED_CHARS,
 } from "./limits"
 import type { BuiltRequest } from "./request"
+import { send, type SendOptions } from "./transport"
 
 /**
  * Sends one request and turns the answer into an MCP tool result: JSON is
@@ -89,25 +91,34 @@ export async function executeCall(
     timeoutMs = CALL_TIMEOUT_MS,
     maxResponseBytes = MAX_RESPONSE_BYTES,
     redact = [],
+    publicOnly = false,
+    addressCheck,
   }: {
     timeoutMs?: number
     maxResponseBytes?: number
     /** Credential values to remove from whatever the API answers. */
     redact?: string[]
-  } = {},
+  } & SendOptions = {},
 ): Promise<CallOutcome> {
   let response: Response
 
   try {
-    response = await fetch(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-      redirect: "manual",
-      cache: "no-store",
-      signal: AbortSignal.timeout(timeoutMs),
-    })
+    response = await send(
+      request.url,
+      {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        signal: AbortSignal.timeout(timeoutMs),
+      },
+      { publicOnly, addressCheck },
+    )
   } catch (error) {
+    // A refused address is the endpoint's rule at work, not an outage.
+    if (error instanceof AddressBlockedError) {
+      throw new PcpError("forbidden", error.message)
+    }
+
     throw new PcpError("upstream", describeFetchError(error, timeoutMs))
   }
 

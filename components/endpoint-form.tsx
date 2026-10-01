@@ -35,6 +35,8 @@ export type EndpointFormValues = {
   specReadAt?: Date | null
   baseUrl: string
   readOnly: boolean
+  /** Refuse private, local and link-local addresses. */
+  publicOnly: boolean
   authType: "none" | "header"
   authHeaderName: string
   authValueTemplate: string
@@ -48,6 +50,7 @@ export const EMPTY_ENDPOINT: EndpointFormValues = {
   specUrl: "",
   baseUrl: "",
   readOnly: false,
+  publicOnly: false,
   authType: "none",
   authHeaderName: DEFAULT_HEADER_NAME,
   authValueTemplate: DEFAULT_VALUE_TEMPLATE,
@@ -82,6 +85,7 @@ export function EndpointForm({
   const [specUrl, setSpecUrl] = useState(initial.specUrl)
   const [baseUrl, setBaseUrl] = useState(initial.baseUrl)
   const [readOnly, setReadOnly] = useState(initial.readOnly)
+  const [publicOnly, setPublicOnly] = useState(initial.publicOnly)
   const [authType, setAuthType] = useState(initial.authType)
 
   return (
@@ -243,6 +247,24 @@ export function EndpointForm({
             <p className="text-xs text-muted-foreground">
               Only operations that read (GET) become tools, so nothing an
               assistant calls here can change data.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label className="font-normal" htmlFor={`${prefix}-public-only`}>
+              <Checkbox
+                id={`${prefix}-public-only`}
+                name="publicOnly"
+                checked={publicOnly}
+                onChange={(event) => setPublicOnly(event.target.checked)}
+              />
+              Public addresses only
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              Refuse private, local and link-local addresses, for the schema and
+              for every call. On for endpoints an assistant registers; turn it
+              off only for an API on your own network that you trust this
+              endpoint to reach.
             </p>
           </div>
 

@@ -35,6 +35,11 @@ pull request, and nothing runs on a push.
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
   header by `upstream.ts` and never read a secret; `openapi/call.ts` scrubs
   the secret from what the API answers.
+- What an assistant may do to an endpoint through the gateway
+  (`lib/core/endpoint-admin.ts`) is narrower than what the owner may do, on
+  purpose: it never chooses, sees or attaches a secret, never moves an
+  endpoint that sends one, and never clears `publicOnly`. Keep all three when
+  adding to it, and add a test for each new field an assistant can set.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.

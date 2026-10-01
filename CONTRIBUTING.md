@@ -72,6 +72,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/oauth.ts`                | The authorization flow (start, callback, disconnect)          |
 | `lib/core/endpoints.ts`            | API endpoints: reading a schema, creating them, calling them  |
 | `lib/core/openapi/`                | OpenAPI → tools and call plans; building and sending requests |
+| `lib/core/endpoint-admin.ts`       | What an assistant may do to endpoints through the gateway     |
 | `lib/core/catalogue.ts`            | Writing a server's tool list into the catalogue               |
 | `lib/core/search.ts`, `gateway.ts` | Ranking tools; the three-tool MCP server the gateway serves   |
 | `lib/core/migrate.ts`              | Boot-time migrations                                          |

@@ -8,6 +8,11 @@ import type {
 
 import type { ResolvedToken } from "./api-tokens"
 import { db } from "./db"
+import {
+  getEndpoint,
+  registerEndpoint,
+  updateEndpointDetails,
+} from "./endpoint-admin"
 import { isPcpError } from "./errors"
 import { appendRequestLog } from "./request-log"
 import { searchTools, summarize, type ToolCandidate } from "./search"
@@ -40,9 +45,18 @@ export async function loadGatewayServers(
   })
 }
 
-export function buildInstructions(servers: GatewayServer[]): string {
+const MANAGE_INSTRUCTIONS =
+  "This token can also add and maintain API endpoints: register_endpoint takes OpenAPI 3 text (JSON or YAML; write one from the API's documentation if it has none), update_endpoint changes an endpoint, get_endpoint reads one. You cannot attach a credential; the owner does that in PCP."
+
+export function buildInstructions(
+  servers: GatewayServer[],
+  { manageEndpoints = false }: { manageEndpoints?: boolean } = {},
+): string {
   if (servers.length === 0) {
-    return "PCP is a gateway to the owner's MCP servers, but this token has no servers to reach yet. Ask the owner to add one in PCP."
+    return [
+      "PCP is a gateway to the owner's MCP servers, but this token has no servers to reach yet. Ask the owner to add one in PCP.",
+      ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
+    ].join("\n")
   }
 
   const lines = servers.map((server) => {
@@ -55,6 +69,7 @@ export function buildInstructions(servers: GatewayServer[]): string {
     "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
     "Servers:",
     ...lines,
+    ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
   ].join("\n")
 }
 
@@ -91,7 +106,11 @@ export function buildGatewayServer(
 ): McpServer {
   const server = new McpServer(
     { name: "pcp", title: "PCP", version: "0.1.0" },
-    { instructions: buildInstructions(servers) },
+    {
+      instructions: buildInstructions(servers, {
+        manageEndpoints: scope.manageEndpoints,
+      }),
+    },
   )
 
   const slugs = servers.map((entry) => entry.slug)
@@ -310,6 +329,138 @@ export function buildGatewayServer(
       },
     ),
   )
+
+  // Only for a token the owner made with "add and change API endpoints":
+  // an assistant that can register endpoints decides where PCP sends
+  // requests, so it is never on by default. What these tools may do is
+  // decided in endpoint-admin.ts.
+  if (scope.manageEndpoints) {
+    const json = (value: unknown) => text(clip(JSON.stringify(value, null, 1)))
+    const slugOf = (args: unknown) => ({
+      server: (args as { endpoint?: string }).endpoint,
+    })
+
+    server.registerTool(
+      "register_endpoint",
+      {
+        title: "Register an API endpoint",
+        description:
+          "Add an API to the owner's PCP from an OpenAPI 3 document, given as text (JSON or YAML). If the API has no OpenAPI document, write one from its documentation. Each operation becomes a tool: find it with search_tools, run it with call_tool. The endpoint sends no credential (the owner attaches a secret in PCP if the API needs one) and refuses private addresses until the owner allows them.",
+        inputSchema: z.object({
+          name: z.string().min(1).max(80).describe("A name for the API."),
+          spec: z
+            .string()
+            .min(1)
+            .describe("The OpenAPI 3 document, as JSON or YAML text."),
+          baseUrl: z
+            .string()
+            .optional()
+            .describe(
+              "Where the API lives, e.g. https://api.example.com/v1. Needed when the document's servers entry is missing or relative.",
+            ),
+          description: z
+            .string()
+            .max(1000)
+            .optional()
+            .describe(
+              "What the API is for, in a sentence or two; other assistants read it when searching.",
+            ),
+          readOnly: z
+            .boolean()
+            .optional()
+            .describe("Offer only GET operations."),
+        }),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      logged("register_endpoint", () => ({}))(
+        async (args: {
+          name: string
+          spec: string
+          baseUrl?: string
+          description?: string
+          readOnly?: boolean
+        }) => json(await registerEndpoint(scope, args)),
+      ),
+    )
+
+    server.registerTool(
+      "update_endpoint",
+      {
+        title: "Change an API endpoint",
+        description:
+          "Change an API endpoint: its name, description, OpenAPI document (when it was added as text), base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Some changes are the owner's alone, and get_endpoint says which; you can never change the credential, and you cannot move an endpoint that sends a secret.",
+        inputSchema: z.object({
+          endpoint: z
+            .string()
+            .describe("The endpoint's short name, as in server/tool."),
+          name: z.string().min(1).max(80).optional(),
+          description: z.string().max(1000).optional(),
+          spec: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "A whole new OpenAPI 3 document as JSON or YAML text; it replaces the old one, and tools are rebuilt from it.",
+            ),
+          baseUrl: z.string().optional(),
+          readOnly: z.boolean().optional(),
+          toolDescriptions: z
+            .record(z.string(), z.string().max(2000).nullable())
+            .optional()
+            .describe(
+              "Tool name to a better description for assistants; null goes back to the schema's own.",
+            ),
+        }),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      logged(
+        "update_endpoint",
+        slugOf,
+      )(async (args: { endpoint: string } & Record<string, unknown>) => {
+        const { endpoint, ...changes } = args
+        return json(await updateEndpointDetails(scope, endpoint, changes))
+      }),
+    )
+
+    server.registerTool(
+      "get_endpoint",
+      {
+        title: "Read an API endpoint",
+        description:
+          "An API endpoint's settings, its tools, what you may change on it, and (with includeSpec) the OpenAPI text it was built from, so you can edit it and send it back with update_endpoint. Never includes a secret.",
+        inputSchema: z.object({
+          endpoint: z
+            .string()
+            .describe("The endpoint's short name, as in server/tool."),
+          includeSpec: z
+            .boolean()
+            .optional()
+            .describe("Also return the stored OpenAPI text, if not too long."),
+        }),
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      },
+      logged(
+        "get_endpoint",
+        slugOf,
+      )(async (args: { endpoint: string; includeSpec?: boolean }) =>
+        json(
+          await getEndpoint(scope, args.endpoint, {
+            includeSpec: args.includeSpec,
+          }),
+        ),
+      ),
+    )
+  }
 
   return server
 }

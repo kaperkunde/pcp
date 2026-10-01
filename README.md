@@ -122,6 +122,21 @@ and three tools:
 | `describe_tool` | Returns one tool's full description and JSON Schema.                   |
 | `call_tool`     | Runs it: PCP adds the credentials, then calls the server or the API.   |
 
+A token made with **Let an assistant with this token add and change API
+endpoints** gets three more tools, so an assistant can set up an API itself:
+
+| Tool                | What it does                                                                                             |
+| ------------------- | -------------------------------------------------------------------------------------------------------- |
+| `register_endpoint` | Adds an API from OpenAPI 3 text (JSON or YAML). The assistant can write one from an API's documentation. |
+| `update_endpoint`   | Changes an endpoint's name, description, schema text, base URL, read-only setting or tool descriptions.  |
+| `get_endpoint`      | Reads an endpoint's settings and tools, and optionally its schema text, to edit and send back.           |
+
+What an assistant can do here is narrower than what you can. It can never
+see, choose or attach a secret: you attach one in the endpoint's settings. It
+cannot move an endpoint that sends a secret. What it registers refuses private
+and local addresses until you allow them. Leave the option off for a token
+that does not need it.
+
 ## How it is secured
 
 The short version: everything sensitive is AES-256-GCM ciphertext under a

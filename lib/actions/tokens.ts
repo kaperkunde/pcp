@@ -35,6 +35,7 @@ export async function createTokenAction(
       name: field(formData, "name"),
       allowAllServers: field(formData, "access") !== "selected",
       serverIds: fields(formData, "serverIds"),
+      manageEndpoints: field(formData, "manageEndpoints") === "on",
       expiresAt:
         days > 0 ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null,
     })

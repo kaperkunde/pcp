@@ -21,6 +21,8 @@ export type ApiTokenSummary = {
   name: string
   prefix: string
   allowAllServers: boolean
+  /** May register and change API endpoints through the gateway. */
+  manageEndpoints: boolean
   servers: Array<{ id: string; name: string }>
   expiresAt: Date | null
   revokedAt: Date | null
@@ -34,6 +36,8 @@ export type ResolvedToken = {
   tokenName: string
   /** null: every server in the vault. */
   serverIds: string[] | null
+  /** May register and change API endpoints (register_endpoint and friends). */
+  manageEndpoints: boolean
 }
 
 export async function listApiTokens(
@@ -52,6 +56,7 @@ export async function listApiTokens(
     name: row.name,
     prefix: row.prefix,
     allowAllServers: row.allowAllServers,
+    manageEndpoints: row.manageEndpoints,
     servers: row.servers.map((link) => link.server),
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
@@ -66,6 +71,7 @@ export async function createApiToken(
     name: string
     allowAllServers: boolean
     serverIds?: string[]
+    manageEndpoints?: boolean
     expiresAt?: Date | null
   },
 ): Promise<{ id: string; token: string }> {
@@ -116,6 +122,7 @@ export async function createApiToken(
       name,
       prefix: token.slice(0, DISPLAY_PREFIX_LENGTH),
       allowAllServers: input.allowAllServers,
+      manageEndpoints: input.manageEndpoints ?? false,
       expiresAt: input.expiresAt ?? null,
       servers: { create: serverIds.map((serverId) => ({ serverId })) },
     },
@@ -175,6 +182,7 @@ export async function resolveApiToken(
     serverIds: record.allowAllServers
       ? null
       : record.servers.map((link) => link.serverId),
+    manageEndpoints: record.manageEndpoints,
   }
 }
 

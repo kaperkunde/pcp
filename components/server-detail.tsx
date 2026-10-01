@@ -35,6 +35,7 @@ export type ServerDetailProps = {
     url: string
     enabled: boolean
     readOnly: boolean
+    publicOnly: boolean
     specSource: "url" | "upload" | null
     specUrl: string | null
     authType: AuthType
@@ -80,6 +81,9 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
               />
               {endpoint && server.readOnly ? (
                 <Badge variant="outline">Read-only</Badge>
+              ) : null}
+              {endpoint && server.publicOnly ? (
+                <Badge variant="outline">Public addresses only</Badge>
               ) : null}
             </div>
             <div className="flex flex-wrap gap-2">

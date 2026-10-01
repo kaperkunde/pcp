@@ -34,6 +34,14 @@ answer before reading it, in case the API echoes it back. Read-only keeps an
 endpoint to GET operations, and a token scoped to other servers does not see
 it.
 
+**An assistant with a token that may manage endpoints** can register an API
+from OpenAPI text and change what it registered, and nothing that decides
+where your secrets go. It cannot see, choose or attach a secret, cannot move
+an endpoint that sends one, and what it registers refuses private and local
+addresses (checked at the moment of connecting, so a rebinding name does not
+get past it) until you allow them. The right is off unless you tick it when
+you make the token.
+
 **Someone with your session cookie but not your password** can use PCP as
 you while the session lasts. They cannot make an API token or a new recovery
 key, because both ask for the password again, so they cannot keep a way in
@@ -68,6 +76,11 @@ Not defended against:
   URL from pointing at a private address; only you can set one, and that is
   often the point. A host that lets anyone else do it needs an address
   policy first (see [ARCHITECTURE.md](ARCHITECTURE.md#api-endpoints)).
+- **Egress through a token that manages endpoints.** An assistant with that
+  right can have PCP send data it holds to any public address, as the
+  arguments of an operation it registered. A prompt injected into such an
+  assistant can do the same. Give the right only to a token that needs it,
+  and review what it registers (the endpoint list shows each one).
 - **A key an API alters before echoing it.** PCP removes the secret as sent;
   an API that hashes or truncates it first is not caught.
 

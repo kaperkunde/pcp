@@ -50,6 +50,8 @@ export type EndpointInput = {
   /** The uploaded file's text. Required to create from an upload. */
   specText?: string | null
   readOnly: boolean
+  /** Refuse private, loopback and link-local addresses (see address.ts). */
+  publicOnly?: boolean
   authType: "none" | "header"
   authHeaderName?: string | null
   authValueTemplate?: string | null
@@ -84,6 +86,7 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
     specSource,
     specUrl: specSource === "url" ? validateSpecUrl(input.specUrl ?? "") : null,
     readOnly: input.readOnly,
+    publicOnly: input.publicOnly === true,
     ownerBaseUrl: input.baseUrl?.trim() || null,
   } as const
 }
@@ -248,7 +251,9 @@ export async function createEndpoint(
     }
     text = input.specText
   } else {
-    ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!))
+    ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
+      publicOnly: data.publicOnly,
+    }))
   }
 
   // Everything that can be wrong with the schema is found before a row
@@ -276,6 +281,7 @@ export async function createEndpoint(
       specSource: data.specSource,
       specUrl: data.specUrl,
       readOnly: data.readOnly,
+      publicOnly: data.publicOnly,
       authType: data.authType,
       authSecretId: data.authSecretId,
       authHeaderName: data.authHeaderName,
@@ -323,7 +329,9 @@ export async function updateEndpoint(
     // downloads it again.
     text = stored.text
   } else {
-    ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!))
+    ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
+      publicOnly: data.publicOnly,
+    }))
   }
 
   const generated = generate(text, data)
@@ -345,6 +353,7 @@ export async function updateEndpoint(
       specSource: data.specSource,
       specUrl: data.specUrl,
       readOnly: data.readOnly,
+      publicOnly: data.publicOnly,
       authType: data.authType,
       authSecretId: data.authSecretId,
       authHeaderName: data.authHeaderName,
@@ -369,7 +378,9 @@ export async function syncEndpointTools(
     let fetchedFrom: string | null = null
 
     if (server.specSource === "url" && server.specUrl) {
-      ;({ text, url: fetchedFrom } = await fetchSpec(server.specUrl))
+      ;({ text, url: fetchedFrom } = await fetchSpec(server.specUrl, {
+        publicOnly: server.publicOnly,
+      }))
     } else {
       const stored = await db().openApiSpec.findUnique({
         where: { serverId: server.id },
@@ -441,8 +452,17 @@ export async function callEndpointTool(
   let outcome: Awaited<ReturnType<typeof executeCall>>
 
   try {
-    outcome = await executeCall(request, { redact })
+    outcome = await executeCall(request, {
+      redact,
+      publicOnly: server.publicOnly,
+    })
   } catch (error) {
+    // The endpoint refusing an address is its rule working, not an outage:
+    // say so, and leave its status alone.
+    if (isPcpError(error) && error.code === "forbidden") {
+      throw error
+    }
+
     const message =
       `${server.name} could not be reached: ${error instanceof Error ? error.message : String(error)}`.slice(
         0,

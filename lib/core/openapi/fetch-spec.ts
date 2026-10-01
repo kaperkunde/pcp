@@ -1,7 +1,9 @@
 import { MAX_SPEC_BYTES } from "../constants"
 import { invalid } from "../errors"
+import { AddressBlockedError } from "./address"
 import { describeFetchError, discard, readCapped } from "./http"
 import { SPEC_FETCH_TIMEOUT_MS, SPEC_MAX_REDIRECTS, USER_AGENT } from "./limits"
+import { send, type SendOptions } from "./transport"
 import { validateSpecUrl } from "./urls"
 
 /**
@@ -11,7 +13,11 @@ import { validateSpecUrl } from "./urls"
  */
 export async function fetchSpec(
   rawUrl: string,
-  { timeoutMs = SPEC_FETCH_TIMEOUT_MS }: { timeoutMs?: number } = {},
+  {
+    timeoutMs = SPEC_FETCH_TIMEOUT_MS,
+    publicOnly = false,
+    addressCheck,
+  }: { timeoutMs?: number } & SendOptions = {},
 ): Promise<{ text: string; url: string }> {
   let url = validateSpecUrl(rawUrl)
   const signal = AbortSignal.timeout(timeoutMs)
@@ -20,17 +26,23 @@ export async function fetchSpec(
     let response: Response
 
     try {
-      response = await fetch(url, {
-        redirect: "manual",
-        cache: "no-store",
-        signal,
-        headers: {
-          accept:
-            "application/json, application/yaml, application/x-yaml, text/yaml, text/plain;q=0.9, */*;q=0.8",
-          "user-agent": USER_AGENT,
+      response = await send(
+        url,
+        {
+          signal,
+          headers: {
+            accept:
+              "application/json, application/yaml, application/x-yaml, text/yaml, text/plain;q=0.9, */*;q=0.8",
+            "user-agent": USER_AGENT,
+          },
         },
-      })
+        { publicOnly, addressCheck },
+      )
     } catch (error) {
+      if (error instanceof AddressBlockedError) {
+        throw invalid(error.message)
+      }
+
       throw invalid(
         `The schema could not be downloaded: ${describeFetchError(error, timeoutMs)}.`,
       )

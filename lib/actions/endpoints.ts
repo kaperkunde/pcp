@@ -50,6 +50,7 @@ async function inputFrom(formData: FormData): Promise<EndpointInput> {
     specUrl: specSource === "url" ? field(formData, "specUrl") : null,
     specText,
     readOnly: field(formData, "readOnly") === "on",
+    publicOnly: field(formData, "publicOnly") === "on",
     authType,
     authHeaderName: field(formData, "authHeaderName"),
     authValueTemplate: field(formData, "authValueTemplate"),

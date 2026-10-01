@@ -180,6 +180,45 @@ on its own network. A multi-tenant host must add an address policy before it
 lets anyone else set one: resolve the name, refuse loopback, private,
 link-local and metadata ranges, and connect to the address it checked.
 
+## Managing endpoints through the gateway
+
+A token the owner made with "add and change API endpoints"
+(`api_token.manage_endpoints`, off for every other token) gets three more
+gateway tools, `register_endpoint(name, spec, baseUrl?, description?,
+readOnly?)`, `update_endpoint(endpoint, …)` and `get_endpoint(endpoint,
+includeSpec?)`. `spec` is OpenAPI 3 as text, so an assistant can write a
+document from an API's documentation and register it in one call. The rules
+are in `lib/core/endpoint-admin.ts`, and they exist because an assistant that
+can register an endpoint decides where PCP sends requests:
+
+- **No credential, ever.** Nothing the tools accept names a secret, a header
+  or a template, and `get_endpoint` shows only whether a header is sent and
+  what it is called. An assistant cannot attach a secret to an address it
+  chose, or read one.
+- **A secret pins the destination.** With a secret attached the base URL is
+  fixed, and a new schema that names another server leaves it where it was.
+  Without a secret, only an endpoint the assistant registered (or the owner
+  limited to public addresses) can be moved.
+- **Public addresses only.** What an assistant registers has `public_only`
+  set, and only the owner can clear it. Such an endpoint refuses loopback,
+  private, link-local, carrier-grade NAT and multicast addresses and the IPv6
+  forms that wrap one (`openapi/address.ts`), for its calls and for any
+  schema download. The check is made on the address the socket connects to
+  (`openapi/transport.ts` resolves the name itself and checks every answer),
+  so a name that resolves to a public address for a check and a private one
+  for the connection cannot get through. The owner turns it off per endpoint,
+  for an API on their own network.
+- **Text only.** The assistant supplies the schema as text; PCP never fetches
+  an address the assistant chose. An endpoint the owner reads from a URL
+  keeps that URL, and its schema is the owner's to change.
+- **Read-only can be turned on, not off,** while a secret is attached.
+- A token limited to some servers only sees endpoints in its scope, and what
+  it registers is added to that scope.
+
+What remains is egress: an assistant with this right can have PCP send data
+it holds to any public URL, as an operation's arguments. That is why the right
+is the owner's to give, per token, and why the tokens page marks it.
+
 ## Data on disk
 
 `PCP_DATA_DIR` (default `./data`, `/data` in Docker):
@@ -196,7 +235,8 @@ link-local and metadata ranges, and connect to the address it checked.
 
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
-description and its tool count, and three tools:
+description and its tool count, and three tools (three more for a token with
+the right to manage endpoints, below):
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with

@@ -91,6 +91,10 @@ model ApiToken {
   /// The first characters of the token, so the owner can tell them apart.
   prefix          String
   allowAllServers Boolean   @default(true) @map("allow_all_servers")
+  /// Whether the assistant may register and change API endpoints through
+  /// the gateway (register_endpoint, update_endpoint, get_endpoint). Off
+  /// unless the owner turns it on when making the token.
+  manageEndpoints Boolean   @default(false) @map("manage_endpoints")
   expiresAt       DateTime? @map("expires_at")
   revokedAt       DateTime? @map("revoked_at")
   createdAt       DateTime  @default(now()) @map("created_at")
@@ -197,6 +201,10 @@ model McpServer {
   specUrl    String? @map("spec_url")
   /// openapi: offer GET operations only.
   readOnly   Boolean @default(false) @map("read_only")
+  /// openapi: refuse private, loopback and link-local addresses, for the
+  /// schema download and for every call. Set on endpoints an assistant
+  /// registers; only the owner can clear it.
+  publicOnly Boolean @default(false) @map("public_only")
 
   tools  McpTool[]
   tokens ApiTokenServer[]

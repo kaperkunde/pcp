@@ -182,6 +182,19 @@ function CreateTokenForm({
               </div>
             ) : null}
           </fieldset>
+          <div className="flex flex-col gap-1.5">
+            <Label className="font-normal" htmlFor="token-manage">
+              <Checkbox id="token-manage" name="manageEndpoints" />
+              Let an assistant with this token add and change API endpoints
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              It can register an API from OpenAPI schema text and edit its
+              schema, description and base URL. It can never see or choose a
+              secret, and the endpoints it adds refuse private addresses until
+              you allow them. Leave this off unless the assistant needs to set
+              up APIs itself.
+            </p>
+          </div>
           <Field
             label="Your password"
             htmlFor="token-password"
@@ -253,6 +266,9 @@ function TokenRow({ token }: { token: ApiTokenSummary }) {
               </Badge>
             ))
           )}
+          {token.manageEndpoints && !dead ? (
+            <Badge variant="warning">Manages endpoints</Badge>
+          ) : null}
         </div>
         <div className="flex gap-1">
           {dead ? (

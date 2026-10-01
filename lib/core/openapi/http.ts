@@ -41,10 +41,12 @@ export function describeFetchError(error: unknown, timeoutMs: number): string {
     return `no answer within ${Math.round(timeoutMs / 1000)} seconds`
   }
 
-  const cause = error instanceof Error ? (error.cause as unknown) : undefined
+  // fetch wraps the system error as `cause`; node:http reports it directly.
+  const source =
+    error instanceof Error && error.cause ? (error.cause as unknown) : error
   const code =
-    cause && typeof cause === "object" && "code" in cause
-      ? String((cause as { code: unknown }).code)
+    source && typeof source === "object" && "code" in source
+      ? String((source as { code: unknown }).code)
       : ""
   const message = error instanceof Error ? error.message : String(error)
 
