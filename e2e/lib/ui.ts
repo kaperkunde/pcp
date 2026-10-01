@@ -78,6 +78,17 @@ export async function openToken(page: Page, name: string): Promise<string> {
 }
 
 /**
+ * Unfolds the tool list on a server's own page, which starts folded.
+ */
+export async function showServerTools(page: Page) {
+  const toggle = page.getByRole("button", { name: /^Tools \(\d+\)$/ })
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+    await toggle.click()
+  }
+  await expect(toggle).toHaveAttribute("aria-expanded", "true")
+}
+
+/**
  * Unfolds a server's tools on a token's page: each server shows only a
  * count of its tools until it is opened.
  */

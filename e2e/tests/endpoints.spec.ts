@@ -9,6 +9,7 @@ import { OWNER_PASSWORD } from "../lib/auth"
 import {
   addSecret,
   allowAllTools,
+  showServerTools,
   confirmWithPassword,
   createToken,
 } from "../lib/ui"
@@ -118,6 +119,7 @@ test("adds an endpoint from a schema URL, with a stored secret", async ({
   endpointId = page.url().split("/").pop()!
   await expect(page.getByText("Ready", { exact: true })).toBeVisible()
   await expect(page.getByText("Tools (4)")).toBeVisible()
+  await showServerTools(page)
   await expect(page.locator("code", { hasText: "listPets" })).toBeVisible()
   await expect(
     page.locator("code", { hasText: "GET /pets/{petId}" }),
@@ -351,6 +353,7 @@ test("a schema file can be uploaded, read-only, with the base URL typed in", asy
   await expect(page.getByText("Ready", { exact: true })).toBeVisible()
   // Only the two GET operations; the cookie one is left out.
   await expect(page.getByText("Tools (2)")).toBeVisible()
+  await showServerTools(page)
   await expect(page.locator("code", { hasText: "listPets" })).toBeVisible()
   await expect(page.locator("code", { hasText: "createPet" })).toHaveCount(0)
   // Nothing to download again: an uploaded schema is replaced, not re-read.

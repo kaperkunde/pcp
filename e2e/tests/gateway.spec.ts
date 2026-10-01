@@ -9,6 +9,7 @@ import {
   confirmWithPassword,
   createToken,
   openToken,
+  showServerTools,
   showTools,
 } from "../lib/ui"
 
@@ -62,6 +63,9 @@ test("adds a server that authenticates with a stored secret", async ({
   serverId = page.url().split("/").pop()!
   await expect(page.getByText("Connected")).toBeVisible()
   await expect(page.getByText("Tools (3)")).toBeVisible()
+  // The tools stay folded until asked for.
+  await expect(page.locator("code", { hasText: "echo_auth" })).toHaveCount(0)
+  await showServerTools(page)
   await expect(page.locator("code", { hasText: "echo_auth" })).toBeVisible()
 
   // The short name defaults to the slugified name; set the one the tests use.
@@ -74,6 +78,7 @@ test("adds a server that authenticates with a stored secret", async ({
 
 test("lets the owner rewrite a tool's description", async ({ page }) => {
   await page.goto(`/servers/${serverId}`)
+  await showServerTools(page)
   const row = page.getByRole("listitem").filter({ hasText: "send_postcard" })
   await row.getByRole("button", { name: "Edit description" }).click()
   await row
