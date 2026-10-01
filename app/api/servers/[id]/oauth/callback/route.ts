@@ -7,7 +7,11 @@ import { requireSession } from "@/lib/server/session"
 
 export const dynamic = "force-dynamic"
 
-/** Where the authorization server sends the browser back with a code. */
+/**
+ * The per-server redirect address PCP registered itself with before there
+ * was one for the whole install (/api/oauth/callback). Clients registered
+ * then still send the browser here.
+ */
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -17,8 +21,9 @@ export async function GET(
   let destination = `/servers/${id}?connected=1`
 
   try {
-    await finishOAuth(ctx, id, new URL(request.url).searchParams, {
+    await finishOAuth(ctx, new URL(request.url).searchParams, {
       publicUrl: await publicUrlFor(ctx, request),
+      serverId: id,
     })
   } catch (error) {
     const message = isPcpError(error)

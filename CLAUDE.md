@@ -53,7 +53,7 @@ pull request, and nothing runs on a push.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
-  redirects and the health check.
+  (redirects and PCP's client metadata document) and the health check.
 - The single-user assumption lives in two places: `ownerVault()` and the
   setup page. Do not add a third.
 

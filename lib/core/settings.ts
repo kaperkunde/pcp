@@ -10,8 +10,20 @@ export async function getSetting(
   ctx: VaultContext,
   key: string,
 ): Promise<string | null> {
+  return getVaultSetting(ctx.vaultId, key)
+}
+
+/**
+ * A setting read without the vault being unlocked. Settings are not
+ * encrypted; this is for the ones a request without a session needs (the
+ * public URL, for PCP's OAuth client metadata document).
+ */
+export async function getVaultSetting(
+  vaultId: string,
+  key: string,
+): Promise<string | null> {
   const row = await db().setting.findUnique({
-    where: { vaultId_key: { vaultId: ctx.vaultId, key } },
+    where: { vaultId_key: { vaultId, key } },
   })
 
   return row?.value ?? null

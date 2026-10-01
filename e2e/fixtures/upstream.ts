@@ -24,6 +24,12 @@ import { z } from "zod"
  *   with metadata, dynamic client registration, an authorize page that
  *   approves at once, and a token endpoint. Enough for the real SDK flow
  *   PCP runs, nothing more.
+ * - `/closed/mcp` — the same tools behind an authorization server (issuer
+ *   `${origin}/closed`) that lets no app register itself, like most large
+ *   providers: it knows one client (`closedClient`), whose redirect URIs a
+ *   test fills in the way an owner would in a provider's console. It wants
+ *   the client secret at the token endpoint, and hands out a refresh token
+ *   only when the sign-in asked for `access_type=offline`.
  *
  * - `/openapi.json` and `/api/*` — a small REST API (a pet store) with its
  *   OpenAPI document, for PCP's API endpoints. `/api/*` wants the same
@@ -35,12 +41,22 @@ import { z } from "zod"
  */
 
 type Registered = { client_id: string; redirect_uris: string[] }
-type Code = { client_id: string; redirect_uri: string; challenge: string }
+type Code = {
+  client_id: string
+  redirect_uri: string
+  challenge: string
+  offline?: boolean
+}
 
 export type Upstream = {
   origin: string
   mcpUrl: string
   oauthMcpUrl: string
+  closedMcpUrl: string
+  /** The one client the closed authorization server knows. */
+  closedClient: { id: string; secret: string; redirectUris: Set<string> }
+  /** The query of every sign-in the closed authorization server saw. */
+  closedSignIns: Array<Record<string, string>>
   expectedToken: string
   /** Tokens the fake authorization server has issued. */
   issuedTokens: Set<string>
@@ -329,6 +345,12 @@ export async function startUpstream({
   const issuedTokens = new Set<string>()
   const clients = new Map<string, Registered>()
   const codes = new Map<string, Code>()
+  const closedClient = {
+    id: "closed-client",
+    secret: `closed-secret-${randomBytes(6).toString("hex")}`,
+    redirectUris: new Set<string>(),
+  }
+  const closedSignIns: Upstream["closedSignIns"] = []
   let origin = ""
 
   // The Authorization header of the request being served, read by the
@@ -343,6 +365,12 @@ export async function startUpstream({
       },
     ),
     "/oauth/mcp": createMcpHandler(
+      () => buildServer(calls, () => currentAuthorization, lateTools),
+      {
+        legacy: "stateless",
+      },
+    ),
+    "/closed/mcp": createMcpHandler(
       () => buildServer(calls, () => currentAuthorization, lateTools),
       {
         legacy: "stateless",
@@ -367,20 +395,111 @@ export async function startUpstream({
         )
       }
 
-      if (url.pathname === "/oauth/mcp") {
+      if (url.pathname === "/oauth/mcp" || url.pathname === "/closed/mcp") {
         const token = authorization?.replace(/^Bearer\s+/i, "")
         if (!token || !issuedTokens.has(token)) {
           res.setHeader(
             "WWW-Authenticate",
-            `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/oauth/mcp"`,
+            `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource${url.pathname}"`,
           )
           return json(res, 401, { error: "unauthorized" })
         }
         currentAuthorization = authorization
         return await sendWebResponse(
-          await handlers["/oauth/mcp"].fetch(toWebRequest(req, origin, body)),
+          await handlers[url.pathname].fetch(toWebRequest(req, origin, body)),
           res,
         )
+      }
+
+      if (url.pathname === "/.well-known/oauth-protected-resource/closed/mcp") {
+        return json(res, 200, {
+          resource: `${origin}/closed/mcp`,
+          authorization_servers: [`${origin}/closed`],
+        })
+      }
+
+      if (url.pathname === "/.well-known/oauth-authorization-server/closed") {
+        // No registration_endpoint, and no client metadata documents.
+        return json(res, 200, {
+          issuer: `${origin}/closed`,
+          authorization_endpoint: `${origin}/closed/authorize`,
+          token_endpoint: `${origin}/closed/token`,
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code", "refresh_token"],
+          code_challenge_methods_supported: ["S256"],
+          token_endpoint_auth_methods_supported: [
+            "client_secret_basic",
+            "client_secret_post",
+          ],
+        })
+      }
+
+      if (url.pathname === "/closed/authorize") {
+        closedSignIns.push(Object.fromEntries(url.searchParams))
+        const redirectUri = url.searchParams.get("redirect_uri") ?? ""
+        if (
+          url.searchParams.get("client_id") !== closedClient.id ||
+          !closedClient.redirectUris.has(redirectUri)
+        ) {
+          return json(res, 400, { error: "invalid_request" })
+        }
+        const code = `code-${randomBytes(8).toString("hex")}`
+        codes.set(code, {
+          client_id: closedClient.id,
+          redirect_uri: redirectUri,
+          challenge: url.searchParams.get("code_challenge") ?? "",
+          offline: url.searchParams.get("access_type") === "offline",
+        })
+        const back = new URL(redirectUri)
+        back.searchParams.set("code", code)
+        back.searchParams.set("state", url.searchParams.get("state") ?? "")
+        back.searchParams.set("iss", `${origin}/closed`)
+        res.statusCode = 302
+        res.setHeader("location", back.toString())
+        return res.end()
+      }
+
+      if (url.pathname === "/closed/token" && req.method === "POST") {
+        const form = new URLSearchParams(body)
+        const basic = authorization?.startsWith("Basic ")
+          ? Buffer.from(authorization.slice(6), "base64").toString()
+          : null
+        const [id, secret] = basic
+          ? basic.split(":").map(decodeURIComponent)
+          : [form.get("client_id"), form.get("client_secret")]
+        if (id !== closedClient.id || secret !== closedClient.secret) {
+          return json(res, 401, { error: "invalid_client" })
+        }
+        let offline = false
+        if (form.get("grant_type") === "authorization_code") {
+          const code = codes.get(form.get("code") ?? "")
+          const expected = createHash("sha256")
+            .update(form.get("code_verifier") ?? "")
+            .digest("base64url")
+          if (!code || code.challenge !== expected) {
+            return json(res, 400, { error: "invalid_grant" })
+          }
+          codes.delete(form.get("code") ?? "")
+          offline = code.offline ?? false
+        } else if (form.get("grant_type") === "refresh_token") {
+          if (!issuedTokens.has(`refresh:${form.get("refresh_token")}`)) {
+            return json(res, 400, { error: "invalid_grant" })
+          }
+        } else {
+          return json(res, 400, { error: "unsupported_grant_type" })
+        }
+        const access = `access-${randomBytes(8).toString("hex")}`
+        issuedTokens.add(access)
+        const refresh = offline
+          ? `refresh-${randomBytes(8).toString("hex")}`
+          : null
+        if (refresh) issuedTokens.add(`refresh:${refresh}`)
+        return json(res, 200, {
+          access_token: access,
+          token_type: "Bearer",
+          expires_in: 3600,
+          ...(refresh ? { refresh_token: refresh } : {}),
+        })
       }
 
       if (url.pathname === "/openapi.json") {
@@ -556,6 +675,9 @@ export async function startUpstream({
     origin,
     mcpUrl: `${origin}/mcp`,
     oauthMcpUrl: `${origin}/oauth/mcp`,
+    closedMcpUrl: `${origin}/closed/mcp`,
+    closedClient,
+    closedSignIns,
     openapiUrl: `${origin}/openapi.json`,
     expectedToken,
     issuedTokens,

@@ -975,6 +975,11 @@ const inflight = new Map<string, Promise<SyncResult>>()
 /** When each server/tool name was last looked for and not found. */
 const missedAt = new Map<string, number>()
 
+/** A server only the owner can make reachable again (sign in, add a client). */
+function waitsForOwner(status: string): boolean {
+  return status === "auth_required" || status === "client_required"
+}
+
 /**
  * Whether the gateway should read a server's tools again: what it has (or
  * last tried) is older than maxAge. A server waiting for the owner to sign
@@ -986,7 +991,7 @@ export function rereadDue(
   maxAge: number,
   lastAttempt = 0,
 ): boolean {
-  if (!canRereadTools(server) || server.status === "auth_required") {
+  if (!canRereadTools(server) || waitsForOwner(server.status)) {
     return false
   }
 
@@ -1064,7 +1069,7 @@ async function rereadForMissingTool(
   server: GatewayServer,
   name: string,
 ): Promise<GatewayServer | null> {
-  if (!canRereadTools(server) || server.status === "auth_required") {
+  if (!canRereadTools(server) || waitsForOwner(server.status)) {
     return null
   }
 

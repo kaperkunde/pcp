@@ -10,7 +10,8 @@ code without changing the single-user product.
 ```
 app/                 Routes and pages (Next.js App Router)
   mcp/route.ts       The gateway endpoint
-  api/servers/…      OAuth start and callback
+  api/oauth/…        OAuth callback and PCP's client metadata document
+  api/servers/…      OAuth start (and the per-server callback older clients use)
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
@@ -32,8 +33,9 @@ sensitive is AES-256-GCM ciphertext under it, with the row's own id as
 associated data (a ciphertext cannot be moved to another row):
 
 - secret values (`secret.ciphertext`),
-- OAuth token sets and dynamically registered client credentials (a `secret`
-  row of kind `oauth`, owned by the server that uses it),
+- OAuth token sets and the clients PCP registered (a `secret` row of kind
+  `oauth`, owned by the server that uses it); an OAuth client secret the
+  owner gives PCP is one of their own `text` secrets,
 - the PKCE verifier of an authorization in flight (`oauth_state`).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
@@ -272,6 +274,51 @@ give, and tools ask first by default.
   which tool, which upstream, how long, whether it worked. Never arguments
   or results.
 
+## Connecting OAuth servers
+
+An OAuth server needs a client ID for PCP before anyone can sign in, and
+servers differ in how they hand one out. `startOAuth` (`lib/core/oauth.ts`)
+discovers the authorization server and `chooseRegistration`
+(`lib/core/oauth-client.ts`) picks, without knowing any provider by name:
+
+1. **The owner's client**, when the server's settings have a client ID (and,
+   optionally, a secret: one of the owner's own secrets, which the form can
+   create from a pasted value). Always first.
+2. **A client PCP registered earlier**, kept in the server's managed secret.
+3. **Dynamic registration** (RFC 7591), when the server has a registration
+   endpoint, or publishes no metadata at all.
+4. **PCP's client metadata document**, when the server supports those and
+   PCP's public URL is https: the client ID is
+   `<public URL>/api/oauth/client-metadata`, which the authorization server
+   fetches. The MCP spec ranks this above registration; PCP does not,
+   because a PCP reachable only on a private network registers fine but
+   cannot be fetched.
+5. **Otherwise the owner is asked**: the server's status becomes
+   `client_required`, and its page says to create a client with the
+   provider using PCP's redirect URI. A registration endpoint that refuses
+   PCP ends the same way. The gateway's connect result says so too.
+
+Every flow returns to one address, `/api/oauth/callback`; the state
+parameter names the flow, and the flow the server. The owner registers that
+address once per provider, before the server exists in PCP, and one client
+can serve several servers. Clients PCP registered when the address was
+per-server (`/api/servers/<id>/oauth/callback`) keep using it.
+
+The owner's client is bound to the authorization server it is first used
+with (the SDK's SEP-2352 check, stamped in the managed secret), so a server
+that later names another authorization server never gets its secret.
+
+Some providers only issue a refresh token when the sign-in asks for it. The
+server's **extra sign-in parameters** (`oauth_authorize_params`) are added
+to the sign-in address; the names the flow sets itself (client, redirect,
+state, PKCE, scope, resource) are refused when saved and skipped when used.
+When a connection came without a refresh token, the server's page says the
+owner will have to reconnect, and when.
+
+Only the owner's browser registers or signs in. A tool refresh or a gateway
+call on a server that is not connected stops at "needs connecting" without
+contacting the registration endpoint.
+
 ## The gateway's tools
 
 An MCP client that connects to `/mcp` receives an `instructions` string
@@ -336,7 +383,9 @@ sandbox the panel and sign-in pages refuse to be framed. For a server that
 needs connecting, the panel's Connect button asks the host to open
 `/api/servers/<id>/oauth/start` in the owner's browser (`ui/open-link`),
 where their PCP session is, and polls `check_server` until the callback has
-landed.
+landed. A server that needs a client from the owner first (status
+`client_required`) gets the same panel, and text telling the assistant so:
+the start page then lands on the server's page, which says what to create.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.

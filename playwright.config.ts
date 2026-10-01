@@ -88,6 +88,17 @@ export default defineConfig({
       },
     },
     {
+      // An OAuth upstream that lets no app register itself: the owner's own
+      // client, its redirect URI, and extra sign-in parameters.
+      name: "oauth-client",
+      testMatch: /oauth-client\.spec\.ts/,
+      dependencies: ["setup"],
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: "e2e/.auth/owner.json",
+      },
+    },
+    {
       // An API described by an OpenAPI schema: added from a URL and from a
       // file, its operations found and called through the gateway.
       name: "endpoints",

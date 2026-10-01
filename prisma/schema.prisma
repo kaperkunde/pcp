@@ -232,11 +232,16 @@ model McpServer {
   authSecret        Secret? @relation("ServerAuthSecret", fields: [authSecretId], references: [id], onDelete: SetNull)
 
   /// oauth: an optional pre-registered client. Without one PCP registers
-  /// itself dynamically (RFC 7591) when the server allows it.
+  /// itself (dynamically, RFC 7591, or with its client metadata document)
+  /// when the server allows it.
   oauthClientId       String? @map("oauth_client_id")
   oauthClientSecretId String? @map("oauth_client_secret_id")
   oauthClientSecret   Secret? @relation("ServerOAuthClientSecret", fields: [oauthClientSecretId], references: [id], onDelete: SetNull)
   oauthScope          String? @map("oauth_scope")
+  /// oauth: extra parameters for the sign-in address, as a query string
+  /// (lib/core/oauth-client.ts), for providers that only hand out a refresh
+  /// token, or anything else, when the sign-in asks for it.
+  oauthAuthorizeParams String? @map("oauth_authorize_params")
   /// oauth: the managed secret holding PCP's registration with the server
   /// and, once connected, its token set.
   oauthTokensId       String? @map("oauth_tokens_id")
@@ -245,7 +250,8 @@ model McpServer {
   oauthConnectedAt    DateTime? @map("oauth_connected_at")
 
   /// What the last contact with the server found: unknown | ok |
-  /// auth_required | error.
+  /// auth_required | client_required (an OAuth server PCP cannot register
+  /// with, waiting for the owner's client) | error.
   status        String    @default("unknown")
   statusMessage String    @default("") @map("status_message")
   lastSyncedAt  DateTime? @map("last_synced_at")

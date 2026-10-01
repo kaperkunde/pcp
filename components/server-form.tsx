@@ -2,6 +2,7 @@
 
 import { useActionState, useState } from "react"
 
+import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import {
   HeaderAuthFields,
@@ -37,6 +38,7 @@ export type ServerFormValues = {
   oauthClientId: string
   oauthClientSecretId: string
   oauthScope: string
+  oauthAuthorizeParams: string
 }
 
 export const EMPTY_SERVER: ServerFormValues = {
@@ -50,6 +52,7 @@ export const EMPTY_SERVER: ServerFormValues = {
   oauthClientId: "",
   oauthClientSecretId: "",
   oauthScope: "",
+  oauthAuthorizeParams: "",
 }
 
 /**
@@ -60,9 +63,12 @@ export const EMPTY_SERVER: ServerFormValues = {
 export function ServerForm({
   initial,
   secrets,
+  redirectUrl,
 }: {
   initial: ServerFormValues
   secrets: SecretOption[]
+  /** Where OAuth servers send you back: what a provider's client lists. */
+  redirectUrl: string
 }) {
   const editing = Boolean(initial.id)
   const [state, action] = useActionState<ServerActionResult, FormData>(
@@ -165,9 +171,12 @@ export function ServerForm({
             <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
               <p className="text-muted-foreground">
                 After saving, choose <strong>Connect</strong> on the server page
-                to sign in. PCP registers itself with the server when it can;
-                servers that hand out client credentials take them here.
+                to sign in. PCP registers itself with the server when the server
+                allows it. When it does not, create an OAuth client in the
+                provider&apos;s developer settings with this redirect URI, and
+                enter its client ID and secret here:
               </p>
+              <CopyableValue value={redirectUrl} testId="oauth-redirect-url" />
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field
                   label="Client ID (optional)"
@@ -183,7 +192,7 @@ export function ServerForm({
                 <Field
                   label="Client secret (optional)"
                   htmlFor={`${prefix}-client-secret`}
-                  hint="Pick a secret holding it."
+                  hint="A secret holding it, or paste it below."
                 >
                   <Select
                     id={`${prefix}-client-secret`}
@@ -200,6 +209,18 @@ export function ServerForm({
                 </Field>
               </div>
               <Field
+                label="New client secret (optional)"
+                htmlFor={`${prefix}-client-secret-value`}
+                hint="Saved as a new secret, which you can pick for another server that uses the same client."
+              >
+                <Input
+                  id={`${prefix}-client-secret-value`}
+                  name="oauthClientSecretValue"
+                  type="password"
+                  autoComplete="off"
+                />
+              </Field>
+              <Field
                 label="Scope (optional)"
                 htmlFor={`${prefix}-scope`}
                 hint="Leave empty to let the server decide."
@@ -209,6 +230,19 @@ export function ServerForm({
                   name="oauthScope"
                   defaultValue={initial.oauthScope}
                   autoComplete="off"
+                />
+              </Field>
+              <Field
+                label="Extra sign-in parameters (optional)"
+                htmlFor={`${prefix}-authorize-params`}
+                hint="Added to the sign-in address, like access_type=offline&prompt=consent. Some servers only let PCP stay signed in when the sign-in asks for it; the server's documentation says which."
+              >
+                <Input
+                  id={`${prefix}-authorize-params`}
+                  name="oauthAuthorizeParams"
+                  defaultValue={initial.oauthAuthorizeParams}
+                  autoComplete="off"
+                  spellCheck={false}
                 />
               </Field>
             </div>
