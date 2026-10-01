@@ -134,7 +134,8 @@ and these tools:
 A tool you have not decided about answers "Not done yet" and asks you. Where
 the assistant's app can show it, the question appears in the conversation:
 as PCP's panel (an MCP App) or as the app's own prompt. Otherwise the
-assistant hands you a link to PCP. **Allow once** runs that one call,
+assistant hands you a link to PCP. Each token's page says which of these PCP
+may use; turn one off if an app gets stuck on it. **Allow once** runs that one call,
 **Always allow** and **Block** also decide the calls after it, and **Not
 now** runs nothing. A server an assistant proposes is only added once you
 agree; an OAuth one is then connected from a link that opens in your browser.

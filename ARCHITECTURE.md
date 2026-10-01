@@ -304,21 +304,29 @@ Every token has a level per tool (`api_token_tool_access`,
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
-them. `ResolvedToken` is unchanged: the gateway loads the levels by token id.
+them. The gateway loads the levels by token id; `ResolvedToken` carries the
+token's ways of asking (below).
 
 A call to an "ask" tool becomes a `permission_request` row
 (`lib/core/permissions.ts`, ported from plekje's confirmation flow): the
 arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
-and a day to answer. The owner is asked where the client can show it
-(`choosePermissionTier`):
+and a day to answer. The owner is asked the first way, in this order, that
+the client declares and the token allows (`choosePermissionTier`):
 
 | Tier   | When                                            | How                                                                    |
 | ------ | ----------------------------------------------- | ---------------------------------------------------------------------- |
 | `app`  | The request declares the MCP Apps extension     | PCP's panel, shown by `check_permission`                               |
 | `form` | It declares form elicitation                    | An `input_required` result with a one-choice form                      |
-| `url`  | It declares URL elicitation only                | An `input_required` result pointing at `/permissions/<id>`             |
+| `url`  | It declares URL elicitation (and form is off)   | An `input_required` result pointing at `/permissions/<id>`             |
 | `link` | Anything else, including every 2025-era request | Text with the link to `/permissions/<id>` for the assistant to pass on |
+
+A declaration is all the server has to go on, and some clients declare form
+elicitation they never show; the call then hangs until the client's timeout
+(Claude Code in remote and Cowork sessions, anthropics/claude-code#94806).
+So `api_token.permission_tiers` holds the tiers a token may use, all three
+by default, and the token page lets the owner turn `app`, `form` and `url`
+off. The link cannot be turned off: it is what is left.
 
 Whichever way the owner answers, `decidePermission()` claims the row
 (pending to running, one winner) and runs the call once. "Always allow" and
@@ -326,7 +334,7 @@ Whichever way the owner answers, `decidePermission()` claims the row
 bound to its row by vault, token and hash, so a client cannot replay an
 answer onto another call, and it never runs a call the owner already ran.
 `answer_permission` refuses requests that do not declare the MCP Apps
-extension: hosts that show panels hide it from the assistant, and on any
+extension, and tokens with the panel off: hosts that show panels hide it from the assistant, and on any
 other client the assistant could otherwise answer for the owner.
 
 PCP's panel (`ui://pcp/panel`, `lib/core/panel.ts`) is one self-contained

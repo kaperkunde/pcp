@@ -13,7 +13,11 @@ import type {
 } from "@/lib/generated/prisma/client"
 
 import type { SyncResult } from "./catalogue"
-import type { PermissionDecision, PermissionKind } from "./constants"
+import type {
+  PermissionDecision,
+  PermissionKind,
+  PermissionTier,
+} from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
@@ -28,6 +32,7 @@ import {
   connectResult,
   panelResult,
   type ConnectPanel,
+  type PanelContent,
   type PermissionPanel,
 } from "./panel"
 import {
@@ -43,7 +48,6 @@ import {
   storedResultText,
   summaryText,
   type PermissionStatus,
-  type PermissionTier,
   type PermissionVia,
 } from "./permission-rules"
 import { summarize } from "./search"
@@ -76,6 +80,8 @@ export type PermissionScope = {
   ctx: VaultContext
   tokenId: string
   publicUrl: string
+  /** How the token lets PCP ask the owner, in trying order. */
+  permissionTiers: readonly PermissionTier[]
 }
 
 /** The parts of an MCP request the permission step reads. */
@@ -513,7 +519,10 @@ export async function withPermission(
 
   const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
   const view = await toView(scope.ctx, row!, scope.publicUrl)
-  const tier = choosePermissionTier(request.clientCapabilities)
+  const tier = choosePermissionTier(
+    request.clientCapabilities,
+    scope.permissionTiers,
+  )
 
   switch (tier) {
     case "form":
@@ -541,11 +550,25 @@ export async function withPermission(
     default:
       // The panel and the plain link share one result: a panel reads
       // structuredContent, and the text carries the link for everyone else.
-      return panelResult(pendingText(view, tier, toolShowsPanel), {
-        kind: "permission",
-        permission: permissionPanel(view),
-      })
+      return panelResult(
+        pendingText(view, tier, toolShowsPanel),
+        waitingContent(view, tier),
+      )
   }
+}
+
+/**
+ * What a panel shows while a request waits. Buttons only on the app tier:
+ * anywhere else answer_permission refuses them, so a host that mounts the
+ * panel anyway shows where to answer instead.
+ */
+function waitingContent(
+  view: PermissionView,
+  tier: PermissionTier,
+): PanelContent {
+  return tier === "app"
+    ? { kind: "permission", permission: permissionPanel(view) }
+    : { kind: "done", text: `Waiting for you. Answer in PCP: ${view.url}` }
 }
 
 /** The client came back from a form or URL prompt this server issued. */
@@ -895,6 +918,7 @@ export async function listOpenPermissions(
 export async function checkPermission(
   scope: PermissionScope,
   id: string,
+  request: ToolRequest = {},
 ): Promise<CallToolResult> {
   const view = await getPermissionView(scope.ctx, id, {
     publicUrl: scope.publicUrl,
@@ -906,9 +930,16 @@ export async function checkPermission(
   }
 
   if (view.status === "pending") {
+    const tier = choosePermissionTier(
+      request.clientCapabilities,
+      scope.permissionTiers,
+    )
+    const where =
+      tier === "app" ? `in the panel, or at ${view.url}` : `at ${view.url}`
+
     return panelResult(
-      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer in the panel, or at ${view.url} until ${view.expiresAt.toISOString()}.`,
-      { kind: "permission", permission: permissionPanel(view) },
+      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer ${where} until ${view.expiresAt.toISOString()}.`,
+      waitingContent(view, tier),
     )
   }
 

@@ -41,3 +41,36 @@ export const PERMISSION_DECISIONS = [
 export type PermissionDecision = (typeof PERMISSION_DECISIONS)[number]
 
 export type PermissionKind = "call" | "register"
+
+/**
+ * The ways PCP can ask the owner about a call, in the order it tries them
+ * (see choosePermissionTier). The link always works, so a token can turn
+ * off the others but not the link.
+ */
+export const PERMISSION_TIERS = ["app", "form", "url", "link"] as const
+
+export type PermissionTier = (typeof PERMISSION_TIERS)[number]
+
+export const OPTIONAL_PERMISSION_TIERS = ["app", "form", "url"] as const
+
+export const PERMISSION_TIER_LABELS: Record<
+  PermissionTier,
+  { label: string; hint: string }
+> = {
+  app: {
+    label: "PCP's panel",
+    hint: "Buttons in the conversation, in apps that show panels.",
+  },
+  form: {
+    label: "The app's own prompt",
+    hint: "Some apps say they show it and do not, which stalls the call until it times out.",
+  },
+  url: {
+    label: "The app opens PCP",
+    hint: "The app opens the request in PCP for you to answer.",
+  },
+  link: {
+    label: "A link",
+    hint: "The assistant passes on a link to the request in PCP. Always on: it is what is left when nothing above works.",
+  },
+}
