@@ -235,7 +235,7 @@ export function ServerForm({
               <Field
                 label="Extra sign-in parameters (optional)"
                 htmlFor={`${prefix}-authorize-params`}
-                hint="Added to the sign-in address, like access_type=offline&prompt=consent. Some servers only let PCP stay signed in when the sign-in asks for it; the server's documentation says which."
+                hint="Added to the sign-in address, like access_type=offline&prompt=consent. Some servers only let PCP stay signed in when the sign-in asks for it; the server's documentation says which. PCP adds Google's itself."
               >
                 <Input
                   id={`${prefix}-authorize-params`}

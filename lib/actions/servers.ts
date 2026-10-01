@@ -11,6 +11,7 @@ import {
   getServer,
   renameServerSlug,
   setOAuthClient,
+  setOAuthSignInParams,
   setServerEnabled,
   setToolDescription,
   updateServer,
@@ -139,6 +140,27 @@ export async function setOAuthClientAction(
   })
 
   revalidatePath("/servers")
+  revalidatePath(`/servers/${id}`)
+
+  return result
+}
+
+/**
+ * The status card's sign-in parameters, for a sign-in PCP cannot renew. The
+ * form then sends you to sign in again, which is when they apply.
+ */
+export async function setSignInParamsAction(
+  _previous: ServerActionResult,
+  formData: FormData,
+): Promise<ServerActionResult> {
+  const ctx = await requireContext()
+  const id = field(formData, "id")
+
+  const result = await guarded(async () => {
+    await setOAuthSignInParams(ctx, id, field(formData, "oauthAuthorizeParams"))
+    return { id }
+  })
+
   revalidatePath(`/servers/${id}`)
 
   return result

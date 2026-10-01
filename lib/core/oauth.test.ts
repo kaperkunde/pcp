@@ -8,12 +8,14 @@ import {
   createServer,
   getServer,
   setOAuthClient,
+  setOAuthSignInParams,
   updateServer,
 } from "./servers"
 import { scratchDatabase } from "./test-db"
 import {
   describeOAuthConnection,
   PcpOAuthProvider,
+  refusalReason,
   syncServerTools,
 } from "./upstream"
 import { setupVault } from "./vault"
@@ -57,6 +59,34 @@ describe("reconcileIssuer", () => {
   })
 })
 
+describe("refusalReason", () => {
+  it("quotes the challenge, then an error object, never an answer", () => {
+    expect(
+      refusalReason(
+        'Bearer realm="x", error="invalid_token", error_description="Token expired"',
+        null,
+      ),
+    ).toBe("Token expired")
+    expect(refusalReason('Bearer error="invalid_token"', null)).toBe(
+      "invalid_token",
+    )
+    expect(
+      refusalReason(
+        null,
+        '{"error":{"code":403,"message":"API disabled","status":"PERMISSION_DENIED"}}',
+      ),
+    ).toBe("API disabled")
+    expect(
+      refusalReason(null, '{"error":"access_denied","error_description":"No"}'),
+    ).toBe("No")
+    expect(
+      refusalReason(null, '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}'),
+    ).toBeNull()
+    expect(refusalReason(null, "<html>Forbidden</html>")).toBeNull()
+    expect(refusalReason('Bearer error="a\nb"', null)).toBe("a b")
+  })
+})
+
 /**
  * How PCP gets a client ID from servers that do and do not let it register
  * itself, against a small authorization server in the test process.
@@ -69,6 +99,8 @@ describe("connecting an OAuth server", () => {
   let metadata: Record<string, unknown>
   let register: (res: Parameters<typeof json>[0], body: string) => void
   let tokenAnswer: Record<string, unknown>
+  /** How /mcp answers a request with a token; without, it asks for one. */
+  let signedIn: ((body: string, res: Parameters<typeof json>[0]) => void) | null
 
   const HTTP = { publicUrl: "http://pcp.lan:3000" }
   const HTTPS = { publicUrl: "https://pcp.example.com" }
@@ -83,6 +115,7 @@ describe("connecting an OAuth server", () => {
         ...JSON.parse(body),
       })
     tokenAnswer = { access_token: "at", token_type: "Bearer", expires_in: 60 }
+    signedIn = null
     as = await startTestApi((req, res) => {
       const path = req.url.split("?")[0]
 
@@ -112,6 +145,16 @@ describe("connecting an OAuth server", () => {
             }),
           ),
         )
+      }
+
+      if (path === "/mcp" && signedIn && req.headers.authorization) {
+        // No event stream: a stateless server, like Gmail's.
+        if (req.method !== "POST") {
+          res.statusCode = 405
+          return res.end()
+        }
+
+        return signedIn(req.body, res)
       }
 
       if (path === "/mcp") {
@@ -208,6 +251,26 @@ describe("connecting an OAuth server", () => {
     expect(url.searchParams.get("client_id")).toBe("owner-client")
   })
 
+  it("sets the sign-in parameters and keeps the connection", async () => {
+    const id = await oauthServer({
+      oauthClientId: "owner-client",
+      oauthScope: "mail.read",
+    })
+
+    await setOAuthSignInParams(ctx, id, "access_type=offline")
+    expect(await getServer(ctx, id)).toMatchObject({
+      oauthClientId: "owner-client",
+      oauthScope: "mail.read",
+      oauthAuthorizeParams: "access_type=offline",
+    })
+    await expect(setOAuthSignInParams(ctx, id, "state=x")).rejects.toThrow(
+      /PCP sets state itself/,
+    )
+
+    const url = signInAddress(await startOAuth(ctx, id, HTTP))
+    expect(url.searchParams.get("access_type")).toBe("offline")
+  })
+
   it("takes a client only for an OAuth server", async () => {
     const { id } = await createServer(ctx, {
       name: "Open",
@@ -281,7 +344,64 @@ describe("connecting an OAuth server", () => {
     )
     expect(
       await describeOAuthConnection(ctx, await getServer(ctx, id)),
-    ).toMatchObject({ renewable: false })
+    ).toMatchObject({ renewable: false, reconnectRenews: false })
+  })
+
+  // Regression: Gmail turned PCP's token down with a 403 whose body was the
+  // whole tool list, and the server page showed that body as "could not be
+  // reached".
+  it("says a signed-in request was refused, and why, not what the body was", async () => {
+    const id = await oauthServer({ oauthClientId: "owner-client" })
+    const url = signInAddress(await startOAuth(ctx, id, HTTP))
+    signedIn = (body, res) => {
+      const { id: rpcId, method } = JSON.parse(body) as {
+        id?: number
+        method: string
+      }
+
+      if (method === "initialize") {
+        return json(res, 200, {
+          jsonrpc: "2.0",
+          id: rpcId,
+          result: {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "mail", version: "1" },
+          },
+        })
+      }
+
+      if (rpcId === undefined) {
+        res.statusCode = 202
+        return res.end()
+      }
+
+      res.setHeader(
+        "www-authenticate",
+        'Bearer error="access_denied", error_description="Mail API is not enabled for this project"',
+      )
+      json(res, 403, {
+        jsonrpc: "2.0",
+        id: rpcId,
+        result: { tools: [{ name: "send", description: "Sends a mail" }] },
+      })
+    }
+
+    await finishOAuth(
+      ctx,
+      new URLSearchParams({
+        code: "the-code",
+        state: url.searchParams.get("state")!,
+      }),
+      HTTP,
+    )
+
+    const server = await getServer(ctx, id)
+    expect(server.status).toBe("refused")
+    expect(server.statusMessage).toMatch(
+      /^Mail refused PCP's request although PCP is signed in \(HTTP 403: Mail API is not enabled for this project\)\./,
+    )
+    expect(server.statusMessage).not.toMatch(/Sends a mail|jsonrpc/)
   })
 
   it("refuses a callback for another server at its old address", async () => {

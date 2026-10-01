@@ -1,6 +1,6 @@
 "use client"
 
-import { useActionState, useState, useTransition } from "react"
+import { useActionState, useEffect, useState, useTransition } from "react"
 
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
@@ -24,10 +24,12 @@ import {
   refreshToolsAction,
   setOAuthClientAction,
   setServerEnabledAction,
+  setSignInParamsAction,
   setToolDescriptionAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
 import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
+import type { OAuthConnection } from "@/lib/core/upstream"
 
 export type ServerDetailProps = {
   server: {
@@ -47,7 +49,9 @@ export type ServerDetailProps = {
     connected: boolean
     lastSyncedAt: Date | null
     /** OAuth: whether PCP can renew its access, and until when it lasts. */
-    oauthConnection: { renewable: boolean; expiresAt: Date | null } | null
+    oauthConnection: OAuthConnection | null
+    /** OAuth: what the sign-in adds to its address, as the owner set it. */
+    oauthAuthorizeParams: string
   }
   tools: Array<{
     name: string
@@ -195,18 +199,10 @@ export function ServerDetail({
             )
           ) : null}
           {server.oauthConnection && !server.oauthConnection.renewable ? (
-            <p className="text-warning">
-              {server.name} did not give PCP a way to renew its access, so you
-              will need to reconnect when it runs out
-              {server.oauthConnection.expiresAt ? (
-                <>
-                  {" "}
-                  (<LocalDate value={server.oauthConnection.expiresAt} />)
-                </>
-              ) : null}
-              . Some servers only do that when the sign-in asks for it: see
-              Extra sign-in parameters under Settings.
-            </p>
+            <RenewalNotice
+              server={server}
+              connection={server.oauthConnection}
+            />
           ) : null}
           {server.statusMessage ? (
             <p
@@ -287,6 +283,93 @@ export function ServerDetail({
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+/**
+ * A sign-in PCP cannot renew: says until when it lasts, and what to do about
+ * it. Signing in again fixes it when PCP knows what the provider needs
+ * (Google); otherwise the server's documentation names the parameters, which
+ * are asked for here and applied by signing in again.
+ */
+function RenewalNotice({
+  server,
+  connection,
+}: {
+  server: ServerDetailProps["server"]
+  connection: OAuthConnection
+}) {
+  const start = `/api/servers/${server.id}/oauth/start`
+  const [state, action] = useActionState<ServerActionResult, FormData>(
+    setSignInParamsAction,
+    { status: "idle" },
+  )
+
+  // Saved: sign in again, which is when the parameters apply. A full page
+  // load, as the route redirects to the server's sign-in page.
+  useEffect(() => {
+    if (state.status === "ok") {
+      window.location.assign(start)
+    }
+  }, [state, start])
+
+  const lasts = connection.expiresAt ? (
+    <>
+      until <LocalDate value={connection.expiresAt} />
+    </>
+  ) : (
+    "for a limited time"
+  )
+
+  if (connection.reconnectRenews) {
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <p className="text-warning">
+          This sign-in to {server.name} lasts {lasts}, and PCP cannot renew it.
+          Sign in again to fix that: PCP now asks for access it can renew.
+        </p>
+        <a href={start} className={buttonVariants({ size: "sm" })}>
+          Reconnect
+        </a>
+      </div>
+    )
+  }
+
+  const prefix = `sign-in-params-${server.id}`
+
+  return (
+    <form
+      action={action}
+      className="flex flex-col gap-4 rounded-lg border border-border p-4"
+    >
+      <input type="hidden" name="id" value={server.id} />
+      <p className="text-warning">
+        This sign-in to {server.name} lasts {lasts}, and PCP cannot renew it, so
+        you would have to reconnect then. Many servers give renewable access
+        only when the sign-in asks for it: enter what the server&apos;s
+        documentation says, and sign in again.
+      </p>
+      <Field
+        label="Extra sign-in parameters"
+        htmlFor={`${prefix}-params`}
+        hint="Added to the sign-in address, like access_type=offline&prompt=consent."
+      >
+        <Input
+          id={`${prefix}-params`}
+          name="oauthAuthorizeParams"
+          defaultValue={server.oauthAuthorizeParams}
+          required
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </Field>
+      <FormError error={state.status === "error" ? state.error : null} />
+      <div>
+        <SubmitButton size="sm" pendingText="Saving…">
+          Save and reconnect
+        </SubmitButton>
+      </div>
+    </form>
   )
 }
 

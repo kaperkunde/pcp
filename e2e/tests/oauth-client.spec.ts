@@ -102,9 +102,7 @@ test("with the owner's client it connects, and says it cannot renew", async ({
     redirect_uri: redirectUri,
   })
   expect(upstream.closedSignIns.at(-1)).not.toHaveProperty("access_type")
-  await expect(
-    page.getByText(/did not give PCP a way to renew its access/),
-  ).toBeVisible()
+  await expect(page.getByText(/and PCP cannot renew it/)).toBeVisible()
 
   // The secret the owner pasted is one of their own, by the server's name.
   await page.goto("/secrets")
@@ -118,21 +116,16 @@ test("with the owner's client it connects, and says it cannot renew", async ({
 test("extra sign-in parameters get a renewable connection", async ({
   page,
 }) => {
+  // Asked for where the status says the sign-in cannot be renewed.
   await page.goto(`/servers/${serverId}`)
-  const form = settings(page)
-  await form
-    .getByLabel("Extra sign-in parameters (optional)")
-    .fill("client_id=someone-else")
-  await form.getByRole("button", { name: "Save changes" }).click()
-  await expect(form.getByText(/PCP sets client_id itself/)).toBeVisible()
+  const params = page.getByLabel("Extra sign-in parameters", { exact: true })
+  const save = page.getByRole("button", { name: "Save and reconnect" })
+  await params.fill("client_id=someone-else")
+  await save.click()
+  await expect(page.getByText(/PCP sets client_id itself/)).toBeVisible()
 
-  await form
-    .getByLabel("Extra sign-in parameters (optional)")
-    .fill("access_type=offline&prompt=consent")
-  await form.getByRole("button", { name: "Save changes" }).click()
-  await expect(form.getByText(/^Saved\./)).toBeVisible()
-
-  await connect(page, "Reconnect")
+  await params.fill("access_type=offline&prompt=consent")
+  await save.click()
   await expect(page).toHaveURL(
     new RegExp(`/servers/${serverId}\\?connected=1$`),
   )
@@ -142,9 +135,10 @@ test("extra sign-in parameters get a renewable connection", async ({
     prompt: "consent",
   })
   await expect(page.getByText("Connected", { exact: true })).toBeVisible()
+  await expect(page.getByText(/and PCP cannot renew it/)).toHaveCount(0)
   await expect(
-    page.getByText(/did not give PCP a way to renew its access/),
-  ).toHaveCount(0)
+    settings(page).getByLabel("Extra sign-in parameters (optional)"),
+  ).toHaveValue("access_type=offline&prompt=consent")
 })
 
 test("the gateway calls the server with the token from that client", async ({

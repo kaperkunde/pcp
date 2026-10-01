@@ -761,7 +761,7 @@ export function buildGatewayServer(
         })
       }
 
-      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${row.status === "error" && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}`
+      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${(row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}`
 
       return panelResult(said, { kind: "done", text: said, server: state })
     }),

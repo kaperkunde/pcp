@@ -409,8 +409,17 @@ Some providers only issue a refresh token when the sign-in asks for it. The
 server's **extra sign-in parameters** (`oauth_authorize_params`) are added
 to the sign-in address; the names the flow sets itself (client, redirect,
 state, PKCE, scope, resource) are refused when saved and skipped when used.
-When a connection came without a refresh token, the server's page says the
-owner will have to reconnect, and when.
+For providers whose needs PCP knows (`SIGN_IN_DEFAULTS` in
+`oauth-client.ts`: Google's `access_type=offline&prompt=consent`), it adds
+them itself after the owner's, so the owner's value for a name wins. When a
+connection came without a refresh token, the server's page says until when
+it lasts and offers the fix: Reconnect when PCP would now ask for renewable
+access, otherwise the parameters field and Save and reconnect.
+
+A server that answers a signed-in request with 401 or 403 gets the status
+`refused` ("Access refused"), with the HTTP status and the reason from its
+`WWW-Authenticate` challenge or error object, never its body: Google sends
+the whole answer with its refusals.
 
 Only the owner's browser registers or signs in. A tool refresh or a gateway
 call on a server that is not connected stops at "needs connecting" without

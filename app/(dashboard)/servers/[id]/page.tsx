@@ -95,6 +95,7 @@ export default async function ServerPage({
             server.authType !== "oauth" || server.oauthConnectedAt !== null,
           lastSyncedAt: server.lastSyncedAt,
           oauthConnection,
+          oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
         }}
         tools={server.tools.map((tool) => {
           const plan = readCallPlan(tool.operation)

@@ -31,10 +31,11 @@ export type ServerKind = "mcp" | "openapi"
 
 /**
  * client_required: an OAuth server that does not let PCP register itself,
- * and the owner has not given it a client yet.
+ * and the owner has not given it a client yet. refused: the server turned
+ * PCP down (401 or 403) with the credentials it has.
  */
 export type ServerStatus =
-  "unknown" | "ok" | "auth_required" | "client_required" | "error"
+  "unknown" | "ok" | "auth_required" | "client_required" | "refused" | "error"
 
 export type ServerInput = {
   name: string
@@ -574,6 +575,34 @@ export async function setOAuthClient(
     oauthClientSecretValue: client.clientSecretValue ?? null,
     oauthScope: existing.oauthScope,
     oauthAuthorizeParams: existing.oauthAuthorizeParams,
+  })
+}
+
+/**
+ * Sets only an OAuth server's extra sign-in parameters: what the server page
+ * asks for when a sign-in gave PCP access it cannot renew. They take effect
+ * on the next sign-in; the current one stays until then.
+ */
+export async function setOAuthSignInParams(
+  ctx: VaultContext,
+  id: string,
+  params: string,
+): Promise<void> {
+  const existing = await getServer(ctx, id)
+
+  if (existing.authType !== "oauth") {
+    throw new PcpError("state", `${existing.name} does not use OAuth.`)
+  }
+
+  await updateServer(ctx, id, {
+    name: existing.name,
+    url: existing.url,
+    description: existing.description,
+    authType: "oauth",
+    oauthClientId: existing.oauthClientId,
+    oauthClientSecretId: existing.oauthClientSecretId,
+    oauthScope: existing.oauthScope,
+    oauthAuthorizeParams: params,
   })
 }
 
