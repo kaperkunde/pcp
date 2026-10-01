@@ -117,6 +117,7 @@ export async function refreshToolsAction(
     const server = await getServer(ctx, id)
     const sync = await syncServerTools(ctx, server, {
       publicUrl: await publicUrlFor(ctx),
+      byOwner: true,
     })
 
     return {

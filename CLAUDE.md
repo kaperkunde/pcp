@@ -46,9 +46,13 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   the secret from what the API answers.
 - What an assistant may do to an endpoint through the gateway
   (`lib/core/endpoint-admin.ts`) is narrower than what the owner may do, on
-  purpose. It registers one through `register_server` with OpenAPI text, which
-  is a permission request like any new server: the owner is shown the address,
-  the tools and the secret (by name), and nothing exists until they agree.
+  purpose. It registers one through `register_server` with OpenAPI text or a
+  schema URL (downloaded at once, public addresses only, and approved as that
+  copy), which is a permission request like any new server: the owner is shown
+  the address, the tools and the secret (by name), and nothing exists until
+  they agree. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
+  rather than resending it, and a changed document at a URL it proposed is not
+  taken without the owner.
   It never changes a credential, never clears `publicOnly`, can only read and
   turn read-only on for an endpoint that is the owner's (it sends a secret, or
   private addresses are allowed), and a change others would see disables the

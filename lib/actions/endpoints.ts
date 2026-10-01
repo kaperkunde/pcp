@@ -10,6 +10,7 @@ import {
   type EndpointInput,
 } from "@/lib/core/endpoints"
 import { invalid } from "@/lib/core/errors"
+import { readPatches, type PatchOperation } from "@/lib/core/openapi/patch"
 import { renameServerSlug } from "@/lib/core/servers"
 import { field, file, guarded } from "@/lib/server/action-state"
 import { requireContext } from "@/lib/server/session"
@@ -20,6 +21,27 @@ import type { ServerActionResult } from "./servers"
  * Adding and editing API endpoints. Refreshing, enabling and removing one
  * use the server actions in ./servers: an endpoint is a server to them.
  */
+
+/** The edits field: a JSON Patch, or empty for none. */
+function patchesFrom(formData: FormData): PatchOperation[] {
+  const text = field(formData, "patches").trim()
+
+  if (!text) {
+    return []
+  }
+
+  let parsed: unknown
+
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    throw invalid(
+      `The edits are not JSON: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  return readPatches(parsed)
+}
 
 async function inputFrom(formData: FormData): Promise<EndpointInput> {
   const specSource =
@@ -49,6 +71,7 @@ async function inputFrom(formData: FormData): Promise<EndpointInput> {
     specSource,
     specUrl: specSource === "url" ? field(formData, "specUrl") : null,
     specText,
+    patches: patchesFrom(formData),
     readOnly: field(formData, "readOnly") === "on",
     publicOnly: field(formData, "publicOnly") === "on",
     authType,

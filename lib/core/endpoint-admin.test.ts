@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
+import { MAX_SPEC_BYTES } from "./constants"
 import { db } from "./db"
 import {
   createApprovedEndpoint,
@@ -210,7 +211,7 @@ describe("registering an endpoint from text", () => {
       schema: { source: "upload", url: null },
     })
     expect(
-      details.tools.map((tool) => [tool.name, tool.method, tool.path]),
+      details.tools!.map((tool) => [tool.name, tool.method, tool.path]),
     ).toEqual([
       ["createPet", "POST", "/pets"],
       ["listPets", "GET", "/pets"],
@@ -295,7 +296,7 @@ describe("registering an endpoint from text", () => {
       spec: spec(api.origin),
       readOnly: true,
     })
-    expect(details.tools.map((tool) => tool.name)).toEqual(["listPets"])
+    expect(details.tools!.map((tool) => tool.name)).toEqual(["listPets"])
   })
 
   it("refuses a schema that does not read before anyone is asked, and leaves nothing behind", async () => {
@@ -314,15 +315,15 @@ describe("registering an endpoint from text", () => {
     expect(await db().mcpServer.count()).toBe(0)
   })
 
-  it("refuses text longer than an assistant may register", async () => {
+  it("refuses text longer than a schema may be, and says to pass its address instead", async () => {
     await expect(
       prepareRegistration(ctx, {
         name: "Big",
         spec: spec(api.origin, {
-          info: { title: "x", description: "d".repeat(1_000_001) },
+          info: { title: "x", description: "d".repeat(MAX_SPEC_BYTES) },
         }),
       }),
-    ).rejects.toThrow(/an assistant may register up to 1000000/)
+    ).rejects.toThrow(/larger than 5 MB\. Pass its address in openapi_url/)
   })
 
   it("refuses a name with a line break, which would start a line in every assistant's instructions", async () => {
@@ -488,12 +489,12 @@ describe("updating an endpoint the assistant registered", () => {
       description: "Adopt a pet.",
       enabled: false,
     })
-    expect(result.tools.find((tool) => tool.name === "listPets")).toMatchObject(
-      {
-        description: "Everything in stock.",
-        edited: true,
-      },
-    )
+    expect(
+      result.tools!.find((tool) => tool.name === "listPets"),
+    ).toMatchObject({
+      description: "Everything in stock.",
+      edited: true,
+    })
     expect(result.updated).toMatch(/disabled until the owner enables it again/)
     expect(result.updated).toMatch(/No tool called nope/)
     expect((await getServer(ctx, id)).enabled).toBe(false)
@@ -540,7 +541,7 @@ describe("updating an endpoint the assistant registered", () => {
       readOnly: true,
     })
     expect(narrowed.enabled).toBe(true)
-    expect(narrowed.tools.map((tool) => tool.name)).toEqual(["listPets"])
+    expect(narrowed.tools!.map((tool) => tool.name)).toEqual(["listPets"])
 
     // Turning it off again widens the endpoint: that waits for the owner.
     const widened = await updateEndpointDetails(scope, slug, {
@@ -575,12 +576,12 @@ describe("updating an endpoint the assistant registered", () => {
       spec: JSON.stringify(fewer),
     })
 
-    expect(result.tools.map((tool) => tool.name)).toEqual([
+    expect(result.tools!.map((tool) => tool.name)).toEqual([
       "getPet",
       "listPets",
     ])
     expect(
-      result.tools.find((tool) => tool.name === "listPets")!.description,
+      result.tools!.find((tool) => tool.name === "listPets")!.description,
     ).toBe("Mine.")
     expect((await getEndpoint(scope, slug, { includeSpec: true })).spec).toBe(
       JSON.stringify(fewer),
@@ -630,7 +631,7 @@ describe("updating an endpoint the assistant registered", () => {
 
       await expect(
         updateEndpointDetails(scope, slug, { spec: spec(api.origin) }),
-      ).rejects.toThrow(/only they can change the schema/)
+      ).rejects.toThrow(/reads its schema from a URL: change it with patches/)
 
       const result = await updateEndpointDetails(scope, slug, {
         description: "Remote pets.",
@@ -687,7 +688,7 @@ describe("an endpoint becomes the owner's when they attach a secret", () => {
       readOnly: true,
     })
     expect(narrowed.readOnly).toBe(true)
-    expect(narrowed.tools.map((tool) => tool.name)).toEqual(["listPets"])
+    expect(narrowed.tools!.map((tool) => tool.name)).toEqual(["listPets"])
     // Narrowing waits for no one.
     expect((await getServer(ctx, id)).enabled).toBe(true)
   })
@@ -771,7 +772,7 @@ describe("an endpoint becomes the owner's when they attach a secret", () => {
       }),
     ).rejects.toThrow(/theirs to change/)
     expect(
-      (await getEndpoint(scope, slug)).tools.map((tool) => tool.name),
+      (await getEndpoint(scope, slug)).tools!.map((tool) => tool.name),
     ).toEqual(["listPets"])
   })
 })
