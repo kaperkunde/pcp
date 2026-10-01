@@ -20,6 +20,15 @@ Playwright projects your change touches (`pnpm exec playwright test
 --project=<name>`; dependencies run first) — CI runs the whole suite on the
 pull request, and nothing runs on a push.
 
+## Branches and versions
+
+Branch from `develop` and target it with pull requests; `main` only takes
+merges from `develop`, and every push to it is a release (see "Branches and
+releases" in CONTRIBUTING.md). A MAJOR or MINOR bump is `pnpm version:bump
+minor|major` in a commit on `develop`; the patch and the `v*` tags belong to
+the release workflow, never to a hand edit. Anything that states PCP's version
+uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
+
 ## Boundaries
 
 - `lib/core` is framework-free. No `next/*`, no React, no `lib/actions`,

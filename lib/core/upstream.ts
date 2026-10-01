@@ -31,6 +31,7 @@ import {
   writeManagedSecret,
 } from "./secrets"
 import { renderAuthValue, setServerStatus } from "./servers"
+import { PCP_VERSION } from "./version"
 
 /**
  * Talking to the servers in the registry: opening a connection with the
@@ -42,7 +43,7 @@ import { renderAuthValue, setServerStatus } from "./servers"
  * Nothing in this module returns a secret to a caller.
  */
 
-export const PCP_CLIENT_INFO = { name: "pcp", version: "0.1.0" }
+export const PCP_CLIENT_INFO = { name: "pcp", version: PCP_VERSION }
 
 const CONNECT_TIMEOUT_MS = 20_000
 const CALL_TIMEOUT_MS = 120_000

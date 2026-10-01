@@ -2,6 +2,7 @@ import type { CallToolResult, McpServer } from "@modelcontextprotocol/server"
 
 import type { PermissionDecision, PermissionKind } from "./constants"
 import { oauthStartUrl } from "./upstream"
+import { PCP_VERSION } from "./version"
 
 /**
  * PCP's panel (ui://pcp/panel): one MCP App the client shows in the
@@ -414,7 +415,7 @@ const SCRIPT = String.raw`
   new ResizeObserver(resize).observe(document.body);
 
   request("ui/initialize", {
-    appInfo: { name: "pcp-panel", version: "1.0.0" },
+    appInfo: { name: "pcp-panel", version: ${JSON.stringify(PCP_VERSION)} },
     appCapabilities: {},
     protocolVersion: PROTOCOL,
   })

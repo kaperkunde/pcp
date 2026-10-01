@@ -26,7 +26,8 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "prepare": "husky",
-    "test:e2e:reset": "node e2e/scripts/reset.mjs"
+    "test:e2e:reset": "node e2e/scripts/reset.mjs",
+    "version:bump": "node scripts/version.mjs bump"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

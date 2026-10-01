@@ -29,9 +29,37 @@ Husky runs lint-staged (eslint --fix + prettier on the staged files) on every
 commit, then `pnpm typecheck` and `pnpm format:check` over the whole tree.
 Fix what the hook reports; `pnpm format` settles the formatting ones.
 
-GitHub Actions runs on pull requests only (`.github/workflows/ci.yml`): lint,
-format, typecheck and build in one job, unit tests in another, the Playwright
-suite in a third, side by side.
+GitHub Actions runs the checks on pull requests only
+(`.github/workflows/ci.yml`): lint, format, typecheck and build in one job,
+unit tests in another, the Playwright suite in a third, side by side. The one
+thing a push runs is the release workflow, on `main` (below).
+
+## Branches and releases
+
+`main` is the stable line; every push to it is a release. Work happens on
+`develop`: branch from it, open pull requests against it, and merge `develop`
+into `main` when it is ready to ship.
+
+Versions are `MAJOR.MINOR.PATCH`, held in `package.json` and read by the app
+(`lib/core/version.ts`). On each push to `main`, `.github/workflows/release.yml`
+raises the patch (`0.1.0` → `0.1.1`), commits it to `main` as
+`Release vX.Y.Z`, tags it, publishes a GitHub Release with generated notes, and
+fast-forwards `develop` to it. If `develop` has commits `main` lacks by then,
+the fast-forward is skipped; merge `main` into `develop` before the next
+release.
+
+MAJOR and MINOR are raised by hand, in a commit on `develop`:
+
+```bash
+pnpm version:bump minor   # 0.1.4 → 0.2.0
+pnpm version:bump major   # 0.2.0 → 1.0.0
+```
+
+The next merge to `main` releases that version as written, and patches count
+up from there. Never set the patch or push a `v*` tag by hand.
+
+The workflow pushes with the workflow token, so the repository's Actions
+setting "Workflow permissions" must allow read and write.
 
 ## Database
 

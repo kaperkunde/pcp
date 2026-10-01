@@ -55,6 +55,7 @@ import { findTextSecretByName } from "./secrets"
 import { validateServerUrl, type AuthType } from "./servers"
 import { effectiveAccess, loadToolAccess } from "./tool-access"
 import { needsConnecting, syncServerTools } from "./upstream"
+import { PCP_VERSION } from "./version"
 
 /**
  * The MCP server PCP exposes at /mcp: one per request, built for the token
@@ -213,7 +214,7 @@ export function buildGatewayServer(
   servers: GatewayServer[],
 ): McpServer {
   const server = new McpServer(
-    { name: "pcp", title: "PCP", version: "0.2.0" },
+    { name: "pcp", title: "PCP", version: PCP_VERSION },
     {
       instructions: buildInstructions(servers, {
         manageEndpoints: scope.manageEndpoints,

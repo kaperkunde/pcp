@@ -1,0 +1,76 @@
+# A release for every push to main. main is the stable line; work lands on
+# develop and reaches main by merging. scripts/version.mjs picks the version:
+# a MAJOR or MINOR raised on develop (`pnpm version:bump minor`) ships as
+# written, anything else raises the patch of the latest release. The version
+# is committed to package.json on main (the build reads it from there), tagged
+# vX.Y.Z and published as a GitHub Release with generated notes. develop is
+# fast-forwarded to the release when it has nothing main lacks; otherwise it
+# is left for a person to merge.
+#
+# Pushes made with the workflow token start no workflows, so the release
+# commit does not release itself again.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: tag and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The tip of main rather than the pushed commit: a run that waited
+      # behind another must build on that one's release commit.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Pick the version
+        id: version
+        run: |
+          if [ -n "$(git tag --points-at HEAD --list 'v*')" ]; then
+            echo "main is already released as $(git tag --points-at HEAD --list 'v*')."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="$(node scripts/version.mjs next)"
+          echo "Releasing v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Commit and tag
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node scripts/version.mjs set "$VERSION"
+          if ! git diff --quiet -- package.json; then
+            git commit -m "Release v$VERSION" -- package.json
+          fi
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push --atomic origin HEAD:main "refs/tags/v$VERSION"
+      - name: Fast-forward develop
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          git push origin HEAD:develop ||
+            echo "::notice::develop has commits main lacks; merge main into develop by hand."
+      - name: Publish the release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh release create "v$VERSION" --verify-tag --title "v$VERSION" --generate-notes

@@ -9,7 +9,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["lib/**/*.test.ts"],
+    include: ["lib/**/*.test.ts", "scripts/**/*.test.ts"],
     environment: "node",
   },
 })
