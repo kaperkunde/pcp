@@ -9,6 +9,7 @@ import {
   confirmWithPassword,
   createToken,
   openToken,
+  showTools,
 } from "../lib/ui"
 
 // The whole point of PCP in one flow: a secret goes in, a server is added
@@ -214,6 +215,7 @@ test("picks up tools the server adds later", async ({ page, baseURL }) => {
   // before an assistant asks for it.
   upstream.lateTools.add("feed_the_cat")
   await openToken(page, `Assistant ${RUN}`)
+  await showTools(page, SLUG)
   const newTool = page.getByLabel(`Access to ${SLUG}/feed_the_cat`)
   await expect(page.getByLabel(`Access to ${SLUG}/water_plants`)).toBeVisible()
   await expect(newTool).toHaveCount(0)

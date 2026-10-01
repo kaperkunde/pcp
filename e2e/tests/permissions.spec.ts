@@ -8,7 +8,7 @@ import {
   mcpToolCall2026,
   toolText,
 } from "../lib/mcp"
-import { createToken, openToken } from "../lib/ui"
+import { createToken, openToken, showTools } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
 // answers through a link while check_permission waits for them, and the
@@ -82,6 +82,14 @@ test("sets up a server, with its secret typed into the form, and a token", async
 
   token = await createToken(page, TOKEN_NAME)
   tokenId = await openToken(page, TOKEN_NAME)
+  // Each server's tools stay folded until asked for.
+  await expect(
+    page
+      .getByRole("region", { name: SERVER_NAME })
+      .getByText("3 tools: 3 ask you first"),
+  ).toBeVisible()
+  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveCount(0)
+  await showTools(page, SLUG)
   await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
     "ask",
   )
@@ -128,6 +136,7 @@ test("a tool nobody decided on asks first, through a link", async ({
   expect(toolText(direct)).toBe("2")
 
   await page.goto(`/tokens/${tokenId}`)
+  await showTools(page, SLUG)
   await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
     "allowed",
   )
@@ -138,11 +147,13 @@ test("a blocked tool is hidden from the assistant and refused", async ({
   baseURL,
 }) => {
   await page.goto(`/tokens/${tokenId}`)
+  await showTools(page, SLUG)
   await page
     .getByLabel(`Access to ${SLUG}/send_postcard`)
     .selectOption("blocked")
   await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toBeEnabled()
   await page.reload()
+  await showTools(page, SLUG)
   await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toHaveValue(
     "blocked",
   )
@@ -233,6 +244,7 @@ test("copying access gives a second token the same tools", async ({
   ).toBeVisible()
 
   await page.reload()
+  await showTools(page, SLUG)
   await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
     "allowed",
   )
@@ -320,6 +332,7 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
   )
 
   await page.goto(`/tokens/${proposerId}`)
+  await showTools(page, SLUG)
   await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
     "allowed",
   )
