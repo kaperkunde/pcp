@@ -58,3 +58,10 @@ export const MAX_ERROR_EXCERPT = 2000
 export const MAX_HEADER_VALUE = 8192
 
 export const USER_AGENT = "pcp/0.1.0"
+
+/** Edits (JSON Patch operations) kept on one endpoint. */
+export const MAX_PATCH_OPERATIONS = 1000
+/** All of one endpoint's edits, as JSON. */
+export const MAX_PATCH_CHARS = 1_000_000
+/** A JSON Pointer in an edit, or one asked for by get_endpoint. */
+export const MAX_POINTER_LENGTH = 2048

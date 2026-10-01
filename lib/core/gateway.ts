@@ -18,6 +18,7 @@ import type { ResolvedToken } from "./api-tokens"
 import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
+  MAX_SPEC_BYTES,
   PERMISSION_DECISIONS,
   SECRET_PLACEHOLDER,
   type ToolAccess,
@@ -47,6 +48,7 @@ import {
   type RegisterArgs,
   type ToolRequest,
 } from "./permissions"
+import { MAX_PATCH_OPERATIONS } from "./openapi/limits"
 import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog } from "./request-log"
 import { canRereadTools, type SyncResult } from "./catalogue"
@@ -86,8 +88,24 @@ type ToolResult = CallToolResult | InputRequiredResult
 
 const MAX_RESULT_CHARS = 60_000
 const ENDPOINT_CHANGES = { max: 20, windowMs: 10 * 60_000 }
-/** What register_server's openapi_schema may hold; see endpoint-admin.ts. */
-const MAX_OPENAPI_TEXT = 1_000_000
+/**
+ * Edits as a JSON Patch, for register_server and update_endpoint. The shape
+ * is described here for assistants; endpoint-admin.ts checks it.
+ */
+const PATCH_SCHEMA = z
+  .array(
+    z.object({
+      op: z.enum(["add", "remove", "replace", "move", "copy", "test"]),
+      path: z
+        .string()
+        .describe(
+          'A JSON Pointer into the schema; "/" in a key is ~1, so the /pets path is /paths/~1pets.',
+        ),
+      from: z.string().optional().describe("For move and copy."),
+      value: z.unknown().optional().describe("For add, replace and test."),
+    }),
+  )
+  .max(MAX_PATCH_OPERATIONS)
 
 export async function loadGatewayServers(
   scope: GatewayScope,
@@ -624,7 +642,7 @@ export function buildGatewayServer(
     {
       title: "Add a server or an API",
       description:
-        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document as text (openapi_schema): PCP turns each operation into a tool and makes the HTTP calls itself. If the API has no OpenAPI document, write one from its documentation. Authentication is none, OAuth for an MCP server (the owner signs in once they agree), or a header carrying a secret the owner already stored in PCP, named by its NAME. Never pass a secret's value: PCP does not take one here.",
+        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document: as text (openapi_schema), or the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. PCP turns each operation into a tool and makes the HTTP calls itself. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation. Authentication is none, OAuth for an MCP server (the owner signs in once they agree), or a header carrying a secret the owner already stored in PCP, named by its NAME. Never pass a secret's value: PCP does not take one here.",
       inputSchema: z.object({
         name: z
           .string()
@@ -639,16 +657,26 @@ export function buildGatewayServer(
           ),
         openapi_schema: z
           .string()
-          .max(MAX_OPENAPI_TEXT)
+          .max(MAX_SPEC_BYTES)
           .optional()
           .describe(
-            "Registers an API instead of an MCP server: the whole OpenAPI 3.x document as JSON or YAML text. Only references inside the document (#/components/…) are followed; PCP never fetches an address named in it. Up to 1 MB.",
+            `Registers an API instead of an MCP server: the whole OpenAPI 3.x document as JSON or YAML text. Only references inside the document (#/components/…) are followed; PCP never fetches an address named in it. Up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
           ),
+        openapi_url: z
+          .string()
+          .max(2048)
+          .optional()
+          .describe(
+            `Registers an API from the address of its OpenAPI 3.x document instead of its text, such as a raw file in the API's repository. PCP downloads it now, from a public address only, and the owner approves that copy; a later change to the document is not taken without them. Up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
+          ),
+        spec_patches: PATCH_SCHEMA.optional().describe(
+          "With openapi_schema or openapi_url: edits applied to the document before tools are made from it, and kept, so they still apply when it is read again. A JSON Patch (RFC 6902).",
+        ),
         read_only: z
           .boolean()
           .optional()
           .describe(
-            "With openapi_schema: offer only the GET operations as tools.",
+            "With openapi_schema or openapi_url: offer only the GET operations as tools.",
           ),
         description: z
           .string()
@@ -695,6 +723,8 @@ export function buildGatewayServer(
           name: string
           url?: string
           openapi_schema?: string
+          openapi_url?: string
+          spec_patches?: unknown
           read_only?: boolean
           description?: string
           auth_type?: AuthType
@@ -706,7 +736,8 @@ export function buildGatewayServer(
         ctx,
       ) => {
         const authType: AuthType = args.auth_type ?? "none"
-        const isApi = args.openapi_schema !== undefined
+        const isApi =
+          args.openapi_schema !== undefined || args.openapi_url !== undefined
 
         if (isApi && authType === "oauth") {
           return failure(
@@ -716,12 +747,17 @@ export function buildGatewayServer(
 
         if (!isApi && !args.url?.trim()) {
           return failure(
-            "An MCP server needs its address in url. To add an API instead, pass its OpenAPI document in openapi_schema.",
+            "An MCP server needs its address in url. To add an API instead, pass its OpenAPI document in openapi_schema, or its address in openapi_url.",
           )
         }
 
-        if (!isApi && args.read_only !== undefined) {
-          return failure("read_only is for an API: pass openapi_schema.")
+        if (
+          !isApi &&
+          (args.read_only !== undefined || args.spec_patches !== undefined)
+        ) {
+          return failure(
+            "read_only and spec_patches are for an API: pass openapi_schema or openapi_url.",
+          )
         }
 
         let authSecretId: string | null = null
@@ -792,7 +828,9 @@ export function buildGatewayServer(
           const prepared = await prepareRegistration(scope.ctx, {
             name: args.name,
             description: args.description,
-            spec: args.openapi_schema!,
+            spec: args.openapi_schema,
+            specUrl: args.openapi_url,
+            patches: args.spec_patches,
             baseUrl: args.url,
             readOnly: args.read_only,
             authSecretId,
@@ -850,7 +888,7 @@ export function buildGatewayServer(
       {
         title: "Change an API endpoint",
         description:
-          "Change an endpoint you registered: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. A change other assistants would see disables the endpoint until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: you can read it and turn read-only on, nothing else. You can never change a credential. get_endpoint says what you may change.",
+          "Change an endpoint you registered: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Change a schema with edits (a JSON Patch kept beside it and applied whenever tools are made, also after the document is read again) rather than sending it whole: addPatches adds to the edits, patches replaces them all. Read the part you are changing first with get_endpoint's specPointer. A change other assistants would see disables the endpoint until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: you can read it and turn read-only on, nothing else. You can never change a credential. get_endpoint says what you may change.",
         inputSchema: z.object({
           endpoint: z
             .string()
@@ -860,9 +898,22 @@ export function buildGatewayServer(
           spec: z
             .string()
             .min(1)
+            .max(MAX_SPEC_BYTES)
             .optional()
             .describe(
-              "A whole new OpenAPI 3 document as JSON or YAML text; it replaces the old one, and tools are rebuilt from it.",
+              "A whole new OpenAPI 3 document as JSON or YAML text; it replaces the old one, and tools are rebuilt from it with the endpoint's edits. Only for an endpoint registered with text.",
+            ),
+          patches: PATCH_SCHEMA.optional().describe(
+            "Every edit to the schema, replacing the ones it has, applied to the document as stored; [] removes them all.",
+          ),
+          addPatches: PATCH_SCHEMA.optional().describe(
+            "Edits applied after the ones the endpoint has, so pointers are into the schema as get_endpoint's specPointer shows it.",
+          ),
+          refreshSpec: z
+            .boolean()
+            .optional()
+            .describe(
+              "Download the schema's URL again and rebuild the tools from it, with the edits.",
             ),
           baseUrl: z.string().optional(),
           readOnly: z.boolean().optional(),
@@ -904,7 +955,7 @@ export function buildGatewayServer(
       {
         title: "Read an API endpoint",
         description:
-          "An API endpoint's settings, its tools, whose it is, what you may change on it, and (with includeSpec) the OpenAPI text it was built from, so you can edit it and send it back with update_endpoint. Never includes a secret.",
+          "An API endpoint's settings, its tools, whose it is and what you may change on it; and on request its edits, the OpenAPI text it was built from, or one part of the schema by JSON Pointer, so you can write edits for update_endpoint. A part too long to include comes back as its keys, to point further in with. Never includes a secret.",
         inputSchema: z.object({
           endpoint: z
             .string()
@@ -912,19 +963,41 @@ export function buildGatewayServer(
           includeSpec: z
             .boolean()
             .optional()
-            .describe("Also return the stored OpenAPI text, if not too long."),
+            .describe(
+              "Also return the stored OpenAPI text, before edits, if not too long.",
+            ),
+          includePatches: z
+            .boolean()
+            .optional()
+            .describe("Also return the endpoint's edits."),
+          specPointer: z
+            .string()
+            .max(2048)
+            .optional()
+            .describe(
+              'A JSON Pointer into the schema with the edits applied, like "/paths" or "/components/schemas/Pet"; "" is the whole document.',
+            ),
+          unedited: z
+            .boolean()
+            .optional()
+            .describe("Read specPointer from the schema before the edits."),
         }),
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
       logged(
         "get_endpoint",
         slugOf,
-      )(async (args: { endpoint: string; includeSpec?: boolean }) =>
-        json(
-          await getEndpoint(scope, args.endpoint, {
-            includeSpec: args.includeSpec,
-          }),
-        ),
+      )(
+        async (args: {
+          endpoint: string
+          includeSpec?: boolean
+          includePatches?: boolean
+          specPointer?: string
+          unedited?: boolean
+        }) => {
+          const { endpoint, ...options } = args
+          return json(await getEndpoint(scope, endpoint, options))
+        },
       ),
     )
   }

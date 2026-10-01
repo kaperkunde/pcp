@@ -292,13 +292,22 @@ async function summarizeRow(
         : null
 
     if (input.endpoint) {
-      const { preview, readOnly } = input.endpoint
+      const { preview, readOnly, specUrl, patches } = input.endpoint
+      const edits = patches?.length ?? 0
 
       return {
         title: `Add the API endpoint ${input.name}?`,
         lines: [
           `Address: ${input.url}`,
           ...(preview.privateAddress ? [preview.privateAddress] : []),
+          specUrl
+            ? `Schema: downloaded from ${specUrl}; a later change to it waits for you`
+            : "Schema: supplied as text",
+          ...(edits > 0
+            ? [
+                `Edits: ${edits} change${edits === 1 ? "" : "s"} to the schema, applied before the tools are made`,
+              ]
+            : []),
           `Tools: ${preview.toolCount} from the OpenAPI schema it supplied (${preview.methods})`,
           `Operations: ${preview.operations.join(", ")}${preview.more > 0 ? `, and ${preview.more} more` : ""}`,
           ...(preview.skipped ? [`Left out: ${preview.skipped}`] : []),

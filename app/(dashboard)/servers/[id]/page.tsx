@@ -8,6 +8,7 @@ import { ServerForm } from "@/components/server-form"
 import { db } from "@/lib/core/db"
 import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
+import { readStoredPatches } from "@/lib/core/openapi/patch"
 import { readCallPlan } from "@/lib/core/openapi/plan"
 import { listSecrets } from "@/lib/core/secrets"
 import { getServer, type AuthType, type ServerStatus } from "@/lib/core/servers"
@@ -44,9 +45,10 @@ export default async function ServerPage({
   const spec = endpoint
     ? await db().openApiSpec.findUnique({
         where: { serverId: server.id },
-        select: { fetchedAt: true },
+        select: { fetchedAt: true, patches: true },
       })
     : null
+  const patches = readStoredPatches(spec?.patches)
 
   const secrets = (await listSecrets(ctx))
     .filter((secret) => secret.kind === "text")
@@ -119,6 +121,8 @@ export default async function ServerPage({
             specSource: server.specSource === "upload" ? "upload" : "url",
             specUrl: server.specUrl ?? "",
             specReadAt: spec?.fetchedAt ?? null,
+            specUrlFromAssistant: server.specUrlFromAssistant,
+            patches: patches.length > 0 ? JSON.stringify(patches, null, 2) : "",
             // Not prefilled: a value in the field is something the owner
             // typed, which is what lets them confirm where a secret goes.
             baseUrl: "",

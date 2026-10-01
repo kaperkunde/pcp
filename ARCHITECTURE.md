@@ -149,9 +149,18 @@ unchanged. Two functions in `lib/core/upstream.ts` branch on the kind:
   (`mcp_tool.operation`) and validated when read. What PCP cannot send is
   dropped when optional and skips the operation when required, with a reason
   the owner sees (file uploads, cookies, a reference into another document).
-- The schema text is kept in `openapi_spec`, apart from the server row so
-  neither the server list nor the gateway loads it. An uploaded schema is
-  regenerated from that copy when the owner changes a setting.
+- `patch.ts` applies an endpoint's **edits**: a JSON Patch (RFC 6902) kept
+  beside the schema and applied to it every time tools are generated, before
+  `generate.ts` sees it. A schema read from a URL keeps its fixes when it is
+  read again, and a large one is narrowed or corrected without anyone sending
+  it whole. Edits are untrusted input like the schema: keys are set as own
+  properties, `__proto__` is refused, and what an edit adds counts against the
+  same node limit as a parsed document. An edit that no longer applies (the
+  document moved on) fails the read and leaves the tools as they were, naming
+  the edit.
+- The schema text is kept in `openapi_spec`, with the edits, apart from the
+  server row so neither the server list nor the gateway loads it. An uploaded
+  schema is regenerated from that copy when the owner changes a setting.
 
 **Making a call** (`call.ts`, `request.ts`): `buildRequest` turns the
 assistant's arguments into a request following the plan. Arguments the plan
@@ -189,13 +198,15 @@ link-local and metadata ranges, and connect to the address it checked.
 ## Registering and managing endpoints through the gateway
 
 **Registering** is `register_server`, the tool main already had for MCP
-servers, with an OpenAPI document as text in `openapi_schema` (plus `url`
-for the base URL, `read_only`, and a secret named by NAME). It is an
-assistant's request, so it goes through the same owner approval as any other
-new server (below): PCP reads the document when the request is made, refuses
-one that cannot be used, and shows the owner the address, the tool count and
-operations, whether the tools can change things, and the secret that would be
-sent. Nothing exists until they agree; then `executeRegister` creates the
+servers, with an OpenAPI document as text in `openapi_schema` or by its
+address in `openapi_url` (plus `spec_patches` to edit it, `url` for the base
+URL, `read_only`, and a secret named by NAME). It is an assistant's request,
+so it goes through the same owner approval as any other new server (below):
+PCP reads the document when the request is made (downloading it, for a URL),
+applies the edits, refuses one that cannot be used, and shows the owner the
+address, where the schema came from, how many edits it has, the tool count
+and operations, whether the tools can change things, and the secret that
+would be sent. Nothing exists until they agree; then `executeRegister` creates the
 endpoint, on, and adds it to the token's scope. An assistant can write a
 document from an API's documentation and register it in one call. What it
 registers has `public_only` set (below) and cannot carry a secret unless the
@@ -204,7 +215,12 @@ owner approved that secret going to the address they were shown.
 **Reading and changing** one afterwards is for a token the owner made with
 "read and change API endpoints" (`api_token.manage_endpoints`, off for every
 other token): two more gateway tools, `update_endpoint(endpoint, …)` and
-`get_endpoint(endpoint, includeSpec?)`. The rules are in
+`get_endpoint(endpoint, …)`. A schema is changed with edits (`addPatches`
+adds to them, `patches` replaces them all) rather than by sending it again,
+and read a part at a time: `get_endpoint`'s `specPointer` returns one value of
+the edited document by JSON Pointer, and a value too long to include comes
+back as its keys, to point further in with, so a schema of any size can be
+read in steps under the answer's length limit. The rules are in
 `lib/core/endpoint-admin.ts`, and they exist because an assistant that can
 change an endpoint decides where PCP sends requests:
 
@@ -245,11 +261,22 @@ change an endpoint decides where PCP sends requests:
   protect it. What a name resolves to is neither looked up at registration nor
   told to the assistant, so the tools cannot be used to map the owner's DNS.
   A literal private address is noted in the request the owner reads.
-- **Text only.** The assistant supplies the schema as text; PCP never fetches
-  an address the assistant chose. An endpoint the owner reads from a URL
-  keeps that URL, and its schema is the owner's to change.
-- **Bounded.** Fifty endpoints per vault, one million characters of schema per
-  registration (it is held, encrypted, on the request until answered), 4 MB of
+- **Approved as downloaded.** A schema URL an assistant names is downloaded
+  once, when it asks, from public addresses only and with no credential, and
+  the copy is held (encrypted) on the request: the endpoint is made from the
+  document the owner was shown, not from a second download. Afterwards
+  (`mcp_server.spec_url_from_assistant`) a background re-read that finds a
+  different document reports it and keeps the approved tools; the owner's
+  "Re-read" takes it, and so does the assistant's `refreshSpec` while the
+  endpoint is its own, which disables it until the owner enables it again.
+  Whoever controls that address cannot add operations, or words every
+  assistant reads, by changing the file. When a downloaded document does not
+  parse, the assistant is told that much and not the parser's message, which
+  quotes the text. An endpoint the owner reads from a URL they typed keeps
+  following it, as before.
+- **Bounded.** Fifty endpoints per vault, 5 MB of schema per registration,
+  the same as an upload (it is held, encrypted, on the request until
+  answered), a thousand edits and a million characters of them, 4 MB of
   stored tools per endpoint, twenty registrations and twenty changes per token
   per ten minutes, no JSON-RPC batches at the gateway (one POST would be many
   calls), and the catalogue a request loads leaves out tool schemas, which are
@@ -260,7 +287,10 @@ change an endpoint decides where PCP sends requests:
 What remains is egress: an assistant with the right to register can have PCP
 send data it holds to any public URL, as an operation's arguments, once the
 owner has agreed to the endpoint and allowed the tool. Both are the owner's to
-give, and tools ask first by default.
+give, and tools ask first by default. And it can have PCP download a public
+address it names, as a schema: what it learns back is whether that was an
+OpenAPI document and, if so, what the owner would be asked, which matters
+only for a service that trusts PCP's own address more than the assistant's.
 
 ## Data on disk
 

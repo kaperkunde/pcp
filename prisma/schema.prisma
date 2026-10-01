@@ -276,6 +276,11 @@ model McpServer {
   /// schema download and for every call. Set on endpoints an assistant
   /// registers; only the owner can clear it.
   publicOnly Boolean @default(false) @map("public_only")
+  /// openapi: an assistant proposed specUrl and the owner approved the
+  /// schema it held then. A background re-read never takes a changed
+  /// document from it: the owner re-reads it in PCP, or the assistant asks
+  /// for it with update_endpoint while the endpoint is theirs.
+  specUrlFromAssistant Boolean @default(false) @map("spec_url_from_assistant")
 
   tools              McpTool[]
   tokens             ApiTokenServer[]
@@ -321,6 +326,9 @@ model OpenApiSpec {
   server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
   /// The JSON or YAML text as read.
   text      String
+  /// Edits applied to it before tools are generated: a JSON Patch (RFC
+  /// 6902) as JSON (lib/core/openapi/patch.ts).
+  patches   String    @default("[]")
   /// SHA-256 of text, hex.
   hash      String
   fetchedAt DateTime  @map("fetched_at")

@@ -33,6 +33,10 @@ export type EndpointFormValues = {
   specUrl: string
   /** When editing: when PCP last read the schema. */
   specReadAt?: Date | null
+  /** When editing: an assistant proposed the schema URL. */
+  specUrlFromAssistant?: boolean
+  /** Edits to the schema, as JSON Patch text; empty for none. */
+  patches: string
   /** What the owner typed. Empty when editing: the saved address is below. */
   baseUrl: string
   /** When editing: where requests go now. */
@@ -51,6 +55,7 @@ export const EMPTY_ENDPOINT: EndpointFormValues = {
   description: "",
   specSource: "url",
   specUrl: "",
+  patches: "",
   baseUrl: "",
   readOnly: false,
   publicOnly: false,
@@ -86,6 +91,7 @@ export function EndpointForm({
   const [description, setDescription] = useState(initial.description)
   const [specSource, setSpecSource] = useState(initial.specSource)
   const [specUrl, setSpecUrl] = useState(initial.specUrl)
+  const [patches, setPatches] = useState(initial.patches)
   const [baseUrl, setBaseUrl] = useState(initial.baseUrl)
   const [readOnly, setReadOnly] = useState(initial.readOnly)
   const [publicOnly, setPublicOnly] = useState(initial.publicOnly)
@@ -175,6 +181,9 @@ export function EndpointForm({
                 {initial.specSource === "url" ? (
                   <>
                     Read from <code>{initial.specUrl}</code>
+                    {initial.specUrlFromAssistant
+                      ? ", an address an assistant proposed: when the document there changes, the tools stay as you approved them until you re-read it"
+                      : null}
                   </>
                 ) : (
                   "Uploaded as a file"
@@ -220,6 +229,38 @@ export function EndpointForm({
                 />
               </Field>
             )}
+            <Field
+              label="Edits (optional)"
+              htmlFor={`${prefix}-patches`}
+              hint={
+                <>
+                  Changes PCP makes to the schema before it builds the tools,
+                  and makes again whenever the schema is read: a{" "}
+                  <a
+                    className="underline"
+                    href="https://datatracker.ietf.org/doc/html/rfc6902"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    JSON Patch
+                  </a>
+                  , such as{" "}
+                  <code>{'[{"op": "remove", "path": "/paths/~1login"}]'}</code>.
+                  Leave it empty for none.
+                </>
+              }
+            >
+              <Textarea
+                id={`${prefix}-patches`}
+                name="patches"
+                value={patches}
+                onChange={(event) => setPatches(event.target.value)}
+                rows={patches ? Math.min(16, patches.split("\n").length) : 2}
+                spellCheck={false}
+                className="font-mono text-xs"
+                placeholder="[]"
+              />
+            </Field>
           </fieldset>
 
           <Field

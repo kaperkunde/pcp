@@ -553,6 +553,7 @@ async function apiRegistration(
     secret?: { id: string; name: string }
     baseUrl?: string
     readOnly?: boolean
+    patches?: unknown
   } = {},
 ): Promise<RegisterArgs> {
   const prepared = await prepareRegistration(ctx, {
@@ -561,6 +562,7 @@ async function apiRegistration(
     baseUrl: overrides.baseUrl,
     readOnly: overrides.readOnly,
     authSecretId: overrides.secret?.id,
+    patches: overrides.patches,
   })
 
   return {
@@ -578,6 +580,38 @@ async function apiRegistration(
 }
 
 describe("adding an API from OpenAPI text", () => {
+  it("tells the owner where the schema comes from and how many edits it has", async () => {
+    const { ctx, scope } = await setup()
+    const fromText = await apiRegistration(ctx)
+    const edited = await apiRegistration(ctx, {
+      patches: [{ op: "remove", path: "/paths/~1pets/post" }],
+    })
+    // As a schema downloaded from a URL is held on the request.
+    edited.endpoint!.specUrl = "https://raw.example.com/pets/openapi.yaml"
+
+    for (const input of [fromText, edited]) {
+      await withPermission(scope, { kind: "register", input }, {})
+    }
+    const views = await Promise.all(
+      (await db().permissionRequest.findMany()).map((row) =>
+        getPermissionView(ctx, row.id, { publicUrl: PUBLIC_URL }),
+      ),
+    )
+    const [byUrl, asText] = [
+      views.find((view) => view?.lines.some((line) => /^Edits/.test(line))),
+      views.find((view) => !view?.lines.some((line) => /^Edits/.test(line))),
+    ]
+
+    expect(asText?.lines).toContain("Schema: supplied as text")
+    expect(byUrl?.lines).toEqual(
+      expect.arrayContaining([
+        "Schema: downloaded from https://raw.example.com/pets/openapi.yaml; a later change to it waits for you",
+        "Edits: 1 change to the schema, applied before the tools are made",
+        "Tools: 2 from the OpenAPI schema it supplied (GET 1, DELETE 1)",
+      ]),
+    )
+  })
+
   it("adds nothing until the owner agrees, shows what it would do, then adds it on, public-only, and in reach of the token", async () => {
     const { ctx, scope, tokenId } = await setup({ allowAllServers: false })
     const { executor } = stub()

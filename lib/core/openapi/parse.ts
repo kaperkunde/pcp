@@ -23,6 +23,14 @@ export type OpenApiDocument = JsonObject & {
  * appears, stopping at the limit. A cycle never ends, so it stops there too.
  */
 function withinNodeLimit(value: unknown, limit: number): boolean {
+  return countNodes(value, limit) <= limit
+}
+
+/**
+ * How many nodes a value has, counted the same way; past the limit it stops
+ * and answers limit + 1.
+ */
+export function countNodes(value: unknown, limit: number): number {
   const stack: unknown[] = [value]
   let seen = 0
 
@@ -31,7 +39,7 @@ function withinNodeLimit(value: unknown, limit: number): boolean {
     seen += 1
 
     if (seen > limit) {
-      return false
+      return seen
     }
 
     if (Array.isArray(current)) {
@@ -41,7 +49,7 @@ function withinNodeLimit(value: unknown, limit: number): boolean {
     }
   }
 
-  return true
+  return seen
 }
 
 function short(error: unknown): string {
@@ -103,6 +111,14 @@ export function parseSpecText(raw: string): OpenApiDocument {
     )
   }
 
+  return checkDocument(value)
+}
+
+/**
+ * What a document must be to be read as OpenAPI 3: checked on what the text
+ * parsed to, and again once the endpoint's edits are applied to it.
+ */
+export function checkDocument(value: unknown): OpenApiDocument {
   if (!isObject(value)) {
     throw invalid("That is not an OpenAPI document.")
   }

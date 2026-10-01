@@ -547,10 +547,17 @@ export type { SyncResult }
 export async function syncServerTools(
   ctx: VaultContext,
   server: McpServer,
-  { publicUrl }: { publicUrl: string },
+  {
+    publicUrl,
+    byOwner = false,
+  }: {
+    publicUrl: string
+    /** The owner asked for this read (see syncEndpointTools). */
+    byOwner?: boolean
+  },
 ): Promise<SyncResult> {
   if (server.kind === "openapi") {
-    return syncEndpointTools(server)
+    return syncEndpointTools(server, { byOwner })
   }
 
   let connection: UpstreamConnection | null = null
