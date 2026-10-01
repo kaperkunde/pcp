@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test"
 
 import { OWNER_PASSWORD } from "../lib/auth"
 import { callTool, initialize, toolText } from "../lib/mcp"
-import { createToken } from "../lib/ui"
+import { confirmWithPassword, createToken } from "../lib/ui"
 
 // Memories through the gateway: a token the owner lets keep them gets the
 // memory tool and is told when to use it; its own notes need nobody's say;
@@ -26,8 +26,8 @@ test("a token made to keep memories gets the tool and is told when to use it", a
   await page
     .getByLabel("Let an assistant with this token keep memories")
     .check()
-  await page.getByLabel("Your password").fill(OWNER_PASSWORD)
   await page.getByRole("button", { name: "Create token" }).click()
+  await confirmWithPassword(page, OWNER_PASSWORD)
   await expect(page.getByText("Your new token")).toBeVisible()
   token = (await page.getByTestId("new-token").textContent())!
 
