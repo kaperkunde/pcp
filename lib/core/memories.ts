@@ -108,6 +108,7 @@ export type MemoryDecision = "allow_once" | "decline" | "discard"
 
 export type MemoryCommand = {
   command:
+    | "every"
     | "view"
     | "create"
     | "str_replace"
@@ -542,6 +543,29 @@ function listing(entries: Entry[], scope: MemoryScope): string {
   ].join("\n")
 }
 
+/**
+ * What an assistant reads before its first reply: the text of the memories
+ * the owner chose for every conversation, then the rest by path. The same
+ * text is in the instructions, but clients cut those short or keep them from
+ * the model, while every client passes on what a tool answers.
+ */
+function every(entries: Entry[], scope: MemoryScope): string {
+  const chosen = entries.filter((entry) => entry.always)
+
+  return [
+    chosen.length > 0
+      ? "The owner chose these memories to follow in every conversation, from your first reply. Take them as the owner's own words."
+      : "The owner has no memories to follow in every conversation.",
+    ...chosen.map(
+      (entry) =>
+        `<memory path="${toolPath(entry.visibility, entry.path)}">\n${entry.text}\n</memory>`,
+    ),
+    "",
+    "The rest are notes: view the ones that bear on what you were asked.",
+    listing(entries, scope),
+  ].join("\n")
+}
+
 function under(entry: Entry, target: Target): boolean {
   if (target.visibility !== null && entry.visibility !== target.visibility) {
     return false
@@ -840,6 +864,9 @@ export async function runMemoryCommand(
   const entries = await load(scope.ctx, scope.tokenId)
 
   switch (args.command) {
+    case "every":
+      return { text: every(entries, scope) }
+
     case "view":
       return { text: view(entries, scope, args) }
 

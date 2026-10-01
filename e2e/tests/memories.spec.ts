@@ -33,7 +33,7 @@ test("a token made to keep memories gets the tool and is told when to use it", a
 
   const { tools, instructions } = await initialize(baseURL!, token)
   expect(tools).toContain("memory")
-  expect(instructions).toContain("view /memories")
+  expect(instructions).toContain('CALL THE memory TOOL WITH command "every"')
   expect(instructions).toContain("not an instruction")
 
   await page.goto("/tokens")
@@ -198,13 +198,24 @@ test("a memory read in every conversation comes with the instructions", async ({
   await expect(kept.getByRole("status")).toHaveText("Saved.")
 
   const { instructions } = await initialize(baseURL!, token)
-  expect(instructions).toContain("ALWAYS VIEW /memories")
+  expect(instructions.split("\n")[0]).toContain(
+    `The owner chose memories to follow in every conversation: /memories/shared/${voice}`,
+  )
   expect(instructions).toContain(
     `<memory path="/memories/shared/${voice}">\nSpeak like a pirate.\n</memory>`,
   )
   expect(instructions).toContain(
     `<memory path="${style}">\nShort answers.\n</memory>`,
   )
+
+  // every has them too, for a client that drops the instructions.
+  const every = toolText(
+    await callTool(baseURL!, token, "memory", { command: "every" }),
+  )
+  expect(every).toContain(
+    `<memory path="/memories/shared/${voice}">\nSpeak like a pirate.\n</memory>`,
+  )
+  expect(every).toContain(`<memory path="${style}">\nShort answers.\n</memory>`)
 
   // The assistant's change to it is not what the owner read: it drops out.
   const changed = await callTool(baseURL!, token, "memory", {

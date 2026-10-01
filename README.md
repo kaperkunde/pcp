@@ -181,10 +181,12 @@ option off for a token that does not need it.
 A token made with **Let an assistant with this token keep memories** gets a
 `memory` tool: notes that last between conversations and stay with you rather
 than with one app. It works like Claude's own memory tool (files under
-`/memories`: view, create, str_replace, insert, delete, rename, plus search),
-and PCP's instructions, modelled on the protocol Claude's own memory tool
-uses, tell the assistant to look there before anything else and to save what
-you would not want to say twice as it goes.
+`/memories`: view, create, str_replace, insert, delete, rename, plus search
+and every), and PCP's instructions, modelled on the protocol Claude's own
+memory tool uses, tell the assistant to look there before anything else and to
+save what you would not want to say twice as it goes. Before its first reply
+it calls `every`, which returns the memories you chose to have read in every
+conversation and lists the rest.
 
 - `/memories/…` is the assistant's own: only the token that wrote a memory
   reads it, and writing one needs no answer from you.

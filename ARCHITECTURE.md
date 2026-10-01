@@ -319,7 +319,7 @@ only for a service that trusts PCP's own address more than the assistant's.
 A token made with "keep memories" (`api_token.keep_memories`, off unless the
 owner turns it on) gets one more tool, `memory`, with the commands of Claude's
 memory tool (view, create, str_replace, insert, delete, rename, over files
-under `/memories`) plus search, and a paragraph in the instructions saying
+under `/memories`) plus search and every, and a paragraph in the instructions saying
 when to use it. The rules are in `lib/core/memories.ts`. Like endpoint
 management, they are drawn around the fact that what one assistant writes
 another one reads:
@@ -346,13 +346,20 @@ another one reads:
   shared memory is at most 2,000 characters, so it can be read whole.
 - **The instructions name shared memories by path, and carry the ones read
   in every conversation whole.** The memory paragraph follows the protocol
-  Claude's own memory tool adds to the system prompt (view `/memories` before
-  anything else, save as you go, assume the conversation ends at any
+  Claude's own memory tool adds to the system prompt (look at `/memories`
+  before anything else, save as you go, assume the conversation ends at any
   moment). The owner can mark any memory to be read in every conversation
   (`memory.always`, from the Memories page only): a shared one goes into
   every keeping token's instructions, a private one into its own token's.
   Its text is at most 2,000 characters, and the instructions carry at most
-  8,000 characters of them and name the rest. Every such text is one the
+  8,000 characters of them and name the rest. Clients do not always pass
+  the instructions on whole (Claude Code cuts them short; claude.ai showed
+  none of them with PCP's tools deferred), so the instructions open with a
+  line naming these memories, and the memory tool's `every` command returns
+  their text with the listing. The tool's description opens with "call
+  every before your first reply" whether or not there are any: a client that
+  defers tools shows only that first sentence, and keeps a tool list long
+  after the memories change. Every such text is one the
   owner read: an assistant's change to, or move of, an always memory it keeps
   clears the mark, a change to a shared one is a `memory_change` request
   that says it is read in every conversation, and sharing a private one
