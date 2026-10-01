@@ -88,10 +88,10 @@ export function TokenDetail({
         />
       ) : null}
       {waiting.length > 0 ? <WaitingCard waiting={waiting} /> : null}
-      <ToolsCard tokenId={token.id} access={access} locked={locked} />
       {otherTokens.length > 0 && !locked ? (
         <CopyCard tokenId={token.id} otherTokens={otherTokens} />
       ) : null}
+      <ToolsCard tokenId={token.id} access={access} locked={locked} />
       <SettingsCard token={token} servers={servers} locked={locked} />
     </div>
   )
