@@ -12,6 +12,15 @@ import type {
   PermissionRequest,
 } from "@/lib/generated/prisma/client"
 
+import {
+  accessReview,
+  checkAccessLevels,
+  describeAccessAsk,
+  describeSavedAccess,
+  writeAccessLevels,
+  type AccessAsk,
+  type AccessLevel,
+} from "./access-requests"
 import type { SyncResult } from "./catalogue"
 import type {
   PermissionDecision,
@@ -25,7 +34,7 @@ import {
   createApprovedEndpoint,
   type EndpointRegistration,
 } from "./endpoint-admin"
-import { isPcpError } from "./errors"
+import { isPcpError, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import {
   decideMemoryAsk,
@@ -53,6 +62,7 @@ import {
   requestHash,
   storedResultText,
   summaryText,
+  tiersFor,
   type PermissionStatus,
   type PermissionVia,
 } from "./permission-rules"
@@ -123,6 +133,7 @@ export type PermissionAsk =
     }
   | { kind: "register"; input: RegisterArgs }
   | MemoryAsk
+  | AccessAsk
 
 /** Runs what the owner allowed. Tests swap in a stub. */
 export type PermissionExecutor = {
@@ -255,6 +266,8 @@ function describeAsk(ask: PermissionAsk): {
         target: `memory:${ask.input.memoryId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "access":
+      return { target: "access", args: ask.input }
   }
 }
 
@@ -268,6 +281,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return ask.tool.name
     case "register":
       return "register_server"
+    case "access":
+      return "propose_tool_access"
     default:
       return "memory"
   }
@@ -321,6 +336,20 @@ async function summarizeRow(
       kind: row.kind,
       input: args,
     } as MemoryAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "access") {
+    const { levels } = args as AccessAsk["input"]
+    const servers = await db().mcpServer.findMany({
+      where: {
+        vaultId: ctx.vaultId,
+        id: { in: [...new Set(levels.map((level) => level.serverId))] },
+      },
+      select: { id: true, name: true, slug: true },
+    })
+    const asked = describeAccessAsk(levels, servers)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -468,8 +497,13 @@ export function permissionPanel(view: PermissionView): PermissionPanel {
 
 /** What the assistant is told about a request that is no longer pending. */
 function outcomeOf(view: PermissionView): CallToolResult {
-  // A memory's outcome says in full what the owner chose and what happened.
-  if (isMemoryKind(view.kind) && view.outcome && view.status !== "running") {
+  // A memory's or proposed levels' outcome says in full what the owner chose
+  // and what happened.
+  if (
+    (isMemoryKind(view.kind) || view.kind === "access") &&
+    view.outcome &&
+    view.status !== "running"
+  ) {
     return text(view.outcome, view.status === "failed")
   }
 
@@ -513,6 +547,10 @@ function pendingText(
   tier: PermissionTier,
   toolShowsPanel: boolean,
 ): string {
+  if (view.kind === "access") {
+    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}\n\nAsk the owner to open ${view.url} (signed in to PCP): your levels are filled in there and the changes marked, and they can adjust them before they save. Nothing changes until they do. It stays open until ${view.expiresAt.toISOString()}. Afterwards, call check_permission with id "${view.id}" for the result.`
+  }
+
   const where =
     tier === "app" && toolShowsPanel
       ? `Ask the owner to answer in the panel above, or at ${view.url}.`
@@ -582,7 +620,7 @@ export async function withPermission(
   const view = await toView(scope.ctx, row!, scope.publicUrl)
   const tier = choosePermissionTier(
     request.clientCapabilities,
-    scope.permissionTiers,
+    tiersFor(ask.kind, scope.permissionTiers),
   )
 
   switch (tier) {
@@ -765,8 +803,16 @@ export async function decidePermission(
       { via, publicUrl },
       choice === "block"
         ? `The owner blocked ${toolLabel(row)} for this token, so nothing ran.`
-        : "The owner said no, so nothing ran.",
+        : kind === "access"
+          ? "The owner said no, so no tool's level changed."
+          : "The owner said no, so nothing ran.",
     )
+  }
+
+  // Proposed levels are saved by applyAccessRequest, with what the owner
+  // chose on the page; decisionsFor offers nothing else, and this keeps it so.
+  if (kind === "access") {
+    return text("Tool levels are saved on the request's page in PCP.", true)
   }
 
   if (choice === "always" && row.serverId) {
@@ -1066,7 +1112,7 @@ export async function checkPermission(
   if (view.status === "pending") {
     const tier = choosePermissionTier(
       request.clientCapabilities,
-      scope.permissionTiers,
+      tiersFor(view.kind, scope.permissionTiers),
     )
     const where =
       tier === "app" ? `in the panel, or at ${view.url}` : `at ${view.url}`
@@ -1086,6 +1132,115 @@ export async function checkPermission(
     { kind: "done", text: said, isError: outcome.isError === true },
     { isError: outcome.isError === true },
   )
+}
+
+/**
+ * A pending proposal of tool levels, with what its page shows: the tools
+ * the token reaches and the proposed levels still about them. Null when
+ * there is no such request or it is no longer open.
+ */
+export async function getAccessProposal(
+  ctx: VaultContext,
+  id: string,
+): Promise<
+  (Awaited<ReturnType<typeof accessReview>> & { tokenId: string }) | null
+> {
+  const row = await loadRow({ id, vaultId: ctx.vaultId })
+
+  if (!row || row.kind !== "access" || !isOpen(row)) {
+    return null
+  }
+
+  const { levels } = readArgs(ctx, row) as AccessAsk["input"]
+
+  return {
+    tokenId: row.tokenId,
+    ...(await accessReview(ctx, row.tokenId, levels)),
+  }
+}
+
+/**
+ * The owner saved a proposal of tool levels on its page: writes the levels
+ * they chose there (the proposal, or what they made of it), once. Only the
+ * signed-in owner's page calls this; nothing an assistant or its client
+ * sends reaches it.
+ */
+export async function applyAccessRequest(
+  ctx: VaultContext,
+  id: string,
+  levels: unknown,
+  { publicUrl }: { publicUrl: string },
+): Promise<CallToolResult> {
+  const row = await loadRow({ id, vaultId: ctx.vaultId })
+
+  if (!row || row.kind !== "access") {
+    throw notFound("That proposal")
+  }
+
+  if (!isOpen(row)) {
+    throw new PcpError(
+      "state",
+      "This proposal was already answered or has expired. Nothing was saved.",
+    )
+  }
+
+  if (!tokenIsLive(row.token)) {
+    const message =
+      "The token that asked is no longer valid, so no tool's level changed."
+    await finishUnrun(ctx, row, { via: "web", publicUrl }, message)
+    throw new PcpError("state", message)
+  }
+
+  // Refused before the row is claimed, so the owner can fix it and save.
+  const chosen = await checkAccessLevels(ctx, row.tokenId, levels)
+  const claimed = await db().permissionRequest.updateMany({
+    where: { id: row.id, status: "pending", expiresAt: { gt: new Date() } },
+    data: { status: "running", via: "web", decidedAt: new Date() },
+  })
+
+  if (claimed.count !== 1) {
+    throw new PcpError(
+      "state",
+      "This proposal was answered meanwhile. Nothing was saved.",
+    )
+  }
+
+  let outcome: { failed: boolean; text: string }
+
+  try {
+    await writeAccessLevels(ctx, row.tokenId, chosen)
+    const { levels: proposed } = readArgs(ctx, row) as {
+      levels: AccessLevel[]
+    }
+    outcome = { failed: false, text: describeSavedAccess(proposed, chosen) }
+  } catch (error) {
+    if (!isPcpError(error)) {
+      console.error("[permissions] saving tool levels failed", {
+        id: row.id,
+        error,
+      })
+    }
+
+    outcome = {
+      failed: true,
+      text: isPcpError(error)
+        ? error.message
+        : "Something went wrong inside PCP.",
+    }
+  }
+
+  await db().permissionRequest.update({
+    where: { id: row.id },
+    data: {
+      status: outcome.failed ? "failed" : "executed",
+      resultIsError: outcome.failed,
+      resultCiphertext: asBytes(
+        encryptString(ctx.dek, outcome.text, `${aad(row.id)}:result`),
+      ),
+    },
+  })
+
+  return text(outcome.text, outcome.failed)
 }
 
 /** Deletes requests a week past their expiry, answered or not. */

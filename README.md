@@ -127,14 +127,15 @@ required.
 The assistant then sees a short description of the servers behind the token
 and these tools:
 
-| Tool               | What it does                                                                                                     |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `search_tools`     | Finds tools across servers from a few words ("create a github issue").                                           |
-| `describe_tool`    | Returns one tool's full description, JSON Schema and whether it asks you first.                                  |
-| `call_tool`        | Runs it, with PCP adding the credentials to the request to the server or the API.                                |
-| `check_permission` | Says whether you answered a request that was waiting for you, and how it went.                                   |
-| `check_server`     | Says whether a server is connected; offers you a Connect button where it can.                                    |
-| `register_server`  | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name. |
+| Tool                  | What it does                                                                                                     |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                           |
+| `describe_tool`       | Returns one tool's full description, JSON Schema and whether it asks you first.                                  |
+| `call_tool`           | Runs it, with PCP adding the credentials to the request to the server or the API.                                |
+| `check_permission`    | Says whether you answered a request that was waiting for you, and how it went.                                   |
+| `check_server`        | Says whether a server is connected; offers you a Connect button where it can.                                    |
+| `register_server`     | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name. |
+| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers; you review and save it in PCP.          |
 
 A tool you have not decided about answers "Not done yet" and asks you. Where
 the assistant's app can show it, the question appears in the conversation:
@@ -144,6 +145,12 @@ may use; turn one off if an app gets stuck on it. **Allow once** runs that one c
 **Always allow** and **Block** also decide the calls after it, and **Not
 now** runs nothing. A server an assistant proposes is only added once you
 agree; an OAuth one is then connected from a link that opens in your browser.
+
+An assistant can also help with a large set of tools: `propose_tool_access`
+takes levels for many tools at once, by name or by pattern (`list_*`), and
+hands you a link to a page in PCP with its levels filled in and each change
+marked. Nothing changes until you save there, and you can change any level
+first, so an assistant can suggest but never raise its own access.
 
 An assistant can write an OpenAPI schema from an API's documentation and hand
 it to `register_server` as text. You see what it asked for before anything is

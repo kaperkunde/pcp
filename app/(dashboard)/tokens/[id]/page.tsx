@@ -62,6 +62,7 @@ export default async function TokenPage({
           .map(({ id, name }) => ({ id, name }))}
         waiting={waiting.map((request) => ({
           id: request.id,
+          review: request.kind === "access",
           title: request.title,
           lines: request.lines,
           warning: request.warning,

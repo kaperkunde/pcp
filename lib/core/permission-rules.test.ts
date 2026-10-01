@@ -13,8 +13,25 @@ import {
   storedResultText,
   storePermissionTiers,
   summaryText,
+  tiersFor,
   UI_EXTENSION,
 } from "./permission-rules"
+
+describe("tiersFor", () => {
+  it("never asks about proposed tool levels with a prompt or the panel", () => {
+    const everything = {
+      elicitation: { form: {}, url: {} },
+      extensions: { [UI_EXTENSION]: {} },
+    }
+
+    expect(tiersFor("access")).toEqual(["url", "link"])
+    expect(choosePermissionTier(everything, tiersFor("access"))).toBe("url")
+    expect(
+      choosePermissionTier(everything, tiersFor("access", ["app", "link"])),
+    ).toBe("link")
+    expect(tiersFor("call", ["app", "link"])).toEqual(["app", "link"])
+  })
+})
 
 describe("choosePermissionTier", () => {
   it("falls back to a link when the client said nothing", () => {
@@ -208,6 +225,14 @@ describe("decisions", () => {
     ).toEqual(["allow_once", "decline"])
     expect(() => parseDecision("call", "discard")).toThrow(/allow_once/)
     expect(() => parseDecision("memory_change", "discard")).toThrow()
+  })
+
+  it("offers proposed tool levels only a no outside their page", () => {
+    expect(decisionsFor("access").map((decision) => decision.value)).toEqual([
+      "decline",
+    ])
+    expect(() => parseDecision("access", "allow_once")).toThrow()
+    expect(() => parseDecision("access", "always")).toThrow()
   })
 
   it("accepts only the answers it offered", () => {

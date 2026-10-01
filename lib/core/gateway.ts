@@ -14,6 +14,7 @@ import type {
   McpTool,
 } from "@/lib/generated/prisma/client"
 
+import { resolveAccessChanges, type AccessChange } from "./access-requests"
 import type { ResolvedToken } from "./api-tokens"
 import {
   DEFAULT_HEADER_NAME,
@@ -23,6 +24,7 @@ import {
   MAX_SPEC_BYTES,
   PERMISSION_DECISIONS,
   SECRET_PLACEHOLDER,
+  TOOL_ACCESS_LEVELS,
   type ToolAccess,
 } from "./constants"
 import { db } from "./db"
@@ -117,6 +119,8 @@ const PATCH_SCHEMA = z
   .max(MAX_PATCH_OPERATIONS)
 /** Writes and share requests through the memory tool, per token. */
 const MEMORY_WRITES = { max: 60, windowMs: 10 * 60_000 }
+/** Proposals of tool levels, per token: each leaves a request for the owner. */
+const ACCESS_PROPOSALS = { max: 20, windowMs: 10 * 60_000 }
 /** How many shared memories the instructions name. */
 const MAX_LISTED_MEMORIES = 30
 
@@ -218,7 +222,7 @@ export function buildInstructions(
 
   return [
     "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
-    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: pass it on, and call check_permission with the id it gives for the result. A server that needs them to sign in answers with a link to connect it; check_server says when it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees.',
+    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: pass it on, and call check_permission with the id it gives for the result. A server that needs them to sign in answers with a link to connect it; check_server says when it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
     "Servers:",
     ...lines,
     ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
@@ -930,6 +934,69 @@ export function buildGatewayServer(
           { kind: "register", input },
           toolRequest(ctx),
           { toolShowsPanel: true },
+        )
+      },
+    ),
+  )
+
+  server.registerTool(
+    "propose_tool_access",
+    {
+      title: "Propose tool access",
+      description:
+        'Propose which tools this token may run, many at once and across servers: "allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). This changes nothing by itself: PCP fills your levels in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and a level. Later changes override earlier ones, so set a whole server first and the exceptions after. Give the owner the link it returns; check_permission with its id says what they saved.',
+      inputSchema: z.object({
+        changes: z
+          .array(
+            z.object({
+              server: z
+                .string()
+                .describe("The server's short name, as in server/tool."),
+              tools: z
+                .array(z.string().min(1).max(200))
+                .max(500)
+                .optional()
+                .describe(
+                  'Tool names or patterns with * ("list_*"). Leave out for every tool on the server.',
+                ),
+              access: z.enum(TOOL_ACCESS_LEVELS),
+            }),
+          )
+          .min(1)
+          .max(100)
+          .describe(
+            "Applied in order; a later change wins over an earlier one.",
+          ),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    logged("propose_tool_access", () => ({}))(
+      async (args: { changes: AccessChange[] }, ctx) => {
+        if (
+          !checkRateLimit(`access-propose:${scope.tokenId}`, ACCESS_PROPOSALS)
+        ) {
+          return failure(
+            "That is a lot of proposals in a short time. Wait a few minutes.",
+          )
+        }
+
+        const levels = resolveAccessChanges([...bySlug.values()], args.changes)
+
+        if (levels.length === 0) {
+          return text(
+            "Nothing to propose: those tools already have those levels.",
+          )
+        }
+
+        return withPermission(
+          scope,
+          { kind: "access", input: { levels } },
+          toolRequest(ctx),
         )
       },
     ),

@@ -158,12 +158,13 @@ model PermissionRequest {
   vault            Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   tokenId          String     @map("token_id")
   token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-  /// call | register | memory_share | memory_change
+  /// call | register | memory_share | memory_change | access
   kind             String
   serverId         String?    @map("server_id")
   server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
   /// The upstream tool for a call; "register_server" for a new server;
-  /// "memory" for a memory to share or a shared one to change.
+  /// "memory" for a memory to share or a shared one to change;
+  /// "propose_tool_access" for tool levels an assistant proposes.
   toolName         String     @map("tool_name")
   /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
   /// the vault's data key with "permission_request:<id>" as associated data.

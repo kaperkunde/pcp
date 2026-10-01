@@ -80,6 +80,21 @@ export function choosePermissionTier(
 }
 
 /**
+ * The tiers a request of this kind may use. Proposed tool levels are saved
+ * on PCP's page and nowhere else: a prompt or a panel button would let a
+ * client answer for the owner and raise its own access. The page itself is
+ * what the url tier opens, and the link is always left.
+ */
+export function tiersFor(
+  kind: PermissionKind,
+  allowed: readonly PermissionTier[] = PERMISSION_TIERS,
+): PermissionTier[] {
+  return kind === "access"
+    ? allowed.filter((tier) => tier === "url" || tier === "link")
+    : [...allowed]
+}
+
+/**
  * A token's stored tiers ("app,form,url") as a list in trying order. Names
  * PCP does not know are dropped; the link is always there.
  */
@@ -205,6 +220,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Allow the change",
     decline: "Not now",
   },
+  // Saved on the page with the levels the owner chose; the only answer
+  // anywhere else is no.
+  access: {
+    decline: "Not now",
+  },
 }
 
 const SCHEMA_WORDS: Record<
@@ -227,6 +247,10 @@ const SCHEMA_WORDS: Record<
   memory_change: {
     title: "Change this shared memory?",
     description: "Nothing changes unless you say so.",
+  },
+  access: {
+    title: "Change which tools an assistant may run?",
+    description: "Review the levels in PCP; nothing changes until you save.",
   },
 }
 

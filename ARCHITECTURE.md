@@ -408,8 +408,8 @@ keeps memories, both below):
 - `call_tool(server, tool, arguments)` opens a connection to the upstream
   with the configured credential (header secret or OAuth token, refreshed by
   the SDK when needed), calls the tool, and passes the content back.
-- `check_permission(id)`, `check_server(server)` and
-  `register_server(...)` belong to the permission flow below;
+- `check_permission(id)`, `check_server(server)`, `register_server(...)`
+  and `propose_tool_access(changes)` belong to the permission flow below;
   `answer_permission(id, decision)` is only for PCP's panel.
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
@@ -467,6 +467,20 @@ where their PCP session is, and polls `check_server` until the callback has
 landed. A server that needs a client from the owner first (status
 `client_required`) gets the same panel, and text telling the assistant so:
 the start page then lands on the server's page, which says what to create.
+
+`propose_tool_access` lets an assistant suggest levels for its own token,
+many at once (`lib/core/access-requests.ts`): each change names a server,
+tool names or `*` patterns (none for the whole server) and a level, later
+changes winning, so a catalogue of hundreds of tools can be set in a call.
+Blocked tools stay hidden: no name or pattern reaches them. The proposal is
+a request of kind `access` holding one level per tool that would change, and
+it is only ever saved on its page, `/permissions/<id>`, which fills the
+levels in over the token's current ones and marks each change; the owner can
+change any of them before saving, and `applyAccessRequest` writes what they
+saved, once. No other answer saves it: the request skips the panel and the
+form prompt (`tiersFor`), offers only "Not now" anywhere else, and
+`decidePermission` refuses the rest, so no client can answer for the owner
+and raise its own access. The URL prompt only opens the page.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.
