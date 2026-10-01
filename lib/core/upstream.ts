@@ -813,8 +813,12 @@ function refusedMessage(server: McpServer, said: string): string {
     return `${server.name} refused PCP's request (${said}). It may need a secret or a sign-in: set one under Settings.`
   }
 
-  const google = new URL(server.url).hostname.endsWith(".googleapis.com")
-    ? " With Google, the API has to be enabled in the Google Cloud project your OAuth client belongs to (APIs & Services, then Library)."
+  // Google's MCP servers are APIs of their own (gmailmcp.googleapis.com
+  // next to gmail.googleapis.com), and refuse with a bare 403 until both
+  // are enabled in the project of the client the token came from.
+  const host = new URL(server.url).hostname
+  const google = host.endsWith(".googleapis.com")
+    ? ` With Google, enable both the service's API and its MCP API (${host}) in the Google Cloud project your OAuth client belongs to (APIs & Services, then Library); some MCP APIs need the project enrolled in Google's preview first.`
     : ""
 
   return `${server.name} refused PCP's request although PCP is signed in (${said}). The account or OAuth client you signed in with is not allowed to use it yet.${google} Once that is fixed, choose Refresh tools.`
