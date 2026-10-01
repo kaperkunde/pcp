@@ -23,7 +23,10 @@ export async function addSecret(
   ).toBeVisible()
 }
 
-/** Creates an API token for every server and returns it. */
+/**
+ * Creates an API token for every server and returns it. Creating one opens
+ * its own page, with the token shown once at the top.
+ */
 export async function createToken(
   page: Page,
   name: string,
@@ -33,6 +36,8 @@ export async function createToken(
   await page.getByLabel("Name").fill(name)
   await page.getByLabel("Your password").fill(password)
   await page.getByRole("button", { name: "Create token" }).click()
+  await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
+  await expect(page.getByRole("heading", { name })).toBeVisible()
   await expect(page.getByText("Your new token")).toBeVisible()
   const token = await page.getByTestId("new-token").textContent()
   expect(token).toMatch(/^pcp_/)

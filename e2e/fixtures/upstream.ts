@@ -44,6 +44,11 @@ export type Upstream = {
   expectedToken: string
   /** Tokens the fake authorization server has issued. */
   issuedTokens: Set<string>
+  /**
+   * Tools the server gains while a test runs: add a name and the next
+   * tools/list has a tool by that name, which answers with its own name. How the tests show PCP picking up a changed tool list.
+   */
+  lateTools: Set<string>
   /** Every tools/call the server handled, in order. */
   calls: Array<{
     tool: string
@@ -172,6 +177,7 @@ function petstoreSpec(origin: string) {
 function buildServer(
   calls: Upstream["calls"],
   authorization: () => string | null,
+  lateTools: Set<string>,
 ): McpServer {
   const server = new McpServer(
     { name: "fake-upstream", version: "1.0.0" },
@@ -244,6 +250,21 @@ function buildServer(
     },
   )
 
+  for (const name of lateTools) {
+    server.registerTool(
+      name,
+      {
+        description: `A tool the server added later: ${name}.`,
+        inputSchema: z.object({}),
+        annotations: { readOnlyHint: true },
+      },
+      async () => {
+        calls.push({ tool: name, args: {}, authorization: authorization() })
+        return { content: [{ type: "text", text: name }] }
+      },
+    )
+  }
+
   return server
 }
 
@@ -299,6 +320,7 @@ export async function startUpstream({
   expectedToken = `upstream-secret-${randomBytes(6).toString("hex")}`,
 }: { expectedToken?: string } = {}): Promise<Upstream> {
   const calls: Upstream["calls"] = []
+  const lateTools = new Set<string>()
   const requests: Upstream["requests"] = []
   const pets: Pet[] = [
     { id: 1, name: "Fido", status: "available" },
@@ -315,13 +337,13 @@ export async function startUpstream({
 
   const handlers: Record<string, McpHttpHandler> = {
     "/mcp": createMcpHandler(
-      () => buildServer(calls, () => currentAuthorization),
+      () => buildServer(calls, () => currentAuthorization, lateTools),
       {
         legacy: "stateless",
       },
     ),
     "/oauth/mcp": createMcpHandler(
-      () => buildServer(calls, () => currentAuthorization),
+      () => buildServer(calls, () => currentAuthorization, lateTools),
       {
         legacy: "stateless",
       },
@@ -537,6 +559,7 @@ export async function startUpstream({
     openapiUrl: `${origin}/openapi.json`,
     expectedToken,
     issuedTokens,
+    lateTools,
     calls,
     requests,
     close: () =>

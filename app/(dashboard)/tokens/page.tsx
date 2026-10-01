@@ -4,17 +4,17 @@ import { PageHeader } from "@/components/page-header"
 import { TokenManager } from "@/components/token-manager"
 import { listApiTokens } from "@/lib/core/api-tokens"
 import { listServers } from "@/lib/core/servers"
-import { publicUrlFor } from "@/lib/server/public-url"
+import { getVault } from "@/lib/core/vault"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "API tokens" }
 
 export default async function TokensPage() {
   const ctx = await requireContext()
-  const [tokens, servers, publicUrl] = await Promise.all([
+  const [tokens, servers, vault] = await Promise.all([
     listApiTokens(ctx),
     listServers(ctx),
-    publicUrlFor(ctx),
+    getVault(ctx.vaultId),
   ])
 
   return (
@@ -26,7 +26,7 @@ export default async function TokensPage() {
       <TokenManager
         tokens={tokens}
         servers={servers.map(({ id, name, kind }) => ({ id, name, kind }))}
-        endpointUrl={`${publicUrl}/mcp`}
+        username={vault.name}
       />
     </>
   )

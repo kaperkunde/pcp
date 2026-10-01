@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
+import { canRereadTools } from "@/lib/core/catalogue"
 import { disconnectOAuth } from "@/lib/core/oauth"
 import {
   createServer,
@@ -41,6 +42,10 @@ function inputFrom(formData: FormData): ServerInput {
 
 export type ServerActionResult = ActionState<{ id?: string; message?: string }>
 
+function toolCount(count: number): string {
+  return `${count} tool${count === 1 ? "" : "s"}`
+}
+
 export async function createServerAction(
   _previous: ServerActionResult,
   formData: FormData,
@@ -69,11 +74,26 @@ export async function updateServerAction(
   const id = field(formData, "id")
 
   const result = await guarded(async () => {
-    await updateServer(ctx, id, inputFrom(formData))
+    const { reconnect } = await updateServer(ctx, id, inputFrom(formData))
 
     const slug = field(formData, "slug")
     if (slug) {
       await renameServerSlug(ctx, id, slug)
+    }
+
+    // Another address or credential can mean other tools: read them again
+    // rather than keep offering the old list.
+    if (reconnect) {
+      const sync = await syncServerTools(ctx, await getServer(ctx, id), {
+        publicUrl: await publicUrlFor(ctx),
+      })
+
+      return {
+        message:
+          sync.status === "ok"
+            ? `Saved. Found ${toolCount(sync.toolCount)}.`
+            : `Saved. ${sync.message}`,
+      }
     }
 
     return { message: "Saved." }
@@ -81,6 +101,7 @@ export async function updateServerAction(
 
   revalidatePath("/servers")
   revalidatePath(`/servers/${id}`)
+  revalidatePath("/tokens/[id]", "page")
 
   return result
 }
@@ -99,13 +120,15 @@ export async function refreshToolsAction(
     return {
       message:
         sync.status === "ok"
-          ? `Found ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.`
+          ? `Found ${toolCount(sync.toolCount)}.`
           : sync.message,
     }
   })
 
   revalidatePath("/servers")
   revalidatePath(`/servers/${id}`)
+  // Every token's page lists the server's tools.
+  revalidatePath("/tokens/[id]", "page")
 
   return result
 }
@@ -141,11 +164,25 @@ export async function setServerEnabledAction(
 
   const result = await guarded(async () => {
     await setServerEnabled(ctx, id, enabled)
+
+    // A server that was off may have changed meanwhile: an assistant should
+    // find what it has now, not what it had then.
+    if (enabled) {
+      const server = await getServer(ctx, id)
+
+      if (canRereadTools(server)) {
+        await syncServerTools(ctx, server, {
+          publicUrl: await publicUrlFor(ctx),
+        })
+      }
+    }
+
     return {}
   })
 
   revalidatePath("/servers")
   revalidatePath(`/servers/${id}`)
+  revalidatePath("/tokens/[id]", "page")
 
   return result
 }

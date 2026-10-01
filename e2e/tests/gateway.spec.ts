@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test"
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { OWNER_PASSWORD } from "../lib/auth"
 import { callTool, initialize, mcpRequest, toolText } from "../lib/mcp"
-import { addSecret, allowAllTools, createToken } from "../lib/ui"
+import { addSecret, allowAllTools, createToken, openToken } from "../lib/ui"
 
 // The whole point of PCP in one flow: a secret goes in, a server is added
 // that needs it, an assistant with an API token finds and calls the
@@ -176,6 +176,37 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   })
   expect(unknown.body.result?.isError).toBe(true)
   expect(toolText(unknown)).toContain("no tool called no_such_tool")
+})
+
+test("picks up tools the server adds later", async ({ page, baseURL }) => {
+  // An assistant asking for a tool PCP has not seen yet makes it read the
+  // server's list again, and finds it.
+  upstream.lateTools.add("water_plants")
+  const described = await callTool(baseURL!, token, "describe_tool", {
+    server: SLUG,
+    tool: "water_plants",
+  })
+  expect(described.body.result?.isError ?? false, toolText(described)).toBe(
+    false,
+  )
+  // New tools ask the owner first, whatever the token's other tools do.
+  expect(JSON.parse(toolText(described))).toMatchObject({
+    tool: "water_plants",
+    access: "ask",
+  })
+
+  // The owner reads it again from the token's page, to decide a new tool
+  // before an assistant asks for it.
+  upstream.lateTools.add("feed_the_cat")
+  await openToken(page, `Assistant ${RUN}`)
+  const newTool = page.getByLabel(`Access to ${SLUG}/feed_the_cat`)
+  await expect(page.getByLabel(`Access to ${SLUG}/water_plants`)).toBeVisible()
+  await expect(newTool).toHaveCount(0)
+  await page
+    .getByRole("button", { name: `Refresh tools on ${SLUG}`, exact: true })
+    .click()
+  await expect(page.getByText("Found 5 tools.")).toBeVisible()
+  await expect(newTool).toHaveValue("ask")
 })
 
 test("a token scoped to other servers cannot see this one", async ({

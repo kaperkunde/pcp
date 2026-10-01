@@ -1,4 +1,5 @@
 import { requireLiveToken, requireToken } from "./api-tokens"
+import { canRereadTools } from "./catalogue"
 import {
   DEFAULT_TOOL_ACCESS,
   TOOL_ACCESS_LEVELS,
@@ -27,6 +28,8 @@ export type TokenServerAccess = {
   name: string
   slug: string
   enabled: boolean
+  /** Whether the owner can read its tools again from here. */
+  refreshable: boolean
   tools: TokenToolAccess[]
 }
 
@@ -223,6 +226,7 @@ export async function listTokenToolAccess(
     name: server.name,
     slug: server.slug,
     enabled: server.enabled,
+    refreshable: canRereadTools(server),
     tools: server.tools.map((tool) => ({
       name: tool.name,
       title: tool.title,

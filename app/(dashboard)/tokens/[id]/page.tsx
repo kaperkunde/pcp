@@ -67,6 +67,7 @@ export default async function TokenPage({
           warning: request.warning,
           decisions: request.decisions,
         }))}
+        endpointUrl={`${publicUrl}/mcp`}
       />
     </>
   )
