@@ -14,8 +14,11 @@ export async function register() {
 
     const { pruneExpiredSessions } = await import("@/lib/core/sessions")
     const { pruneOAuthStates } = await import("@/lib/core/oauth")
-    await Promise.all([pruneExpiredSessions(), pruneOAuthStates()]).catch(
-      (error) => console.error("[db] cleanup failed", error),
-    )
+    const { prunePermissionRequests } = await import("@/lib/core/permissions")
+    await Promise.all([
+      pruneExpiredSessions(),
+      pruneOAuthStates(),
+      prunePermissionRequests(),
+    ]).catch((error) => console.error("[db] cleanup failed", error))
   }
 }

@@ -66,7 +66,14 @@ describe("applyMigrations", () => {
         .all()
         .map((row) => (row as { name: string }).name)
       expect(tables).toEqual(
-        expect.arrayContaining(["vault", "secret", "mcp_server", "api_token"]),
+        expect.arrayContaining([
+          "vault",
+          "secret",
+          "mcp_server",
+          "api_token",
+          "api_token_tool_access",
+          "permission_request",
+        ]),
       )
       expect(sqlite.pragma("journal_mode", { simple: true })).toBe("wal")
     } finally {

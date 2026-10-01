@@ -22,8 +22,12 @@ either: the key exists in memory only for the duration of a request that
 presented one.
 
 **An assistant with an API token** can call the tools of the servers that
-token reaches. It never receives a stored secret, an OAuth token, or another
-vault's data. Revoking the token ends its access at once.
+token reaches, as far as you allowed them: tools ask you first until you
+decide, and blocked tools are refused. It cannot answer a permission request
+for you, and it can only propose a new server, naming a stored secret rather
+than seeing it; nothing is added until you agree. It never receives a stored
+secret, an OAuth token, or another vault's data. Revoking the token ends its
+access at once.
 
 **Someone with your session cookie but not your password** can use PCP as
 you while the session lasts. They cannot make an API token or a new recovery

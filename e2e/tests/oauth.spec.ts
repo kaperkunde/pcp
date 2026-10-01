@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, toolText } from "../lib/mcp"
-import { createToken } from "../lib/ui"
+import { allowAllTools, createToken } from "../lib/ui"
 
 // An upstream behind OAuth: PCP discovers the authorization server,
 // registers itself, sends the owner's browser to sign in, comes back with
@@ -67,6 +67,7 @@ test("the gateway calls the upstream with the OAuth token", async ({
   const slug = (await page
     .goto(`/servers/${serverId}`)
     .then(() => page.getByLabel("Short name").inputValue()))!
+  await allowAllTools(page, `OAuth assistant ${RUN}`, slug)
 
   const echoed = await callTool(baseURL!, token, "call_tool", {
     server: slug,
