@@ -20,5 +20,10 @@ export async function register() {
       pruneOAuthStates(),
       prunePermissionRequests(),
     ]).catch((error) => console.error("[db] cleanup failed", error))
+
+    // Dynamic DNS and HTTPS, if the owner turned them on: off by default,
+    // so nothing listens or runs here for anyone with a proxy of their own.
+    const { startNetwork } = await import("@/lib/core/network/runtime")
+    await startNetwork()
   }
 }

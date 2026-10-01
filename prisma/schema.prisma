@@ -396,3 +396,15 @@ model Setting {
   @@id([vaultId, key])
   @@map("setting")
 }
+
+// Settings of the machine PCP runs on rather than of a vault: dynamic DNS and
+// HTTPS (lib/core/network/). They are read by background work that runs
+// while nobody is signed in, so they are not encrypted, and nothing from a
+// vault is ever copied into them. See ARCHITECTURE.md, "Reaching PCP".
+model HostSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("host_setting")
+}

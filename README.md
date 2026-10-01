@@ -17,6 +17,7 @@
 
 <p align="center">
   <a href="#run-it">Run it</a> ·
+  <a href="docs/self-hosting.md">Self-hosting guide</a> ·
   <a href="#use-it">Use it</a> ·
   <a href="ARCHITECTURE.md">Architecture</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
@@ -43,12 +44,17 @@ on its own, what it has to ask you about first, and what it cannot touch.
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
 - **Nothing to configure.** `docker compose up`, open the site, choose a
-  password. No environment variables.
+  password. No environment variables. Dynamic DNS and HTTPS with Let's
+  Encrypt are built in for a home server, and off for anyone with a proxy.
 - **Single user, by design.** PCP is yours. The architecture keeps every row
   behind a vault id so a multi-user host can be built on it later, but the
   product exposes none of that.
 
 ## Run it
+
+New to self-hosting? **[The self-hosting guide](docs/self-hosting.md)** walks
+through it step by step, from installing Docker to reaching PCP from your phone
+over HTTPS.
 
 ```bash
 git clone https://github.com/kaperkunde/pcp.git
@@ -61,13 +67,27 @@ name and a password. You will be shown a **recovery key** once — store it in a
 password manager. There is no password reset without it, because there is
 nothing on the server that could reset it.
 
-For anything beyond your own machine, put a TLS-terminating proxy (Caddy,
-Traefik, nginx) in front of port 3000. Most OAuth servers require an `https`
-redirect URL, and the session cookie is only marked `Secure` when requests
-arrive over TLS (`X-Forwarded-Proto`).
+For anything beyond your own machine, PCP needs HTTPS: most OAuth servers
+require an `https` redirect URL, and the session cookie is only marked
+`Secure` over TLS. Either way works:
+
+- **PCP's own HTTPS.** In the step after setup, or later under Settings, turn
+  on **Dynamic DNS** (DuckDNS, No-IP, Dynu, Cloudflare or any update URL) to
+  keep a name pointed at a home connection, and **HTTPS** to get and renew a
+  Let's Encrypt certificate. Start PCP with the ports it needs and forward 80
+  and 443 on your router:
+
+  ```bash
+  docker compose -f docker-compose.yaml -f docker-compose.https.yaml up -d
+  ```
+
+- **Your own proxy** (Caddy, Traefik, nginx, Coolify) in front of port 3000,
+  passing `X-Forwarded-Proto`. Leave both settings off; they are off until
+  turned on, and nothing extra listens or runs.
 
 The data lives in the `pcp-data` volume (`/data` in the container): the
-SQLite database and the request log. Back that up; nothing else holds state.
+SQLite database, the request log and, with HTTPS on, the certificate. Back
+that up; nothing else holds state.
 
 ### Without Docker
 

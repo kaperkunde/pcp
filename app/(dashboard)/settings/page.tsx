@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 
 import { CopyableValue } from "@/components/copyable-value"
+import { DdnsCard, HttpsCard } from "@/components/network-forms"
 import { PageHeader } from "@/components/page-header"
 import {
   ChangePasswordForm,
@@ -15,6 +16,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { getVault } from "@/lib/core/vault"
 import { publicUrlFor, requestOrigin } from "@/lib/server/public-url"
@@ -24,11 +26,12 @@ export const metadata: Metadata = { title: "Settings" }
 
 export default async function SettingsPage() {
   const ctx = await requireContext()
-  const [pinned, detected, publicUrl, vault] = await Promise.all([
+  const [pinned, detected, publicUrl, vault, network] = await Promise.all([
     getSetting(ctx, SETTING_PUBLIC_URL),
     requestOrigin(),
     publicUrlFor(ctx),
     getVault(ctx.vaultId),
+    networkOverview(),
   ])
 
   return (
@@ -48,6 +51,13 @@ export default async function SettingsPage() {
         </CardContent>
       </Card>
       <PublicUrlForm pinned={pinned ?? ""} detected={detected} />
+      <DdnsCard ddns={network.ddns} />
+      <HttpsCard
+        https={network.https}
+        ddnsName={network.ddnsName}
+        ports={network.ports}
+        pinnedPublicUrl={pinned}
+      />
       <ChangePasswordForm username={vault.name} />
       <RecoveryKeyCard username={vault.name} />
       <SessionsCard />

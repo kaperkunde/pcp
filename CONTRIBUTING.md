@@ -111,6 +111,8 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/permissions.ts`          | Asking the owner before a call runs; running it once          |
 | `lib/core/panel.ts`                | PCP's MCP Apps panel and the results it renders               |
 | `lib/core/migrate.ts`              | Boot-time migrations                                          |
+| `lib/core/host-settings.ts`        | Settings of the machine (not a vault), stored unencrypted     |
+| `lib/core/network/`                | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
 | `lib/server/`                      | Next-specific glue: session cookie, public URL, action state  |
 | `lib/actions/`                     | Server Actions the forms call                                 |
 | `app/mcp/route.ts`                 | The gateway endpoint                                          |

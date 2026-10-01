@@ -37,6 +37,9 @@ import { z } from "zod"
  *   how the tests assert what PCP actually sent. `/openapi.json` is open,
  *   like most published schemas, and its server is `${origin}/api`.
  *
+ * - `/ddns/update` — a dynamic DNS service's update URL. It records every
+ *   update in `ddns.updates` and answers with `ddns.status`.
+ *
  * Everything is in memory. Start one per test file.
  */
 
@@ -82,6 +85,15 @@ export type Upstream = {
     contentType: string | null
     body: string
   }>
+  /** The dynamic DNS service: what it was sent, and how it answers. */
+  ddns: {
+    updateUrl: string
+    updates: Array<{
+      query: Record<string, string>
+      authorization: string | null
+    }>
+    status: number
+  }
   close: () => Promise<void>
 }
 
@@ -351,6 +363,7 @@ export async function startUpstream({
     redirectUris: new Set<string>(),
   }
   const closedSignIns: Upstream["closedSignIns"] = []
+  const ddns: Upstream["ddns"] = { updateUrl: "", updates: [], status: 200 }
   let origin = ""
 
   // The Authorization header of the request being served, read by the
@@ -500,6 +513,15 @@ export async function startUpstream({
           expires_in: 3600,
           ...(refresh ? { refresh_token: refresh } : {}),
         })
+      }
+
+      if (url.pathname === "/ddns/update") {
+        ddns.updates.push({
+          query: Object.fromEntries(url.searchParams),
+          authorization,
+        })
+        res.statusCode = ddns.status
+        return res.end(ddns.status === 200 ? "good" : "refused")
       }
 
       if (url.pathname === "/openapi.json") {
@@ -670,6 +692,7 @@ export async function startUpstream({
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const { port } = server.address() as AddressInfo
   origin = `http://127.0.0.1:${port}`
+  ddns.updateUrl = `${origin}/ddns/update`
 
   return {
     origin,
@@ -684,6 +707,7 @@ export async function startUpstream({
     lateTools,
     calls,
     requests,
+    ddns,
     close: () =>
       new Promise((resolve, reject) => {
         for (const handler of Object.values(handlers)) void handler.close()

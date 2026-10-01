@@ -106,8 +106,18 @@ Not defended against:
 
 ## Operational notes
 
-- Run behind TLS. Most OAuth servers require an `https` redirect URL, and the
-  session cookie is only marked `Secure` when the request arrived over TLS.
+- Run behind TLS: your own proxy, or PCP's built-in HTTPS (Settings). Most
+  OAuth servers require an `https` redirect URL, and the session cookie is
+  only marked `Secure` when the request arrived over TLS. Port 3000 stays
+  plain HTTP either way; do not expose it to the internet.
+- With dynamic DNS on, the service's token or password is stored
+  **unencrypted** in the database (the `host_setting` table), because PCP uses
+  it while nobody is signed in. Someone who reads the data directory can move
+  your DNS name. With HTTPS on, the certificate's private key and the ACME
+  account key are files under `tls/` in the data directory (mode 0600). Treat
+  backups of the data volume accordingly.
+- PCP's own HTTPS listeners face the internet directly and overwrite any
+  `X-Forwarded-*` header a client sends.
 - Back up the data volume. Losing it loses the vault.
 - Keep the recovery key somewhere safe. Losing it and the password loses the
   data; that is the design.

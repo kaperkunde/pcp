@@ -91,3 +91,48 @@ export const PERMISSION_TIER_LABELS: Record<
     hint: "The assistant passes on a link to the request in PCP. Always on: it is what is left when nothing above works.",
   },
 }
+
+/**
+ * Dynamic DNS services PCP can keep pointed at this machine
+ * (lib/core/network/ddns.ts). DuckDNS is the one the setup page suggests:
+ * free, and a single token.
+ */
+export const DDNS_PROVIDERS = [
+  "duckdns",
+  "dyndns2",
+  "cloudflare",
+  "custom",
+] as const
+
+export type DdnsProvider = (typeof DDNS_PROVIDERS)[number]
+
+export const DDNS_PROVIDER_LABELS: Record<
+  DdnsProvider,
+  { label: string; hint: string }
+> = {
+  duckdns: {
+    label: "DuckDNS",
+    hint: "Free. Sign in at duckdns.org, pick a name, and copy your token.",
+  },
+  dyndns2: {
+    label: "No-IP, Dynu and others",
+    hint: "Services that speak the common dyndns2 update protocol, with a username and password.",
+  },
+  cloudflare: {
+    label: "Cloudflare",
+    hint: "A domain you own on Cloudflare, with an API token that may edit its DNS.",
+  },
+  custom: {
+    label: "Another service (an update URL)",
+    hint: "Any service that updates when PCP opens a URL.",
+  },
+}
+
+/** dyndns2 services PCP knows the update address of. */
+export const DYNDNS2_SERVERS: Record<string, string> = {
+  "dynupdate.no-ip.com": "No-IP",
+  "api.dynu.com": "Dynu",
+}
+
+/** Let's Encrypt's agreements, which turning HTTPS on accepts. */
+export const LETS_ENCRYPT_TERMS_URL = "https://letsencrypt.org/repository/"

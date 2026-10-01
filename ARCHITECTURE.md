@@ -17,6 +17,7 @@ lib/actions/         Server Actions: read the session, call lib/core, return a s
 lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
+  network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
 ```
@@ -345,6 +346,73 @@ another one reads:
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
   which tool, which upstream, how long, whether it worked. Never arguments
   or results.
+- `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
+  `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
+  PCP").
+
+## Reaching PCP: dynamic DNS and HTTPS
+
+Both are optional, off until the owner turns them on (in the step after setup
+or under Settings), and meant for someone running PCP at home without a proxy
+of their own. While both are off, nothing in `lib/core/network/` starts:
+no timer, no listener, no outbound request.
+
+**Host settings, not vault settings.** The configuration lives in the
+`host_setting` table (`lib/core/host-settings.ts`), not in the per-vault
+`setting` table. It belongs to the machine, and the work that uses it runs
+from a timer with no request and no `VaultContext`. So it is **stored
+unencrypted**: a dynamic DNS service's token or password has to be readable
+while nobody is signed in, and reading the vault without a credential is
+exactly what PCP refuses to allow. The owner is told so where they type it.
+Such a credential can only move a DNS name. Nothing from the vault (a secret,
+a token) is ever copied into a host setting, and the page never sends a saved
+credential back to the browser. Only a signed-in owner's Server Action
+(`lib/actions/network.ts`) changes them.
+
+**One runtime per process.** `lib/core/network/runtime.ts` keeps the timers,
+the listeners and the answers to Let's Encrypt's challenges on `globalThis`,
+because `instrumentation.ts` (which calls `startNetwork()` at boot) and the
+Server Actions (which call `reconcileNetwork()` after a save) are bundled
+apart. Each reconcile reads the host settings and makes the process match.
+
+**Dynamic DNS** (`ddns.ts`): DuckDNS, dyndns2 (No-IP, Dynu, any server),
+Cloudflare (finds the zone and A record, creates the record if needed) or a
+custom URL template (`{ip}`, `{hostname}`, a login in the URL is sent as Basic
+auth). The public IPv4 address is looked up every five minutes from plain-text
+services (`PCP_PUBLIC_IP_URL` overrides them). An update is sent when it
+changed, once a day regardless, and right after a save. Failures back off
+from 5 to 60 minutes. A refused login (`badauth`, `KO`, 401/403) stops
+updates until the owner saves again, as dyndns2 services require. If the
+lookup fails, services that see the caller's address themselves still get an
+update, at most hourly.
+
+**HTTPS** (`tls.ts`, `edge.ts`, `proxy.ts`): `acme-client` gets a Let's
+Encrypt certificate (`PCP_ACME_DIRECTORY` overrides the directory) with the
+HTTP-01 challenge, for a typed name or the dynamic DNS one. The key and
+certificate are files under `tls/`: a server presenting a certificate needs
+its key before anyone signs in. While HTTPS is on, PCP opens two listeners of
+its own next to Next's:
+
+- port 80 (`PCP_HTTP_PORT`; 8080 in the Docker image, mapped by
+  `docker-compose.https.yaml`) answers `/.well-known/acme-challenge/…`. Once
+  a certificate works it redirects everything else to `https://<name>`;
+  before that it forwards to the app, so the site is not broken while waiting.
+- port 443 (`PCP_HTTPS_PORT`, 8443 in Docker) serves the certificate.
+
+Both forward to the app on `127.0.0.1:$PORT`, streaming (MCP's server-sent
+events stay open) and passing upgrades through. They are the edge, so they
+**replace** any `X-Forwarded-*` a client sent rather than trusting it.
+`originFromHeaders`, the `Secure` cookie and the rate limiter's client address
+then work unchanged.
+
+A certificate is renewed once less than a third of its life is left, which
+keeps working as Let's Encrypt shortens lifetimes. The check runs every 30
+minutes, and the new one is swapped in with `setSecureContext`, without a
+restart. A failed request is retried after 1 hour, doubling to at most a day.
+That keeps PCP well inside Let's Encrypt's limits on failed validations;
+"Try again now" skips the wait. A DNS lookup first warns, without blocking,
+when the name does not point at this network. Port 3000 keeps serving plain
+HTTP for the local network.
 
 ## Connecting OAuth servers
 

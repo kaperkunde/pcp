@@ -32,7 +32,14 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
       recoveryKey: recoveryKey!,
     } satisfies SetupState)
 
-    await page.getByRole("link", { name: /open PCP/ }).click()
+    // Then the optional step for reaching PCP from outside, skipped here
+    // (the network project walks it).
+    await page.getByRole("link", { name: "I have saved it — continue" }).click()
+    await expect(
+      page.getByRole("heading", { name: "Reach PCP from anywhere (optional)" }),
+    ).toBeVisible()
+    await expect(page.getByRole("form", { name: "Dynamic DNS" })).toBeVisible()
+    await page.getByRole("link", { name: "Skip for now — open PCP" }).click()
     await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
   }
 

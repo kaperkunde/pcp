@@ -2,6 +2,8 @@ import path from "node:path"
 
 import { defineConfig, devices } from "@playwright/test"
 
+import { E2E_EDGE_HTTP_PORT, E2E_EDGE_HTTPS_PORT } from "./e2e/lib/network"
+
 const baseURL = process.env.PCP_URL ?? "http://localhost:3000"
 
 // The app under test keeps its database here, apart from a developer's own
@@ -47,7 +49,16 @@ export default defineConfig({
     url: `${baseURL}/api/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
-    env: { PCP_DATA_DIR: E2E_DATA_DIR },
+    env: {
+      PCP_DATA_DIR: E2E_DATA_DIR,
+      // The network project turns HTTPS on: its listeners on high ports, a
+      // Let's Encrypt where nothing answers, and no public address lookup
+      // leaving the machine.
+      PCP_HTTP_PORT: String(E2E_EDGE_HTTP_PORT),
+      PCP_HTTPS_PORT: String(E2E_EDGE_HTTPS_PORT),
+      PCP_ACME_DIRECTORY: "http://127.0.0.1:9/directory",
+      PCP_PUBLIC_IP_URL: "http://127.0.0.1:9/ip",
+    },
   },
   projects: [
     {
@@ -126,6 +137,18 @@ export default defineConfig({
       // owner's permission, and the Memories tab.
       name: "memories",
       testMatch: /memories\.spec\.ts/,
+      dependencies: ["setup"],
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: "e2e/.auth/owner.json",
+      },
+    },
+    {
+      // Dynamic DNS through the fake upstream's update URL, a refused login
+      // stopping it; HTTPS turned on, port 80 open, the failure explained;
+      // both turned off.
+      name: "network",
+      testMatch: /network\.spec\.ts/,
       dependencies: ["setup"],
       use: {
         ...devices["Desktop Chrome"],

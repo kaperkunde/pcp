@@ -77,6 +77,10 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   (redirects and PCP's client metadata document) and the health check.
 - The single-user assumption lives in two places: `ownerVault()` and the
   setup page. Do not add a third.
+- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS) belong to
+  the machine, are read with no credential, and are stored unencrypted. Never
+  copy anything from the vault into one. `lib/core/network/` starts nothing
+  (timer, listener, request) while both features are off.
 
 ## Cryptography
 

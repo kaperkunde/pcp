@@ -1,0 +1,15 @@
+# Adds the ports PCP's own HTTPS needs, on top of docker-compose.yaml:
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.https.yaml up -d
+#
+# Then turn HTTPS on under Settings (or in the step after setup). Port 80
+# answers Let's Encrypt and sends everything else to https; port 443 is PCP
+# over HTTPS. Your router forwards both to this computer. Nothing listens
+# on them inside the container until HTTPS is on. Leave this file out if
+# another program on this computer already uses ports 80 and 443 — a proxy
+# of your own, say — and let that proxy handle HTTPS instead.
+services:
+  pcp:
+    ports:
+      - "80:8080"
+      - "443:8443"
