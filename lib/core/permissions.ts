@@ -62,6 +62,7 @@ import {
   findTextSecretByName,
   validateSecretValue,
 } from "./secrets"
+import { oauthRedirectUrl } from "./oauth-client"
 import { createServer, getServer, type ServerInput } from "./servers"
 import { writeToolAccess } from "./tool-access"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
@@ -102,6 +103,12 @@ export type PermissionScope = {
 export type RegisterArgs = ServerInput & {
   secretName?: string | null
   newSecretName?: string | null
+  /**
+   * The new secret may be left empty: an OAuth client's secret, for a client
+   * that has none. With OAuth the secret is the client's, sent only to the
+   * token address; with a header it is sent with every call.
+   */
+  newSecretOptional?: boolean
   endpoint?: EndpointRegistration
 }
 
@@ -156,7 +163,14 @@ export type PermissionView = {
    * its value in on PCP's page, so that is the only place to agree. `exists`
    * when a secret by that name has been added since, which is then used.
    */
-  secretToEnter: { name: string; exists: boolean } | null
+  secretToEnter: {
+    name: string
+    exists: boolean
+    /** It may be left empty (a client without a secret). */
+    optional: boolean
+    /** Set when it is an OAuth client's secret: the client's ID. */
+    clientId: string | null
+  } | null
 }
 
 type Row = PermissionRequest & {
@@ -319,9 +333,39 @@ function toolLabel(row: Pick<Row, "server" | "toolName">): string {
 }
 
 /** What the owner is shown: read from the row, the catalogue and the args. */
+/**
+ * What the owner reads about a new server's OAuth: the first line is the
+ * authentication, the rest where the sign-in goes and what to set up with
+ * the provider. An endpoint's addresses come from someone else's schema, so
+ * they are shown before anyone signs in there.
+ */
+function registerOAuthLines(input: RegisterArgs, publicUrl: string): string[] {
+  const oauth = input.endpoint?.preview.oauth
+  const scope = input.oauthScope ?? oauth?.scope ?? null
+  const client = input.oauthClientId
+    ? input.newSecretName
+      ? ` with your client "${input.oauthClientId}"; enter its client secret here when you agree (leave it empty for a client without one)`
+      : ` with your client "${input.oauthClientId}" and the secret "${input.secretName ?? "?"}"`
+    : ""
+
+  return [
+    `Authentication: OAuth${client}; you sign in when you connect it${scope ? ` (scope ${scope})` : ""}`,
+    ...(oauth
+      ? [
+          `Sign-in at: ${oauth.authorizationUrl}`,
+          `Tokens from: ${oauth.tokenUrl}${input.oauthClientId ? "; your client secret goes there" : ""}`,
+        ]
+      : []),
+    ...(input.oauthClientId
+      ? [`Redirect URI your client needs: ${oauthRedirectUrl(publicUrl)}`]
+      : []),
+  ]
+}
+
 async function summarizeRow(
   ctx: VaultContext,
   row: Row,
+  publicUrl: string,
 ): Promise<{ title: string; lines: string[]; warning: string | null }> {
   const args = readArgs(ctx, row)
   const asker = `Asked by the token "${row.token.name}"`
@@ -357,18 +401,22 @@ async function summarizeRow(
 
   if (row.kind === "register") {
     const input = args as RegisterArgs
+    const oauthLines =
+      input.authType === "oauth" ? registerOAuthLines(input, publicUrl) : []
     const auth =
       input.authType === "header" && input.newSecretName
         ? `Authentication: sends a new secret, saved as "${input.newSecretName}", in the ${input.authHeaderName || "Authorization"} header; you enter its value here when you agree`
         : input.authType === "header"
           ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header`
           : input.authType === "oauth"
-            ? `Authentication: OAuth; you sign in when you connect it${input.oauthScope ? ` (scope ${input.oauthScope})` : ""}`
+            ? oauthLines[0]!
             : "Authentication: none"
     const warning =
       input.authType === "header"
         ? `PCP will send the secret "${input.secretName ?? "?"}" to this address with every call. Only add it if you trust the address.`
-        : null
+        : input.authType === "oauth" && input.endpoint
+          ? "PCP will send your OAuth token for this account to this address with every call. Only add it if you trust the address and the sign-in addresses."
+          : null
 
     if (input.endpoint) {
       const { preview, readOnly, specUrl, patches } = input.endpoint
@@ -394,6 +442,7 @@ async function summarizeRow(
             ? "Read-only: only GET operations become tools"
             : "Can change things: its tools may create, change and delete at this address",
           auth,
+          ...oauthLines.slice(1),
           ...(input.description ? [`Description: ${input.description}`] : []),
           asker,
         ],
@@ -406,6 +455,7 @@ async function summarizeRow(
       lines: [
         `Address: ${input.url}`,
         auth,
+        ...oauthLines.slice(1),
         ...(input.description ? [`Description: ${input.description}`] : []),
         asker,
       ],
@@ -453,7 +503,7 @@ async function toView(
   row: Row,
   publicUrl: string,
 ): Promise<PermissionView> {
-  const summary = await summarizeRow(ctx, row)
+  const summary = await summarizeRow(ctx, row, publicUrl)
   const kind = row.kind as PermissionKind
   const status =
     row.status === "pending" && !isOpen(row)
@@ -485,10 +535,24 @@ async function toView(
   }
 }
 
-/** The name of a secret the owner types in to agree to a new server. */
-function newSecretNameOf(ctx: VaultContext, row: PermissionRequest) {
-  return row.kind === "register"
-    ? ((readArgs(ctx, row) as RegisterArgs).newSecretName ?? null)
+/** A secret the owner types in to agree to a new server, if there is one. */
+function newSecretOf(
+  ctx: VaultContext,
+  row: PermissionRequest,
+): { name: string; optional: boolean; clientId: string | null } | null {
+  if (row.kind !== "register") {
+    return null
+  }
+
+  const args = readArgs(ctx, row) as RegisterArgs
+
+  return args.newSecretName
+    ? {
+        name: args.newSecretName,
+        optional: args.newSecretOptional === true,
+        clientId:
+          args.authType === "oauth" ? (args.oauthClientId ?? null) : null,
+      }
     : null
 }
 
@@ -496,10 +560,13 @@ async function secretToEnter(
   ctx: VaultContext,
   row: PermissionRequest,
 ): Promise<PermissionView["secretToEnter"]> {
-  const name = newSecretNameOf(ctx, row)
+  const secret = newSecretOf(ctx, row)
 
-  return name
-    ? { name, exists: (await findTextSecretByName(ctx, name)) !== null }
+  return secret
+    ? {
+        ...secret,
+        exists: (await findTextSecretByName(ctx, secret.name)) !== null,
+      }
     : null
 }
 
@@ -556,7 +623,9 @@ function pendingText(view: PermissionView): string {
   }
 
   const typed = view.secretToEnter
-    ? ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
+    ? view.secretToEnter.clientId
+      ? ` They type the client secret of their OAuth client in there, if it has one; do not ask them for it here.`
+      : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
     : ""
 
   return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nGive the owner this link, to open signed in to PCP and answer there: ${view.url}${typed} Then call check_permission with id "${view.id}": it waits while they answer, and gives the result. The request stays open until ${view.expiresAt.toISOString()}.`
@@ -707,12 +776,14 @@ export async function decidePermission(
     return text("Tool levels are saved on the request's page in PCP.", true)
   }
 
-  // A secret PCP does not hold yet is typed in on PCP's page.
-  const newSecretName = newSecretNameOf(ctx, row)
+  // A secret PCP does not hold yet is typed in on PCP's page; a client's
+  // may be left empty, for a client without one.
+  const newSecret = newSecretOf(ctx, row)
 
-  if (newSecretName) {
+  if (newSecret) {
     const problem =
-      secretValue || !(await findTextSecretByName(ctx, newSecretName))
+      secretValue ||
+      !(newSecret.optional || (await findTextSecretByName(ctx, newSecret.name)))
         ? validateSecretValue(secretValue ?? "")
         : null
 
@@ -834,26 +905,47 @@ async function secretForRegister(
   secretValue: string | undefined,
 ): Promise<{ id: string | null; saved: { id: string; name: string } | null }> {
   if (!asked.newSecretName) {
-    return { id: asked.authSecretId ?? null, saved: null }
+    return {
+      id:
+        (asked.authType === "oauth"
+          ? asked.oauthClientSecretId
+          : asked.authSecretId) ?? null,
+      saved: null,
+    }
   }
 
   if (!secretValue) {
     const existing = await findTextSecretByName(ctx, asked.newSecretName)
 
-    if (!existing) {
+    if (!existing && !asked.newSecretOptional) {
       throw invalid(`Enter the value of the secret "${asked.newSecretName}".`)
     }
 
-    return { id: existing.id, saved: null }
+    return { id: existing?.id ?? null, saved: null }
   }
 
   const saved = await createSecretNamedAfter(ctx, {
     base: asked.newSecretName,
     value: secretValue,
-    description: `Sent to ${asked.name} in the ${asked.authHeaderName || "Authorization"} header.`,
+    description:
+      asked.authType === "oauth"
+        ? `Client secret for the OAuth client ${asked.oauthClientId ?? "?"}.`
+        : `Sent to ${asked.name} in the ${asked.authHeaderName || "Authorization"} header.`,
   })
 
   return { id: saved.id, saved }
+}
+
+/** The approved server's credential: a header's secret, or an OAuth client. */
+function secretFields(asked: RegisterArgs, secretId: string | null) {
+  return asked.authType === "oauth"
+    ? {
+        authSecretId: null,
+        oauthClientId: asked.oauthClientId ?? null,
+        oauthClientSecretId: asked.oauthClientId ? secretId : null,
+        oauthScope: asked.oauthScope ?? null,
+      }
+    : { authSecretId: secretId }
 }
 
 async function executeRegister(
@@ -873,10 +965,10 @@ async function executeRegister(
           name: asked.name,
           description: asked.description,
           url: asked.url,
-          authType: asked.authType === "header" ? "header" : "none",
+          authType: asked.authType,
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
-          authSecretId: secret.id,
+          ...secretFields(asked, secret.id),
           endpoint: asked.endpoint,
         })
       : await createServer(ctx, {
@@ -886,8 +978,7 @@ async function executeRegister(
           authType: asked.authType,
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
-          authSecretId: secret.id,
-          oauthScope: asked.oauthScope,
+          ...secretFields(asked, secret.id),
         })
   } catch (error) {
     // The secret was typed in for this server alone.

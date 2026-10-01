@@ -387,6 +387,7 @@ const GATEWAY_TOOLS = [
   "check_permission",
   "check_server",
   "register_server",
+  "propose_tool_access",
 ]
 
 test("a token cannot read or change endpoints unless the owner says so", async ({
@@ -453,8 +454,10 @@ test("an assistant proposes an API as OpenAPI text; nothing exists until the own
     openapi_schema: managedSpec(upstream.origin),
     auth_type: "oauth",
   })
+  // OAuth sends the owner's token, so the address has to be named, as for
+  // a secret (endpoint-oauth.spec.ts signs in to an API).
   expect(oauth.body.result?.isError).toBe(true)
-  expect(toolText(oauth)).toMatch(/OAuth is for MCP servers/)
+  expect(toolText(oauth)).toMatch(/OAuth token is sent to an address you name/)
 
   const asked = await callTool(baseURL!, managerToken, "register_server", {
     name: MANAGED,

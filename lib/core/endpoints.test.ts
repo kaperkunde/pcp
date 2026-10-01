@@ -245,13 +245,20 @@ describe("createEndpoint", () => {
     ])
   })
 
-  it("sends only a header secret, and only one that exists", async () => {
+  it("sends a secret that exists, or a token from the schema's sign-in", async () => {
     await expect(
       createEndpoint(ctx, input({ authType: "header", authSecretId: "nope" })),
     ).rejects.toThrow(/does not exist/)
     await expect(
-      createEndpoint(ctx, input({ authType: "oauth" as never })),
-    ).rejects.toThrow(/header, or no credential/)
+      createEndpoint(ctx, input({ authType: "basic" as never })),
+    ).rejects.toThrow(/an OAuth token, or no credential/)
+    // This schema's only scheme is an API key: there is no sign-in to use.
+    await expect(
+      createEndpoint(
+        ctx,
+        input({ authType: "oauth", baseUrl: `${api.origin}/api` }),
+      ),
+    ).rejects.toThrow(/declares no OAuth sign-in/)
   })
 
   it("saves a secret typed into the form with it, and none when it is refused", async () => {

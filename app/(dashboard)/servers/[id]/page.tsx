@@ -133,12 +133,20 @@ export default async function ServerPage({
             currentBaseUrl: server.url,
             readOnly: server.readOnly,
             publicOnly: server.publicOnly,
-            authType: server.authType === "header" ? "header" : "none",
+            authType:
+              server.authType === "header" || server.authType === "oauth"
+                ? server.authType
+                : "none",
             authHeaderName: server.authHeaderName ?? "Authorization",
             authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
             authSecretId: server.authSecretId ?? "",
+            oauthClientId: server.oauthClientId ?? "",
+            oauthClientSecretId: server.oauthClientSecretId ?? "",
+            oauthScope: server.oauthScope ?? "",
+            oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
           }}
           secrets={secrets}
+          redirectUrl={redirectUrl}
         />
       ) : (
         <ServerForm

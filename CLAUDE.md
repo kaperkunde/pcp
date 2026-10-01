@@ -60,8 +60,8 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
   It never changes a credential and never clears `publicOnly`. On an
-  endpoint that is the owner's (it sends a secret, or private addresses are
-  allowed) it can turn read-only on, and anything else it may change there
+  endpoint that is the owner's (it sends a secret or an OAuth token, or private
+  addresses are allowed) it can turn read-only on, and anything else it may change there
   (name, description, edits, tool descriptions, a re-read of the schema URL)
   is a permission request (`endpoint_change`) that shows the owner every new
   edit and description in full and what it does to the tools, and makes only

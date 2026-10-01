@@ -275,6 +275,101 @@ export async function withNewSecret<T>(
   }
 }
 
+export type OAuthClientFields = {
+  oauthClientId: string | null
+  /** Null while newSecret is still to be saved. */
+  oauthClientSecretId: string | null
+  oauthScope: string | null
+  oauthAuthorizeParams: string | null
+  newSecret: NewSecret | null
+}
+
+/**
+ * The OAuth client the owner created with a provider, its scope and extra
+ * sign-in parameters, for an MCP server or an API endpoint. A client secret
+ * typed into a form becomes one of the owner's own secrets (so another server
+ * that signs in with the same client can pick it, and it can be rotated on
+ * the Secrets page), saved by withNewSecret with the row, like a header's.
+ */
+export async function normalizeOAuthClient(
+  ctx: VaultContext,
+  input: Pick<
+    ServerInput,
+    | "oauthClientId"
+    | "oauthClientSecretId"
+    | "oauthClientSecretValue"
+    | "oauthScope"
+    | "oauthAuthorizeParams"
+  >,
+  sender: { name: string },
+): Promise<OAuthClientFields> {
+  const oauthClientId = input.oauthClientId?.trim() || null
+  const oauthScope = input.oauthScope?.trim() || null
+
+  if (oauthClientId && oauthClientId.length > 500) {
+    throw invalid("That client ID is too long.")
+  }
+
+  if (oauthScope && (oauthScope.length > 4000 || /[\r\n]/.test(oauthScope))) {
+    throw invalid("The scope is too long, or spans lines.")
+  }
+
+  const typedSecret = input.oauthClientSecretValue?.trim()
+
+  if ((typedSecret || input.oauthClientSecretId) && !oauthClientId) {
+    throw invalid("A client secret needs a client ID to go with it.")
+  }
+
+  let newSecret: NewSecret | null = null
+  let oauthClientSecretId: string | null = null
+
+  if (typedSecret) {
+    const problem = validateSecretValue(typedSecret)
+
+    if (problem) {
+      throw invalid(problem)
+    }
+
+    newSecret = {
+      name: null,
+      base: `${sender.name} OAuth client secret`,
+      value: typedSecret,
+      description: `Client secret for the OAuth client ${oauthClientId}.`,
+    }
+  } else if (input.oauthClientSecretId) {
+    await requireTextSecret(ctx, input.oauthClientSecretId)
+    oauthClientSecretId = input.oauthClientSecretId
+  }
+
+  return {
+    oauthClientId,
+    oauthClientSecretId,
+    oauthScope,
+    oauthAuthorizeParams: normalizeAuthorizeParams(input.oauthAuthorizeParams),
+    newSecret,
+  }
+}
+
+/** Where a secret saved by withNewSecret goes: the header's, or the client's. */
+export function secretColumns(
+  data: {
+    authType: string
+    authSecretId: string | null
+    oauthClientSecretId: string | null
+  },
+  secretId: string | null,
+): { authSecretId: string | null; oauthClientSecretId: string | null } {
+  return data.authType === "oauth"
+    ? {
+        authSecretId: data.authSecretId,
+        oauthClientSecretId: secretId ?? data.oauthClientSecretId,
+      }
+    : {
+        authSecretId: secretId ?? data.authSecretId,
+        oauthClientSecretId: data.oauthClientSecretId,
+      }
+}
+
 async function normalizeInput(ctx: VaultContext, input: ServerInput) {
   const { name, description } = normalizeNameAndDescription(input)
   const url = validateServerUrl(input.url)
@@ -306,38 +401,12 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
       break
     }
     case "oauth": {
-      data.oauthClientId = input.oauthClientId?.trim() || null
-      data.oauthScope = input.oauthScope?.trim() || null
-      data.oauthAuthorizeParams = normalizeAuthorizeParams(
-        input.oauthAuthorizeParams,
-      )
-
-      if (data.oauthClientId && data.oauthClientId.length > 500) {
-        throw invalid("That client ID is too long.")
-      }
-
-      const typedSecret = input.oauthClientSecretValue?.trim()
-
-      if (typedSecret || input.oauthClientSecretId) {
-        if (!data.oauthClientId) {
-          throw invalid("A client secret needs a client ID to go with it.")
-        }
-      }
-
-      if (typedSecret) {
-        // Kept as one of the owner's own secrets, so another server that
-        // signs in with the same client can pick it, and it can be rotated
-        // on the Secrets page.
-        const { id } = await createSecretNamedAfter(ctx, {
-          base: `${name} OAuth client secret`,
-          value: typedSecret,
-          description: `Client secret for the OAuth client ${data.oauthClientId}.`,
-        })
-        data.oauthClientSecretId = id
-      } else if (input.oauthClientSecretId) {
-        await requireTextSecret(ctx, input.oauthClientSecretId)
-        data.oauthClientSecretId = input.oauthClientSecretId
-      }
+      const client = await normalizeOAuthClient(ctx, input, { name })
+      data.oauthClientId = client.oauthClientId
+      data.oauthClientSecretId = client.oauthClientSecretId
+      data.oauthScope = client.oauthScope
+      data.oauthAuthorizeParams = client.oauthAuthorizeParams
+      newSecret = client.newSecret
       break
     }
     default:
@@ -466,7 +535,7 @@ export async function createServer(
         vaultId: ctx.vaultId,
         slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
         ...data,
-        authSecretId: secretId ?? data.authSecretId,
+        ...secretColumns(data, secretId),
       },
     }),
   )
@@ -515,7 +584,7 @@ export async function updateServer(
       data.oauthClientId !== existing.oauthClientId)
 
   await withNewSecret(ctx, newSecret, async (secretId) => {
-    data.authSecretId = secretId ?? data.authSecretId
+    Object.assign(data, secretColumns(data, secretId))
     await db().mcpServer.update({
       where: { id },
       data: {
@@ -537,11 +606,11 @@ export async function updateServer(
 }
 
 /**
- * Gives an OAuth server the client the owner created with the provider,
- * keeping every other setting: what the server page asks for when the server
+ * Gives an OAuth server or endpoint the client the owner created with the
+ * provider, keeping every other setting: what its page asks for when it
  * does not let PCP register itself. The client ID is required here, since
- * without one the server still cannot be connected; a secret left out keeps
- * the one it has.
+ * without one it still cannot be connected; a secret left out keeps the one
+ * it has.
  */
 export async function setOAuthClient(
   ctx: VaultContext,
@@ -551,22 +620,14 @@ export async function setOAuthClient(
     clientSecretId?: string | null
     clientSecretValue?: string | null
   },
-): Promise<{ reconnect: boolean }> {
+): Promise<void> {
   const existing = await getServer(ctx, id)
-
-  if (existing.authType !== "oauth") {
-    throw new PcpError("state", `${existing.name} does not use OAuth.`)
-  }
 
   if (!client.clientId.trim()) {
     throw invalid("Enter the client ID.")
   }
 
-  return updateServer(ctx, id, {
-    name: existing.name,
-    url: existing.url,
-    description: existing.description,
-    authType: "oauth",
+  await writeOAuthClient(ctx, existing, {
     oauthClientId: client.clientId,
     oauthClientSecretId:
       client.clientSecretId === undefined
@@ -579,9 +640,9 @@ export async function setOAuthClient(
 }
 
 /**
- * Sets only an OAuth server's extra sign-in parameters: what the server page
- * asks for when a sign-in gave PCP access it cannot renew. They take effect
- * on the next sign-in; the current one stays until then.
+ * Sets only an OAuth server's extra sign-in parameters: what its page asks
+ * for when a sign-in gave PCP access it cannot renew. They take effect on the
+ * next sign-in; the current one stays until then.
  */
 export async function setOAuthSignInParams(
   ctx: VaultContext,
@@ -590,20 +651,53 @@ export async function setOAuthSignInParams(
 ): Promise<void> {
   const existing = await getServer(ctx, id)
 
-  if (existing.authType !== "oauth") {
-    throw new PcpError("state", `${existing.name} does not use OAuth.`)
-  }
-
-  await updateServer(ctx, id, {
-    name: existing.name,
-    url: existing.url,
-    description: existing.description,
-    authType: "oauth",
+  await writeOAuthClient(ctx, existing, {
     oauthClientId: existing.oauthClientId,
     oauthClientSecretId: existing.oauthClientSecretId,
     oauthScope: existing.oauthScope,
     oauthAuthorizeParams: params,
   })
+}
+
+/**
+ * Writes the OAuth client columns and nothing else, for either kind of
+ * server. A different client drops the tokens PCP holds: they belong to the
+ * old one.
+ */
+async function writeOAuthClient(
+  ctx: VaultContext,
+  existing: Awaited<ReturnType<typeof getServer>>,
+  input: Parameters<typeof normalizeOAuthClient>[1],
+): Promise<void> {
+  if (existing.authType !== "oauth") {
+    throw new PcpError("state", `${existing.name} does not use OAuth.`)
+  }
+
+  const { newSecret, ...client } = await normalizeOAuthClient(
+    ctx,
+    input,
+    existing,
+  )
+  const dropTokens =
+    existing.oauthTokensId !== null &&
+    client.oauthClientId !== existing.oauthClientId
+
+  await withNewSecret(ctx, newSecret, (secretId) =>
+    db().mcpServer.update({
+      where: { id: existing.id },
+      data: {
+        ...client,
+        oauthClientSecretId: secretId ?? client.oauthClientSecretId,
+        ...(dropTokens
+          ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
+          : {}),
+      },
+    }),
+  )
+
+  if (dropTokens && existing.oauthTokensId) {
+    await deleteManagedSecret(ctx, existing.oauthTokensId)
+  }
 }
 
 export async function renameServerSlug(
