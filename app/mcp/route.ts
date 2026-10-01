@@ -7,7 +7,7 @@ import {
   loadGatewayServers,
   type GatewayScope,
 } from "@/lib/core/gateway"
-import { sharedMemoryPaths } from "@/lib/core/memories"
+import { instructionMemories } from "@/lib/core/memories"
 import { checkRateLimit } from "@/lib/core/rate-limit"
 import { publicUrlFor } from "@/lib/server/public-url"
 
@@ -39,8 +39,8 @@ const mcpHandler = createMcpHandler(
     )
 
     return buildGatewayServer(scope, servers, {
-      sharedMemories: scope.keepMemories
-        ? await sharedMemoryPaths(scope.ctx)
+      memories: scope.keepMemories
+        ? await instructionMemories(scope.ctx, scope.tokenId)
         : null,
     })
   },

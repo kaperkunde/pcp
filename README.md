@@ -38,15 +38,13 @@ on its own, what it has to ask you about first, and what it cannot touch.
   needs.
 - **APIs without an MCP server.** Give PCP an OpenAPI schema, as a URL or a
   file, and each operation becomes a tool. PCP makes the HTTP calls itself,
-  with your secret in a header, and hands the assistant the answer.
+  with your secret or OAuth sign-in, and hands the assistant the answer.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
 - **Nothing to configure.** `docker compose up`, open the site, choose a
   password. No environment variables.
-- **Single user, by design.** PCP is yours. The architecture keeps every row
-  behind a vault id so a multi-user host can be built on it later, but the
-  product exposes none of that.
+- **Single user, by design.** PCP is yours: one owner, one encrypted vault.
 
 ## Run it
 
@@ -94,19 +92,23 @@ required.
    Slack, GitHub and others) let no app register itself: PCP then says so,
    and you create an OAuth client in the provider's developer settings with
    the redirect URI the server form shows, and enter its client ID and
-   secret. If the provider only keeps you signed in when asked (Google wants
-   `access_type=offline`), put that in **Extra sign-in parameters**. PCP reads each server's tool
-   list; you can rewrite any tool's description so an assistant picks it
-   correctly.
+   secret. Some providers only keep you signed in when the sign-in asks for
+   it: PCP adds what it knows (Google's `access_type=offline`) itself, and
+   **Extra sign-in parameters** takes anything else. A server that refuses
+   PCP shows why on its page. PCP reads each server's tool list; you can
+   rewrite any tool's description so an assistant picks it correctly.
 3. **API endpoints.** Add an API by giving PCP its OpenAPI 3 schema, as a URL
    or an uploaded JSON or YAML file. PCP turns each operation into a tool,
    with the arguments the schema describes, and tells you what it left out
-   (file uploads, cookies). Choose a secret to send in a header, and
-   **Read-only** to offer only GET operations. Requests go to the base URL
-   saved on the endpoint, which PCP never changes on its own when the schema
-   does. A secret is only sent to an address you typed, or to the origin the
-   schema was downloaded from, so with an uploaded file you enter the base URL
-   yourself.
+   (file uploads, cookies). Choose a secret to send in a header, or, for an
+   API whose schema declares an OAuth sign-in (Google's, Microsoft Graph),
+   your own OAuth client and **Connect**. **Read-only** offers only GET
+   operations. Requests go to the base URL saved on the endpoint, which PCP
+   never changes on its own when the schema does. A secret is only sent to an
+   address you typed, or to the origin the schema was downloaded from, so
+   with an uploaded file you enter the base URL yourself. **Edits** (a JSON
+   Patch) fix or narrow a schema you do not control, and are kept when it is
+   read again.
 4. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password to make one. A token can reach every server and endpoint or only
    the ones you pick, and can expire. Revoking it destroys its copy of the
@@ -127,54 +129,68 @@ required.
 The assistant then sees a short description of the servers behind the token
 and these tools:
 
-| Tool               | What it does                                                                                                     |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `search_tools`     | Finds tools across servers from a few words ("create a github issue").                                           |
-| `describe_tool`    | Returns one tool's full description, JSON Schema and whether it asks you first.                                  |
-| `call_tool`        | Runs it, with PCP adding the credentials to the request to the server or the API.                                |
-| `check_permission` | Says whether you answered a request that was waiting for you, and how it went.                                   |
-| `check_server`     | Says whether a server is connected; offers you a Connect button where it can.                                    |
-| `register_server`  | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name. |
+| Tool                  | What it does                                                                                                                                                      |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                                                                            |
+| `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                      |
+| `call_tool`           | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs, and `decode` decodes base64 text in it (an email's body). |
+| `check_permission`    | Waits for your answer to a request, then says how it went.                                                                                                        |
+| `check_server`        | Says whether a server is connected; while you sign in to it, waits until you have.                                                                                |
+| `register_server`     | Proposes a new MCP server, or an API from an OpenAPI 3 schema (text or a URL), with no auth, a secret named by name, or OAuth.                                    |
+| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers; you review and save it in PCP.                                                           |
 
-A tool you have not decided about answers "Not done yet" and asks you. Where
-the assistant's app can show it, the question appears in the conversation:
-as PCP's panel (an MCP App) or as the app's own prompt. Otherwise the
-assistant hands you a link to PCP. Each token's page says which of these PCP
-may use; turn one off if an app gets stuck on it. **Allow once** runs that one call,
+A tool you have not decided about answers "Not done yet" and asks you: the
+assistant hands you a link to the request in PCP, and waits while you
+answer there, so it carries on by itself once you have. If you take longer
+than it waits, tell it you answered. **Allow once** runs that one call,
 **Always allow** and **Block** also decide the calls after it, and **Not
 now** runs nothing. A server an assistant proposes is only added once you
-agree; an OAuth one is then connected from a link that opens in your browser.
+agree; an OAuth one is then connected from a link to its page in PCP, and the
+assistant waits while you sign in.
+
+An assistant can also help with a large set of tools: `propose_tool_access`
+takes levels for many tools at once, by name or by pattern (`list_*`), and
+hands you a link to a page in PCP with its levels filled in and each change
+marked. Nothing changes until you save there, and you can change any level
+first, so an assistant can suggest but never raise its own access.
 
 An assistant can write an OpenAPI schema from an API's documentation and hand
-it to `register_server` as text. You see what it asked for before anything is
-added: the address, how many tools and which operations, whether it can change
-things, and the secret it would send. An API added that way reaches public
+it to `register_server` as text, or name a schema's URL. You see what it asked
+for before anything is added: the address, how many tools and which
+operations, whether it can change things, and the secret it would send. A
+secret PCP does not hold yet is typed in by you on that page, so its value
+never passes through the assistant. An API added that way reaches public
 addresses only until you allow private ones on the endpoint's page.
 
 A token made with **Let an assistant with this token read and change API
 endpoints** gets two more tools:
 
-| Tool              | What it does                                                                                            |
-| ----------------- | ------------------------------------------------------------------------------------------------------- |
-| `update_endpoint` | Changes an endpoint's name, description, schema text, base URL, read-only setting or tool descriptions. |
-| `get_endpoint`    | Reads an endpoint's settings and tools, and optionally its schema text, to edit and send back.          |
+| Tool              | What it does                                                                                                                       |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `update_endpoint` | Changes an endpoint's name, description, edits, base URL, read-only setting or tool descriptions, or reads its schema URL again.   |
+| `get_endpoint`    | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make. |
 
 What an assistant can do here is narrower than what you can. It can change an
 endpoint it registered only while nothing of yours is attached to it (no
-secret, public addresses only), and a change disables the endpoint until you
+secret or OAuth sign-in, public addresses only), and a change disables the endpoint until you
 enable it again, because the words it writes reach every other assistant. It
 can never see, choose or change a secret afterwards. Once an endpoint sends
-your secret, or you allow private addresses, it is yours: an assistant can
-read it and turn read-only on, and nothing else. Leave the option off for a
-token that does not need it.
+your secret or OAuth token, or you allow private addresses, it is yours: an assistant can
+read it and turn read-only on, and it can ask you to fix the schema with
+edits, rename it, reword its tools or read its schema URL again. You are shown
+every edit and description in full and what it does to the tools, and nothing
+changes unless you agree. Its address and secret stay yours alone. Leave the
+option off for a token that does not need it.
 
 A token made with **Let an assistant with this token keep memories** gets a
 `memory` tool: notes that last between conversations and stay with you rather
 than with one app. It works like Claude's own memory tool (files under
-`/memories`: view, create, str_replace, insert, delete, rename, plus search),
-and PCP's instructions tell the assistant to look there before work that may
-depend on what you prefer or decided before, and to save what you would not
-want to say twice.
+`/memories`: view, create, str_replace, insert, delete, rename, plus search
+and every), and PCP's instructions, modelled on the protocol Claude's own
+memory tool uses, tell the assistant to look there before anything else and to
+save what you would not want to say twice as it goes. Before its first reply
+it calls `every`, which returns the memories you chose to have read in every
+conversation and lists the rest.
 
 - `/memories/…` is the assistant's own: only the token that wrote a memory
   reads it, and writing one needs no answer from you.
@@ -188,7 +204,12 @@ want to say twice.
 Text with characters that do not show on screen is refused, so what you read
 is all there is. The **Memories** tab lists every memory with the token that
 wrote it; you can add shared ones yourself, and edit, move or delete any of
-them. Memories are encrypted like everything else.
+them. Tick **Read in every conversation** on one (up to 2,000 characters) and
+its text comes with PCP's instructions, so an assistant has it before it does
+anything rather than when it thinks to look; a shared one reaches every
+assistant, one an assistant keeps reaches only that one. If an assistant
+changes one it keeps, it is no longer read in every conversation until you
+tick it again. Memories are encrypted like everything else.
 
 ## How it is secured
 
@@ -211,8 +232,8 @@ Consequences worth knowing:
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
 - The gateway never returns a secret to an assistant, only what the upstream
-  server answered. An API's answer is scrubbed of the secret first, in case it
-  echoes the key back in an error.
+  server answered. An API's answer is scrubbed of the secret or token first,
+  in case it echoes the key back in an error.
 
 ## Development
 

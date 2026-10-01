@@ -1,9 +1,10 @@
 "use client"
 
-import { RefreshCw } from "lucide-react"
+import { ChevronRight, RefreshCw } from "lucide-react"
 import {
   useActionState,
   useEffect,
+  useId,
   useOptimistic,
   useState,
   useTransition,
@@ -16,11 +17,10 @@ import { KeepMemoriesField } from "@/components/keep-memories-field"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { clearNewToken, peekNewToken } from "@/components/new-token-handoff"
 import { PermissionDecision } from "@/components/permission-decision"
-import { PermissionTiersField } from "@/components/permission-tiers-field"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button, ButtonLink } from "@/components/ui/button"
 import { refreshToolsAction } from "@/lib/actions/servers"
 import {
   Card,
@@ -52,10 +52,21 @@ import { cn } from "@/lib/utils"
 
 export type WaitingRequest = {
   id: string
+  /** Proposed tool levels are reviewed and saved on their own page. */
+  review: boolean
   title: string
   lines: string[]
   warning: string | null
   decisions: Array<{ value: Decision; label: string }>
+  /** A new server's secret, typed in when agreeing to it. */
+  secret: {
+    name: string
+    exists: boolean
+    optional: boolean
+    clientId: string | null
+  } | null
+  /** A memory to share: the toggle for reading it in every conversation. */
+  every: { asked: boolean } | null
 }
 
 export function TokenDetail({
@@ -163,7 +174,20 @@ function WaitingCard({ waiting }: { waiting: WaitingRequest[] }) {
                   {item.warning}
                 </p>
               ) : null}
-              <PermissionDecision id={item.id} decisions={item.decisions} />
+              {item.review ? (
+                <div>
+                  <ButtonLink href={`/permissions/${item.id}`} size="sm">
+                    Review and save
+                  </ButtonLink>
+                </div>
+              ) : (
+                <PermissionDecision
+                  id={item.id}
+                  decisions={item.decisions}
+                  secret={item.secret}
+                  every={item.every}
+                />
+              )}
             </li>
           ))}
         </ul>
@@ -219,6 +243,20 @@ function AccessOptions() {
   ))
 }
 
+/** "12 tools: 3 allowed, 9 ask you first", for a server shown folded. */
+function toolsSummary(tools: TokenToolAccess[]): string {
+  const counts = TOOL_ACCESS_LEVELS.map(
+    (level) =>
+      [level, tools.filter((tool) => tool.access === level).length] as const,
+  )
+    .filter(([, count]) => count > 0)
+    .map(
+      ([level, count]) => `${count} ${TOOL_ACCESS_LABELS[level].toLowerCase()}`,
+    )
+
+  return `${tools.length} ${tools.length === 1 ? "tool" : "tools"}: ${counts.join(", ")}`
+}
+
 function ServerTools({
   tokenId,
   server,
@@ -233,6 +271,10 @@ function ServerTools({
   const [bulk, setBulk] = useState<ToolAccess>("allowed")
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  // Folded until asked for: a server can bring hundreds of tools, and the
+  // page should show every server at a glance.
+  const [open, setOpen] = useState(false)
+  const listId = useId()
 
   function applyAll() {
     startTransition(async () => {
@@ -256,8 +298,23 @@ function ServerTools({
     <section aria-label={server.name} className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{server.name}</span>
-          <code className="text-xs text-muted-foreground">{server.slug}</code>
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={listId}
+            onClick={() => setOpen((value) => !value)}
+            className="-ml-1 flex cursor-pointer flex-wrap items-center gap-2 rounded-md px-1 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          >
+            <ChevronRight
+              className={cn(
+                "size-4 shrink-0 text-muted-foreground transition-transform",
+                open && "rotate-90",
+              )}
+              aria-hidden
+            />
+            <span className="font-medium">{server.name}</span>
+            <code className="text-xs text-muted-foreground">{server.slug}</code>
+          </button>
           {server.enabled ? null : (
             <Badge variant="outline">Switched off</Badge>
           )}
@@ -305,11 +362,15 @@ function ServerTools({
       <FormError error={error} />
       <FormNote message={note} />
       {server.tools.length === 0 ? (
-        <p className="text-muted-foreground">
+        <p id={listId} className="pl-6 text-muted-foreground">
           No tools known yet. Connect the server, or refresh its tools.
         </p>
+      ) : !open ? (
+        <p id={listId} className="pl-6 text-muted-foreground">
+          {toolsSummary(server.tools)}
+        </p>
       ) : (
-        <ul className="flex flex-col divide-y divide-border">
+        <ul id={listId} className="flex flex-col divide-y divide-border pl-6">
           {server.tools.map((tool) => (
             <ToolAccessRow
               key={tool.name}
@@ -518,10 +579,6 @@ function SettingsCard({
             <KeepMemoriesField
               id="token-memories"
               defaultChecked={token.keepMemories}
-            />
-            <PermissionTiersField
-              idPrefix="token-tier"
-              checked={token.permissionTiers}
             />
             <FormError error={state.status === "error" ? state.error : null} />
             <FormNote message={state.status === "ok" ? state.message : null} />

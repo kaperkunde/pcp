@@ -230,6 +230,108 @@ describe("generateTools", () => {
     )
   })
 
+  it("does not say the summary or the method and path twice", () => {
+    const { tools } = generateTools(
+      spec({
+        paths: {
+          "/invoices": {
+            get: {
+              operationId: "getInvoices",
+              summary: "List invoices",
+              description:
+                "## GET /api/v1/invoices\n\n## GET /invoices\n\nLists invoices, filtered.",
+            },
+            post: {
+              operationId: "createInvoice",
+              summary: "Create an invoice",
+              description: "Create an invoice. The body is the invoice.",
+            },
+          },
+        },
+      }),
+      OPTIONS,
+    )
+
+    expect(tools.map((tool) => tool.description)).toEqual([
+      // Another path's heading stays: it is not this one.
+      "List invoices\n\n## GET /api/v1/invoices\n\nLists invoices, filtered.\n\nGET /invoices",
+      "Create an invoice. The body is the invoice.\n\nPOST /invoices",
+    ])
+  })
+
+  it("outlines what a successful call answers", () => {
+    expect(byName.listPets!.output).toBe("[any]")
+    expect(byName.deletePet!.output).toBeNull()
+
+    const { tools } = generateTools(
+      spec({
+        components: {
+          schemas: {
+            Invoice: {
+              allOf: [
+                { $ref: "#/components/schemas/Base" },
+                {
+                  type: "object",
+                  properties: {
+                    number: { type: "string" },
+                    status: { type: "string", enum: ["draft", "paid"] },
+                    lines: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/Line" },
+                    },
+                  },
+                },
+              ],
+            },
+            Base: { type: "object", properties: { id: { type: "string" } } },
+            Line: {
+              type: "object",
+              properties: {
+                cost: { type: "number" },
+                // Text the API encodes is marked as such.
+                image: { type: "string", format: "byte" },
+                // A reference back into itself stops.
+                parent: { $ref: "#/components/schemas/Line" },
+              },
+            },
+          },
+        },
+        paths: {
+          "/invoices": {
+            get: {
+              operationId: "getInvoices",
+              responses: {
+                "401": { description: "no" },
+                "200": {
+                  description: "ok",
+                  content: {
+                    "application/json": {
+                      schema: {
+                        type: "object",
+                        properties: {
+                          data: {
+                            type: "array",
+                            items: { $ref: "#/components/schemas/Invoice" },
+                          },
+                          meta: { $ref: "#/components/schemas/Missing" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+      OPTIONS,
+    )
+
+    expect(tools[0]!.output).toBe(
+      '{data: [{id: string, number: string, status: "draft" | "paid", lines: [{cost: number, image: string (base64), parent: {…}}]}], meta: {…}}',
+    )
+  })
+
   it("offers only GET operations when read-only", () => {
     const readOnly = generateTools(PETSTORE, { ...OPTIONS, readOnly: true })
     expect(readOnly.tools.map((tool) => tool.name)).toEqual([
@@ -311,6 +413,54 @@ describe("unsupported features", () => {
       { readOnly: false, blockedHeaders: ["x-api-key"] },
     )
     expect(withAuth.tools[0]!.operation.params).toEqual([])
+  })
+
+  it("sends a parameter that can take one value itself, instead of asking for it", () => {
+    const { tools } = one({
+      parameters: [
+        // Required, one value: PCP sends it.
+        {
+          name: "X-Requested-With",
+          in: "header",
+          required: true,
+          schema: { type: "string", enum: ["XMLHttpRequest"] },
+        },
+        // Optional, defaulting to its one value: PCP sends it.
+        {
+          name: "format",
+          in: "query",
+          schema: { type: "string", const: "json", default: "json" },
+        },
+        // Optional without a default: leaving it out may mean something.
+        {
+          name: "only",
+          in: "query",
+          schema: { type: "string", enum: ["mine"] },
+        },
+        // A value that cannot be sent as a header stays an argument.
+        {
+          name: "X-Odd",
+          in: "header",
+          required: true,
+          schema: { type: "string", enum: ["a\nb"] },
+        },
+      ],
+    })
+    const tool = tools[0]!
+
+    expect(Object.keys(tool.inputSchema.properties as object)).toEqual([
+      "only",
+      "X-Odd",
+    ])
+    expect(tool.inputSchema.required).toEqual(["X-Odd"])
+    expect(
+      tool.operation.params
+        .filter((param) => param.value !== undefined)
+        .map((param) => [param.name, param.value]),
+    ).toEqual([
+      ["format", "json"],
+      ["X-Requested-With", "XMLHttpRequest"],
+    ])
   })
 
   it("drops an optional body it cannot encode, and skips a required one", () => {

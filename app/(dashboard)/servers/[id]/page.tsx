@@ -54,18 +54,20 @@ export default async function ServerPage({
     .filter((secret) => secret.kind === "text")
     .map(({ id, name }) => ({ id, name }))
 
+  const redirectUrl = oauthRedirectUrl(await publicUrlFor(ctx))
+
   const oauthConnection = await describeOAuthConnection(ctx, server).catch(
     () => null,
   )
 
-  // An error the status line already says (a server that needs a client
-  // from the owner) is shown once.
   const notice =
-    typeof query.error === "string" &&
-    !(query.error && server.statusMessage.startsWith(query.error))
+    typeof query.error === "string" && query.error
       ? { kind: "error" as const, message: query.error }
       : query.connected
-        ? { kind: "ok" as const, message: `Connected to ${server.name}.` }
+        ? {
+            kind: "ok" as const,
+            message: `Connected to ${server.name}. An assistant waiting for this carries on by itself; one that stopped waiting needs telling.`,
+          }
         : null
 
   return (
@@ -96,6 +98,7 @@ export default async function ServerPage({
             server.authType !== "oauth" || server.oauthConnectedAt !== null,
           lastSyncedAt: server.lastSyncedAt,
           oauthConnection,
+          oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
         }}
         tools={server.tools.map((tool) => {
           const plan = readCallPlan(tool.operation)
@@ -109,6 +112,7 @@ export default async function ServerPage({
           }
         })}
         notice={notice}
+        redirectUrl={redirectUrl}
       />
       <h2 className="text-lg">Settings</h2>
       {endpoint ? (
@@ -129,12 +133,20 @@ export default async function ServerPage({
             currentBaseUrl: server.url,
             readOnly: server.readOnly,
             publicOnly: server.publicOnly,
-            authType: server.authType === "header" ? "header" : "none",
+            authType:
+              server.authType === "header" || server.authType === "oauth"
+                ? server.authType
+                : "none",
             authHeaderName: server.authHeaderName ?? "Authorization",
             authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
             authSecretId: server.authSecretId ?? "",
+            oauthClientId: server.oauthClientId ?? "",
+            oauthClientSecretId: server.oauthClientSecretId ?? "",
+            oauthScope: server.oauthScope ?? "",
+            oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
           }}
           secrets={secrets}
+          redirectUrl={redirectUrl}
         />
       ) : (
         <ServerForm
@@ -154,7 +166,7 @@ export default async function ServerPage({
             oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
           }}
           secrets={secrets}
-          redirectUrl={oauthRedirectUrl(await publicUrlFor(ctx))}
+          redirectUrl={redirectUrl}
         />
       )}
     </>
