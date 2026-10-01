@@ -21,9 +21,11 @@ import { PCP_VERSION } from "./version"
  *
  * Hosts hand over the same result again whenever they rebuild the panel, so
  * the panel asks check_permission or check_server where things are now
- * before trusting it. When something changed, the done view offers to tell
- * the assistant (ui/message), since model context alone waits for the
- * owner's next message.
+ * before trusting it, and shows a question only once PCP says it is open.
+ * Model context alone waits for the owner's next message, so what the owner
+ * just did here goes to the assistant as a message (ui/message) at once; a
+ * change a rebuilt panel finds is offered as a button. Once nothing is left
+ * to do, the panel asks the host to close it (request-teardown).
  *
  * To add a view: a builder here that returns panelResult() with a new kind,
  * and a renderer for that kind in SCRIPT below.
@@ -164,6 +166,8 @@ const SCRIPT = String.raw`
   const PROTOCOL = "2026-01-26";
   const POLL_MS = 3000;
   const POLL_TRIES = 100;
+  // How long a rebuilt panel waits for PCP before showing what it was given.
+  const CHECK_MS = 10000;
   const waiters = new Map();
   let nextId = 1;
   let permission = null;
@@ -177,14 +181,14 @@ const SCRIPT = String.raw`
     window.parent.postMessage(Object.assign({ jsonrpc: "2.0" }, message), "*");
   }
 
-  function request(method, params) {
+  function request(method, params, timeoutMs = 120000) {
     const id = nextId++;
     post({ id, method, params });
     return new Promise((resolve, reject) => {
       waiters.set(id, { resolve, reject });
       setTimeout(() => {
         if (waiters.delete(id)) reject(new Error("timeout"));
-      }, 120000);
+      }, timeoutMs);
     });
   }
 
@@ -233,10 +237,23 @@ const SCRIPT = String.raw`
     polling = null;
   }
 
+  function showWaiting(text) {
+    stopPolling();
+    $("w-text").textContent = text;
+    show("waiting");
+  }
+
+  // Nothing is left to do here: ask the host to close the panel. The host
+  // decides; if it agrees it sends ui/resource-teardown first.
+  function finish() {
+    notify("ui/notifications/request-teardown");
+  }
+
   // Model context (tell) waits for the owner's next message. A message sent
-  // for them (ui/message) is what gets the assistant going again, so when
-  // something changed here the done view offers one, in the owner's words.
-  function renderDone(text, isError, message) {
+  // for them (ui/message) is what gets the assistant going again. When the
+  // owner just did something here (send), it goes at once; when a rebuilt
+  // panel finds a change, the done view offers it, in the owner's words.
+  function renderDone(text, isError, message, send) {
     stopPolling();
     $("outcome").textContent = text || "Done.";
     $("outcome").className = isError ? "outcome error" : "outcome";
@@ -245,26 +262,33 @@ const SCRIPT = String.raw`
     $("d-tell").disabled = false;
     $("d-status").textContent = "";
     show("done");
+    if (message && send) sendMessage();
   }
 
   function sendMessage() {
     if (!pendingMessage) return;
     $("d-tell").disabled = true;
+    const failed = () => {
+      $("d-tell").disabled = false;
+      $("d-actions").hidden = false;
+      $("d-status").textContent =
+        "Your app did not send it. Tell the assistant yourself.";
+      resize();
+    };
     request("ui/message", {
       role: "user",
       content: [{ type: "text", text: pendingMessage }],
     })
-      .then(() => {
+      .then((result) => {
+        // A host that refuses says so in the result, not as an error.
+        if (result && result.isError) return failed();
+        pendingMessage = null;
         $("d-actions").hidden = true;
         $("d-status").textContent = "Sent.";
         resize();
+        finish();
       })
-      .catch(() => {
-        $("d-tell").disabled = false;
-        $("d-status").textContent =
-          "Your app did not send it. Tell the assistant yourself.";
-        resize();
-      });
+      .catch(failed);
   }
 
   function renderPermission(asked) {
@@ -316,7 +340,7 @@ const SCRIPT = String.raw`
         'The owner chose "' + decision.label + '" for: ' +
           (permission.title || "") + "\n" + textOf(result),
       );
-      onResult(result, answered(permission, decision.label));
+      onResult(result, answered(permission, decision.label), true);
     } catch (error) {
       setBusy($("p-buttons"), false);
       $("p-error").textContent =
@@ -370,7 +394,9 @@ const SCRIPT = String.raw`
         });
         const state = result && result.structuredContent &&
           result.structuredContent.server;
-        if (state && state.connected) connected(connect);
+        if (state && state.connected) {
+          connected(connect, { send: true });
+        }
       } catch (error) {
         // Keep polling; the next round may get through.
       } finally {
@@ -384,7 +410,7 @@ const SCRIPT = String.raw`
       ": " + (asked.title || "your request") + " Carry on.";
   }
 
-  function connected(server, recent = true) {
+  function connected(server, { recent = true, send = false } = {}) {
     if (recent) {
       tell("The owner connected " + server.name + ' (server "' +
         server.slug + '"). Try the call again.');
@@ -393,10 +419,11 @@ const SCRIPT = String.raw`
       server.name + " is connected.",
       false,
       recent ? "I connected " + server.name + " in PCP. Carry on." : null,
+      send,
     );
   }
 
-  function onResult(result, message) {
+  function onResult(result, message, send) {
     const content = result && result.structuredContent;
     if (
       content && content.kind === "permission" && content.permission &&
@@ -406,54 +433,67 @@ const SCRIPT = String.raw`
     } else if (content && content.kind === "connect" && content.connect) {
       renderConnect(content.connect);
     } else {
-      renderDone(textOf(result), result && result.isError, message);
+      renderDone(textOf(result), result && result.isError, message, send);
     }
   }
 
   // The host hands over the result the panel was made for, and hands the
   // same one again whenever it rebuilds the panel (scrolling back, the app
   // returning from the browser). By then the owner may have answered or
-  // signed in, so show it, then ask PCP where things are now.
+  // signed in, so a question is not shown until PCP says it is still open.
   async function fromHost(result) {
-    onResult(result);
     const content = result && result.structuredContent;
+    const asked =
+      content && content.kind === "permission" && content.permission &&
+      content.permission.status === "pending"
+        ? content.permission
+        : null;
+
+    if (!asked) {
+      onResult(result);
+      if (content && content.kind === "connect" && connect) checkConnected();
+      return;
+    }
+
+    showWaiting("Checking whether you already answered…");
+    let now;
     try {
-      if (content && content.kind === "permission" && permission) {
-        const id = permission.id;
-        const now = await request("tools/call", {
-          name: "check_permission",
-          arguments: { id },
-        });
-        if (!permission || permission.id !== id) return;
-        const later = now && now.structuredContent;
-        if (later && later.kind === "permission") {
-          onResult(now);
-        } else {
-          // Long after, this is history rather than news.
-          const asked = permission;
-          const recent = Date.parse(asked.expires_at) > Date.now();
-          permission = null;
-          if (recent) {
-            tell("The owner answered: " + (asked.title || "") + "\n" +
-              textOf(now));
-          }
-          if (
-            asked.kind === "register" && later && later.kind === "done" &&
-            later.server && later.server.connected
-          ) {
-            connected(later.server, recent);
-          } else {
-            onResult(now, recent ? answered(asked) : null);
-            if (later && later.kind === "connect" && later.connect) {
-              checkConnected();
-            }
-          }
-        }
-      } else if (content && content.kind === "connect" && connect) {
-        checkConnected();
-      }
+      now = await request(
+        "tools/call",
+        { name: "check_permission", arguments: { id: asked.id } },
+        CHECK_MS,
+      );
     } catch (error) {
-      // Keep what the host handed over; the buttons still work.
+      // PCP did not answer: the question as given. Answering one that is
+      // settled already is refused, so its buttons do no harm.
+      onResult(result);
+      return;
+    }
+
+    const later = now && now.structuredContent;
+    if (later && later.kind === "permission") {
+      onResult(now);
+      return;
+    }
+
+    // Long after, this is history rather than news: nothing to tell the
+    // assistant, nothing left for the owner to do, so the panel can go.
+    const recent = Date.parse(asked.expires_at) > Date.now();
+    if (recent) {
+      tell("The owner answered: " + (asked.title || "") + "\n" + textOf(now));
+    }
+    if (
+      asked.kind === "register" && later && later.kind === "done" &&
+      later.server && later.server.connected
+    ) {
+      connected(later.server, { recent });
+    } else {
+      onResult(now, recent ? answered(asked) : null);
+    }
+    if (later && later.kind === "connect" && later.connect) {
+      checkConnected();
+    } else if (!recent) {
+      finish();
     }
   }
 
@@ -584,7 +624,7 @@ button:disabled { opacity: 0.6; cursor: default; }
 `
 
 const BODY = `
-<div id="waiting"><p class="muted">Loading…</p></div>
+<div id="waiting"><p class="muted" id="w-text">Loading…</p></div>
 <div id="permission" hidden>
   <h1 id="p-title"></h1>
   <ul id="p-lines"></ul>

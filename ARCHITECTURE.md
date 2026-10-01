@@ -495,15 +495,21 @@ the start page then lands on the server's page, which says what to create.
 
 Hosts hand the panel the tool result it was made for, and hand the same one
 again whenever they rebuild it (scrolling back, the app returning from the
-browser), so a result is a snapshot: the panel shows it, then asks
-`check_permission` or `check_server` where things are now. `check_permission`
-answers an allowed request whose OAuth server still needs signing in to with
-the connect view, and once it is connected with the server's state. The
-panel tells the model what changed (`ui/update-model-context`, read on the
-owner's next message), and its done view offers "Tell the assistant", which
-posts a message in the owner's words (`ui/message`) so the assistant carries
-on. PCP itself cannot wake the assistant: nothing in MCP lets a server start
-a turn.
+browser), so a result is a snapshot: the panel asks `check_permission` or
+`check_server` where things are now, and shows a question's buttons only
+once PCP says it is still open (if PCP does not answer, the question as given;
+answering a settled one is refused). `check_permission` answers an allowed
+request whose OAuth server still needs signing in to with the connect view,
+and once it is connected with the server's state. MCP Apps keep no state for
+a panel across rebuilds, so PCP's request is the record. Model context
+(`ui/update-model-context`) is only read on the owner's next message, so
+what the owner just did in the panel (an answer, a sign-in it saw land) goes
+to the assistant as a message in the owner's words (`ui/message`) at once;
+a change a rebuilt panel finds is offered as "Tell the assistant" instead,
+so reloading never posts. When nothing is left to do (the message went, or
+the request is more than a day old), the panel asks the host to close it
+(`ui/notifications/request-teardown`); the host decides. PCP itself cannot
+wake the assistant: nothing in MCP lets a server start a turn.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.

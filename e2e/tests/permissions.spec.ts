@@ -542,16 +542,28 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   )
 })
 
+/** What the fake host saw the panel do, and switches for how it behaves. */
+type FakeHost = {
+  pcpCall: (name: string, args: unknown) => Promise<unknown>
+  sent: unknown[]
+  told: unknown[]
+  opened: string[]
+  teardowns: number
+  refuseMessages: boolean
+  toolsDown: boolean
+}
+
 /**
  * Shows PCP's panel the way an MCP Apps host does: in a sandboxed frame,
- * handed `result`, with its tool calls sent to PCP. What the panel asks the
- * host to post (ui/message) and to tell the model are kept on window.
+ * handed `result`, with its tool calls sent to PCP. What the panel asks of
+ * the host is kept on window (FakeHost).
  */
 async function hostPanel(
   page: Page,
   baseURL: string,
   html: string,
   result: unknown,
+  { refuseMessages = false, toolsDown = false } = {},
 ) {
   await page.exposeFunction(
     "pcpCall",
@@ -564,15 +576,17 @@ async function hostPanel(
   )
   await page.setContent('<iframe sandbox="allow-scripts"></iframe>')
   await page.evaluate(
-    ({ html, result }) => {
+    ({ html, result, refuseMessages, toolsDown }) => {
       const frame = document.querySelector("iframe")!
-      const host = window as unknown as {
-        pcpCall: (name: string, args: unknown) => Promise<unknown>
-        sent: unknown[]
-        told: unknown[]
-      }
-      host.sent = []
-      host.told = []
+      const host = window as unknown as FakeHost
+      Object.assign(host, {
+        sent: [],
+        told: [],
+        opened: [],
+        teardowns: 0,
+        refuseMessages,
+        toolsDown,
+      })
       const post = (message: object) =>
         frame.contentWindow!.postMessage({ jsonrpc: "2.0", ...message }, "*")
 
@@ -581,26 +595,46 @@ async function hostPanel(
         const { id, method, params } = event.data
         if (method === "ui/notifications/initialized") {
           post({ method: "ui/notifications/tool-result", params: result })
+        } else if (method === "ui/notifications/request-teardown") {
+          host.teardowns += 1
         } else if (method === "tools/call") {
-          post({
-            id,
-            result: await host.pcpCall(params.name, params.arguments),
-          })
+          post(
+            host.toolsDown
+              ? { id, error: { code: -32000, message: "Not connected" } }
+              : {
+                  id,
+                  result: await host.pcpCall(params.name, params.arguments),
+                },
+          )
+        } else if (method === "ui/message") {
+          if (!host.refuseMessages) host.sent.push(params)
+          post({ id, result: host.refuseMessages ? { isError: true } : {} })
         } else if (id !== undefined) {
-          if (method === "ui/message") host.sent.push(params)
           if (method === "ui/update-model-context") host.told.push(params)
+          if (method === "ui/open-link") host.opened.push(params.url)
           post({ id, result: { hostContext: {} } })
         }
       })
       frame.srcdoc = html
     },
-    { html, result },
+    { html, result, refuseMessages, toolsDown },
   )
 
-  return page.frameLocator("iframe")
+  return {
+    panel: page.frameLocator("iframe"),
+    host: <K extends keyof FakeHost>(key: K) =>
+      page.evaluate((key) => (window as unknown as FakeHost)[key], key),
+    set: (key: "refuseMessages" | "toolsDown", value: boolean) =>
+      page.evaluate(
+        ([key, value]) => {
+          ;(window as unknown as Record<string, boolean>)[key] = value
+        },
+        [key, value] as const,
+      ),
+  }
 }
 
-test("a panel the host rebuilds shows where things are now, and can tell the assistant", async ({
+test("a panel the host rebuilds shows where things are now, and tells the assistant", async ({
   page,
   baseURL,
 }) => {
@@ -638,33 +672,113 @@ test("a panel the host rebuilds shows where things are now, and can tell the ass
     html,
     asked.body.result,
   )
-  await expect(first.getByText(`${name} needs connecting`)).toBeVisible()
-  await expect(first.getByRole("button", { name: "Connect" })).toBeVisible()
+  await expect(first.panel.getByText(`${name} needs connecting`)).toBeVisible()
+  await expect(
+    first.panel.getByRole("button", { name: "Add server" }),
+  ).not.toBeVisible()
 
+  // Signing in while this panel watches: it tells the assistant at once,
+  // then asks to be closed.
+  await first.panel.getByRole("button", { name: "Connect" }).click()
+  await expect.poll(() => first.host("opened")).toEqual([connect.startUrl])
   await page.goto(connect.startUrl)
   await expect(page).toHaveURL(
     new RegExp(`/servers/${connect.serverId}\\?connected=1$`),
   )
+  await expect(first.panel.getByText(`${name} is connected.`)).toBeVisible()
+  await expect
+    .poll(() => first.host("sent"))
+    .toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: `I connected ${name} in PCP. Carry on.` },
+        ],
+      },
+    ])
+  await expect.poll(() => first.host("teardowns")).toBe(1)
 
-  // Signed in since: connected, with a message for the assistant.
-  const hostPage = await page.context().newPage()
-  const second = await hostPanel(hostPage, baseURL!, html, asked.body.result)
-  await expect(second.getByText(`${name} is connected.`)).toBeVisible()
-  await expect(
-    second.getByRole("button", { name: "Add server" }),
-  ).not.toBeVisible()
-  expect(JSON.stringify(await hostPage.evaluate("window.told"))).toContain(
+  // Rebuilt after that: connected, and a button rather than a second post.
+  const second = await hostPanel(
+    await page.context().newPage(),
+    baseURL!,
+    html,
+    asked.body.result,
+    { refuseMessages: true },
+  )
+  await expect(second.panel.getByText(`${name} is connected.`)).toBeVisible()
+  expect(JSON.stringify(await second.host("told"))).toContain(
     `The owner connected ${name}`,
   )
+  expect(await second.host("sent")).toEqual([])
 
-  await second.getByRole("button", { name: "Tell the assistant" }).click()
-  await expect(second.getByText("Sent.")).toBeVisible()
-  expect(await hostPage.evaluate("window.sent")).toEqual([
-    {
-      role: "user",
-      content: [
-        { type: "text", text: `I connected ${name} in PCP. Carry on.` },
-      ],
-    },
-  ])
+  // A host that refuses says so in its result.
+  const tell = second.panel.getByRole("button", { name: "Tell the assistant" })
+  await tell.click()
+  await expect(
+    second.panel.getByText("Your app did not send it."),
+  ).toBeVisible()
+  expect(await second.host("teardowns")).toBe(0)
+
+  await second.set("refuseMessages", false)
+  await tell.click()
+  await expect(second.panel.getByText("Sent.")).toBeVisible()
+  expect(await second.host("sent")).toHaveLength(1)
+  expect(await second.host("teardowns")).toBe(1)
+})
+
+test("a rebuilt panel shows an open question once PCP says so, and an answer goes to the assistant", async ({
+  page,
+  baseURL,
+}) => {
+  const name = `Still open ${RUN}`
+  const html = (
+    await mcpRequest(baseURL!, token, "resources/read", {
+      uri: "ui://pcp/panel",
+    })
+  ).body.result!.contents![0].text!
+  const asked = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "register_server",
+    { name, url: upstream.oauthMcpUrl, auth_type: "oauth" },
+    { capabilities: PANELS },
+  )
+
+  // PCP out of reach: the question as given.
+  const offline = await hostPanel(
+    await page.context().newPage(),
+    baseURL!,
+    html,
+    asked.body.result,
+    { toolsDown: true },
+  )
+  await expect(
+    offline.panel.getByRole("button", { name: "Add server" }),
+  ).toBeVisible()
+
+  // Still open, says PCP: the question, and answering it tells the
+  // assistant without being asked to.
+  const open = await hostPanel(
+    await page.context().newPage(),
+    baseURL!,
+    html,
+    asked.body.result,
+  )
+  await expect(open.panel.getByText(`Add the server ${name}?`)).toBeVisible()
+  await open.panel.getByRole("button", { name: "Not now" }).click()
+  await expect
+    .poll(() => open.host("sent"))
+    .toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `I answered in PCP ("Not now"): Add the server ${name}? Carry on.`,
+          },
+        ],
+      },
+    ])
+  await expect.poll(() => open.host("teardowns")).toBe(1)
 })
