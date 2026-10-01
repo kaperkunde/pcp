@@ -7,9 +7,11 @@ import {
   decisionsFor,
   isOpen,
   parseDecision,
+  parsePermissionTiers,
   previewArgs,
   requestHash,
   storedResultText,
+  storePermissionTiers,
   summaryText,
   UI_EXTENSION,
 } from "./permission-rules"
@@ -51,6 +53,44 @@ describe("choosePermissionTier", () => {
         extensions: { "example.com/other": {} },
       } as never),
     ).toBe("link")
+  })
+
+  it("skips what the token turned off, down to the link", () => {
+    const everything = {
+      elicitation: { form: {}, url: {} },
+      extensions: { [UI_EXTENSION]: {} },
+    } as never
+
+    expect(choosePermissionTier(everything, ["form", "url", "link"])).toBe(
+      "form",
+    )
+    expect(choosePermissionTier(everything, ["url", "link"])).toBe("url")
+    expect(choosePermissionTier(everything, ["link"])).toBe("link")
+    // A client that only shows a prompt the token turned off gets the link.
+    expect(
+      choosePermissionTier({ elicitation: {} }, ["app", "url", "link"]),
+    ).toBe("link")
+  })
+})
+
+describe("permission tiers on a token", () => {
+  it("reads the stored list in trying order, always with the link", () => {
+    expect(parsePermissionTiers("app,form,url")).toEqual([
+      "app",
+      "form",
+      "url",
+      "link",
+    ])
+    expect(parsePermissionTiers("url, app")).toEqual(["app", "url", "link"])
+    expect(parsePermissionTiers("")).toEqual(["link"])
+    expect(parsePermissionTiers("form,telepathy")).toEqual(["form", "link"])
+  })
+
+  it("stores the ones that can be turned off, and refuses unknown names", () => {
+    expect(storePermissionTiers(["url", "app"])).toBe("app,url")
+    expect(storePermissionTiers(["link"])).toBe("")
+    expect(storePermissionTiers([])).toBe("")
+    expect(() => storePermissionTiers(["telepathy"])).toThrow(/options shown/)
   })
 })
 

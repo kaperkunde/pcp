@@ -490,8 +490,8 @@ export function buildGatewayServer(
       annotations: { readOnlyHint: true, openWorldHint: false },
       _meta: PANEL_TOOL_META,
     },
-    logged("check_permission", () => ({}))(async (args: { id: string }) =>
-      checkPermission(scope, args.id),
+    logged("check_permission", () => ({}))(async (args: { id: string }, ctx) =>
+      checkPermission(scope, args.id, toolRequest(ctx)),
     ),
   )
 
@@ -515,12 +515,16 @@ export function buildGatewayServer(
       ) => {
         // Hosts that show panels hide this tool from the assistant. A client
         // that did not say it shows panels may list it to the assistant, so
-        // the answer has to come from the owner in PCP instead.
+        // the answer has to come from the owner in PCP instead; so it does
+        // when the owner turned the panel off for this token.
         if (
-          choosePermissionTier(toolRequest(ctx).clientCapabilities) !== "app"
+          choosePermissionTier(
+            toolRequest(ctx).clientCapabilities,
+            scope.permissionTiers,
+          ) !== "app"
         ) {
           return failure(
-            `This app did not say it shows PCP's panel, so the owner answers in PCP: ${permissionUrl(scope.publicUrl, args.id)}`,
+            `This app did not say it shows PCP's panel, or the panel is off for this token, so the owner answers in PCP: ${permissionUrl(scope.publicUrl, args.id)}`,
           )
         }
 

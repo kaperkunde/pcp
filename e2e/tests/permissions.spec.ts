@@ -218,6 +218,62 @@ test("a client's own prompt asks, and runs the answer once", async ({
   expect(callsOf("echo_auth")).toBe(1)
 })
 
+test("a way of asking turned off on the token falls back to the link", async ({
+  page,
+  baseURL,
+}) => {
+  const prompt = () => page.getByLabel("The app's own prompt")
+  const panel = () => page.getByLabel("PCP's panel")
+  const save = async () => {
+    await page.getByRole("button", { name: "Save settings" }).click()
+    await expect(
+      page.getByRole("status").filter({ hasText: "Saved." }),
+    ).toBeVisible()
+  }
+
+  await page.goto(`/tokens/${tokenId}`)
+  await expect(prompt()).toBeChecked()
+  await expect(page.getByLabel("A link")).toBeDisabled()
+  await prompt().uncheck()
+  await panel().uncheck()
+  await save()
+
+  // A client that declares a prompt is not sent one it might never show.
+  const args = { server: SLUG, tool: "echo_auth", arguments: {} }
+  const asked = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
+    capabilities: { ...FORM, ...PANELS },
+  })
+  expect(asked.body.result?.resultType).not.toBe("input_required")
+  expect(toolText(asked)).toContain("Not done yet")
+  const { id } = linkIn(toolText(asked))
+
+  // With the panel off, a panel host gets no buttons and cannot answer.
+  const checked = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "check_permission",
+    { id },
+    { capabilities: PANELS },
+  )
+  expect(checked.body.result?.structuredContent?.kind).toBe("done")
+  const clicked = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "answer_permission",
+    { id, decision: "always" },
+    { capabilities: PANELS },
+  )
+  expect(clicked.body.result?.isError).toBe(true)
+  expect(callsOf("echo_auth")).toBe(1)
+
+  // Back on, for the tests after this one.
+  await page.reload()
+  await expect(prompt()).not.toBeChecked()
+  await prompt().check()
+  await panel().check()
+  await save()
+})
+
 test("a client that shows panels gets PCP's panel, which only the owner answers", async ({
   baseURL,
 }) => {

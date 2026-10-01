@@ -6,6 +6,7 @@ import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { PermissionDecision } from "@/components/permission-decision"
+import { PermissionTiersField } from "@/components/permission-tiers-field"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
@@ -421,6 +422,10 @@ function SettingsCard({
             <ManageEndpointsField
               id="token-manage"
               defaultChecked={token.manageEndpoints}
+            />
+            <PermissionTiersField
+              idPrefix="token-tier"
+              checked={token.permissionTiers}
             />
             <FormError error={state.status === "error" ? state.error : null} />
             <FormNote message={state.status === "ok" ? state.message : null} />
