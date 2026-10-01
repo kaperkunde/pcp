@@ -106,7 +106,7 @@ test("issues an API token and describes the servers behind it", async ({
 }) => {
   token = await createToken(page, `Assistant ${RUN}`)
 
-  const { instructions, tools } = await initialize(baseURL!, token)
+  const { instructions, tools, serverInfo } = await initialize(baseURL!, token)
   expect(tools).toEqual([
     "search_tools",
     "describe_tool",
@@ -119,6 +119,15 @@ test("issues an API token and describes the servers behind it", async ({
   expect(instructions).toContain(
     `${SLUG}: Sends postcards and adds numbers. (3 tools)`,
   )
+
+  // The app shows PCP's icon beside the gateway, served from PCP itself.
+  const icon = serverInfo?.icons?.find((entry) =>
+    entry.sizes?.includes("192x192"),
+  )
+  expect(icon?.src).toBe(`${baseURL}/icons/icon-192.png`)
+  const image = await fetch(icon!.src)
+  expect(image.status).toBe(200)
+  expect(image.headers.get("content-type")).toBe("image/png")
 
   // Tools ask the owner first by default (permissions.spec.ts covers that);
   // this spec is about the gateway, so let the token run them.

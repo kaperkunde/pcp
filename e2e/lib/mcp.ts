@@ -13,6 +13,10 @@ export type McpResponse = {
         _meta?: { ui?: { resourceUri?: string; visibility?: string[] } }
       }>
       contents?: Array<{ uri: string; mimeType?: string; text?: string }>
+      serverInfo?: {
+        name: string
+        icons?: Array<{ src: string; mimeType?: string; sizes?: string[] }>
+      }
       // PCP's panel reads these (lib/core/panel.ts).
       structuredContent?: {
         kind?: string
@@ -92,7 +96,11 @@ export async function callTool(
 export async function initialize(
   baseURL: string,
   token: string,
-): Promise<{ instructions: string; tools: string[] }> {
+): Promise<{
+  instructions: string
+  tools: string[]
+  serverInfo: NonNullable<McpResponse["body"]["result"]>["serverInfo"]
+}> {
   const init = await mcpRequest(baseURL, token, "initialize", {
     protocolVersion: "2025-06-18",
     capabilities: {},
@@ -103,6 +111,7 @@ export async function initialize(
   return {
     instructions: String(init.body.result?.instructions ?? ""),
     tools: (list.body.result?.tools ?? []).map((tool) => tool.name),
+    serverInfo: init.body.result?.serverInfo,
   }
 }
 

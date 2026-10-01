@@ -4,6 +4,7 @@ import {
   McpServer,
   type CallToolResult,
   type ClientCapabilities,
+  type Icon,
   type InputRequiredResult,
   type ServerContext,
 } from "@modelcontextprotocol/server"
@@ -287,6 +288,21 @@ function toolRequest(ctx: ServerContext | undefined): ToolRequest {
 
 const HEADER_NAME = /^[A-Za-z0-9-]{1,100}$/
 
+/**
+ * PCP's icon for an app to show beside the gateway (the server's `icons` in
+ * the MCP spec). Absolute, and on PCP's own address: an app may refuse an
+ * icon served from anywhere else. The files are the web app's (public/icons).
+ */
+export function gatewayIcons(publicUrl: string): Icon[] {
+  const base = publicUrl.replace(/\/+$/, "")
+
+  return [192, 512].map((size) => ({
+    src: `${base}/icons/icon-${size}.png`,
+    mimeType: "image/png",
+    sizes: [`${size}x${size}`],
+  }))
+}
+
 export function buildGatewayServer(
   scope: GatewayScope,
   servers: GatewayServer[],
@@ -298,7 +314,12 @@ export function buildGatewayServer(
   } = {},
 ): McpServer {
   const server = new McpServer(
-    { name: "pcp", title: "PCP", version: PCP_VERSION },
+    {
+      name: "pcp",
+      title: "PCP",
+      version: PCP_VERSION,
+      icons: gatewayIcons(scope.publicUrl),
+    },
     {
       instructions: buildInstructions(servers, {
         manageEndpoints: scope.manageEndpoints,
