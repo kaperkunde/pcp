@@ -198,8 +198,10 @@ test("a memory read in every conversation comes with the instructions", async ({
   await expect(kept.getByRole("status")).toHaveText("Saved.")
 
   const { instructions } = await initialize(baseURL!, token)
+  // The first line says so, for a client that cuts instructions short (which
+  // ones it names is pinned in memories.test.ts; runs here leave theirs).
   expect(instructions.split("\n")[0]).toContain(
-    `The owner chose memories to follow in every conversation: /memories/shared/${voice}`,
+    "The owner chose memories to follow in every conversation:",
   )
   expect(instructions).toContain(
     `<memory path="/memories/shared/${voice}">\nSpeak like a pirate.\n</memory>`,
