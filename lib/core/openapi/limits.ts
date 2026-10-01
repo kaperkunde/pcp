@@ -41,6 +41,8 @@ export const MAX_TOOL_DESCRIPTION = 2000
 export const MAX_OUTLINE_CHARS = 2000
 /** Properties of one object an outline names before "… N more". */
 export const MAX_OUTLINE_PROPERTIES = 40
+/** Likely mistakes in a schema listed at once (lint.ts). */
+export const MAX_SCHEMA_PROBLEMS = 50
 /** Schema nodes visited while outlining one answer. */
 export const OUTLINE_MAX_NODES = 2000
 /**

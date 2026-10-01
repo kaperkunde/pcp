@@ -221,7 +221,10 @@ adds to them, `patches` replaces them all) rather than by sending it again,
 and read a part at a time: `get_endpoint`'s `specPointer` returns one value of
 the edited document by JSON Pointer, and a value too long to include comes
 back as its keys, to point further in with, so a schema of any size can be
-read in steps under the answer's length limit. The rules are in
+read in steps under the answer's length limit (such a read leaves out what
+the first one said). `includeProblems` lists likely mistakes in the schema
+that confuse assistants, each with the edits that fix it
+(`openapi/lint.ts`); `register_server` names them too. The rules are in
 `lib/core/endpoint-admin.ts`, and they exist because an assistant that can
 change an endpoint decides where PCP sends requests:
 

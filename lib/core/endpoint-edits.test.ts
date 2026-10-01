@@ -491,10 +491,12 @@ describe("changing an endpoint with edits", () => {
       updateOrAsk(scope, slug, { refreshSpec: true }),
     ).resolves.toMatchObject({ updated: expect.stringMatching(/not changed/) })
 
-    expect((await getEndpoint(scope, slug)).changes).toMatchObject({
-      patches: expect.stringMatching(/^asks the owner/),
-      refreshSpec: expect.stringMatching(/^asks the owner/),
-      baseUrl: expect.stringMatching(/^no: the owner/),
+    expect((await getEndpoint(scope, slug)).changes).toEqual({
+      "name, description, toolDescriptions, patches, refreshSpec":
+        expect.stringMatching(/^asks the owner/),
+      "spec, baseUrl": expect.stringMatching(/^no: the owner/),
+      readOnly: expect.stringMatching(/on only/),
+      authentication: expect.stringMatching(/only the owner/),
     })
   })
 })
@@ -582,8 +584,11 @@ describe("reading a schema a part at a time", () => {
     expect(stored.specPart).toMatchObject({
       value: "https://demo.example.com/api",
     })
-    // The tool list is left out so the part has room.
+    // The tool list is left out so the part has room, and what was said on
+    // the first read is not said again.
     expect(edited.tools).toBeUndefined()
+    expect(edited.changes).toBeUndefined()
+    expect(edited.description).toBeUndefined()
     expect(edited.toolCount).toBe(2)
   })
 

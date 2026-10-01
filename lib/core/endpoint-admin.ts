@@ -22,6 +22,7 @@ import { invalid, PcpError } from "./errors"
 import { bareHostname, isPublicAddress } from "./openapi/address"
 import { fetchSpec } from "./openapi/fetch-spec"
 import { isObject } from "./openapi/json"
+import { lintDocument, type SchemaProblem } from "./openapi/lint"
 import { readPatches, valueAt, type PatchOperation } from "./openapi/patch"
 import { readCallPlan } from "./openapi/plan"
 import { canonicalJson } from "./permission-rules"
@@ -91,7 +92,8 @@ export type EndpointScope = Pick<ResolvedToken, "ctx" | "tokenId" | "serverIds">
 export type EndpointDetails = {
   endpoint: string
   name: string
-  description: string
+  /** Left out, with statusMessage and changes, when one part is asked for. */
+  description?: string
   baseUrl: string
   readOnly: boolean
   /** Refuses private, local and link-local addresses; only the owner clears it. */
@@ -113,9 +115,12 @@ export type EndpointDetails = {
   }
   authentication: { type: "none" | "header"; header: string | null }
   status: ServerStatus
-  statusMessage: string
-  /** What this token can and cannot change on this endpoint right now. */
-  changes: Record<string, string>
+  statusMessage?: string
+  /**
+   * What this token can and cannot change on this endpoint right now, with
+   * the fields that share an answer listed together ("name, description").
+   */
+  changes?: Record<string, string>
   toolCount: number
   /** Left out when a part of the schema is asked for, to leave it room. */
   tools?: Array<{
@@ -129,6 +134,10 @@ export type EndpointDetails = {
   spec?: string
   /** The edits, when asked for and not too long. */
   patches?: PatchOperation[]
+  /** Likely mistakes in the edited schema, with edits that fix them. */
+  problems?: SchemaProblem[]
+  /** How many more there are than listed. */
+  moreProblems?: number
   /** One part of the edited schema, when asked for by pointer. */
   specPart?:
     | { pointer: string; value: unknown }
@@ -259,6 +268,19 @@ function describeChanges(server: McpServer): Record<string, string> {
   }
 }
 
+/** Fields that share an answer, as one entry: said once, not five times. */
+function groupChanges(changes: Record<string, string>): Record<string, string> {
+  const byAnswer = new Map<string, string[]>()
+
+  for (const [field, answer] of Object.entries(changes)) {
+    byAnswer.set(answer, [...(byAnswer.get(answer) ?? []), field])
+  }
+
+  return Object.fromEntries(
+    [...byAnswer].map(([answer, fields]) => [fields.join(", "), answer]),
+  )
+}
+
 export type ReadOptions = {
   includeSpec?: boolean
   includePatches?: boolean
@@ -266,6 +288,8 @@ export type ReadOptions = {
   specPointer?: string
   /** Read specPointer from the schema as stored, before the edits. */
   unedited?: boolean
+  /** List likely mistakes in the schema, with the edits that fix them. */
+  includeProblems?: boolean
 }
 
 async function detailsOf(
@@ -275,6 +299,7 @@ async function detailsOf(
     includePatches = false,
     specPointer,
     unedited = false,
+    includeProblems = false,
   }: ReadOptions = {},
 ): Promise<EndpointDetails> {
   const [row, spec] = await Promise.all([
@@ -309,7 +334,7 @@ async function detailsOf(
         : { type: "none", header: null },
     status: server.status as ServerStatus,
     statusMessage: server.statusMessage,
-    changes: describeChanges(server),
+    changes: groupChanges(describeChanges(server)),
     toolCount: server.tools.length,
     tools: server.tools.map((tool) => {
       const plan = readCallPlan(tool.operation)
@@ -329,8 +354,21 @@ async function detailsOf(
 
   // The answer has a length limit, and a large endpoint's tool list alone can
   // reach it: what was asked for comes first.
-  if (includeSpec || includePatches || specPointer !== undefined) {
+  if (
+    includeSpec ||
+    includePatches ||
+    includeProblems ||
+    specPointer !== undefined
+  ) {
     delete details.tools
+  }
+
+  // A read for one part of the schema, or its mistakes, is one of many in a
+  // row: what the endpoint is and what may be changed were said already.
+  if (includeProblems || specPointer !== undefined) {
+    delete details.description
+    delete details.statusMessage
+    delete details.changes
   }
 
   if (!server.enabled) {
@@ -355,6 +393,22 @@ async function detailsOf(
     } else {
       notes.push(
         "The edits are too long to include here; replace them all with patches to start over.",
+      )
+    }
+  }
+
+  if (includeProblems && spec) {
+    const { problems, more } = lintDocument(
+      readDocument(spec.text, spec.patches),
+      { blockedHeaders: server.authHeaderName ? [server.authHeaderName] : [] },
+    )
+    details.problems = problems
+    if (more > 0) {
+      details.moreProblems = more
+    }
+    if (problems.some((problem) => problem.fix)) {
+      notes.push(
+        "Each fix is a list of edits for update_endpoint's addPatches; check one with specPointer before sending it.",
       )
     }
   }
@@ -501,6 +555,8 @@ export async function prepareRegistration(
   description: string
   registration: EndpointRegistration
   url: string
+  /** Likely mistakes in the schema as edited, for the assistant. */
+  problems: SchemaProblem[]
 }> {
   const { name, description } = normalizeNameAndDescription(input)
   const fromUrl = input.specUrl !== undefined
@@ -574,6 +630,9 @@ export async function prepareRegistration(
     name,
     description,
     url: preview.baseUrl,
+    problems: lintDocument(readDocument(text, patches), {
+      blockedHeaders: input.authHeaderName ? [input.authHeaderName] : [],
+    }).problems,
     registration: {
       spec: text,
       specUrl,

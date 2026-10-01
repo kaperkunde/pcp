@@ -39,6 +39,16 @@ async function updateEndpointDetails(
   return result
 }
 
+/** What get_endpoint says about one field, wherever it is grouped. */
+function changeFor(
+  details: { changes?: Record<string, string> },
+  field: string,
+) {
+  return Object.entries(details.changes ?? {}).find(([fields]) =>
+    fields.split(", ").includes(field),
+  )?.[1]
+}
+
 let cleanup: () => Promise<void>
 let api: TestApi
 let ctx: Awaited<ReturnType<typeof setupVault>>
@@ -376,11 +386,11 @@ describe("getEndpoint", () => {
       belongsTo: "owner",
       authentication: { type: "header", header: "X-API-Key" },
     })
-    expect(details.changes.baseUrl).toMatch(
+    expect(changeFor(details, "baseUrl")).toMatch(
       /the owner configured this endpoint/,
     )
-    expect(details.changes.authentication).toMatch(/only the owner/)
-    expect(details.changes.readOnly).toMatch(/yes, on only/)
+    expect(changeFor(details, "authentication")).toMatch(/only the owner/)
+    expect(changeFor(details, "readOnly")).toMatch(/yes, on only/)
   })
 
   it("never includes a secret, its name, or its id", async () => {
@@ -795,6 +805,49 @@ describe("an endpoint becomes the owner's when they attach a secret", () => {
     expect(
       (await getEndpoint(scope, slug)).tools!.map((tool) => tool.name),
     ).toEqual(["listPets"])
+  })
+})
+
+describe("mistakes in a schema", () => {
+  it("are listed on request, and told to the assistant that registers it", async () => {
+    const input = {
+      name: "Pets",
+      spec: spec(api.origin, {
+        paths: {
+          "/pets": {
+            get: {
+              operationId: "listPets",
+              parameters: [
+                {
+                  name: "status",
+                  in: "query",
+                  schema: { type: "string" },
+                  example: "?status=sold",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    }
+    const { problems } = await prepareRegistration(ctx, input)
+    expect(problems.map((problem) => problem.at)).toEqual([
+      "/paths/~1pets/get/parameters/0/example",
+      "/paths",
+    ])
+
+    const { slug } = await approve(input)
+    const details = await getEndpoint(scope, slug, { includeProblems: true })
+
+    expect(details.problems).toEqual(problems)
+    expect(details.problems![0]!.fix).toEqual([
+      {
+        op: "replace",
+        path: "/paths/~1pets/get/parameters/0/example",
+        value: "sold",
+      },
+    ])
+    expect(details.tools).toBeUndefined()
   })
 })
 

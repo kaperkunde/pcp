@@ -58,6 +58,7 @@ import {
   type ToolRequest,
 } from "./permissions"
 import { MAX_PATCH_OPERATIONS } from "./openapi/limits"
+import type { SchemaProblem } from "./openapi/lint"
 import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog } from "./request-log"
 import { canRereadTools, type SyncResult } from "./catalogue"
@@ -224,6 +225,24 @@ export function buildInstructions(
     ...lines,
     ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
     ...memoryInstructions(sharedMemories),
+  ].join("\n")
+}
+
+/** Mistakes PCP found in a schema being registered, briefly. */
+function problemsLead(problems: SchemaProblem[]): string {
+  const shown = problems
+    .slice(0, 5)
+    .map(
+      (problem) =>
+        `- ${problem.problem}${problem.fix ? ` Fix: ${JSON.stringify(problem.fix)}` : ""}`,
+    )
+
+  return [
+    `PCP found ${problems.length} likely mistake${problems.length === 1 ? "" : "s"} in this schema. Once it is added, send the fixes with update_endpoint's addPatches; get_endpoint with includeProblems lists them all. (Registering it again with them in spec_patches would leave this request open too.)`,
+    ...shown,
+    ...(problems.length > shown.length
+      ? [`- and ${problems.length - shown.length} more`]
+      : []),
   ].join("\n")
 }
 
@@ -890,6 +909,7 @@ export function buildGatewayServer(
           secretName,
         }
         let input: RegisterArgs
+        let problems: SchemaProblem[] = []
 
         if (isApi) {
           // Reading a large schema is real work, and every call leaves a
@@ -926,6 +946,7 @@ export function buildGatewayServer(
             oauthScope: null,
             endpoint: prepared.registration,
           }
+          problems = prepared.problems
         } else {
           input = {
             ...common,
@@ -936,12 +957,21 @@ export function buildGatewayServer(
           }
         }
 
-        return withPermission(
+        const request = toolRequest(ctx)
+        const asked = await withPermission(
           scope,
           { kind: "register", input },
-          toolRequest(ctx),
+          request,
           { toolShowsPanel: true },
         )
+
+        // The assistant hears about mistakes PCP found in the schema, with
+        // the edits that fix them.
+        return problems.length === 0 ||
+          isInputRequiredResult(asked) ||
+          request.requestState !== undefined
+          ? asked
+          : withLead(problemsLead(problems), asked)
       },
     ),
   )
@@ -1073,6 +1103,12 @@ export function buildGatewayServer(
             .boolean()
             .optional()
             .describe("Read specPointer from the schema before the edits."),
+          includeProblems: z
+            .boolean()
+            .optional()
+            .describe(
+              "List likely mistakes in the schema that confuse assistants (examples written as query strings or of the wrong type, a required header that only takes one value, answers it does not describe), each with the edits that fix it.",
+            ),
         }),
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
@@ -1086,6 +1122,7 @@ export function buildGatewayServer(
           includePatches?: boolean
           specPointer?: string
           unedited?: boolean
+          includeProblems?: boolean
         }) => {
           const { endpoint, ...options } = args
           return json(await getEndpoint(scope, endpoint, options))
