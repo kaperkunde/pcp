@@ -318,3 +318,29 @@ describe("the finished url", () => {
     ).toThrow(/unfilled/)
   })
 })
+
+describe("paths that mean something else to some servers", () => {
+  it("encodes a semicolon in a value, so '..;' is not a dot segment for servers that read it as one", () => {
+    expect(buildRequest(pathPlan, BASE, { petId: "..;" }, {}).url).toBe(
+      "https://api.example.com/v1/pets/..%3B",
+    )
+    expect(buildRequest(pathPlan, BASE, { petId: "a;b=c" }, {}).url).toBe(
+      "https://api.example.com/v1/pets/a%3Bb%3Dc",
+    )
+  })
+
+  it("keeps a literal path template that normalizes away from leaving the base path", () => {
+    // These come from the schema, which an assistant may have written. The
+    // URL parser removes the dot segments; the prefix check then refuses.
+    for (const path of [
+      "/../admin",
+      "/%2e%2e/admin",
+      "/.%2E/admin",
+      "/a/../../admin",
+    ]) {
+      expect(() => buildRequest(plan({ path }), BASE, {}, {}), path).toThrow(
+        /leave the endpoint's base URL/,
+      )
+    }
+  })
+})

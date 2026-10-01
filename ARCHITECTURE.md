@@ -207,7 +207,10 @@ can register an endpoint decides where PCP sends requests:
   (`openapi/transport.ts` resolves the name itself and checks every answer),
   so a name that resolves to a public address for a check and a private one
   for the connection cannot get through. The owner turns it off per endpoint,
-  for an API on their own network.
+  for an API on their own network. It connects directly, not through an
+  outbound proxy (a proxy does its own name resolution, which PCP could not
+  check): a host that must use one has to turn this off for those endpoints,
+  and the proxy's own egress rules are then what protect it.
 - **Text only.** The assistant supplies the schema as text; PCP never fetches
   an address the assistant chose. An endpoint the owner reads from a URL
   keeps that URL, and its schema is the owner's to change.

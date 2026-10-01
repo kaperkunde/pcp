@@ -39,16 +39,41 @@ const MIN_REDACTED_LENGTH = 4
  * appear inside a JSON string; the longest goes first so a header value
  * is not left half-redacted around the key it contains.
  */
-export function redactSecrets(text: string, values: string[]): string {
-  const variants = values
-    .filter((value) => value.length >= MIN_REDACTED_LENGTH)
-    .flatMap((value) => [value, JSON.stringify(value).slice(1, -1)])
-    .sort((a, b) => b.length - a.length)
+export function redactSecrets(
+  text: string,
+  values: string[],
+  { truncated = false }: { truncated?: boolean } = {},
+): string {
+  const variants = [
+    ...new Set(
+      values
+        .filter((value) => value.length >= MIN_REDACTED_LENGTH)
+        .flatMap((value) => [value, JSON.stringify(value).slice(1, -1)]),
+    ),
+  ].sort((a, b) => b.length - a.length)
 
   let result = text
-  for (const variant of new Set(variants)) {
+  for (const variant of variants) {
     result = result.split(variant).join(REDACTED)
   }
+
+  // An answer cut at the size limit can end partway through the key, which
+  // the whole-value pass cannot see: drop the start of it too.
+  if (truncated) {
+    for (const variant of variants) {
+      for (
+        let length = variant.length - 1;
+        length >= MIN_REDACTED_LENGTH;
+        length--
+      ) {
+        if (result.endsWith(variant.slice(0, length))) {
+          result = `${result.slice(0, -length)}${REDACTED}`
+          break
+        }
+      }
+    }
+  }
+
   return result
 }
 
@@ -192,7 +217,7 @@ export async function executeCall(
     // Before the JSON is parsed, so the text and structuredContent are
     // both clean.
     if (text !== null) {
-      text = redactSecrets(text, redact)
+      text = redactSecrets(text, redact, { truncated })
     }
   }
 

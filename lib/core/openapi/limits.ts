@@ -12,6 +12,12 @@ export const MAX_TOOL_SCHEMA_CHARS = 32_000
 export const REF_MAX_DEPTH = 64
 /** Nodes visited while inlining references, per operation. */
 export const REF_MAX_NODES = 20_000
+/**
+ * Nodes visited while inlining references, across the whole schema. Each
+ * operation has its own budget, but 2000 operations at the full budget would
+ * hold the server for seconds; past this, the rest are skipped.
+ */
+export const MAX_TOTAL_REF_NODES = 2_000_000
 export const MAX_TOOL_DESCRIPTION = 2000
 export const MAX_YAML_ALIASES = 100
 

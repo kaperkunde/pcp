@@ -200,3 +200,43 @@ describe("redaction", () => {
     )
   })
 })
+
+describe("redaction when the answer is cut at the size cap", () => {
+  it("drops the start of a key the cut ended in the middle of", () => {
+    const secret = "sk-live-0123456789"
+    // The first ten characters of the key made it in before the cut.
+    expect(
+      redactSecrets(`token: ${secret.slice(0, 10)}`, [secret], {
+        truncated: true,
+      }),
+    ).toBe("token: [redacted]")
+    // Also for a header value that wraps the key.
+    expect(
+      redactSecrets("auth: Bearer sk-live-01", [secret, `Bearer ${secret}`], {
+        truncated: true,
+      }),
+    ).toBe("auth: [redacted]")
+    // A complete answer that merely ends like the start of the key is left.
+    expect(redactSecrets(`ends: ${secret.slice(0, 10)}`, [secret])).toBe(
+      `ends: ${secret.slice(0, 10)}`,
+    )
+    // A cut that did not reach the key changes nothing.
+    expect(redactSecrets("plain text", [secret], { truncated: true })).toBe(
+      "plain text",
+    )
+  })
+
+  it("applies to a real answer cut by the byte cap", async () => {
+    api = await startTestApi((_, res) => {
+      res.setHeader("content-type", "text/plain")
+      // The key straddles the 30-byte cap.
+      res.end(`${"x".repeat(24)}sk-live-0123456789 and more text`)
+    })
+    const outcome = await executeCall(get("/x"), {
+      maxResponseBytes: 30,
+      redact: ["sk-live-0123456789"],
+    })
+    expect(text(outcome)).toMatch(/^x{24}\[redacted\]\n… \(truncated by PCP/)
+    expect(text(outcome)).not.toContain("sk-liv")
+  })
+})

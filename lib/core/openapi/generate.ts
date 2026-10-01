@@ -5,13 +5,14 @@ import {
   MAX_OPERATIONS,
   MAX_TOOL_DESCRIPTION,
   MAX_TOOL_SCHEMA_CHARS,
+  MAX_TOTAL_REF_NODES,
+  REF_MAX_NODES,
 } from "./limits"
 import type { OpenApiDocument } from "./parse"
 import type { BodyPlan, CallPlan, ParamPlan } from "./plan"
 import {
   derefShallow,
   inlineRefs,
-  newBudget,
   UnsupportedRef,
   type RefBudget,
 } from "./refs"
@@ -67,6 +68,33 @@ class Skip extends Error {
   constructor(readonly reason: string) {
     super(reason)
   }
+}
+
+/**
+ * The literal parts of a path template (outside {placeholders}) come from the
+ * schema, which an assistant may have written. Dot segments, encoded dots,
+ * slashes and semicolons, backslashes and the characters that end a path
+ * would make the request mean something other than the path says, on a
+ * server that reads them differently from PCP.
+ */
+function unsafePathReason(path: string): string | null {
+  const literal = path.replace(/\{[^}]*\}/g, "x")
+
+  if (/[\\?#;\u0000-\u001f\u007f]/.test(literal)) {
+    return "its path has a character PCP will not send (a backslash, ?, #, ; or a control character)"
+  }
+
+  if (/%(2e|2f|5c|3b|00)/i.test(literal)) {
+    return "its path has an encoded dot, slash, backslash or semicolon"
+  }
+
+  if (
+    literal.split("/").some((segment) => segment === "." || segment === "..")
+  ) {
+    return "its path has a dot segment"
+  }
+
+  return null
 }
 
 function sanitizeName(raw: string): string {
@@ -201,6 +229,8 @@ export function generateTools(
   const skipped: Generated["skipped"] = []
   const used = new Set<string>()
   let operations = 0
+  // Shared by every operation: see MAX_TOTAL_REF_NODES.
+  let pool = MAX_TOTAL_REF_NODES
 
   for (const [path, rawItem] of entries(doc.paths)) {
     let item: unknown
@@ -240,8 +270,27 @@ export function generateTools(
 
       const label = `${method.toUpperCase()} ${path}`
 
+      if (pool <= 0) {
+        skipped.push({
+          operation: label,
+          reason: "the schema is larger than PCP reads in full",
+        })
+        continue
+      }
+
+      const budget: RefBudget = { nodes: Math.min(REF_MAX_NODES, pool) }
+      const granted = budget.nodes
+
       try {
-        const tool = buildTool(doc, path, method, item, operation, options)
+        const tool = buildTool(
+          doc,
+          path,
+          method,
+          item,
+          operation,
+          options,
+          budget,
+        )
         tools.push({ ...tool, name: uniqueName(tool.name, used) })
       } catch (error) {
         if (error instanceof Skip) {
@@ -251,6 +300,9 @@ export function generateTools(
         } else {
           throw error
         }
+      } finally {
+        // An exhausted budget is negative: the operation used all it had.
+        pool -= granted - Math.max(0, budget.nodes)
       }
     }
   }
@@ -308,17 +360,21 @@ function buildTool(
   item: JsonObject,
   operation: JsonObject,
   options: { blockedHeaders: string[] },
+  budget: RefBudget,
 ): GeneratedTool {
   if (!path.startsWith("/")) {
     throw new Skip("its path does not start with /")
+  }
+
+  const unsafe = unsafePathReason(path)
+  if (unsafe) {
+    throw new Skip(unsafe)
   }
 
   const servers = own(operation, "servers") ?? own(item, "servers")
   if (Array.isArray(servers) && servers.length > 0) {
     throw new Skip("it uses a server of its own")
   }
-
-  const budget = newBudget()
 
   // Path-level parameters, overridden by the operation's own.
   const merged = new Map<string, RawParameter>()

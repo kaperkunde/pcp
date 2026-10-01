@@ -81,6 +81,10 @@ Not defended against:
   arguments of an operation it registered. A prompt injected into such an
   assistant can do the same. Give the right only to a token that needs it,
   and review what it registers (the endpoint list shows each one).
+- **Endpoints behind an outbound proxy.** Public-only endpoints connect
+  directly so PCP can check the address it connects to. A host that must use
+  a proxy has to allow private addresses on those endpoints, which turns that
+  check off; the proxy's own egress rules are what protect it then.
 - **A key an API alters before echoing it.** PCP removes the secret as sent;
   an API that hashes or truncates it first is not caught.
 

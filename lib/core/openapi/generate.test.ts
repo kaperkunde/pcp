@@ -536,3 +536,105 @@ describe("server variables", () => {
     expect(missing.serverUrlProblem).toMatch(/tenant/)
   })
 })
+
+describe("literal paths from a schema someone else wrote", () => {
+  const skippedFor = (path: string) =>
+    generateTools(
+      spec({ paths: { [path]: { get: { operationId: "op" } } } }),
+      OPTIONS,
+    )
+
+  it("skips the ones that mean something else to some servers", () => {
+    for (const path of [
+      "/a/../b",
+      "/a/./b",
+      "/..",
+      "/a/%2e%2e/b",
+      "/a/%2E/b",
+      "/a%2fb",
+      "/a%5Cb",
+      "/a%3bb",
+      "/a%00b",
+      "/a;/..;/b",
+      "/a\\b",
+      "/a?b=1",
+      "/a#b",
+      "/a\u0001b",
+    ]) {
+      const result = skippedFor(path)
+      expect(result.tools, path).toEqual([])
+      expect(result.skipped[0]!.reason, path).toMatch(/its path has/)
+    }
+  })
+
+  it("keeps ordinary paths, dots in names, and placeholders", () => {
+    for (const path of [
+      "/v1.0/pets",
+      "/pets.json",
+      "/a-b_c/~d",
+      "/pets/{petId}.json",
+    ]) {
+      const doc = spec({
+        paths: {
+          [path]: {
+            get: {
+              operationId: "op",
+              parameters: [
+                {
+                  name: "petId",
+                  in: "path",
+                  required: true,
+                  schema: { type: "string" },
+                },
+              ],
+            },
+          },
+        },
+      })
+      expect(generateTools(doc, OPTIONS).tools, path).toHaveLength(1)
+    }
+  })
+})
+
+describe("the budget for the whole schema", () => {
+  it("stops reading references across operations, not only within one", () => {
+    // Each operation inlines a schema of about 2,000 nodes, well inside the
+    // per-operation budget; a thousand of them are not.
+    const big = {
+      type: "object",
+      properties: Object.fromEntries(
+        Array.from({ length: 900 }, (_, i) => [`p${i}`, { type: "string" }]),
+      ),
+    }
+    const paths = Object.fromEntries(
+      Array.from({ length: 1500 }, (_, i) => [
+        `/p${i}`,
+        {
+          post: {
+            operationId: `op${i}`,
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/Big" },
+                },
+              },
+            },
+          },
+        },
+      ]),
+    )
+    const started = Date.now()
+    const result = generateTools(
+      spec({ paths, components: { schemas: { Big: big } } }),
+      OPTIONS,
+    )
+
+    expect(result.tools.length).toBeGreaterThan(100)
+    expect(result.tools.length).toBeLessThan(1500)
+    expect(result.skipped.at(-1)!.reason).toBe(
+      "the schema is larger than PCP reads in full",
+    )
+    expect(Date.now() - started).toBeLessThan(8000)
+  })
+})

@@ -264,7 +264,8 @@ export function EndpointForm({
               Refuse private, local and link-local addresses, for the schema and
               for every call. On for endpoints an assistant registers; turn it
               off only for an API on your own network that you trust this
-              endpoint to reach.
+              endpoint to reach, or when this machine can only reach the
+              internet through a proxy.
             </p>
           </div>
 
