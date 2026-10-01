@@ -10,6 +10,8 @@ import {
   deleteServer,
   getServer,
   renameServerSlug,
+  setOAuthClient,
+  setOAuthSignInParams,
   setServerEnabled,
   setToolDescription,
   updateServer,
@@ -17,12 +19,7 @@ import {
   type ServerInput,
 } from "@/lib/core/servers"
 import { syncServerTools } from "@/lib/core/upstream"
-import {
-  type ActionState,
-  field,
-  guarded,
-  secretFrom,
-} from "@/lib/server/action-state"
+import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -38,7 +35,9 @@ function inputFrom(formData: FormData): ServerInput {
       : "none",
     authHeaderName: field(formData, "authHeaderName"),
     authValueTemplate: field(formData, "authValueTemplate"),
-    ...secretFrom(formData),
+    authSecretId: field(formData, "authSecretId") || null,
+    authSecretName: field(formData, "authSecretName") || null,
+    authSecretValue: field(formData, "authSecretValue") || null,
     oauthClientId: field(formData, "oauthClientId") || null,
     oauthClientSecretId: field(formData, "oauthClientSecretId") || null,
     oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,
@@ -109,6 +108,60 @@ export async function updateServerAction(
   revalidatePath("/servers")
   revalidatePath(`/servers/${id}`)
   revalidatePath("/tokens/[id]", "page")
+
+  return result
+}
+
+/** The server page's status card: the client a closed provider needs. */
+export async function setOAuthClientAction(
+  _previous: ServerActionResult,
+  formData: FormData,
+): Promise<ServerActionResult> {
+  const ctx = await requireContext()
+  const id = field(formData, "id")
+
+  const result = await guarded(async () => {
+    await setOAuthClient(ctx, id, {
+      clientId: field(formData, "oauthClientId"),
+      clientSecretValue: field(formData, "oauthClientSecretValue") || null,
+    })
+
+    // Moves the status on from "needs a client" to "needs connecting".
+    const sync = await syncServerTools(ctx, await getServer(ctx, id), {
+      publicUrl: await publicUrlFor(ctx),
+    })
+
+    return {
+      message:
+        sync.status === "ok"
+          ? `Saved. Found ${toolCount(sync.toolCount)}.`
+          : "Saved. Choose Connect to sign in with your client.",
+    }
+  })
+
+  revalidatePath("/servers")
+  revalidatePath(`/servers/${id}`)
+
+  return result
+}
+
+/**
+ * The status card's sign-in parameters, for a sign-in PCP cannot renew. The
+ * form then sends you to sign in again, which is when they apply.
+ */
+export async function setSignInParamsAction(
+  _previous: ServerActionResult,
+  formData: FormData,
+): Promise<ServerActionResult> {
+  const ctx = await requireContext()
+  const id = field(formData, "id")
+
+  const result = await guarded(async () => {
+    await setOAuthSignInParams(ctx, id, field(formData, "oauthAuthorizeParams"))
+    return { id }
+  })
+
+  revalidatePath(`/servers/${id}`)
 
   return result
 }

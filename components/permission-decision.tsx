@@ -7,31 +7,32 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import { decidePermissionAction } from "@/lib/actions/permissions"
-import {
-  MAX_SECRET_VALUE,
-  type PermissionDecision as Decision,
-} from "@/lib/core/constants"
+import type { PermissionDecision as Decision } from "@/lib/core/constants"
 import { cn } from "@/lib/utils"
+
+/** The answers that carry out the request, rather than turn it down. */
+const AGREES: Decision[] = ["allow_once", "always"]
 
 /**
  * The owner's buttons for something an assistant asked for. Answering runs
  * the call there and then; the page around it re-renders with the outcome.
- * A new server that sends a secret the owner has not stored yet asks for it
- * here, and agreeing stores it with the server.
+ *
+ * A new server that sends a secret PCP does not hold yet asks for its value
+ * here, the one place it is typed in (`secret`); with `exists`, a secret of
+ * that name was added since and is used when the field is left empty.
  */
 export function PermissionDecision({
   id,
   decisions,
-  newSecret = null,
+  secret,
 }: {
   id: string
   decisions: Array<{ value: Decision; label: string }>
-  newSecret?: { name: string } | null
+  secret?: { name: string; exists: boolean } | null
 }) {
   const [pending, startTransition] = useTransition()
   const [chosen, setChosen] = useState<Decision | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [secretName, setSecretName] = useState(newSecret?.name ?? "")
   const [secretValue, setSecretValue] = useState("")
   const [done, setDone] = useState<{
     message: string
@@ -39,10 +40,10 @@ export function PermissionDecision({
   } | null>(null)
 
   function decide(value: Decision) {
-    const agreeing = value !== "decline" && value !== "block"
+    const agrees = AGREES.includes(value)
 
-    if (newSecret && agreeing && !secretValue.trim()) {
-      setError("Enter the secret to add it.")
+    if (secret && agrees && !secret.exists && !secretValue) {
+      setError(`Enter the value of the secret "${secret.name}" first.`)
       return
     }
 
@@ -53,9 +54,7 @@ export function PermissionDecision({
       const result = await decidePermissionAction(
         id,
         value,
-        newSecret && agreeing
-          ? { name: secretName, value: secretValue }
-          : undefined,
+        secret && agrees && secretValue ? secretValue : undefined,
       )
 
       if (result.status === "error") {
@@ -68,51 +67,45 @@ export function PermissionDecision({
 
   if (done) {
     return (
-      <p
-        className={cn(
-          "whitespace-pre-wrap break-words",
-          done.isError && "text-destructive",
-        )}
-        data-testid="permission-outcome"
-      >
-        {done.message}
-      </p>
+      <div className="flex flex-col gap-2">
+        <p
+          className={cn(
+            "whitespace-pre-wrap break-words",
+            done.isError && "text-destructive",
+          )}
+          data-testid="permission-outcome"
+        >
+          {done.message}
+        </p>
+        <p className="text-muted-foreground">
+          The assistant that asked carries on by itself if it is still waiting;
+          if it stopped, tell it you answered.
+        </p>
+      </div>
     )
   }
 
   return (
     <div className="flex flex-col gap-3">
-      {newSecret ? (
-        <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
-          <Field
-            label="Secret value"
-            htmlFor={`permission-${id}-secret-value`}
-            hint="The API key or token it sends. PCP stores it encrypted under Secrets; the assistant never sees it."
-          >
-            <Input
-              id={`permission-${id}-secret-value`}
-              type="password"
-              value={secretValue}
-              onChange={(event) => setSecretValue(event.target.value)}
-              autoComplete="off"
-              maxLength={MAX_SECRET_VALUE}
-              disabled={pending}
-            />
-          </Field>
-          <Field
-            label="Save it as"
-            htmlFor={`permission-${id}-secret-name`}
-            hint="The name it gets under Secrets; the assistant suggested this one."
-          >
-            <Input
-              id={`permission-${id}-secret-name`}
-              value={secretName}
-              onChange={(event) => setSecretName(event.target.value)}
-              maxLength={100}
-              disabled={pending}
-            />
-          </Field>
-        </div>
+      {secret ? (
+        <Field
+          label={`Value of the secret "${secret.name}"`}
+          htmlFor={`permission-${id}-secret`}
+          hint={
+            secret.exists
+              ? `You have added a secret with this name since; leave this empty to use it, or enter a value to save a new one.`
+              : "The key or token itself. It is saved under Secrets, encrypted, and sent only to the address above; the assistant never sees it."
+          }
+        >
+          <Input
+            id={`permission-${id}-secret`}
+            type="password"
+            autoComplete="off"
+            value={secretValue}
+            onChange={(event) => setSecretValue(event.target.value)}
+            disabled={pending}
+          />
+        </Field>
       ) : null}
       <FormError error={error} />
       <div className="flex flex-wrap gap-2">

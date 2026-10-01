@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { NEW_SECRET } from "./constants"
 import { CATALOGUE_MAX_AGE_MS, rereadDue } from "./gateway"
+import { listSecrets, revealSecret } from "./secrets"
 import { createServer, updateServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 
 // When the gateway reads a server's tools again, and when saving a server
-// says its tools may have changed.
+// says its tools may have changed or saves a secret typed in with it.
 
 const NOW = Date.parse("2026-10-01T12:00:00Z")
 const HOUR = 60 * 60_000
@@ -106,5 +108,47 @@ describe("updateServer", () => {
         authType: "oauth",
       }),
     ).toEqual({ reconnect: true })
+  })
+
+  it("saves a secret typed into the form, and only with the server", async () => {
+    const ctx = await setupVault({
+      name: "Owner",
+      password: "correct horse battery staple",
+    })
+    const typed = {
+      name: "Tools",
+      url: "https://tools.example.com/mcp",
+      authType: "header" as const,
+      authSecretId: NEW_SECRET,
+      authSecretValue: "tok-123",
+    }
+
+    // A bad address is found before the secret is saved.
+    await expect(
+      createServer(ctx, { ...typed, url: "ftp://tools.example.com" }),
+    ).rejects.toThrow(/https/)
+    expect(await listSecrets(ctx)).toEqual([])
+
+    const { id } = await createServer(ctx, typed)
+    const [secret] = await listSecrets(ctx)
+    expect(secret).toMatchObject({
+      name: "Tools key",
+      usedBy: [{ id, name: "Tools" }],
+    })
+    expect(await revealSecret(ctx, secret!.id)).toBe("tok-123")
+
+    // Switching to another new one on an edit, under a name of the owner's.
+    expect(
+      await updateServer(ctx, id, {
+        ...typed,
+        authSecretName: "Tools rotated",
+        authSecretValue: "tok-456",
+      }),
+    ).toEqual({ reconnect: true })
+    const rotated = (await listSecrets(ctx)).find(
+      (each) => each.name === "Tools rotated",
+    )
+    expect(rotated?.usedBy).toEqual([{ id, name: "Tools" }])
+    expect(await revealSecret(ctx, rotated!.id)).toBe("tok-456")
   })
 })

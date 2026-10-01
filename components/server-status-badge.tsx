@@ -42,6 +42,8 @@ export function ServerStatusBadge({
   switch (status) {
     case "ok":
       return <Badge>Connected</Badge>
+    case "refused":
+      return <Badge variant="destructive">Access refused</Badge>
     case "error":
       return <Badge variant="destructive">Unreachable</Badge>
     default:

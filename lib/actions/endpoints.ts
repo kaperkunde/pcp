@@ -12,7 +12,7 @@ import {
 import { invalid } from "@/lib/core/errors"
 import { readPatches, type PatchOperation } from "@/lib/core/openapi/patch"
 import { renameServerSlug } from "@/lib/core/servers"
-import { field, file, guarded, secretFrom } from "@/lib/server/action-state"
+import { field, file, guarded } from "@/lib/server/action-state"
 import { requireContext } from "@/lib/server/session"
 
 import type { ServerActionResult } from "./servers"
@@ -77,7 +77,9 @@ async function inputFrom(formData: FormData): Promise<EndpointInput> {
     authType,
     authHeaderName: field(formData, "authHeaderName"),
     authValueTemplate: field(formData, "authValueTemplate"),
-    ...secretFrom(formData),
+    authSecretId: field(formData, "authSecretId") || null,
+    authSecretName: field(formData, "authSecretName") || null,
+    authSecretValue: field(formData, "authSecretValue") || null,
   }
 }
 

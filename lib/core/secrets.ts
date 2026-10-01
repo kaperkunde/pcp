@@ -1,4 +1,3 @@
-import { MAX_SECRET_VALUE } from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
@@ -31,6 +30,7 @@ export type SecretSummary = {
 
 const MAX_NAME = 100
 const MAX_DESCRIPTION = 500
+const MAX_VALUE = 64 * 1024
 
 function aad(secretId: string): string {
   return `secret:${secretId}`
@@ -98,26 +98,32 @@ export async function findTextSecretByName(
   })
 }
 
-export async function createSecret(
+export function validateSecretValue(value: string): string | null {
+  if (!value) {
+    return "Enter the secret's value."
+  }
+
+  if (value.length > MAX_VALUE) {
+    return "That value is too large for a secret."
+  }
+
+  return null
+}
+
+/**
+ * Everything createSecret checks, without writing: a form that saves a new
+ * secret along with something else checks it before either is written.
+ */
+export async function checkNewSecret(
   ctx: VaultContext,
-  input: { name: string; value: string; description?: string },
-): Promise<{ id: string }> {
+  input: { name: string; value: string },
+): Promise<void> {
   const name = input.name.trim()
-  const nameProblem = validateSecretName(name)
+  const problem = validateSecretName(name) ?? validateSecretValue(input.value)
 
-  if (nameProblem) {
-    throw invalid(nameProblem)
+  if (problem) {
+    throw invalid(problem)
   }
-
-  if (!input.value) {
-    throw invalid("Enter the secret's value.")
-  }
-
-  if (input.value.length > MAX_SECRET_VALUE) {
-    throw invalid("That value is too large for a secret.")
-  }
-
-  const description = (input.description ?? "").trim().slice(0, MAX_DESCRIPTION)
 
   const existing = await db().secret.findUnique({
     where: { vaultId_name: { vaultId: ctx.vaultId, name } },
@@ -127,7 +133,16 @@ export async function createSecret(
   if (existing) {
     throw new PcpError("conflict", `A secret named "${name}" already exists.`)
   }
+}
 
+export async function createSecret(
+  ctx: VaultContext,
+  input: { name: string; value: string; description?: string },
+): Promise<{ id: string }> {
+  await checkNewSecret(ctx, input)
+
+  const name = input.name.trim()
+  const description = (input.description ?? "").trim().slice(0, MAX_DESCRIPTION)
   const id = newId()
 
   await db().secret.create({
@@ -241,7 +256,7 @@ export async function updateSecret(
       throw invalid("Enter the secret's value.")
     }
 
-    if (input.value.length > MAX_SECRET_VALUE) {
+    if (input.value.length > MAX_VALUE) {
       throw invalid("That value is too large for a secret.")
     }
 

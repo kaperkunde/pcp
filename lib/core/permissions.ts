@@ -1,10 +1,4 @@
-import {
-  inputRequired,
-  inputResponse,
-  type CallToolResult,
-  type ClientCapabilities,
-  type InputRequiredResult,
-} from "@modelcontextprotocol/server"
+import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type {
   McpServer,
@@ -13,13 +7,7 @@ import type {
 } from "@/lib/generated/prisma/client"
 
 import type { SyncResult } from "./catalogue"
-import {
-  DEFAULT_HEADER_NAME,
-  MAX_SECRET_VALUE,
-  type PermissionDecision,
-  type PermissionKind,
-  type PermissionTier,
-} from "./constants"
+import type { PermissionDecision, PermissionKind } from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
@@ -27,7 +15,7 @@ import {
   createApprovedEndpoint,
   type EndpointRegistration,
 } from "./endpoint-admin"
-import { invalid, isPcpError, PcpError } from "./errors"
+import { invalid, isPcpError } from "./errors"
 import { newId } from "./ids"
 import {
   decideMemoryAsk,
@@ -36,19 +24,16 @@ import {
   type MemoryDecision,
 } from "./memories"
 import {
-  connectPanel,
+  connectLinks,
   connectResult,
-  panelResult,
-  type ConnectPanel,
-  type PanelContent,
-  type PermissionPanel,
-} from "./panel"
+  isConnectResult,
+  type ConnectLinks,
+  type ServerState,
+} from "./connect"
+import { waitForOwner } from "./owner-wait"
 import {
-  choosePermissionTier,
-  decisionSchema,
   decisionsFor,
   isOpen,
-  parseDecision,
   PERMISSION_KEEP_MS,
   PERMISSION_TTL_MS,
   previewArgs,
@@ -56,14 +41,13 @@ import {
   storedResultText,
   summaryText,
   type PermissionStatus,
-  type PermissionVia,
 } from "./permission-rules"
 import { summarize } from "./search"
 import {
-  createSecret,
+  createSecretNamedAfter,
   deleteSecret,
   findTextSecretByName,
-  validateSecretName,
+  validateSecretValue,
 } from "./secrets"
 import { createServer, getServer, type ServerInput } from "./servers"
 import { writeToolAccess } from "./tool-access"
@@ -71,16 +55,18 @@ import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 
 /**
  * The owner's say before an assistant's call runs. A call to a tool the
- * token may only "ask" about, and every new server an assistant wants to
- * add, becomes a pending request row; the owner answers wherever their
- * client lets them (see choosePermissionTier): the PCP panel in the
- * conversation, the client's own prompt, or /permissions/<id> in PCP.
- * Whichever way, decidePermission() runs the call, once.
+ * token may only "ask" about, every new server an assistant wants to add,
+ * and every change to a shared memory becomes a pending request row. The
+ * assistant is handed a link to /permissions/<id>, where the signed-in
+ * owner answers; decidePermission() runs the call, once. Nothing here
+ * trusts the assistant: only the owner's answer on that page runs anything.
  *
- * Nothing here trusts the assistant: a call runs when the client returns
- * the owner's answer to a prompt this server issued (bound to the row by
- * requestState and the hash of the call), when the panel's app-only tool
- * reports a click, or when the signed-in owner answers on the page.
+ * The assistant passes the link on and calls check_permission, which holds
+ * the call until the owner has answered (lib/core/owner-wait.ts), so the
+ * conversation carries on without them coming back to say so. Prompts in
+ * the client (elicitation) and PCP's own panel (MCP Apps) were tried first
+ * and dropped: Claude's apps stalled on prompts, and showed a panel they
+ * rebuilt with its first question again, unable to ask PCP for the answer.
  *
  * Ported from plekje's confirmation flow (lib/mcp/confirm.ts there). The
  * difference: an answer can also settle the tool for the calls after it
@@ -94,40 +80,19 @@ export type PermissionScope = {
   ctx: VaultContext
   tokenId: string
   publicUrl: string
-  /** How the token lets PCP ask the owner, in trying order. */
-  permissionTiers: readonly PermissionTier[]
-}
-
-/** The parts of an MCP request the permission step reads. */
-export type ToolRequest = {
-  /**
-   * What the client says it can show. Sent with every request since
-   * protocol revision 2026-07-28; undefined on older requests, which
-   * declared it once at an initialize a stateless server never sees.
-   */
-  clientCapabilities?: ClientCapabilities
-  /** Answers to a previous input_required round (a prompt this server sent). */
-  inputResponses?: Record<string, unknown>
-  /** The opaque state a previous input_required round handed out: a row id. */
-  requestState?: string
 }
 
 /**
  * A new server as an assistant asked for it; never a secret's value. With
- * `endpoint` it is an API from OpenAPI text, and `url` is its base URL.
+ * `endpoint` it is an API from OpenAPI text, and `url` is its base URL. With
+ * `newSecretName` it sends a secret PCP does not hold yet: the owner types
+ * its value in on PCP's page when they agree, and it is saved by that name.
  */
 export type RegisterArgs = ServerInput & {
   secretName?: string | null
-  /**
-   * The secret named secretName is not stored yet: the owner types its value
-   * as they agree, on PCP's own page, and it is stored then.
-   */
-  newSecret?: boolean
+  newSecretName?: string | null
   endpoint?: EndpointRegistration
 }
-
-/** A secret the owner typed while agreeing to a request. */
-export type TypedSecret = { name: string; value: string }
 
 export type PermissionAsk =
   | {
@@ -170,12 +135,13 @@ export type PermissionView = {
   outcomeIsError: boolean
   decisions: Array<{ value: PermissionDecision; label: string }>
   /** Set once an allowed request left an OAuth server needing connecting. */
-  connect: ConnectPanel | null
+  connect: ConnectLinks | null
   /**
-   * A new server that sends a secret the owner has not stored yet: agreeing
-   * means typing it, so it is answered on PCP's page and nowhere else.
+   * A new server that sends a secret PCP does not hold yet: the owner types
+   * its value in on PCP's page, so that is the only place to agree. `exists`
+   * when a secret by that name has been added since, which is then used.
    */
-  newSecret: { name: string } | null
+  secretToEnter: { name: string; exists: boolean } | null
 }
 
 type Row = PermissionRequest & {
@@ -223,7 +189,8 @@ export function clipResult(result: CallToolResult): CallToolResult {
 
 /**
  * One call to an upstream tool. An OAuth server that is not connected (or
- * whose sign-in expired) answers with the connect panel instead of an error.
+ * whose sign-in expired) answers with the link to connect it instead of an
+ * error.
  */
 export async function runCall(
   ctx: VaultContext,
@@ -300,35 +267,6 @@ function readArgs(ctx: VaultContext, row: PermissionRequest) {
   ) as Record<string, unknown>
 }
 
-/** The secret a register request needs typed, when it needs one. */
-function newSecretOf(
-  ctx: VaultContext,
-  row: PermissionRequest,
-): { name: string } | null {
-  if (row.kind !== "register") {
-    return null
-  }
-
-  const asked = readArgs(ctx, row) as RegisterArgs
-
-  return asked.newSecret === true && asked.secretName
-    ? { name: asked.secretName }
-    : null
-}
-
-/**
- * The ways a request may be answered. Typing a secret only happens on PCP's
- * page: never in the assistant's app, whose panel and prompts it can read.
- */
-function tiersFor(
-  view: Pick<PermissionView, "newSecret">,
-  tiers: readonly PermissionTier[],
-): readonly PermissionTier[] {
-  return view.newSecret
-    ? tiers.filter((tier) => tier === "url" || tier === "link")
-    : tiers
-}
-
 function readResult(ctx: VaultContext, row: PermissionRequest): string | null {
   return row.resultCiphertext
     ? decryptString(
@@ -377,12 +315,11 @@ async function summarizeRow(
 
   if (row.kind === "register") {
     const input = args as RegisterArgs
-    const header = input.authHeaderName || "Authorization"
     const auth =
-      input.authType === "header" && input.newSecret
-        ? `Authentication: sends a new secret, "${input.secretName ?? "?"}", in the ${header} header; you enter it in PCP when you agree, and PCP stores it encrypted`
+      input.authType === "header" && input.newSecretName
+        ? `Authentication: sends a new secret, saved as "${input.newSecretName}", in the ${input.authHeaderName || "Authorization"} header; you enter its value here when you agree`
         : input.authType === "header"
-          ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${header} header`
+          ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header`
           : input.authType === "oauth"
             ? `Authentication: OAuth; you sign in when you connect it${input.oauthScope ? ` (scope ${input.oauthScope})` : ""}`
             : "Authentication: none"
@@ -500,24 +437,28 @@ async function toView(
     decisions: decisionsFor(kind),
     connect:
       finished && row.server && needsConnecting(row.server)
-        ? connectPanel(row.server, publicUrl)
+        ? connectLinks(row.server, publicUrl)
         : null,
-    newSecret: newSecretOf(ctx, row),
+    secretToEnter: await secretToEnter(ctx, row),
   }
 }
 
-export function permissionPanel(view: PermissionView): PermissionPanel {
-  return {
-    id: view.id,
-    kind: view.kind,
-    status: "pending",
-    title: view.title,
-    lines: view.lines,
-    warning: view.warning,
-    url: view.url,
-    expires_at: view.expiresAt.toISOString(),
-    decisions: view.decisions,
-  }
+/** The name of a secret the owner types in to agree to a new server. */
+function newSecretNameOf(ctx: VaultContext, row: PermissionRequest) {
+  return row.kind === "register"
+    ? ((readArgs(ctx, row) as RegisterArgs).newSecretName ?? null)
+    : null
+}
+
+async function secretToEnter(
+  ctx: VaultContext,
+  row: PermissionRequest,
+): Promise<PermissionView["secretToEnter"]> {
+  const name = newSecretNameOf(ctx, row)
+
+  return name
+    ? { name, exists: (await findTextSecretByName(ctx, name)) !== null }
+    : null
 }
 
 /** What the assistant is told about a request that is no longer pending. */
@@ -545,7 +486,7 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     default:
       return text(
-        `Still waiting for the owner. They can answer at ${view.url} until ${view.expiresAt.toISOString()}.`,
+        `Still waiting for the owner. They can answer at ${view.url} until ${view.expiresAt.toISOString()}. Afterwards, call check_permission with id "${view.id}" for the result.`,
       )
   }
 }
@@ -562,38 +503,22 @@ async function outcomeFromRow(
     : text("There is no permission request with that id.", true)
 }
 
-function pendingText(
-  view: PermissionView,
-  tier: PermissionTier,
-  toolShowsPanel: boolean,
-): string {
-  const where =
-    tier === "app" && toolShowsPanel
-      ? `Ask the owner to answer in the panel above, or at ${view.url}.`
-      : tier === "app"
-        ? `Call check_permission with id "${view.id}": it shows the owner a panel to answer in. Or ask them to open ${view.url}.`
-        : `Ask the owner to open ${view.url} (signed in to PCP) and answer there.`
+function pendingText(view: PermissionView): string {
+  const typed = view.secretToEnter
+    ? ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
+    : ""
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\n${where} It stays open until ${view.expiresAt.toISOString()}. Afterwards, call check_permission with id "${view.id}" for the result.`
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nGive the owner this link, to open signed in to PCP and answer there: ${view.url}${typed} Then call check_permission with id "${view.id}": it waits while they answer, and gives the result. The request stays open until ${view.expiresAt.toISOString()}.`
 }
 
 /**
- * Asks the owner about a call or a new server, or picks up their answer
- * when the client comes back from a prompt this server issued.
+ * Asks the owner about a call, a new server or a shared memory. The same
+ * request asked again finds the row it already has.
  */
 export async function withPermission(
   scope: PermissionScope,
   ask: PermissionAsk,
-  request: ToolRequest,
-  {
-    toolShowsPanel = false,
-    executor = defaultExecutor,
-  }: { toolShowsPanel?: boolean; executor?: PermissionExecutor } = {},
-): Promise<CallToolResult | InputRequiredResult> {
-  if (typeof request.requestState === "string") {
-    return resumeRound(scope, ask, request, request.requestState, executor)
-  }
-
+): Promise<CallToolResult> {
   const { target, args } = describeAsk(ask)
   const argsHash = requestHash(ask.kind, target, args)
   const now = new Date()
@@ -633,139 +558,28 @@ export async function withPermission(
   }
 
   const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
-  const view = await toView(scope.ctx, row!, scope.publicUrl)
-  const tier = choosePermissionTier(
-    request.clientCapabilities,
-    tiersFor(view, scope.permissionTiers),
-  )
 
-  switch (tier) {
-    case "form":
-      return inputRequired({
-        inputRequests: {
-          decision: inputRequired.elicit({
-            message: `An assistant asked PCP for this:\n\n${summaryText(view)}`,
-            requestedSchema: decisionSchema(view.kind),
-          }),
-        },
-        requestState: view.id,
-      })
-
-    case "url":
-      return inputRequired({
-        inputRequests: {
-          decision: inputRequired.elicitUrl({
-            message: `Answer in PCP: ${view.title}`,
-            url: view.url,
-          }),
-        },
-        requestState: view.id,
-      })
-
-    default:
-      // The panel and the plain link share one result: a panel reads
-      // structuredContent, and the text carries the link for everyone else.
-      return panelResult(
-        pendingText(view, tier, toolShowsPanel),
-        waitingContent(view, tier),
-      )
-  }
+  return text(pendingText(await toView(scope.ctx, row!, scope.publicUrl)))
 }
 
 /**
- * What a panel shows while a request waits. Buttons only on the app tier:
- * anywhere else answer_permission refuses them, so a host that mounts the
- * panel anyway shows where to answer instead.
- */
-function waitingContent(
-  view: PermissionView,
-  tier: PermissionTier,
-): PanelContent {
-  return tier === "app"
-    ? { kind: "permission", permission: permissionPanel(view) }
-    : { kind: "done", text: `Waiting for you. Answer in PCP: ${view.url}` }
-}
-
-/** The client came back from a form or URL prompt this server issued. */
-async function resumeRound(
-  scope: PermissionScope,
-  ask: PermissionAsk,
-  request: ToolRequest,
-  id: string,
-  executor: PermissionExecutor,
-): Promise<CallToolResult> {
-  const row = await db().permissionRequest.findFirst({
-    where: { id, vaultId: scope.ctx.vaultId, tokenId: scope.tokenId },
-    select: { id: true, argsHash: true, kind: true },
-  })
-  const { target, args } = describeAsk(ask)
-
-  if (
-    !row ||
-    row.kind !== ask.kind ||
-    row.argsHash !== requestHash(ask.kind, target, args)
-  ) {
-    return text(
-      "That permission request belongs to a different call. Call the tool again to ask the owner anew.",
-      true,
-    )
-  }
-
-  const options = {
-    via: "form" as const,
-    publicUrl: scope.publicUrl,
-    tokenId: scope.tokenId,
-  }
-  const answer = inputResponse(request.inputResponses, "decision")
-
-  if (answer.kind === "elicit" && answer.action === "accept") {
-    // Form mode carries the answer; URL mode only says the page was opened,
-    // so its outcome is whatever the owner decided there.
-    if (answer.content && "decision" in answer.content) {
-      let decision: PermissionDecision
-
-      try {
-        decision = parseDecision(
-          row.kind as PermissionKind,
-          answer.content.decision,
-        )
-      } catch (error) {
-        return text(isPcpError(error) ? error.message : "Unknown answer.", true)
-      }
-
-      return decidePermission(scope.ctx, row.id, decision, options, executor)
-    }
-
-    return outcomeFromRow(scope.ctx, row.id, scope.publicUrl)
-  }
-
-  if (answer.kind === "elicit") {
-    return decidePermission(scope.ctx, row.id, "decline", options, executor)
-  }
-
-  return outcomeFromRow(scope.ctx, row.id, scope.publicUrl)
-}
-
-/**
- * The owner's answer, from the prompt, the panel or the page. "Always
- * allow" and "Block" also set the tool's level for the token; "Allow once"
- * and "Always allow" run the call, once, however many answers race for it.
+ * The owner's answer on PCP's page. "Always allow" and "Block" also set the
+ * tool's level for the token; "Allow once" and "Always allow" run the call,
+ * once, however many answers race for it.
  */
 export async function decidePermission(
   ctx: VaultContext,
   id: string,
   decision: PermissionDecision,
   {
-    via,
     publicUrl,
     tokenId,
-    secret,
+    secretValue,
   }: {
-    via: PermissionVia
     publicUrl: string
     tokenId?: string
-    /** The secret a new server needs, typed by the owner on PCP's page. */
-    secret?: TypedSecret
+    /** The value of a new server's secret, typed in on PCP's page. */
+    secretValue?: string
   },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
@@ -803,16 +617,13 @@ export async function decidePermission(
     return finishUnrun(
       ctx,
       row,
-      { via, publicUrl },
+      publicUrl,
       "The token that asked is no longer valid, so nothing ran.",
     )
   }
 
   if (isMemoryKind(kind)) {
-    return decideMemory(ctx, row, choice as MemoryDecision, {
-      via,
-      publicUrl,
-    })
+    return decideMemory(ctx, row, choice as MemoryDecision, publicUrl)
   }
 
   if (choice === "block" || choice === "decline") {
@@ -823,28 +634,33 @@ export async function decidePermission(
     return finishUnrun(
       ctx,
       row,
-      { via, publicUrl },
+      publicUrl,
       choice === "block"
         ? `The owner blocked ${toolLabel(row)} for this token, so nothing ran.`
         : "The owner said no, so nothing ran.",
     )
   }
 
+  // A secret PCP does not hold yet is typed in on PCP's page.
+  const newSecretName = newSecretNameOf(ctx, row)
+
+  if (newSecretName) {
+    const problem =
+      secretValue || !(await findTextSecretByName(ctx, newSecretName))
+        ? validateSecretValue(secretValue ?? "")
+        : null
+
+    if (problem) {
+      return text(problem, true)
+    }
+  }
+
   if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
   }
 
-  // Checked before the request is claimed, so the owner can try again.
-  const typed =
-    kind === "register"
-      ? await checkTypedSecret(ctx, row, { via, publicUrl, secret })
-      : null
-
-  // One winner, however many clicks, panels and prompts race for it.
-  const claimed = await db().permissionRequest.updateMany({
-    where: { id: row.id, status: "pending", expiresAt: { gt: new Date() } },
-    data: { status: "running", via, decidedAt: new Date() },
-  })
+  // One winner, however many answers race for it.
+  const claimed = await claim(row.id)
 
   if (claimed.count !== 1) {
     return outcomeFromRow(ctx, row.id, publicUrl)
@@ -856,7 +672,7 @@ export async function decidePermission(
     result =
       kind === "call"
         ? await executeCall(ctx, row, publicUrl, executor)
-        : await executeRegister(ctx, row, publicUrl, executor, typed)
+        : await executeRegister(ctx, row, publicUrl, executor, secretValue)
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -871,13 +687,10 @@ export async function decidePermission(
     )
   }
 
-  const kindOfResult = (
-    result.structuredContent as { kind?: string } | undefined
-  )?.kind
   // A call that reached an unconnected server did not run; a new server that
   // now needs connecting was added, which is what the owner agreed to.
   const failed =
-    result.isError === true || (kind === "call" && kindOfResult === "connect")
+    result.isError === true || (kind === "call" && isConnectResult(result))
   const stored = storedResultText(
     result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])),
   )
@@ -927,55 +740,37 @@ async function executeCall(
 }
 
 /**
- * The secret the owner typed for a new server that needs one they had not
- * stored: required, and only from PCP's page. Null when none is needed.
+ * The secret a new server sends: the one the request named, or for a new
+ * one, the value the owner typed in, saved under the name the assistant
+ * proposed (with a number added when that is taken by now). Without a value,
+ * a secret of that name the owner has added since is used.
  */
-async function checkTypedSecret(
+async function secretForRegister(
   ctx: VaultContext,
-  row: Row,
-  {
-    via,
-    publicUrl,
-    secret,
-  }: { via: PermissionVia; publicUrl: string; secret?: TypedSecret },
-): Promise<TypedSecret | null> {
-  const needed = newSecretOf(ctx, row)
-
-  if (!needed) {
-    return null
+  asked: RegisterArgs,
+  secretValue: string | undefined,
+): Promise<{ id: string | null; saved: { id: string; name: string } | null }> {
+  if (!asked.newSecretName) {
+    return { id: asked.authSecretId ?? null, saved: null }
   }
 
-  if (via !== "web") {
-    throw new PcpError(
-      "forbidden",
-      `This needs the owner to enter the secret "${needed.name}" in PCP, so it is answered there: ${permissionUrl(publicUrl, row.id)}.`,
-    )
+  if (!secretValue) {
+    const existing = await findTextSecretByName(ctx, asked.newSecretName)
+
+    if (!existing) {
+      throw invalid(`Enter the value of the secret "${asked.newSecretName}".`)
+    }
+
+    return { id: existing.id, saved: null }
   }
 
-  const name = secret?.name.trim() || needed.name
-  const value = secret?.value.trim() ?? ""
-  const nameProblem = validateSecretName(name)
+  const saved = await createSecretNamedAfter(ctx, {
+    base: asked.newSecretName,
+    value: secretValue,
+    description: `Sent to ${asked.name} in the ${asked.authHeaderName || "Authorization"} header.`,
+  })
 
-  if (nameProblem) {
-    throw invalid(nameProblem)
-  }
-
-  if (!value) {
-    throw invalid(`Enter the secret "${name}" to add it.`)
-  }
-
-  if (value.length > MAX_SECRET_VALUE) {
-    throw invalid("That value is too large for a secret.")
-  }
-
-  if (await findTextSecretByName(ctx, name)) {
-    throw new PcpError(
-      "conflict",
-      `A secret named "${name}" already exists. Give this one another name.`,
-    )
-  }
-
-  return { name, value }
+  return { id: saved.id, saved }
 }
 
 async function executeRegister(
@@ -983,18 +778,10 @@ async function executeRegister(
   row: Row,
   publicUrl: string,
   executor: PermissionExecutor,
-  typed: TypedSecret | null,
+  secretValue?: string,
 ): Promise<CallToolResult> {
   const asked = readArgs(ctx, row) as RegisterArgs
-  // Stored as the owner agrees, and removed again if the server is not added.
-  const stored = typed
-    ? await createSecret(ctx, {
-        name: typed.name,
-        value: typed.value,
-        description: `Sent to ${asked.name} in the ${asked.authHeaderName || DEFAULT_HEADER_NAME} header.`,
-      })
-    : null
-  const authSecretId = stored?.id ?? asked.authSecretId
+  const secret = await secretForRegister(ctx, asked, secretValue)
   let created: { id: string; sync?: SyncResult }
 
   try {
@@ -1006,7 +793,7 @@ async function executeRegister(
           authType: asked.authType === "header" ? "header" : "none",
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
-          authSecretId,
+          authSecretId: secret.id,
           endpoint: asked.endpoint,
         })
       : await createServer(ctx, {
@@ -1016,12 +803,13 @@ async function executeRegister(
           authType: asked.authType,
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
-          authSecretId,
+          authSecretId: secret.id,
           oauthScope: asked.oauthScope,
         })
   } catch (error) {
-    if (stored) {
-      await deleteSecret(ctx, stored.id).catch(() => {})
+    // The secret was typed in for this server alone.
+    if (secret.saved) {
+      await deleteSecret(ctx, secret.saved.id).catch(() => {})
     }
 
     throw error
@@ -1047,6 +835,10 @@ async function executeRegister(
 
   const server = await getServer(ctx, id)
   const added = `Added ${server.name} as "${server.slug}"`
+  // Its name, which the owner chose to keep; never its value.
+  const saved = secret.saved
+    ? ` The secret the owner entered is saved in PCP as "${secret.saved.name}".`
+    : ""
 
   if (server.authType === "oauth") {
     return connectResult(server, publicUrl, { lead: added })
@@ -1058,12 +850,12 @@ async function executeRegister(
 
   if (sync.status !== "ok") {
     return text(
-      `${added}, but its tools could not be read yet: ${sync.message}`,
+      `${added}, but its tools could not be read yet: ${sync.message}${saved}`,
     )
   }
 
   return text(
-    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search_tools finds them.`,
+    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search_tools finds them.${saved}`,
   )
 }
 
@@ -1076,12 +868,9 @@ async function decideMemory(
   ctx: VaultContext,
   row: Row,
   decision: MemoryDecision,
-  { via, publicUrl }: { via: PermissionVia; publicUrl: string },
+  publicUrl: string,
 ): Promise<CallToolResult> {
-  const claimed = await db().permissionRequest.updateMany({
-    where: { id: row.id, status: "pending", expiresAt: { gt: new Date() } },
-    data: { status: "running", via, decidedAt: new Date() },
-  })
+  const claimed = await claim(row.id)
 
   if (claimed.count !== 1) {
     return outcomeFromRow(ctx, row.id, publicUrl)
@@ -1128,18 +917,26 @@ async function decideMemory(
   return text(outcome.text, failed)
 }
 
+/** Marks an open request as running: the answer that gets it wins. */
+function claim(id: string) {
+  return db().permissionRequest.updateMany({
+    where: { id, status: "pending", expiresAt: { gt: new Date() } },
+    data: { status: "running", via: "web", decidedAt: new Date() },
+  })
+}
+
 /** Closes a request without running it. */
 async function finishUnrun(
   ctx: VaultContext,
   row: Row,
-  { via, publicUrl }: { via: PermissionVia; publicUrl: string },
+  publicUrl: string,
   message: string,
 ): Promise<CallToolResult> {
   const updated = await db().permissionRequest.updateMany({
     where: { id: row.id, status: "pending" },
     data: {
       status: "declined",
-      via,
+      via: "web",
       decidedAt: new Date(),
       resultCiphertext: asBytes(
         encryptString(ctx.dek, message, `${aad(row.id)}:result`),
@@ -1188,32 +985,41 @@ export async function listOpenPermissions(
   return Promise.all(rows.map((row) => toView(ctx, row, publicUrl)))
 }
 
-/** check_permission: where a request stands, with the panel while pending. */
+/**
+ * check_permission: where a request stands. While it is still waiting for
+ * the owner, the call is held until they answer or `waitMs` pass.
+ */
 export async function checkPermission(
   scope: PermissionScope,
   id: string,
-  request: ToolRequest = {},
+  { signal, waitMs }: { signal?: AbortSignal; waitMs?: number } = {},
 ): Promise<CallToolResult> {
-  const view = await getPermissionView(scope.ctx, id, {
-    publicUrl: scope.publicUrl,
-    tokenId: scope.tokenId,
-  })
+  const look = () =>
+    getPermissionView(scope.ctx, id, {
+      publicUrl: scope.publicUrl,
+      tokenId: scope.tokenId,
+    })
+  const first = await look()
 
-  if (!view) {
+  if (!first) {
     return text("There is no permission request with that id.", true)
   }
 
-  if (view.status === "pending") {
-    const tier = choosePermissionTier(
-      request.clientCapabilities,
-      tiersFor(view, scope.permissionTiers),
-    )
-    const where =
-      tier === "app" ? `in the panel, or at ${view.url}` : `at ${view.url}`
+  // A request that is running finishes in a moment: wait for that too.
+  const settled = (view: PermissionView | null) =>
+    view && view.status !== "pending" && view.status !== "running" ? view : null
+  const view =
+    settled(first) ??
+    (await waitForOwner(async () => settled(await look()), {
+      signal,
+      ms: waitMs,
+    })) ??
+    (await look()) ??
+    first
 
-    return panelResult(
-      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer ${where} until ${view.expiresAt.toISOString()}.`,
-      waitingContent(view, tier),
+  if (view.status === "pending") {
+    return text(
+      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey answer at ${view.url} until ${view.expiresAt.toISOString()}. If they are still on it, call check_permission again to keep waiting; otherwise stop here, and check again when they say they have answered.`,
     )
   }
 
@@ -1221,11 +1027,50 @@ export async function checkPermission(
   const said =
     outcome.content[0]?.type === "text" ? outcome.content[0].text : ""
 
-  return panelResult(
-    said,
-    { kind: "done", text: said, isError: outcome.isError === true },
-    { isError: outcome.isError === true },
-  )
+  // Allowed, but the server it added still needs signing in to.
+  if (view.connect) {
+    const server = await getServer(scope.ctx, view.connect.serverId)
+    const connect = connectResult(server, scope.publicUrl, {
+      lead: "Not connected yet",
+    })
+    const next =
+      connect.content[0]?.type === "text" ? connect.content[0].text : ""
+
+    return { ...connect, content: [{ type: "text", text: `${said}\n${next}` }] }
+  }
+
+  // An OAuth server it added has been signed in to since: the outcome still
+  // says it needs connecting, so say where it is now.
+  const added =
+    view.kind === "register" && view.serverId
+      ? await db().mcpServer.findFirst({
+          where: { id: view.serverId, vaultId: scope.ctx.vaultId },
+          include: { _count: { select: { tools: true } } },
+        })
+      : null
+
+  if (added?.authType === "oauth") {
+    const server: ServerState = {
+      id: added.id,
+      name: added.name,
+      slug: added.slug,
+      connected: !needsConnecting(added),
+      status: added.status,
+      toolCount: added._count.tools,
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `${said}\nIt is connected now, with ${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}.`,
+        },
+      ],
+      structuredContent: { kind: "done", server },
+    }
+  }
+
+  return outcome
 }
 
 /** Deletes requests a week past their expiry, answered or not. */

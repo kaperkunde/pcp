@@ -148,18 +148,16 @@ test("adds an endpoint with a secret typed into the form", async ({ page }) => {
   await page.getByLabel("Authentication").selectOption("header")
   await page
     .getByLabel("Secret", { exact: true })
-    .selectOption({ label: "Enter a new secret…" })
-  await page.getByLabel("Secret value").fill(upstream.expectedToken)
+    .selectOption({ label: "A new secret, entered here" })
+  await page.getByLabel("New secret's value").fill(upstream.expectedToken)
   await page.getByRole("button", { name: "Add endpoint" }).click()
 
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
   await expect(page.getByText("Tools (4)")).toBeVisible()
 
-  // Stored under Secrets, named after the endpoint and used by it.
+  // Saved under Secrets, named after the endpoint and used by it.
   await page.goto("/secrets")
-  const stored = page
-    .getByRole("listitem")
-    .filter({ hasText: `${name} secret` })
+  const stored = page.getByRole("listitem").filter({ hasText: `${name} key` })
   await expect(stored.getByText(name, { exact: true })).toBeVisible()
 })
 
@@ -387,7 +385,6 @@ const GATEWAY_TOOLS = [
   "describe_tool",
   "call_tool",
   "check_permission",
-  "answer_permission",
   "check_server",
   "register_server",
 ]

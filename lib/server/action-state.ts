@@ -1,4 +1,3 @@
-import { NEW_SECRET_CHOICE } from "@/lib/core/constants"
 import { isPcpError } from "@/lib/core/errors"
 
 /**
@@ -48,22 +47,4 @@ export function fields(formData: FormData, name: string): string[] {
 export function file(formData: FormData, name: string): File | null {
   const value = formData.get(name)
   return value instanceof File && value.size > 0 ? value : null
-}
-
-/**
- * The secret a server or endpoint form sends (components/header-auth-fields):
- * one chosen from the stored ones, or one typed in to be stored on save.
- */
-export function secretFrom(formData: FormData): {
-  authSecretId: string | null
-  authSecretValue: string | null
-} {
-  const chosen = field(formData, "authSecretId")
-
-  return chosen === NEW_SECRET_CHOICE
-    ? {
-        authSecretId: null,
-        authSecretValue: field(formData, "authSecretValue") || null,
-      }
-    : { authSecretId: chosen || null, authSecretValue: null }
 }
