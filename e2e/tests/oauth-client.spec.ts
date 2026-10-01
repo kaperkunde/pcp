@@ -6,7 +6,7 @@ import { allowAllTools, createToken } from "../lib/ui"
 
 // An OAuth server that lets no app register itself, the way most large
 // providers work: PCP says so instead of failing, shows the redirect URI to
-// register, takes the client the owner created, and adds the sign-in
+// register, takes the client the owner created in its status card, and adds the sign-in
 // parameters a provider needs before it hands out a refresh token.
 test.describe.configure({ mode: "serial" })
 
@@ -69,15 +69,23 @@ test("with the owner's client it connects, and says it cannot renew", async ({
   // What the owner does in the provider's console.
   upstream.closedClient.redirectUris.add(redirectUri)
 
+  // Asked for where the status says so, not in Settings.
   await page.goto(`/servers/${serverId}`)
-  const form = settings(page)
-  await form.getByLabel("Client ID (optional)").fill(upstream.closedClient.id)
-  await form
-    .getByLabel("New client secret (optional)")
+  await page
+    .getByLabel("Client ID", { exact: true })
+    .fill(upstream.closedClient.id)
+  await page
+    .getByLabel("Client secret", { exact: true })
     .fill(upstream.closedClient.secret)
-  await form.getByRole("button", { name: "Save changes" }).click()
-  await expect(form.getByText(/^Saved\./)).toBeVisible()
+  await page.getByRole("button", { name: "Save client" }).click()
+  await expect(
+    page.getByText("Saved. Choose Connect to sign in with your client."),
+  ).toBeVisible()
   await expect(page.getByText("Needs connecting")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Save client" })).toHaveCount(0)
+  await expect(settings(page).getByLabel("Client ID (optional)")).toHaveValue(
+    upstream.closedClient.id,
+  )
 
   await connect(page, "Connect")
   await expect(page).toHaveURL(

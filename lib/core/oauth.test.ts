@@ -4,7 +4,12 @@ import { db } from "./db"
 import { finishOAuth, reconcileIssuer, startOAuth } from "./oauth"
 import { legacyRedirectUrl, oauthRedirectUrl } from "./oauth-client"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
-import { createServer, getServer, updateServer } from "./servers"
+import {
+  createServer,
+  getServer,
+  setOAuthClient,
+  updateServer,
+} from "./servers"
 import { scratchDatabase } from "./test-db"
 import {
   describeOAuthConnection,
@@ -162,6 +167,57 @@ describe("connecting an OAuth server", () => {
     expect(as.requests.some((req) => req.url === "/register")).toBe(false)
     await syncServerTools(ctx, await getServer(ctx, id), HTTP)
     expect((await getServer(ctx, id)).status).toBe("client_required")
+  })
+
+  it("takes the client from the status card and keeps the other settings", async () => {
+    const id = await oauthServer({
+      oauthScope: "mail.read",
+      oauthAuthorizeParams: "access_type=offline",
+    })
+    await expect(startOAuth(ctx, id, HTTP)).rejects.toThrow()
+
+    await expect(setOAuthClient(ctx, id, { clientId: "  " })).rejects.toThrow(
+      /Enter the client ID/,
+    )
+
+    await setOAuthClient(ctx, id, {
+      clientId: "owner-client",
+      clientSecretValue: "owner-client-secret",
+    })
+    const server = await getServer(ctx, id)
+    expect(server).toMatchObject({
+      name: "Mail",
+      url: `${as.origin}/mcp`,
+      authType: "oauth",
+      oauthClientId: "owner-client",
+      oauthScope: "mail.read",
+      oauthAuthorizeParams: "access_type=offline",
+    })
+    expect(server.oauthClientSecretId).not.toBeNull()
+
+    // Saving the ID again without a secret keeps the one it has.
+    await setOAuthClient(ctx, id, { clientId: "owner-client" })
+    expect((await getServer(ctx, id)).oauthClientSecretId).toBe(
+      server.oauthClientSecretId,
+    )
+
+    // Out of "needs a client": the next read asks for a sign-in instead.
+    await syncServerTools(ctx, await getServer(ctx, id), HTTP)
+    expect((await getServer(ctx, id)).status).toBe("auth_required")
+    const url = signInAddress(await startOAuth(ctx, id, HTTP))
+    expect(url.searchParams.get("client_id")).toBe("owner-client")
+  })
+
+  it("takes a client only for an OAuth server", async () => {
+    const { id } = await createServer(ctx, {
+      name: "Open",
+      url: `${as.origin}/mcp`,
+      authType: "none",
+    })
+
+    await expect(
+      setOAuthClient(ctx, id, { clientId: "owner-client" }),
+    ).rejects.toThrow(/does not use OAuth/)
   })
 
   it("signs in with the owner's client, secret and sign-in parameters", async () => {

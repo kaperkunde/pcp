@@ -2,6 +2,7 @@
 
 import { useActionState, useState, useTransition } from "react"
 
+import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { ServerStatusBadge } from "@/components/server-status-badge"
@@ -15,11 +16,13 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Textarea } from "@/components/ui/input"
+import { Input, Textarea } from "@/components/ui/input"
+import { Field } from "@/components/ui/label"
 import {
   deleteServerAction,
   disconnectOAuthAction,
   refreshToolsAction,
+  setOAuthClientAction,
   setServerEnabledAction,
   setToolDescriptionAction,
   type ServerActionResult,
@@ -55,12 +58,25 @@ export type ServerDetailProps = {
     operation: { method: string; path: string } | null
   }>
   notice: { kind: "ok" | "error"; message: string } | null
+  /** Where OAuth servers send you back: what a provider's client lists. */
+  redirectUrl: string
 }
 
-export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
+export function ServerDetail({
+  server,
+  tools,
+  notice,
+  redirectUrl,
+}: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
+  // Kept here rather than in the form: saving moves the server on from
+  // "needs a client", which removes the form, and the note should stay.
+  const [clientState, saveClient] = useActionState<
+    ServerActionResult,
+    FormData
+  >(setOAuthClientAction, { status: "idle" })
 
   function run(action: () => Promise<ServerActionResult>) {
     startTransition(async () => {
@@ -201,6 +217,18 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
               {server.statusMessage}
             </p>
           ) : null}
+          {server.authType === "oauth" &&
+          server.status === "client_required" ? (
+            <OAuthClientForm
+              serverId={server.id}
+              redirectUrl={redirectUrl}
+              action={saveClient}
+              error={clientState.status === "error" ? clientState.error : null}
+            />
+          ) : null}
+          <FormNote
+            message={clientState.status === "ok" ? clientState.message : null}
+          />
           <FormError error={result.status === "error" ? result.error : null} />
           <FormNote message={result.status === "ok" ? result.message : null} />
         </CardContent>
@@ -257,6 +285,66 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+/**
+ * The client a server that does not let PCP register itself needs, asked for
+ * where its status says so. Scope and sign-in parameters stay in Settings.
+ */
+function OAuthClientForm({
+  serverId,
+  redirectUrl,
+  action,
+  error,
+}: {
+  serverId: string
+  redirectUrl: string
+  action: (formData: FormData) => void
+  error: string | null
+}) {
+  const prefix = `oauth-client-${serverId}`
+
+  return (
+    <form
+      action={action}
+      className="flex flex-col gap-4 rounded-lg border border-border p-4"
+    >
+      <input type="hidden" name="id" value={serverId} />
+      <p className="text-muted-foreground">
+        The redirect URI to give the provider:
+      </p>
+      <CopyableValue value={redirectUrl} />
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Client ID" htmlFor={`${prefix}-id`}>
+          <Input
+            id={`${prefix}-id`}
+            name="oauthClientId"
+            required
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </Field>
+        <Field
+          label="Client secret"
+          htmlFor={`${prefix}-secret`}
+          hint="Saved as one of your secrets."
+        >
+          <Input
+            id={`${prefix}-secret`}
+            name="oauthClientSecretValue"
+            type="password"
+            autoComplete="off"
+          />
+        </Field>
+      </div>
+      <FormError error={error} />
+      <div>
+        <SubmitButton size="sm" pendingText="Saving…">
+          Save client
+        </SubmitButton>
+      </div>
+    </form>
   )
 }
 

@@ -367,8 +367,9 @@ discovers the authorization server and `chooseRegistration`
    cannot be fetched.
 5. **Otherwise the owner is asked**: the server's status becomes
    `client_required`, and its page says to create a client with the
-   provider using PCP's redirect URI. A registration endpoint that refuses
-   PCP ends the same way. The gateway's connect result says so too.
+   provider using PCP's redirect URI and asks for its ID and secret right
+   there, in the status card. A registration endpoint that refuses PCP ends
+   the same way. The gateway's connect result says so too.
 
 Every flow returns to one address, `/api/oauth/callback`; the state
 parameter names the flow, and the flow the server. The owner registers that

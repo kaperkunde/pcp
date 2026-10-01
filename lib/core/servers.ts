@@ -418,6 +418,48 @@ export async function updateServer(
   }
 }
 
+/**
+ * Gives an OAuth server the client the owner created with the provider,
+ * keeping every other setting: what the server page asks for when the server
+ * does not let PCP register itself. The client ID is required here, since
+ * without one the server still cannot be connected; a secret left out keeps
+ * the one it has.
+ */
+export async function setOAuthClient(
+  ctx: VaultContext,
+  id: string,
+  client: {
+    clientId: string
+    clientSecretId?: string | null
+    clientSecretValue?: string | null
+  },
+): Promise<{ reconnect: boolean }> {
+  const existing = await getServer(ctx, id)
+
+  if (existing.authType !== "oauth") {
+    throw new PcpError("state", `${existing.name} does not use OAuth.`)
+  }
+
+  if (!client.clientId.trim()) {
+    throw invalid("Enter the client ID.")
+  }
+
+  return updateServer(ctx, id, {
+    name: existing.name,
+    url: existing.url,
+    description: existing.description,
+    authType: "oauth",
+    oauthClientId: client.clientId,
+    oauthClientSecretId:
+      client.clientSecretId === undefined
+        ? existing.oauthClientSecretId
+        : client.clientSecretId,
+    oauthClientSecretValue: client.clientSecretValue ?? null,
+    oauthScope: existing.oauthScope,
+    oauthAuthorizeParams: existing.oauthAuthorizeParams,
+  })
+}
+
 export async function renameServerSlug(
   ctx: VaultContext,
   id: string,
