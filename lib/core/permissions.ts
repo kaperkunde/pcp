@@ -41,6 +41,7 @@ import {
   connectLinks,
   connectResult,
   isConnectResult,
+  linkLastText,
   type ConnectLinks,
   type ServerState,
 } from "./connect"
@@ -77,12 +78,15 @@ import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
  * owner answers; decidePermission() runs the call, once. Nothing here
  * trusts the assistant: only the owner's answer on that page runs anything.
  *
- * The assistant passes the link on and calls check_permission, which holds
- * the call until the owner has answered (lib/core/owner-wait.ts), so the
- * conversation carries on without them coming back to say so. Prompts in
- * the client (elicitation) and PCP's own panel (MCP Apps) were tried first
- * and dropped: Claude's apps stalled on prompts, and showed a panel they
- * rebuilt with its first question again, unable to ask PCP for the answer.
+ * The assistant ends its reply with the link and calls check_permission
+ * once the owner says they have answered; it holds the call while they are
+ * still on it (lib/core/owner-wait.ts). The link has to come last: Claude's
+ * apps fold the text written before a tool call into the tool's row and
+ * show a summary of their own, so a link followed by check_permission in
+ * the same reply was often never seen. Prompts in the client (elicitation)
+ * and PCP's own panel (MCP Apps) were tried first and dropped: Claude's
+ * apps stalled on prompts, and showed a panel they rebuilt with its first
+ * question again, unable to ask PCP for the answer.
  *
  * An answer can also settle the tool for the calls after it ("Always
  * allow", "Block").
@@ -607,7 +611,7 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     default:
       return text(
-        `Still waiting for the owner. They can answer at ${view.url} until ${view.expiresAt.toISOString()}. Afterwards, call check_permission with id "${view.id}" for the result.`,
+        `Still waiting for the owner. They can answer until ${view.expiresAt.toISOString()}. When they say they have, call check_permission with id "${view.id}" for the result.\n\n${linkLastText(view.url)}`,
       )
   }
 }
@@ -626,7 +630,7 @@ async function outcomeFromRow(
 
 function pendingText(view: PermissionView): string {
   if (view.kind === "access") {
-    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}\n\nGive the owner this link, to open signed in to PCP: ${view.url} Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. Then call check_permission with id "${view.id}": it waits while they review, and says what they saved. The request stays open until ${view.expiresAt.toISOString()}.`
+    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. When they say they have saved, call check_permission with id "${view.id}": it says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
   }
 
   const typed = view.secretToEnter
@@ -635,7 +639,7 @@ function pendingText(view: PermissionView): string {
       : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
     : ""
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nGive the owner this link, to open signed in to PCP and answer there: ${view.url}${typed} Then call check_permission with id "${view.id}": it waits while they answer, and gives the result. The request stays open until ${view.expiresAt.toISOString()}.`
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
 }
 
 /**
@@ -1179,6 +1183,59 @@ export async function listOpenPermissions(
   return Promise.all(rows.map((row) => toView(ctx, row, publicUrl)))
 }
 
+/** A request waiting for the owner, as the header's list shows it. */
+export type PendingRequest = {
+  id: string
+  title: string
+  tokenName: string
+  createdAt: Date
+}
+
+/**
+ * Every request in the vault still waiting for the owner, newest first: how
+ * many there are, and the first `limit` of them with their titles.
+ */
+export async function listPendingRequests(
+  ctx: VaultContext,
+  publicUrl: string,
+  { limit = 10 }: { limit?: number } = {},
+): Promise<{ total: number; requests: PendingRequest[] }> {
+  const now = new Date()
+  // A revoked or expired token's requests can no longer be answered.
+  const where = {
+    vaultId: ctx.vaultId,
+    status: "pending",
+    expiresAt: { gt: now },
+    token: {
+      revokedAt: null,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+    },
+  }
+  const [total, rows] = await Promise.all([
+    db().permissionRequest.count({ where }),
+    db().permissionRequest.findMany({
+      where,
+      include: ROW_INCLUDE,
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    }),
+  ])
+  const requests = await Promise.all(
+    rows.map(async (row) => {
+      const { title } = await summarizeRow(ctx, row, publicUrl)
+
+      return {
+        id: row.id,
+        title,
+        tokenName: row.token.name,
+        createdAt: row.createdAt,
+      }
+    }),
+  )
+
+  return { total, requests }
+}
+
 /**
  * check_permission: where a request stands. While it is still waiting for
  * the owner, the call is held until they answer or `waitMs` pass.
@@ -1213,7 +1270,7 @@ export async function checkPermission(
 
   if (view.status === "pending") {
     return text(
-      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey answer at ${view.url} until ${view.expiresAt.toISOString()}. If they are still on it, call check_permission again to keep waiting; otherwise stop here, and check again when they say they have answered.`,
+      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer until ${view.expiresAt.toISOString()}. Stop here, and call check_permission again when they say they have answered.\n\n${linkLastText(view.url)}`,
     )
   }
 

@@ -66,7 +66,7 @@ export default async function ServerPage({
       : query.connected
         ? {
             kind: "ok" as const,
-            message: `Connected to ${server.name}. An assistant waiting for this carries on by itself; one that stopped waiting needs telling.`,
+            message: `Connected to ${server.name}. Tell the assistant that asked that it is connected, and it carries on.`,
           }
         : null
 

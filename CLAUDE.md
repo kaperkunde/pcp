@@ -98,8 +98,10 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   use `useActionState`. Route handlers exist only for the gateway, OAuth
   (redirects and PCP's client metadata document) and the health check.
 - The owner is asked by link only: a result hands the assistant a link to
-  PCP's page and a check that waits (`check_permission`, `check_server`,
-  `lib/core/owner-wait.ts`). No client prompts (elicitation) and no MCP Apps
+  PCP's page, to end its reply with (`linkLastText`: nothing after it, or
+  Claude's apps fold it out of sight), and a check to call once the owner
+  says they answered (`check_permission`, `check_server`,
+  `lib/core/owner-wait.ts`). The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
   ARCHITECTURE.md). Anything new that needs the owner works the same way.
 - The single-user assumption lives in two places: `ownerVault()` and the

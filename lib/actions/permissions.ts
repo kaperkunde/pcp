@@ -8,6 +8,7 @@ import {
   applyAccessRequest,
   decidePermission,
   getPermissionView,
+  listPendingRequests,
 } from "@/lib/core/permissions"
 import { type ActionState, guarded } from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
@@ -88,4 +89,35 @@ export async function saveAccessRequestAction(
   revalidatePath("/tokens", "layout")
 
   return result
+}
+
+export type PendingRequestsState = {
+  total: number
+  requests: Array<{
+    id: string
+    title: string
+    tokenName: string
+    createdAt: string
+  }>
+}
+
+/**
+ * What is waiting for the owner, for the header's notifications: read when
+ * the menu opens and every little while, so a request an assistant makes
+ * shows without reloading the page.
+ */
+export async function pendingRequestsAction(): Promise<PendingRequestsState> {
+  const ctx = await requireContext()
+  const { total, requests } = await listPendingRequests(
+    ctx,
+    await publicUrlFor(ctx),
+  )
+
+  return {
+    total,
+    requests: requests.map((request) => ({
+      ...request,
+      createdAt: request.createdAt.toISOString(),
+    })),
+  }
 }

@@ -161,7 +161,7 @@ export function visibleTools(server: GatewayServer): GatewayTool[] {
 }
 
 const MANAGE_INSTRUCTIONS =
-  "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one. A change to an endpoint you registered switches it off until the owner enables it again. Once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs: you can turn read-only on, and ask them to fix its schema with edits or better tool descriptions, which waits for their answer. You cannot change a credential."
+  "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one. A change to an endpoint you registered switches it off until the owner enables it again. Once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs: you can turn read-only on, and ask them to fix its schema with edits or better tool descriptions, which they answer in PCP. You cannot change a credential."
 
 /**
  * What a token that keeps memories is told about them. Shaped after the
@@ -310,7 +310,7 @@ export function buildInstructions(
   return [
     ...memoryLead(memories),
     "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
-    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: give it to the owner in your reply, then call check_permission with the id it gives, which waits while they answer and returns the result, so you can carry on without them coming back to tell you. A server that needs them to sign in answers with a link to connect it; check_server waits the same way until it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
+    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
     "Servers:",
     ...lines,
     ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
@@ -643,7 +643,7 @@ export function buildGatewayServer(
     {
       title: "Call a tool",
       description:
-        'Run a tool on one of the owner\'s MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them; check_permission then waits for their answer. A long JSON answer comes back as a preview: pass fields to get only the parts you need, and decode for text an API sends base64-encoded.',
+        'Run a tool on one of the owner\'s MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them: end your reply with it, and call check_permission once they say they have answered. A long JSON answer comes back as a preview: pass fields to get only the parts you need, and decode for text an API sends base64-encoded.',
       inputSchema: z.object({
         server: z.string().describe("The server, as returned by search_tools."),
         tool: z.string().describe("The tool name."),
@@ -726,7 +726,7 @@ export function buildGatewayServer(
     {
       title: "Check a permission request",
       description:
-        "Waits for the owner's answer to a request, then says how it went: up to 45 seconds while it is still open, so call it right after passing on the link, and again if they are still on it. Takes the id from the result that asked.",
+        "Says how a request went once the owner has answered it. Call it when they say they have, not in the same reply as the link (that would hide the link in some apps); if it is still open, it waits up to 45 seconds for them. Takes the id from the result that asked.",
       inputSchema: z.object({
         id: z.string().min(1).max(64).describe("The request's id."),
       }),
@@ -742,7 +742,7 @@ export function buildGatewayServer(
     {
       title: "Check a server",
       description:
-        "Whether one of the owner's servers is connected and how many tools it has. For a server that needs the owner to sign in, it waits up to 45 seconds for them to do so, so call it right after passing on the link to connect it, and again if they are still on it.",
+        "Whether one of the owner's servers is connected and how many tools it has. For a server that needs the owner to sign in, call it once they say they have, not in the same reply as the link to connect it; if they are still signing in, it waits up to 45 seconds for them.",
       inputSchema: z.object({
         server: z
           .string()
@@ -1112,7 +1112,7 @@ export function buildGatewayServer(
     {
       title: "Propose tool access",
       description:
-        'Propose which tools this token may run, many at once and across servers: "allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). This changes nothing by itself: PCP fills your levels in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and a level. Later changes override earlier ones, so set a whole server first and the exceptions after. Give the owner the link it returns, then call check_permission with its id, which waits while they review and says what they saved.',
+        'Propose which tools this token may run, many at once and across servers: "allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). This changes nothing by itself: PCP fills your levels in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and a level. Later changes override earlier ones, so set a whole server first and the exceptions after. End your reply with the link it returns, and call check_permission with its id once the owner says they have saved; it says what they saved.',
       inputSchema: z.object({
         changes: z
           .array(
@@ -1189,7 +1189,7 @@ export function buildGatewayServer(
       {
         title: "Change an API endpoint",
         description:
-          "Change an API endpoint: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Change a schema with edits (a JSON Patch kept beside it and applied whenever tools are made, also after the document is read again) rather than sending it whole: addPatches adds to the edits, patches replaces them all. Read the part you are changing first with get_endpoint's specPointer. On an endpoint you registered, a change other assistants would see disables it until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: turning read-only on happens at once; its name, description, edits, tool descriptions and a new read of its schema URL are put to the owner, who sees every edit and description in full, and nothing changes until they agree (call check_permission for the answer); its address and document are theirs alone. You can never change a credential. get_endpoint says what you may change.",
+          "Change an API endpoint: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Change a schema with edits (a JSON Patch kept beside it and applied whenever tools are made, also after the document is read again) rather than sending it whole: addPatches adds to the edits, patches replaces them all. Read the part you are changing first with get_endpoint's specPointer. On an endpoint you registered, a change other assistants would see disables it until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: turning read-only on happens at once; its name, description, edits, tool descriptions and a new read of its schema URL are put to the owner, who sees every edit and description in full, and nothing changes until they agree (end your reply with the link, and call check_permission once they say they have answered); its address and document are theirs alone. You can never change a credential. get_endpoint says what you may change.",
         inputSchema: z.object({
           endpoint: z
             .string()

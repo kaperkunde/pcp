@@ -196,8 +196,8 @@ export default async function PermissionPage({
               ) : null}
               {view.status === "expired" ? null : (
                 <p className="text-muted-foreground">
-                  The assistant that asked carries on by itself if it is still
-                  waiting; if it stopped, tell it you answered.
+                  Tell the assistant that asked that you answered, and it
+                  carries on.
                 </p>
               )}
             </div>

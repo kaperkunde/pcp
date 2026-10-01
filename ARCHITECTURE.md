@@ -540,24 +540,29 @@ A call to an "ask" tool becomes a `permission_request` row
 arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
 and a day to answer. The result is text for the assistant: what was asked,
-the link to `/permissions/<id>` to give the owner, and to call
-`check_permission` next. The signed-in owner answers on that page, and only
-there; `decidePermission()` claims the row (pending to running, one winner)
+the link to `/permissions/<id>` to end its reply with, and to call
+`check_permission` once the owner says they have answered. The signed-in
+owner answers on that page, and only there (the header's bell lists every
+request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
 
 Nothing can wake an assistant from outside its conversation: an MCP server
-cannot start a turn, and an answer on PCP's page reaches no app. So
-`check_permission` holds the call while the request is open
-(`lib/core/owner-wait.ts`: up to 45 seconds, under the minute at which
-clients and proxies give up, checking every second, and dropping out when
-the client goes away) and answers as soon as the owner has; the assistant,
-still in its turn, carries on by itself. A longer wait is another call; the
-text says to stop when the owner is not on it. An OAuth server that needs
-signing in (a call to it, or one the owner just agreed to add) answers with
-a link to its page in PCP, where Connect starts the sign-in, and
-`check_server` waits the same way until it is connected and its tools are
-read. A server that needs a client from the owner first (status
+cannot start a turn, and an answer on PCP's page reaches no app. The link
+has to be the last thing in the assistant's reply, with no tool call after
+it: Claude's apps fold the text an assistant writes before a tool call into
+that call's row and show a summary of their own, so a link followed by
+`check_permission` in the same reply was often never seen. So the result
+says to end the reply with the link (`connect.ts: linkLastText`, the link on
+its own last line) and to call `check_permission` once the owner says they
+have answered. In case they are still on it, the check holds the call while
+the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
+minute at which clients and proxies give up, checking every second, and
+dropping out when the client goes away) and answers as soon as they have.
+An OAuth server that needs signing in (a call to it, or one the owner just
+agreed to add) answers with a link to its page in PCP, handed over the same
+way, where Connect starts the sign-in; `check_server` then says whether it
+is connected, waiting the same way, and its tools are read. A server that needs a client from the owner first (status
 `client_required`) gets the same link; its page says what to create.
 
 The client's own prompts (form and URL elicitation, with `input_required`
@@ -568,8 +573,8 @@ until the call timed out
 They mounted a declared panel for every result of a tool, rebuilt it from
 the original result whenever the conversation was shown again (the first
 question again, after it was answered), did not let a rebuilt panel reach
-PCP, and did not act on `ui/message` or `request-teardown`. A link and a
-check that waits work in every client.
+PCP, and did not act on `ui/message` or `request-teardown`. A link at the
+end of a reply works in every client.
 
 `propose_tool_access` lets an assistant suggest levels for its own token,
 many at once (`lib/core/access-requests.ts`): each change names a server,

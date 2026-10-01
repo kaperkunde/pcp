@@ -134,19 +134,19 @@ and these tools:
 | `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                                                                            |
 | `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                      |
 | `call_tool`           | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs, and `decode` decodes base64 text in it (an email's body). |
-| `check_permission`    | Waits for your answer to a request, then says how it went.                                                                                                        |
-| `check_server`        | Says whether a server is connected; while you sign in to it, waits until you have.                                                                                |
+| `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                         |
+| `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                   |
 | `register_server`     | Proposes a new MCP server, or an API from an OpenAPI 3 schema (text or a URL), with no auth, a secret named by name, or OAuth.                                    |
 | `propose_tool_access` | Proposes which tools its token may run, many at once and across servers; you review and save it in PCP.                                                           |
 
 A tool you have not decided about answers "Not done yet" and asks you: the
-assistant hands you a link to the request in PCP, and waits while you
-answer there, so it carries on by itself once you have. If you take longer
-than it waits, tell it you answered. **Allow once** runs that one call,
-**Always allow** and **Block** also decide the calls after it, and **Not
-now** runs nothing. A server an assistant proposes is only added once you
-agree; an OAuth one is then connected from a link to its page in PCP, and the
-assistant waits while you sign in.
+assistant ends its reply with a link to the request in PCP. Answer there,
+tell it you have, and it carries on. The bell at the top of every page in
+PCP shows how many requests are waiting and lists them, so you can answer
+one without the link. **Allow once** runs that one call, **Always allow** and
+**Block** also decide the calls after it, and **Not now** runs nothing. A
+server an assistant proposes is only added once you agree; an OAuth one is
+then connected from a link to its page in PCP.
 
 An assistant can also help with a large set of tools: `propose_tool_access`
 takes levels for many tools at once, by name or by pattern (`list_*`), and

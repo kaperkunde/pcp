@@ -1,9 +1,10 @@
 /**
  * Waiting for the owner. Nothing can wake an assistant from outside its
  * conversation: an MCP server cannot start a turn, and the owner answering
- * on PCP's page reaches no app. So a check that would answer "still
- * waiting" holds the call open instead and answers as soon as the owner has
- * done their part. The assistant, still in its turn, carries on by itself.
+ * on PCP's page reaches no app. The assistant ends its reply with the link
+ * and checks when the owner says they are done; a check that would answer
+ * "still waiting" holds the call open for a while instead, in case they are
+ * still on it, and answers as soon as they have done their part.
  */
 
 /**
