@@ -88,6 +88,18 @@ export default defineConfig({
       },
     },
     {
+      // An API that signs in with OAuth: proposed by an assistant with the
+      // owner's client ID, the client secret typed in on the approval page,
+      // connected, and called with the token.
+      name: "endpoint-oauth",
+      testMatch: /endpoint-oauth\.spec\.ts/,
+      dependencies: ["setup"],
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: "e2e/.auth/owner.json",
+      },
+    },
+    {
       // An OAuth upstream that lets no app register itself: the owner's own
       // client, its redirect URI, and extra sign-in parameters.
       name: "oauth-client",

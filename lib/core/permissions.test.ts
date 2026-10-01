@@ -735,7 +735,12 @@ describe("a new secret the owner types in", () => {
 
     const id = await onlyRequestId()
     const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
-    expect(view?.secretToEnter).toEqual({ name: "Pets API key", exists: false })
+    expect(view?.secretToEnter).toEqual({
+      name: "Pets API key",
+      exists: false,
+      optional: false,
+      clientId: null,
+    })
     expect(view?.lines).toContain(
       'Authentication: sends a new secret, saved as "Pets API key", in the X-API-Key header; you enter its value here when you agree',
     )
@@ -840,7 +845,7 @@ describe("a new secret the owner types in", () => {
     expect(
       (await getPermissionView(ctx, first, { publicUrl: PUBLIC_URL }))
         ?.secretToEnter,
-    ).toEqual({ name: "Pets API key", exists: true })
+    ).toMatchObject({ name: "Pets API key", exists: true })
 
     await decidePermission(ctx, first, "allow_once", web, executor)
     expect(
@@ -865,6 +870,169 @@ describe("a new secret the owner types in", () => {
     )
     expect(textOf(typed)).toMatch(/saved in PCP as "Pets API key 2"/)
     expect(await revealSecret(ctx, added.id)).toBe("from-secrets-page")
+  })
+})
+
+describe("an API that signs in with OAuth", () => {
+  const OAUTH_SPEC = JSON.stringify({
+    openapi: "3.0.3",
+    info: { title: "Mail" },
+    servers: [{ url: "https://mail.example.com/v1" }],
+    components: {
+      securitySchemes: {
+        oauth: {
+          type: "oauth2",
+          flows: {
+            authorizationCode: {
+              authorizationUrl: "https://accounts.example.com/authorize",
+              tokenUrl: "https://accounts.example.com/token",
+              scopes: { "mail.read": "", "mail.send": "" },
+            },
+          },
+        },
+      },
+    },
+    paths: {
+      "/me": {
+        get: { operationId: "me", security: [{ oauth: ["mail.read"] }] },
+      },
+    },
+  })
+
+  /** register_server with auth_type oauth and the owner's client_id. */
+  async function withClient(ctx: VaultContext): Promise<RegisterArgs> {
+    const prepared = await prepareRegistration(ctx, {
+      name: "Mail",
+      spec: OAUTH_SPEC,
+      baseUrl: "https://mail.example.com/v1",
+      oauth: { scope: null },
+    })
+
+    return {
+      name: prepared.name,
+      description: prepared.description,
+      url: prepared.url,
+      authType: "oauth",
+      oauthClientId: "owner-client",
+      oauthClientSecretId: null,
+      secretName: "Mail OAuth client secret",
+      newSecretName: "Mail OAuth client secret",
+      newSecretOptional: true,
+      oauthScope: prepared.registration.preview.oauth?.scope ?? null,
+      endpoint: prepared.registration,
+    }
+  }
+
+  it("needs the base URL named, and a schema with a sign-in", async () => {
+    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
+
+    await expect(
+      prepareRegistration(ctx, {
+        name: "Mail",
+        spec: OAUTH_SPEC,
+        oauth: { scope: null },
+      }),
+    ).rejects.toThrow(/OAuth token is sent to an address you name/)
+    await expect(
+      prepareRegistration(ctx, {
+        name: "Pets",
+        spec: PETS_SPEC,
+        baseUrl: "https://api.example.com/v1",
+        oauth: { scope: null },
+      }),
+    ).rejects.toThrow(/declares no OAuth sign-in/)
+  })
+
+  it("shows the owner where they sign in, where the client secret goes and the redirect URI", async () => {
+    const { ctx, scope } = await setup()
+
+    const asked = await withPermission(scope, {
+      kind: "register",
+      input: await withClient(ctx),
+    })
+    expect(textOf(asked)).toMatch(
+      /type the client secret of their OAuth client in there/,
+    )
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(view?.secretToEnter).toEqual({
+      name: "Mail OAuth client secret",
+      exists: false,
+      optional: true,
+      clientId: "owner-client",
+    })
+    expect(view?.lines).toEqual(
+      expect.arrayContaining([
+        'Authentication: OAuth with your client "owner-client"; enter its client secret here when you agree (leave it empty for a client without one); you sign in when you connect it (scope mail.read)',
+        "Sign-in at: https://accounts.example.com/authorize",
+        "Tokens from: https://accounts.example.com/token; your client secret goes there",
+        `Redirect URI your client needs: ${PUBLIC_URL}/api/oauth/callback`,
+      ]),
+    )
+    expect(view?.warning).toMatch(/OAuth token for this account/)
+  })
+
+  it("adds it with the client and the secret typed in, and asks the owner to connect it", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: await withClient(ctx),
+    })
+    const added = await decidePermission(
+      ctx,
+      await onlyRequestId(),
+      "allow_once",
+      { publicUrl: PUBLIC_URL, secretValue: "client-s3cret" },
+      executor,
+    )
+
+    expect(textOf(added)).toMatch(/Added Mail as "mail"/)
+    expect(textOf(added)).not.toContain("client-s3cret")
+    const server = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Mail" },
+    })
+    expect(server).toMatchObject({
+      kind: "openapi",
+      authType: "oauth",
+      oauthClientId: "owner-client",
+      oauthScope: "mail.read",
+      oauthAuthorizationUrl: "https://accounts.example.com/authorize",
+      oauthTokenUrl: "https://accounts.example.com/token",
+      oauthConnectedAt: null,
+    })
+    expect(await revealSecret(ctx, server.oauthClientSecretId!)).toBe(
+      "client-s3cret",
+    )
+  })
+
+  it("can be agreed to with the client secret left empty", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: await withClient(ctx),
+    })
+    const added = await decidePermission(
+      ctx,
+      await onlyRequestId(),
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    expect(added.isError ?? false).toBe(false)
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
+    ).toMatchObject({
+      oauthClientId: "owner-client",
+      oauthClientSecretId: null,
+    })
+    expect(await db().secret.count()).toBe(0)
   })
 })
 

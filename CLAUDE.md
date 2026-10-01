@@ -55,8 +55,8 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
   It never changes a credential, never clears `publicOnly`, can only read and
-  turn read-only on for an endpoint that is the owner's (it sends a secret, or
-  private addresses are allowed), and a change others would see disables the
+  turn read-only on for an endpoint that is the owner's (it sends a secret or
+  an OAuth token, or private addresses are allowed), and a change others would see disables the
   endpoint until the owner enables it. Its changes go through
   `changeEndpoint`, which writes only the columns it is given and never the
   credential. Keep all of that when adding to it, and add a test for each new

@@ -56,7 +56,12 @@ export type WaitingRequest = {
   warning: string | null
   decisions: Array<{ value: Decision; label: string }>
   /** A new server's secret, typed in when agreeing to it. */
-  secret: { name: string; exists: boolean } | null
+  secret: {
+    name: string
+    exists: boolean
+    optional: boolean
+    clientId: string | null
+  } | null
 }
 
 export function TokenDetail({

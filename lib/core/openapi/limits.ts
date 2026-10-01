@@ -36,6 +36,8 @@ export const MAX_PATH_LENGTH = 2048
 export const MAX_NAME_LENGTH = 256
 export const MAX_SERVER_URL_LENGTH = 2048
 export const MAX_PARAMETERS = 200
+/** Scopes PCP asks for from one schema's OAuth flow. */
+export const MAX_OAUTH_SCOPES = 100
 export const MAX_TOOL_DESCRIPTION = 2000
 /**
  * Everything one endpoint's tools may add up to once stored (schemas,

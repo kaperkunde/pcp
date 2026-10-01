@@ -8,6 +8,10 @@ import {
   type SecretOption,
 } from "@/components/header-auth-fields"
 import { LocalDate } from "@/components/local-date"
+import {
+  OAuthClientFields,
+  type OAuthClientValues,
+} from "@/components/oauth-client-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
@@ -44,11 +48,11 @@ export type EndpointFormValues = {
   readOnly: boolean
   /** Refuse private, local and link-local addresses. */
   publicOnly: boolean
-  authType: "none" | "header"
+  authType: "none" | "header" | "oauth"
   authHeaderName: string
   authValueTemplate: string
   authSecretId: string
-}
+} & OAuthClientValues
 
 export const EMPTY_ENDPOINT: EndpointFormValues = {
   name: "",
@@ -63,6 +67,10 @@ export const EMPTY_ENDPOINT: EndpointFormValues = {
   authHeaderName: DEFAULT_HEADER_NAME,
   authValueTemplate: DEFAULT_VALUE_TEMPLATE,
   authSecretId: "",
+  oauthClientId: "",
+  oauthClientSecretId: "",
+  oauthScope: "",
+  oauthAuthorizeParams: "",
 }
 
 /**
@@ -75,9 +83,12 @@ export const EMPTY_ENDPOINT: EndpointFormValues = {
 export function EndpointForm({
   initial,
   secrets,
+  redirectUrl,
 }: {
   initial: EndpointFormValues
   secrets: SecretOption[]
+  /** Where OAuth providers send you back: what your client lists. */
+  redirectUrl: string
 }) {
   const editing = Boolean(initial.id)
   const [state, action] = useActionState<ServerActionResult, FormData>(
@@ -276,7 +287,7 @@ export function EndpointForm({
                   means typing it to confirm.
                 </>
               ) : (
-                "Where the API lives. Leave it empty to use the address in the schema, unless you attach a secret: then enter it, so PCP knows where you mean it to go. Once saved, PCP keeps this address even if the schema changes."
+                "Where the API lives. Leave it empty to use the address in the schema, unless you attach a secret or sign in with OAuth: then enter it, so PCP knows where you mean it to go. Once saved, PCP keeps this address even if the schema changes."
               )
             }
           >
@@ -331,12 +342,17 @@ export function EndpointForm({
               name="authType"
               value={authType}
               onChange={(event) =>
-                setAuthType(event.target.value as "none" | "header")
+                setAuthType(
+                  event.target.value as EndpointFormValues["authType"],
+                )
               }
             >
               <option value="none">None — the API is open</option>
               <option value="header">
                 Secret in a header — an API key or token
+              </option>
+              <option value="oauth">
+                OAuth — sign in with your account, as the schema says
               </option>
             </Select>
           </Field>
@@ -346,6 +362,26 @@ export function EndpointForm({
               prefix={prefix}
               secrets={secrets}
               initial={initial}
+            />
+          ) : null}
+
+          {authType === "oauth" ? (
+            <OAuthClientFields
+              prefix={prefix}
+              secrets={secrets}
+              initial={initial}
+              redirectUrl={redirectUrl}
+              scopeHint="Leave empty to ask for the scopes the operations PCP offers need, as the schema says."
+              intro={
+                <>
+                  PCP signs in where the schema&apos;s oauth2 flow (an
+                  authorization code flow) says, renews the token itself, and
+                  sends it to the base URL with every call. After saving, choose{" "}
+                  <strong>Connect</strong> on the endpoint&apos;s page. Most
+                  providers want a client you create in their developer settings
+                  with this redirect URI; enter its client ID and secret here:
+                </>
+              }
             />
           ) : null}
 

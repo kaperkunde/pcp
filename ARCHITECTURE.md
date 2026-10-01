@@ -190,6 +190,36 @@ secret later to an address that came from the schema asks for it again. An edit
 with the field left empty keeps the saved address and never takes the schema's
 server, so a schema cannot aim the secret somewhere the owner did not choose.
 
+**Signing in with OAuth.** An endpoint can send the owner's OAuth token
+instead of a secret, for APIs that take only that (Google's, Microsoft
+Graph, Spotify). Where to sign in comes from the schema: `openapi/oauth.ts`
+reads an `oauth2` security scheme's authorization code flow (the only flow
+where a person signs in; implicit, password and client credentials are not
+used, and OpenID Connect discovery is not read) and the scopes the offered
+operations require, or every scope the flow lists when none names one. The
+sign-in and token addresses are stored on the row
+(`oauth_authorization_url`, `oauth_token_url`) when the owner saves or
+approves the endpoint, and only then: a later schema that moves them is
+reported in the status, never followed, so the client secret and the refresh
+token only go where the owner was shown. Saving new ones drops the tokens.
+
+The flow is the MCP servers' (below), with the stored addresses standing in
+for discovery: `upstream.ts: endpointDiscovery` gives the SDK an
+authorization server whose metadata is those two addresses, with no issuer
+(a schema names addresses, not the server's identity, so the sign-in
+address's origin stands in for it, and the owner's client is bound to that),
+and no resource indicator (a REST API names none, and providers that do not
+know RFC 8707 refuse it). The owner's client works as for an MCP server, and
+so do Google's sign-in defaults and the renewal notice. Token requests go
+through `openapi/transport.ts` under the endpoint's address rule, like its
+calls. A call carries `Authorization: Bearer <token>`; a token that has run
+out is renewed first with the refresh token, and a 401 gets one renewed token
+and one more try (a refused request did nothing). A renewal the provider
+refuses leaves the endpoint needing connecting, which the gateway turns into
+the connect panel. The token is redacted from what the API answers, like a
+secret, and the `Authorization` header is never one of an operation's
+arguments.
+
 Private addresses are allowed, as they are for MCP servers: only the owner
 sets a schema URL or base URL, and a self-hosted PCP often talks to services
 on its own network. A multi-tenant host must add an address policy before it
@@ -201,7 +231,8 @@ link-local and metadata ranges, and connect to the address it checked.
 **Registering** is `register_server`, the tool main already had for MCP
 servers, with an OpenAPI document as text in `openapi_schema` or by its
 address in `openapi_url` (plus `spec_patches` to edit it, `url` for the base
-URL, `read_only`, and a secret named by NAME). It is an assistant's request,
+URL, `read_only`, and a secret named by NAME, or `auth_type` oauth for a
+document that declares a sign-in, with the owner's `client_id`). It is an assistant's request,
 so it goes through the same owner approval as any other new server (below):
 PCP reads the document when the request is made (downloading it, for a URL),
 applies the edits, refuses one that cannot be used, and shows the owner the
@@ -209,6 +240,14 @@ address, where the schema came from, how many edits it has, the tool count
 and operations, whether the tools can change things, and the secret that
 would be sent. Nothing exists until they agree; then `executeRegister` creates the
 endpoint, on, and adds it to the token's scope.
+
+With OAuth the owner is also shown where they will sign in, where the client
+secret goes and the redirect URI their client needs; the token goes to the
+base URL, so that has to be named in the request, as for a secret. A
+`client_id` (for an MCP server too) is the owner's client at a provider that
+lets no app register itself, and its secret is a new secret the owner types
+in on the approval page, which may be left empty for a client without one;
+`secret` can name one they stored instead.
 
 A secret is named, never sent. A name PCP does not hold yet (an MCP server's
 or an API's) makes a request the owner agrees to on PCP's own page, like
@@ -237,8 +276,9 @@ read in steps under the answer's length limit. The rules are in
 change an endpoint decides where PCP sends requests:
 
 - **Whose endpoint it is.** An endpoint is the assistant's while it sends no
-  secret and is still limited to public addresses. It is the owner's once it
-  sends one of their secrets or they allow private addresses. The assistant can
+  secret or token and is still limited to public addresses. It is the owner's
+  once it sends one of their secrets or OAuth tokens, or they allow private
+  addresses. The assistant can
   rewrite its own; on the owner's it can read and turn read-only on, and
   nothing else. A new schema could add operations the owner's key then
   performs, and a new address, name or description could send the key, or

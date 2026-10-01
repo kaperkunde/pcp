@@ -286,10 +286,16 @@ model McpServer {
   oauthTokens         Secret? @relation("ServerOAuthTokens", fields: [oauthTokensId], references: [id], onDelete: SetNull)
   /// oauth: when the current token set was obtained; null until connected.
   oauthConnectedAt    DateTime? @map("oauth_connected_at")
+  /// openapi + oauth: where the owner signs in and where PCP exchanges the
+  /// code and renews the token, from the schema's oauth2 flow as the owner
+  /// approved it. MCP servers discover theirs instead.
+  oauthAuthorizationUrl String? @map("oauth_authorization_url")
+  oauthTokenUrl         String? @map("oauth_token_url")
 
   /// What the last contact with the server found: unknown | ok |
   /// auth_required | client_required (an OAuth server PCP cannot register
-  /// with, waiting for the owner's client) | error.
+  /// with, waiting for the owner's client) | refused (it turned down the
+  /// credentials PCP sent) | error.
   status        String    @default("unknown")
   statusMessage String    @default("") @map("status_message")
   lastSyncedAt  DateTime? @map("last_synced_at")

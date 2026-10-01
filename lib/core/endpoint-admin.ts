@@ -110,7 +110,7 @@ export type EndpointDetails = {
     /** How many edits are applied to it. */
     edits: number
   }
-  authentication: { type: "none" | "header"; header: string | null }
+  authentication: { type: "none" | "header" | "oauth"; header: string | null }
   status: ServerStatus
   statusMessage: string
   /** What this token can and cannot change on this endpoint right now. */
@@ -300,7 +300,9 @@ async function detailsOf(
     authentication:
       server.authType === "header"
         ? { type: "header", header: server.authHeaderName }
-        : { type: "none", header: null },
+        : server.authType === "oauth"
+          ? { type: "oauth", header: "Authorization" }
+          : { type: "none", header: null },
     status: server.status as ServerStatus,
     statusMessage: server.statusMessage,
     changes: describeChanges(server),
@@ -467,6 +469,8 @@ export type RegistrationInput = {
   /** Or a secret the owner enters when they agree, by the name it will get. */
   newSecretName?: string | null
   authHeaderName?: string | null
+  /** Signs in with the schema's OAuth flow; the scope, if one was given. */
+  oauth?: { scope: string | null } | null
 }
 
 async function assertRoomForEndpoint(ctx: VaultContext) {
@@ -518,13 +522,17 @@ export async function prepareRegistration(
   }
 
   const patches = input.patches === undefined ? [] : readPatches(input.patches)
-  const sendsSecret = Boolean(input.authSecretId || input.newSecretName)
+  const sendsSecret =
+    !input.oauth && Boolean(input.authSecretId || input.newSecretName)
 
-  // A secret goes where an address says, and the schema is someone else's
-  // document: the address has to come from the request the owner will read.
-  if (sendsSecret && !input.baseUrl?.trim()) {
+  // A secret or a token goes where an address says, and the schema is
+  // someone else's document: the address has to come from the request the
+  // owner will read.
+  if ((sendsSecret || input.oauth) && !input.baseUrl?.trim()) {
     throw invalid(
-      "A secret is sent to an address you name: pass the base URL in url, so the owner sees where it will go.",
+      input.oauth
+        ? "The owner's OAuth token is sent to an address you name: pass the base URL in url, so the owner sees where it will go."
+        : "A secret is sent to an address you name: pass the base URL in url, so the owner sees where it will go.",
     )
   }
 
@@ -547,6 +555,7 @@ export async function prepareRegistration(
       ownerBaseUrl: input.baseUrl,
       hasSecret: sendsSecret,
       authHeaderName: input.authHeaderName,
+      oauth: input.oauth ?? undefined,
       patches,
       fetchedFrom: fetched?.url ?? null,
     })
@@ -597,10 +606,14 @@ export async function createApprovedEndpoint(
     name: string
     description?: string
     url: string
-    authType: "none" | "header"
+    authType: "none" | "header" | "oauth"
     authHeaderName?: string | null
     authValueTemplate?: string | null
     authSecretId?: string | null
+    /** oauth: the owner's client, and the scope they were shown. */
+    oauthClientId?: string | null
+    oauthClientSecretId?: string | null
+    oauthScope?: string | null
     endpoint: EndpointRegistration
   },
 ): Promise<{ id: string; sync: SyncResult }> {
@@ -630,6 +643,11 @@ export async function createApprovedEndpoint(
     authHeaderName: asked.authHeaderName,
     authValueTemplate: asked.authValueTemplate,
     authSecretId: asked.authSecretId,
+    oauthClientId: asked.oauthClientId,
+    oauthClientSecretId: asked.oauthClientSecretId,
+    // The scope the owner was shown, which is what the schema asked for when
+    // none was given.
+    oauthScope: asked.oauthScope ?? endpoint.preview.oauth?.scope ?? null,
   })
 }
 

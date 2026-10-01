@@ -707,7 +707,7 @@ export function buildGatewayServer(
     {
       title: "Add a server or an API",
       description:
-        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document: as text (openapi_schema), or the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. PCP turns each operation into a tool and makes the HTTP calls itself; a header parameter an operation declares becomes one of its arguments, except the header that carries the secret and the ones PCP sets itself (Authorization, Content-Type, Accept and the like), which are left out. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation. Authentication is none, OAuth for an MCP server (the owner signs in once they agree), or a header carrying one of the owner's secrets, named by its NAME: one stored in PCP, or a name for a new one, whose value the owner types in on PCP's page when they agree (that request can only be answered there). Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.",
+        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document: as text (openapi_schema), or the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. PCP turns each operation into a tool and makes the HTTP calls itself; a header parameter an operation declares becomes one of its arguments, except the header that carries the secret and the ones PCP sets itself (Authorization, Content-Type, Accept and the like), which are left out. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation. Authentication is none; a header carrying one of the owner's secrets, named by its NAME: one stored in PCP, or a name for a new one, whose value the owner types in on PCP's page when they agree (that request can only be answered there); or OAuth, where the owner signs in once they agree. OAuth works for an MCP server, and for an API whose OpenAPI document declares an oauth2 security scheme with an authorizationCode flow (authorizationUrl and tokenUrl; add one with spec_patches when the document lacks it): PCP renews the token itself. Not supported: OpenID Connect discovery without such a flow, the implicit, password and client-credentials flows, and keys sent in the query string. Most large providers (Google, Microsoft, Spotify) let no app register itself: pass client_id, the ID of a client the owner created in the provider's developer settings with PCP's redirect URI, and the owner enters its client secret on PCP's page. Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.",
       inputSchema: z.object({
         name: z
           .string()
@@ -752,13 +752,20 @@ export function buildGatewayServer(
           .enum(["none", "oauth", "header"])
           .optional()
           .describe(
-            "none (the default); oauth (MCP servers: the owner signs in after agreeing); or header (sends a secret the owner stored in PCP).",
+            "none (the default); header (sends a secret the owner stored in PCP); or oauth (the owner signs in after agreeing: an MCP server, or an API whose document has an oauth2 authorizationCode flow).",
           ),
         secret: z
           .string()
           .optional()
           .describe(
-            'For header: the name of a secret the owner stored in PCP, or a name for a new one (say "Linear API key"), which the owner fills in on PCP\'s page when they agree. Its name, never its value.',
+            "For header: the name of a secret the owner stored in PCP, or a name for a new one (say \"Linear API key\"), which the owner fills in on PCP's page when they agree. For oauth with client_id: the name of the secret holding that client's secret, or leave it out and the owner enters it on PCP's page. Its name, never its value.",
+          ),
+        client_id: z
+          .string()
+          .max(500)
+          .optional()
+          .describe(
+            "For oauth: the client ID of an OAuth client the owner created with the provider (for Google, in Google Cloud's APIs & Services, Credentials). Needed when the provider lets no app register itself. Its redirect URI must be PCP's, which the owner is shown when they agree. Not a secret.",
           ),
         header_name: z
           .string()
@@ -774,9 +781,10 @@ export function buildGatewayServer(
           ),
         oauth_scope: z
           .string()
+          .max(4000)
           .optional()
           .describe(
-            "For oauth: the scope to ask for, when the server needs one.",
+            "For oauth: the scope to ask for, space-separated. For an API, leave it out to ask for the scopes its offered operations need, as the document says.",
           ),
       }),
       annotations: { readOnlyHint: false, openWorldHint: true },
@@ -795,14 +803,19 @@ export function buildGatewayServer(
         header_name?: string
         value_template?: string
         oauth_scope?: string
+        client_id?: string
       }) => {
         const authType: AuthType = args.auth_type ?? "none"
         const isApi =
           args.openapi_schema !== undefined || args.openapi_url !== undefined
 
-        if (isApi && authType === "oauth") {
+        if (authType !== "oauth" && (args.client_id || args.oauth_scope)) {
+          return failure("client_id and oauth_scope are for auth_type oauth.")
+        }
+
+        if (authType === "oauth" && args.secret && !args.client_id?.trim()) {
           return failure(
-            "An API sends no credential or a secret in a header. OAuth is for MCP servers: use auth_type none or header.",
+            "With oauth, secret names the client secret of the client in client_id: pass client_id too, or leave secret out.",
           )
         }
 
@@ -870,6 +883,42 @@ export function buildGatewayServer(
           }
         }
 
+        let oauthClientId: string | null = null
+        let oauthClientSecretId: string | null = null
+        let newSecretOptional = false
+
+        if (authType === "oauth" && args.client_id?.trim()) {
+          oauthClientId = args.client_id.trim()
+
+          if (/[\u0000-\u001f\u007f]/.test(oauthClientId)) {
+            return failure("The client ID cannot have control characters.")
+          }
+
+          // The client's secret: one the owner stored, named here, or one
+          // they type in on PCP's page (a client may have none, so they may
+          // leave it empty).
+          const named = args.secret?.trim()
+          const stored = named
+            ? await findTextSecretByName(scope.ctx, named)
+            : null
+
+          if (stored) {
+            oauthClientSecretId = stored.id
+            secretName = stored.name
+          } else {
+            const name = named || `${args.name.trim()} OAuth client secret`
+            const problem = validateSecretName(name)
+
+            if (problem) {
+              return failure(`The client secret's name: ${problem}`)
+            }
+
+            newSecretName = name
+            secretName = name
+            newSecretOptional = true
+          }
+        }
+
         const common = {
           description: args.description?.trim() ?? "",
           authType,
@@ -877,7 +926,10 @@ export function buildGatewayServer(
           authValueTemplate,
           authSecretId,
           secretName,
+          oauthClientId,
+          oauthClientSecretId,
           ...(newSecretName ? { newSecretName } : {}),
+          ...(newSecretOptional ? { newSecretOptional } : {}),
         }
         let input: RegisterArgs
 
@@ -907,6 +959,10 @@ export function buildGatewayServer(
             authSecretId,
             newSecretName,
             authHeaderName,
+            oauth:
+              authType === "oauth"
+                ? { scope: args.oauth_scope?.trim() || null }
+                : null,
           })
 
           input = {
@@ -914,7 +970,9 @@ export function buildGatewayServer(
             name: prepared.name,
             description: prepared.description,
             url: prepared.url,
-            oauthScope: null,
+            oauthScope:
+              prepared.registration.preview.oauth?.scope ??
+              (args.oauth_scope?.trim() || null),
             endpoint: prepared.registration,
           }
         } else {

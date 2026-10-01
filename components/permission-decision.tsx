@@ -19,7 +19,9 @@ const AGREES: Decision[] = ["allow_once", "always"]
  *
  * A new server that sends a secret PCP does not hold yet asks for its value
  * here, the one place it is typed in (`secret`); with `exists`, a secret of
- * that name was added since and is used when the field is left empty.
+ * that name was added since and is used when the field is left empty. With
+ * `clientId` it is that OAuth client's secret, which may be left empty
+ * (`optional`) for a client without one.
  */
 export function PermissionDecision({
   id,
@@ -28,7 +30,12 @@ export function PermissionDecision({
 }: {
   id: string
   decisions: Array<{ value: Decision; label: string }>
-  secret?: { name: string; exists: boolean } | null
+  secret?: {
+    name: string
+    exists: boolean
+    optional?: boolean
+    clientId?: string | null
+  } | null
 }) {
   const [pending, startTransition] = useTransition()
   const [chosen, setChosen] = useState<Decision | null>(null)
@@ -42,7 +49,13 @@ export function PermissionDecision({
   function decide(value: Decision) {
     const agrees = AGREES.includes(value)
 
-    if (secret && agrees && !secret.exists && !secretValue) {
+    if (
+      secret &&
+      agrees &&
+      !secret.exists &&
+      !secret.optional &&
+      !secretValue
+    ) {
       setError(`Enter the value of the secret "${secret.name}" first.`)
       return
     }
@@ -89,12 +102,18 @@ export function PermissionDecision({
     <div className="flex flex-col gap-3">
       {secret ? (
         <Field
-          label={`Value of the secret "${secret.name}"`}
+          label={
+            secret.clientId
+              ? `Client secret of the OAuth client "${secret.clientId}"`
+              : `Value of the secret "${secret.name}"`
+          }
           htmlFor={`permission-${id}-secret`}
           hint={
             secret.exists
-              ? `You have added a secret with this name since; leave this empty to use it, or enter a value to save a new one.`
-              : "The key or token itself. It is saved under Secrets, encrypted, and sent only to the address above; the assistant never sees it."
+              ? `You have added a secret named "${secret.name}" since; leave this empty to use it, or enter a value to save a new one.`
+              : secret.clientId
+                ? `From the provider's developer settings, where you created the client. It is saved under Secrets as "${secret.name}", encrypted, and sent only to the token address above; the assistant never sees it. Leave it empty for a client without a secret.`
+                : "The key or token itself. It is saved under Secrets, encrypted, and sent only to the address above; the assistant never sees it."
           }
         >
           <Input

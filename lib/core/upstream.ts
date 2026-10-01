@@ -1,4 +1,5 @@
 import {
+  auth,
   Client,
   SdkHttpError,
   StreamableHTTPClientTransport,
@@ -6,6 +7,7 @@ import {
   type CallToolResult,
   type OAuthClientMetadata,
   type OAuthClientProvider,
+  type FetchLike,
   type OAuthDiscoveryState,
   type StoredOAuthClientInformation,
   type StoredOAuthTokens,
@@ -19,6 +21,7 @@ import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { PcpError } from "./errors"
+import { send } from "./openapi/transport"
 import {
   applyAuthorizeParams,
   applySignInDefaults,
@@ -99,6 +102,14 @@ export class PcpOAuthProvider implements OAuthClientProvider {
   /** Set when the flow needs the person's browser: where to send it. */
   authorizationUrl: URL | null = null
 
+  /**
+   * An API endpoint's token is not bound to a resource (RFC 8707): the
+   * schema names no resource identifier, and providers that do not know the
+   * parameter can refuse it. Left undefined for MCP servers, where the SDK
+   * uses the resource their metadata names.
+   */
+  validateResourceURL?: OAuthClientProvider["validateResourceURL"]
+
   constructor(
     private readonly ctx: VaultContext,
     private readonly server: McpServer,
@@ -112,7 +123,11 @@ export class PcpOAuthProvider implements OAuthClientProvider {
        */
       clientMetadataUrl?: string
     },
-  ) {}
+  ) {
+    if (server.kind === "openapi") {
+      this.validateResourceURL = async () => undefined
+    }
+  }
 
   get redirectUrl(): string {
     return this.options.redirectUrl
@@ -271,6 +286,13 @@ export class PcpOAuthProvider implements OAuthClientProvider {
   }
 
   async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
+    // An endpoint's sign-in is the one its owner approved, never discovered.
+    const fixed = endpointDiscovery(this.server)
+
+    if (fixed) {
+      return fixed
+    }
+
     if (this.interactive) {
       return (await this.readFlowState())?.discovery ?? this.pendingDiscovery
     }
@@ -414,6 +436,139 @@ export class PcpOAuthProvider implements OAuthClientProvider {
 }
 
 /**
+ * An API endpoint's sign-in, as discovery would have found it: the addresses
+ * stored from its schema's oauth2 flow when the owner approved it. There is
+ * no issuer: a schema names addresses, not the server's identity, so the SDK
+ * takes the sign-in address's origin as the authorization server, which is
+ * also what the owner's client is bound to (SEP-2352). And a resource of the
+ * API's own address, so the SDK does not look for metadata the API does not
+ * publish.
+ */
+export function endpointDiscovery(
+  server: Pick<
+    McpServer,
+    "kind" | "url" | "oauthAuthorizationUrl" | "oauthTokenUrl"
+  >,
+): OAuthDiscoveryState | undefined {
+  if (
+    server.kind !== "openapi" ||
+    !server.oauthAuthorizationUrl ||
+    !server.oauthTokenUrl
+  ) {
+    return undefined
+  }
+
+  return {
+    authorizationServerUrl: new URL(server.oauthAuthorizationUrl).origin,
+    authorizationServerMetadata: {
+      authorization_endpoint: server.oauthAuthorizationUrl,
+      token_endpoint: server.oauthTokenUrl,
+      response_types_supported: ["code"],
+    } as OAuthDiscoveryState["authorizationServerMetadata"],
+    resourceMetadata: { resource: server.url },
+  }
+}
+
+/**
+ * How PCP talks to an endpoint's authorization server: under the endpoint's
+ * address rule, like its calls, since the token address came from a schema.
+ * Undefined means the SDK's own fetch.
+ */
+export function oauthFetch(
+  server: Pick<McpServer, "kind" | "publicOnly">,
+): FetchLike | undefined {
+  if (server.kind !== "openapi" || !server.publicOnly) {
+    return undefined
+  }
+
+  return (url, init) => {
+    const body = init?.body
+
+    return send(
+      String(url),
+      {
+        method: init?.method,
+        headers: Object.fromEntries(new Headers(init?.headers)),
+        body:
+          typeof body === "string"
+            ? body
+            : body instanceof URLSearchParams
+              ? body.toString()
+              : undefined,
+        signal: init?.signal ?? undefined,
+      },
+      { publicOnly: true },
+    )
+  }
+}
+
+/** Renewed this long before it runs out, so a call does not race the clock. */
+const RENEW_MARGIN_MS = 60_000
+
+/**
+ * The access token an OAuth endpoint's call carries, renewed first when it
+ * has run out (or `renew` says the API refused it). Without a token, or one
+ * that cannot be renewed, the endpoint needs connecting: UnauthorizedError,
+ * as for an MCP server.
+ */
+async function endpointToken(
+  ctx: VaultContext,
+  server: McpServer,
+  { publicUrl, renew = false }: { publicUrl: string; renew?: boolean },
+): Promise<{ access: string; refresh: string | undefined }> {
+  const provider = new PcpOAuthProvider(ctx, server, {
+    redirectUrl: oauthRedirectUrl(publicUrl),
+    publicUrl,
+  })
+  const held = await provider.tokenSet()
+  let tokens = held.tokens
+  const signIn = `${server.name} needs to be connected in PCP.`
+
+  if (!server.oauthConnectedAt || !tokens?.access_token) {
+    throw new UnauthorizedError(signIn)
+  }
+
+  const { expiresAt } = tokenLifetime(tokens, held.savedAt)
+  const expired =
+    expiresAt !== null && expiresAt.getTime() - RENEW_MARGIN_MS <= Date.now()
+
+  if (renew || expired) {
+    if (!tokens.refresh_token) {
+      // Nothing to renew with: what PCP holds is over, and saying it is
+      // connected would be untrue.
+      if (expired) {
+        await db().mcpServer.update({
+          where: { id: server.id },
+          data: { oauthConnectedAt: null },
+        })
+      }
+
+      throw new UnauthorizedError(signIn)
+    }
+
+    // A refresh token is spent on the way: the SDK saves the new set, or
+    // forgets the old one and asks for a sign-in nobody can give here.
+    const result = await auth(provider, {
+      serverUrl: server.url,
+      scope: server.oauthScope ?? undefined,
+      fetchFn: oauthFetch(server),
+    })
+
+    if (result !== "AUTHORIZED") {
+      throw new UnauthorizedError(signIn)
+    }
+
+    ;({ tokens } = await provider.tokenSet())
+
+    if (!tokens?.access_token) {
+      throw new UnauthorizedError(signIn)
+    }
+  }
+
+  return { access: tokens.access_token, refresh: tokens.refresh_token }
+}
+
+/**
  * What the owner is told about a connection: whether PCP can renew it on
  * its own, and when the access it has runs out. Null when not connected.
  */
@@ -487,7 +642,29 @@ async function authHeaders(
 async function credential(
   ctx: VaultContext,
   server: McpServer,
+  {
+    publicUrl,
+    renew = false,
+  }: {
+    /** Needed for an OAuth endpoint, whose token may be renewed on the way. */
+    publicUrl?: string
+    renew?: boolean
+  } = {},
 ): Promise<{ headers: Record<string, string>; redact: string[] }> {
+  // An MCP server's OAuth token is the SDK transport's to send.
+  if (server.authType === "oauth" && server.kind === "openapi") {
+    const token = await endpointToken(ctx, server, {
+      publicUrl: publicUrl ?? "",
+      renew,
+    })
+    const value = `Bearer ${token.access}`
+
+    return {
+      headers: { Authorization: value },
+      redact: [token.access, value, ...(token.refresh ? [token.refresh] : [])],
+    }
+  }
+
   if (server.authType !== "header") {
     return { headers: {}, redact: [] }
   }
@@ -666,6 +843,42 @@ export async function syncServerTools(
   }
 }
 
+/**
+ * One API endpoint call with its credential. An OAuth endpoint whose token
+ * the API refuses (401) gets one renewed token and one more try: a refused
+ * request did nothing, so sending it again is safe.
+ */
+async function callEndpoint(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  { publicUrl }: { publicUrl: string },
+): Promise<CallToolResult> {
+  try {
+    const { headers, redact } = await credential(ctx, server, { publicUrl })
+
+    return await callEndpointTool(server, toolName, args, {
+      authHeaders: headers,
+      redact,
+      ...(server.authType === "oauth"
+        ? {
+            renew: async () =>
+              credential(ctx, server, { publicUrl, renew: true }),
+          }
+        : {}),
+    })
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      const message = `${server.name} needs to be connected: open it in PCP and choose Connect.`
+      await setServerStatus(server.id, "auth_required", message)
+      throw new PcpError("unauthorized", message)
+    }
+
+    throw error
+  }
+}
+
 export async function callServerTool(
   ctx: VaultContext,
   server: McpServer,
@@ -674,11 +887,7 @@ export async function callServerTool(
   { publicUrl }: { publicUrl: string },
 ): Promise<CallToolResult> {
   if (server.kind === "openapi") {
-    const { headers, redact } = await credential(ctx, server)
-    return callEndpointTool(server, toolName, args, {
-      authHeaders: headers,
-      redact,
-    })
+    return callEndpoint(ctx, server, toolName, args, { publicUrl })
   }
 
   let connection: UpstreamConnection | null = null

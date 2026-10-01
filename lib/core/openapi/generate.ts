@@ -14,6 +14,7 @@ import {
   REF_MAX_CHARS,
   REF_MAX_NODES,
 } from "./limits"
+import { readOAuth, type OAuthReading } from "./oauth"
 import type { OpenApiDocument } from "./parse"
 import type { BodyPlan, CallPlan, ParamPlan } from "./plan"
 import {
@@ -66,6 +67,8 @@ export type Generated = {
   description: string
   /** What the schema says requests need, in words, or null. */
   security: string | null
+  /** The OAuth sign-in it declares, for the operations offered (oauth.ts). */
+  oauth: OAuthReading
   tools: GeneratedTool[]
   skipped: Array<{ operation: string; reason: string }>
 }
@@ -258,6 +261,8 @@ export function generateTools(
   const tools: GeneratedTool[] = []
   const skipped: Generated["skipped"] = []
   const used = new Set<string>()
+  /** The security requirements of the operations offered. */
+  const requirements: unknown[] = []
   let operations = 0
   // Shared by every operation: see MAX_TOTAL_REF_NODES.
   let pool = MAX_TOTAL_REF_NODES
@@ -351,6 +356,7 @@ export function generateTools(
 
         stored += size
         tools.push({ ...tool, name: uniqueName(tool.name, used) })
+        requirements.push(own(operation, "security") ?? own(doc, "security"))
       } catch (error) {
         if (error instanceof Skip) {
           skipped.push({ operation: label, reason: error.reason })
@@ -375,6 +381,7 @@ export function generateTools(
     title: shorten(ownString(info, "title"), 200),
     description: shorten(ownString(info, "description"), 1000),
     security: describeSecurity(doc),
+    oauth: readOAuth(doc, requirements),
     tools,
     skipped,
   }
