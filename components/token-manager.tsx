@@ -2,7 +2,13 @@
 
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useActionState, useEffect, useState, useTransition } from "react"
+import {
+  useActionState,
+  useEffect,
+  useState,
+  useTransition,
+  type FormEvent,
+} from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
@@ -90,6 +96,20 @@ function CreateTokenForm({
     }
   }, [made, router])
 
+  // What the first form chose, while the second asks for the password.
+  const [draft, setDraft] = useState<Array<[string, string]> | null>(null)
+
+  function review(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const entries: Array<[string, string]> = []
+
+    for (const [key, value] of new FormData(event.currentTarget)) {
+      if (typeof value === "string") entries.push([key, value])
+    }
+
+    setDraft(entries)
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -98,53 +118,80 @@ function CreateTokenForm({
           One per assistant or machine, so each can be revoked on its own.
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <form action={action} className="flex flex-col gap-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Name" htmlFor="token-name">
+      <CardContent className="flex flex-col gap-6">
+        {/* Two forms, so the one with the password holds the account and the
+            password and nothing else: next to a name field and a "Create"
+            button, Safari takes a password field for a sign-up and offers
+            to generate one, whatever its autocomplete says. */}
+        <form onSubmit={review}>
+          <fieldset disabled={draft !== null} className="flex flex-col gap-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Name" htmlFor="token-name">
+                <Input
+                  id="token-name"
+                  name="name"
+                  autoComplete="off"
+                  required
+                  maxLength={80}
+                  placeholder="Claude on my laptop"
+                />
+              </Field>
+              <Field label="Expires" htmlFor="token-expires">
+                <Select id="token-expires" name="expiresIn" defaultValue="">
+                  <option value="">Never</option>
+                  <option value="7">In 7 days</option>
+                  <option value="30">In 30 days</option>
+                  <option value="90">In 90 days</option>
+                  <option value="365">In a year</option>
+                </Select>
+              </Field>
+            </div>
+            <ServerScopeFields servers={servers} />
+            <ManageEndpointsField id="token-manage" />
+            {draft === null ? (
+              <div>
+                <Button type="submit">Create token</Button>
+              </div>
+            ) : null}
+          </fieldset>
+        </form>
+        {draft !== null ? (
+          <form
+            action={action}
+            className="flex flex-col gap-4 rounded-lg border border-border p-4"
+          >
+            <p className="text-muted-foreground">
+              A token is a lasting way into your vault, so PCP asks for your
+              password before it makes one.
+            </p>
+            {draft.map(([key, value], index) => (
+              <input key={index} type="hidden" name={key} value={value} />
+            ))}
+            <UsernameField id="token-account" value={username} />
+            <Field label="Your password" htmlFor="token-password">
               <Input
-                id="token-name"
-                name="name"
-                // Not a username, whatever a password manager makes of a
-                // text field above a password.
-                autoComplete="off"
+                id="token-password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                autoFocus
                 required
-                maxLength={80}
-                placeholder="Claude on my laptop"
               />
             </Field>
-            <Field label="Expires" htmlFor="token-expires">
-              <Select id="token-expires" name="expiresIn" defaultValue="">
-                <option value="">Never</option>
-                <option value="7">In 7 days</option>
-                <option value="30">In 30 days</option>
-                <option value="90">In 90 days</option>
-                <option value="365">In a year</option>
-              </Select>
-            </Field>
-          </div>
-          <ServerScopeFields servers={servers} />
-          <ManageEndpointsField id="token-manage" />
-          <UsernameField value={username} />
-          <Field
-            label="Your password"
-            htmlFor="token-password"
-            hint="A token is a lasting way into your vault, so PCP asks for your password before it makes one."
-          >
-            <Input
-              id="token-password"
-              name="password"
-              type="password"
-              autoComplete="current-password"
-              required
-            />
-          </Field>
-          <FormError error={state.status === "error" ? state.error : null} />
-          <FormNote message={made ? "Created. Opening it…" : null} />
-          <div>
-            <SubmitButton pendingText="Creating…">Create token</SubmitButton>
-          </div>
-        </form>
+            <FormError error={state.status === "error" ? state.error : null} />
+            <FormNote message={made ? "Created. Opening it…" : null} />
+            <div className="flex gap-2">
+              <SubmitButton pendingText="Checking…">Confirm</SubmitButton>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setDraft(null)}
+              >
+                Back
+              </Button>
+            </div>
+          </form>
+        ) : null}
       </CardContent>
     </Card>
   )

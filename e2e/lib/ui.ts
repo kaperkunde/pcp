@@ -34,14 +34,39 @@ export async function createToken(
 ): Promise<string> {
   await page.goto("/tokens")
   await page.getByLabel("Name").fill(name)
-  await page.getByLabel("Your password").fill(password)
   await page.getByRole("button", { name: "Create token" }).click()
+  await confirmWithPassword(page, password)
   await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
   await expect(page.getByRole("heading", { name })).toBeVisible()
   await expect(page.getByText("Your new token")).toBeVisible()
   const token = await page.getByTestId("new-token").textContent()
   expect(token).toMatch(/^pcp_/)
   return token!
+}
+
+/**
+ * Answers the token form's password step. The form that asks holds the
+ * account and the password and nothing else a password manager would fill:
+ * anything more and Safari takes it for a sign-up and offers to generate a
+ * new password instead of filling the saved one.
+ */
+export async function confirmWithPassword(page: Page, password: string) {
+  const field = page.getByLabel("Your password")
+  await expect(field).toHaveAttribute("autocomplete", "current-password")
+
+  const fillable = await field.evaluate((input) =>
+    [...(input as HTMLInputElement).form!.elements]
+      .filter(
+        (element): element is HTMLInputElement =>
+          element instanceof HTMLInputElement && element.type !== "hidden",
+      )
+      .map((element) => element.autocomplete),
+  )
+  expect(fillable).toEqual(["username", "current-password"])
+  await expect(page.getByLabel("Account")).not.toHaveValue("")
+
+  await field.fill(password)
+  await page.getByRole("button", { name: "Confirm" }).click()
 }
 
 /** Opens a token's page from the token list; returns the token's id. */
