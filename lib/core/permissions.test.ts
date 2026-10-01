@@ -23,7 +23,7 @@ import {
   type RegisterArgs,
 } from "./permissions"
 import { UI_EXTENSION } from "./permission-rules"
-import { createSecret } from "./secrets"
+import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
@@ -285,6 +285,34 @@ describe("asking the owner", () => {
     expect((await db().permissionRequest.findFirstOrThrow()).status).toBe(
       "declined",
     )
+  })
+
+  it("leaves the request open when the prompt is cancelled", async () => {
+    // Claude's apps send a cancel when their own timeout gives up on a
+    // prompt they never finished showing; the owner has not answered.
+    const { scope, server } = await setup()
+    const { calls, executor } = stub()
+    const url = { clientCapabilities: { elicitation: { url: {} } } }
+    const asked = call(server, "add_numbers", { a: 1, b: 2 })
+
+    const prompt = await withPermission(scope, asked, url, { executor })
+    const cancelled = await withPermission(
+      scope,
+      asked,
+      {
+        ...url,
+        requestState: (prompt as { requestState?: string }).requestState,
+        inputResponses: { decision: { action: "cancel" } },
+      },
+      { executor },
+    )
+
+    const row = await db().permissionRequest.findFirstOrThrow()
+    expect(row.status).toBe("pending")
+    expect(textOf(cancelled)).toContain("Still waiting for the owner")
+    expect(textOf(cancelled)).toContain(`/permissions/${row.id}`)
+    expect(textOf(cancelled)).toContain(`id "${row.id}"`)
+    expect(calls).toHaveLength(0)
   })
 })
 
@@ -760,6 +788,208 @@ describe("adding an API from OpenAPI text", () => {
     expect(Buffer.from(row.argsCiphertext).toString("utf8")).not.toContain(
       "listPets",
     )
+  })
+})
+
+describe("a new secret the owner types in", () => {
+  /** register_server naming a secret PCP does not hold yet. */
+  async function withNewSecret(ctx: VaultContext): Promise<RegisterArgs> {
+    const prepared = await prepareRegistration(ctx, {
+      name: "Pets",
+      spec: PETS_SPEC,
+      baseUrl: "https://api.example.com/v1",
+      newSecretName: "Pets API key",
+    })
+
+    return {
+      name: prepared.name,
+      description: prepared.description,
+      url: prepared.url,
+      authType: "header",
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+      authSecretId: null,
+      secretName: "Pets API key",
+      newSecretName: "Pets API key",
+      oauthScope: null,
+      endpoint: prepared.registration,
+    }
+  }
+
+  const PANELS_AND_FORMS = {
+    clientCapabilities: {
+      extensions: { [UI_EXTENSION]: { mimeTypes: ["text/html"] } },
+      elicitation: { form: {} },
+    } as never,
+  }
+
+  it("is asked for on PCP's page only, never in the panel or the client's prompt", async () => {
+    const { ctx, scope } = await setup()
+
+    const asked = await withPermission(
+      scope,
+      { kind: "register", input: await withNewSecret(ctx) },
+      PANELS_AND_FORMS,
+      { toolShowsPanel: true },
+    )
+    // Neither a form the client fills in nor the panel's buttons: the link.
+    expect(isInputRequiredResult(asked)).toBe(false)
+    expect(textOf(asked)).toMatch(/Ask the owner to open .*\/permissions\//)
+    expect(textOf(asked)).toMatch(
+      /type the value of the secret "Pets API key" in there; do not ask them for it here/,
+    )
+    expect((asked as CallToolResult).structuredContent).toMatchObject({
+      kind: "done",
+    })
+
+    const id = await onlyRequestId()
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.secretToEnter).toEqual({ name: "Pets API key", exists: false })
+    expect(view?.lines).toContain(
+      'Authentication: sends a new secret, saved as "Pets API key", in the X-API-Key header; you enter its value here when you agree',
+    )
+    expect(view?.warning).toMatch(/"Pets API key" to this address/)
+
+    const checked = await checkPermission(scope, id, PANELS_AND_FORMS)
+    expect(checked.structuredContent).toMatchObject({ kind: "done" })
+  })
+
+  it("cannot be agreed to from the panel or without the value; declining works anywhere", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const input = await withNewSecret(ctx)
+    const web = { via: "web" as const, publicUrl: PUBLIC_URL }
+
+    await withPermission(scope, { kind: "register", input }, {})
+    const id = await onlyRequestId()
+
+    const fromPanel = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { via: "app", publicUrl: PUBLIC_URL, secretValue: "k-123" },
+      executor,
+    )
+    expect(fromPanel.isError).toBe(true)
+    expect(textOf(fromPanel)).toMatch(/types in on PCP's page/)
+
+    const empty = await decidePermission(ctx, id, "allow_once", web, executor)
+    expect(empty.isError).toBe(true)
+    expect(textOf(empty)).toMatch(/Enter the secret's value/)
+
+    // Still waiting, and nothing was made.
+    expect(
+      (await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL }))?.status,
+    ).toBe("pending")
+    expect(await db().secret.count()).toBe(0)
+    expect(await db().mcpServer.count()).toBe(1)
+
+    await withPermission(
+      scope,
+      { kind: "register", input: { ...input, name: "Other pets" } },
+      {},
+    )
+    const other = (
+      await db().permissionRequest.findFirstOrThrow({
+        where: { id: { not: id } },
+      })
+    ).id
+    const declined = await decidePermission(
+      ctx,
+      other,
+      "decline",
+      { via: "app", publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(textOf(declined)).toMatch(/said no/)
+  })
+
+  it("saves the value the owner typed under the proposed name and sends it, without telling the assistant", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+
+    await withPermission(
+      scope,
+      { kind: "register", input: await withNewSecret(ctx) },
+      {},
+    )
+    const id = await onlyRequestId()
+    const added = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { via: "web", publicUrl: PUBLIC_URL, secretValue: "k-123" },
+      executor,
+    )
+
+    expect(textOf(added)).toMatch(/Added Pets as "pets" with 3 tools/)
+    expect(textOf(added)).toMatch(/saved in PCP as "Pets API key"/)
+    expect(textOf(added)).not.toContain("k-123")
+
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "Pets API key" },
+    })
+    expect(await revealSecret(ctx, secret.id)).toBe("k-123")
+    expect(secret.description).toBe("Sent to Pets in the X-API-Key header.")
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
+    ).toMatchObject({
+      authType: "header",
+      authSecretId: secret.id,
+      authHeaderName: "X-API-Key",
+      url: "https://api.example.com/v1",
+      publicOnly: true,
+    })
+    // The value is on no request row.
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    expect(
+      Buffer.from(row.resultCiphertext ?? []).toString("utf8"),
+    ).not.toContain("k-123")
+  })
+
+  it("uses a secret of that name the owner added meanwhile, or saves a typed one beside it", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const web = { via: "web" as const, publicUrl: PUBLIC_URL }
+    const input = await withNewSecret(ctx)
+
+    await withPermission(scope, { kind: "register", input }, {})
+    const first = await onlyRequestId()
+    const added = await createSecret(ctx, {
+      name: "Pets API key",
+      value: "from-secrets-page",
+    })
+    expect(
+      (await getPermissionView(ctx, first, { publicUrl: PUBLIC_URL }))
+        ?.secretToEnter,
+    ).toEqual({ name: "Pets API key", exists: true })
+
+    await decidePermission(ctx, first, "allow_once", web, executor)
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
+    ).toMatchObject({ authSecretId: added.id })
+
+    await withPermission(
+      scope,
+      { kind: "register", input: { ...input, name: "More pets" } },
+      {},
+    )
+    const second = (
+      await db().permissionRequest.findFirstOrThrow({
+        where: { status: "pending" },
+      })
+    ).id
+    const typed = await decidePermission(
+      ctx,
+      second,
+      "allow_once",
+      { ...web, secretValue: "typed-again" },
+      executor,
+    )
+    expect(textOf(typed)).toMatch(/saved in PCP as "Pets API key 2"/)
+    expect(await revealSecret(ctx, added.id)).toBe("from-secrets-page")
   })
 })
 

@@ -25,7 +25,7 @@ import {
   createApprovedEndpoint,
   type EndpointRegistration,
 } from "./endpoint-admin"
-import { isPcpError } from "./errors"
+import { invalid, isPcpError } from "./errors"
 import { newId } from "./ids"
 import {
   decideMemoryAsk,
@@ -57,6 +57,12 @@ import {
   type PermissionVia,
 } from "./permission-rules"
 import { summarize } from "./search"
+import {
+  createSecretNamedAfter,
+  deleteSecret,
+  findTextSecretByName,
+  validateSecretValue,
+} from "./secrets"
 import { createServer, getServer, type ServerInput } from "./servers"
 import { writeToolAccess } from "./tool-access"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
@@ -106,10 +112,13 @@ export type ToolRequest = {
 
 /**
  * A new server as an assistant asked for it; never a secret's value. With
- * `endpoint` it is an API from OpenAPI text, and `url` is its base URL.
+ * `endpoint` it is an API from OpenAPI text, and `url` is its base URL. With
+ * `newSecretName` it sends a secret PCP does not hold yet: the owner types
+ * its value in on PCP's page when they agree, and it is saved by that name.
  */
 export type RegisterArgs = ServerInput & {
   secretName?: string | null
+  newSecretName?: string | null
   endpoint?: EndpointRegistration
 }
 
@@ -155,6 +164,12 @@ export type PermissionView = {
   decisions: Array<{ value: PermissionDecision; label: string }>
   /** Set once an allowed request left an OAuth server needing connecting. */
   connect: ConnectPanel | null
+  /**
+   * A new server that sends a secret PCP does not hold yet: the owner types
+   * its value in on PCP's page, so that is the only place to agree. `exists`
+   * when a secret by that name has been added since, which is then used.
+   */
+  secretToEnter: { name: string; exists: boolean } | null
 }
 
 type Row = PermissionRequest & {
@@ -328,11 +343,13 @@ async function summarizeRow(
   if (row.kind === "register") {
     const input = args as RegisterArgs
     const auth =
-      input.authType === "header"
-        ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header`
-        : input.authType === "oauth"
-          ? `Authentication: OAuth; you sign in when you connect it${input.oauthScope ? ` (scope ${input.oauthScope})` : ""}`
-          : "Authentication: none"
+      input.authType === "header" && input.newSecretName
+        ? `Authentication: sends a new secret, saved as "${input.newSecretName}", in the ${input.authHeaderName || "Authorization"} header; you enter its value here when you agree`
+        : input.authType === "header"
+          ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header`
+          : input.authType === "oauth"
+            ? `Authentication: OAuth; you sign in when you connect it${input.oauthScope ? ` (scope ${input.oauthScope})` : ""}`
+            : "Authentication: none"
     const warning =
       input.authType === "header"
         ? `PCP will send the secret "${input.secretName ?? "?"}" to this address with every call. Only add it if you trust the address.`
@@ -449,7 +466,41 @@ async function toView(
       finished && row.server && needsConnecting(row.server)
         ? connectPanel(row.server, publicUrl)
         : null,
+    secretToEnter: await secretToEnter(ctx, row),
   }
+}
+
+/** The name of a secret the owner types in to agree to a new server. */
+function newSecretNameOf(ctx: VaultContext, row: PermissionRequest) {
+  return row.kind === "register"
+    ? ((readArgs(ctx, row) as RegisterArgs).newSecretName ?? null)
+    : null
+}
+
+async function secretToEnter(
+  ctx: VaultContext,
+  row: PermissionRequest,
+): Promise<PermissionView["secretToEnter"]> {
+  const name = newSecretNameOf(ctx, row)
+
+  return name
+    ? { name, exists: (await findTextSecretByName(ctx, name)) !== null }
+    : null
+}
+
+/**
+ * The ways the owner can be asked about this request. A secret's value is
+ * typed in on PCP's own page, never in the client's prompt or the panel,
+ * which would carry it through the conversation's app: so such a request
+ * is answered there, by the link or the client opening it.
+ */
+function tiersFor(
+  view: PermissionView,
+  allowed: readonly PermissionTier[],
+): readonly PermissionTier[] {
+  return view.secretToEnter
+    ? allowed.filter((tier) => tier === "url" || tier === "link")
+    : allowed
 }
 
 export function permissionPanel(view: PermissionView): PermissionPanel {
@@ -491,7 +542,7 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     default:
       return text(
-        `Still waiting for the owner. They can answer at ${view.url} until ${view.expiresAt.toISOString()}.`,
+        `Still waiting for the owner. They can answer at ${view.url} until ${view.expiresAt.toISOString()}. Afterwards, call check_permission with id "${view.id}" for the result.`,
       )
   }
 }
@@ -519,8 +570,11 @@ function pendingText(
       : tier === "app"
         ? `Call check_permission with id "${view.id}": it shows the owner a panel to answer in. Or ask them to open ${view.url}.`
         : `Ask the owner to open ${view.url} (signed in to PCP) and answer there.`
+  const typed = view.secretToEnter
+    ? ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
+    : ""
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\n${where} It stays open until ${view.expiresAt.toISOString()}. Afterwards, call check_permission with id "${view.id}" for the result.`
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\n${where}${typed} It stays open until ${view.expiresAt.toISOString()}. Afterwards, call check_permission with id "${view.id}" for the result.`
 }
 
 /**
@@ -582,7 +636,7 @@ export async function withPermission(
   const view = await toView(scope.ctx, row!, scope.publicUrl)
   const tier = choosePermissionTier(
     request.clientCapabilities,
-    scope.permissionTiers,
+    tiersFor(view, scope.permissionTiers),
   )
 
   switch (tier) {
@@ -685,7 +739,10 @@ async function resumeRound(
     return outcomeFromRow(scope.ctx, row.id, scope.publicUrl)
   }
 
-  if (answer.kind === "elicit") {
+  // Only a decline is the owner saying no. A cancel is the prompt closing
+  // without an answer, which is also what a client sends when its own
+  // timeout gives up on a prompt it never showed: the request stays open.
+  if (answer.kind === "elicit" && answer.action === "decline") {
     return decidePermission(scope.ctx, row.id, "decline", options, executor)
   }
 
@@ -705,7 +762,14 @@ export async function decidePermission(
     via,
     publicUrl,
     tokenId,
-  }: { via: PermissionVia; publicUrl: string; tokenId?: string },
+    secretValue,
+  }: {
+    via: PermissionVia
+    publicUrl: string
+    tokenId?: string
+    /** The value of a new server's secret, typed in on PCP's page. */
+    secretValue?: string
+  },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
   const row = await loadRow({
@@ -769,6 +833,28 @@ export async function decidePermission(
     )
   }
 
+  // A secret PCP does not hold yet is typed in on PCP's page, and only
+  // there: an answer from the prompt or the panel cannot carry it.
+  const newSecretName = newSecretNameOf(ctx, row)
+
+  if (newSecretName) {
+    if (via !== "web") {
+      return text(
+        `Adding this needs the value of the secret "${newSecretName}", which the owner types in on PCP's page: ${permissionUrl(publicUrl, row.id)}`,
+        true,
+      )
+    }
+
+    const problem =
+      secretValue || !(await findTextSecretByName(ctx, newSecretName))
+        ? validateSecretValue(secretValue ?? "")
+        : null
+
+    if (problem) {
+      return text(problem, true)
+    }
+  }
+
   if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
   }
@@ -789,7 +875,7 @@ export async function decidePermission(
     result =
       kind === "call"
         ? await executeCall(ctx, row, publicUrl, executor)
-        : await executeRegister(ctx, row, publicUrl, executor)
+        : await executeRegister(ctx, row, publicUrl, executor, secretValue)
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -859,34 +945,82 @@ async function executeCall(
   )
 }
 
+/**
+ * The secret a new server sends: the one the request named, or for a new
+ * one, the value the owner typed in, saved under the name the assistant
+ * proposed (with a number added when that is taken by now). Without a value,
+ * a secret of that name the owner has added since is used.
+ */
+async function secretForRegister(
+  ctx: VaultContext,
+  asked: RegisterArgs,
+  secretValue: string | undefined,
+): Promise<{ id: string | null; saved: { id: string; name: string } | null }> {
+  if (!asked.newSecretName) {
+    return { id: asked.authSecretId ?? null, saved: null }
+  }
+
+  if (!secretValue) {
+    const existing = await findTextSecretByName(ctx, asked.newSecretName)
+
+    if (!existing) {
+      throw invalid(`Enter the value of the secret "${asked.newSecretName}".`)
+    }
+
+    return { id: existing.id, saved: null }
+  }
+
+  const saved = await createSecretNamedAfter(ctx, {
+    base: asked.newSecretName,
+    value: secretValue,
+    description: `Sent to ${asked.name} in the ${asked.authHeaderName || "Authorization"} header.`,
+  })
+
+  return { id: saved.id, saved }
+}
+
 async function executeRegister(
   ctx: VaultContext,
   row: Row,
   publicUrl: string,
   executor: PermissionExecutor,
+  secretValue?: string,
 ): Promise<CallToolResult> {
   const asked = readArgs(ctx, row) as RegisterArgs
-  const created: { id: string; sync?: SyncResult } = asked.endpoint
-    ? await createApprovedEndpoint(ctx, {
-        name: asked.name,
-        description: asked.description,
-        url: asked.url,
-        authType: asked.authType === "header" ? "header" : "none",
-        authHeaderName: asked.authHeaderName,
-        authValueTemplate: asked.authValueTemplate,
-        authSecretId: asked.authSecretId,
-        endpoint: asked.endpoint,
-      })
-    : await createServer(ctx, {
-        name: asked.name,
-        url: asked.url,
-        description: asked.description,
-        authType: asked.authType,
-        authHeaderName: asked.authHeaderName,
-        authValueTemplate: asked.authValueTemplate,
-        authSecretId: asked.authSecretId,
-        oauthScope: asked.oauthScope,
-      })
+  const secret = await secretForRegister(ctx, asked, secretValue)
+  let created: { id: string; sync?: SyncResult }
+
+  try {
+    created = asked.endpoint
+      ? await createApprovedEndpoint(ctx, {
+          name: asked.name,
+          description: asked.description,
+          url: asked.url,
+          authType: asked.authType === "header" ? "header" : "none",
+          authHeaderName: asked.authHeaderName,
+          authValueTemplate: asked.authValueTemplate,
+          authSecretId: secret.id,
+          endpoint: asked.endpoint,
+        })
+      : await createServer(ctx, {
+          name: asked.name,
+          url: asked.url,
+          description: asked.description,
+          authType: asked.authType,
+          authHeaderName: asked.authHeaderName,
+          authValueTemplate: asked.authValueTemplate,
+          authSecretId: secret.id,
+          oauthScope: asked.oauthScope,
+        })
+  } catch (error) {
+    // The secret was typed in for this server alone.
+    if (secret.saved) {
+      await deleteSecret(ctx, secret.saved.id).catch(() => {})
+    }
+
+    throw error
+  }
+
   const { id } = created
   const token = await db().apiToken.findUniqueOrThrow({
     where: { id: row.tokenId },
@@ -907,6 +1041,10 @@ async function executeRegister(
 
   const server = await getServer(ctx, id)
   const added = `Added ${server.name} as "${server.slug}"`
+  // Its name, which the owner chose to keep; never its value.
+  const saved = secret.saved
+    ? ` The secret the owner entered is saved in PCP as "${secret.saved.name}".`
+    : ""
 
   if (server.authType === "oauth") {
     return connectResult(server, publicUrl, { lead: added })
@@ -918,12 +1056,12 @@ async function executeRegister(
 
   if (sync.status !== "ok") {
     return text(
-      `${added}, but its tools could not be read yet: ${sync.message}`,
+      `${added}, but its tools could not be read yet: ${sync.message}${saved}`,
     )
   }
 
   return text(
-    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search_tools finds them.`,
+    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search_tools finds them.${saved}`,
   )
 }
 
@@ -1066,7 +1204,7 @@ export async function checkPermission(
   if (view.status === "pending") {
     const tier = choosePermissionTier(
       request.clientCapabilities,
-      scope.permissionTiers,
+      tiersFor(view, scope.permissionTiers),
     )
     const where =
       tier === "app" ? `in the panel, or at ${view.url}` : `at ${view.url}`

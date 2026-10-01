@@ -112,7 +112,11 @@ export default async function PermissionPage({
                   .
                 </p>
               ) : null}
-              <PermissionDecision id={view.id} decisions={view.decisions} />
+              <PermissionDecision
+                id={view.id}
+                decisions={view.decisions}
+                secret={view.secretToEnter}
+              />
             </>
           ) : (
             <div
