@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { NEW_SECRET } from "./constants"
-import { CATALOGUE_MAX_AGE_MS, rereadDue } from "./gateway"
+import { CATALOGUE_MAX_AGE_MS, gatewayIcons, rereadDue } from "./gateway"
 import { listSecrets, revealSecret } from "./secrets"
 import { createServer, updateServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 
-// When the gateway reads a server's tools again, and when saving a server
-// says its tools may have changed or saves a secret typed in with it.
+// The icon the gateway names, when it reads a server's tools again, and when
+// saving a server says its tools may have changed or saves a secret typed in
+// with it.
 
 const NOW = Date.parse("2026-10-01T12:00:00Z")
 const HOUR = 60 * 60_000
@@ -24,6 +25,23 @@ function server(
     ...overrides,
   }
 }
+
+describe("gatewayIcons", () => {
+  it("points at PCP's own icons on its public address", () => {
+    expect(gatewayIcons("https://pcp.example.com/")).toEqual([
+      {
+        src: "https://pcp.example.com/icons/icon-192.png",
+        mimeType: "image/png",
+        sizes: ["192x192"],
+      },
+      {
+        src: "https://pcp.example.com/icons/icon-512.png",
+        mimeType: "image/png",
+        sizes: ["512x512"],
+      },
+    ])
+  })
+})
 
 describe("rereadDue", () => {
   it("reads a list older than the limit, and not a fresh one", () => {
