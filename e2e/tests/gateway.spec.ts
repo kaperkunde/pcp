@@ -3,7 +3,13 @@ import { expect, test } from "@playwright/test"
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { OWNER_PASSWORD } from "../lib/auth"
 import { callTool, initialize, mcpRequest, toolText } from "../lib/mcp"
-import { addSecret, allowAllTools, createToken, openToken } from "../lib/ui"
+import {
+  addSecret,
+  allowAllTools,
+  confirmWithPassword,
+  createToken,
+  openToken,
+} from "../lib/ui"
 
 // The whole point of PCP in one flow: a secret goes in, a server is added
 // that needs it, an assistant with an API token finds and calls the
@@ -83,8 +89,8 @@ test("a token is only made with the password", async ({ page }) => {
   // The session alone must not be enough to mint a lasting way in.
   await page.goto("/tokens")
   await page.getByLabel("Name").fill(`Unconfirmed ${RUN}`)
-  await page.getByLabel("Your password").fill("not the password")
   await page.getByRole("button", { name: "Create token" }).click()
+  await confirmWithPassword(page, "not the password")
   await expect(page.locator("p[role=alert]")).toHaveText(/not right/)
   await expect(page.getByText("Your new token")).toHaveCount(0)
 
@@ -224,8 +230,8 @@ test("a token scoped to other servers cannot see this one", async ({
   await page.getByLabel("Name").fill(`Scoped ${RUN}`)
   await page.getByLabel("Only these servers").check()
   await page.getByLabel(`Other ${RUN}`).check()
-  await page.getByLabel("Your password").fill(OWNER_PASSWORD)
   await page.getByRole("button", { name: "Create token" }).click()
+  await confirmWithPassword(page, OWNER_PASSWORD)
   const scopedToken = (await page.getByTestId("new-token").textContent())!
 
   const { instructions } = await initialize(baseURL!, scopedToken)
