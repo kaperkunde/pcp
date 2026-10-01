@@ -1282,7 +1282,7 @@ export function buildGatewayServer(
             .boolean()
             .optional()
             .describe(
-              "List likely mistakes in the schema that confuse assistants (examples written as query strings or of the wrong type, a required header that only takes one value, answers it does not describe), each with the edits that fix it.",
+              "List likely mistakes in the schema that confuse assistants (examples of the wrong type, a required header that only takes one value, answers it does not describe), each with the edits that fix it.",
             ),
         }),
         annotations: { readOnlyHint: true, openWorldHint: false },

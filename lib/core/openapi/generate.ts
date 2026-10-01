@@ -661,14 +661,7 @@ function planParameter(
   }
 
   const description = shorten(ownString(parameter.node, "description"), 1000)
-  // Only a small plain example: one can be as large as the whole file.
-  const rawExample = own(parameter.node, "example")
-  const example =
-    (typeof rawExample === "string" && rawExample.length <= 500) ||
-    typeof rawExample === "number" ||
-    typeof rawExample === "boolean"
-      ? rawExample
-      : undefined
+  const example = parameterExample(own(parameter.node, "example"))
   const property: JsonObject = {
     ...schema.schema,
     ...(description ? { description } : {}),
@@ -696,6 +689,34 @@ function planParameter(
     },
     schema: property,
   }
+}
+
+/**
+ * A parameter's example as an assistant should pass it, or undefined. Only a
+ * small plain one: one can be as large as the whole file. Schemas often write
+ * the example as the query string ("?status=paid"), which an assistant
+ * copies whole into the value; that is read as what follows "=", and
+ * dropped when nothing does or only a placeholder ("{client_id}").
+ */
+export function parameterExample(
+  raw: unknown,
+): string | number | boolean | undefined {
+  if (typeof raw === "number" || typeof raw === "boolean") {
+    return raw
+  }
+
+  if (typeof raw !== "string" || raw.length > 500) {
+    return undefined
+  }
+
+  const query = /^\?[^=]*=(.*)$/s.exec(raw)
+
+  if (!query) {
+    return raw
+  }
+
+  const value = query[1]!
+  return value === "" || /^\{[^}]*\}$/.test(value) ? undefined : value
 }
 
 const SENDABLE_VALUE = new RegExp(`^[\\x20-\\x7e]{1,${MAX_HEADER_VALUE}}$`)

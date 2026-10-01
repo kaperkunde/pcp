@@ -1,3 +1,4 @@
+import { parameterExample } from "./generate"
 import { isBlockedHeader } from "./headers"
 import { entries, isObject, own, ownString, type JsonObject } from "./json"
 import { MAX_SCHEMA_PROBLEMS } from "./limits"
@@ -11,11 +12,13 @@ import { resolvePointer } from "./refs"
  * send it with update_endpoint (or spec_patches) instead of working out
  * the JSON Pointer itself. Found in the schema as edited.
  *
- * - An example written as a query string ("?status=paid"), which an
- *   assistant copies into the value.
- * - An example that is not of the parameter's type.
+ * - An example that is not of the parameter's type. (One written as a query
+ *   string, "?status=paid", is not a mistake to report: the generator reads
+ *   it as the value after "=".)
  * - A required header whose example shows one value and whose schema
- *   allows any: if it only takes that value, PCP can send it itself.
+ *   allows any: if it only takes that value, PCP can send it itself. Not
+ *   for a header that carries a credential, whose example is a placeholder
+ *   for something only the owner has.
  * - Operations that do not describe their answer, so describe_tool cannot
  *   say what they return.
  */
@@ -120,31 +123,25 @@ function exampleProblems(
   parameter: JsonObject,
 ): SchemaProblem[] {
   const name = ownString(parameter, "name") ?? ""
-  const example = own(parameter, "example")
+  // As an assistant is shown it, query-string prefix and all taken off.
+  const example = parameterExample(own(parameter, "example"))
   const schema = schemaOf(doc, parameter)
-  const problems: SchemaProblem[] = []
 
-  if (typeof example === "string" && /^\?[^=]*=/.test(example)) {
-    const value = example.slice(example.indexOf("=") + 1)
-    const placeholder = value === "" || /^\{[^}]*\}$/.test(value)
+  if (example === undefined || fitsType(example, own(schema, "type"))) {
+    return []
+  }
 
-    problems.push({
-      problem: `The example for ${name} is written as a query string (${JSON.stringify(example.slice(0, 80))}); assistants copy it into the value.`,
-      at: `${at}/example`,
-      fix: placeholder
-        ? [{ op: "remove", path: `${at}/example` }]
-        : [{ op: "replace", path: `${at}/example`, value }],
-    })
-  } else if (example !== undefined && !fitsType(example, own(schema, "type"))) {
-    problems.push({
+  return [
+    {
       problem: `The example for ${name} (${JSON.stringify(example).slice(0, 80)}) is not a ${String(own(schema, "type"))}.`,
       at: `${at}/example`,
       fix: [{ op: "remove", path: `${at}/example` }],
-    })
-  }
-
-  return problems
+    },
+  ]
 }
+
+/** A header named for a credential: a password, key, token or secret. */
+const CREDENTIAL_HEADER = /pass(word)?|secret|token|key|auth|session|cookie/i
 
 function headerProblems(
   doc: OpenApiDocument,
@@ -160,6 +157,7 @@ function headerProblems(
     own(parameter, "in") !== "header" ||
     own(parameter, "required") !== true ||
     isBlockedHeader(name, blockedHeaders) ||
+    CREDENTIAL_HEADER.test(name) ||
     own(schema, "enum") !== undefined ||
     own(schema, "const") !== undefined ||
     typeof example !== "string" ||

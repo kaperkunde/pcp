@@ -31,6 +31,13 @@ const doc = parseSpecText(
           schema: { type: "string" },
           example: "XMLHttpRequest",
         },
+        "X-API-PASSWORD": {
+          name: "X-API-PASSWORD",
+          in: "header",
+          required: true,
+          schema: { type: "string" },
+          example: "supersecretpassword",
+        },
         "X-Api-Token": {
           name: "X-Api-Token",
           in: "header",
@@ -48,6 +55,12 @@ const doc = parseSpecText(
             { $ref: "#/components/parameters/status" },
             { $ref: "#/components/parameters/client_id" },
             { $ref: "#/components/parameters/X-Requested-With" },
+            {
+              name: "created_at",
+              in: "query",
+              schema: { type: "integer" },
+              example: "?created_at=yesterday",
+            },
             {
               name: "per_page",
               in: "query",
@@ -86,21 +99,9 @@ describe("lintDocument", () => {
 
   it("finds examples an assistant would copy wrongly, with the edits that fix them", () => {
     expect(more).toBe(0)
+    // A query-string example is not one: the generator reads the value. Nor
+    // is a password header's placeholder a value PCP should send.
     expect(problems.map((problem) => [problem.at, problem.fix])).toEqual([
-      [
-        "/components/parameters/status/example",
-        [
-          {
-            op: "replace",
-            path: "/components/parameters/status/example",
-            value: "archived,deleted",
-          },
-        ],
-      ],
-      [
-        "/components/parameters/client_id/example",
-        [{ op: "remove", path: "/components/parameters/client_id/example" }],
-      ],
       [
         "/components/parameters/X-Requested-With",
         [
@@ -121,6 +122,15 @@ describe("lintDocument", () => {
           {
             op: "remove",
             path: "/paths/~1api~1v1~1invoices/get/parameters/3/example",
+          },
+        ],
+      ],
+      [
+        "/paths/~1api~1v1~1invoices/get/parameters/4/example",
+        [
+          {
+            op: "remove",
+            path: "/paths/~1api~1v1~1invoices/get/parameters/4/example",
           },
         ],
       ],
@@ -148,11 +158,19 @@ describe("lintDocument", () => {
       readOnly: false,
       blockedHeaders: ["X-Api-Token"],
     }).tools
-    expect(Object.keys(invoices!.inputSchema.properties as object)).toEqual([
+    const properties = invoices!.inputSchema.properties as Record<
+      string,
+      { examples?: unknown[] }
+    >
+    expect(Object.keys(properties)).toEqual([
       "status",
       "client_id",
+      "created_at",
       "per_page",
       "page",
     ])
+    // The query-string examples, as the values an assistant passes.
+    expect(properties.status!.examples).toEqual(["archived,deleted"])
+    expect(properties.client_id!.examples).toBeUndefined()
   })
 })

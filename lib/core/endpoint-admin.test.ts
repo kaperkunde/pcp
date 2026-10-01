@@ -827,10 +827,10 @@ describe("mistakes in a schema", () => {
               operationId: "listPets",
               parameters: [
                 {
-                  name: "status",
+                  name: "limit",
                   in: "query",
-                  schema: { type: "string" },
-                  example: "?status=sold",
+                  schema: { type: "integer" },
+                  example: "?limit=ten",
                 },
               ],
             },
@@ -848,12 +848,9 @@ describe("mistakes in a schema", () => {
     const details = await getEndpoint(scope, slug, { includeProblems: true })
 
     expect(details.problems).toEqual(problems)
+    expect(details.problems![0]!.problem).toMatch(/"ten"\) is not a integer/)
     expect(details.problems![0]!.fix).toEqual([
-      {
-        op: "replace",
-        path: "/paths/~1pets/get/parameters/0/example",
-        value: "sold",
-      },
+      { op: "remove", path: "/paths/~1pets/get/parameters/0/example" },
     ])
     expect(details.tools).toBeUndefined()
   })
