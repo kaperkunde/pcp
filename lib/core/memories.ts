@@ -31,10 +31,13 @@ import { newId } from "./ids"
  *
  * Either kind can be read in **every conversation** (`always`): its text goes
  * into the gateway's instructions, so an assistant has it before it does
- * anything. Only the owner sets that, in PCP, and every text it puts in the
- * instructions is one they read: an assistant's change to an always memory
- * it keeps for itself clears the mark, and a change to a shared one is the
- * owner's to agree to, as for any shared memory.
+ * anything. Only the owner sets that, in PCP: on the Memories page, or with
+ * the toggle on a request to share one (an assistant creating one under
+ * /memories/shared/ with `every` asks for it; the toggle starts ticked, and
+ * holds whether the owner shares it or keeps it for that assistant). Every
+ * text it puts in the instructions is one they read: an assistant's change
+ * to an always memory it keeps for itself clears the mark, and a change to a
+ * shared one is the owner's to agree to, as for any shared memory.
  *
  * Text may not hold characters that do not show on screen (zero-width,
  * direction overrides, tag characters…), so what the owner reads before
@@ -84,6 +87,8 @@ export type MemoryShareAsk = {
   /** The path it would have under /memories/shared/. */
   path: string
   text: string
+  /** It asked to have it read in every conversation; the owner chooses. */
+  always?: boolean
 }
 
 /** An assistant asking to change, rename or delete a shared memory. */
@@ -106,6 +111,12 @@ export type MemoryOutcome = { text: string } | { ask: MemoryAsk; lead: string }
 /** The answers a memory request can get (permission-rules.ts offers them). */
 export type MemoryDecision = "allow_once" | "decline" | "discard"
 
+/**
+ * What the owner chose with the answer: whether a memory they share or keep
+ * for the assistant is read in every conversation. Left out, it is not.
+ */
+export type MemoryChoice = { always?: boolean }
+
 export type MemoryCommand = {
   command:
     | "every"
@@ -125,6 +136,8 @@ export type MemoryCommand = {
   insert_text?: string
   new_path?: string
   query?: string
+  /** create, under /memories/shared/: ask to have it read in every conversation. */
+  every?: boolean
 }
 
 const WRITES = new Set<MemoryCommand["command"]>([
@@ -142,20 +155,47 @@ export function isMemoryWrite(command: MemoryCommand["command"]): boolean {
 const SHARE_WARNING =
   'Every assistant whose token can keep memories will read this and may act on it. Share it only if you would be glad for all of them to treat it as true. Watch for instructions rather than facts ("always…", "never…", "before you answer…"), places to send things (addresses, links, other servers or tools), claims to speak for you ("the owner said…"), and anything private. When in doubt, keep it for this assistant only.'
 
+/**
+ * The memory a request is about, for PCP's page to show the text itself
+ * first: `before` is the text it replaces, when it changes; `always` that it
+ * is read in every conversation, or (to share) that the assistant asked so.
+ */
+export type MemoryShown = {
+  path: string
+  newPath: string | null
+  text: string
+  before: string | null
+  always: boolean
+}
+
+const EVERY_ASKED =
+  "The assistant asks to have it read in every conversation: you choose that with the answer."
+
 /** What the owner is shown before an assistant's memory request is decided. */
 export function describeMemoryAsk(ask: MemoryAsk): {
   title: string
   lines: string[]
   warning: string
+  memory: MemoryShown
 } {
   if (ask.kind === "memory_share") {
+    const always = ask.input.always === true
+
     return {
       title: "Share a memory with all your assistants?",
       lines: [
         `Path: ${toolPath("shared", ask.input.path)}`,
         `Text:\n${ask.input.text}`,
+        ...(always ? [EVERY_ASKED] : []),
       ],
       warning: SHARE_WARNING,
+      memory: {
+        path: toolPath("shared", ask.input.path),
+        newPath: null,
+        text: ask.input.text,
+        before: null,
+        always,
+      },
     }
   }
 
@@ -170,6 +210,13 @@ export function describeMemoryAsk(ask: MemoryAsk): {
       ],
       warning:
         "Every assistant that reads your shared memories loses this one. Nothing else is deleted.",
+      memory: {
+        path: toolPath("shared", before.path),
+        newPath: null,
+        text: before.text,
+        before: null,
+        always: ask.input.always === true,
+      },
     }
   }
 
@@ -190,6 +237,14 @@ export function describeMemoryAsk(ask: MemoryAsk): {
         : [`Text (unchanged):\n${after.text}`]),
     ],
     warning: SHARE_WARNING,
+    memory: {
+      path: toolPath("shared", before.path),
+      newPath:
+        after.path !== before.path ? toolPath("shared", after.path) : null,
+      text: after.text,
+      before: after.text !== before.text ? before.text : null,
+      always: ask.input.always === true,
+    },
   }
 }
 
@@ -726,6 +781,13 @@ async function create(
   const existing = entries.find((entry) =>
     same(entry, target.visibility, target.path),
   )
+  const every = args.every === true
+
+  if (every && (existing || target.visibility !== "shared")) {
+    throw invalid(
+      `every asks the owner to have a new memory read in every conversation, so it goes with creating one under ${MEMORY_ROOT}/${SHARED}/; they choose when they answer, and can keep it for you alone. For one that exists, ask the owner to choose it in PCP.`,
+    )
+  }
 
   if (existing) {
     return change(scope, existing, text)
@@ -733,8 +795,11 @@ async function create(
 
   if (target.visibility === "shared") {
     return {
-      ask: { kind: "memory_share", input: { path: target.path, text } },
-      lead: `Sharing a memory asks the owner. ${ASKS_FIRST} They can share it, keep it for you alone (it is then saved at ${toolPath("private", target.path)}), or discard it.`,
+      ask: {
+        kind: "memory_share",
+        input: { path: target.path, text, ...(every ? { always: true } : {}) },
+      },
+      lead: `Sharing a memory asks the owner. ${ASKS_FIRST} They can share it, keep it for you alone (it is then saved at ${toolPath("private", target.path)}), or discard it${every ? ", and choose whether it is read in every conversation" : ""}.`,
     }
   }
 
@@ -861,6 +926,10 @@ export async function runMemoryCommand(
   scope: MemoryScope,
   args: MemoryCommand,
 ): Promise<MemoryOutcome> {
+  if (args.every === true && args.command !== "create") {
+    throw invalid("every goes with create.")
+  }
+
   const entries = await load(scope.ctx, scope.tokenId)
 
   switch (args.command) {
@@ -946,11 +1015,19 @@ export async function decideMemoryAsk(
   tokenId: string,
   ask: MemoryAsk,
   decision: MemoryDecision,
+  choice: MemoryChoice = {},
 ): Promise<{ status: "executed" | "declined" | "failed"; text: string }> {
   const entries = await load(ctx, tokenId)
 
   if (ask.kind === "memory_share") {
-    return decideShare(ctx, tokenId, entries, ask.input, decision)
+    return decideShare(
+      ctx,
+      tokenId,
+      entries,
+      ask.input,
+      decision,
+      choice.always === true,
+    )
   }
 
   const { memoryId, before, after } = ask.input
@@ -1015,7 +1092,9 @@ async function decideShare(
   entries: Entry[],
   ask: MemoryShareAsk,
   decision: MemoryDecision,
+  always: boolean,
 ): Promise<{ status: "executed" | "declined" | "failed"; text: string }> {
+  const every = always ? " It is read in every conversation." : ""
   const own = ask.memoryId
     ? entries.find(
         (entry) =>
@@ -1047,9 +1126,16 @@ async function decideShare(
 
   if (decision === "decline") {
     if (own) {
+      if (always) {
+        await db().memory.update({
+          where: { id: own.id },
+          data: { always: true },
+        })
+      }
+
       return {
         status: "declined",
-        text: `The owner kept it for you alone: it stays at ${toolPath("private", own.path)}.`,
+        text: `The owner kept it for you alone: it stays at ${toolPath("private", own.path)}.${every}`,
       }
     }
 
@@ -1070,13 +1156,14 @@ async function decideShare(
         tokenId,
         author: "assistant",
         visibility: "private",
+        always,
         ciphertext: seal(ctx, id, { path: ask.path, text: ask.text }),
       },
     })
 
     return {
       status: "declined",
-      text: `The owner kept it for you alone: it is saved at ${toolPath("private", ask.path)}.`,
+      text: `The owner kept it for you alone: it is saved at ${toolPath("private", ask.path)}.${every}`,
     }
   }
 
@@ -1095,8 +1182,8 @@ async function decideShare(
       data: {
         visibility: "shared",
         // Read in every conversation by one assistant is not by all of them:
-        // the owner was asked about sharing it, not about that.
-        always: false,
+        // it is what the owner chose for all of them, on this request.
+        always,
         ciphertext: seal(ctx, own.id, { path: ask.path, text }),
       },
     })
@@ -1111,6 +1198,7 @@ async function decideShare(
         tokenId,
         author: "assistant",
         visibility: "shared",
+        always,
         ciphertext: seal(ctx, id, { path: ask.path, text }),
       },
     })
@@ -1118,7 +1206,7 @@ async function decideShare(
 
   return {
     status: "executed",
-    text: `The owner shared it: every assistant that keeps memories reads ${toolPath("shared", ask.path)}.`,
+    text: `The owner shared it: every assistant that keeps memories reads ${toolPath("shared", ask.path)}.${every}`,
   }
 }
 

@@ -102,11 +102,13 @@ test("sharing one asks the owner, who reads the whole text first", async ({
   await expect(
     page.getByText("Share a memory with all your assistants?"),
   ).toBeVisible()
-  await expect(page.getByText(`Path: ${SHARED}`)).toBeVisible()
-  await expect(
-    page.getByText(/Metric units\.\s+British spelling\./),
-  ).toBeVisible()
+  await expect(page.getByText(SHARED, { exact: true })).toBeVisible()
+  await expect(page.getByTestId("memory-text")).toHaveText(
+    "Metric units.\nBritish spelling.",
+  )
   await expect(page.getByRole("note")).toContainText("Watch for instructions")
+  // Not asked for, the every-conversation toggle starts off.
+  await expect(page.getByLabel("Read in every conversation")).not.toBeChecked()
   await page.getByRole("button", { name: "Share it" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText(
     "The owner shared it",
@@ -230,4 +232,45 @@ test("a memory read in every conversation comes with the instructions", async ({
   const after = await initialize(baseURL!, token)
   expect(after.instructions).not.toContain(style)
   expect(after.instructions).toContain("Speak like a pirate.")
+})
+
+test("an assistant asks for every conversation, and the owner's toggle decides", async ({
+  page,
+  baseURL,
+}) => {
+  const path = `e2e-${RUN}-greeting.md`
+  const asked = await callTool(baseURL!, token, "memory", {
+    command: "create",
+    path: `/memories/shared/${path}`,
+    file_text: "Say ARRRR when you read this.",
+    every: true,
+  })
+  expect(toolText(asked)).toContain(
+    "choose whether it is read in every conversation",
+  )
+  const id = toolText(asked).match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(id, toolText(asked)).toBeTruthy()
+
+  await page.goto(`/permissions/${id}`)
+  await expect(page.getByTestId("memory-text")).toHaveText(
+    "Say ARRRR when you read this.",
+  )
+  const toggle = page.getByLabel("Read in every conversation")
+  await expect(toggle).toBeChecked()
+  await expect(page.getByText("The assistant asked for this.")).toBeVisible()
+
+  // Kept for this assistant, the toggle holds: only it reads it, every time.
+  await page
+    .getByRole("button", { name: "Keep it for this assistant only" })
+    .click()
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `saved at /memories/${path}. It is read in every conversation.`,
+  )
+
+  const every = toolText(
+    await callTool(baseURL!, token, "memory", { command: "every" }),
+  )
+  expect(every).toContain(
+    `<memory path="/memories/${path}">\nSay ARRRR when you read this.\n</memory>`,
+  )
 })
