@@ -112,9 +112,9 @@ test("issues an API token and describes the servers behind it", async ({
     "describe_tool",
     "call_tool",
     "check_permission",
-    "answer_permission",
     "check_server",
     "register_server",
+    "propose_tool_access",
   ])
   expect(instructions).toContain(
     `${SLUG}: Sends postcards and adds numbers. (3 tools)`,

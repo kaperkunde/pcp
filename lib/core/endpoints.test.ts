@@ -10,7 +10,13 @@ import {
 } from "./endpoints"
 import { buildInstructions, loadGatewayServers } from "./gateway"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
-import { createSecret, deleteSecret, listSecrets } from "./secrets"
+import { NEW_SECRET } from "./constants"
+import {
+  createSecret,
+  deleteSecret,
+  listSecrets,
+  revealSecret,
+} from "./secrets"
 import {
   getServer,
   listServers,
@@ -246,6 +252,81 @@ describe("createEndpoint", () => {
     await expect(
       createEndpoint(ctx, input({ authType: "oauth" as never })),
     ).rejects.toThrow(/header, or no credential/)
+  })
+
+  it("saves a secret typed into the form with it, and none when it is refused", async () => {
+    const typed = {
+      baseUrl: `${api.origin}/api`,
+      authType: "header" as const,
+      authSecretId: NEW_SECRET,
+      authSecretValue: KEY,
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+    }
+
+    // Refused for the schema after the secret was checked: nothing is kept.
+    await expect(
+      createEndpoint(ctx, input({ ...typed, specText: "{ nope" })),
+    ).rejects.toThrow()
+    await expect(
+      createEndpoint(ctx, input({ ...typed, authSecretValue: "" })),
+    ).rejects.toThrow(/Enter the secret's value/)
+    expect(await listSecrets(ctx)).toEqual([])
+
+    const { id } = await createEndpoint(ctx, input(typed))
+    const [secret] = await listSecrets(ctx)
+    expect(secret).toMatchObject({
+      name: "Petstore key",
+      description: "Sent to Petstore in the X-API-Key header.",
+      usedBy: [{ id, name: "Petstore" }],
+    })
+    expect(await revealSecret(ctx, secret!.id)).toBe(KEY)
+
+    // Named by the owner; a name that is taken is refused before anything.
+    await expect(
+      createEndpoint(ctx, input({ ...typed, authSecretName: "Petstore key" })),
+    ).rejects.toThrow(/already exists/)
+    const named = await createEndpoint(
+      ctx,
+      input({ ...typed, authSecretName: "Pets live key" }),
+    )
+    expect((await getServer(ctx, named.id)).authSecretId).toBe(
+      (await listSecrets(ctx)).find((each) => each.name === "Pets live key")
+        ?.id,
+    )
+    expect(await db().mcpServer.count()).toBe(2)
+  })
+
+  it("switches to a secret typed in on an edit, saved beside the old one", async () => {
+    const auth = await withSecret()
+    const { id } = await createEndpoint(
+      ctx,
+      input({ ...auth, baseUrl: `${api.origin}/api` }),
+    )
+
+    await updateEndpoint(
+      ctx,
+      id,
+      input({
+        ...auth,
+        baseUrl: `${api.origin}/api`,
+        authSecretId: NEW_SECRET,
+        authSecretName: "Pets rotated key",
+        authSecretValue: "sk-live-rotated",
+      }),
+    )
+
+    const rotated = (await listSecrets(ctx)).find(
+      (each) => each.name === "Pets rotated key",
+    )
+    expect(rotated?.usedBy).toEqual([{ id, name: "Petstore" }])
+    expect((await getServer(ctx, id)).authSecretId).toBe(rotated?.id)
+    expect(await revealSecret(ctx, rotated!.id)).toBe("sk-live-rotated")
+    // The old one stays, no longer used by it.
+    expect(
+      (await listSecrets(ctx)).find((each) => each.id === auth.authSecretId)
+        ?.usedBy,
+    ).toEqual([])
   })
 
   it("names the second endpoint with the same name differently", async () => {

@@ -1,5 +1,6 @@
 import {
   Client,
+  SdkHttpError,
   StreamableHTTPClientTransport,
   UnauthorizedError,
   type CallToolResult,
@@ -20,8 +21,10 @@ import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { PcpError } from "./errors"
 import {
   applyAuthorizeParams,
+  applySignInDefaults,
   oauthRedirectUrl,
   registrationMetadata,
+  signInDefaults,
   tokenLifetime,
 } from "./oauth-client"
 import {
@@ -216,9 +219,18 @@ export class PcpOAuthProvider implements OAuthClientProvider {
   async tokenSet(): Promise<{
     tokens: StoredOAuthTokens | undefined
     savedAt: string | undefined
+    /** The authorization server the client is bound to, when known. */
+    issuer: string | undefined
   }> {
     const store = await this.readStore()
-    return { tokens: store.tokens, savedAt: store.tokensSavedAt }
+    const issuer =
+      store.clientIssuer?.issuer ??
+      (store.client as { issuer?: unknown } | undefined)?.issuer
+    return {
+      tokens: store.tokens,
+      savedAt: store.tokensSavedAt,
+      issuer: typeof issuer === "string" ? issuer : undefined,
+    }
   }
 
   async saveTokens(tokens: StoredOAuthTokens): Promise<void> {
@@ -240,9 +252,8 @@ export class PcpOAuthProvider implements OAuthClientProvider {
       )
     }
 
-    this.authorizationUrl = applyAuthorizeParams(
-      authorizationUrl,
-      this.server.oauthAuthorizeParams,
+    this.authorizationUrl = applySignInDefaults(
+      applyAuthorizeParams(authorizationUrl, this.server.oauthAuthorizeParams),
     )
   }
 
@@ -406,10 +417,17 @@ export class PcpOAuthProvider implements OAuthClientProvider {
  * What the owner is told about a connection: whether PCP can renew it on
  * its own, and when the access it has runs out. Null when not connected.
  */
+export type OAuthConnection = {
+  renewable: boolean
+  expiresAt: Date | null
+  /** Not renewable, but a new sign-in would be: PCP asks for it now. */
+  reconnectRenews: boolean
+}
+
 export async function describeOAuthConnection(
   ctx: VaultContext,
   server: McpServer,
-): Promise<{ renewable: boolean; expiresAt: Date | null } | null> {
+): Promise<OAuthConnection | null> {
   if (server.authType !== "oauth" || !server.oauthConnectedAt) {
     return null
   }
@@ -418,9 +436,21 @@ export async function describeOAuthConnection(
     redirectUrl: "",
     publicUrl: "",
   })
-  const { tokens, savedAt } = await provider.tokenSet()
+  const { tokens, savedAt, issuer } = await provider.tokenSet()
 
-  return tokens ? tokenLifetime(tokens, savedAt) : null
+  if (!tokens) {
+    return null
+  }
+
+  const lifetime = tokenLifetime(tokens, savedAt)
+
+  return {
+    ...lifetime,
+    // A sign-in from before PCP asked this provider for renewable access
+    // (signInDefaults) is fixed by signing in again.
+    reconnectRenews:
+      !lifetime.renewable && issuer !== undefined && !!signInDefaults(issuer),
+  }
 }
 
 export async function forgetOAuthTokens(
@@ -492,8 +522,20 @@ export type UpstreamConnection = {
   client: Client
   transport: StreamableHTTPClientTransport
   provider: PcpOAuthProvider | null
+  /** The server's last answer that was not a success, if any. */
+  refusal: () => Refusal | undefined
   close: () => Promise<void>
 }
+
+/**
+ * What the server said when it turned a request down. The SDK's error keeps
+ * the status and the body, but not the WWW-Authenticate header, which is
+ * where a server says why it refused a token.
+ */
+type Refusal = { status: number; challenge: string | null }
+
+/** The refusal behind an error thrown while connecting. */
+const refusals = new WeakMap<object, Refusal>()
 
 /**
  * A connected client for one server. The caller closes it. An OAuth server
@@ -513,12 +555,28 @@ export async function openUpstream(
       : null
 
   const headers = await authHeaders(ctx, server)
-  const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+  const endpoint = new URL(server.url)
+  let refusal: Refusal | undefined
+  const transport = new StreamableHTTPClientTransport(endpoint, {
     // Never cached: these are live calls carrying credentials. It also keeps
     // a host that wraps fetch with a cache (Next.js) out of the way when the
     // SDK aborts its event stream on close.
     requestInit: { headers, cache: "no-store" },
     ...(provider ? { authProvider: provider } : {}),
+    fetch: async (url, init) => {
+      const response = await fetch(url, init)
+
+      // Only the server's own answers: not the sign-in's discovery or token
+      // requests, which the SDK reports itself.
+      if (!response.ok && String(url) === endpoint.href) {
+        refusal = {
+          status: response.status,
+          challenge: response.headers.get("www-authenticate"),
+        }
+      }
+
+      return response
+    },
   })
   const client = new Client(PCP_CLIENT_INFO)
 
@@ -526,6 +584,11 @@ export async function openUpstream(
     await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS })
   } catch (error) {
     await transport.close().catch(() => {})
+
+    if (refusal && error !== null && typeof error === "object") {
+      refusals.set(error, refusal)
+    }
+
     throw error
   }
 
@@ -533,6 +596,7 @@ export async function openUpstream(
     client,
     transport,
     provider,
+    refusal: () => refusal,
     close: async () => {
       await client.close().catch(() => {})
     },
@@ -593,7 +657,7 @@ export async function syncServerTools(
 
     return { status: "ok", message: "", toolCount }
   } catch (error) {
-    const result = describeFailure(server, error)
+    const result = describeFailure(server, error, connection)
     await setServerStatus(server.id, result.status, result.message)
 
     return { ...result, toolCount: 0 }
@@ -627,13 +691,17 @@ export async function callServerTool(
       { timeout: CALL_TIMEOUT_MS },
     )
   } catch (error) {
-    const failure = describeFailure(server, error)
+    const failure = describeFailure(server, error, connection)
     await setServerStatus(server.id, failure.status, failure.message)
 
     // "unauthorized" tells the gateway the server needs connecting (or its
-    // credential was refused), not that it could not be reached.
+    // credential was refused), not that it could not be reached. A server
+    // that turned a signed-in request down needs the owner, but not a
+    // sign-in.
     throw new PcpError(
-      failure.status === "error" ? "upstream" : "unauthorized",
+      failure.status === "auth_required" || failure.status === "client_required"
+        ? "unauthorized"
+        : "upstream",
       failure.message,
     )
   } finally {
@@ -644,10 +712,32 @@ export async function callServerTool(
 function describeFailure(
   server: McpServer,
   error: unknown,
+  connection: UpstreamConnection | null,
 ): {
-  status: "auth_required" | "client_required" | "error"
+  status: "auth_required" | "client_required" | "refused" | "error"
   message: string
 } {
+  if (SdkHttpError.isInstance(error)) {
+    const { status, text } = error.data ?? { status: 0 }
+    const refusal =
+      connection?.refusal() ??
+      (typeof error === "object" ? refusals.get(error) : undefined)
+    const reason = refusalReason(
+      refusal?.status === status ? refusal.challenge : null,
+      typeof text === "string" ? text : null,
+    )
+    const said = `HTTP ${status}${reason ? `: ${reason}` : ""}`
+
+    if (status === 401 || status === 403) {
+      return { status: "refused", message: refusedMessage(server, said) }
+    }
+
+    return {
+      status: "error",
+      message: `${server.name} could not be reached (${said}).`,
+    }
+  }
+
   if (error instanceof UnauthorizedError) {
     // Still true until the owner gives it a client: a sync or a call does
     // not change what the server allows.
@@ -674,4 +764,62 @@ function describeFailure(
     status: "error",
     message: `${server.name} could not be reached: ${message}`.slice(0, 500),
   }
+}
+
+/**
+ * Why a server turned a request down, in its own words: the reason in its
+ * WWW-Authenticate challenge, or an error object in the body. Never the body
+ * itself, which can be a whole answer (Google sends the tool list with its
+ * 401).
+ */
+export function refusalReason(
+  challenge: string | null,
+  body: string | null,
+): string | null {
+  const fromChallenge =
+    challenge?.match(/error_description="([^"]*)"/)?.[1] ??
+    challenge?.match(/error="([^"]*)"/)?.[1]
+  let fromBody: unknown
+
+  try {
+    const parsed = JSON.parse(body ?? "") as {
+      error?: unknown
+      error_description?: unknown
+    }
+    fromBody =
+      typeof parsed.error === "string"
+        ? (parsed.error_description ?? parsed.error)
+        : (parsed.error as { message?: unknown } | undefined)?.message
+  } catch {
+    // Not JSON: nothing PCP can quote safely.
+  }
+
+  const reason = fromChallenge ?? (typeof fromBody === "string" ? fromBody : "")
+  const clean = reason
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .trim()
+    .slice(0, 200)
+
+  return clean || null
+}
+
+/** What to tell the owner about a server that refused a request. */
+function refusedMessage(server: McpServer, said: string): string {
+  if (server.authType === "header") {
+    return `${server.name} refused the secret PCP sent (${said}). Check the secret under Settings, then choose Refresh tools.`
+  }
+
+  if (server.authType !== "oauth") {
+    return `${server.name} refused PCP's request (${said}). It may need a secret or a sign-in: set one under Settings.`
+  }
+
+  // Google's MCP servers are APIs of their own (gmailmcp.googleapis.com
+  // next to gmail.googleapis.com), and refuse with a bare 403 until both
+  // are enabled in the project of the client the token came from.
+  const host = new URL(server.url).hostname
+  const google = host.endsWith(".googleapis.com")
+    ? ` With Google, enable both the service's API and its MCP API (${host}) in the Google Cloud project your OAuth client belongs to (APIs & Services, then Library); some MCP APIs need the project enrolled in Google's preview first.`
+    : ""
+
+  return `${server.name} refused PCP's request although PCP is signed in (${said}). The account or OAuth client you signed in with is not allowed to use it yet.${google} Once that is fixed, choose Refresh tools.`
 }

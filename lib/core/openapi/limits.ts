@@ -37,6 +37,14 @@ export const MAX_NAME_LENGTH = 256
 export const MAX_SERVER_URL_LENGTH = 2048
 export const MAX_PARAMETERS = 200
 export const MAX_TOOL_DESCRIPTION = 2000
+/** The outline of what a tool answers (outline.ts), as text. */
+export const MAX_OUTLINE_CHARS = 2000
+/** Properties of one object an outline names before "… N more". */
+export const MAX_OUTLINE_PROPERTIES = 40
+/** Likely mistakes in a schema listed at once (lint.ts). */
+export const MAX_SCHEMA_PROBLEMS = 50
+/** Schema nodes visited while outlining one answer. */
+export const OUTLINE_MAX_NODES = 2000
 /**
  * Everything one endpoint's tools may add up to once stored (schemas,
  * descriptions, call plans). Every gateway request reads the catalogue, and
