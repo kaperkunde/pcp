@@ -2,6 +2,7 @@ import { invalid } from "../errors"
 import { isBlockedHeader } from "./headers"
 import { entries, isObject, own, ownString, type JsonObject } from "./json"
 import {
+  MAX_HEADER_VALUE,
   MAX_NAME_LENGTH,
   MAX_OPERATIONS,
   MAX_PARAMETERS,
@@ -15,6 +16,7 @@ import {
   REF_MAX_NODES,
 } from "./limits"
 import { readOAuth, type OAuthReading } from "./oauth"
+import { outlineAnswer } from "./outline"
 import type { OpenApiDocument } from "./parse"
 import type { BodyPlan, CallPlan, ParamPlan } from "./plan"
 import {
@@ -55,6 +57,8 @@ export type GeneratedTool = {
   inputSchema: JsonObject
   annotations: ToolAnnotations
   operation: CallPlan
+  /** What a successful call answers, in outline (outline.ts), or null. */
+  output: string | null
 }
 
 export type Generated = {
@@ -344,7 +348,8 @@ export function generateTools(
         const size =
           JSON.stringify(tool.inputSchema).length +
           JSON.stringify(tool.operation).length +
-          tool.description.length
+          tool.description.length +
+          (tool.output?.length ?? 0)
 
         if (stored + size > MAX_TOTAL_TOOL_CHARS) {
           skipped.push({
@@ -477,6 +482,12 @@ function buildTool(
       continue
     }
 
+    // A value PCP sends itself is not the assistant's to give.
+    if (plan.param.value !== undefined) {
+      params.push({ ...plan.param, arg: parameter.name })
+      continue
+    }
+
     let arg = parameter.name
     if (Object.hasOwn(properties, arg) || arg === "__proto__") {
       arg = `${parameter.in}_${parameter.name}`
@@ -547,6 +558,7 @@ function buildTool(
     inputSchema,
     annotations,
     operation: plan,
+    output: outlineAnswer(doc, operation),
   }
 }
 
@@ -667,6 +679,10 @@ function planParameter(
   }
 
   const explode = own(parameter.node, "explode")
+  const fixed =
+    parameter.in === "path" || schema.serialize
+      ? null
+      : onlyValue(schema.schema, parameter.required)
 
   return {
     param: {
@@ -676,9 +692,45 @@ function planParameter(
       style,
       explode: typeof explode === "boolean" ? explode : style === "form",
       ...(schema.serialize ? { serialize: schema.serialize } : {}),
+      ...(fixed !== null ? { value: fixed } : {}),
     },
     schema: property,
   }
+}
+
+const SENDABLE_VALUE = new RegExp(`^[\\x20-\\x7e]{1,${MAX_HEADER_VALUE}}$`)
+
+/**
+ * The one value a header or query parameter can take, when PCP should send
+ * it rather than ask for it: the schema allows a single value (const, or an
+ * enum of one), and the parameter is required or defaults to that value. An
+ * optional one without a default is left to the assistant, since leaving it
+ * out may mean something.
+ */
+function onlyValue(schema: JsonObject, required: boolean): string | null {
+  const constant = own(schema, "const")
+  const choices = own(schema, "enum")
+  const value =
+    constant !== undefined
+      ? constant
+      : Array.isArray(choices) && choices.length === 1
+        ? choices[0]
+        : undefined
+
+  if (
+    typeof value !== "string" &&
+    typeof value !== "number" &&
+    typeof value !== "boolean"
+  ) {
+    return null
+  }
+
+  if (!required && own(schema, "default") !== value) {
+    return null
+  }
+
+  const text = String(value)
+  return SENDABLE_VALUE.test(text) ? text : null
 }
 
 function planBody(
@@ -807,6 +859,33 @@ function acceptFor(doc: OpenApiDocument, operation: JsonObject): string {
     : "application/json, */*;q=0.8"
 }
 
+/** Letters and digits only, lower case: what two phrasings share. */
+function sameWords(a: string, b: string): boolean {
+  const plain = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "")
+  return plain(a) !== "" && plain(a) === plain(b)
+}
+
+/**
+ * The description without lines that only say the method and path again
+ * ("## GET /pets"), which the description ends with anyway.
+ */
+function withoutRestatedLine(
+  description: string,
+  method: Method,
+  path: string,
+): string {
+  const plain = (text: string) =>
+    text.toLowerCase().replace(/[^a-z0-9{}/_-]+/g, "")
+  const restated = plain(`${method}${path}`)
+
+  return description
+    .split("\n")
+    .filter((line) => plain(line) !== restated)
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
 function describeOperation(
   doc: OpenApiDocument,
   method: Method,
@@ -836,9 +915,10 @@ function describeOperation(
     .filter(Boolean)
     .join("\n")
 
+  const body = withoutRestatedLine(description, method, path)
   let head = [
-    summary,
-    description && description !== summary ? description : "",
+    sameWords(body.slice(0, summary.length), summary) ? "" : summary,
+    body,
   ]
     .filter(Boolean)
     .join("\n\n")

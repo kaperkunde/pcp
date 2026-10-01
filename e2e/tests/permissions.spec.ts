@@ -13,7 +13,8 @@ import { createToken, openToken } from "../lib/ui"
 // The owner's say over what an assistant runs: tools ask first, the owner
 // answers through a link while check_permission waits for them, and the
 // answer can settle the tool for the token. Blocked tools vanish; access
-// copies between tokens; an assistant can propose a server, which is added
+// copies between tokens; an assistant can propose tool levels, which change
+// only once the owner saves them on PCP's page, and a server, which is added
 // only once the owner agrees, and an OAuth one is connected from a link
 // while check_server waits.
 test.describe.configure({ mode: "serial" })
@@ -255,6 +256,86 @@ test("copying access gives a second token the same tools", async ({
     arguments: { to: "Ada", message: "Hi" },
   })
   expect(refused.body.result?.isError).toBe(true)
+})
+
+test("an assistant proposes tool levels; nothing changes until you save them", async ({
+  page,
+  baseURL,
+}) => {
+  const name = `Proposing assistant ${RUN}`
+  const proposer = await createToken(page, name)
+  const proposerId = await openToken(page, name)
+
+  const proposed = await callTool(baseURL!, proposer, "propose_tool_access", {
+    changes: [
+      { server: SLUG, access: "allowed" },
+      { server: SLUG, tools: ["send_*"], access: "blocked" },
+    ],
+  })
+  expect(proposed.body.result?.isError ?? false, toolText(proposed)).toBe(false)
+  expect(toolText(proposed)).toContain("3 tools would change")
+  const { path, id } = linkIn(toolText(proposed))
+
+  // Asking changed nothing: the tool still asks first.
+  const described = await callTool(baseURL!, proposer, "describe_tool", {
+    server: SLUG,
+    tool: "add_numbers",
+  })
+  expect(toolText(described)).toContain('"access": "ask"')
+
+  // The token's page sends the owner to review it.
+  await page.goto(`/tokens/${proposerId}`)
+  await page.getByRole("link", { name: "Review and save" }).click()
+  await expect(page).toHaveURL(new RegExp(`${path}$`))
+  await expect(
+    page.getByText("Change which tools an assistant may run?"),
+  ).toBeVisible()
+
+  // The proposal is filled in and each change marked.
+  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
+    "allowed",
+  )
+  await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toHaveValue(
+    "blocked",
+  )
+  await expect(page.locator("li[data-changed]")).toHaveCount(3)
+  await expect(page.getByTestId("access-summary")).toContainText(
+    "Saving changes 3 tools: 2 to Allowed, 1 to Blocked.",
+  )
+
+  // The owner takes one back before saving, while the assistant waits.
+  const waited = callTool(baseURL!, proposer, "check_permission", { id })
+  await page.getByLabel(`Access to ${SLUG}/echo_auth`).selectOption("ask")
+  await expect(page.locator("li[data-changed]")).toHaveCount(2)
+  await expect(page.getByTestId("access-summary")).toContainText(
+    "Saving changes 2 tools: 1 to Allowed, 1 to Blocked.",
+  )
+  await page.getByRole("button", { name: "Save changes" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "You saved these levels.",
+  )
+
+  expect(toolText(await waited)).toContain(
+    "They did not take 1 of the 3 levels",
+  )
+
+  await page.goto(`/tokens/${proposerId}`)
+  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
+    "allowed",
+  )
+  await expect(page.getByLabel(`Access to ${SLUG}/echo_auth`)).toHaveValue(
+    "ask",
+  )
+  await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toHaveValue(
+    "blocked",
+  )
+
+  const ran = await callTool(baseURL!, proposer, "call_tool", {
+    server: SLUG,
+    tool: "add_numbers",
+    arguments: { a: 2, b: 3 },
+  })
+  expect(toolText(ran)).toBe("5")
 })
 
 test("an assistant can propose a server with a stored secret; it is added once you agree", async ({

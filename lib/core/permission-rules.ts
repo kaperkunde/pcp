@@ -128,6 +128,15 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Allow the change",
     decline: "Not now",
   },
+  // Saved with the levels the owner chose on the page (applyAccessRequest),
+  // never by a decision: the only one is no.
+  access: {
+    decline: "Not now",
+  },
+  endpoint_change: {
+    allow_once: "Make the change",
+    decline: "Not now",
+  },
 }
 
 /** The answers the owner is offered, in order, with their labels. */

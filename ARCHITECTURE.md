@@ -271,7 +271,10 @@ adds to them, `patches` replaces them all) rather than by sending it again,
 and read a part at a time: `get_endpoint`'s `specPointer` returns one value of
 the edited document by JSON Pointer, and a value too long to include comes
 back as its keys, to point further in with, so a schema of any size can be
-read in steps under the answer's length limit. The rules are in
+read in steps under the answer's length limit (such a read leaves out what
+the first one said). `includeProblems` lists likely mistakes in the schema
+that confuse assistants, each with the edits that fix it
+(`openapi/lint.ts`); `register_server` names them too. The rules are in
 `lib/core/endpoint-admin.ts`, and they exist because an assistant that can
 change an endpoint decides where PCP sends requests:
 
@@ -279,10 +282,17 @@ change an endpoint decides where PCP sends requests:
   secret or token and is still limited to public addresses. It is the owner's
   once it sends one of their secrets or OAuth tokens, or they allow private
   addresses. The assistant can
-  rewrite its own; on the owner's it can read and turn read-only on, and
-  nothing else. A new schema could add operations the owner's key then
-  performs, and a new address, name or description could send the key, or
-  another assistant, somewhere else.
+  rewrite its own. On the owner's it can read it and turn read-only on, and it
+  can ask (a permission request of kind `endpoint_change`) for a new name or
+  description, edits, tool descriptions, or a new read of the schema URL: the
+  owner is shown every new edit and description in full and what it does to
+  the tools (added, taken out, changed, and a warning when a new tool writes
+  with their secret), and only that is made, to the endpoint as it was when
+  they were asked (`endpoint-admin.ts: applyEndpointChange`); a re-read
+  schema must still be the document they were told about. Its address and a
+  whole new schema stay the owner's alone: a new address could send the key
+  somewhere else, and a new document is not something a page of lines can
+  show them.
 - **Nothing takes effect without the owner.** A registration waits for their
   answer. A change to an endpoint that other assistants can see (its words,
   schema or address, or read-only turned off) disables it until the owner
@@ -475,12 +485,20 @@ keeps memories, both below):
   light stemming) and returns `server/tool — summary` lines.
 - `describe_tool(server, tool)` returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
-  published it, and whether the tool runs at once or asks first.
-- `call_tool(server, tool, arguments)` opens a connection to the upstream
-  with the configured credential (header secret or OAuth token, refreshed by
-  the SDK when needed), calls the tool, and passes the content back.
-- `check_permission(id)`, `check_server(server)` and
-  `register_server(...)` belong to the permission flow below.
+  published it, whether the tool runs at once or asks first, and for an API
+  endpoint's tool, `returns`: an outline of its success answer read from the
+  schema (`openapi/outline.ts`, stored as `mcp_tool.output`).
+- `call_tool(server, tool, arguments, fields?)` opens a connection to the
+  upstream with the configured credential (header secret or OAuth token,
+  refreshed by the SDK when needed), calls the tool, and passes the content
+  back shaped for the assistant (`lib/core/answers.ts`): `fields` keeps only
+  the named paths of a JSON answer (lists are looked into), a JSON answer
+  still too long becomes a preview that is valid JSON with a note on asking
+  for less, and structured content that repeats the text is dropped. A call
+  that waits for the owner keeps its fields on the request
+  (`permission_request.fields`).
+- `check_permission(id)`, `check_server(server)`, `register_server(...)`
+  and `propose_tool_access(changes)` belong to the permission flow below.
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the
@@ -531,6 +549,19 @@ the original result whenever the conversation was shown again (the first
 question again, after it was answered), did not let a rebuilt panel reach
 PCP, and did not act on `ui/message` or `request-teardown`. A link and a
 check that waits work in every client.
+
+`propose_tool_access` lets an assistant suggest levels for its own token,
+many at once (`lib/core/access-requests.ts`): each change names a server,
+tool names or `*` patterns (none for the whole server) and a level, later
+changes winning, so a catalogue of hundreds of tools can be set in a call.
+Blocked tools stay hidden: no name or pattern reaches them. The proposal is
+a request of kind `access` holding one level per tool that would change. Its
+page fills the levels in over the token's current ones and marks each
+change; the owner can change any of them, and only their save there writes
+anything (`applyAccessRequest`, once). The kind's only decision is "Not
+now", and `decidePermission` refuses any other, so an assistant cannot raise
+its own access. `check_permission` waits for the save as for any answer and
+says what was saved, and how it differs from what was proposed.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.

@@ -20,6 +20,11 @@ Playwright projects your change touches (`pnpm exec playwright test
 --project=<name>`; dependencies run first) — CI runs the whole suite on the
 pull request, and nothing runs on a push.
 
+When pushing straight to `develop`, skip the Playwright run: it is slow, and
+the suite runs on the pull request from `develop` to `main` anyway. Still
+update the specs your change affects, and say in the commit or your summary
+that e2e was not run.
+
 ## Branches and versions
 
 Branch from `develop` and target it with pull requests; `main` only takes
@@ -54,13 +59,18 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   permission page, and its value never reaches the assistant. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
-  It never changes a credential, never clears `publicOnly`, can only read and
-  turn read-only on for an endpoint that is the owner's (it sends a secret or
-  an OAuth token, or private addresses are allowed), and a change others would see disables the
-  endpoint until the owner enables it. Its changes go through
-  `changeEndpoint`, which writes only the columns it is given and never the
-  credential. Keep all of that when adding to it, and add a test for each new
-  field an assistant can set.
+  It never changes a credential and never clears `publicOnly`. On an
+  endpoint that is the owner's (it sends a secret or an OAuth token, or private
+  addresses are allowed) it can turn read-only on, and anything else it may change there
+  (name, description, edits, tool descriptions, a re-read of the schema URL)
+  is a permission request (`endpoint_change`) that shows the owner every new
+  edit and description in full and what it does to the tools, and makes only
+  that, to the endpoint as it was when they were asked; never the address or
+  a whole new schema. On its own endpoint a change others would see disables
+  it until the owner enables it. Its changes go through `changeEndpoint`,
+  which writes only the columns it is given and never the credential. Keep
+  all of that when adding to it, and add a test for each new field an
+  assistant can set.
 - Memories (`lib/core/memories.ts`): an assistant writes its own
   (`/memories/…`) without asking, but anything other assistants would read
   (`/memories/shared/…`: creating, sharing, changing, renaming, deleting) is a
@@ -72,6 +82,11 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   only the owner sets that mark, and an assistant's change to an always
   memory it keeps clears it, so every text in the instructions is one the
   owner read. Never a token's own memory the owner did not mark.
+- Tool levels an assistant proposes for its token (`propose_tool_access`,
+  `lib/core/access-requests.ts`) are written only by the owner's save on the
+  request's page (`applyAccessRequest`), with what they chose there. No
+  decision and nothing the assistant sends writes them, and blocked tools
+  stay out of what it can name.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.

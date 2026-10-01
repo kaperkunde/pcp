@@ -127,6 +127,14 @@ describe("decisions", () => {
     expect(() => parseDecision("memory_change", "discard")).toThrow()
   })
 
+  it("offers proposed tool levels no answer but no", () => {
+    expect(decisionsFor("access").map((decision) => decision.value)).toEqual([
+      "decline",
+    ])
+    expect(() => parseDecision("access", "allow_once")).toThrow()
+    expect(() => parseDecision("access", "always")).toThrow()
+  })
+
   it("accepts only the answers it offered", () => {
     expect(parseDecision("call", "always")).toBe("always")
     expect(() => parseDecision("register", "always")).toThrow(/allow_once/)

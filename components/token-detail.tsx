@@ -19,7 +19,7 @@ import { PermissionDecision } from "@/components/permission-decision"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button, ButtonLink } from "@/components/ui/button"
 import { refreshToolsAction } from "@/lib/actions/servers"
 import {
   Card,
@@ -51,6 +51,8 @@ import { cn } from "@/lib/utils"
 
 export type WaitingRequest = {
   id: string
+  /** Proposed tool levels are reviewed and saved on their own page. */
+  review: boolean
   title: string
   lines: string[]
   warning: string | null
@@ -169,11 +171,19 @@ function WaitingCard({ waiting }: { waiting: WaitingRequest[] }) {
                   {item.warning}
                 </p>
               ) : null}
-              <PermissionDecision
-                id={item.id}
-                decisions={item.decisions}
-                secret={item.secret}
-              />
+              {item.review ? (
+                <div>
+                  <ButtonLink href={`/permissions/${item.id}`} size="sm">
+                    Review and save
+                  </ButtonLink>
+                </div>
+              ) : (
+                <PermissionDecision
+                  id={item.id}
+                  decisions={item.decisions}
+                  secret={item.secret}
+                />
+              )}
             </li>
           ))}
         </ul>

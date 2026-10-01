@@ -108,6 +108,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/catalogue.ts`            | Writing a server's tool list into the catalogue               |
 | `lib/core/search.ts`, `gateway.ts` | Ranking tools; the MCP server the gateway serves              |
 | `lib/core/tool-access.ts`          | Per-token tool levels: allowed, ask, blocked; copying them    |
+| `lib/core/access-requests.ts`      | Tool levels an assistant proposes; the owner's save           |
 | `lib/core/permissions.ts`          | Asking the owner before a call runs; running it once          |
 | `lib/core/owner-wait.ts`           | Holding a check while the owner answers or signs in           |
 | `lib/core/connect.ts`              | The link an assistant hands over to connect an OAuth server   |

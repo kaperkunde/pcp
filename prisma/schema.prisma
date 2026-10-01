@@ -154,12 +154,13 @@ model PermissionRequest {
   vault            Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   tokenId          String     @map("token_id")
   token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-  /// call | register | memory_share | memory_change
+  /// call | register | memory_share | memory_change | access | endpoint_change
   kind             String
   serverId         String?    @map("server_id")
   server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
   /// The upstream tool for a call; "register_server" for a new server;
-  /// "memory" for a memory to share or a shared one to change.
+  /// "memory" for a memory to share or a shared one to change;
+  /// "propose_tool_access" for tool levels an assistant proposes.
   toolName         String     @map("tool_name")
   /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
   /// the vault's data key with "permission_request:<id>" as associated data.
@@ -167,6 +168,9 @@ model PermissionRequest {
   /// sha256 of the kind, the target and the canonical arguments, so the same
   /// request asked twice finds the row it already has.
   argsHash         String     @map("args_hash")
+  /// call: the parts of the answer the assistant asked for (call_tool's
+  /// fields), as a JSON list of paths. Names, never values.
+  fields           String?
   /// pending | running | executed | failed | declined
   status           String     @default("pending")
   /// Where the owner answered: app | form | url | web
@@ -351,6 +355,9 @@ model McpTool {
   /// openapi: the call plan (JSON) that turns the tool's arguments into an
   /// HTTP request. Null for MCP tools.
   operation   String?
+  /// openapi: an outline of what a successful call answers, from the
+  /// schema; describe_tool shows it. Null when the schema does not say.
+  output      String?
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 

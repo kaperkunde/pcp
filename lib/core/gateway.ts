@@ -10,6 +10,7 @@ import type {
   McpTool,
 } from "@/lib/generated/prisma/client"
 
+import { resolveAccessChanges, type AccessChange } from "./access-requests"
 import type { ResolvedToken } from "./api-tokens"
 import {
   DEFAULT_HEADER_NAME,
@@ -18,6 +19,7 @@ import {
   MAX_SHARED_MEMORY_CHARS,
   MAX_SPEC_BYTES,
   SECRET_PLACEHOLDER,
+  TOOL_ACCESS_LEVELS,
   type ToolAccess,
 } from "./constants"
 import { db } from "./db"
@@ -26,6 +28,7 @@ import {
   prepareRegistration,
   updateEndpointDetails,
 } from "./endpoint-admin"
+import { MAX_FIELDS, readFields } from "./answers"
 import { isPcpError } from "./errors"
 import {
   isMemoryWrite,
@@ -43,6 +46,7 @@ import {
   type RegisterArgs,
 } from "./permissions"
 import { MAX_PATCH_OPERATIONS } from "./openapi/limits"
+import type { SchemaProblem } from "./openapi/lint"
 import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog } from "./request-log"
 import { canRereadTools, type SyncResult } from "./catalogue"
@@ -103,6 +107,8 @@ const PATCH_SCHEMA = z
   .max(MAX_PATCH_OPERATIONS)
 /** Writes and share requests through the memory tool, per token. */
 const MEMORY_WRITES = { max: 60, windowMs: 10 * 60_000 }
+/** Proposals of tool levels, per token: each leaves a request for the owner. */
+const ACCESS_PROPOSALS = { max: 20, windowMs: 10 * 60_000 }
 /** How many shared memories the instructions name. */
 const MAX_LISTED_MEMORIES = 30
 /**
@@ -154,7 +160,7 @@ export function visibleTools(server: GatewayServer): GatewayTool[] {
 }
 
 const MANAGE_INSTRUCTIONS =
-  "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one you registered. A change to an endpoint of yours switches it off until the owner enables it again; once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs, and you can only read it and turn read-only on. You cannot change a credential."
+  "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one. A change to an endpoint you registered switches it off until the owner enables it again. Once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs: you can turn read-only on, and ask them to fix its schema with edits or better tool descriptions, which waits for their answer. You cannot change a credential."
 
 /**
  * What a token that keeps memories is told about them. Shaped after the
@@ -261,11 +267,29 @@ export function buildInstructions(
 
   return [
     "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
-    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: give it to the owner in your reply, then call check_permission with the id it gives, which waits while they answer and returns the result, so you can carry on without them coming back to tell you. A server that needs them to sign in answers with a link to connect it; check_server waits the same way until it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees.',
+    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: give it to the owner in your reply, then call check_permission with the id it gives, which waits while they answer and returns the result, so you can carry on without them coming back to tell you. A server that needs them to sign in answers with a link to connect it; check_server waits the same way until it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
     "Servers:",
     ...lines,
     ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
     ...memoryInstructions(memories),
+  ].join("\n")
+}
+
+/** Mistakes PCP found in a schema being registered, briefly. */
+function problemsLead(problems: SchemaProblem[]): string {
+  const shown = problems
+    .slice(0, 5)
+    .map(
+      (problem) =>
+        `- ${problem.problem}${problem.fix ? ` Fix: ${JSON.stringify(problem.fix)}` : ""}`,
+    )
+
+  return [
+    `PCP found ${problems.length} likely mistake${problems.length === 1 ? "" : "s"} in this schema. Once it is added, send the fixes with update_endpoint's addPatches; get_endpoint with includeProblems lists them all. (Registering it again with them in spec_patches would leave this request open too.)`,
+    ...shown,
+    ...(problems.length > shown.length
+      ? [`- and ${problems.length - shown.length} more`]
+      : []),
   ].join("\n")
 }
 
@@ -485,7 +509,7 @@ export function buildGatewayServer(
     {
       title: "Describe a tool",
       description:
-        'The full description and JSON Schema of a tool\'s arguments, and whether it runs at once ("allowed") or asks the owner first ("ask"). Call this before call_tool.',
+        'The full description and JSON Schema of a tool\'s arguments, whether it runs at once ("allowed") or asks the owner first ("ask"), and for an API, the shape of what it answers ("returns"). Call this before call_tool.',
       inputSchema: z.object({
         server: z.string().describe("The server, as returned by search_tools."),
         tool: z.string().describe("The tool name."),
@@ -508,7 +532,7 @@ export function buildGatewayServer(
         where: {
           serverId_name: { serverId: found.server.id, name: tool.name },
         },
-        select: { inputSchema: true, annotations: true },
+        select: { inputSchema: true, annotations: true, output: true },
       })
 
       if (!row) {
@@ -535,6 +559,8 @@ export function buildGatewayServer(
           description: tool.descriptionOverride ?? tool.description,
           access: tool.access,
           inputSchema,
+          // What a successful call answers, when the API's schema says.
+          ...(row.output ? { returns: row.output } : {}),
           annotations,
         },
         null,
@@ -554,7 +580,7 @@ export function buildGatewayServer(
     {
       title: "Call a tool",
       description:
-        'Run a tool on one of the owner\'s MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them; check_permission then waits for their answer.',
+        'Run a tool on one of the owner\'s MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them; check_permission then waits for their answer. A long JSON answer comes back as a preview: pass fields to get only the parts you need.',
       inputSchema: z.object({
         server: z.string().describe("The server, as returned by search_tools."),
         tool: z.string().describe("The tool name."),
@@ -563,6 +589,14 @@ export function buildGatewayServer(
           .optional()
           .describe(
             "The tool's arguments, matching describe_tool's inputSchema.",
+          ),
+        fields: z
+          .array(z.string().min(1).max(200))
+          .min(1)
+          .max(MAX_FIELDS)
+          .optional()
+          .describe(
+            'Keep only these parts of a JSON answer, as paths of keys joined by dots: ["data.id", "data.number", "meta.pagination"]. A list on the way is looked into, so data.number is the number of every item in data. describe_tool\'s "returns" shows the keys an API answers with.',
           ),
       }),
       annotations: { openWorldHint: true },
@@ -575,7 +609,9 @@ export function buildGatewayServer(
         server: string
         tool: string
         arguments?: Record<string, unknown>
+        fields?: string[]
       }) => {
+        const fields = readFields(args.fields)
         const found = await lookup(args.server, args.tool, {
           includeBlocked: true,
         })
@@ -598,16 +634,14 @@ export function buildGatewayServer(
             server: target,
             tool,
             args: args.arguments ?? {},
+            fields,
           })
         }
 
-        return runCall(
-          scope.ctx,
-          target,
-          tool.name,
-          args.arguments ?? {},
-          scope.publicUrl,
-        )
+        return runCall(scope.ctx, target, tool.name, args.arguments ?? {}, {
+          publicUrl: scope.publicUrl,
+          fields,
+        })
       },
     ),
   )
@@ -932,6 +966,7 @@ export function buildGatewayServer(
           ...(newSecretOptional ? { newSecretOptional } : {}),
         }
         let input: RegisterArgs
+        let problems: SchemaProblem[] = []
 
         if (isApi) {
           // Reading a large schema is real work, and every call leaves a
@@ -975,6 +1010,7 @@ export function buildGatewayServer(
               (args.oauth_scope?.trim() || null),
             endpoint: prepared.registration,
           }
+          problems = prepared.problems
         } else {
           input = {
             ...common,
@@ -985,7 +1021,72 @@ export function buildGatewayServer(
           }
         }
 
-        return withPermission(scope, { kind: "register", input })
+        const asked = await withPermission(scope, { kind: "register", input })
+
+        // The assistant hears about mistakes PCP found in the schema, with
+        // the edits that fix them.
+        return problems.length === 0
+          ? asked
+          : withLead(problemsLead(problems), asked)
+      },
+    ),
+  )
+
+  server.registerTool(
+    "propose_tool_access",
+    {
+      title: "Propose tool access",
+      description:
+        'Propose which tools this token may run, many at once and across servers: "allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). This changes nothing by itself: PCP fills your levels in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and a level. Later changes override earlier ones, so set a whole server first and the exceptions after. Give the owner the link it returns, then call check_permission with its id, which waits while they review and says what they saved.',
+      inputSchema: z.object({
+        changes: z
+          .array(
+            z.object({
+              server: z
+                .string()
+                .describe("The server's short name, as in server/tool."),
+              tools: z
+                .array(z.string().min(1).max(200))
+                .max(500)
+                .optional()
+                .describe(
+                  'Tool names or patterns with * ("list_*"). Leave out for every tool on the server.',
+                ),
+              access: z.enum(TOOL_ACCESS_LEVELS),
+            }),
+          )
+          .min(1)
+          .max(100)
+          .describe(
+            "Applied in order; a later change wins over an earlier one.",
+          ),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    logged("propose_tool_access", () => ({}))(
+      async (args: { changes: AccessChange[] }) => {
+        if (
+          !checkRateLimit(`access-propose:${scope.tokenId}`, ACCESS_PROPOSALS)
+        ) {
+          return failure(
+            "That is a lot of proposals in a short time. Wait a few minutes.",
+          )
+        }
+
+        const levels = resolveAccessChanges([...bySlug.values()], args.changes)
+
+        if (levels.length === 0) {
+          return text(
+            "Nothing to propose: those tools already have those levels.",
+          )
+        }
+
+        return withPermission(scope, { kind: "access", input: { levels } })
       },
     ),
   )
@@ -1013,7 +1114,7 @@ export function buildGatewayServer(
       {
         title: "Change an API endpoint",
         description:
-          "Change an endpoint you registered: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Change a schema with edits (a JSON Patch kept beside it and applied whenever tools are made, also after the document is read again) rather than sending it whole: addPatches adds to the edits, patches replaces them all. Read the part you are changing first with get_endpoint's specPointer. A change other assistants would see disables the endpoint until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: you can read it and turn read-only on, nothing else. You can never change a credential. get_endpoint says what you may change.",
+          "Change an API endpoint: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Change a schema with edits (a JSON Patch kept beside it and applied whenever tools are made, also after the document is read again) rather than sending it whole: addPatches adds to the edits, patches replaces them all. Read the part you are changing first with get_endpoint's specPointer. On an endpoint you registered, a change other assistants would see disables it until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: turning read-only on happens at once; its name, description, edits, tool descriptions and a new read of its schema URL are put to the owner, who sees every edit and description in full, and nothing changes until they agree (call check_permission for the answer); its address and document are theirs alone. You can never change a credential. get_endpoint says what you may change.",
         inputSchema: z.object({
           endpoint: z
             .string()
@@ -1071,7 +1172,15 @@ export function buildGatewayServer(
         }
 
         const { endpoint, ...changes } = args
-        return json(await updateEndpointDetails(scope, endpoint, changes))
+        const outcome = await updateEndpointDetails(scope, endpoint, changes)
+
+        // On an endpoint of the owner's, the change is theirs to make.
+        return "ask" in outcome
+          ? withPermission(scope, {
+              kind: "endpoint_change",
+              input: outcome.ask,
+            })
+          : json(outcome)
       }),
     )
 
@@ -1106,6 +1215,12 @@ export function buildGatewayServer(
             .boolean()
             .optional()
             .describe("Read specPointer from the schema before the edits."),
+          includeProblems: z
+            .boolean()
+            .optional()
+            .describe(
+              "List likely mistakes in the schema that confuse assistants (examples written as query strings or of the wrong type, a required header that only takes one value, answers it does not describe), each with the edits that fix it.",
+            ),
         }),
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
@@ -1119,6 +1234,7 @@ export function buildGatewayServer(
           includePatches?: boolean
           specPointer?: string
           unedited?: boolean
+          includeProblems?: boolean
         }) => {
           const { endpoint, ...options } = args
           return json(await getEndpoint(scope, endpoint, options))

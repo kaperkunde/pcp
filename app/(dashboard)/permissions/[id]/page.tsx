@@ -1,12 +1,13 @@
 import type { Metadata } from "next"
 import Link from "next/link"
 
+import { AccessReview } from "@/components/access-review"
 import { LocalDate } from "@/components/local-date"
 import { PageHeader } from "@/components/page-header"
 import { PermissionDecision } from "@/components/permission-decision"
 import { buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { getPermissionView } from "@/lib/core/permissions"
+import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -23,6 +24,15 @@ const STATUS: Record<string, string> = {
   failed: "You allowed this, but it did not go through.",
   declined: "You said no, so nothing ran.",
   expired: "This expired without an answer, so nothing ran.",
+}
+
+/** The same, for tool levels an assistant proposed. */
+const ACCESS_STATUS: Record<string, string> = {
+  executed: "You saved these levels.",
+  running: "Saving now.",
+  failed: "You saved, but the levels were not written.",
+  declined: "You said no, so no tool's level changed.",
+  expired: "This expired without an answer, so no tool's level changed.",
 }
 
 /**
@@ -54,12 +64,16 @@ export default async function PermissionPage({
 
   const pending = view.status === "pending"
   const memory = view.kind === "memory_share" || view.kind === "memory_change"
-  // A memory's outcome says what was done, whichever answer it was.
+  const access = view.kind === "access"
+  // A memory's outcome says what was done, whichever answer it was. Saved
+  // levels' outcome is written for the assistant; the status says it here.
   const showOutcome =
+    !access &&
     (view.status === "executed" ||
       view.status === "failed" ||
       (memory && view.status === "declined")) &&
     view.outcome
+  const proposal = access && pending ? await getAccessProposal(ctx, id) : null
 
   return (
     <>
@@ -72,11 +86,15 @@ export default async function PermissionPage({
               {view.tokenName}
             </Link>{" "}
             on <LocalDate value={view.createdAt} />.
-            {pending ? " Nothing runs until you answer." : null}
+            {pending
+              ? access
+                ? " Nothing changes until you save."
+                : " Nothing runs until you answer."
+              : null}
           </>
         }
       />
-      <Card className="max-w-2xl">
+      <Card className={access && pending ? "max-w-4xl" : "max-w-2xl"}>
         <CardHeader>
           <CardTitle className="break-words">{view.title}</CardTitle>
         </CardHeader>
@@ -94,7 +112,23 @@ export default async function PermissionPage({
               {view.warning}
             </p>
           ) : null}
-          {pending ? (
+          {pending && proposal ? (
+            <>
+              <p className="text-muted-foreground">
+                The assistant&apos;s levels are filled in below and every change
+                is marked. Change any of them, then save; you can change them
+                again on the token&apos;s page.
+                {proposal.gone > 0
+                  ? ` ${proposal.gone} of the proposed tools are no longer on this token and are left out.`
+                  : null}
+              </p>
+              <AccessReview
+                id={view.id}
+                servers={proposal.servers}
+                proposed={proposal.proposed}
+              />
+            </>
+          ) : pending ? (
             <>
               {view.kind === "call" ? (
                 <p className="text-muted-foreground">
@@ -124,7 +158,10 @@ export default async function PermissionPage({
               data-testid="permission-outcome"
             >
               {memory && showOutcome ? null : (
-                <p>{STATUS[view.status] ?? view.status}</p>
+                <p>
+                  {(access ? ACCESS_STATUS : STATUS)[view.status] ??
+                    view.status}
+                </p>
               )}
               {showOutcome ? (
                 <p

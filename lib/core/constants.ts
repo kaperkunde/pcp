@@ -52,7 +52,12 @@ export const PERMISSION_DECISIONS = [
 export type PermissionDecision = (typeof PERMISSION_DECISIONS)[number]
 
 export type PermissionKind =
-  "call" | "register" | "memory_share" | "memory_change"
+  | "call"
+  | "register"
+  | "memory_share"
+  | "memory_change"
+  | "access"
+  | "endpoint_change"
 
 /** The longest memory, in characters. */
 export const MAX_MEMORY_CHARS = 10_000
