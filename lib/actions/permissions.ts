@@ -22,6 +22,7 @@ export type DecidePermissionResult = ActionState<{
 export async function decidePermissionAction(
   id: string,
   decision: string,
+  secret?: { name: string; value: string },
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -37,7 +38,14 @@ export async function decidePermissionAction(
       ctx,
       id,
       parseDecision(view.kind, decision),
-      { via: "web", publicUrl },
+      {
+        via: "web",
+        publicUrl,
+        // Straight from the browser: only two strings are taken from it.
+        ...(typeof secret?.name === "string" && typeof secret.value === "string"
+          ? { secret: { name: secret.name, value: secret.value } }
+          : {}),
+      },
     )
     const message = outcome.content
       .flatMap((part) => (part.type === "text" ? [part.text] : []))
@@ -48,6 +56,10 @@ export async function decidePermissionAction(
 
   revalidatePath(`/permissions/${id}`)
   revalidatePath("/tokens", "layout")
+
+  if (secret) {
+    revalidatePath("/secrets")
+  }
 
   return result
 }

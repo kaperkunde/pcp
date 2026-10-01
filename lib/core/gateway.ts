@@ -61,7 +61,7 @@ import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog } from "./request-log"
 import { canRereadTools, type SyncResult } from "./catalogue"
 import { searchTools, summarize, type ToolCandidate } from "./search"
-import { findTextSecretByName } from "./secrets"
+import { findTextSecretByName, validateSecretName } from "./secrets"
 import { validateServerUrl, type AuthType } from "./servers"
 import { effectiveAccess, loadToolAccess } from "./tool-access"
 import { needsConnecting, syncServerTools } from "./upstream"
@@ -712,7 +712,7 @@ export function buildGatewayServer(
     {
       title: "Add a server or an API",
       description:
-        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document: as text (openapi_schema), or the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. PCP turns each operation into a tool and makes the HTTP calls itself. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation. Authentication is none, OAuth for an MCP server (the owner signs in once they agree), or a header carrying a secret the owner already stored in PCP, named by its NAME. Never pass a secret's value: PCP does not take one here.",
+        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document: as text (openapi_schema), or the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. PCP turns each operation into a tool and makes the HTTP calls itself. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation. Authentication is none, OAuth for an MCP server (the owner signs in once they agree), or a header carrying one of the owner's secrets, named by its NAME: one they stored in PCP, or a new one, which they type into PCP when they agree (in PCP itself, never through this app). Never pass a secret's value: PCP does not take one here.",
       inputSchema: z.object({
         name: z
           .string()
@@ -757,13 +757,13 @@ export function buildGatewayServer(
           .enum(["none", "oauth", "header"])
           .optional()
           .describe(
-            "none (the default); oauth (MCP servers: the owner signs in after agreeing); or header (sends a secret the owner stored in PCP).",
+            "none (the default); oauth (MCP servers: the owner signs in after agreeing); or header (sends one of the owner's secrets).",
           ),
         secret: z
           .string()
           .optional()
           .describe(
-            "For header: the name of a secret the owner stored in PCP. Its name, never its value.",
+            'For header: the name of a secret the owner stored in PCP, or the name for a new one (like "Pet store API key") that they enter when they agree. Its name, never its value.',
           ),
         header_name: z
           .string()
@@ -832,6 +832,7 @@ export function buildGatewayServer(
 
         let authSecretId: string | null = null
         let secretName: string | null = null
+        let newSecret = false
         let authHeaderName: string | null = null
         let authValueTemplate: string | null = null
 
@@ -844,14 +845,21 @@ export function buildGatewayServer(
 
           const secret = await findTextSecretByName(scope.ctx, args.secret)
 
-          if (!secret) {
-            return failure(
-              `No secret called "${args.secret.trim()}". The owner can add one in PCP; then ask again with its name.`,
-            )
+          if (secret) {
+            authSecretId = secret.id
+            secretName = secret.name
+          } else {
+            // Not stored yet: the owner types it in PCP when they agree.
+            secretName = args.secret.trim()
+            const problem = validateSecretName(secretName)
+
+            if (problem) {
+              return failure(`That cannot be a secret's name. ${problem}`)
+            }
+
+            newSecret = true
           }
 
-          authSecretId = secret.id
-          secretName = secret.name
           authHeaderName = args.header_name?.trim() || DEFAULT_HEADER_NAME
           authValueTemplate =
             args.value_template?.trim() || DEFAULT_VALUE_TEMPLATE
@@ -877,6 +885,7 @@ export function buildGatewayServer(
           authValueTemplate,
           authSecretId,
           secretName,
+          ...(newSecret ? { newSecret } : {}),
         }
         let input: RegisterArgs
 
@@ -904,6 +913,7 @@ export function buildGatewayServer(
             baseUrl: args.url,
             readOnly: args.read_only,
             authSecretId,
+            newSecret,
             authHeaderName,
           })
 

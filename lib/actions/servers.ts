@@ -17,7 +17,12 @@ import {
   type ServerInput,
 } from "@/lib/core/servers"
 import { syncServerTools } from "@/lib/core/upstream"
-import { type ActionState, field, guarded } from "@/lib/server/action-state"
+import {
+  type ActionState,
+  field,
+  guarded,
+  secretFrom,
+} from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -33,7 +38,7 @@ function inputFrom(formData: FormData): ServerInput {
       : "none",
     authHeaderName: field(formData, "authHeaderName"),
     authValueTemplate: field(formData, "authValueTemplate"),
-    authSecretId: field(formData, "authSecretId") || null,
+    ...secretFrom(formData),
     oauthClientId: field(formData, "oauthClientId") || null,
     oauthClientSecretId: field(formData, "oauthClientSecretId") || null,
     oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,

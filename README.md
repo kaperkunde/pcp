@@ -148,7 +148,9 @@ agree; an OAuth one is then connected from a link that opens in your browser.
 An assistant can write an OpenAPI schema from an API's documentation and hand
 it to `register_server` as text. You see what it asked for before anything is
 added: the address, how many tools and which operations, whether it can change
-things, and the secret it would send. An API added that way reaches public
+things, and the secret it would send. If you have not stored that secret yet,
+you type it into PCP as you agree, and it is kept under Secrets. An API added
+that way reaches public
 addresses only until you allow private ones on the endpoint's page.
 
 A token made with **Let an assistant with this token read and change API

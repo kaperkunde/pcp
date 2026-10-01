@@ -56,6 +56,7 @@ export type WaitingRequest = {
   lines: string[]
   warning: string | null
   decisions: Array<{ value: Decision; label: string }>
+  newSecret: { name: string } | null
 }
 
 export function TokenDetail({
@@ -163,7 +164,11 @@ function WaitingCard({ waiting }: { waiting: WaitingRequest[] }) {
                   {item.warning}
                 </p>
               ) : null}
-              <PermissionDecision id={item.id} decisions={item.decisions} />
+              <PermissionDecision
+                id={item.id}
+                decisions={item.decisions}
+                newSecret={item.newSecret}
+              />
             </li>
           ))}
         </ul>

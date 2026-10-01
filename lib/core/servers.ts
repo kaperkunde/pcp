@@ -1,6 +1,7 @@
 import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
+  MAX_SECRET_VALUE,
   SECRET_PLACEHOLDER,
 } from "./constants"
 import type { VaultContext } from "./context"
@@ -36,6 +37,11 @@ export type ServerInput = {
   authHeaderName?: string | null
   authValueTemplate?: string | null
   authSecretId?: string | null
+  /**
+   * A secret typed into the form instead of chosen: stored as a new secret
+   * of the owner's and sent in place of authSecretId.
+   */
+  authSecretValue?: string | null
   oauthClientId?: string | null
   oauthClientSecretId?: string | null
   /** A client secret typed into the form: stored as a new secret. */
@@ -132,23 +138,36 @@ export function normalizeNameAndDescription(input: {
   return { name, description: (input.description ?? "").trim().slice(0, 1000) }
 }
 
-/** Header authentication: which secret, in which header, in what form. */
+/**
+ * Header authentication: which secret, in which header, in what form. A
+ * secret typed in the form comes back as `typedSecret`, not yet stored:
+ * the caller stores it (storeTypedSecret) once nothing else can refuse the
+ * save, so a refused one leaves no secret behind.
+ */
 export async function normalizeHeaderAuth(
   ctx: VaultContext,
   input: Pick<
     ServerInput,
-    "authSecretId" | "authHeaderName" | "authValueTemplate"
+    "authSecretId" | "authSecretValue" | "authHeaderName" | "authValueTemplate"
   >,
 ): Promise<{
-  authSecretId: string
+  authSecretId: string | null
   authHeaderName: string
   authValueTemplate: string
+  typedSecret: string | null
 }> {
-  if (!input.authSecretId) {
-    throw invalid("Choose the secret to send.")
+  const typedSecret = input.authSecretValue?.trim() || null
+
+  if (typedSecret) {
+    if (typedSecret.length > MAX_SECRET_VALUE) {
+      throw invalid("That value is too large for a secret.")
+    }
+  } else if (!input.authSecretId) {
+    throw invalid("Choose the secret to send, or enter a new one.")
+  } else {
+    await requireTextSecret(ctx, input.authSecretId)
   }
 
-  await requireTextSecret(ctx, input.authSecretId)
   const authHeaderName = validateHeaderName(
     input.authHeaderName?.trim() || DEFAULT_HEADER_NAME,
   )
@@ -163,10 +182,29 @@ export async function normalizeHeaderAuth(
   }
 
   return {
-    authSecretId: input.authSecretId,
+    authSecretId: typedSecret ? null : input.authSecretId!,
     authHeaderName,
     authValueTemplate: template,
+    typedSecret,
   }
+}
+
+/**
+ * A secret the owner typed while adding or editing a server, kept as one of
+ * their own secrets under the server's name, so it can be rotated on the
+ * Secrets page and picked for another server.
+ */
+export async function storeTypedSecret(
+  ctx: VaultContext,
+  input: { serverName: string; headerName: string; value: string },
+): Promise<string> {
+  const { id } = await createSecretNamedAfter(ctx, {
+    base: `${input.serverName} secret`,
+    value: input.value,
+    description: `Sent to ${input.serverName} in the ${input.headerName} header.`,
+  })
+
+  return id
 }
 
 async function normalizeInput(ctx: VaultContext, input: ServerInput) {
@@ -190,9 +228,19 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
   switch (input.authType) {
     case "none":
       break
-    case "header":
-      Object.assign(data, await normalizeHeaderAuth(ctx, input))
+    case "header": {
+      const { typedSecret, ...auth } = await normalizeHeaderAuth(ctx, input)
+      Object.assign(data, auth)
+
+      if (typedSecret) {
+        data.authSecretId = await storeTypedSecret(ctx, {
+          serverName: name,
+          headerName: auth.authHeaderName,
+          value: typedSecret,
+        })
+      }
       break
+    }
     case "oauth": {
       data.oauthClientId = input.oauthClientId?.trim() || null
       data.oauthScope = input.oauthScope?.trim() || null

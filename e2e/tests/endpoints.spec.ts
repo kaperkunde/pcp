@@ -138,6 +138,31 @@ test("adds an endpoint from a schema URL, with a stored secret", async ({
   ).toBeVisible()
 })
 
+test("adds an endpoint with a secret typed into the form", async ({ page }) => {
+  const name = `Typed pets ${RUN}`
+
+  await page.goto("/servers/endpoints/new")
+  await page.getByLabel("Name", { exact: true }).fill(name)
+  await page.getByLabel("Schema URL").fill(upstream.openapiUrl)
+  await page.getByLabel("Base URL (optional)").fill(`${upstream.origin}/api`)
+  await page.getByLabel("Authentication").selectOption("header")
+  await page
+    .getByLabel("Secret", { exact: true })
+    .selectOption({ label: "Enter a new secret…" })
+  await page.getByLabel("Secret value").fill(upstream.expectedToken)
+  await page.getByRole("button", { name: "Add endpoint" }).click()
+
+  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
+  await expect(page.getByText("Tools (4)")).toBeVisible()
+
+  // Stored under Secrets, named after the endpoint and used by it.
+  await page.goto("/secrets")
+  const stored = page
+    .getByRole("listitem")
+    .filter({ hasText: `${name} secret` })
+  await expect(stored.getByText(name, { exact: true })).toBeVisible()
+})
+
 test("lists the endpoint under API endpoints, and its secret as used", async ({
   page,
 }) => {

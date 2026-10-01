@@ -9,6 +9,15 @@ export const DEFAULT_HEADER_NAME = "Authorization"
 export const DEFAULT_VALUE_TEMPLATE = "Bearer {{secret}}"
 export const SECRET_PLACEHOLDER = "{{secret}}"
 
+/**
+ * The secret picker's choice for typing a new secret in place: its value is
+ * stored as one of the owner's secrets when the form is saved.
+ */
+export const NEW_SECRET_CHOICE = "new"
+
+/** The longest value a secret may hold. */
+export const MAX_SECRET_VALUE = 64 * 1024
+
 /** The largest OpenAPI schema PCP reads, uploaded or downloaded. */
 export const MAX_SPEC_BYTES = 5 * 1024 * 1024
 export const SPEC_FILE_ACCEPT =

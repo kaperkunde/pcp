@@ -259,6 +259,26 @@ describe("managed OAuth secrets", () => {
 })
 
 describe("servers and tokens", () => {
+  it("stores a secret typed for a server as one of the owner's", async () => {
+    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
+
+    const { id } = await createServer(ctx, {
+      name: "My GitHub",
+      url: "https://mcp.example.com/mcp",
+      authType: "header",
+      authSecretValue: "ghp_typed",
+    })
+    const server = await getServer(ctx, id)
+    const [secret] = await listSecrets(ctx)
+
+    expect(secret).toMatchObject({
+      id: server.authSecretId,
+      name: "My GitHub secret",
+      kind: "text",
+    })
+    expect(await revealSecret(ctx, secret.id)).toBe("ghp_typed")
+  })
+
   it("registers a server, scopes tokens to it and resolves bearer tokens", async () => {
     const ctx = await setupVault({ name: "Ada", password: PASSWORD })
     const secret = await createSecret(ctx, { name: "api key", value: "k" })

@@ -1,3 +1,4 @@
+import { MAX_SECRET_VALUE } from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
@@ -30,7 +31,6 @@ export type SecretSummary = {
 
 const MAX_NAME = 100
 const MAX_DESCRIPTION = 500
-const MAX_VALUE = 64 * 1024
 
 function aad(secretId: string): string {
   return `secret:${secretId}`
@@ -113,7 +113,7 @@ export async function createSecret(
     throw invalid("Enter the secret's value.")
   }
 
-  if (input.value.length > MAX_VALUE) {
+  if (input.value.length > MAX_SECRET_VALUE) {
     throw invalid("That value is too large for a secret.")
   }
 
@@ -241,7 +241,7 @@ export async function updateSecret(
       throw invalid("Enter the secret's value.")
     }
 
-    if (input.value.length > MAX_VALUE) {
+    if (input.value.length > MAX_SECRET_VALUE) {
       throw invalid("That value is too large for a secret.")
     }
 

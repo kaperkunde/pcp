@@ -23,7 +23,7 @@ import {
   type RegisterArgs,
 } from "./permissions"
 import { UI_EXTENSION } from "./permission-rules"
-import { createSecret } from "./secrets"
+import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
@@ -552,6 +552,8 @@ async function apiRegistration(
   ctx: VaultContext,
   overrides: {
     secret?: { id: string; name: string }
+    /** A secret the owner has not stored yet, by the name asked for. */
+    newSecret?: string
     baseUrl?: string
     readOnly?: boolean
     patches?: unknown
@@ -563,18 +565,21 @@ async function apiRegistration(
     baseUrl: overrides.baseUrl,
     readOnly: overrides.readOnly,
     authSecretId: overrides.secret?.id,
+    newSecret: overrides.newSecret !== undefined,
     patches: overrides.patches,
   })
+  const sends = Boolean(overrides.secret || overrides.newSecret)
 
   return {
     name: prepared.name,
     description: prepared.description,
     url: prepared.url,
-    authType: overrides.secret ? "header" : "none",
-    authHeaderName: overrides.secret ? "X-API-Key" : null,
-    authValueTemplate: overrides.secret ? "{{secret}}" : null,
+    authType: sends ? "header" : "none",
+    authHeaderName: sends ? "X-API-Key" : null,
+    authValueTemplate: sends ? "{{secret}}" : null,
     authSecretId: overrides.secret?.id ?? null,
-    secretName: overrides.secret?.name ?? null,
+    secretName: overrides.secret?.name ?? overrides.newSecret ?? null,
+    ...(overrides.newSecret ? { newSecret: true } : {}),
     oauthScope: null,
     endpoint: prepared.registration,
   }
@@ -760,6 +765,136 @@ describe("adding an API from OpenAPI text", () => {
     expect(Buffer.from(row.argsCiphertext).toString("utf8")).not.toContain(
       "listPets",
     )
+  })
+})
+
+describe("adding an API with a secret the owner has not stored yet", () => {
+  const PANEL_AND_FORM = {
+    clientCapabilities: {
+      elicitation: { form: {}, url: {} },
+      extensions: { [UI_EXTENSION]: {} },
+    } as never,
+  }
+
+  async function ask(ctx: VaultContext, scope: PermissionScope) {
+    const input = await apiRegistration(ctx, {
+      newSecret: "Pets key",
+      baseUrl: "https://api.example.com/v1",
+    })
+    const asked = await withPermission(
+      scope,
+      { kind: "register", input },
+      PANEL_AND_FORM,
+    )
+    return { asked, id: await onlyRequestId() }
+  }
+
+  it("is answered on PCP's page, never in the assistant's app", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const { asked, id } = await ask(ctx, scope)
+
+    // A prompt that opens PCP's page, not the panel or the client's form.
+    expect(isInputRequiredResult(asked)).toBe(true)
+    expect(JSON.stringify(asked)).toContain(`/permissions/${id}`)
+    expect(JSON.stringify(asked)).toContain('"mode":"url"')
+
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.newSecret).toEqual({ name: "Pets key" })
+    expect(view?.lines).toContain(
+      'Authentication: sends a new secret, "Pets key", in the X-API-Key header; you enter it in PCP when you agree, and PCP stores it encrypted',
+    )
+
+    const checked = await checkPermission(scope, id, PANEL_AND_FORM)
+    expect((checked as CallToolResult).structuredContent).toMatchObject({
+      kind: "done",
+    })
+
+    for (const via of ["app", "form"] as const) {
+      await expect(
+        decidePermission(
+          ctx,
+          id,
+          "allow_once",
+          { via, publicUrl: PUBLIC_URL, secret: { name: "x", value: "y" } },
+          executor,
+        ),
+      ).rejects.toThrow(/enter the secret "Pets key" in PCP/)
+    }
+
+    expect(await db().secret.count()).toBe(0)
+    expect(await db().mcpServer.count()).toBe(1)
+    expect(
+      (await db().permissionRequest.findUniqueOrThrow({ where: { id } }))
+        .status,
+    ).toBe("pending")
+  })
+
+  it("stores the secret the owner types as they agree, and sends it", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const { id } = await ask(ctx, scope)
+    const web = { via: "web" as const, publicUrl: PUBLIC_URL }
+
+    // Refused without one, and still open to answer again.
+    await expect(
+      decidePermission(ctx, id, "allow_once", web, executor),
+    ).rejects.toThrow(/Enter the secret "Pets key"/)
+
+    await createSecret(ctx, { name: "Pets key", value: "taken" })
+    await expect(
+      decidePermission(
+        ctx,
+        id,
+        "allow_once",
+        { ...web, secret: { name: "Pets key", value: "k-123" } },
+        executor,
+      ),
+    ).rejects.toThrow(/already exists/)
+
+    const added = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { ...web, secret: { name: " Pets key 2 ", value: " k-123 " } },
+      executor,
+    )
+    expect(added.isError).toBeUndefined()
+
+    const server = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Pets" },
+    })
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "Pets key 2" },
+    })
+    expect(server).toMatchObject({
+      authType: "header",
+      authSecretId: secret.id,
+      authHeaderName: "X-API-Key",
+      url: "https://api.example.com/v1",
+    })
+    expect(await revealSecret(ctx, secret.id)).toBe("k-123")
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    expect(row.status).toBe("executed")
+  })
+
+  it("stores nothing when the owner says no", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const { id } = await ask(ctx, scope)
+
+    await decidePermission(
+      ctx,
+      id,
+      "decline",
+      { via: "web", publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    expect(await db().secret.count()).toBe(0)
+    expect(await db().mcpServer.count()).toBe(1)
   })
 })
 

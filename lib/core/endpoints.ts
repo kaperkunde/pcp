@@ -5,6 +5,7 @@ import type { CallToolResult } from "@modelcontextprotocol/client"
 import type { McpServer } from "@/lib/generated/prisma/client"
 
 import { storeTools, type SyncResult } from "./catalogue"
+import { DEFAULT_HEADER_NAME } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid, isPcpError, PcpError } from "./errors"
@@ -35,6 +36,7 @@ import {
   normalizeNameAndDescription,
   setServerStatus,
   slugify,
+  storeTypedSecret,
   uniqueSlug,
 } from "./servers"
 
@@ -81,6 +83,8 @@ export type EndpointInput = {
   authHeaderName?: string | null
   authValueTemplate?: string | null
   authSecretId?: string | null
+  /** A secret typed into the form: stored as one of the owner's own. */
+  authSecretValue?: string | null
 }
 
 async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
@@ -100,6 +104,7 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
           authSecretId: null,
           authHeaderName: null,
           authValueTemplate: null,
+          typedSecret: null,
         }
 
   const specSource = input.specSource === "upload" ? "upload" : "url"
@@ -114,6 +119,24 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
     publicOnly: input.publicOnly === true,
     ownerBaseUrl: input.baseUrl?.trim() || null,
   } as const
+}
+
+/** Stores a secret typed into the form; its id, or null when none was. */
+async function storeTyped(
+  ctx: VaultContext,
+  data: {
+    name: string
+    authHeaderName: string | null
+    typedSecret: string | null
+  },
+): Promise<string | null> {
+  return data.typedSecret
+    ? storeTypedSecret(ctx, {
+        serverName: data.name,
+        headerName: data.authHeaderName ?? DEFAULT_HEADER_NAME,
+        value: data.typedSecret,
+      })
+    : null
 }
 
 /** The schema text with the edits applied, checked again as a schema. */
@@ -403,6 +426,8 @@ export async function createEndpoint(
     hasSecret: data.authType === "header",
   })
 
+  // Stored only now, with nothing left to refuse the endpoint for.
+  const typedSecretId = await storeTyped(ctx, data)
   const id = newId()
   const server = await db().mcpServer.create({
     data: {
@@ -421,7 +446,7 @@ export async function createEndpoint(
       specUrlFromAssistant:
         data.specSource === "url" && input.specUrlFromAssistant === true,
       authType: data.authType,
-      authSecretId: data.authSecretId,
+      authSecretId: typedSecretId ?? data.authSecretId,
       authHeaderName: data.authHeaderName,
       authValueTemplate: data.authValueTemplate,
     },
@@ -438,6 +463,13 @@ export async function createEndpoint(
     await db()
       .mcpServer.delete({ where: { id } })
       .catch(() => {})
+
+    if (typedSecretId) {
+      await db()
+        .secret.delete({ where: { id: typedSecretId } })
+        .catch(() => {})
+    }
+
     throw error
   }
 }
@@ -529,6 +561,7 @@ export async function updateEndpoint(
     existing.specUrlFromAssistant &&
     data.specSource === "url" &&
     data.specUrl === existing.specUrl
+  const typedSecretId = await storeTyped(ctx, data)
 
   const server = await db().mcpServer.update({
     where: { id },
@@ -542,7 +575,7 @@ export async function updateEndpoint(
       publicOnly: data.publicOnly,
       specUrlFromAssistant,
       authType: data.authType,
-      authSecretId: data.authSecretId,
+      authSecretId: typedSecretId ?? data.authSecretId,
       authHeaderName: data.authHeaderName,
       authValueTemplate: data.authValueTemplate,
     },

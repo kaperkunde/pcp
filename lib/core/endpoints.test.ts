@@ -10,7 +10,12 @@ import {
 } from "./endpoints"
 import { buildInstructions, loadGatewayServers } from "./gateway"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
-import { createSecret, deleteSecret, listSecrets } from "./secrets"
+import {
+  createSecret,
+  deleteSecret,
+  listSecrets,
+  revealSecret,
+} from "./secrets"
 import {
   getServer,
   listServers,
@@ -547,6 +552,76 @@ describe("secrets", () => {
     await expect(deleteSecret(ctx, auth.authSecretId)).rejects.toThrow(
       /used by/,
     )
+  })
+
+  it("can be typed into the form, and are stored then as the owner's own", async () => {
+    const { id } = await createEndpoint(
+      ctx,
+      input({
+        authType: "header",
+        authSecretValue: ` ${KEY} `,
+        authHeaderName: "X-API-Key",
+        authValueTemplate: "{{secret}}",
+        baseUrl: `${api.origin}/api`,
+      }),
+    )
+
+    const server = await getServer(ctx, id)
+    const [secret] = await listSecrets(ctx)
+    expect(secret).toMatchObject({
+      id: server.authSecretId,
+      name: "Petstore secret",
+      kind: "text",
+      description: "Sent to Petstore in the X-API-Key header.",
+    })
+    expect(secret.usedBy.map((entry) => entry.name)).toEqual(["Petstore"])
+    expect(await revealSecret(ctx, secret.id)).toBe(KEY)
+
+    // Typed again while editing, it is a new one beside the first.
+    await updateEndpoint(
+      ctx,
+      id,
+      input({
+        authType: "header",
+        authSecretValue: "sk-live-rotated",
+        authHeaderName: "X-API-Key",
+        authValueTemplate: "{{secret}}",
+        baseUrl: `${api.origin}/api`,
+      }),
+    )
+    const rotated = await getServer(ctx, id)
+    expect(rotated.authSecretId).not.toBe(secret.id)
+    expect(await revealSecret(ctx, rotated.authSecretId!)).toBe(
+      "sk-live-rotated",
+    )
+    expect((await listSecrets(ctx)).map((entry) => entry.name)).toEqual([
+      "Petstore secret",
+      "Petstore secret 2",
+    ])
+  })
+
+  it("typed into a form that is refused, are not stored", async () => {
+    const typed = {
+      authType: "header" as const,
+      authSecretValue: KEY,
+      baseUrl: `${api.origin}/api`,
+    }
+
+    await expect(
+      createEndpoint(ctx, input({ ...typed, specText: "{ nope" })),
+    ).rejects.toThrow()
+    await expect(
+      createEndpoint(ctx, input({ ...typed, authValueTemplate: "Bearer" })),
+    ).rejects.toThrow(/must contain/)
+
+    expect(await db().secret.count()).toBe(0)
+    expect(await db().mcpServer.count()).toBe(0)
+  })
+
+  it("must be chosen or typed when one is sent", async () => {
+    await expect(
+      createEndpoint(ctx, input({ authType: "header", authSecretValue: "  " })),
+    ).rejects.toThrow(/Choose the secret to send, or enter a new one/)
   })
 })
 

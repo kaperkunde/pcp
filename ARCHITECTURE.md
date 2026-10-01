@@ -470,6 +470,13 @@ the start page then lands on the server's page, which says what to create.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.
+A name the owner has not stored yet is a new secret (`newSecret` on the
+request): the owner types its value as they agree, so that request is only
+answered on `/permissions/<id>` (or the URL prompt that opens it), never in
+the panel or the client's form, which the assistant's app can read.
+`decidePermission` checks the typed secret before it claims the request,
+stores it as the owner's own, and deletes it again if the server is not
+added.
 Once the owner agrees, PCP adds the server, adds it to the asking token when
 that token is scoped to chosen servers, and reads its tools, or hands back
 the connect panel for OAuth. With `openapi_schema` the request is an API

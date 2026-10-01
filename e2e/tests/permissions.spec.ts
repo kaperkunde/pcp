@@ -386,15 +386,6 @@ test("an assistant can propose a server with a stored secret; it is added once y
 }) => {
   const name = `Proposed ${RUN}`
 
-  const unknown = await callTool(baseURL!, token, "register_server", {
-    name,
-    url: upstream.mcpUrl,
-    auth_type: "header",
-    secret: `No such secret ${RUN}`,
-  })
-  expect(unknown.body.result?.isError).toBe(true)
-  expect(toolText(unknown)).toContain("No secret called")
-
   const asked = await callTool(baseURL!, token, "register_server", {
     name,
     url: upstream.mcpUrl,
@@ -420,6 +411,58 @@ test("an assistant can propose a server with a stored secret; it is added once y
   expect(after.instructions).toContain(
     `proposed-${RUN}: Proposed by an assistant. (3 tools)`,
   )
+})
+
+test("a secret you have not stored is typed in PCP as you agree, never in the app", async ({
+  page,
+  baseURL,
+}) => {
+  const name = `Proposed with a new key ${RUN}`
+  const secretName = `New key ${RUN}`
+
+  const asked = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "register_server",
+    {
+      name,
+      url: upstream.mcpUrl,
+      auth_type: "header",
+      secret: secretName,
+    },
+    { capabilities: PANELS },
+  )
+  // No buttons in the panel: it is answered on PCP's page.
+  expect(asked.body.result?.structuredContent?.kind).toBe("done")
+  const { path, id } = linkIn(toolText(asked))
+
+  const clicked = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "answer_permission",
+    { id, decision: "allow_once" },
+    { capabilities: PANELS },
+  )
+  expect(clicked.body.result?.isError).toBe(true)
+  expect(toolText(clicked)).toContain(`enter the secret "${secretName}" in PCP`)
+
+  await page.goto(path)
+  await expect(
+    page.getByText(`sends a new secret, "${secretName}"`),
+  ).toBeVisible()
+  await expect(page.getByLabel("Save it as")).toHaveValue(secretName)
+  await page.getByLabel("Secret value").fill(upstream.expectedToken)
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText("3 tools")
+
+  // Stored as one of yours, and in use by the server it came with.
+  await page.goto("/secrets")
+  await expect(
+    page
+      .getByRole("listitem")
+      .filter({ hasText: secretName })
+      .filter({ hasText: name }),
+  ).toBeVisible()
 })
 
 test("an OAuth server an assistant proposes is connected through a link", async ({
