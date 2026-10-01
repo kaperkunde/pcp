@@ -313,6 +313,142 @@ describe("sharing a memory", () => {
       run(alice, { ...preferences, file_text: "x".repeat(2_001) }),
     ).rejects.toThrow(/at most 2000 characters/)
   })
+  it("asks to have it read in every conversation, which the owner chooses", async () => {
+    const ask = askOf(await run(alice, { ...preferences, every: true }))
+    expect(ask).toEqual({
+      kind: "memory_share",
+      input: {
+        path: "preferences.md",
+        text: "Metric units. British spelling.",
+        always: true,
+      },
+    })
+    // Asked without it, it is another request.
+    expect(askOf(await run(alice, preferences))).not.toEqual(ask)
+
+    const shown = describeMemoryAsk(ask)
+    expect(shown.lines).toContain(
+      "The assistant asks to have it read in every conversation: you choose that with the answer.",
+    )
+    expect(shown.memory).toEqual({
+      path: "/memories/shared/preferences.md",
+      newPath: null,
+      text: "Metric units. British spelling.",
+      before: null,
+      always: true,
+    })
+
+    // The assistant asking is not the owner choosing: left out, it is not.
+    expect(
+      (await decideMemoryAsk(ctx, alice.tokenId, ask, "allow_once")).status,
+    ).toBe("executed")
+    expect((await instructionMemories(ctx, bob.tokenId)).always).toEqual([])
+  })
+
+  it("is read in every conversation by all of them when the owner shares it so", async () => {
+    const ask = askOf(await run(alice, preferences))
+    const outcome = await decideMemoryAsk(
+      ctx,
+      alice.tokenId,
+      ask,
+      "allow_once",
+      { always: true },
+    )
+
+    expect(outcome.text).toContain("It is read in every conversation.")
+    expect(await instructionMemories(ctx, bob.tokenId)).toEqual({
+      shared: [],
+      always: [
+        {
+          path: "/memories/shared/preferences.md",
+          text: "Metric units. British spelling.",
+        },
+      ],
+    })
+  })
+
+  it("is read in every conversation by the assistant alone when the owner keeps it for it", async () => {
+    const ask = askOf(await run(alice, { ...preferences, every: true }))
+    const outcome = await decideMemoryAsk(ctx, alice.tokenId, ask, "decline", {
+      always: true,
+    })
+
+    expect(outcome).toEqual({
+      status: "declined",
+      text: "The owner kept it for you alone: it is saved at /memories/preferences.md. It is read in every conversation.",
+    })
+    expect((await instructionMemories(ctx, alice.tokenId)).always).toEqual([
+      {
+        path: "/memories/preferences.md",
+        text: "Metric units. British spelling.",
+      },
+    ])
+    expect((await instructionMemories(ctx, bob.tokenId)).always).toEqual([])
+  })
+
+  it("marks an own memory the owner keeps or shares with the toggle on", async () => {
+    await run(alice, {
+      command: "create",
+      path: "/memories/draft.md",
+      file_text: "Short answers.",
+    })
+    const moved = askOf(
+      await run(alice, {
+        command: "rename",
+        path: "/memories/draft.md",
+        new_path: "/memories/shared/draft.md",
+      }),
+    )
+
+    await decideMemoryAsk(ctx, alice.tokenId, moved, "decline", {
+      always: true,
+    })
+    expect((await instructionMemories(ctx, alice.tokenId)).always).toEqual([
+      { path: "/memories/draft.md", text: "Short answers." },
+    ])
+
+    // Shared without the toggle, it is in no one's every conversation.
+    const again = askOf(
+      await run(alice, {
+        command: "rename",
+        path: "/memories/draft.md",
+        new_path: "/memories/shared/draft.md",
+      }),
+    )
+    await decideMemoryAsk(ctx, alice.tokenId, again, "allow_once")
+    expect((await instructionMemories(ctx, alice.tokenId)).always).toEqual([])
+  })
+
+  it("takes every only when creating a shared memory", async () => {
+    await expect(
+      run(alice, {
+        command: "create",
+        path: "/memories/notes.md",
+        file_text: "Mine.",
+        every: true,
+      }),
+    ).rejects.toThrow(/goes with creating one under \/memories\/shared\//)
+
+    await createMemory(ctx, { path: "units.md", text: "Metric." })
+    await expect(
+      run(alice, {
+        command: "create",
+        path: "/memories/shared/units.md",
+        file_text: "Imperial.",
+        every: true,
+      }),
+    ).rejects.toThrow(/For one that exists/)
+
+    await expect(
+      run(alice, {
+        command: "rename",
+        path: "/memories/shared/units.md",
+        new_path: "/memories/shared/measures.md",
+        every: true,
+      }),
+    ).rejects.toThrow(/every goes with create/)
+    expect(await db().memory.count()).toBe(1)
+  })
 })
 
 describe("a shared memory", () => {

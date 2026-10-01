@@ -389,8 +389,13 @@ another one reads:
   Claude's own memory tool adds to the system prompt (look at `/memories`
   before anything else, save as you go, assume the conversation ends at any
   moment). The owner can mark any memory to be read in every conversation
-  (`memory.always`, from the Memories page only): a shared one goes into
-  every keeping token's instructions, a private one into its own token's.
+  (`memory.always`): on the Memories page, or with the toggle on a
+  `memory_share` request, where it holds whether they share the memory or
+  keep it for the assistant that asked. An assistant can only ask for it
+  (`create` under `/memories/shared/` with `every: true` starts the toggle
+  ticked); the mark is the owner's answer, never the assistant's ask. A
+  shared one goes into every keeping token's instructions, a private one
+  into its own token's.
   Its text is at most 2,000 characters, and the instructions carry at most
   8,000 characters of them and name the rest. Clients do not always pass
   the instructions on whole (Claude Code cuts them short; claude.ai showed
@@ -403,7 +408,7 @@ another one reads:
   owner read: an assistant's change to, or move of, an always memory it keeps
   clears the mark, a change to a shared one is a `memory_change` request
   that says it is read in every conversation, and sharing a private one
-  clears it. Any other memory of a token's own is its words alone and is
+  sets it to what the owner chose on that request. Any other memory of a token's own is its words alone and is
   only read through the tool, which labels each memory with who wrote it and
   says that it is a note, not an instruction.
 - **Bounded.** 500 memories per vault, 10,000 characters each, 60 writes and

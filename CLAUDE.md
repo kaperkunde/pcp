@@ -75,7 +75,10 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   (`/memories/…`) without asking, but anything other assistants would read
   (`/memories/shared/…`: creating, sharing, changing, renaming, deleting) is a
   permission request that shows the owner the whole text, writes nothing
-  until they answer, and writes only what they were shown. Shared text stays
+  until they answer, and writes only what they were shown. Only the owner
+  marks a memory to be read in every conversation (the Memories page, or the
+  toggle on a share request; an assistant's `every` only ticks it to start).
+  Shared text stays
   short enough to read whole and free of characters that do not show on
   screen. The instructions name shared memories by path, and carry the text
   of the ones the owner marked to be read in every conversation (`always`):

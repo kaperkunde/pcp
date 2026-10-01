@@ -5,8 +5,10 @@ import { AccessReview } from "@/components/access-review"
 import { LocalDate } from "@/components/local-date"
 import { PageHeader } from "@/components/page-header"
 import { PermissionDecision } from "@/components/permission-decision"
+import { Badge } from "@/components/ui/badge"
 import { buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import type { MemoryShown } from "@/lib/core/memories"
 import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
@@ -99,12 +101,25 @@ export default async function PermissionPage({
           <CardTitle className="break-words">{view.title}</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          <ul className="flex list-disc flex-col gap-1 pl-5 break-words whitespace-pre-wrap">
-            {view.lines.map((line, index) => (
-              <li key={index}>{line}</li>
-            ))}
-          </ul>
-          {view.warning ? (
+          {view.memory ? (
+            <MemoryText memory={view.memory} asking={view.kind} />
+          ) : (
+            <ul className="flex list-disc flex-col gap-1 pl-5 break-words whitespace-pre-wrap">
+              {view.lines.map((line, index) => (
+                <li key={index}>{line}</li>
+              ))}
+            </ul>
+          )}
+          {view.warning && view.memory ? (
+            // The text is what to check; the warning says what to look for,
+            // under it, without drawing the eye away from it.
+            <p
+              className="border-l-2 pl-3 text-sm text-muted-foreground"
+              role="note"
+            >
+              {view.warning}
+            </p>
+          ) : view.warning ? (
             <p
               className="rounded-md border border-destructive/50 p-3"
               role="note"
@@ -136,7 +151,7 @@ export default async function PermissionPage({
                   You can change that on the token&apos;s page.
                 </p>
               ) : view.kind === "memory_share" ? (
-                <p className="text-muted-foreground">
+                <p className="text-sm text-muted-foreground">
                   Kept for this assistant only, it is saved where only the
                   assistant that asked reads it. You can read, edit and delete
                   every memory under{" "}
@@ -150,6 +165,11 @@ export default async function PermissionPage({
                 id={view.id}
                 decisions={view.decisions}
                 secret={view.secretToEnter}
+                every={
+                  view.kind === "memory_share" && view.memory
+                    ? { asked: view.memory.always }
+                    : null
+                }
               />
             </>
           ) : (
@@ -200,5 +220,62 @@ export default async function PermissionPage({
         </CardContent>
       </Card>
     </>
+  )
+}
+
+/**
+ * The memory a request is about, set apart so it is the first thing read:
+ * the path above it, and the text it replaces, when it changes, above that.
+ */
+function MemoryText({
+  memory,
+  asking,
+}: {
+  memory: MemoryShown
+  asking: string
+}) {
+  const text = "whitespace-pre-wrap break-words"
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+        <code className="break-all">{memory.path}</code>
+        {memory.newPath ? (
+          <>
+            <span aria-hidden>→</span>
+            <span className="sr-only">moves to</span>
+            <code className="break-all">{memory.newPath}</code>
+          </>
+        ) : null}
+        {memory.always && asking !== "memory_share" ? (
+          <Badge variant="secondary">Read in every conversation</Badge>
+        ) : null}
+      </div>
+      {memory.before !== null ? (
+        <figure className="flex flex-col gap-1">
+          <figcaption className="text-xs font-medium text-muted-foreground">
+            Now
+          </figcaption>
+          <blockquote
+            className={`${text} rounded-md border border-dashed p-3 text-sm text-muted-foreground`}
+          >
+            {memory.before}
+          </blockquote>
+        </figure>
+      ) : null}
+      <figure className="flex flex-col gap-1">
+        {memory.before !== null ? (
+          <figcaption className="text-xs font-medium text-muted-foreground">
+            After the change
+          </figcaption>
+        ) : null}
+        <blockquote
+          className={`${text} rounded-md border-2 border-primary/30 bg-muted/60 p-4 text-base leading-relaxed`}
+          data-testid="memory-text"
+        >
+          {memory.text}
+        </blockquote>
+      </figure>
+    </div>
   )
 }

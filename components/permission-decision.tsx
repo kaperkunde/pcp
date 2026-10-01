@@ -4,8 +4,8 @@ import { useState, useTransition } from "react"
 
 import { FormError } from "@/components/form-status"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Checkbox, Input } from "@/components/ui/input"
+import { Field, Label } from "@/components/ui/label"
 import { decidePermissionAction } from "@/lib/actions/permissions"
 import type { PermissionDecision as Decision } from "@/lib/core/constants"
 import { cn } from "@/lib/utils"
@@ -22,11 +22,16 @@ const AGREES: Decision[] = ["allow_once", "always"]
  * that name was added since and is used when the field is left empty. With
  * `clientId` it is that OAuth client's secret, which may be left empty
  * (`optional`) for a client without one.
+ *
+ * A memory to share offers a toggle for reading it in every conversation
+ * (`every`), ticked when the assistant asked for that; it holds whether the
+ * owner shares the memory or keeps it for that assistant.
  */
 export function PermissionDecision({
   id,
   decisions,
   secret,
+  every,
 }: {
   id: string
   decisions: Array<{ value: Decision; label: string }>
@@ -36,11 +41,13 @@ export function PermissionDecision({
     optional?: boolean
     clientId?: string | null
   } | null
+  every?: { asked: boolean } | null
 }) {
   const [pending, startTransition] = useTransition()
   const [chosen, setChosen] = useState<Decision | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [secretValue, setSecretValue] = useState("")
+  const [always, setAlways] = useState(every?.asked === true)
   const [done, setDone] = useState<{
     message: string
     isError: boolean
@@ -68,6 +75,7 @@ export function PermissionDecision({
         id,
         value,
         secret && agrees && secretValue ? secretValue : undefined,
+        every ? always : undefined,
       )
 
       if (result.status === "error") {
@@ -125,6 +133,25 @@ export function PermissionDecision({
             disabled={pending}
           />
         </Field>
+      ) : null}
+      {every ? (
+        <div className="flex flex-col gap-1.5">
+          <Label className="font-normal" htmlFor={`permission-${id}-always`}>
+            <Checkbox
+              id={`permission-${id}-always`}
+              checked={always}
+              onChange={(event) => setAlways(event.target.checked)}
+              disabled={pending}
+            />
+            Read in every conversation
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            {every.asked ? "The assistant asked for this. " : null}
+            It comes with PCP&apos;s instructions, as your own words, so an
+            assistant follows it from its first reply: every assistant if you
+            share it, only this one if you keep it for this assistant.
+          </p>
+        </div>
       ) : null}
       <FormError error={error} />
       <div className="flex flex-wrap gap-2">

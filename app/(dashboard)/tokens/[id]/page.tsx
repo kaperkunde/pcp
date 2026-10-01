@@ -68,6 +68,10 @@ export default async function TokenPage({
           warning: request.warning,
           decisions: request.decisions,
           secret: request.secretToEnter,
+          every:
+            request.kind === "memory_share" && request.memory
+              ? { asked: request.memory.always }
+              : null,
         }))}
         endpointUrl={`${publicUrl}/mcp`}
       />

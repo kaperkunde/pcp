@@ -65,6 +65,8 @@ export type WaitingRequest = {
     optional: boolean
     clientId: string | null
   } | null
+  /** A memory to share: the toggle for reading it in every conversation. */
+  every: { asked: boolean } | null
 }
 
 export function TokenDetail({
@@ -183,6 +185,7 @@ function WaitingCard({ waiting }: { waiting: WaitingRequest[] }) {
                   id={item.id}
                   decisions={item.decisions}
                   secret={item.secret}
+                  every={item.every}
                 />
               )}
             </li>

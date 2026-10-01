@@ -1196,6 +1196,13 @@ describe("a memory an assistant wants to share", () => {
       'Asked by the token "Claude"',
     ])
     expect(view?.warning).toContain("Watch for instructions")
+    expect(view?.memory).toEqual({
+      path: "/memories/shared/preferences.md",
+      newPath: null,
+      text: "Metric units.\nBritish spelling.",
+      before: null,
+      always: false,
+    })
     expect(view?.decisions.map((decision) => decision.label)).toEqual([
       "Share it",
       "Keep it for this assistant only",
@@ -1217,6 +1224,33 @@ describe("a memory an assistant wants to share", () => {
     expect(textOf(await checkPermission(scope, id))).toContain(
       "kept it for you alone",
     )
+  })
+
+  it("reads it in every conversation when the owner ticks that with the answer", async () => {
+    const { ctx, scope } = await setup()
+
+    await withPermission(scope, {
+      ...share,
+      input: { ...share.input, always: true },
+    })
+    const id = await onlyRequestId()
+    expect(
+      (await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL }))?.memory
+        ?.always,
+    ).toBe(true)
+
+    expect(
+      textOf(
+        await decidePermission(ctx, id, "allow_once", {
+          ...web,
+          always: true,
+        }),
+      ),
+    ).toContain("It is read in every conversation.")
+    expect((await listMemories(ctx))[0]).toMatchObject({
+      visibility: "shared",
+      always: true,
+    })
   })
 
   it("discards it, and refuses an answer it did not offer", async () => {

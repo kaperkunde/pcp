@@ -28,6 +28,8 @@ export async function decidePermissionAction(
   decision: string,
   /** A new server's secret, typed in on the page; nowhere else takes it. */
   secretValue?: string,
+  /** A memory to share: read it in every conversation, the page's toggle. */
+  always?: boolean,
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -46,6 +48,7 @@ export async function decidePermissionAction(
       {
         publicUrl,
         secretValue: typeof secretValue === "string" ? secretValue : undefined,
+        always: always === true,
       },
     )
     const message = outcome.content

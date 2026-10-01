@@ -33,7 +33,9 @@ import {
   decideMemoryAsk,
   describeMemoryAsk,
   type MemoryAsk,
+  type MemoryChoice,
   type MemoryDecision,
+  type MemoryShown,
 } from "./memories"
 import {
   connectLinks,
@@ -150,6 +152,8 @@ export type PermissionView = {
   title: string
   lines: string[]
   warning: string | null
+  /** A memory request's memory, for the page to show its text first. */
+  memory: MemoryShown | null
   url: string
   createdAt: Date
   expiresAt: Date
@@ -366,7 +370,12 @@ async function summarizeRow(
   ctx: VaultContext,
   row: Row,
   publicUrl: string,
-): Promise<{ title: string; lines: string[]; warning: string | null }> {
+): Promise<{
+  title: string
+  lines: string[]
+  warning: string | null
+  memory?: MemoryShown
+}> {
   const args = readArgs(ctx, row)
   const asker = `Asked by the token "${row.token.name}"`
 
@@ -503,7 +512,7 @@ async function toView(
   row: Row,
   publicUrl: string,
 ): Promise<PermissionView> {
-  const summary = await summarizeRow(ctx, row, publicUrl)
+  const { memory = null, ...summary } = await summarizeRow(ctx, row, publicUrl)
   const kind = row.kind as PermissionKind
   const status =
     row.status === "pending" && !isOpen(row)
@@ -521,6 +530,7 @@ async function toView(
     serverName: row.server?.name ?? null,
     tool: row.toolName,
     ...summary,
+    memory,
     url: permissionUrl(publicUrl, row.id),
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
@@ -702,11 +712,14 @@ export async function decidePermission(
     publicUrl,
     tokenId,
     secretValue,
+    always,
   }: {
     publicUrl: string
     tokenId?: string
     /** The value of a new server's secret, typed in on PCP's page. */
     secretValue?: string
+    /** A memory to share: read it in every conversation, ticked on the page. */
+    always?: boolean
   },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
@@ -750,7 +763,9 @@ export async function decidePermission(
   }
 
   if (isMemoryKind(kind)) {
-    return decideMemory(ctx, row, choice as MemoryDecision, publicUrl)
+    return decideMemory(ctx, row, choice as MemoryDecision, publicUrl, {
+      always: always === true,
+    })
   }
 
   if (choice === "block" || choice === "decline") {
@@ -1043,6 +1058,7 @@ async function decideMemory(
   row: Row,
   decision: MemoryDecision,
   publicUrl: string,
+  choice: MemoryChoice,
 ): Promise<CallToolResult> {
   const claimed = await claim(row.id)
 
@@ -1058,6 +1074,7 @@ async function decideMemory(
       row.tokenId,
       { kind: row.kind, input: readArgs(ctx, row) } as MemoryAsk,
       decision,
+      choice,
     )
   } catch (error) {
     if (!isPcpError(error)) {
