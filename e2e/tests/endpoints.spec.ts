@@ -6,7 +6,7 @@ import { expect, test } from "@playwright/test"
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, initialize, toolText } from "../lib/mcp"
 import { OWNER_PASSWORD } from "../lib/auth"
-import { addSecret, createToken } from "../lib/ui"
+import { addSecret, allowAllTools, createToken } from "../lib/ui"
 
 // An API described by an OpenAPI schema, added like a server: PCP reads the
 // schema, an assistant finds the operations as tools through /mcp, and PCP
@@ -157,6 +157,10 @@ test("an assistant finds and describes the operations", async ({
 
   const { instructions } = await initialize(baseURL!, token)
   expect(instructions).toContain(`${SLUG}: Pets for sale. (4 tools)`)
+
+  // Tools ask the owner first by default (permissions.spec.ts covers that);
+  // this spec is about the endpoint, so let the token run them.
+  await allowAllTools(page, `Pets assistant ${RUN}`, SLUG)
 
   const search = await callTool(baseURL!, token, "search_tools", {
     query: "list pets",
@@ -348,14 +352,23 @@ test("a schema that cannot be read is refused and the form keeps what was typed"
   await expect(page.getByText(`${NAME} broken`)).toHaveCount(0)
 })
 
-test("a token has no way to manage endpoints unless the owner says so", async ({
+const GATEWAY_TOOLS = [
+  "search_tools",
+  "describe_tool",
+  "call_tool",
+  "check_permission",
+  "answer_permission",
+  "check_server",
+  "register_server",
+]
+
+test("a token cannot read or change endpoints unless the owner says so", async ({
   baseURL,
 }) => {
   const { tools } = await initialize(baseURL!, token)
-  expect(tools).toEqual(["search_tools", "describe_tool", "call_tool"])
+  expect(tools).toEqual(GATEWAY_TOOLS)
 
   for (const [name, args] of [
-    ["register_endpoint", { name: "x", spec: managedSpec(upstream.origin) }],
     ["update_endpoint", { endpoint: SLUG, name: "Hijacked" }],
     ["get_endpoint", { endpoint: SLUG }],
   ] as const) {
@@ -367,14 +380,16 @@ test("a token has no way to manage endpoints unless the owner says so", async ({
   }
 })
 
-test("the owner can make a token that may add and change API endpoints", async ({
+test("the owner can make a token that may read and change API endpoints", async ({
   page,
   baseURL,
 }) => {
   await page.goto("/tokens")
   await page.getByLabel("Name").fill(`Endpoint manager ${RUN}`)
   await page
-    .getByLabel("Let an assistant with this token add and change API endpoints")
+    .getByLabel(
+      "Let an assistant with this token read and change API endpoints",
+    )
     .check()
   await page.getByLabel("Your password").fill(OWNER_PASSWORD)
   await page.getByRole("button", { name: "Create token" }).click()
@@ -382,15 +397,8 @@ test("the owner can make a token that may add and change API endpoints", async (
   managerToken = (await page.getByTestId("new-token").textContent())!
 
   const { tools, instructions } = await initialize(baseURL!, managerToken)
-  expect(tools).toEqual([
-    "search_tools",
-    "describe_tool",
-    "call_tool",
-    "register_endpoint",
-    "update_endpoint",
-    "get_endpoint",
-  ])
-  expect(instructions).toContain("register_endpoint takes OpenAPI 3 text")
+  expect(tools).toEqual([...GATEWAY_TOOLS, "update_endpoint", "get_endpoint"])
+  expect(instructions).toContain("get_endpoint reads one")
 
   await page.reload()
   await expect(
@@ -401,72 +409,101 @@ test("the owner can make a token that may add and change API endpoints", async (
   ).toBeVisible()
 })
 
-test("an assistant registers an API from schema text; it waits for the owner and has no credential", async ({
+test("an assistant proposes an API as OpenAPI text; nothing exists until the owner agrees", async ({
+  page,
   baseURL,
 }) => {
-  const registered = await callTool(
-    baseURL!,
-    managerToken,
-    "register_endpoint",
-    {
-      name: MANAGED,
-      spec: managedSpec(upstream.origin),
-      description: "Pets, registered by an assistant.",
-    },
-  )
-  expect(registered.body.result?.isError ?? false, toolText(registered)).toBe(
-    false,
-  )
-
-  const details = JSON.parse(toolText(registered)) as {
-    endpoint: string
-    baseUrl: string
-    enabled: boolean
-    belongsTo: string
-    publicOnly: boolean
-    authentication: { type: string }
-    tools: Array<{ name: string }>
-    next: string[]
-  }
-  expect(details).toMatchObject({
-    endpoint: MANAGED_SLUG,
-    baseUrl: `${upstream.origin}/api`,
-    enabled: false,
-    belongsTo: "assistant",
-    publicOnly: true,
-    authentication: { type: "none" },
+  // A document that cannot be used is refused before the owner is asked.
+  const broken = await callTool(baseURL!, managerToken, "register_server", {
+    name: MANAGED,
+    openapi_schema: "not an OpenAPI document",
   })
-  expect(details.tools.map((tool) => tool.name)).toEqual([
-    "createPet",
-    "getPet",
-    "listPets",
-  ])
-  // It is told so, and told what it cannot yet do.
-  expect(details.next.join(" ")).toMatch(/disabled.*until the owner enables it/)
-  expect(details.next.join(" ")).toMatch(/private or local address/)
+  expect(broken.body.result?.isError).toBe(true)
+  expect(toolText(broken)).not.toContain("Not done yet")
 
-  // Nothing uses it, the registering token included: not search, not call.
+  const oauth = await callTool(baseURL!, managerToken, "register_server", {
+    name: MANAGED,
+    openapi_schema: managedSpec(upstream.origin),
+    auth_type: "oauth",
+  })
+  expect(oauth.body.result?.isError).toBe(true)
+  expect(toolText(oauth)).toMatch(/OAuth is for MCP servers/)
+
+  const asked = await callTool(baseURL!, managerToken, "register_server", {
+    name: MANAGED,
+    openapi_schema: managedSpec(upstream.origin),
+    description: "Pets, registered by an assistant.",
+  })
+  expect(asked.body.result?.isError ?? false, toolText(asked)).toBe(false)
+  expect(toolText(asked)).toContain("Not done yet")
+  const id = toolText(asked).match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(id, toolText(asked)).toBeTruthy()
+
+  // Not before the owner agrees: not in the instructions, not in search.
+  const before = await initialize(baseURL!, managerToken)
+  expect(before.instructions).not.toContain(MANAGED_SLUG)
   const search = await callTool(baseURL!, managerToken, "search_tools", {
     query: "list pets",
   })
   expect(toolText(search)).not.toContain(MANAGED_SLUG)
-  const before = upstream.requests.length
-  const call = await callTool(baseURL!, managerToken, "call_tool", {
+
+  // The owner is shown what they would be agreeing to.
+  await page.goto(`/permissions/${id}`)
+  await expect(page.getByText(`Add the API endpoint ${MANAGED}?`)).toBeVisible()
+  await expect(page.getByText(`Address: ${upstream.origin}/api`)).toBeVisible()
+  await expect(
+    page.getByText(/Tools: 3 from the OpenAPI schema it supplied/),
+  ).toBeVisible()
+  await expect(
+    page.getByText("Operations: GET /pets, POST /pets, GET /pets/{petId}"),
+  ).toBeVisible()
+  await expect(page.getByText("Authentication: none")).toBeVisible()
+  // The fake API is on loopback, which an assistant's endpoint will not reach.
+  await expect(
+    page.getByText(/127\.0\.0\.1 is a private or local address/),
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText("3 tools")
+
+  const after = await initialize(baseURL!, managerToken)
+  expect(after.instructions).toContain(
+    `${MANAGED_SLUG}: Pets, registered by an assistant. (3 tools)`,
+  )
+  const found = await callTool(baseURL!, managerToken, "search_tools", {
+    query: "list pets",
+    server: MANAGED_SLUG,
+  })
+  expect(toolText(found)).toContain(`${MANAGED_SLUG}/listPets`)
+
+  // What the owner agreed to, as the assistant can read it back.
+  const read = await callTool(baseURL!, managerToken, "get_endpoint", {
+    endpoint: MANAGED_SLUG,
+  })
+  expect(JSON.parse(toolText(read))).toMatchObject({
+    endpoint: MANAGED_SLUG,
+    baseUrl: `${upstream.origin}/api`,
+    enabled: true,
+    belongsTo: "assistant",
+    publicOnly: true,
+    authentication: { type: "none" },
+  })
+
+  // Tools ask first by default; this spec is about the endpoint.
+  await allowAllTools(page, `Endpoint manager ${RUN}`, MANAGED_SLUG)
+
+  // PCP will not send to a private address for an endpoint an assistant
+  // registered: the request never leaves.
+  const requests = upstream.requests.length
+  const refused = await callTool(baseURL!, managerToken, "call_tool", {
     server: MANAGED_SLUG,
     tool: "listPets",
     arguments: {},
   })
-  expect(call.body.result?.isError).toBe(true)
-  expect(toolText(call)).toContain(`No server called ${MANAGED_SLUG}`)
-  expect(upstream.requests).toHaveLength(before)
-
-  // While it waits it is the assistant's to work on, and stays disabled.
-  const edited = await callTool(baseURL!, managerToken, "update_endpoint", {
-    endpoint: MANAGED_SLUG,
-    description: "Pets on offer.",
-  })
-  expect(edited.body.result?.isError ?? false, toolText(edited)).toBe(false)
-  expect(JSON.parse(toolText(edited))).toMatchObject({ enabled: false })
+  expect(refused.body.result?.isError).toBe(true)
+  expect(toolText(refused)).toMatch(
+    /127\.0\.0\.1 is, or resolves to, a private or local address/,
+  )
+  expect(upstream.requests).toHaveLength(requests)
 
   // A gateway batch is many calls in one request; there are none.
   const batch = await fetch(`${baseURL}/mcp`, {
@@ -484,46 +521,16 @@ test("an assistant registers an API from schema text; it waits for the owner and
   expect(batch.status).toBe(400)
 })
 
-test("the owner enables it; a change by the assistant switches it off until they say so again", async ({
+test("a change by the assistant switches the endpoint off until the owner enables it again", async ({
   page,
   baseURL,
 }) => {
-  await page.goto("/servers")
-  await page.getByRole("link").filter({ hasText: MANAGED }).click()
-  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  await expect(page.getByText("Disabled", { exact: true })).toBeVisible()
-
-  await page.getByRole("button", { name: "Enable", exact: true }).click()
-  await expect(
-    page.getByRole("button", { name: "Disable", exact: true }),
-  ).toBeVisible()
-
-  // Now it is found, and PCP will not send to a private address for an
-  // endpoint an assistant registered: the request never leaves.
-  const search = await callTool(baseURL!, managerToken, "search_tools", {
-    query: "list pets",
-    server: MANAGED_SLUG,
-  })
-  expect(toolText(search)).toContain(`${MANAGED_SLUG}/listPets`)
-
-  const before = upstream.requests.length
-  const refused = await callTool(baseURL!, managerToken, "call_tool", {
-    server: MANAGED_SLUG,
-    tool: "listPets",
-    arguments: {},
-  })
-  expect(refused.body.result?.isError).toBe(true)
-  expect(toolText(refused)).toMatch(
-    /127\.0\.0\.1 is, or resolves to, a private or local address/,
-  )
-  expect(upstream.requests).toHaveLength(before)
-
-  // The assistant rewrites its description. Other assistants would read it,
-  // so the endpoint is switched off until the owner has looked again.
+  // Its words reach every other assistant, so the owner looks again.
   const changed = await callTool(baseURL!, managerToken, "update_endpoint", {
     endpoint: MANAGED_SLUG,
     description: "Pets on offer, now with a new description.",
   })
+  expect(changed.body.result?.isError ?? false, toolText(changed)).toBe(false)
   expect(JSON.parse(toolText(changed))).toMatchObject({ enabled: false })
   expect(JSON.parse(toolText(changed)).updated).toMatch(
     /disabled until the owner enables it again/,
@@ -534,12 +541,20 @@ test("the owner enables it; a change by the assistant switches it off until they
   })
   expect(toolText(gone)).toMatch(/No server called/)
 
-  await page.reload()
+  await page.goto("/servers")
+  await page.getByRole("link").filter({ hasText: MANAGED }).click()
+  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
   await expect(page.getByText("Disabled", { exact: true })).toBeVisible()
   await page.getByRole("button", { name: "Enable", exact: true }).click()
   await expect(
     page.getByRole("button", { name: "Disable", exact: true }),
   ).toBeVisible()
+
+  const back = await callTool(baseURL!, managerToken, "search_tools", {
+    query: "list pets",
+    server: MANAGED_SLUG,
+  })
+  expect(toolText(back)).toContain(`${MANAGED_SLUG}/listPets`)
 })
 
 test("the owner allows the address and attaches the secret, typing the address to confirm it", async ({

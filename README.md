@@ -27,9 +27,11 @@
 
 A self-hosted gateway between your AI assistant and the MCP servers you use.
 PCP keeps the credentials those servers need in an encrypted store, signs in
-to the ones that use OAuth, and exposes a single MCP endpoint with three tools
-— `search_tools`, `describe_tool` and `call_tool` — so an assistant can reach
-dozens of servers without carrying every tool definition in its context.
+to the ones that use OAuth, and exposes a single MCP endpoint built around
+three tools — `search_tools`, `describe_tool` and `call_tool` — so an
+assistant can reach dozens of servers without carrying every tool definition
+in its context. You decide, per token and per tool, what an assistant may run
+on its own, what it has to ask you about first, and what it cannot touch.
 
 - **One endpoint for every server.** Add servers in the web UI; an assistant
   connects once, with an API token, and finds tools by describing what it
@@ -103,7 +105,9 @@ required.
 4. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password to make one. A token can reach every server and endpoint or only
    the ones you pick, and can expire. Revoking it destroys its copy of the
-   vault key.
+   vault key. A token's page sets each tool to **Allowed**, **Ask you first**
+   (the default) or **Blocked**, a whole server at once, or copies all of it
+   from another token.
 5. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
    bearer token. For Claude Code:
 
@@ -116,31 +120,47 @@ required.
    works the same way.
 
 The assistant then sees a short description of the servers behind the token
-and three tools:
+and these tools:
 
-| Tool            | What it does                                                           |
-| --------------- | ---------------------------------------------------------------------- |
-| `search_tools`  | Finds tools across servers from a few words ("create a github issue"). |
-| `describe_tool` | Returns one tool's full description and JSON Schema.                   |
-| `call_tool`     | Runs it: PCP adds the credentials, then calls the server or the API.   |
+| Tool               | What it does                                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `search_tools`     | Finds tools across servers from a few words ("create a github issue").                                           |
+| `describe_tool`    | Returns one tool's full description, JSON Schema and whether it asks you first.                                  |
+| `call_tool`        | Runs it, with PCP adding the credentials to the request to the server or the API.                                |
+| `check_permission` | Says whether you answered a request that was waiting for you, and how it went.                                   |
+| `check_server`     | Says whether a server is connected; offers you a Connect button where it can.                                    |
+| `register_server`  | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name. |
 
-A token made with **Let an assistant with this token add and change API
-endpoints** gets three more tools, so an assistant can set up an API itself:
+A tool you have not decided about answers "Not done yet" and asks you. Where
+the assistant's app can show it, the question appears in the conversation:
+as PCP's panel (an MCP App) or as the app's own prompt. Otherwise the
+assistant hands you a link to PCP. **Allow once** runs that one call,
+**Always allow** and **Block** also decide the calls after it, and **Not
+now** runs nothing. A server an assistant proposes is only added once you
+agree; an OAuth one is then connected from a link that opens in your browser.
 
-| Tool                | What it does                                                                                             |
-| ------------------- | -------------------------------------------------------------------------------------------------------- |
-| `register_endpoint` | Adds an API from OpenAPI 3 text (JSON or YAML). The assistant can write one from an API's documentation. |
-| `update_endpoint`   | Changes an endpoint's name, description, schema text, base URL, read-only setting or tool descriptions.  |
-| `get_endpoint`      | Reads an endpoint's settings and tools, and optionally its schema text, to edit and send back.           |
+An assistant can write an OpenAPI schema from an API's documentation and hand
+it to `register_server` as text. You see what it asked for before anything is
+added: the address, how many tools and which operations, whether it can change
+things, and the secret it would send. An API added that way reaches public
+addresses only until you allow private ones on the endpoint's page.
 
-What an assistant can do here is narrower than what you can. An endpoint it
-registers starts **disabled**: nothing uses it until you enable it, and a
-change it makes to one disables it again, because the words it writes reach
-every other assistant. It can never see, choose or attach a secret: you attach
-one in the endpoint's settings. It refuses private and local addresses until
-you allow them. Once you attach a secret or allow private addresses the
-endpoint is yours: an assistant can read it and turn read-only on, and nothing
-else. Leave the option off for a token that does not need it.
+A token made with **Let an assistant with this token read and change API
+endpoints** gets two more tools:
+
+| Tool              | What it does                                                                                            |
+| ----------------- | ------------------------------------------------------------------------------------------------------- |
+| `update_endpoint` | Changes an endpoint's name, description, schema text, base URL, read-only setting or tool descriptions. |
+| `get_endpoint`    | Reads an endpoint's settings and tools, and optionally its schema text, to edit and send back.          |
+
+What an assistant can do here is narrower than what you can. It can change an
+endpoint it registered only while nothing of yours is attached to it (no
+secret, public addresses only), and a change disables the endpoint until you
+enable it again, because the words it writes reach every other assistant. It
+can never see, choose or change a secret afterwards. Once an endpoint sends
+your secret, or you allow private addresses, it is yours: an assistant can
+read it and turn read-only on, and nothing else. Leave the option off for a
+token that does not need it.
 
 ## How it is secured
 

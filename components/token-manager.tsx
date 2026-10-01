@@ -1,13 +1,16 @@
 "use client"
 
+import Link from "next/link"
 import { useActionState, useState, useTransition } from "react"
 
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
+import { ManageEndpointsField } from "@/components/manage-endpoints-field"
+import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button, ButtonLink } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -15,8 +18,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Checkbox, Input, Select } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { Input, Select } from "@/components/ui/input"
+import { Field } from "@/components/ui/label"
 import {
   createTokenAction,
   deleteTokenAction,
@@ -32,7 +35,7 @@ export function TokenManager({
   endpointUrl,
 }: {
   tokens: ApiTokenSummary[]
-  servers: Array<{ id: string; name: string; kind: ServerKind }>
+  servers: Array<{ id: string; name: string; kind?: ServerKind }>
   endpointUrl: string
 }) {
   return (
@@ -66,15 +69,13 @@ function CreateTokenForm({
   servers,
   endpointUrl,
 }: {
-  servers: Array<{ id: string; name: string; kind: ServerKind }>
+  servers: Array<{ id: string; name: string; kind?: ServerKind }>
   endpointUrl: string
 }) {
   const [state, action] = useActionState<CreateTokenResult, FormData>(
     createTokenAction,
     { status: "idle" },
   )
-  const [access, setAccess] = useState<"all" | "selected">("all")
-
   if (state.status === "ok") {
     return (
       <Card>
@@ -138,63 +139,8 @@ function CreateTokenForm({
               </Select>
             </Field>
           </div>
-          <fieldset className="flex flex-col gap-2">
-            <legend className="mb-2 text-sm font-medium">Access</legend>
-            <Label className="font-normal">
-              <input
-                type="radio"
-                name="access"
-                value="all"
-                checked={access === "all"}
-                onChange={() => setAccess("all")}
-                className="accent-primary"
-              />
-              Every server and endpoint, including ones added later
-            </Label>
-            <Label className="font-normal">
-              <input
-                type="radio"
-                name="access"
-                value="selected"
-                checked={access === "selected"}
-                onChange={() => setAccess("selected")}
-                className="accent-primary"
-              />
-              Only these servers
-            </Label>
-            {access === "selected" ? (
-              <div className="ml-6 flex flex-col gap-2 pt-1">
-                {servers.length === 0 ? (
-                  <p className="text-muted-foreground">
-                    No servers or endpoints to choose from yet.
-                  </p>
-                ) : (
-                  servers.map((server) => (
-                    <Label key={server.id} className="font-normal">
-                      <Checkbox name="serverIds" value={server.id} />
-                      {server.name}
-                      {server.kind === "openapi" ? (
-                        <Badge variant="outline">API</Badge>
-                      ) : null}
-                    </Label>
-                  ))
-                )}
-              </div>
-            ) : null}
-          </fieldset>
-          <div className="flex flex-col gap-1.5">
-            <Label className="font-normal" htmlFor="token-manage">
-              <Checkbox id="token-manage" name="manageEndpoints" />
-              Let an assistant with this token add and change API endpoints
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              It can register an API from OpenAPI schema text and edit what it
-              registered. Those endpoints stay off until you enable them, and
-              refuse private addresses until you allow them. It can never see or
-              choose a secret, and once you attach one the endpoint is yours.
-              Leave this off unless the assistant needs to set up APIs itself.
-            </p>
-          </div>
+          <ServerScopeFields servers={servers} />
+          <ManageEndpointsField id="token-manage" />
           <Field
             label="Your password"
             htmlFor="token-password"
@@ -251,7 +197,12 @@ function TokenRow({ token }: { token: ApiTokenSummary }) {
     <li className="flex flex-col gap-1 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{token.name}</span>
+          <Link
+            href={`/tokens/${token.id}`}
+            className="font-medium hover:underline"
+          >
+            {token.name}
+          </Link>
           <code className="text-xs text-muted-foreground">{token.prefix}…</code>
           {token.revokedAt ? (
             <Badge variant="destructive">Revoked</Badge>
@@ -266,11 +217,17 @@ function TokenRow({ token }: { token: ApiTokenSummary }) {
               </Badge>
             ))
           )}
-          {token.manageEndpoints && !dead ? (
+          {!dead && token.manageEndpoints ? (
             <Badge variant="warning">Manages endpoints</Badge>
+          ) : null}
+          {!dead && token.openPermissions > 0 ? (
+            <Badge variant="warning">{token.openPermissions} waiting</Badge>
           ) : null}
         </div>
         <div className="flex gap-1">
+          <ButtonLink href={`/tokens/${token.id}`} variant="ghost" size="xs">
+            {dead ? "Details" : "Edit access"}
+          </ButtonLink>
           {dead ? (
             <Button
               variant="ghost"

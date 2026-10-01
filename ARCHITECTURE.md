@@ -184,36 +184,48 @@ on its own network. A multi-tenant host must add an address policy before it
 lets anyone else set one: resolve the name, refuse loopback, private,
 link-local and metadata ranges, and connect to the address it checked.
 
-## Managing endpoints through the gateway
+## Registering and managing endpoints through the gateway
 
-A token the owner made with "add and change API endpoints"
-(`api_token.manage_endpoints`, off for every other token) gets three more
-gateway tools, `register_endpoint(name, spec, baseUrl?, description?,
-readOnly?)`, `update_endpoint(endpoint, …)` and `get_endpoint(endpoint,
-includeSpec?)`. `spec` is OpenAPI 3 as text, so an assistant can write a
-document from an API's documentation and register it in one call. The rules
-are in `lib/core/endpoint-admin.ts`, and they exist because an assistant that
-can register an endpoint decides where PCP sends requests:
+**Registering** is `register_server`, the tool main already had for MCP
+servers, with an OpenAPI document as text in `openapi_schema` (plus `url`
+for the base URL, `read_only`, and a secret named by NAME). It is an
+assistant's request, so it goes through the same owner approval as any other
+new server (below): PCP reads the document when the request is made, refuses
+one that cannot be used, and shows the owner the address, the tool count and
+operations, whether the tools can change things, and the secret that would be
+sent. Nothing exists until they agree; then `executeRegister` creates the
+endpoint, on, and adds it to the token's scope. An assistant can write a
+document from an API's documentation and register it in one call. What it
+registers has `public_only` set (below) and cannot carry a secret unless the
+owner approved that secret going to the address they were shown.
 
-- **Whose endpoint it is.** An endpoint is the assistant's while nothing of
-  the owner's is attached (no secret) and it is still limited to public
-  addresses. It becomes the owner's when they attach a secret or allow private
-  addresses. The assistant can rewrite its own; on the owner's it can read and
-  turn read-only on, and nothing else. A new schema could add operations the
-  owner's key then performs, and a new address, name or description could send
-  the key, or another assistant, somewhere else.
-- **Nothing takes effect without the owner.** A registered endpoint starts
-  disabled. A change to one that other assistants can see (its words, schema or
-  address, or read-only turned off) disables it again until the owner enables
-  it. Text an assistant writes reaches every other assistant through
+**Reading and changing** one afterwards is for a token the owner made with
+"read and change API endpoints" (`api_token.manage_endpoints`, off for every
+other token): two more gateway tools, `update_endpoint(endpoint, …)` and
+`get_endpoint(endpoint, includeSpec?)`. The rules are in
+`lib/core/endpoint-admin.ts`, and they exist because an assistant that can
+change an endpoint decides where PCP sends requests:
+
+- **Whose endpoint it is.** An endpoint is the assistant's while it sends no
+  secret and is still limited to public addresses. It is the owner's once it
+  sends one of their secrets or they allow private addresses. The assistant can
+  rewrite its own; on the owner's it can read and turn read-only on, and
+  nothing else. A new schema could add operations the owner's key then
+  performs, and a new address, name or description could send the key, or
+  another assistant, somewhere else.
+- **Nothing takes effect without the owner.** A registration waits for their
+  answer. A change to an endpoint that other assistants can see (its words,
+  schema or address, or read-only turned off) disables it until the owner
+  enables it. Text an assistant writes reaches every other assistant through
   `search_tools`, the gateway's instructions and `describe_tool`, so it is the
   owner's to approve. Names cannot hold line breaks, which would otherwise
   start a line of their own in those instructions.
-- **No credential, ever.** Nothing the tools accept names a secret, a header
-  or a template, and `get_endpoint` shows only whether a header is sent and
-  what it is called. The writer these changes go through
-  (`endpoints.ts: changeEndpoint`) writes only the columns it is given and
-  never the credential, the schema's source, or public-only, so an owner
+- **No credential changes, ever.** A secret only comes with a registration
+  the owner approves, and then by name. `update_endpoint` accepts nothing that
+  names a secret, a header or a template, and `get_endpoint` shows only
+  whether a header is sent and what it is called. The writer these changes go
+  through (`endpoints.ts: changeEndpoint`) writes only the columns it is given
+  and never the credential, the schema's source, or public-only, so an owner
   changing those at the same moment is not overwritten and the rules above
   cannot be got around by what is passed in.
 - **Public addresses only.** What an assistant registers has `public_only`
@@ -230,19 +242,23 @@ can register an endpoint decides where PCP sends requests:
   this off for those endpoints, and the proxy's own egress rules are then what
   protect it. What a name resolves to is neither looked up at registration nor
   told to the assistant, so the tools cannot be used to map the owner's DNS.
+  A literal private address is noted in the request the owner reads.
 - **Text only.** The assistant supplies the schema as text; PCP never fetches
   an address the assistant chose. An endpoint the owner reads from a URL
   keeps that URL, and its schema is the owner's to change.
-- **Bounded.** Fifty endpoints per vault, 4 MB of stored tools per endpoint,
-  twenty changes per token per ten minutes, no JSON-RPC batches at the
-  gateway (one POST would be many calls), and the catalogue a request loads
-  leaves out tool schemas, which are read when a tool is described or called.
+- **Bounded.** Fifty endpoints per vault, one million characters of schema per
+  registration (it is held, encrypted, on the request until answered), 4 MB of
+  stored tools per endpoint, twenty registrations and twenty changes per token
+  per ten minutes, no JSON-RPC batches at the gateway (one POST would be many
+  calls), and the catalogue a request loads leaves out tool schemas, which are
+  read when a tool is described or called.
 - A token limited to some servers only sees endpoints in its scope, and what
   it registers is added to that scope.
 
-What remains is egress: an assistant with this right can have PCP send data
-it holds to any public URL, as an operation's arguments. That is why the right
-is the owner's to give, per token, and why the tokens page marks it.
+What remains is egress: an assistant with the right to register can have PCP
+send data it holds to any public URL, as an operation's arguments, once the
+owner has agreed to the endpoint and allowed the tool. Both are the owner's to
+give, and tools ask first by default.
 
 ## Data on disk
 
@@ -256,24 +272,80 @@ is the owner's to give, per token, and why the tokens page marks it.
   which tool, which upstream, how long, whether it worked. Never arguments
   or results.
 
-## The gateway's three tools
+## The gateway's tools
 
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
-description and its tool count, and three tools (three more for a token with
-the right to manage endpoints, below):
+description and the number of tools it may see, and these tools (two more
+for a token with the right to manage endpoints, below):
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with
   light stemming) and returns `server/tool — summary` lines.
 - `describe_tool(server, tool)` returns the description (the owner's
-  override when there is one) and the JSON Schema exactly as the upstream
-  published it.
+  override when there is one), the JSON Schema exactly as the upstream
+  published it, and whether the tool runs at once or asks first.
 - `call_tool(server, tool, arguments)` opens a connection to the upstream
   with the configured credential (header secret or OAuth token, refreshed by
   the SDK when needed), calls the tool, and passes the content back.
+- `check_permission(id)`, `check_server(server)` and
+  `register_server(...)` belong to the permission flow below;
+  `answer_permission(id, decision)` is only for PCP's panel.
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the
 gateway finds a server with no tools. It is a cache of the upstream's
 `tools/list`; the owner's description overrides survive a refresh.
+
+## Tool access and the owner's permission
+
+Every token has a level per tool (`api_token_tool_access`,
+`lib/core/tool-access.ts`): **allowed**, **blocked**, or, when there is no
+row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
+a refresh and comes back keeps its level. Blocked tools are left out of the
+instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
+them. `ResolvedToken` is unchanged: the gateway loads the levels by token id.
+
+A call to an "ask" tool becomes a `permission_request` row
+(`lib/core/permissions.ts`, ported from plekje's confirmation flow): the
+arguments encrypted under the vault's key with the row id as associated
+data, a hash of the call so the same call asked twice finds the same row,
+and a day to answer. The owner is asked where the client can show it
+(`choosePermissionTier`):
+
+| Tier   | When                                            | How                                                                    |
+| ------ | ----------------------------------------------- | ---------------------------------------------------------------------- |
+| `app`  | The request declares the MCP Apps extension     | PCP's panel, shown by `check_permission`                               |
+| `form` | It declares form elicitation                    | An `input_required` result with a one-choice form                      |
+| `url`  | It declares URL elicitation only                | An `input_required` result pointing at `/permissions/<id>`             |
+| `link` | Anything else, including every 2025-era request | Text with the link to `/permissions/<id>` for the assistant to pass on |
+
+Whichever way the owner answers, `decidePermission()` claims the row
+(pending to running, one winner) and runs the call once. "Always allow" and
+"Block" also write the tool's level. A retry that carries `requestState` is
+bound to its row by vault, token and hash, so a client cannot replay an
+answer onto another call, and it never runs a call the owner already ran.
+`answer_permission` refuses requests that do not declare the MCP Apps
+extension: hosts that show panels hide it from the assistant, and on any
+other client the assistant could otherwise answer for the owner.
+
+PCP's panel (`ui://pcp/panel`, `lib/core/panel.ts`) is one self-contained
+MCP App; a tool result picks its view through `structuredContent.kind`
+(`permission`, `connect`, or plain text). OAuth never runs inside it: hosts
+sandbox the panel and sign-in pages refuse to be framed. For a server that
+needs connecting, the panel's Connect button asks the host to open
+`/api/servers/<id>/oauth/start` in the owner's browser (`ui/open-link`),
+where their PCP session is, and polls `check_server` until the callback has
+landed.
+
+`register_server` takes a secret's name, never its value, and always asks:
+otherwise an assistant could point a stored secret at an address it chose.
+Once the owner agrees, PCP adds the server, adds it to the asking token when
+that token is scoped to chosen servers, and reads its tools, or hands back
+the connect panel for OAuth. With `openapi_schema` the request is an API
+endpoint instead: the gateway has `endpoint-admin.ts: prepareRegistration`
+read the text before asking (so the owner is only asked about something that
+works, and sees its address, tool count and operations), and
+`executeRegister` creates it from the same text with
+`createApprovedEndpoint`: on, public addresses only. Requests are deleted at
+boot a week after they expire.

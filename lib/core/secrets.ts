@@ -87,6 +87,17 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
   })
 }
 
+/** A secret the owner entered, found by its name (for register_server). */
+export async function findTextSecretByName(
+  ctx: VaultContext,
+  name: string,
+): Promise<{ id: string; name: string } | null> {
+  return db().secret.findFirst({
+    where: { vaultId: ctx.vaultId, name: name.trim(), kind: "text" },
+    select: { id: true, name: true },
+  })
+}
+
 export async function createSecret(
   ctx: VaultContext,
   input: { name: string; value: string; description?: string },

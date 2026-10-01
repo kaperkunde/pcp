@@ -99,6 +99,18 @@ export default defineConfig({
       },
     },
     {
+      // Per-token tool access and the owner's permission: the link, the
+      // client's own prompt, PCP's panel, copying access, and servers an
+      // assistant proposes.
+      name: "permissions",
+      testMatch: /permissions\.spec\.ts/,
+      dependencies: ["setup"],
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: "e2e/.auth/owner.json",
+      },
+    },
+    {
       // Signs every browser out, so it comes last and signs in on its own.
       name: "recovery",
       testMatch: /recovery\.spec\.ts/,

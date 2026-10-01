@@ -22,8 +22,13 @@ either: the key exists in memory only for the duration of a request that
 presented one.
 
 **An assistant with an API token** can call the tools of the servers that
-token reaches. It never receives a stored secret, an OAuth token, or another
-vault's data. Revoking the token ends its access at once.
+token reaches, as far as you allowed them: tools ask you first until you
+decide, and blocked tools are refused. It cannot answer a permission request
+for you, and it can only propose a new server or API (as OpenAPI text),
+naming a stored secret rather than seeing it; nothing is added until you
+agree, and you are shown the address, the tools and the secret first. It never receives a stored
+secret, an OAuth token, or another vault's data. Revoking the token ends its
+access at once.
 
 **An assistant with an API token and an API endpoint** can call the operations
 the schema lists, with your secret in the header, and nothing else. It cannot
@@ -34,16 +39,18 @@ answer before reading it, in case the API echoes it back. Read-only keeps an
 endpoint to GET operations, and a token scoped to other servers does not see
 it.
 
-**An assistant with a token that may manage endpoints** can register an API
-from OpenAPI text and rewrite what it registered, and nothing that decides
-where your secrets go. What it registers starts disabled, and a change that
-other assistants would see disables it again until you enable it. It cannot
-see, choose or attach a secret. Once you attach a secret or allow private
-addresses the endpoint is yours: it can read it and turn read-only on, and
-nothing else, so it cannot add operations your key would then perform or move
-it. What it registers refuses private and local addresses (checked at the
-moment of connecting, so a rebinding name does not get past it) until you
-allow them. The right is off unless you tick it when you make the token.
+**An assistant with a token that may manage endpoints** can read an API
+endpoint and rewrite one it registered, and nothing that decides where your
+secrets go. A change that other assistants would see disables the endpoint
+until you enable it. It cannot see, choose or change a secret. Once an
+endpoint sends your secret, or you allow private addresses, the endpoint is
+yours: it can read it and turn read-only on, and nothing else, so it cannot add
+operations your key would then perform or move it. An API an assistant
+proposes is only added when you agree, refuses private and local addresses
+(checked at the moment of connecting, so a rebinding name does not get past
+it) until you allow them, and sends a secret only to the address you were
+shown. The right to read and change endpoints is off unless you tick it when
+you make the token.
 
 **Someone with your session cookie but not your password** can use PCP as
 you while the session lasts. They cannot make an API token or a new recovery
@@ -79,11 +86,13 @@ Not defended against:
   URL from pointing at a private address; only you can set one, and that is
   often the point. A host that lets anyone else do it needs an address
   policy first (see [ARCHITECTURE.md](ARCHITECTURE.md#api-endpoints)).
-- **Egress through a token that manages endpoints.** An assistant with that
-  right can have PCP send data it holds to any public address, as the
-  arguments of an operation it registered. A prompt injected into such an
-  assistant can do the same. Give the right only to a token that needs it,
-  and review what it registers (the endpoint list shows each one).
+- **Egress through an API an assistant registers.** Once you agree to an API
+  and allow its tools, an assistant can have PCP send data it holds to that
+  public address, as the arguments of an operation. A prompt injected into the
+  assistant can do the same. Read what you are asked before you agree (it
+  shows the address, the operations and whether they can change things),
+  turn on Read-only where it is enough, and give a token the right to change
+  endpoints only if it needs it.
 - **Schema text on disk.** An endpoint's OpenAPI document, and the call plans
   built from it, are stored unencrypted, like server addresses and names. A
   copy of the disk shows them. Do not put a key or a hostname you would not

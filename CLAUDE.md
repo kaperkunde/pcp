@@ -37,14 +37,16 @@ pull request, and nothing runs on a push.
   the secret from what the API answers.
 - What an assistant may do to an endpoint through the gateway
   (`lib/core/endpoint-admin.ts`) is narrower than what the owner may do, on
-  purpose: it never chooses, sees or attaches a secret, never clears
-  `publicOnly`, can only read and turn read-only on for an endpoint the owner
-  has taken over (a secret attached, or private addresses allowed), and
-  nothing it writes takes effect without the owner: a registered endpoint
-  starts disabled and a change others would see disables it again. Its
-  changes go through `changeEndpoint`, which writes only the columns it is
-  given and never the credential. Keep all of that when adding to it, and add
-  a test for each new field an assistant can set.
+  purpose. It registers one through `register_server` with OpenAPI text, which
+  is a permission request like any new server: the owner is shown the address,
+  the tools and the secret (by name), and nothing exists until they agree.
+  It never changes a credential, never clears `publicOnly`, can only read and
+  turn read-only on for an endpoint that is the owner's (it sends a secret, or
+  private addresses are allowed), and a change others would see disables the
+  endpoint until the owner enables it. Its changes go through
+  `changeEndpoint`, which writes only the columns it is given and never the
+  credential. Keep all of that when adding to it, and add a test for each new
+  field an assistant can set.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.

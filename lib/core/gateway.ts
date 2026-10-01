@@ -1,4 +1,12 @@
-import { McpServer, type CallToolResult } from "@modelcontextprotocol/server"
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  isInputRequiredResult,
+  McpServer,
+  type CallToolResult,
+  type ClientCapabilities,
+  type InputRequiredResult,
+  type ServerContext,
+} from "@modelcontextprotocol/server"
 import { z } from "zod"
 
 import type {
@@ -7,70 +15,122 @@ import type {
 } from "@/lib/generated/prisma/client"
 
 import type { ResolvedToken } from "./api-tokens"
+import {
+  DEFAULT_HEADER_NAME,
+  DEFAULT_VALUE_TEMPLATE,
+  PERMISSION_DECISIONS,
+  SECRET_PLACEHOLDER,
+  type ToolAccess,
+} from "./constants"
 import { db } from "./db"
 import {
   getEndpoint,
-  registerEndpoint,
+  prepareRegistration,
   updateEndpointDetails,
 } from "./endpoint-admin"
 import { isPcpError } from "./errors"
+import {
+  APP_ONLY_TOOL_META,
+  connectResult,
+  PANEL_TOOL_META,
+  panelResult,
+  registerPanelResource,
+  type ServerState,
+} from "./panel"
+import { choosePermissionTier } from "./permission-rules"
+import {
+  checkPermission,
+  decidePermission,
+  permissionUrl,
+  runCall,
+  withPermission,
+  type RegisterArgs,
+  type ToolRequest,
+} from "./permissions"
 import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog } from "./request-log"
 import { searchTools, summarize, type ToolCandidate } from "./search"
-import { callServerTool, syncServerTools } from "./upstream"
+import { findTextSecretByName } from "./secrets"
+import { validateServerUrl, type AuthType } from "./servers"
+import { effectiveAccess, loadToolAccess } from "./tool-access"
+import { needsConnecting, syncServerTools } from "./upstream"
 
 /**
  * The MCP server PCP exposes at /mcp: one per request, built for the token
- * that presented itself. It has three tools instead of the sum of every
- * upstream's, so an assistant's context holds a short summary of what is
- * available and fetches the details of a tool only when it needs them.
+ * that presented itself. It has a handful of tools instead of the sum of
+ * every upstream's, so an assistant's context holds a short summary of what
+ * is available and fetches the details of a tool only when it needs them.
+ *
+ * Each token has a level per tool (lib/core/tool-access.ts): blocked tools
+ * are invisible, allowed tools run, and the rest ask the owner first
+ * (lib/core/permissions.ts).
  */
 
 export type GatewayScope = ResolvedToken & { publicUrl: string }
 
 /**
- * A tool as the gateway keeps it for a request: enough to search and list.
- * The schema and the call plan are read when a tool is described or called,
- * so a request does not carry every tool's schema, which for a large
- * endpoint is megabytes.
+ * A tool as the gateway keeps it for a request: enough to search and list,
+ * and the token's level for it. The schema and the call plan are read when a
+ * tool is described or called, so a request does not carry every tool's
+ * schema, which for a large endpoint is megabytes.
  */
 export type GatewayTool = Pick<
   McpTool,
   "id" | "name" | "title" | "description" | "descriptionOverride"
->
+> & { access: ToolAccess }
 
 export type GatewayServer = McpServerRow & { tools: GatewayTool[] }
 
+type ToolResult = CallToolResult | InputRequiredResult
+
 const MAX_RESULT_CHARS = 60_000
 const ENDPOINT_CHANGES = { max: 20, windowMs: 10 * 60_000 }
+/** What register_server's openapi_schema may hold; see endpoint-admin.ts. */
+const MAX_OPENAPI_TEXT = 1_000_000
 
 export async function loadGatewayServers(
   scope: GatewayScope,
 ): Promise<GatewayServer[]> {
-  return db().mcpServer.findMany({
-    where: {
-      vaultId: scope.ctx.vaultId,
-      enabled: true,
-      ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
-    },
-    include: {
-      tools: {
-        orderBy: { name: "asc" },
-        select: {
-          id: true,
-          name: true,
-          title: true,
-          description: true,
-          descriptionOverride: true,
+  const [servers, stored] = await Promise.all([
+    db().mcpServer.findMany({
+      where: {
+        vaultId: scope.ctx.vaultId,
+        enabled: true,
+        ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
+      },
+      include: {
+        tools: {
+          orderBy: { name: "asc" },
+          select: {
+            id: true,
+            name: true,
+            title: true,
+            description: true,
+            descriptionOverride: true,
+          },
         },
       },
-    },
-    orderBy: { name: "asc" },
-  })
+      orderBy: { name: "asc" },
+    }),
+    loadToolAccess(scope.tokenId),
+  ])
+
+  return servers.map((server) => ({
+    ...server,
+    tools: server.tools.map((tool) => ({
+      ...tool,
+      access: effectiveAccess(stored, server.id, tool.name),
+    })),
+  }))
+}
+
+/** The tools an assistant with this token may see. */
+export function visibleTools(server: GatewayServer): GatewayTool[] {
+  return server.tools.filter((tool) => tool.access !== "blocked")
 }
 
 const MANAGE_INSTRUCTIONS =
-  "This token can also add and maintain API endpoints: register_endpoint takes OpenAPI 3 text (JSON or YAML; write one from the API's documentation if it has none), update_endpoint changes one you registered, get_endpoint reads one. A new or changed endpoint stays disabled until the owner enables it in PCP, and you cannot attach a credential; the owner does that too."
+  "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one you registered. A change to an endpoint of yours switches it off until the owner enables it again; once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs, and you can only read it and turn read-only on. You cannot change a credential."
 
 export function buildInstructions(
   servers: GatewayServer[],
@@ -78,19 +138,20 @@ export function buildInstructions(
 ): string {
   if (servers.length === 0) {
     return [
-      "PCP is a gateway to the owner's MCP servers, but this token has no servers to reach yet. Ask the owner to add one in PCP.",
+      "PCP is a gateway to the owner's MCP servers and APIs, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, or an API from OpenAPI text).",
       ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
     ].join("\n")
   }
 
   const lines = servers.map((server) => {
     const summary = summarize(server.description || "", 120)
-    const count = server.tools.length
+    const count = visibleTools(server).length
     return `- ${server.slug}: ${summary || server.name} (${count} tool${count === 1 ? "" : "s"})`
   })
 
   return [
     "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
+    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: pass it on, and call check_permission with the id it gives for the result. A server that needs them to sign in answers with a link to connect it; check_server says when it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees.',
     "Servers:",
     ...lines,
     ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
@@ -99,7 +160,7 @@ export function buildInstructions(
 
 function candidates(servers: GatewayServer[]): ToolCandidate[] {
   return servers.flatMap((server) =>
-    server.tools.map((tool) => ({
+    visibleTools(server).map((tool) => ({
       server: server.slug,
       serverName: server.name,
       serverDescription: server.description,
@@ -114,22 +175,44 @@ function text(value: string): CallToolResult {
   return { content: [{ type: "text", text: value }] }
 }
 
+/**
+ * Results PCP wrote itself (a refusal, an unknown name). The log keeps their
+ * text; for any other failed result, what an upstream or an API said, it
+ * only says that the tool failed.
+ */
+const authored = new WeakSet<CallToolResult>()
+
 function failure(value: string): CallToolResult {
-  return { content: [{ type: "text", text: value }], isError: true }
+  const result: CallToolResult = {
+    content: [{ type: "text", text: value }],
+    isError: true,
+  }
+  authored.add(result)
+  return result
 }
 
-function clip(value: string): string {
-  return value.length > MAX_RESULT_CHARS
-    ? `${value.slice(0, MAX_RESULT_CHARS)}\n… (truncated by PCP)`
-    : value
+/** The parts of the SDK's request context the permission step reads. */
+function toolRequest(ctx: ServerContext | undefined): ToolRequest {
+  const mcpReq = ctx?.mcpReq
+  const envelope = mcpReq?.envelope as Record<string, unknown> | undefined
+  const state = mcpReq?.requestState?.()
+
+  return {
+    clientCapabilities: envelope?.[CLIENT_CAPABILITIES_META_KEY] as
+      ClientCapabilities | undefined,
+    inputResponses: mcpReq?.inputResponses,
+    requestState: typeof state === "string" ? state : undefined,
+  }
 }
+
+const HEADER_NAME = /^[A-Za-z0-9-]{1,100}$/
 
 export function buildGatewayServer(
   scope: GatewayScope,
   servers: GatewayServer[],
 ): McpServer {
   const server = new McpServer(
-    { name: "pcp", title: "PCP", version: "0.1.0" },
+    { name: "pcp", title: "PCP", version: "0.2.0" },
     {
       instructions: buildInstructions(servers, {
         manageEndpoints: scope.manageEndpoints,
@@ -140,22 +223,18 @@ export function buildGatewayServer(
   const slugs = servers.map((entry) => entry.slug)
   const bySlug = new Map(servers.map((entry) => [entry.slug, entry]))
 
-  // Results an upstream wrote (an API's error body, an MCP tool's error
-  // text). The log says that a call failed, never what the upstream said.
-  const fromUpstream = new WeakSet<CallToolResult>()
-
   const logged =
     (
       tool: string,
       extra: (args: unknown) => { server?: string; upstreamTool?: string },
     ) =>
-    (run: (args: never) => Promise<CallToolResult>) =>
-    async (args: unknown): Promise<CallToolResult> => {
+    (run: (args: never, ctx: ServerContext) => Promise<ToolResult>) =>
+    async (args: unknown, ctx: ServerContext): Promise<ToolResult> => {
       const started = Date.now()
-      let result: CallToolResult
+      let result: ToolResult
 
       try {
-        result = await run(args as never)
+        result = await run(args as never, ctx)
       } catch (error) {
         const message = isPcpError(error)
           ? error.message
@@ -168,22 +247,27 @@ export function buildGatewayServer(
         result = failure(message)
       }
 
+      // A prompt for the owner is not an answer yet; the retry that carries
+      // their answer is logged on its own.
+      const failed = !isInputRequiredResult(result) && result.isError === true
+      const firstText =
+        !isInputRequiredResult(result) && result.content[0]?.type === "text"
+          ? result.content[0].text
+          : ""
+
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
         tokenId: scope.tokenId,
         tool,
         ...extra(args),
-        ok: !result.isError,
+        ok: !failed,
         ms: Date.now() - started,
-        ...(result.isError
+        ...(failed
           ? {
-              error: fromUpstream.has(result)
-                ? "The tool reported an error."
-                : String(
-                    result.content[0]?.type === "text"
-                      ? result.content[0].text
-                      : "",
-                  ).slice(0, 200),
+              error:
+                !isInputRequiredResult(result) && authored.has(result)
+                  ? String(firstText).slice(0, 200)
+                  : "The tool reported an error.",
             }
           : {}),
       })
@@ -234,7 +318,7 @@ export function buildGatewayServer(
 
         if (matches.length === 0) {
           return text(
-            servers.every((entry) => entry.tools.length === 0)
+            servers.every((entry) => visibleTools(entry).length === 0)
               ? "No tools are known yet. The owner can refresh each server's tools in PCP."
               : `No tools match "${args.query}". Try other words, or search with an empty query to list everything.`,
           )
@@ -255,7 +339,7 @@ export function buildGatewayServer(
     {
       title: "Describe a tool",
       description:
-        "The full description and JSON Schema of a tool's arguments. Call this before call_tool.",
+        'The full description and JSON Schema of a tool\'s arguments, and whether it runs at once ("allowed") or asks the owner first ("ask"). Call this before call_tool.',
       inputSchema: z.object({
         server: z.string().describe("The server, as returned by search_tools."),
         tool: z.string().describe("The tool name."),
@@ -297,21 +381,24 @@ export function buildGatewayServer(
         inputSchema = row.inputSchema
       }
 
+      const described = JSON.stringify(
+        {
+          server: args.server,
+          tool: tool.name,
+          title: tool.title ?? undefined,
+          description: tool.descriptionOverride ?? tool.description,
+          access: tool.access,
+          inputSchema,
+          annotations,
+        },
+        null,
+        1,
+      )
+
       return text(
-        clip(
-          JSON.stringify(
-            {
-              server: args.server,
-              tool: tool.name,
-              title: tool.title ?? undefined,
-              description: tool.descriptionOverride ?? tool.description,
-              inputSchema,
-              annotations,
-            },
-            null,
-            1,
-          ),
-        ),
+        described.length > 60_000
+          ? `${described.slice(0, 60_000)}\n… (truncated by PCP)`
+          : described,
       )
     }),
   )
@@ -321,7 +408,7 @@ export function buildGatewayServer(
     {
       title: "Call a tool",
       description:
-        "Run a tool on one of the owner's MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them.",
+        'Run a tool on one of the owner\'s MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" and waits for their answer.',
       inputSchema: z.object({
         server: z.string().describe("The server, as returned by search_tools."),
         tool: z.string().describe("The tool name."),
@@ -338,111 +425,393 @@ export function buildGatewayServer(
       server: (args as { server?: string }).server,
       upstreamTool: (args as { tool?: string }).tool,
     }))(
-      async (args: {
-        server: string
-        tool: string
-        arguments?: Record<string, unknown>
-      }) => {
-        const found = findTool(bySlug, args.server, args.tool)
+      async (
+        args: {
+          server: string
+          tool: string
+          arguments?: Record<string, unknown>
+        },
+        ctx,
+      ) => {
+        const found = findTool(bySlug, args.server, args.tool, {
+          includeBlocked: true,
+        })
 
         if ("error" in found) {
           return failure(found.error)
         }
 
-        const result = await callServerTool(
+        const { server: target, tool } = found
+
+        if (tool.access === "blocked") {
+          return failure(
+            `The owner has blocked ${target.slug}/${tool.name} for this token.`,
+          )
+        }
+
+        const request = toolRequest(ctx)
+
+        // A retry carrying requestState answers a prompt this server issued,
+        // even when the owner has since allowed the tool: it must not run
+        // the call a second time.
+        if (tool.access === "ask" || request.requestState !== undefined) {
+          return withPermission(
+            scope,
+            {
+              kind: "call",
+              server: target,
+              tool,
+              args: args.arguments ?? {},
+            },
+            request,
+          )
+        }
+
+        return runCall(
           scope.ctx,
-          found.server,
-          found.tool.name,
+          target,
+          tool.name,
           args.arguments ?? {},
-          { publicUrl: scope.publicUrl },
+          scope.publicUrl,
         )
-
-        const answer: CallToolResult = {
-          content: result.content.map((block) =>
-            block.type === "text"
-              ? { ...block, text: clip(block.text) }
-              : block,
-          ),
-          ...(result.isError ? { isError: true } : {}),
-          ...(result.structuredContent
-            ? { structuredContent: result.structuredContent }
-            : {}),
-        }
-
-        if (answer.isError) {
-          fromUpstream.add(answer)
-        }
-
-        return answer
       },
     ),
   )
 
-  // Only for a token the owner made with "add and change API endpoints":
-  // an assistant that can register endpoints decides where PCP sends
-  // requests, so it is never on by default. What these tools may do is
-  // decided in endpoint-admin.ts.
-  if (scope.manageEndpoints) {
-    const json = (value: unknown) => text(clip(JSON.stringify(value, null, 1)))
-    // Reading a large schema and rewriting its tools is real work, so adding
-    // and changing are limited per token, apart from the request limit.
-    const tooOften = () =>
-      checkRateLimit(`endpoint-admin:${scope.tokenId}`, ENDPOINT_CHANGES)
-        ? null
-        : failure(
-            "That is a lot of endpoint changes in a short time. Wait a few minutes.",
+  server.registerTool(
+    "check_permission",
+    {
+      title: "Check a permission request",
+      description:
+        "Whether the owner answered a request that was waiting for them, and how it went. Takes the id from the result that asked. While it is still waiting, clients that show panels give the owner the buttons to answer.",
+      inputSchema: z.object({
+        id: z.string().min(1).max(64).describe("The request's id."),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      _meta: PANEL_TOOL_META,
+    },
+    logged("check_permission", () => ({}))(async (args: { id: string }) =>
+      checkPermission(scope, args.id),
+    ),
+  )
+
+  server.registerTool(
+    "answer_permission",
+    {
+      title: "Answer a permission request",
+      description:
+        "Used by PCP's panel when the owner presses a button. Not for assistants: an assistant cannot answer for the owner.",
+      inputSchema: z.object({
+        id: z.string().min(1).max(64),
+        decision: z.enum(PERMISSION_DECISIONS),
+      }),
+      annotations: { readOnlyHint: false, openWorldHint: true },
+      _meta: APP_ONLY_TOOL_META,
+    },
+    logged("answer_permission", () => ({}))(
+      async (
+        args: { id: string; decision: (typeof PERMISSION_DECISIONS)[number] },
+        ctx,
+      ) => {
+        // Hosts that show panels hide this tool from the assistant. A client
+        // that did not say it shows panels may list it to the assistant, so
+        // the answer has to come from the owner in PCP instead.
+        if (
+          choosePermissionTier(toolRequest(ctx).clientCapabilities) !== "app"
+        ) {
+          return failure(
+            `This app did not say it shows PCP's panel, so the owner answers in PCP: ${permissionUrl(scope.publicUrl, args.id)}`,
           )
+        }
+
+        return decidePermission(scope.ctx, args.id, args.decision, {
+          via: "app",
+          publicUrl: scope.publicUrl,
+          tokenId: scope.tokenId,
+        })
+      },
+    ),
+  )
+
+  server.registerTool(
+    "check_server",
+    {
+      title: "Check a server",
+      description:
+        "Whether one of the owner's servers is connected and how many tools it has. For a server that needs the owner to sign in, clients that show panels give the owner a Connect button.",
+      inputSchema: z.object({
+        server: z
+          .string()
+          .describe("The server's short name, as in the list of servers."),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      _meta: PANEL_TOOL_META,
+    },
+    logged("check_server", (args) => ({
+      server: (args as { server?: string }).server,
+    }))(async (args: { server: string }) => {
+      const row = await db().mcpServer.findFirst({
+        where: {
+          vaultId: scope.ctx.vaultId,
+          slug: args.server,
+          ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
+        },
+        include: { _count: { select: { tools: true } } },
+      })
+
+      if (!row) {
+        return failure(
+          `No server called ${args.server}. Servers: ${slugs.join(", ") || "(none)"}.`,
+        )
+      }
+
+      const state: ServerState = {
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        connected: !needsConnecting(row),
+        status: row.status,
+        toolCount: row._count.tools,
+      }
+
+      if (!state.connected) {
+        return connectResult(row, scope.publicUrl, {
+          lead: "Not connected yet",
+          state,
+        })
+      }
+
+      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${row.status === "error" && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}`
+
+      return panelResult(said, { kind: "done", text: said, server: state })
+    }),
+  )
+
+  server.registerTool(
+    "register_server",
+    {
+      title: "Add a server or an API",
+      description:
+        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document as text (openapi_schema): PCP turns each operation into a tool and makes the HTTP calls itself. If the API has no OpenAPI document, write one from its documentation. Authentication is none, OAuth for an MCP server (the owner signs in once they agree), or a header carrying a secret the owner already stored in PCP, named by its NAME. Never pass a secret's value: PCP does not take one here.",
+      inputSchema: z.object({
+        name: z
+          .string()
+          .min(1)
+          .max(80)
+          .describe('What to call it, e.g. "Linear" or "Pet store API".'),
+        url: z
+          .string()
+          .optional()
+          .describe(
+            "An MCP server: its MCP endpoint, like https://mcp.example.com/mcp. An API: the base URL requests go to, like https://api.example.com/v1; leave it out to use the server the schema names, unless a secret is sent, then it is required.",
+          ),
+        openapi_schema: z
+          .string()
+          .max(MAX_OPENAPI_TEXT)
+          .optional()
+          .describe(
+            "Registers an API instead of an MCP server: the whole OpenAPI 3.x document as JSON or YAML text. Only references inside the document (#/components/…) are followed; PCP never fetches an address named in it. Up to 1 MB.",
+          ),
+        read_only: z
+          .boolean()
+          .optional()
+          .describe(
+            "With openapi_schema: offer only the GET operations as tools.",
+          ),
+        description: z
+          .string()
+          .max(1000)
+          .optional()
+          .describe("One sentence on what it is for; assistants see it."),
+        auth_type: z
+          .enum(["none", "oauth", "header"])
+          .optional()
+          .describe(
+            "none (the default); oauth (MCP servers: the owner signs in after agreeing); or header (sends a secret the owner stored in PCP).",
+          ),
+        secret: z
+          .string()
+          .optional()
+          .describe(
+            "For header: the name of a secret the owner stored in PCP. Its name, never its value.",
+          ),
+        header_name: z
+          .string()
+          .optional()
+          .describe(
+            `For header: the header to send (default ${DEFAULT_HEADER_NAME}).`,
+          ),
+        value_template: z
+          .string()
+          .optional()
+          .describe(
+            `For header: the header's value with ${SECRET_PLACEHOLDER} where the secret goes (default "${DEFAULT_VALUE_TEMPLATE}").`,
+          ),
+        oauth_scope: z
+          .string()
+          .optional()
+          .describe(
+            "For oauth: the scope to ask for, when the server needs one.",
+          ),
+      }),
+      annotations: { readOnlyHint: false, openWorldHint: true },
+      _meta: PANEL_TOOL_META,
+    },
+    logged("register_server", () => ({}))(
+      async (
+        args: {
+          name: string
+          url?: string
+          openapi_schema?: string
+          read_only?: boolean
+          description?: string
+          auth_type?: AuthType
+          secret?: string
+          header_name?: string
+          value_template?: string
+          oauth_scope?: string
+        },
+        ctx,
+      ) => {
+        const authType: AuthType = args.auth_type ?? "none"
+        const isApi = args.openapi_schema !== undefined
+
+        if (isApi && authType === "oauth") {
+          return failure(
+            "An API sends no credential or a secret in a header. OAuth is for MCP servers: use auth_type none or header.",
+          )
+        }
+
+        if (!isApi && !args.url?.trim()) {
+          return failure(
+            "An MCP server needs its address in url. To add an API instead, pass its OpenAPI document in openapi_schema.",
+          )
+        }
+
+        if (!isApi && args.read_only !== undefined) {
+          return failure("read_only is for an API: pass openapi_schema.")
+        }
+
+        let authSecretId: string | null = null
+        let secretName: string | null = null
+        let authHeaderName: string | null = null
+        let authValueTemplate: string | null = null
+
+        if (authType === "header") {
+          if (!args.secret?.trim()) {
+            return failure(
+              "Header authentication needs the name of a secret the owner stored in PCP, in secret.",
+            )
+          }
+
+          const secret = await findTextSecretByName(scope.ctx, args.secret)
+
+          if (!secret) {
+            return failure(
+              `No secret called "${args.secret.trim()}". The owner can add one in PCP; then ask again with its name.`,
+            )
+          }
+
+          authSecretId = secret.id
+          secretName = secret.name
+          authHeaderName = args.header_name?.trim() || DEFAULT_HEADER_NAME
+          authValueTemplate =
+            args.value_template?.trim() || DEFAULT_VALUE_TEMPLATE
+
+          if (!HEADER_NAME.test(authHeaderName)) {
+            return failure("Header names use letters, digits and dashes only.")
+          }
+
+          if (
+            !authValueTemplate.includes(SECRET_PLACEHOLDER) ||
+            /[\r\n]/.test(authValueTemplate)
+          ) {
+            return failure(
+              `The header value must be one line containing ${SECRET_PLACEHOLDER}.`,
+            )
+          }
+        }
+
+        const common = {
+          description: args.description?.trim() ?? "",
+          authType,
+          authHeaderName,
+          authValueTemplate,
+          authSecretId,
+          secretName,
+        }
+        let input: RegisterArgs
+
+        if (isApi) {
+          // Reading a large schema is real work, and every call leaves a
+          // request row behind until the owner answers.
+          if (
+            !checkRateLimit(
+              `endpoint-register:${scope.tokenId}`,
+              ENDPOINT_CHANGES,
+            )
+          ) {
+            return failure(
+              "That is a lot of API registrations in a short time. Wait a few minutes.",
+            )
+          }
+
+          // Refused here, before the owner is asked, when it cannot work.
+          const prepared = await prepareRegistration(scope.ctx, {
+            name: args.name,
+            description: args.description,
+            spec: args.openapi_schema!,
+            baseUrl: args.url,
+            readOnly: args.read_only,
+            authSecretId,
+            authHeaderName,
+          })
+
+          input = {
+            ...common,
+            name: prepared.name,
+            description: prepared.description,
+            url: prepared.url,
+            oauthScope: null,
+            endpoint: prepared.registration,
+          }
+        } else {
+          input = {
+            ...common,
+            name: args.name.trim(),
+            url: validateServerUrl(args.url!),
+            oauthScope:
+              authType === "oauth" ? args.oauth_scope?.trim() || null : null,
+          }
+        }
+
+        return withPermission(
+          scope,
+          { kind: "register", input },
+          toolRequest(ctx),
+          { toolShowsPanel: true },
+        )
+      },
+    ),
+  )
+
+  // Only for a token the owner made with "read and change API endpoints".
+  // Registering an endpoint is register_server, which asks the owner; these
+  // are about what happens after. What they may do is decided in
+  // endpoint-admin.ts.
+  if (scope.manageEndpoints) {
+    const json = (value: unknown) =>
+      text(
+        (() => {
+          const written = JSON.stringify(value, null, 1)
+          return written.length > MAX_RESULT_CHARS
+            ? `${written.slice(0, MAX_RESULT_CHARS)}\n… (truncated by PCP)`
+            : written
+        })(),
+      )
     const slugOf = (args: unknown) => ({
       server: (args as { endpoint?: string }).endpoint,
     })
-
-    server.registerTool(
-      "register_endpoint",
-      {
-        title: "Register an API endpoint",
-        description:
-          "Add an API to the owner's PCP from an OpenAPI 3 document, given as text (JSON or YAML). If the API has no OpenAPI document, write one from its documentation. Each operation becomes a tool. The endpoint starts disabled: nothing uses it, you included, until the owner enables it in PCP. It sends no credential and refuses private addresses until the owner allows them.",
-        inputSchema: z.object({
-          name: z.string().min(1).max(80).describe("A name for the API."),
-          spec: z
-            .string()
-            .min(1)
-            .describe("The OpenAPI 3 document, as JSON or YAML text."),
-          baseUrl: z
-            .string()
-            .optional()
-            .describe(
-              "Where the API lives, e.g. https://api.example.com/v1. Needed when the document's servers entry is missing or relative.",
-            ),
-          description: z
-            .string()
-            .max(1000)
-            .optional()
-            .describe(
-              "What the API is for, in a sentence or two; other assistants read it when searching.",
-            ),
-          readOnly: z
-            .boolean()
-            .optional()
-            .describe("Offer only GET operations."),
-        }),
-        annotations: {
-          readOnlyHint: false,
-          destructiveHint: false,
-          idempotentHint: false,
-          openWorldHint: false,
-        },
-      },
-      logged("register_endpoint", () => ({}))(
-        async (args: {
-          name: string
-          spec: string
-          baseUrl?: string
-          description?: string
-          readOnly?: boolean
-        }) => tooOften() ?? json(await registerEndpoint(scope, args)),
-      ),
-    )
 
     server.registerTool(
       "update_endpoint",
@@ -483,11 +852,18 @@ export function buildGatewayServer(
         "update_endpoint",
         slugOf,
       )(async (args: { endpoint: string } & Record<string, unknown>) => {
+        // Reading a large schema and rewriting its tools is real work, so
+        // changes are limited per token, apart from the request limit.
+        if (
+          !checkRateLimit(`endpoint-admin:${scope.tokenId}`, ENDPOINT_CHANGES)
+        ) {
+          return failure(
+            "That is a lot of endpoint changes in a short time. Wait a few minutes.",
+          )
+        }
+
         const { endpoint, ...changes } = args
-        return (
-          tooOften() ??
-          json(await updateEndpointDetails(scope, endpoint, changes))
-        )
+        return json(await updateEndpointDetails(scope, endpoint, changes))
       }),
     )
 
@@ -496,7 +872,7 @@ export function buildGatewayServer(
       {
         title: "Read an API endpoint",
         description:
-          "An API endpoint's settings, its tools, what you may change on it, and (with includeSpec) the OpenAPI text it was built from, so you can edit it and send it back with update_endpoint. Never includes a secret.",
+          "An API endpoint's settings, its tools, whose it is, what you may change on it, and (with includeSpec) the OpenAPI text it was built from, so you can edit it and send it back with update_endpoint. Never includes a secret.",
         inputSchema: z.object({
           endpoint: z
             .string()
@@ -521,6 +897,8 @@ export function buildGatewayServer(
     )
   }
 
+  registerPanelResource(server)
+
   return server
 }
 
@@ -528,6 +906,7 @@ function findTool(
   bySlug: Map<string, GatewayServer>,
   slug: string,
   name: string,
+  { includeBlocked = false }: { includeBlocked?: boolean } = {},
 ): { server: GatewayServer; tool: GatewayTool } | { error: string } {
   const server = bySlug.get(slug)
 
@@ -537,7 +916,10 @@ function findTool(
     }
   }
 
-  const tool = server.tools.find((entry) => entry.name === name)
+  const tool = server.tools.find(
+    (entry) =>
+      entry.name === name && (includeBlocked || entry.access !== "blocked"),
+  )
 
   if (!tool) {
     return {

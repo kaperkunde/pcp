@@ -3,27 +3,39 @@ import { isIP } from "node:net"
 import type { McpServer, McpTool } from "@/lib/generated/prisma/client"
 
 import type { ResolvedToken } from "./api-tokens"
+import type { SyncResult } from "./catalogue"
+import type { VaultContext } from "./context"
 import { db } from "./db"
-import { changeEndpoint, createEndpoint } from "./endpoints"
+import {
+  changeEndpoint,
+  createEndpoint,
+  previewEndpoint,
+  type EndpointPreview,
+} from "./endpoints"
 import { invalid, PcpError } from "./errors"
 import { bareHostname, isPublicAddress } from "./openapi/address"
 import { readCallPlan } from "./openapi/plan"
 import { validateBaseUrl } from "./openapi/urls"
-import { setToolDescription, type ServerStatus } from "./servers"
+import {
+  normalizeNameAndDescription,
+  setToolDescription,
+  type ServerStatus,
+} from "./servers"
 
 /**
- * Registering and changing API endpoints on behalf of an assistant, through
- * the gateway's register_endpoint, update_endpoint and get_endpoint tools.
+ * What an assistant may do to API endpoints through the gateway: register
+ * one (register_server with OpenAPI text, which waits for the owner), and
+ * read and change one (get_endpoint and update_endpoint).
  *
  * An assistant is not the owner. It decides what goes into a tool call, and
  * a prompt injected into it could decide worse. So what it may do here is
  * narrower than what the owner can do in the UI, and drawn around who an
  * endpoint belongs to:
  *
- * - An endpoint is the **assistant's** while nothing of the owner's is
- *   attached (no secret) and it is still limited to public addresses. The
- *   assistant registered it, and may rewrite it.
- * - It becomes the **owner's** the moment the owner attaches a secret or
+ * - An endpoint is the **assistant's** while it sends no secret and is still
+ *   limited to public addresses. The assistant registered it, and may
+ *   rewrite it.
+ * - It is the **owner's** once it sends one of their secrets or the owner
  *   allows private addresses. From then on the assistant can read it and
  *   turn read-only on, and nothing else: a new schema could add operations
  *   the owner's key can then perform, and a new address or description could
@@ -31,21 +43,31 @@ import { setToolDescription, type ServerStatus } from "./servers"
  *
  * And three rules hold for both:
  *
- * - No credential, ever. Nothing here names, sees or attaches a secret, and
- *   the writer these changes go through (endpoints.ts changeEndpoint) never
+ * - No credential changes, ever. A secret only comes with a registration the
+ *   owner approves, named by its NAME and shown to them with the address it
+ *   goes to; update_endpoint never names, sees or attaches one, and the
+ *   writer its changes go through (endpoints.ts changeEndpoint) never
  *   touches the credential, the schema's source or public-only.
- * - Nothing takes effect without the owner. A registered endpoint starts
- *   disabled, and any change to an endpoint that other assistants can see
- *   (words, schema, address, or read-only turned off) disables it again until
- *   the owner enables it. Words an assistant writes reach every other
- *   assistant through search, instructions and tool descriptions, so they
- *   are the owner's to approve.
+ * - Nothing takes effect without the owner. A registration is a request the
+ *   owner answers before any endpoint exists (permissions.ts), and any change
+ *   to an endpoint that other assistants can see (words, schema, address, or
+ *   read-only turned off) disables it again until the owner enables it.
+ *   Words an assistant writes reach every other assistant through search,
+ *   instructions and tool descriptions, so they are the owner's to approve.
  * - It only supplies a schema as text. PCP never fetches an address it chose.
  */
 
 const MAX_INCLUDED_SPEC = 50_000
-/** Endpoints in one vault: what a loop of register_endpoint can add. */
+/**
+ * Endpoints in one vault: what an owner who keeps saying yes to an assistant
+ * can be talked into.
+ */
 const MAX_ENDPOINTS = 50
+/**
+ * The longest schema an assistant may register as text. It is held, encrypted,
+ * on a request row until the owner answers, and no model writes more.
+ */
+const MAX_REGISTERED_SPEC_CHARS = 1_000_000
 
 export type EndpointScope = Pick<ResolvedToken, "ctx" | "tokenId" | "serverIds">
 
@@ -274,20 +296,30 @@ export async function getEndpoint(
   return detailsOf(await findEndpoint(scope, slug), options)
 }
 
-export type RegisterInput = {
-  name: string
+/** What an assistant asked to register, as the owner is asked about it. */
+export type EndpointRegistration = {
+  /** The OpenAPI text, as given. */
   spec: string
-  baseUrl?: string | null
-  description?: string
-  readOnly?: boolean
+  readOnly: boolean
+  /** What PCP worked out from the text, for the owner to read. */
+  preview: EndpointPreview & { privateAddress: string | null }
 }
 
-export async function registerEndpoint(
-  scope: EndpointScope,
-  input: RegisterInput,
-): Promise<EndpointDetails & { registered: string; next: string[] }> {
+export type RegistrationInput = {
+  name: string
+  description?: string
+  spec: string
+  /** Where requests go; empty means the address in the schema. */
+  baseUrl?: string | null
+  readOnly?: boolean
+  /** The secret by id, with the header it goes in, when there is one. */
+  authSecretId?: string | null
+  authHeaderName?: string | null
+}
+
+async function assertRoomForEndpoint(ctx: VaultContext) {
   const held = await db().mcpServer.count({
-    where: { vaultId: scope.ctx.vaultId, kind: "openapi" },
+    where: { vaultId: ctx.vaultId, kind: "openapi" },
   })
 
   if (held >= MAX_ENDPOINTS) {
@@ -296,50 +328,103 @@ export async function registerEndpoint(
       `PCP holds ${MAX_ENDPOINTS} API endpoints already. Ask the owner to remove some before adding more.`,
     )
   }
+}
 
-  const { id, sync } = await createEndpoint(scope.ctx, {
-    name: input.name,
-    description: input.description,
-    baseUrl: input.baseUrl?.trim() || null,
-    specSource: "upload",
-    specText: input.spec,
-    readOnly: input.readOnly === true,
-    // Always: the destination of what an assistant registers is the
-    // assistant's choice, so it may only be a public one until the owner
-    // says otherwise.
-    publicOnly: true,
-    // Never a credential: a secret and an address the assistant chose must
-    // not meet.
-    authType: "none",
-    // Off until the owner has seen it: its name and descriptions would reach
-    // every other assistant through search and the gateway's instructions.
-    enabled: false,
-  })
+/**
+ * Everything that can be wrong with a registration, found before the owner
+ * is asked: the name, the text, the address. No row is made and nothing is
+ * fetched; the answer is the request the owner will read and the page will
+ * hold. A schema that cannot be used is refused here, so the owner is only
+ * ever asked about something that would work.
+ */
+export async function prepareRegistration(
+  ctx: VaultContext,
+  input: RegistrationInput,
+): Promise<{
+  name: string
+  description: string
+  registration: EndpointRegistration
+  url: string
+}> {
+  const { name, description } = normalizeNameAndDescription(input)
 
-  // A token limited to some servers should be able to use what it made, once
-  // the owner has enabled it.
-  if (scope.serverIds !== null) {
-    await db().apiTokenServer.create({
-      data: { tokenId: scope.tokenId, serverId: id },
-    })
+  if (!input.spec.trim()) {
+    throw invalid("openapi_schema is empty. Pass the whole OpenAPI document.")
   }
 
-  const server = await db().mcpServer.findUniqueOrThrow({
-    where: { id },
-    include: { tools: { orderBy: { name: "asc" } } },
+  if (input.spec.length > MAX_REGISTERED_SPEC_CHARS) {
+    throw invalid(
+      `The schema is ${input.spec.length} characters; an assistant may register up to ${MAX_REGISTERED_SPEC_CHARS}. Leave out operations that are not needed, or ask the owner to add the API in PCP.`,
+    )
+  }
+
+  // A secret goes where an address says, and the schema is someone else's
+  // document: the address has to come from the request the owner will read.
+  if (input.authSecretId && !input.baseUrl?.trim()) {
+    throw invalid(
+      "A secret is sent to an address you name: pass the base URL in url, so the owner sees where it will go.",
+    )
+  }
+
+  await assertRoomForEndpoint(ctx)
+
+  const readOnly = input.readOnly === true
+  const preview = previewEndpoint(input.spec, {
+    readOnly,
+    ownerBaseUrl: input.baseUrl,
+    hasSecret: Boolean(input.authSecretId),
+    authHeaderName: input.authHeaderName,
   })
-  const details = await detailsOf(server)
-  const address = privateAddressNote(server.url)
 
   return {
-    ...details,
-    registered: `Registered ${server.name} as ${server.slug} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${sync.message ? ` ${sync.message}` : ""}`,
-    next: [
-      "It is disabled: nothing, including search_tools and call_tool, uses it until the owner enables it in PCP.",
-      ...(address ? [address] : []),
-      "It sends no credential.",
-    ],
+    name,
+    description,
+    url: preview.baseUrl,
+    registration: {
+      spec: input.spec,
+      readOnly,
+      preview: {
+        ...preview,
+        privateAddress: privateAddressNote(preview.baseUrl),
+      },
+    },
   }
+}
+
+/**
+ * Creates what the owner approved. The address is the one they were shown,
+ * and an assistant's endpoint reaches public addresses only (the owner can
+ * lift that on the endpoint's page); it starts on, because the owner just
+ * said yes.
+ */
+export async function createApprovedEndpoint(
+  ctx: VaultContext,
+  asked: {
+    name: string
+    description?: string
+    url: string
+    authType: "none" | "header"
+    authHeaderName?: string | null
+    authValueTemplate?: string | null
+    authSecretId?: string | null
+    endpoint: EndpointRegistration
+  },
+): Promise<{ id: string; sync: SyncResult }> {
+  await assertRoomForEndpoint(ctx)
+
+  return createEndpoint(ctx, {
+    name: asked.name,
+    description: asked.description,
+    baseUrl: asked.url,
+    specSource: "upload",
+    specText: asked.endpoint.spec,
+    readOnly: asked.endpoint.readOnly,
+    publicOnly: true,
+    authType: asked.authType,
+    authHeaderName: asked.authHeaderName,
+    authValueTemplate: asked.authValueTemplate,
+    authSecretId: asked.authSecretId,
+  })
 }
 
 export type UpdateInput = {

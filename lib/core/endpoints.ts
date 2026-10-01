@@ -239,6 +239,71 @@ async function applySpec(
   return { status: "ok", message, toolCount }
 }
 
+export type EndpointPreview = {
+  /** Where requests would go. */
+  baseUrl: string
+  toolCount: number
+  /** Operations as "GET /pets", in document order, as many as `limit`. */
+  operations: string[]
+  /** How many operations the list leaves out. */
+  more: number
+  /** "GET 4, POST 2": what the tools would do. */
+  methods: string
+  /** What PCP leaves out, in words; empty when nothing. */
+  skipped: string
+}
+
+/**
+ * What creating an endpoint from this text would give, worked out without a
+ * row, a request or a secret. It throws what createEndpoint would throw, so
+ * a schema that cannot be used is refused before anyone is asked about it.
+ */
+export function previewEndpoint(
+  text: string,
+  options: {
+    readOnly: boolean
+    ownerBaseUrl?: string | null
+    hasSecret: boolean
+    authHeaderName?: string | null
+    limit?: number
+  },
+): EndpointPreview {
+  const generated = generate(text, {
+    readOnly: options.readOnly,
+    authHeaderName: options.authHeaderName ?? null,
+  })
+  const baseUrl = resolveBaseUrl({
+    ownerBaseUrl: options.ownerBaseUrl?.trim() || null,
+    serverUrl: generated.serverUrl,
+    serverUrlProblem: generated.serverUrlProblem,
+    specUrl: null,
+    fetchedFrom: null,
+    hasSecret: options.hasSecret,
+  })
+  const limit = options.limit ?? 12
+  const counts = new Map<string, number>()
+
+  for (const tool of generated.tools) {
+    const method = tool.operation.method
+    counts.set(method, (counts.get(method) ?? 0) + 1)
+  }
+
+  return {
+    baseUrl,
+    toolCount: generated.tools.length,
+    operations: generated.tools
+      .slice(0, limit)
+      .map((tool) =>
+        `${tool.operation.method} ${tool.operation.path}`.slice(0, 120),
+      ),
+    more: Math.max(0, generated.tools.length - limit),
+    methods: [...counts]
+      .map(([method, count]) => `${method} ${count}`)
+      .join(", "),
+    skipped: generated.skipped.length > 0 ? skippedList(generated) : "",
+  }
+}
+
 export async function createEndpoint(
   ctx: VaultContext,
   input: EndpointInput,
