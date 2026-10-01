@@ -19,6 +19,12 @@ import { db } from "./db"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { PcpError } from "./errors"
 import {
+  applyAuthorizeParams,
+  oauthRedirectUrl,
+  registrationMetadata,
+  tokenLifetime,
+} from "./oauth-client"
+import {
   deleteManagedSecret,
   readSecretValue,
   revealSecret,
@@ -41,10 +47,6 @@ export const PCP_CLIENT_INFO = { name: "pcp", version: "0.1.0" }
 const CONNECT_TIMEOUT_MS = 20_000
 const CALL_TIMEOUT_MS = 120_000
 const OAUTH_STATE_TTL_MS = 15 * 60 * 1000
-
-export function oauthCallbackUrl(publicUrl: string, serverId: string): string {
-  return `${publicUrl.replace(/\/+$/, "")}/api/servers/${serverId}/oauth/callback`
-}
 
 export function managedSecretName(server: Pick<McpServer, "id">): string {
   return `oauth/${server.id}`
@@ -73,6 +75,12 @@ type FlowState = {
 
 type OAuthStore = {
   client?: StoredOAuthClientInformation
+  /**
+   * The authorization server the owner's own client was first used with.
+   * The SDK refuses to send the client to any other (SEP-2352), so a server
+   * that later points somewhere else never gets the client secret.
+   */
+  clientIssuer?: { clientId: string; issuer: string }
   tokens?: StoredOAuthTokens
   tokensSavedAt?: string
 }
@@ -94,6 +102,11 @@ export class PcpOAuthProvider implements OAuthClientProvider {
       redirectUrl: string
       publicUrl: string
       stateId?: string
+      /**
+       * PCP's client metadata document, offered as the client ID. Set only
+       * when startOAuth chose it (lib/core/oauth-client.ts says when).
+       */
+      clientMetadataUrl?: string
     },
   ) {}
 
@@ -101,20 +114,18 @@ export class PcpOAuthProvider implements OAuthClientProvider {
     return this.options.redirectUrl
   }
 
+  get clientMetadataUrl(): string | undefined {
+    return this.options.clientMetadataUrl
+  }
+
   get clientMetadata(): OAuthClientMetadata {
-    return {
-      client_name: "PCP",
-      client_uri: this.options.publicUrl,
-      software_id: "pcp",
-      software_version: PCP_CLIENT_INFO.version,
-      redirect_uris: [this.options.redirectUrl],
-      grant_types: ["authorization_code", "refresh_token"],
-      response_types: ["code"],
-      token_endpoint_auth_method: this.server.oauthClientSecretId
-        ? "client_secret_post"
-        : "none",
-      ...(this.server.oauthScope ? { scope: this.server.oauthScope } : {}),
-    }
+    return registrationMetadata({
+      publicUrl: this.options.publicUrl,
+      redirectUrl: this.options.redirectUrl,
+      version: PCP_CLIENT_INFO.version,
+      confidential: Boolean(this.server.oauthClientSecretId),
+      scope: this.server.oauthScope,
+    })
   }
 
   /**
@@ -133,8 +144,13 @@ export class PcpOAuthProvider implements OAuthClientProvider {
 
   async clientInformation(): Promise<StoredOAuthClientInformation | undefined> {
     if (this.server.oauthClientId) {
+      const { clientIssuer } = await this.readStore()
+
       return {
         client_id: this.server.oauthClientId,
+        ...(clientIssuer?.clientId === this.server.oauthClientId
+          ? { issuer: clientIssuer.issuer }
+          : {}),
         ...(this.server.oauthClientSecretId
           ? {
               client_secret: await readSecretValue(
@@ -146,13 +162,46 @@ export class PcpOAuthProvider implements OAuthClientProvider {
       }
     }
 
-    return (await this.readStore()).client
+    const { client } = await this.readStore()
+
+    // Without the owner's browser nothing can be signed in to, so there is
+    // nothing to register for either: say it needs connecting rather than
+    // register in the background (or fail to, on a server that does not
+    // allow it).
+    if (!client && !this.interactive) {
+      throw new UnauthorizedError(
+        `${this.server.name} needs to be connected in PCP.`,
+      )
+    }
+
+    return client
+  }
+
+  /** The client PCP registered earlier (dynamically or by its document). */
+  async storedClient(): Promise<StoredOAuthClientInformation | undefined> {
+    return this.server.oauthClientId
+      ? undefined
+      : (await this.readStore()).client
   }
 
   async saveClientInformation(
     clientInformation: StoredOAuthClientInformation,
   ): Promise<void> {
     if (this.server.oauthClientId) {
+      // Only the stamp of which authorization server it belongs to; the
+      // client itself is the owner's settings.
+      const { client_id: clientId, issuer } = clientInformation
+
+      if (
+        clientId === this.server.oauthClientId &&
+        typeof issuer === "string"
+      ) {
+        await this.updateStore((store) => ({
+          ...store,
+          clientIssuer: { clientId, issuer },
+        }))
+      }
+
       return
     }
 
@@ -161,6 +210,14 @@ export class PcpOAuthProvider implements OAuthClientProvider {
 
   async tokens(): Promise<StoredOAuthTokens | undefined> {
     return (await this.readStore()).tokens
+  }
+
+  async tokenSet(): Promise<{
+    tokens: StoredOAuthTokens | undefined
+    savedAt: string | undefined
+  }> {
+    const store = await this.readStore()
+    return { tokens: store.tokens, savedAt: store.tokensSavedAt }
   }
 
   async saveTokens(tokens: StoredOAuthTokens): Promise<void> {
@@ -182,7 +239,10 @@ export class PcpOAuthProvider implements OAuthClientProvider {
       )
     }
 
-    this.authorizationUrl = authorizationUrl
+    this.authorizationUrl = applyAuthorizeParams(
+      authorizationUrl,
+      this.server.oauthAuthorizeParams,
+    )
   }
 
   /**
@@ -341,6 +401,27 @@ export class PcpOAuthProvider implements OAuthClientProvider {
   }
 }
 
+/**
+ * What the owner is told about a connection: whether PCP can renew it on
+ * its own, and when the access it has runs out. Null when not connected.
+ */
+export async function describeOAuthConnection(
+  ctx: VaultContext,
+  server: McpServer,
+): Promise<{ renewable: boolean; expiresAt: Date | null } | null> {
+  if (server.authType !== "oauth" || !server.oauthConnectedAt) {
+    return null
+  }
+
+  const provider = new PcpOAuthProvider(ctx, server, {
+    redirectUrl: "",
+    publicUrl: "",
+  })
+  const { tokens, savedAt } = await provider.tokenSet()
+
+  return tokens ? tokenLifetime(tokens, savedAt) : null
+}
+
 export async function forgetOAuthTokens(
   ctx: VaultContext,
   server: McpServer,
@@ -425,7 +506,7 @@ export async function openUpstream(
   const provider =
     server.authType === "oauth"
       ? new PcpOAuthProvider(ctx, server, {
-          redirectUrl: oauthCallbackUrl(publicUrl, server.id),
+          redirectUrl: oauthRedirectUrl(publicUrl),
           publicUrl,
         })
       : null
@@ -544,7 +625,7 @@ export async function callServerTool(
     // "unauthorized" tells the gateway the server needs connecting (or its
     // credential was refused), not that it could not be reached.
     throw new PcpError(
-      failure.status === "auth_required" ? "unauthorized" : "upstream",
+      failure.status === "error" ? "upstream" : "unauthorized",
       failure.message,
     )
   } finally {
@@ -555,8 +636,21 @@ export async function callServerTool(
 function describeFailure(
   server: McpServer,
   error: unknown,
-): { status: "auth_required" | "error"; message: string } {
+): {
+  status: "auth_required" | "client_required" | "error"
+  message: string
+} {
   if (error instanceof UnauthorizedError) {
+    // Still true until the owner gives it a client: a sync or a call does
+    // not change what the server allows.
+    if (
+      server.authType === "oauth" &&
+      server.status === "client_required" &&
+      !server.oauthClientId
+    ) {
+      return { status: "client_required", message: server.statusMessage }
+    }
+
     return {
       status: "auth_required",
       message:

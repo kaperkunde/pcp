@@ -20,7 +20,7 @@ export function LoginForm({ username }: { username: string }) {
     <Card>
       <CardContent>
         <form action={action} className="flex flex-col gap-4">
-          <UsernameField value={username} />
+          <UsernameField id="login-account" value={username} />
           <Field label="Password" htmlFor="login-password">
             <Input
               id="login-password"

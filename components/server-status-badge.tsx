@@ -31,6 +31,10 @@ export function ServerStatusBadge({
     }
   }
 
+  if (status === "client_required") {
+    return <Badge variant="warning">Needs an OAuth client</Badge>
+  }
+
   if (!connected || status === "auth_required") {
     return <Badge variant="warning">Needs connecting</Badge>
   }

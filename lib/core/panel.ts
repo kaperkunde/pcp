@@ -110,14 +110,21 @@ export function connectPanel(
 
 /** An OAuth server that needs the owner to sign in before it can be used. */
 export function connectResult(
-  server: { id: string; slug: string; name: string },
+  server: { id: string; slug: string; name: string; status?: string },
   publicUrl: string,
   { lead = "Not done yet", state }: { lead?: string; state?: ServerState } = {},
 ): CallToolResult {
   const connect = connectPanel(server, publicUrl)
 
+  // The server will not let PCP register itself: signing in cannot work
+  // until the owner creates a client with the provider and gives it to PCP.
+  // Connect still helps, as it opens the server's page, which says how.
+  const waitsForClient = server.status === "client_required"
+
   return panelResult(
-    `${lead}: ${server.name} needs connecting before its tools can be used. Ask the owner to press Connect in the panel, or to open ${connect.pageUrl} (signed in to PCP) and choose Connect. Call check_server with server "${server.slug}" to see when it is connected (on clients that show panels, that also gives the owner the Connect button), then try again.`,
+    waitsForClient
+      ? `${lead}: ${server.name} needs an OAuth client from the owner before it can be connected, because it does not let PCP register itself. Ask the owner to open ${connect.pageUrl} (signed in to PCP), which says what to create with the provider and where to enter it, and then to choose Connect. Call check_server with server "${server.slug}" to see when it is connected, then try again.`
+      : `${lead}: ${server.name} needs connecting before its tools can be used. Ask the owner to press Connect in the panel, or to open ${connect.pageUrl} (signed in to PCP) and choose Connect. Call check_server with server "${server.slug}" to see when it is connected (on clients that show panels, that also gives the owner the Connect button), then try again.`,
     { kind: "connect", connect, ...(state ? { server: state } : {}) },
   )
 }

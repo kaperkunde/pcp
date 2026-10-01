@@ -89,7 +89,7 @@ export async function deleteTokenAction(id: string): Promise<ActionState> {
   return result
 }
 
-/** Name, servers and expiry of an existing token. */
+/** Name, servers, how PCP asks and expiry of an existing token. */
 export async function updateTokenAction(
   _previous: UpdateTokenResult,
   formData: FormData,
@@ -106,6 +106,8 @@ export async function updateTokenAction(
       serverIds: fields(formData, "serverIds"),
       manageEndpoints: field(formData, "manageEndpoints") === "on",
       keepMemories: field(formData, "keepMemories") === "on",
+      // Unchecked boxes are not sent: an empty list is the link alone.
+      permissionTiers: fields(formData, "permissionTiers"),
       expiresAt:
         expiresIn === "keep"
           ? undefined

@@ -1,6 +1,17 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { reconcileIssuer } from "./oauth"
+import { db } from "./db"
+import { finishOAuth, reconcileIssuer, startOAuth } from "./oauth"
+import { legacyRedirectUrl, oauthRedirectUrl } from "./oauth-client"
+import { json, startTestApi, type TestApi } from "./openapi/test-api"
+import { createServer, getServer, updateServer } from "./servers"
+import { scratchDatabase } from "./test-db"
+import {
+  describeOAuthConnection,
+  PcpOAuthProvider,
+  syncServerTools,
+} from "./upstream"
+import { setupVault } from "./vault"
 
 // Regression: in the Docker image (bound to 0.0.0.0) Next.js rewrote the
 // first loopback address in the callback URL — which was inside the encoded
@@ -38,5 +49,273 @@ describe("reconcileIssuer", () => {
     )
     expect(reconcileIssuer(undefined, "http://127.0.0.1:1")).toBeUndefined()
     expect(reconcileIssuer("not a url", "http://127.0.0.1:1")).toBe("not a url")
+  })
+})
+
+/**
+ * How PCP gets a client ID from servers that do and do not let it register
+ * itself, against a small authorization server in the test process.
+ */
+describe("connecting an OAuth server", () => {
+  let cleanup: () => Promise<void>
+  let ctx: Awaited<ReturnType<typeof setupVault>>
+  let as: TestApi
+  /** Added to (or, as undefined, removed from) the server's metadata. */
+  let metadata: Record<string, unknown>
+  let register: (res: Parameters<typeof json>[0], body: string) => void
+  let tokenAnswer: Record<string, unknown>
+
+  const HTTP = { publicUrl: "http://pcp.lan:3000" }
+  const HTTPS = { publicUrl: "https://pcp.example.com" }
+
+  beforeEach(async () => {
+    ;({ cleanup } = await scratchDatabase())
+    ctx = await setupVault({ name: "Ada", password: "correct horse battery" })
+    metadata = {}
+    register = (res, body) =>
+      json(res, 201, {
+        client_id: "dynamic-client",
+        ...JSON.parse(body),
+      })
+    tokenAnswer = { access_token: "at", token_type: "Bearer", expires_in: 60 }
+    as = await startTestApi((req, res) => {
+      const path = req.url.split("?")[0]
+
+      if (path.startsWith("/.well-known/oauth-protected-resource")) {
+        return json(res, 200, {
+          resource: `${as.origin}/mcp`,
+          authorization_servers: [as.origin],
+        })
+      }
+
+      if (path === "/.well-known/oauth-authorization-server") {
+        return json(
+          res,
+          200,
+          JSON.parse(
+            JSON.stringify({
+              issuer: as.origin,
+              authorization_endpoint: `${as.origin}/authorize`,
+              token_endpoint: `${as.origin}/token`,
+              response_types_supported: ["code"],
+              code_challenge_methods_supported: ["S256"],
+              token_endpoint_auth_methods_supported: [
+                "client_secret_basic",
+                "none",
+              ],
+              ...metadata,
+            }),
+          ),
+        )
+      }
+
+      if (path === "/mcp") {
+        res.setHeader(
+          "www-authenticate",
+          `Bearer resource_metadata="${as.origin}/.well-known/oauth-protected-resource/mcp"`,
+        )
+        return json(res, 401, { error: "unauthorized" })
+      }
+
+      if (path === "/register") {
+        return register(res, req.body)
+      }
+
+      if (path === "/token") {
+        return json(res, 200, tokenAnswer)
+      }
+
+      json(res, 404, { error: "not_found" })
+    })
+  })
+
+  afterEach(async () => {
+    await as.close()
+    await cleanup()
+  })
+
+  async function oauthServer(extra: Record<string, string> = {}) {
+    const { id } = await createServer(ctx, {
+      name: "Mail",
+      url: `${as.origin}/mcp`,
+      authType: "oauth",
+      ...extra,
+    })
+    return id
+  }
+
+  function signInAddress(result: Awaited<ReturnType<typeof startOAuth>>) {
+    expect(result).toHaveProperty("redirectTo")
+    return new URL((result as { redirectTo: string }).redirectTo)
+  }
+
+  it("asks the owner for a client when the server lets no app register", async () => {
+    const id = await oauthServer()
+
+    await expect(startOAuth(ctx, id, HTTP)).rejects.toThrow(
+      /Mail needs an OAuth client from you: it does not let apps register themselves\. .*http:\/\/pcp\.lan:3000\/api\/oauth\/callback/,
+    )
+    expect(await getServer(ctx, id)).toMatchObject({
+      status: "client_required",
+    })
+    // Nothing tried to register, and a later read keeps saying why.
+    expect(as.requests.some((req) => req.url === "/register")).toBe(false)
+    await syncServerTools(ctx, await getServer(ctx, id), HTTP)
+    expect((await getServer(ctx, id)).status).toBe("client_required")
+  })
+
+  it("signs in with the owner's client, secret and sign-in parameters", async () => {
+    const id = await oauthServer()
+    await expect(startOAuth(ctx, id, HTTP)).rejects.toThrow()
+
+    await updateServer(ctx, id, {
+      name: "Mail",
+      url: `${as.origin}/mcp`,
+      authType: "oauth",
+      oauthClientId: "owner-client",
+      oauthClientSecretValue: "owner-client-secret",
+      oauthAuthorizeParams: "access_type=offline&prompt=consent",
+    })
+
+    const server = await getServer(ctx, id)
+    const secret = await db().secret.findUniqueOrThrow({
+      where: { id: server.oauthClientSecretId! },
+    })
+    expect(secret).toMatchObject({
+      name: "Mail OAuth client secret",
+      kind: "text",
+    })
+
+    const url = signInAddress(await startOAuth(ctx, id, HTTP))
+    expect(url.origin + url.pathname).toBe(`${as.origin}/authorize`)
+    expect(Object.fromEntries(url.searchParams)).toMatchObject({
+      client_id: "owner-client",
+      redirect_uri: oauthRedirectUrl(HTTP.publicUrl),
+      access_type: "offline",
+      prompt: "consent",
+      response_type: "code",
+    })
+
+    // The owner's client is bound to the authorization server it was first
+    // used with, so the SDK never sends its secret to another.
+    const bound = await new PcpOAuthProvider(ctx, await getServer(ctx, id), {
+      redirectUrl: oauthRedirectUrl(HTTP.publicUrl),
+      publicUrl: HTTP.publicUrl,
+    }).clientInformation()
+    expect(bound).toMatchObject({
+      client_id: "owner-client",
+      client_secret: "owner-client-secret",
+      issuer: as.origin,
+    })
+
+    // The callback: the state names the server, the secret goes to the
+    // token endpoint, and a token set without a refresh token is reported.
+    const { serverId } = await finishOAuth(
+      ctx,
+      new URLSearchParams({
+        code: "the-code",
+        state: url.searchParams.get("state")!,
+      }),
+      HTTP,
+    )
+    expect(serverId).toBe(id)
+    const token = as.requests.find((req) => req.url === "/token")!
+    expect(token.headers.authorization).toBe(
+      `Basic ${Buffer.from("owner-client:owner-client-secret").toString("base64")}`,
+    )
+    expect(
+      await describeOAuthConnection(ctx, await getServer(ctx, id)),
+    ).toMatchObject({ renewable: false })
+  })
+
+  it("refuses a callback for another server at its old address", async () => {
+    const id = await oauthServer({ oauthClientId: "owner-client" })
+    const other = await oauthServer({ oauthClientId: "owner-client" })
+    const url = signInAddress(await startOAuth(ctx, id, HTTP))
+
+    await expect(
+      finishOAuth(
+        ctx,
+        new URLSearchParams({
+          code: "c",
+          state: url.searchParams.get("state")!,
+        }),
+        { ...HTTP, serverId: other },
+      ),
+    ).rejects.toThrow(/not one PCP started/)
+  })
+
+  it("asks the owner for a client when the server refuses PCP's registration", async () => {
+    metadata = { registration_endpoint: `${as.origin}/register` }
+    register = (res) =>
+      json(res, 403, {
+        error: "unapproved_software_statement",
+        error_description: "Only approved clients may register.",
+      })
+    const id = await oauthServer()
+
+    await expect(startOAuth(ctx, id, HTTP)).rejects.toThrow(
+      /it refused PCP's registration \(unapproved_software_statement: Only approved clients may register\.\)/,
+    )
+    expect((await getServer(ctx, id)).status).toBe("client_required")
+  })
+
+  it("registers dynamically with the one redirect address", async () => {
+    metadata = {
+      registration_endpoint: `${as.origin}/register`,
+      // Both offered: PCP keeps to registration, which needs nothing public.
+      client_id_metadata_document_supported: true,
+    }
+    const id = await oauthServer()
+
+    // Reading the tools before anyone signed in registers nothing: only the
+    // owner's Connect does.
+    await syncServerTools(ctx, await getServer(ctx, id), HTTPS)
+    expect((await getServer(ctx, id)).status).toBe("auth_required")
+    expect(as.requests.some((req) => req.url === "/register")).toBe(false)
+
+    const url = signInAddress(await startOAuth(ctx, id, HTTPS))
+    expect(url.searchParams.get("client_id")).toBe("dynamic-client")
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      oauthRedirectUrl(HTTPS.publicUrl),
+    )
+    const registration = as.requests.find((req) => req.url === "/register")!
+    expect(JSON.parse(registration.body).redirect_uris).toEqual([
+      oauthRedirectUrl(HTTPS.publicUrl),
+    ])
+  })
+
+  it("offers its client metadata document when that is the only way", async () => {
+    metadata = { client_id_metadata_document_supported: true }
+    const id = await oauthServer()
+
+    const url = signInAddress(await startOAuth(ctx, id, HTTPS))
+    expect(url.searchParams.get("client_id")).toBe(
+      "https://pcp.example.com/api/oauth/client-metadata",
+    )
+    expect(as.requests.some((req) => req.url === "/register")).toBe(false)
+
+    // Off https the document cannot be fetched: the owner is asked instead.
+    const lan = await oauthServer()
+    await expect(startOAuth(ctx, lan, HTTP)).rejects.toThrow(
+      /needs an OAuth client/,
+    )
+  })
+
+  it("keeps the per-server address for a client registered with it", async () => {
+    const id = await oauthServer()
+    const server = await getServer(ctx, id)
+    const legacy = legacyRedirectUrl(HTTP.publicUrl, id)
+    await new PcpOAuthProvider(ctx, server, {
+      redirectUrl: legacy,
+      publicUrl: HTTP.publicUrl,
+    }).saveClientInformation({
+      client_id: "old-client",
+      redirect_uris: [legacy],
+    } as never)
+
+    const url = signInAddress(await startOAuth(ctx, id, HTTP))
+    expect(url.searchParams.get("client_id")).toBe("old-client")
+    expect(url.searchParams.get("redirect_uri")).toBe(legacy)
   })
 })

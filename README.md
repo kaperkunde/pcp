@@ -90,7 +90,12 @@ required.
    header (`Authorization: Bearer {{secret}}` by default), or OAuth. For
    OAuth, choose **Connect** on the server page: PCP discovers the
    authorization server, registers itself if it can, sends you to sign in
-   and keeps the tokens as a managed secret. PCP reads each server's tool
+   and keeps the tokens as a managed secret. Many large providers (Google,
+   Slack, GitHub and others) let no app register itself: PCP then says so,
+   and you create an OAuth client in the provider's developer settings with
+   the redirect URI the server form shows, and enter its client ID and
+   secret. If the provider only keeps you signed in when asked (Google wants
+   `access_type=offline`), put that in **Extra sign-in parameters**. PCP reads each server's tool
    list; you can rewrite any tool's description so an assistant picks it
    correctly.
 3. **API endpoints.** Add an API by giving PCP its OpenAPI 3 schema, as a URL
@@ -134,7 +139,8 @@ and these tools:
 A tool you have not decided about answers "Not done yet" and asks you. Where
 the assistant's app can show it, the question appears in the conversation:
 as PCP's panel (an MCP App) or as the app's own prompt. Otherwise the
-assistant hands you a link to PCP. **Allow once** runs that one call,
+assistant hands you a link to PCP. Each token's page says which of these PCP
+may use; turn one off if an app gets stuck on it. **Allow once** runs that one call,
 **Always allow** and **Block** also decide the calls after it, and **Not
 now** runs nothing. A server an assistant proposes is only added once you
 agree; an OAuth one is then connected from a link that opens in your browser.

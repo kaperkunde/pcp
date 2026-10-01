@@ -43,6 +43,8 @@ export type ServerDetailProps = {
     statusMessage: string
     connected: boolean
     lastSyncedAt: Date | null
+    /** OAuth: whether PCP can renew its access, and until when it lasts. */
+    oauthConnection: { renewable: boolean; expiresAt: Date | null } | null
   }
   tools: Array<{
     name: string
@@ -173,6 +175,20 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
             ) : (
               <FormError error={notice.message} />
             )
+          ) : null}
+          {server.oauthConnection && !server.oauthConnection.renewable ? (
+            <p className="text-warning">
+              {server.name} did not give PCP a way to renew its access, so you
+              will need to reconnect when it runs out
+              {server.oauthConnection.expiresAt ? (
+                <>
+                  {" "}
+                  (<LocalDate value={server.oauthConnection.expiresAt} />)
+                </>
+              ) : null}
+              . Some servers only do that when the sign-in asks for it: see
+              Extra sign-in parameters under Settings.
+            </p>
           ) : null}
           {server.statusMessage ? (
             <p

@@ -3,7 +3,12 @@ import "server-only"
 import { headers } from "next/headers"
 
 import type { VaultContext } from "@/lib/core/context"
-import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
+import {
+  getSetting,
+  getVaultSetting,
+  SETTING_PUBLIC_URL,
+} from "@/lib/core/settings"
+import { ownerVault } from "@/lib/core/vault"
 
 /**
  * Where PCP is reachable from outside, for OAuth redirect URIs and the
@@ -37,4 +42,20 @@ export async function publicUrlFor(
   }
 
   return request ? originFromHeaders(request.headers) : requestOrigin()
+}
+
+/**
+ * The public URL for a request nobody signed in to make (an authorization
+ * server fetching PCP's client metadata document): the owner's pinned
+ * address, or where the request came in.
+ */
+export async function publicUrlWithoutSession(
+  request: Request,
+): Promise<string> {
+  const vault = await ownerVault()
+  const pinned = vault
+    ? await getVaultSetting(vault.id, SETTING_PUBLIC_URL)
+    : null
+
+  return pinned || originFromHeaders(request.headers)
 }

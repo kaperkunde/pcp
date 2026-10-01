@@ -10,7 +10,8 @@ code without changing the single-user product.
 ```
 app/                 Routes and pages (Next.js App Router)
   mcp/route.ts       The gateway endpoint
-  api/servers/…      OAuth start and callback
+  api/oauth/…        OAuth callback and PCP's client metadata document
+  api/servers/…      OAuth start (and the per-server callback older clients use)
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
@@ -32,8 +33,9 @@ sensitive is AES-256-GCM ciphertext under it, with the row's own id as
 associated data (a ciphertext cannot be moved to another row):
 
 - secret values (`secret.ciphertext`),
-- OAuth token sets and dynamically registered client credentials (a `secret`
-  row of kind `oauth`, owned by the server that uses it),
+- OAuth token sets and the clients PCP registered (a `secret` row of kind
+  `oauth`, owned by the server that uses it); an OAuth client secret the
+  owner gives PCP is one of their own `text` secrets,
 - the PKCE verifier of an authorization in flight (`oauth_state`).
 - a memory's path and text (`memory.ciphertext`, as one JSON value).
 
@@ -314,6 +316,51 @@ another one reads:
   which tool, which upstream, how long, whether it worked. Never arguments
   or results.
 
+## Connecting OAuth servers
+
+An OAuth server needs a client ID for PCP before anyone can sign in, and
+servers differ in how they hand one out. `startOAuth` (`lib/core/oauth.ts`)
+discovers the authorization server and `chooseRegistration`
+(`lib/core/oauth-client.ts`) picks, without knowing any provider by name:
+
+1. **The owner's client**, when the server's settings have a client ID (and,
+   optionally, a secret: one of the owner's own secrets, which the form can
+   create from a pasted value). Always first.
+2. **A client PCP registered earlier**, kept in the server's managed secret.
+3. **Dynamic registration** (RFC 7591), when the server has a registration
+   endpoint, or publishes no metadata at all.
+4. **PCP's client metadata document**, when the server supports those and
+   PCP's public URL is https: the client ID is
+   `<public URL>/api/oauth/client-metadata`, which the authorization server
+   fetches. The MCP spec ranks this above registration; PCP does not,
+   because a PCP reachable only on a private network registers fine but
+   cannot be fetched.
+5. **Otherwise the owner is asked**: the server's status becomes
+   `client_required`, and its page says to create a client with the
+   provider using PCP's redirect URI. A registration endpoint that refuses
+   PCP ends the same way. The gateway's connect result says so too.
+
+Every flow returns to one address, `/api/oauth/callback`; the state
+parameter names the flow, and the flow the server. The owner registers that
+address once per provider, before the server exists in PCP, and one client
+can serve several servers. Clients PCP registered when the address was
+per-server (`/api/servers/<id>/oauth/callback`) keep using it.
+
+The owner's client is bound to the authorization server it is first used
+with (the SDK's SEP-2352 check, stamped in the managed secret), so a server
+that later names another authorization server never gets its secret.
+
+Some providers only issue a refresh token when the sign-in asks for it. The
+server's **extra sign-in parameters** (`oauth_authorize_params`) are added
+to the sign-in address; the names the flow sets itself (client, redirect,
+state, PKCE, scope, resource) are refused when saved and skipped when used.
+When a connection came without a refresh token, the server's page says the
+owner will have to reconnect, and when.
+
+Only the owner's browser registers or signs in. A tool refresh or a gateway
+call on a server that is not connected stops at "needs connecting" without
+contacting the registration endpoint.
+
 ## The gateway's tools
 
 An MCP client that connects to `/mcp` receives an `instructions` string
@@ -347,21 +394,29 @@ Every token has a level per tool (`api_token_tool_access`,
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
-them. `ResolvedToken` is unchanged: the gateway loads the levels by token id.
+them. The gateway loads the levels by token id; `ResolvedToken` carries the
+token's ways of asking (below).
 
 A call to an "ask" tool becomes a `permission_request` row
 (`lib/core/permissions.ts`, ported from plekje's confirmation flow): the
 arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
-and a day to answer. The owner is asked where the client can show it
-(`choosePermissionTier`):
+and a day to answer. The owner is asked the first way, in this order, that
+the client declares and the token allows (`choosePermissionTier`):
 
 | Tier   | When                                            | How                                                                    |
 | ------ | ----------------------------------------------- | ---------------------------------------------------------------------- |
 | `app`  | The request declares the MCP Apps extension     | PCP's panel, shown by `check_permission`                               |
 | `form` | It declares form elicitation                    | An `input_required` result with a one-choice form                      |
-| `url`  | It declares URL elicitation only                | An `input_required` result pointing at `/permissions/<id>`             |
+| `url`  | It declares URL elicitation (and form is off)   | An `input_required` result pointing at `/permissions/<id>`             |
 | `link` | Anything else, including every 2025-era request | Text with the link to `/permissions/<id>` for the assistant to pass on |
+
+A declaration is all the server has to go on, and some clients declare form
+elicitation they never show; the call then hangs until the client's timeout
+(Claude Code in remote and Cowork sessions, anthropics/claude-code#94806).
+So `api_token.permission_tiers` holds the tiers a token may use, all three
+by default, and the token page lets the owner turn `app`, `form` and `url`
+off. The link cannot be turned off: it is what is left.
 
 Whichever way the owner answers, `decidePermission()` claims the row
 (pending to running, one winner) and runs the call once. "Always allow" and
@@ -369,7 +424,7 @@ Whichever way the owner answers, `decidePermission()` claims the row
 bound to its row by vault, token and hash, so a client cannot replay an
 answer onto another call, and it never runs a call the owner already ran.
 `answer_permission` refuses requests that do not declare the MCP Apps
-extension: hosts that show panels hide it from the assistant, and on any
+extension, and tokens with the panel off: hosts that show panels hide it from the assistant, and on any
 other client the assistant could otherwise answer for the owner.
 
 PCP's panel (`ui://pcp/panel`, `lib/core/panel.ts`) is one self-contained
@@ -379,7 +434,9 @@ sandbox the panel and sign-in pages refuse to be framed. For a server that
 needs connecting, the panel's Connect button asks the host to open
 `/api/servers/<id>/oauth/start` in the owner's browser (`ui/open-link`),
 where their PCP session is, and polls `check_server` until the callback has
-landed.
+landed. A server that needs a client from the owner first (status
+`client_required`) gets the same panel, and text telling the assistant so:
+the start page then lands on the server's page, which says what to create.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.

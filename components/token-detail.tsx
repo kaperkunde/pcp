@@ -16,6 +16,7 @@ import { KeepMemoriesField } from "@/components/keep-memories-field"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { clearNewToken, peekNewToken } from "@/components/new-token-handoff"
 import { PermissionDecision } from "@/components/permission-decision"
+import { PermissionTiersField } from "@/components/permission-tiers-field"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
@@ -88,10 +89,10 @@ export function TokenDetail({
         />
       ) : null}
       {waiting.length > 0 ? <WaitingCard waiting={waiting} /> : null}
-      <ToolsCard tokenId={token.id} access={access} locked={locked} />
       {otherTokens.length > 0 && !locked ? (
         <CopyCard tokenId={token.id} otherTokens={otherTokens} />
       ) : null}
+      <ToolsCard tokenId={token.id} access={access} locked={locked} />
       <SettingsCard token={token} servers={servers} locked={locked} />
     </div>
   )
@@ -517,6 +518,10 @@ function SettingsCard({
             <KeepMemoriesField
               id="token-memories"
               defaultChecked={token.keepMemories}
+            />
+            <PermissionTiersField
+              idPrefix="token-tier"
+              checked={token.permissionTiers}
             />
             <FormError error={state.status === "error" ? state.error : null} />
             <FormNote message={state.status === "ok" ? state.message : null} />

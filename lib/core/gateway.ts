@@ -587,8 +587,8 @@ export function buildGatewayServer(
       annotations: { readOnlyHint: true, openWorldHint: false },
       _meta: PANEL_TOOL_META,
     },
-    logged("check_permission", () => ({}))(async (args: { id: string }) =>
-      checkPermission(scope, args.id),
+    logged("check_permission", () => ({}))(async (args: { id: string }, ctx) =>
+      checkPermission(scope, args.id, toolRequest(ctx)),
     ),
   )
 
@@ -612,12 +612,16 @@ export function buildGatewayServer(
       ) => {
         // Hosts that show panels hide this tool from the assistant. A client
         // that did not say it shows panels may list it to the assistant, so
-        // the answer has to come from the owner in PCP instead.
+        // the answer has to come from the owner in PCP instead; so it does
+        // when the owner turned the panel off for this token.
         if (
-          choosePermissionTier(toolRequest(ctx).clientCapabilities) !== "app"
+          choosePermissionTier(
+            toolRequest(ctx).clientCapabilities,
+            scope.permissionTiers,
+          ) !== "app"
         ) {
           return failure(
-            `This app did not say it shows PCP's panel, so the owner answers in PCP: ${permissionUrl(scope.publicUrl, args.id)}`,
+            `This app did not say it shows PCP's panel, or the panel is off for this token, so the owner answers in PCP: ${permissionUrl(scope.publicUrl, args.id)}`,
           )
         }
 
@@ -1136,6 +1140,11 @@ const inflight = new Map<string, Promise<SyncResult>>()
 /** When each server/tool name was last looked for and not found. */
 const missedAt = new Map<string, number>()
 
+/** A server only the owner can make reachable again (sign in, add a client). */
+function waitsForOwner(status: string): boolean {
+  return status === "auth_required" || status === "client_required"
+}
+
 /**
  * Whether the gateway should read a server's tools again: what it has (or
  * last tried) is older than maxAge. A server waiting for the owner to sign
@@ -1147,7 +1156,7 @@ export function rereadDue(
   maxAge: number,
   lastAttempt = 0,
 ): boolean {
-  if (!canRereadTools(server) || server.status === "auth_required") {
+  if (!canRereadTools(server) || waitsForOwner(server.status)) {
     return false
   }
 
@@ -1225,7 +1234,7 @@ async function rereadForMissingTool(
   server: GatewayServer,
   name: string,
 ): Promise<GatewayServer | null> {
-  if (!canRereadTools(server) || server.status === "auth_required") {
+  if (!canRereadTools(server) || waitsForOwner(server.status)) {
     return null
   }
 

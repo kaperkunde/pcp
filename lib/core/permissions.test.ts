@@ -127,8 +127,9 @@ describe("asking the owner", () => {
 
     expect(textOf(first)).toContain("Not done yet")
     expect(textOf(first)).toContain(`${PUBLIC_URL}/permissions/${id}`)
+    // No buttons where answer_permission would refuse them.
     expect((first as CallToolResult).structuredContent).toMatchObject({
-      kind: "permission",
+      kind: "done",
     })
 
     const row = await db().permissionRequest.findUniqueOrThrow({
@@ -165,6 +166,39 @@ describe("asking the owner", () => {
     expect(view?.lines).toContain("to: Ada")
     expect(view?.lines).toContain('Asked by the token "Claude"')
     expect(view?.warning).toMatch(/destructive/)
+  })
+
+  it("asks with the link when the token turned off what the client declares", async () => {
+    const { scope, server } = await setup()
+    const { calls, executor } = stub()
+    const limited = { ...scope, permissionTiers: ["url", "link"] as const }
+    const panelAndForm = {
+      clientCapabilities: {
+        elicitation: { form: {} },
+        extensions: { [UI_EXTENSION]: {} },
+      } as never,
+    }
+
+    const asked = await withPermission(
+      limited,
+      call(server, "add_numbers", { a: 1, b: 2 }),
+      panelAndForm,
+      { executor },
+    )
+
+    // No prompt that could stall the call: the text carries the link.
+    expect(isInputRequiredResult(asked)).toBe(false)
+    expect(textOf(asked)).toMatch(/Ask the owner to open .*\/permissions\//)
+    expect(calls).toHaveLength(0)
+
+    // check_permission shows no buttons either, only where to answer.
+    const checked = await checkPermission(
+      limited,
+      await onlyRequestId(),
+      panelAndForm,
+    )
+    expect(checked.structuredContent).toMatchObject({ kind: "done" })
+    expect(textOf(checked)).toMatch(/answer at .*\/permissions\//)
   })
 
   it("runs a form prompt's answer once, bound to the call it was asked for", async () => {

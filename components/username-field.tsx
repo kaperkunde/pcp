@@ -1,26 +1,30 @@
+import { Input } from "@/components/ui/input"
+import { Field } from "@/components/ui/label"
+
 /**
  * The account a password belongs to, for password managers. PCP has one
- * owner and no username, but Safari classifies a password form by the field
- * it takes for the username: without one it guesses (a token's name, a
- * recovery key), finds no saved password for that "account", and offers to
- * generate a new one instead of filling the saved one. Naming the account
- * (the owner's name, as at setup) in every form that asks for the password
- * keeps it to one saved password, filled wherever PCP asks for it.
+ * owner and no username, but Safari decides what a password field is from
+ * the form around it: without a username it guesses one (a token's name, a
+ * recovery key), takes the form for a sign-up, and offers to generate a new
+ * password instead of filling the saved one. A form that asks for the
+ * password therefore holds this field (the owner's name, saved as the
+ * username at setup) and the password, and nothing else a manager would
+ * fill.
  *
- * Hidden from view and from the tab order, not with `hidden` or
- * display:none: Safari skips fields that are not rendered.
+ * It is shown, read-only: Safari passes over fields that are not visible.
  */
-export function UsernameField({ value }: { value: string }) {
+export function UsernameField({ id, value }: { id: string; value: string }) {
   return (
-    <input
-      type="text"
-      name="username"
-      autoComplete="username"
-      value={value}
-      readOnly
-      tabIndex={-1}
-      aria-hidden
-      className="sr-only"
-    />
+    <Field label="Account" htmlFor={id}>
+      <Input
+        id={id}
+        name="username"
+        type="text"
+        autoComplete="username"
+        value={value}
+        readOnly
+        className="bg-muted/40 text-muted-foreground"
+      />
+    </Field>
   )
 }

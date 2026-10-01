@@ -1,22 +1,37 @@
-import { auth } from "@modelcontextprotocol/client"
+import {
+  auth,
+  discoverOAuthServerInfo,
+  RegistrationRejectedError,
+  type OAuthDiscoveryState,
+} from "@modelcontextprotocol/client"
 
 import type { VaultContext } from "./context"
 import { randomSecret } from "./crypto"
 import { db } from "./db"
 import { PcpError } from "./errors"
-import { getServer } from "./servers"
+import {
+  chooseRegistration,
+  clientMetadataUrl,
+  legacyRedirectUrl,
+  oauthRedirectUrl,
+} from "./oauth-client"
+import { getServer, setServerStatus } from "./servers"
 import {
   forgetOAuthTokens,
-  oauthCallbackUrl,
   PcpOAuthProvider,
   syncServerTools,
 } from "./upstream"
 
 /**
- * Connecting an OAuth-protected MCP server: the SDK runs discovery,
- * registers PCP as a client when the server allows it, and builds the
- * authorization URL; the browser goes there and comes back to the callback
+ * Connecting an OAuth-protected MCP server: PCP discovers the authorization
+ * server and decides how to identify itself to it (lib/core/oauth-client.ts);
+ * the SDK then registers PCP when that is the way, and builds the
+ * authorization URL. The browser goes there and comes back to the callback
  * route with a code, which is exchanged for tokens.
+ *
+ * A server that does not let PCP register itself waits for the owner
+ * (status client_required): they create a client with the provider, using
+ * PCP's redirect address, and give PCP its ID and secret.
  */
 
 export type StartResult = { redirectTo: string } | { connected: true }
@@ -33,16 +48,53 @@ export async function startOAuth(
   }
 
   const stateId = randomSecret(24)
-  const provider = new PcpOAuthProvider(ctx, server, {
-    redirectUrl: oauthCallbackUrl(publicUrl, server.id),
+  const probe = new PcpOAuthProvider(ctx, server, {
+    redirectUrl: oauthRedirectUrl(publicUrl),
     publicUrl,
-    stateId,
+  })
+  const storedClient = await probe.storedClient()
+  const discovery = server.oauthClientId ? undefined : await discover(server)
+  const method = chooseRegistration({
+    clientId: server.oauthClientId,
+    storedClient: storedClient !== undefined,
+    metadata: discovery?.authorizationServerMetadata,
+    metadataUrl: clientMetadataUrl(publicUrl),
   })
 
-  const result = await auth(provider, {
-    serverUrl: server.url,
-    scope: server.oauthScope ?? undefined,
+  if (method === "needs-client") {
+    throw await needsClient(server, publicUrl)
+  }
+
+  const provider = new PcpOAuthProvider(ctx, server, {
+    redirectUrl: redirectFor(storedClient, publicUrl, server.id),
+    publicUrl,
+    stateId,
+    ...(method === "metadata-document"
+      ? { clientMetadataUrl: clientMetadataUrl(publicUrl)! }
+      : {}),
   })
+
+  if (discovery) {
+    // The flow uses what was just discovered rather than asking again.
+    await provider.saveDiscoveryState(discovery)
+  }
+
+  let result: Awaited<ReturnType<typeof auth>>
+
+  try {
+    result = await auth(provider, {
+      serverUrl: server.url,
+      scope: server.oauthScope ?? undefined,
+    })
+  } catch (error) {
+    // A registration endpoint that refuses PCP (an allow-list of clients,
+    // or a guessed /register that is not there) leaves the same way out.
+    if (error instanceof RegistrationRejectedError) {
+      throw await needsClient(server, publicUrl, rejection(error))
+    }
+
+    throw error
+  }
 
   if (result === "REDIRECT") {
     if (!provider.authorizationUrl) {
@@ -57,25 +109,102 @@ export async function startOAuth(
   return { connected: true }
 }
 
-/** Handles the authorization server's redirect back to PCP. */
+async function discover(server: {
+  url: string
+}): Promise<OAuthDiscoveryState | undefined> {
+  try {
+    const info = await discoverOAuthServerInfo(server.url)
+
+    return {
+      authorizationServerUrl: String(info.authorizationServerUrl),
+      resourceMetadata: info.resourceMetadata,
+      authorizationServerMetadata: info.authorizationServerMetadata,
+    }
+  } catch {
+    // The SDK's own discovery runs next and reports what is wrong.
+    return undefined
+  }
+}
+
+/**
+ * The redirect address for this flow. A client PCP registered before there
+ * was one address for the whole install only knows the per-server one; the
+ * server would refuse any other.
+ */
+function redirectFor(
+  storedClient: object | undefined,
+  publicUrl: string,
+  serverId: string,
+): string {
+  const current = oauthRedirectUrl(publicUrl)
+  const legacy = legacyRedirectUrl(publicUrl, serverId)
+  const listed = (storedClient as { redirect_uris?: unknown } | undefined)
+    ?.redirect_uris
+  const registered = Array.isArray(listed) ? listed : []
+
+  return registered.includes(legacy) && !registered.includes(current)
+    ? legacy
+    : current
+}
+
+function rejection(error: RegistrationRejectedError): string {
+  try {
+    const body = JSON.parse(error.body) as {
+      error?: string
+      error_description?: string
+    }
+    const said = [body.error, body.error_description].filter(Boolean).join(": ")
+
+    if (said) {
+      return `it refused PCP's registration (${said.slice(0, 200)})`
+    }
+  } catch {
+    // Not JSON: say only the status.
+  }
+
+  return `it refused PCP's registration (HTTP ${error.status})`
+}
+
+/**
+ * Records that the server waits for the owner's client and says what to do.
+ * The message is the server page's status line and what an assistant hears.
+ */
+async function needsClient(
+  server: { id: string; name: string },
+  publicUrl: string,
+  why = "it does not let apps register themselves",
+): Promise<PcpError> {
+  const message = `${server.name} needs an OAuth client from you: ${why}. Create one in the provider's developer settings with ${oauthRedirectUrl(publicUrl)} as its redirect URI, then enter its client ID and secret under Settings below.`
+
+  await setServerStatus(server.id, "client_required", message)
+
+  return new PcpError("state", message)
+}
+
+/**
+ * Handles the authorization server's redirect back to PCP. The state
+ * parameter names the flow, and the flow names the server; `serverId` is
+ * given by the per-server callback address older registrations use.
+ */
 export async function finishOAuth(
   ctx: VaultContext,
-  serverId: string,
   params: URLSearchParams,
-  { publicUrl }: { publicUrl: string },
-): Promise<void> {
-  const server = await getServer(ctx, serverId)
+  { publicUrl, serverId }: { publicUrl: string; serverId?: string },
+): Promise<{ serverId: string }> {
   const stateId = params.get("state") ?? ""
   const state = stateId
     ? await db().oAuthState.findUnique({ where: { id: stateId } })
     : null
 
-  if (!state || state.serverId !== server.id) {
+  if (!state || (serverId !== undefined && state.serverId !== serverId)) {
     throw new PcpError(
       "state",
       "This sign-in link is not one PCP started. Try connecting again.",
     )
   }
+
+  // Another vault's flow reads as not found, like any other server of theirs.
+  const server = await getServer(ctx, state.serverId)
 
   if (state.expiresAt.getTime() < Date.now()) {
     await db().oAuthState.delete({ where: { id: stateId } })
@@ -127,8 +256,26 @@ export async function finishOAuth(
     await db().oAuthState.deleteMany({ where: { id: stateId } })
   }
 
-  const fresh = await getServer(ctx, serverId)
+  const fresh = await getServer(ctx, server.id)
   await syncServerTools(ctx, fresh, { publicUrl })
+
+  return { serverId: server.id }
+}
+
+/** Where the callback sends the owner's browser when it cannot finish. */
+export async function serverForState(
+  ctx: VaultContext,
+  params: URLSearchParams,
+): Promise<string | null> {
+  const stateId = params.get("state")
+  const state = stateId
+    ? await db().oAuthState.findUnique({
+        where: { id: stateId },
+        select: { serverId: true, server: { select: { vaultId: true } } },
+      })
+    : null
+
+  return state && state.server.vaultId === ctx.vaultId ? state.serverId : null
 }
 
 const LOOPBACK_HOSTS = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i

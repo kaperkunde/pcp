@@ -32,7 +32,7 @@ export function RecoverForm({ username }: { username: string }) {
               required
             />
           </Field>
-          <UsernameField value={username} />
+          <UsernameField id="recover-account" value={username} />
           <Field label="New password" htmlFor="recover-password">
             <Input
               id="recover-password"

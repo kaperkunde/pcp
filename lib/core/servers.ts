@@ -7,7 +7,8 @@ import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
-import { deleteManagedSecret } from "./secrets"
+import { normalizeAuthorizeParams } from "./oauth-client"
+import { createSecretNamedAfter, deleteManagedSecret } from "./secrets"
 
 /**
  * The registry of servers a vault can reach, and how each one is
@@ -20,7 +21,12 @@ export type AuthType = "none" | "header" | "oauth"
 
 export type ServerKind = "mcp" | "openapi"
 
-export type ServerStatus = "unknown" | "ok" | "auth_required" | "error"
+/**
+ * client_required: an OAuth server that does not let PCP register itself,
+ * and the owner has not given it a client yet.
+ */
+export type ServerStatus =
+  "unknown" | "ok" | "auth_required" | "client_required" | "error"
 
 export type ServerInput = {
   name: string
@@ -32,7 +38,10 @@ export type ServerInput = {
   authSecretId?: string | null
   oauthClientId?: string | null
   oauthClientSecretId?: string | null
+  /** A client secret typed into the form: stored as a new secret. */
+  oauthClientSecretValue?: string | null
   oauthScope?: string | null
+  oauthAuthorizeParams?: string | null
 }
 
 export type ServerSummary = {
@@ -175,6 +184,7 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
     oauthClientId: null as string | null,
     oauthClientSecretId: null as string | null,
     oauthScope: null as string | null,
+    oauthAuthorizeParams: null as string | null,
   }
 
   switch (input.authType) {
@@ -186,12 +196,33 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
     case "oauth": {
       data.oauthClientId = input.oauthClientId?.trim() || null
       data.oauthScope = input.oauthScope?.trim() || null
+      data.oauthAuthorizeParams = normalizeAuthorizeParams(
+        input.oauthAuthorizeParams,
+      )
 
-      if (input.oauthClientSecretId) {
+      if (data.oauthClientId && data.oauthClientId.length > 500) {
+        throw invalid("That client ID is too long.")
+      }
+
+      const typedSecret = input.oauthClientSecretValue?.trim()
+
+      if (typedSecret || input.oauthClientSecretId) {
         if (!data.oauthClientId) {
           throw invalid("A client secret needs a client ID to go with it.")
         }
+      }
 
+      if (typedSecret) {
+        // Kept as one of the owner's own secrets, so another server that
+        // signs in with the same client can pick it, and it can be rotated
+        // on the Secrets page.
+        const { id } = await createSecretNamedAfter(ctx, {
+          base: `${name} OAuth client secret`,
+          value: typedSecret,
+          description: `Client secret for the OAuth client ${data.oauthClientId}.`,
+        })
+        data.oauthClientSecretId = id
+      } else if (input.oauthClientSecretId) {
         await requireTextSecret(ctx, input.oauthClientSecretId)
         data.oauthClientSecretId = input.oauthClientSecretId
       }

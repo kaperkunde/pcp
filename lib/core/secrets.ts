@@ -144,6 +144,42 @@ export async function createSecret(
   return { id }
 }
 
+/**
+ * Creates one of the owner's secrets for a value they typed somewhere other
+ * than the Secrets page, under a name made from `base` that is free (a
+ * number is added when it is not).
+ */
+export async function createSecretNamedAfter(
+  ctx: VaultContext,
+  input: { base: string; value: string; description?: string },
+): Promise<{ id: string; name: string }> {
+  const base =
+    input.base
+      .replace(/[^\p{L}\p{N} ._\-/]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .replace(/^[^\p{L}\p{N}]+/u, "")
+      .trim()
+      .slice(0, MAX_NAME - 4) || "Secret"
+
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? base : `${base} ${n}`
+    const taken = await db().secret.findUnique({
+      where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+      select: { id: true },
+    })
+
+    if (!taken) {
+      const { id } = await createSecret(ctx, {
+        name,
+        value: input.value,
+        description: input.description,
+      })
+
+      return { id, name }
+    }
+  }
+}
+
 export async function updateSecret(
   ctx: VaultContext,
   id: string,

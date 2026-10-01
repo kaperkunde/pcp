@@ -7,9 +7,12 @@ import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
 import { db } from "@/lib/core/db"
 import { isPcpError } from "@/lib/core/errors"
+import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import { readCallPlan } from "@/lib/core/openapi/plan"
 import { listSecrets } from "@/lib/core/secrets"
 import { getServer, type AuthType, type ServerStatus } from "@/lib/core/servers"
+import { describeOAuthConnection } from "@/lib/core/upstream"
+import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Server" }
@@ -49,8 +52,15 @@ export default async function ServerPage({
     .filter((secret) => secret.kind === "text")
     .map(({ id, name }) => ({ id, name }))
 
+  const oauthConnection = await describeOAuthConnection(ctx, server).catch(
+    () => null,
+  )
+
+  // An error the status line already says (a server that needs a client
+  // from the owner) is shown once.
   const notice =
-    typeof query.error === "string"
+    typeof query.error === "string" &&
+    !(query.error && server.statusMessage.startsWith(query.error))
       ? { kind: "error" as const, message: query.error }
       : query.connected
         ? { kind: "ok" as const, message: `Connected to ${server.name}.` }
@@ -83,6 +93,7 @@ export default async function ServerPage({
           connected:
             server.authType !== "oauth" || server.oauthConnectedAt !== null,
           lastSyncedAt: server.lastSyncedAt,
+          oauthConnection,
         }}
         tools={server.tools.map((tool) => {
           const plan = readCallPlan(tool.operation)
@@ -136,8 +147,10 @@ export default async function ServerPage({
             oauthClientId: server.oauthClientId ?? "",
             oauthClientSecretId: server.oauthClientSecretId ?? "",
             oauthScope: server.oauthScope ?? "",
+            oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
           }}
           secrets={secrets}
+          redirectUrl={oauthRedirectUrl(await publicUrlFor(ctx))}
         />
       )}
     </>

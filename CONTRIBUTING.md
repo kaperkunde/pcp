@@ -70,6 +70,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/servers.ts`              | The MCP server registry and its auth configuration            |
 | `lib/core/upstream.ts`             | Connecting to upstreams; the OAuth client provider            |
 | `lib/core/oauth.ts`                | The authorization flow (start, callback, disconnect)          |
+| `lib/core/oauth-client.ts`         | How PCP gets a client ID; redirect URI; sign-in parameters    |
 | `lib/core/endpoints.ts`            | API endpoints: reading a schema, creating them, calling them  |
 | `lib/core/openapi/`                | OpenAPI → tools and call plans; building and sending requests |
 | `lib/core/endpoint-admin.ts`       | What an assistant may do to endpoints through the gateway     |
@@ -83,7 +84,8 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/server/`                      | Next-specific glue: session cookie, public URL, action state  |
 | `lib/actions/`                     | Server Actions the forms call                                 |
 | `app/mcp/route.ts`                 | The gateway endpoint                                          |
-| `app/api/servers/[id]/oauth/`      | OAuth start and callback routes                               |
+| `app/api/oauth/`                   | OAuth callback; PCP's client metadata document                |
+| `app/api/servers/[id]/oauth/`      | OAuth start; the per-server callback older clients use        |
 | `e2e/fixtures/upstream.ts`         | The fake MCP + OAuth server the e2e suite talks to            |
 | `app/manifest.ts`, `public/icons/` | The manifest and icon set; `assets/icon.png` is the master    |
 
