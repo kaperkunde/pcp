@@ -172,9 +172,9 @@ A token made with **Let an assistant with this token keep memories** gets a
 `memory` tool: notes that last between conversations and stay with you rather
 than with one app. It works like Claude's own memory tool (files under
 `/memories`: view, create, str_replace, insert, delete, rename, plus search),
-and PCP's instructions tell the assistant to look there before work that may
-depend on what you prefer or decided before, and to save what you would not
-want to say twice.
+and PCP's instructions, modelled on the protocol Claude's own memory tool
+uses, tell the assistant to look there before anything else and to save what
+you would not want to say twice as it goes.
 
 - `/memories/…` is the assistant's own: only the token that wrote a memory
   reads it, and writing one needs no answer from you.
@@ -188,7 +188,12 @@ want to say twice.
 Text with characters that do not show on screen is refused, so what you read
 is all there is. The **Memories** tab lists every memory with the token that
 wrote it; you can add shared ones yourself, and edit, move or delete any of
-them. Memories are encrypted like everything else.
+them. Tick **Read in every conversation** on one (up to 2,000 characters) and
+its text comes with PCP's instructions, so an assistant has it before it does
+anything rather than when it thinks to look; a shared one reaches every
+assistant, one an assistant keeps reaches only that one. If an assistant
+changes one it keeps, it is no longer read in every conversation until you
+tick it again. Memories are encrypted like everything else.
 
 ## How it is secured
 

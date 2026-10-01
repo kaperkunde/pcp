@@ -324,10 +324,21 @@ another one reads:
   as zero-width spaces, direction overrides and tag characters, private-use,
   blank fillers, variation selectors that can carry bytes) is refused, and a
   shared memory is at most 2,000 characters, so it can be read whole.
-- **The instructions name shared memories, by path only.** Every one of them
-  was agreed to by the owner; a token's own memories are its words alone and
-  are only read through the tool, which labels each memory with who wrote it
-  and says that it is a note, not an instruction.
+- **The instructions name shared memories by path, and carry the ones read
+  in every conversation whole.** The memory paragraph follows the protocol
+  Claude's own memory tool adds to the system prompt (view `/memories` before
+  anything else, save as you go, assume the conversation ends at any
+  moment). The owner can mark any memory to be read in every conversation
+  (`memory.always`, from the Memories page only): a shared one goes into
+  every keeping token's instructions, a private one into its own token's.
+  Its text is at most 2,000 characters, and the instructions carry at most
+  8,000 characters of them and name the rest. Every such text is one the
+  owner read: an assistant's change to, or move of, an always memory it keeps
+  clears the mark, a change to a shared one is a `memory_change` request
+  that says it is read in every conversation, and sharing a private one
+  clears it. Any other memory of a token's own is its words alone and is
+  only read through the tool, which labels each memory with who wrote it and
+  says that it is a note, not an instruction.
 - **Bounded.** 500 memories per vault, 10,000 characters each, 60 writes and
   share requests per token per ten minutes. Path and text are encrypted
   together, so uniqueness of paths is checked in code after decrypting the

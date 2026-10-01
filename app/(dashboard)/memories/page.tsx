@@ -15,7 +15,7 @@ export default async function MemoriesPage() {
     <>
       <PageHeader
         title="Memories"
-        description="Notes assistants keep for you between conversations. A memory is either kept by the assistant that wrote it, or shared with every assistant whose token can keep memories. An assistant only shares one, or changes a shared one, after you agree."
+        description="Notes assistants keep for you between conversations. A memory is either kept by the assistant that wrote it, or shared with every assistant whose token can keep memories. An assistant only shares one, or changes a shared one, after you agree. One you mark to be read in every conversation comes with PCP's instructions, so an assistant has it from the start."
       />
       <MemoriesManager memories={memories} />
     </>

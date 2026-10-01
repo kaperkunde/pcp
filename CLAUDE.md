@@ -66,8 +66,11 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   permission request that shows the owner the whole text, writes nothing
   until they answer, and writes only what they were shown. Shared text stays
   short enough to read whole and free of characters that do not show on
-  screen, and only shared memories' paths go into the instructions, never a
-  token's own memory.
+  screen. The instructions name shared memories by path, and carry the text
+  of the ones the owner marked to be read in every conversation (`always`):
+  only the owner sets that mark, and an assistant's change to an always
+  memory it keeps clears it, so every text in the instructions is one the
+  owner read. Never a token's own memory the owner did not mark.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
