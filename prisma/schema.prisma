@@ -379,6 +379,10 @@ model OpenApiSpec {
   /// SHA-256 of text, hex.
   hash      String
   fetchedAt DateTime  @map("fetched_at")
+  /// The PCP_VERSION that built the endpoint's tools from it. A boot under
+  /// another version rebuilds them from this copy (endpoints.ts
+  /// rebuildOutdatedEndpoints). Null for tools built before it was kept.
+  builtWith String?   @map("built_with")
 
   @@map("openapi_spec")
 }

@@ -4,6 +4,7 @@ import { createApiToken, resolveApiToken } from "./api-tokens"
 import { db } from "./db"
 import {
   createEndpoint,
+  rebuildOutdatedEndpoints,
   syncEndpointTools,
   updateEndpoint,
   type EndpointInput,
@@ -26,6 +27,7 @@ import {
 import { scratchDatabase } from "./test-db"
 import { callServerTool, syncServerTools } from "./upstream"
 import { setupVault } from "./vault"
+import { PCP_VERSION } from "./version"
 
 let cleanup: () => Promise<void>
 let api: TestApi
@@ -620,6 +622,112 @@ describe("refreshing and editing", () => {
         authType: "none",
       }),
     ).rejects.toThrow(/API endpoint/)
+  })
+})
+
+describe("tools an earlier PCP built", () => {
+  /** The pet store, with an answer to outline, as an older PCP left it. */
+  async function builtByEarlierPcp() {
+    const described = JSON.parse(schema(api.origin))
+    described.paths["/pets"].get.responses = {
+      "200": {
+        description: "The pets",
+        content: {
+          "application/json": {
+            schema: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: { name: { type: "string" } },
+              },
+            },
+          },
+        },
+      },
+    }
+    const { id } = await createEndpoint(
+      ctx,
+      input({ specText: JSON.stringify(described) }),
+    )
+
+    await db().mcpTool.updateMany({
+      where: { serverId: id },
+      data: { description: "stale", output: null },
+    })
+    await db().openApiSpec.update({
+      where: { serverId: id },
+      data: { builtWith: "0.0.1" },
+    })
+    await db().mcpServer.update({
+      where: { id },
+      data: {
+        status: "ok",
+        statusMessage:
+          "The schema at its URL has changed since it was approved.",
+      },
+    })
+
+    return id
+  }
+
+  it("are rebuilt from the kept copy once, and nothing else about the endpoint changes", async () => {
+    const id = await builtByEarlierPcp()
+    const before = await db().openApiSpec.findUniqueOrThrow({
+      where: { serverId: id },
+    })
+
+    expect(await rebuildOutdatedEndpoints()).toEqual({ rebuilt: 1, failed: [] })
+
+    const server = await getServer(ctx, id)
+    const listPets = server.tools.find((tool) => tool.name === "listPets")!
+    expect(listPets.description).not.toBe("stale")
+    expect(listPets.output).toMatch(/name/)
+    expect(server.status).toBe("ok")
+    expect(server.statusMessage).toBe(
+      "The schema at its URL has changed since it was approved.",
+    )
+
+    const after = await db().openApiSpec.findUniqueOrThrow({
+      where: { serverId: id },
+    })
+    expect(after.builtWith).toBe(PCP_VERSION)
+    expect(after.fetchedAt).toEqual(before.fetchedAt)
+
+    expect(await rebuildOutdatedEndpoints()).toEqual({ rebuilt: 0, failed: [] })
+  })
+
+  it("stay as they are when the kept schema no longer builds, to be tried again", async () => {
+    const id = await builtByEarlierPcp()
+    await db().openApiSpec.update({
+      where: { serverId: id },
+      data: {
+        patches: JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
+      },
+    })
+
+    const result = await rebuildOutdatedEndpoints()
+    expect(result.rebuilt).toBe(0)
+    expect(result.failed).toEqual([
+      { serverId: id, message: expect.any(String) },
+    ])
+
+    const server = await getServer(ctx, id)
+    expect(server.tools).toHaveLength(3)
+    expect(server.tools.every((tool) => tool.description === "stale")).toBe(
+      true,
+    )
+    expect(
+      (await db().openApiSpec.findUniqueOrThrow({ where: { serverId: id } }))
+        .builtWith,
+    ).toBe("0.0.1")
+  })
+
+  it("are marked with the version that built them", async () => {
+    const { id } = await createEndpoint(ctx, input())
+    expect(
+      (await db().openApiSpec.findUniqueOrThrow({ where: { serverId: id } }))
+        .builtWith,
+    ).toBe(PCP_VERSION)
   })
 })
 

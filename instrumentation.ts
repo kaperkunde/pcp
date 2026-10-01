@@ -20,5 +20,22 @@ export async function register() {
       pruneOAuthStates(),
       prunePermissionRequests(),
     ]).catch((error) => console.error("[db] cleanup failed", error))
+
+    // Not waited for: until it is done, endpoints answer with the tools
+    // they had.
+    const { rebuildOutdatedEndpoints } = await import("@/lib/core/endpoints")
+    void rebuildOutdatedEndpoints()
+      .then(({ rebuilt, failed }) => {
+        if (rebuilt > 0) {
+          console.log(`[endpoints] rebuilt the tools of ${rebuilt} endpoint(s)`)
+        }
+        for (const { serverId, message } of failed) {
+          console.error("[endpoints] could not rebuild tools", {
+            server: serverId,
+            message,
+          })
+        }
+      })
+      .catch((error) => console.error("[endpoints] rebuild failed", error))
   }
 }

@@ -41,6 +41,7 @@ import {
   slugify,
   uniqueSlug,
 } from "./servers"
+import { PCP_VERSION } from "./version"
 
 /**
  * API endpoints: HTTP APIs described by an OpenAPI schema. Each is a server
@@ -322,15 +323,9 @@ function schemaServerUrl(
   }
 }
 
-async function applySpec(
-  server: McpServer,
-  text: string,
-  patches: PatchOperation[],
-  generated: Generated,
-  fetchedFrom: string | null,
-): Promise<SyncResult> {
-  const toolCount = await storeTools(
-    server.id,
+function storeGenerated(serverId: string, generated: Generated) {
+  return storeTools(
+    serverId,
     generated.tools.map((tool) => ({
       name: tool.name,
       title: tool.title,
@@ -341,6 +336,16 @@ async function applySpec(
       output: tool.output,
     })),
   )
+}
+
+async function applySpec(
+  server: McpServer,
+  text: string,
+  patches: PatchOperation[],
+  generated: Generated,
+  fetchedFrom: string | null,
+): Promise<SyncResult> {
+  const toolCount = await storeGenerated(server.id, generated)
 
   const hash = specHash(text)
   const stored = await db().openApiSpec.findUnique({
@@ -353,13 +358,14 @@ async function applySpec(
   if (stored?.hash === hash) {
     await db().openApiSpec.update({
       where: { serverId: server.id },
-      data: { fetchedAt, patches: edits },
+      data: { fetchedAt, patches: edits, builtWith: PCP_VERSION },
     })
   } else {
+    const columns = { text, hash, fetchedAt, patches: edits }
     await db().openApiSpec.upsert({
       where: { serverId: server.id },
-      create: { serverId: server.id, text, hash, fetchedAt, patches: edits },
-      update: { text, hash, fetchedAt, patches: edits },
+      create: { serverId: server.id, ...columns, builtWith: PCP_VERSION },
+      update: { ...columns, builtWith: PCP_VERSION },
     })
   }
 
@@ -381,6 +387,66 @@ async function applySpec(
   await setServerStatus(server.id, "ok", message, { lastSyncedAt: fetchedAt })
 
   return { status: "ok", message, toolCount }
+}
+
+/**
+ * Rebuilds the tools of every endpoint another PCP version built, from the
+ * copy and edits PCP keeps: the schema the owner approved, read by today's
+ * generator. Run at boot. Without it an endpoint keeps what the PCP that
+ * added it made of its schema (no outline of its answers, a header PCP now
+ * sends itself still asked for) until its schema is read again, which for
+ * an uploaded schema, or a URL whose document has since changed, is never.
+ *
+ * Nothing is downloaded and nothing about the endpoint changes but its
+ * tools: not when it was read, not its status or what that says (that the
+ * document at its URL changed, say, or that it waits to be signed in to).
+ * An endpoint whose schema no longer builds keeps the tools it has and is
+ * tried again at the next boot.
+ */
+export async function rebuildOutdatedEndpoints(): Promise<{
+  rebuilt: number
+  failed: Array<{ serverId: string; message: string }>
+}> {
+  const outdated = await db().openApiSpec.findMany({
+    where: { OR: [{ builtWith: null }, { builtWith: { not: PCP_VERSION } }] },
+    select: { serverId: true },
+  })
+  const failed: Array<{ serverId: string; message: string }> = []
+  let rebuilt = 0
+
+  // One at a time: each holds a whole schema in memory.
+  for (const { serverId } of outdated) {
+    try {
+      const server = await db().mcpServer.findUnique({
+        where: { id: serverId },
+      })
+      const spec = await storedSpec(serverId)
+
+      if (!server || server.kind !== "openapi" || !spec) {
+        continue
+      }
+
+      const generated = generateEndpointTools(spec.text, {
+        readOnly: server.readOnly,
+        authHeaderName: server.authHeaderName,
+        patches: spec.patches,
+      })
+
+      await storeGenerated(serverId, generated)
+      await db().openApiSpec.update({
+        where: { serverId },
+        data: { builtWith: PCP_VERSION },
+      })
+      rebuilt += 1
+    } catch (error) {
+      failed.push({
+        serverId,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  return { rebuilt, failed }
 }
 
 /** The fingerprint kept with a schema's text, to tell a changed one. */
