@@ -208,7 +208,20 @@ applies the edits, refuses one that cannot be used, and shows the owner the
 address, where the schema came from, how many edits it has, the tool count
 and operations, whether the tools can change things, and the secret that
 would be sent. Nothing exists until they agree; then `executeRegister` creates the
-endpoint, on, and adds it to the token's scope. An assistant can write a
+endpoint, on, and adds it to the token's scope.
+
+A secret is named, never sent. A name PCP does not hold yet (an MCP server's
+or an API's) makes a request the owner can only agree to on PCP's own page,
+where they type the value in: the panel and the client's prompt run inside
+the assistant's app, so they are not offered for it (the client opens the
+page, or the assistant hands over the link), and an answer from either is
+refused. The value is saved as a new secret by the proposed name (a number is
+added when that is taken by then) just before the server is made, and removed
+again if making it fails; a secret of that name the owner added in the
+meantime is used when they leave the field empty. The assistant is told the
+name it was saved as, never the value. The owner's own forms work the same
+way: the secret picker has "a new secret, entered here", saved with the
+server or endpoint once everything else on the form has been checked. An assistant can write a
 document from an API's documentation and register it in one call. What it
 registers has `public_only` set (below) and cannot carry a secret unless the
 owner approved that secret going to the address they were shown.
@@ -324,10 +337,21 @@ another one reads:
   as zero-width spaces, direction overrides and tag characters, private-use,
   blank fillers, variation selectors that can carry bytes) is refused, and a
   shared memory is at most 2,000 characters, so it can be read whole.
-- **The instructions name shared memories, by path only.** Every one of them
-  was agreed to by the owner; a token's own memories are its words alone and
-  are only read through the tool, which labels each memory with who wrote it
-  and says that it is a note, not an instruction.
+- **The instructions name shared memories by path, and carry the ones read
+  in every conversation whole.** The memory paragraph follows the protocol
+  Claude's own memory tool adds to the system prompt (view `/memories` before
+  anything else, save as you go, assume the conversation ends at any
+  moment). The owner can mark any memory to be read in every conversation
+  (`memory.always`, from the Memories page only): a shared one goes into
+  every keeping token's instructions, a private one into its own token's.
+  Its text is at most 2,000 characters, and the instructions carry at most
+  8,000 characters of them and name the rest. Every such text is one the
+  owner read: an assistant's change to, or move of, an always memory it keeps
+  clears the mark, a change to a shared one is a `memory_change` request
+  that says it is read in every conversation, and sharing a private one
+  clears it. Any other memory of a token's own is its words alone and is
+  only read through the tool, which labels each memory with who wrote it and
+  says that it is a note, not an instruction.
 - **Bounded.** 500 memories per vault, 10,000 characters each, 60 writes and
   share requests per token per ten minutes. Path and text are encrypted
   together, so uniqueness of paths is checked in code after decrypting the

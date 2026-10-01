@@ -1,6 +1,7 @@
 import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
+  NEW_SECRET,
   SECRET_PLACEHOLDER,
 } from "./constants"
 import type { VaultContext } from "./context"
@@ -8,7 +9,14 @@ import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { normalizeAuthorizeParams } from "./oauth-client"
-import { createSecretNamedAfter, deleteManagedSecret } from "./secrets"
+import {
+  checkNewSecret,
+  createSecret,
+  createSecretNamedAfter,
+  deleteManagedSecret,
+  deleteSecret,
+  validateSecretValue,
+} from "./secrets"
 
 /**
  * The registry of servers a vault can reach, and how each one is
@@ -35,7 +43,12 @@ export type ServerInput = {
   authType: AuthType
   authHeaderName?: string | null
   authValueTemplate?: string | null
+  /** A secret's id, or NEW_SECRET for one typed into the form. */
   authSecretId?: string | null
+  /** With NEW_SECRET: what to call it; empty names it after the server. */
+  authSecretName?: string | null
+  /** With NEW_SECRET: its value, saved as a new secret. */
+  authSecretValue?: string | null
   oauthClientId?: string | null
   oauthClientSecretId?: string | null
   /** A client secret typed into the form: stored as a new secret. */
@@ -132,23 +145,46 @@ export function normalizeNameAndDescription(input: {
   return { name, description: (input.description ?? "").trim().slice(0, 1000) }
 }
 
-/** Header authentication: which secret, in which header, in what form. */
+/** A secret typed into a form, saved when the row that sends it is. */
+export type NewSecret = {
+  /** The name given; null names it after what sends it. */
+  name: string | null
+  /** What a name made up for it starts with. */
+  base: string
+  value: string
+  description: string
+}
+
+export type HeaderAuth = {
+  /** Null while newSecret is still to be saved. */
+  authSecretId: string | null
+  authHeaderName: string
+  authValueTemplate: string
+  newSecret: NewSecret | null
+}
+
+/**
+ * Header authentication: which secret, in which header, in what form. A
+ * secret typed into the form is checked here with everything else and saved
+ * by saveNewSecret just before the row that sends it, so a form refused for
+ * another reason leaves no secret behind.
+ */
 export async function normalizeHeaderAuth(
   ctx: VaultContext,
   input: Pick<
     ServerInput,
-    "authSecretId" | "authHeaderName" | "authValueTemplate"
+    | "authSecretId"
+    | "authHeaderName"
+    | "authValueTemplate"
+    | "authSecretName"
+    | "authSecretValue"
   >,
-): Promise<{
-  authSecretId: string
-  authHeaderName: string
-  authValueTemplate: string
-}> {
+  sender: { name: string },
+): Promise<HeaderAuth> {
   if (!input.authSecretId) {
-    throw invalid("Choose the secret to send.")
+    throw invalid("Choose the secret to send, or enter a new one.")
   }
 
-  await requireTextSecret(ctx, input.authSecretId)
   const authHeaderName = validateHeaderName(
     input.authHeaderName?.trim() || DEFAULT_HEADER_NAME,
   )
@@ -162,10 +198,79 @@ export async function normalizeHeaderAuth(
     throw invalid("The header value cannot span lines.")
   }
 
+  let newSecret: NewSecret | null = null
+
+  if (input.authSecretId === NEW_SECRET) {
+    const value = input.authSecretValue ?? ""
+    const name = input.authSecretName?.trim() || null
+    const description = `Sent to ${sender.name} in the ${authHeaderName} header.`
+
+    if (name) {
+      await checkNewSecret(ctx, { name, value })
+    } else {
+      const problem = validateSecretValue(value)
+
+      if (problem) {
+        throw invalid(problem)
+      }
+    }
+
+    newSecret = { name, base: `${sender.name} key`, value, description }
+  } else {
+    await requireTextSecret(ctx, input.authSecretId)
+  }
+
   return {
-    authSecretId: input.authSecretId,
+    authSecretId: newSecret ? null : input.authSecretId,
     authHeaderName,
     authValueTemplate: template,
+    newSecret,
+  }
+}
+
+/** Saves a secret typed into a form; its id, and the name it got. */
+export async function saveNewSecret(
+  ctx: VaultContext,
+  secret: NewSecret,
+): Promise<{ id: string; name: string }> {
+  if (secret.name) {
+    const { id } = await createSecret(ctx, {
+      name: secret.name,
+      value: secret.value,
+      description: secret.description,
+    })
+
+    return { id, name: secret.name }
+  }
+
+  return createSecretNamedAfter(ctx, {
+    base: secret.base,
+    value: secret.value,
+    description: secret.description,
+  })
+}
+
+/**
+ * Writes a row that sends a secret typed into the form: the secret is saved
+ * first, and removed again when the write fails, so nothing is left that the
+ * owner did not end up with.
+ */
+export async function withNewSecret<T>(
+  ctx: VaultContext,
+  secret: NewSecret | null,
+  write: (secretId: string | null) => Promise<T>,
+): Promise<T> {
+  if (!secret) {
+    return write(null)
+  }
+
+  const { id } = await saveNewSecret(ctx, secret)
+
+  try {
+    return await write(id)
+  } catch (error) {
+    await deleteSecret(ctx, id).catch(() => {})
+    throw error
   }
 }
 
@@ -186,13 +291,19 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
     oauthScope: null as string | null,
     oauthAuthorizeParams: null as string | null,
   }
+  let newSecret: NewSecret | null = null
 
   switch (input.authType) {
     case "none":
       break
-    case "header":
-      Object.assign(data, await normalizeHeaderAuth(ctx, input))
+    case "header": {
+      const auth = await normalizeHeaderAuth(ctx, input, { name })
+      data.authSecretId = auth.authSecretId
+      data.authHeaderName = auth.authHeaderName
+      data.authValueTemplate = auth.authValueTemplate
+      newSecret = auth.newSecret
       break
+    }
     case "oauth": {
       data.oauthClientId = input.oauthClientId?.trim() || null
       data.oauthScope = input.oauthScope?.trim() || null
@@ -232,7 +343,7 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
       throw invalid("Unknown authentication type.")
   }
 
-  return data
+  return { data, newSecret }
 }
 
 async function requireTextSecret(ctx: VaultContext, id: string) {
@@ -344,17 +455,20 @@ export async function createServer(
   ctx: VaultContext,
   input: ServerInput,
 ): Promise<{ id: string }> {
-  const data = await normalizeInput(ctx, input)
+  const { data, newSecret } = await normalizeInput(ctx, input)
   const id = newId()
 
-  await db().mcpServer.create({
-    data: {
-      id,
-      vaultId: ctx.vaultId,
-      slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
-      ...data,
-    },
-  })
+  await withNewSecret(ctx, newSecret, async (secretId) =>
+    db().mcpServer.create({
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
+        ...data,
+        authSecretId: secretId ?? data.authSecretId,
+      },
+    }),
+  )
 
   return { id }
 }
@@ -389,7 +503,7 @@ export async function updateServer(
     )
   }
 
-  const data = await normalizeInput(ctx, input)
+  const { data, newSecret } = await normalizeInput(ctx, input)
 
   // Switching away from OAuth, or to a different client, drops the tokens
   // PCP obtained: they belong to the old configuration.
@@ -399,14 +513,17 @@ export async function updateServer(
       data.url !== existing.url ||
       data.oauthClientId !== existing.oauthClientId)
 
-  await db().mcpServer.update({
-    where: { id },
-    data: {
-      ...data,
-      ...(dropTokens
-        ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
-        : {}),
-    },
+  await withNewSecret(ctx, newSecret, async (secretId) => {
+    data.authSecretId = secretId ?? data.authSecretId
+    await db().mcpServer.update({
+      where: { id },
+      data: {
+        ...data,
+        ...(dropTokens
+          ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
+          : {}),
+      },
+    })
   })
 
   if (dropTokens && existing.oauthTokensId) {
