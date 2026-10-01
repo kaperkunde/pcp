@@ -51,7 +51,9 @@ test("the redirect URI is shown before the server exists", async ({ page }) => {
 test("connecting says the server needs a client from you", async ({ page }) => {
   await connect(page, "Connect")
 
-  await expect(page).toHaveURL(new RegExp(`/servers/${serverId}\\?error=`))
+  // Said in the status line, not in the address, where it would outlast
+  // the status.
+  await expect(page).toHaveURL(new RegExp(`/servers/${serverId}$`))
   await expect(
     page.getByText("Needs an OAuth client", { exact: true }),
   ).toBeVisible()
@@ -69,8 +71,9 @@ test("with the owner's client it connects, and says it cannot renew", async ({
   // What the owner does in the provider's console.
   upstream.closedClient.redirectUris.add(redirectUri)
 
-  // Asked for where the status says so, not in Settings.
-  await page.goto(`/servers/${serverId}`)
+  // Asked for where the status says so, not in Settings, on the page
+  // Connect left you on.
+  await connect(page, "Connect")
   await page
     .getByLabel("Client ID", { exact: true })
     .fill(upstream.closedClient.id)
@@ -83,6 +86,8 @@ test("with the owner's client it connects, and says it cannot renew", async ({
   ).toBeVisible()
   await expect(page.getByText("Needs connecting")).toBeVisible()
   await expect(page.getByRole("button", { name: "Save client" })).toHaveCount(0)
+  // Regression: the message from the failed Connect outlived the save.
+  await expect(page.getByText(/needs an OAuth client from you/)).toHaveCount(0)
   await expect(settings(page).getByLabel("Client ID (optional)")).toHaveValue(
     upstream.closedClient.id,
   )
