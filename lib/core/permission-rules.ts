@@ -10,7 +10,7 @@ import { invalid } from "./errors"
 /**
  * The decisions behind asking the owner before an assistant's call runs
  * (lib/core/permissions.ts), kept free of the database and the network so
- * they can be tested on their own. Ported from plekje's confirm-rules.
+ * they can be tested on their own.
  */
 
 /**

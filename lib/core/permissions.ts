@@ -84,9 +84,8 @@ import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
  * and dropped: Claude's apps stalled on prompts, and showed a panel they
  * rebuilt with its first question again, unable to ask PCP for the answer.
  *
- * Ported from plekje's confirmation flow (lib/mcp/confirm.ts there). The
- * difference: an answer can also settle the tool for the calls after it
- * ("Always allow", "Block").
+ * An answer can also settle the tool for the calls after it ("Always
+ * allow", "Block").
  */
 
 /** What the gateway knows about the request it is serving. */

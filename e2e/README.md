@@ -84,6 +84,10 @@ since signing in is limited per address too.
   provider's console; it wants the client secret at `/closed/token` and
   issues a refresh token only when the sign-in carried `access_type=offline`.
   `closedSignIns` records each sign-in's query.
+- `/closed-api/*` — a small API behind that same authorization server, with
+  its OpenAPI document (declaring the `oauth2` sign-in) at
+  `/closed-api/openapi.json`, for API endpoints that sign in with OAuth.
+  `closedApiRequests` records what reached it.
 
 It records every tool call in `calls`, which is how the tests assert what
 reached the upstream. A name added to `lateTools` becomes a tool on both MCP

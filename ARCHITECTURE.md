@@ -2,8 +2,8 @@
 
 PCP is a Next.js application with a framework-free core. This document covers
 the three things that shape it: how data is encrypted, how a request finds
-the vault it works on, and how a multi-tenant host could be built on the same
-code without changing the single-user product.
+the vault it works on, and what keeps the core usable under a different host
+without changing the single-user product.
 
 ## Layers
 
@@ -94,10 +94,10 @@ resolved token, serves the request and discards it. Upstream connections are
 opened per call. Nothing in the endpoint knows how many vaults exist, which
 is what makes it serve many of them at once.
 
-## Building a multi-tenant host on it
+## Running the core under another host
 
-The plan for a SaaS that serves many people from one endpoint, without
-exposing any of it in this repository:
+Nothing in the core assumes one vault, so a host that serves many people
+from one endpoint could be built on it. What that would take:
 
 1. **Embed `lib/core`.** It has no Next.js imports (ESLint rejects them), one
    database module to swap and an explicit `VaultContext`. Extracting it to a
@@ -120,9 +120,8 @@ exposing any of it in this repository:
    step instead of at boot (`instrumentation.ts` → `applyMigrations()` is
    for a single instance). Rate limits (`lib/core/rate-limit.ts`) are
    per-process and would move to a shared store.
-5. **Never expose the seams here.** No admin API, no "create vault"
-   endpoint, no tenant switch in the UI: the public product stays
-   single-user.
+5. **None of it lives in this repository.** No admin API, no "create vault"
+   endpoint, no tenant switch in the UI: PCP stays single-user.
 
 ## API endpoints
 
@@ -162,6 +161,12 @@ unchanged. Two functions in `lib/core/upstream.ts` branch on the kind:
 - The schema text is kept in `openapi_spec`, with the edits, apart from the
   server row so neither the server list nor the gateway loads it. An uploaded
   schema is regenerated from that copy when the owner changes a setting.
+  `openapi_spec.built_with` records the PCP version that built the tools; a
+  boot under another version rebuilds them from the stored copy
+  (`endpoints.ts: rebuildOutdatedEndpoints`, in the background), so an
+  endpoint gets what a newer generator makes of its schema without being
+  downloaded again. One that no longer builds keeps its tools and is tried at
+  the next boot.
 
 **Making a call** (`call.ts`, `request.ts`): `buildRequest` turns the
 assistant's arguments into a request following the plan. Arguments the plan
@@ -215,8 +220,8 @@ through `openapi/transport.ts` under the endpoint's address rule, like its
 calls. A call carries `Authorization: Bearer <token>`; a token that has run
 out is renewed first with the refresh token, and a 401 gets one renewed token
 and one more try (a refused request did nothing). A renewal the provider
-refuses leaves the endpoint needing connecting, which the gateway turns into
-the connect panel. The token is redacted from what the API answers, like a
+refuses leaves the endpoint needing connecting, which the gateway answers
+with a link to connect it. The token is redacted from what the API answers, like a
 secret, and the `Authorization` header is never one of an operation's
 arguments.
 
@@ -228,8 +233,8 @@ link-local and metadata ranges, and connect to the address it checked.
 
 ## Registering and managing endpoints through the gateway
 
-**Registering** is `register_server`, the tool main already had for MCP
-servers, with an OpenAPI document as text in `openapi_schema` or by its
+**Registering** is `register_server`, the same tool that adds MCP servers,
+with an OpenAPI document as text in `openapi_schema` or by its
 address in `openapi_url` (plus `spec_patches` to edit it, `url` for the base
 URL, `read_only`, and a secret named by NAME, or `auth_type` oauth for a
 document that declares a sign-in, with the owner's `client_id`). It is an assistant's request,
@@ -531,7 +536,7 @@ instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
 them. The gateway loads the levels by token id.
 
 A call to an "ask" tool becomes a `permission_request` row
-(`lib/core/permissions.ts`, ported from plekje's confirmation flow): the
+(`lib/core/permissions.ts`): the
 arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
 and a day to answer. The result is text for the assistant: what was asked,
@@ -583,9 +588,9 @@ says what was saved, and how it differs from what was proposed.
 otherwise an assistant could point a stored secret at an address it chose.
 Once the owner agrees, PCP adds the server, adds it to the asking token when
 that token is scoped to chosen servers, and reads its tools, or hands back
-the link to connect it for OAuth. With `openapi_schema` the request is an API
-endpoint instead: the gateway has `endpoint-admin.ts: prepareRegistration`
-read the text before asking (so the owner is only asked about something that
+the link to connect it for OAuth. With `openapi_schema` or `openapi_url` the
+request is an API endpoint instead: the gateway has
+`endpoint-admin.ts: prepareRegistration` read the document before asking (so the owner is only asked about something that
 works, and sees its address, tool count and operations), and
 `executeRegister` creates it from the same text with
 `createApprovedEndpoint`: on, public addresses only. Requests are deleted at

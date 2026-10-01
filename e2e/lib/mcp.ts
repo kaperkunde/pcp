@@ -120,7 +120,7 @@ export async function initialize(
  * One tools/call on the stateless 2026-07-28 revision: the client's
  * capabilities travel with the request. PCP reads none of them to decide how
  * to ask the owner (always a link, lib/core/permissions.ts); the spec sends
- * them to show that. Ported from plekje's e2e helpers.
+ * them to show that.
  */
 export async function mcpToolCall2026(
   baseURL: string,
