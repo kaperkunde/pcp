@@ -33,6 +33,7 @@ model Vault {
   settings Setting[]
 
   permissionRequests PermissionRequest[]
+  memories           Memory[]
 
   @@map("vault")
 }
@@ -98,6 +99,10 @@ model ApiToken {
   /// register_server, which every token may ask for and the owner decides.
   /// Off unless the owner turns it on.
   manageEndpoints Boolean   @default(false) @map("manage_endpoints")
+  /// Whether the assistant may keep memories (the gateway's memory tool):
+  /// its own, and the shared ones the owner agreed to. Sharing one always
+  /// asks the owner. Off unless the owner turns it on.
+  keepMemories    Boolean   @default(false) @map("keep_memories")
   /// How PCP may ask the owner about this token's calls, comma-separated in
   /// any order: app | form | url. The link in the result is always on, so
   /// an empty value means the link alone.
@@ -110,6 +115,7 @@ model ApiToken {
   servers            ApiTokenServer[]
   toolAccess         ApiTokenToolAccess[]
   permissionRequests PermissionRequest[]
+  memories           Memory[]
 
   @@index([vaultId])
   @@map("api_token")
@@ -152,11 +158,12 @@ model PermissionRequest {
   vault            Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   tokenId          String     @map("token_id")
   token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-  /// call | register
+  /// call | register | memory_share | memory_change
   kind             String
   serverId         String?    @map("server_id")
   server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  /// The upstream tool for a call; "register_server" for a new server.
+  /// The upstream tool for a call; "register_server" for a new server;
+  /// "memory" for a memory to share or a shared one to change.
   toolName         String     @map("tool_name")
   /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
   /// the vault's data key with "permission_request:<id>" as associated data.
@@ -179,6 +186,33 @@ model PermissionRequest {
   @@index([vaultId, status])
   @@index([expiresAt])
   @@map("permission_request")
+}
+
+/// A note an assistant keeps for the owner through the gateway's memory
+/// tool (lib/core/memories.ts), or one the owner wrote. `private` ones are
+/// read only by the token that wrote them; `shared` ones by every token that
+/// may keep memories, and an assistant only shares one once the owner agrees.
+model Memory {
+  id         String    @id
+  vaultId    String    @map("vault_id")
+  vault      Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// The token that wrote it. Null for the owner's own, and once the token
+  /// is deleted: the memory stays, it is the owner's.
+  tokenId    String?   @map("token_id")
+  token      ApiToken? @relation(fields: [tokenId], references: [id], onDelete: SetNull)
+  /// assistant | owner
+  author     String    @default("assistant")
+  /// private | shared
+  visibility String    @default("private")
+  /// The path and the text as JSON, AES-256-GCM under the vault's data key
+  /// with "memory:<id>" as associated data.
+  ciphertext Bytes
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@index([vaultId, visibility])
+  @@index([tokenId])
+  @@map("memory")
 }
 
 /// One encrypted value. `text` secrets are entered by the owner; `oauth`

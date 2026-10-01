@@ -30,18 +30,35 @@ export const TOOL_ACCESS_LABELS: Record<ToolAccess, string> = {
   blocked: "Blocked",
 }
 
-/** How the owner can answer an assistant's request. */
+/**
+ * How the owner can answer an assistant's request. Each kind offers some of
+ * them (lib/core/permission-rules.ts); "discard" is only for a memory an
+ * assistant wants to share.
+ */
 export const PERMISSION_DECISIONS = [
   "allow_once",
   "always",
   "block",
   "decline",
+  "discard",
 ] as const
 
 export type PermissionDecision = (typeof PERMISSION_DECISIONS)[number]
 
-export type PermissionKind = "call" | "register"
+export type PermissionKind =
+  "call" | "register" | "memory_share" | "memory_change"
 
+/** The longest memory, in characters. */
+export const MAX_MEMORY_CHARS = 10_000
+
+/**
+ * The longest shared memory: short enough that the owner reads all of it
+ * when an assistant asks to share it.
+ */
+export const MAX_SHARED_MEMORY_CHARS = 2_000
+
+/** The longest memory path, without the leading /memories/. */
+export const MAX_MEMORY_PATH = 200
 /**
  * The ways PCP can ask the owner about a call, in the order it tries them
  * (see choosePermissionTier). The link always works, so a token can turn

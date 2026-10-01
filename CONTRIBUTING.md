@@ -104,6 +104,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/endpoints.ts`            | API endpoints: reading a schema, creating them, calling them  |
 | `lib/core/openapi/`                | OpenAPI → tools and call plans; building and sending requests |
 | `lib/core/endpoint-admin.ts`       | What an assistant may do to endpoints through the gateway     |
+| `lib/core/memories.ts`             | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/catalogue.ts`            | Writing a server's tool list into the catalogue               |
 | `lib/core/search.ts`, `gateway.ts` | Ranking tools; the MCP server the gateway serves              |
 | `lib/core/tool-access.ts`          | Per-token tool levels: allowed, ask, blocked; copying them    |

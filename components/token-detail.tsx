@@ -12,6 +12,7 @@ import {
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
+import { KeepMemoriesField } from "@/components/keep-memories-field"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { clearNewToken, peekNewToken } from "@/components/new-token-handoff"
 import { PermissionDecision } from "@/components/permission-decision"
@@ -149,7 +150,7 @@ function WaitingCard({ waiting }: { waiting: WaitingRequest[] }) {
           {waiting.map((item) => (
             <li key={item.id} className="flex flex-col gap-2 py-3">
               <span className="font-medium break-words">{item.title}</span>
-              <ul className="flex list-disc flex-col gap-1 pl-5 break-words text-muted-foreground">
+              <ul className="flex list-disc flex-col gap-1 pl-5 break-words whitespace-pre-wrap text-muted-foreground">
                 {item.lines.map((line, index) => (
                   <li key={index}>{line}</li>
                 ))}
@@ -513,6 +514,10 @@ function SettingsCard({
             <ManageEndpointsField
               id="token-manage"
               defaultChecked={token.manageEndpoints}
+            />
+            <KeepMemoriesField
+              id="token-memories"
+              defaultChecked={token.keepMemories}
             />
             <PermissionTiersField
               idPrefix="token-tier"

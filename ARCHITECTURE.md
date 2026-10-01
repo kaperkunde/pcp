@@ -37,6 +37,7 @@ associated data (a ciphertext cannot be moved to another row):
   `oauth`, owned by the server that uses it); an OAuth client secret the
   owner gives PCP is one of their own `text` secrets,
 - the PKCE verifier of an authorization in flight (`oauth_state`).
+- a memory's path and text (`memory.ciphertext`, as one JSON value).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -262,6 +263,47 @@ send data it holds to any public URL, as an operation's arguments, once the
 owner has agreed to the endpoint and allowed the tool. Both are the owner's to
 give, and tools ask first by default.
 
+## Memories
+
+A token made with "keep memories" (`api_token.keep_memories`, off unless the
+owner turns it on) gets one more tool, `memory`, with the commands of Claude's
+memory tool (view, create, str_replace, insert, delete, rename, over files
+under `/memories`) plus search, and a paragraph in the instructions saying
+when to use it. The rules are in `lib/core/memories.ts`. Like endpoint
+management, they are drawn around the fact that what one assistant writes
+another one reads:
+
+- **Private memories** (`/memories/…`) belong to the token that wrote them
+  and are read by it alone. Writing one needs nobody's say: it is that
+  assistant's own notebook, no more trusted than the client's built-in
+  memory.
+- **Shared memories** (`/memories/shared/…`) are read by every token that
+  keeps memories. An assistant can only ask: creating one, sharing one of its
+  own, and changing, renaming or deleting a shared one are permission
+  requests (`memory_share`, `memory_change`) through the same flow as a tool
+  call, showing the owner the path and the whole text with a warning about
+  stored instructions. The ask writes nothing, so the client's retry with the
+  owner's answer finds the same request. A share is answered **Share it**,
+  **Keep it for this assistant only** (saved privately; also what declining
+  the client's own prompt means), or **Discard it**. On a yes,
+  `decideMemoryAsk` re-reads the memory and writes only if it is still what
+  the owner was shown. The owner writes, moves and deletes memories freely on
+  the Memories page.
+- **What the owner reads is all there is.** Text with characters that do not
+  show on screen (controls other than tab and newline, format characters such
+  as zero-width spaces, direction overrides and tag characters, private-use,
+  blank fillers, variation selectors that can carry bytes) is refused, and a
+  shared memory is at most 2,000 characters, so it can be read whole.
+- **The instructions name shared memories, by path only.** Every one of them
+  was agreed to by the owner; a token's own memories are its words alone and
+  are only read through the tool, which labels each memory with who wrote it
+  and says that it is a note, not an instruction.
+- **Bounded.** 500 memories per vault, 10,000 characters each, 60 writes and
+  share requests per token per ten minutes. Path and text are encrypted
+  together, so uniqueness of paths is checked in code after decrypting the
+  vault's memories, as `search.ts` scores every tool. A memory outlives the
+  token that wrote it (`token_id` is set to null) and is then the owner's.
+
 ## Data on disk
 
 `PCP_DATA_DIR` (default `./data`, `/data` in Docker):
@@ -324,7 +366,8 @@ contacting the registration endpoint.
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
-for a token with the right to manage endpoints, below):
+for a token with the right to manage endpoints, and `memory` for a token that
+keeps memories, both below):
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with

@@ -194,6 +194,40 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Add server",
     decline: "Not now",
   },
+  // Not now keeps it for the assistant that asked: a memory of its own needs
+  // nobody's say. Discard is the answer to text the owner does not want kept.
+  memory_share: {
+    allow_once: "Share it",
+    decline: "Keep it for this assistant only",
+    discard: "Discard it",
+  },
+  memory_change: {
+    allow_once: "Allow the change",
+    decline: "Not now",
+  },
+}
+
+const SCHEMA_WORDS: Record<
+  PermissionKind,
+  { title: string; description: string }
+> = {
+  call: {
+    title: "Your answer",
+    description: "Always allow and Block also decide the calls after this one.",
+  },
+  register: {
+    title: "Add this server?",
+    description: "The server is only added if you say so.",
+  },
+  memory_share: {
+    title: "Share this memory?",
+    description:
+      "Shared, every assistant that keeps memories reads it. Kept, only this one does.",
+  },
+  memory_change: {
+    title: "Change this shared memory?",
+    description: "Nothing changes unless you say so.",
+  },
 }
 
 /** The answers the owner is offered, in order, with their labels. */
@@ -228,11 +262,8 @@ export function decisionSchema(kind: PermissionKind) {
     properties: {
       decision: {
         type: "string" as const,
-        title: kind === "call" ? "Your answer" : "Add this server?",
-        description:
-          kind === "call"
-            ? "Always allow and Block also decide the calls after this one."
-            : "The server is only added if you say so.",
+        title: SCHEMA_WORDS[kind].title,
+        description: SCHEMA_WORDS[kind].description,
         oneOf: decisionsFor(kind).map((decision) => ({
           const: decision.value,
           title: decision.label,

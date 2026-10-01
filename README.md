@@ -168,6 +168,28 @@ your secret, or you allow private addresses, it is yours: an assistant can
 read it and turn read-only on, and nothing else. Leave the option off for a
 token that does not need it.
 
+A token made with **Let an assistant with this token keep memories** gets a
+`memory` tool: notes that last between conversations and stay with you rather
+than with one app. It works like Claude's own memory tool (files under
+`/memories`: view, create, str_replace, insert, delete, rename, plus search),
+and PCP's instructions tell the assistant to look there before work that may
+depend on what you prefer or decided before, and to save what you would not
+want to say twice.
+
+- `/memories/…` is the assistant's own: only the token that wrote a memory
+  reads it, and writing one needs no answer from you.
+- `/memories/shared/…` is read by every assistant whose token keeps memories.
+  An assistant that wants to share a memory, or change, rename or delete a
+  shared one, has to ask, the same way a tool asks: you see the whole text (a
+  shared memory is at most 2,000 characters) with a warning about what to look
+  for, and choose **Share it**, **Keep it for this assistant only** or
+  **Discard it**. Nothing is written before you answer.
+
+Text with characters that do not show on screen is refused, so what you read
+is all there is. The **Memories** tab lists every memory with the token that
+wrote it; you can add shared ones yourself, and edit, move or delete any of
+them. Memories are encrypted like everything else.
+
 ## How it is secured
 
 The short version: everything sensitive is AES-256-GCM ciphertext under a
