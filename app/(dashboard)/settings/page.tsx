@@ -16,6 +16,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
+import { getVault } from "@/lib/core/vault"
 import { publicUrlFor, requestOrigin } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -23,10 +24,11 @@ export const metadata: Metadata = { title: "Settings" }
 
 export default async function SettingsPage() {
   const ctx = await requireContext()
-  const [pinned, detected, publicUrl] = await Promise.all([
+  const [pinned, detected, publicUrl, vault] = await Promise.all([
     getSetting(ctx, SETTING_PUBLIC_URL),
     requestOrigin(),
     publicUrlFor(ctx),
+    getVault(ctx.vaultId),
   ])
 
   return (
@@ -46,8 +48,8 @@ export default async function SettingsPage() {
         </CardContent>
       </Card>
       <PublicUrlForm pinned={pinned ?? ""} detected={detected} />
-      <ChangePasswordForm />
-      <RecoveryKeyCard />
+      <ChangePasswordForm username={vault.name} />
+      <RecoveryKeyCard username={vault.name} />
       <SessionsCard />
     </>
   )

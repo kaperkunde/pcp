@@ -400,7 +400,7 @@ test("the owner can make a token that may read and change API endpoints", async 
   expect(tools).toEqual([...GATEWAY_TOOLS, "update_endpoint", "get_endpoint"])
   expect(instructions).toContain("get_endpoint reads one")
 
-  await page.reload()
+  await page.goto("/tokens")
   await expect(
     page
       .getByRole("listitem")

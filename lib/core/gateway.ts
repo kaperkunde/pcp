@@ -49,6 +49,7 @@ import {
 } from "./permissions"
 import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog } from "./request-log"
+import { canRereadTools, type SyncResult } from "./catalogue"
 import { searchTools, summarize, type ToolCandidate } from "./search"
 import { findTextSecretByName } from "./secrets"
 import { validateServerUrl, type AuthType } from "./servers"
@@ -223,6 +224,33 @@ export function buildGatewayServer(
   const slugs = servers.map((entry) => entry.slug)
   const bySlug = new Map(servers.map((entry) => [entry.slug, entry]))
 
+  /** findTool, re-reading the server once when it lacks the tool. */
+  async function lookup(
+    slug: string,
+    name: string,
+    options?: { includeBlocked?: boolean },
+  ): Promise<ReturnType<typeof findTool>> {
+    const found = findTool(bySlug, slug, name, options)
+    const known = bySlug.get(slug)
+
+    if (
+      !("error" in found) ||
+      !known ||
+      known.tools.some((tool) => tool.name === name)
+    ) {
+      return found
+    }
+
+    const fresh = await rereadForMissingTool(scope, known, name)
+
+    if (!fresh) {
+      return found
+    }
+
+    bySlug.set(slug, fresh)
+    return findTool(bySlug, slug, name, options)
+  }
+
   const logged =
     (
       tool: string,
@@ -350,7 +378,7 @@ export function buildGatewayServer(
       server: (args as { server?: string }).server,
       upstreamTool: (args as { tool?: string }).tool,
     }))(async (args: { server: string; tool: string }) => {
-      const found = findTool(bySlug, args.server, args.tool)
+      const found = await lookup(args.server, args.tool)
 
       if ("error" in found) {
         return failure(found.error)
@@ -433,7 +461,7 @@ export function buildGatewayServer(
         },
         ctx,
       ) => {
-        const found = findTool(bySlug, args.server, args.tool, {
+        const found = await lookup(args.server, args.tool, {
           includeBlocked: true,
         })
 
@@ -930,11 +958,69 @@ function findTool(
   return { server, tool }
 }
 
+/** How old a tool list may get before a gateway request reads it again. */
+export const CATALOGUE_MAX_AGE_MS = 6 * 60 * 60_000
+/** How often one missing tool name may send the gateway to re-read a list. */
+export const MISSING_TOOL_RECHECK_MS = 60_000
+const MAX_REMEMBERED_MISSES = 1_000
+
+/**
+ * When this process last set out to read each server's tools in the
+ * background, so that a server that keeps failing is tried once per period
+ * instead of on every request.
+ */
+const lastReread = new Map<string, number>()
+/** Reads under way, by server: concurrent requests wait for the same one. */
+const inflight = new Map<string, Promise<SyncResult>>()
+/** When each server/tool name was last looked for and not found. */
+const missedAt = new Map<string, number>()
+
+/**
+ * Whether the gateway should read a server's tools again: what it has (or
+ * last tried) is older than maxAge. A server waiting for the owner to sign
+ * in is left alone; reading it cannot work until they do.
+ */
+export function rereadDue(
+  server: Pick<McpServerRow, "kind" | "specSource" | "status" | "lastSyncedAt">,
+  now: number,
+  maxAge: number,
+  lastAttempt = 0,
+): boolean {
+  if (!canRereadTools(server) || server.status === "auth_required") {
+    return false
+  }
+
+  const last = Math.max(server.lastSyncedAt?.getTime() ?? 0, lastAttempt)
+
+  return now - last >= maxAge
+}
+
+function reread(
+  scope: GatewayScope,
+  server: GatewayServer,
+): Promise<SyncResult> {
+  let running = inflight.get(server.id)
+
+  if (!running) {
+    lastReread.set(server.id, Date.now())
+    running = syncServerTools(scope.ctx, server, {
+      publicUrl: scope.publicUrl,
+    }).finally(() => inflight.delete(server.id))
+    inflight.set(server.id, running)
+  }
+
+  return running
+}
+
 /**
  * Reads the catalogue of a server nobody has read yet (added through some
- * other path than the UI, say). Servers that failed before are left to the
- * owner's Refresh: retrying them on every call would slow the gateway down
- * by an upstream timeout each time.
+ * other path than the UI, say), before the request that needs it. Servers
+ * that failed before are not waited for: retrying them on every call would
+ * slow the gateway down by an upstream timeout each time.
+ *
+ * Tool lists change whenever a server's makers ship, so a list older than
+ * CATALOGUE_MAX_AGE_MS is read again too, in the background: this request
+ * answers from what is stored, the next ones see the new list.
  */
 export async function ensureCatalogue(
   scope: GatewayScope,
@@ -944,12 +1030,65 @@ export async function ensureCatalogue(
 
   for (const server of servers) {
     if (server.tools.length === 0 && server.status === "unknown") {
-      const result = await syncServerTools(scope.ctx, server, {
-        publicUrl: scope.publicUrl,
-      })
+      const result = await reread(scope, server)
       refreshed ||= result.status === "ok"
+    } else if (
+      !inflight.has(server.id) &&
+      rereadDue(
+        server,
+        Date.now(),
+        CATALOGUE_MAX_AGE_MS,
+        lastReread.get(server.id),
+      )
+    ) {
+      void reread(scope, server).catch((error) => {
+        console.error("[gateway] background tool refresh failed", {
+          server: server.id,
+          error,
+        })
+      })
     }
   }
 
   return refreshed ? loadGatewayServers(scope) : servers
+}
+
+/**
+ * An assistant named a tool the stored list lacks: the server may have added
+ * it since. Reads the list again, at most once per MISSING_TOOL_RECHECK_MS
+ * for the same name, and returns the server as it is now, or null when
+ * nothing new was read.
+ */
+async function rereadForMissingTool(
+  scope: GatewayScope,
+  server: GatewayServer,
+  name: string,
+): Promise<GatewayServer | null> {
+  if (!canRereadTools(server) || server.status === "auth_required") {
+    return null
+  }
+
+  const key = `${server.id}/${name}`
+  const now = Date.now()
+  const missed = missedAt.get(key)
+
+  if (missed !== undefined && now - missed < MISSING_TOOL_RECHECK_MS) {
+    return null
+  }
+
+  if (missedAt.size >= MAX_REMEMBERED_MISSES) {
+    missedAt.clear()
+  }
+  missedAt.set(key, now)
+
+  const result = await reread(scope, server)
+
+  if (result.status !== "ok") {
+    return null
+  }
+
+  return (
+    (await loadGatewayServers(scope)).find((entry) => entry.id === server.id) ??
+    null
+  )
 }

@@ -27,6 +27,19 @@ export type CatalogueTool = {
 
 const DELETE_CHUNK = 500
 
+/**
+ * Whether reading a server's tools again can find anything new: an MCP
+ * server's tools change whenever its makers ship, and so can a schema
+ * fetched from an address. An uploaded schema changes only when the owner
+ * uploads another.
+ */
+export function canRereadTools(server: {
+  kind: string
+  specSource: string | null
+}): boolean {
+  return server.kind !== "openapi" || server.specSource === "url"
+}
+
 export async function storeTools(
   serverId: string,
   tools: CatalogueTool[],

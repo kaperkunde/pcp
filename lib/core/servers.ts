@@ -328,11 +328,27 @@ export async function createServer(
   return { id }
 }
 
+/** What reaching a server depends on; a change to any can change its tools. */
+const CONNECTION_FIELDS = [
+  "url",
+  "authType",
+  "authHeaderName",
+  "authValueTemplate",
+  "authSecretId",
+  "oauthClientId",
+  "oauthClientSecretId",
+  "oauthScope",
+] as const
+
+/**
+ * Saves a server's settings. `reconnect` says its address or credentials
+ * changed, so the tools stored for it may no longer be the ones it has.
+ */
 export async function updateServer(
   ctx: VaultContext,
   id: string,
   input: ServerInput,
-): Promise<void> {
+): Promise<{ reconnect: boolean }> {
   const existing = await getServer(ctx, id)
 
   if (existing.kind !== "mcp") {
@@ -364,6 +380,10 @@ export async function updateServer(
 
   if (dropTokens && existing.oauthTokensId) {
     await deleteManagedSecret(ctx, existing.oauthTokensId)
+  }
+
+  return {
+    reconnect: CONNECTION_FIELDS.some((key) => data[key] !== existing[key]),
   }
 }
 

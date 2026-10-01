@@ -1,12 +1,13 @@
 "use client"
 
 import Link from "next/link"
-import { useActionState, useState, useTransition } from "react"
+import { useRouter } from "next/navigation"
+import { useActionState, useEffect, useState, useTransition } from "react"
 
-import { CopyableValue } from "@/components/copyable-value"
-import { FormError } from "@/components/form-status"
+import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
+import { handOffNewToken } from "@/components/new-token-handoff"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
@@ -20,6 +21,7 @@ import {
 } from "@/components/ui/card"
 import { Input, Select } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
+import { UsernameField } from "@/components/username-field"
 import {
   createTokenAction,
   deleteTokenAction,
@@ -32,15 +34,15 @@ import type { ServerKind } from "@/lib/core/servers"
 export function TokenManager({
   tokens,
   servers,
-  endpointUrl,
+  username,
 }: {
   tokens: ApiTokenSummary[]
   servers: Array<{ id: string; name: string; kind?: ServerKind }>
-  endpointUrl: string
+  username: string
 }) {
   return (
     <div className="flex flex-col gap-6">
-      <CreateTokenForm servers={servers} endpointUrl={endpointUrl} />
+      <CreateTokenForm servers={servers} username={username} />
       <Card>
         <CardHeader>
           <CardTitle>Tokens ({tokens.length})</CardTitle>
@@ -67,47 +69,26 @@ export function TokenManager({
 
 function CreateTokenForm({
   servers,
-  endpointUrl,
+  username,
 }: {
   servers: Array<{ id: string; name: string; kind?: ServerKind }>
-  endpointUrl: string
+  username: string
 }) {
   const [state, action] = useActionState<CreateTokenResult, FormData>(
     createTokenAction,
     { status: "idle" },
   )
-  if (state.status === "ok") {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Your new token</CardTitle>
-          <CardDescription>
-            Copy it now: PCP keeps only a hash and cannot show it again.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <CopyableValue value={state.token} testId="new-token" />
-          <p className="text-muted-foreground">
-            Point an MCP client at <code>{endpointUrl}</code> with the header{" "}
-            <code>Authorization: Bearer &lt;token&gt;</code>. For Claude Code:
-          </p>
-          <CopyableValue
-            value={`claude mcp add --transport http pcp ${endpointUrl} --header "Authorization: Bearer ${state.token}"`}
-          />
-          <form action={action}>
-            <Button
-              type="submit"
-              variant="outline"
-              size="sm"
-              formAction={() => window.location.reload()}
-            >
-              Done
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
-    )
-  }
+  const router = useRouter()
+  const made = state.status === "ok" ? state : null
+
+  // A new token can do nothing yet without asking: open its page, where the
+  // owner copies it once and decides what it may run.
+  useEffect(() => {
+    if (made) {
+      handOffNewToken(made.id, made.token)
+      router.push(`/tokens/${made.id}`)
+    }
+  }, [made, router])
 
   return (
     <Card>
@@ -124,6 +105,9 @@ function CreateTokenForm({
               <Input
                 id="token-name"
                 name="name"
+                // Not a username, whatever a password manager makes of a
+                // text field above a password.
+                autoComplete="off"
                 required
                 maxLength={80}
                 placeholder="Claude on my laptop"
@@ -141,6 +125,7 @@ function CreateTokenForm({
           </div>
           <ServerScopeFields servers={servers} />
           <ManageEndpointsField id="token-manage" />
+          <UsernameField value={username} />
           <Field
             label="Your password"
             htmlFor="token-password"
@@ -155,6 +140,7 @@ function CreateTokenForm({
             />
           </Field>
           <FormError error={state.status === "error" ? state.error : null} />
+          <FormNote message={made ? "Created. Opening it…" : null} />
           <div>
             <SubmitButton pendingText="Creating…">Create token</SubmitButton>
           </div>

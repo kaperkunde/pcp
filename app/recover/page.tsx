@@ -3,7 +3,7 @@ import { redirect } from "next/navigation"
 
 import { AuthShell } from "@/components/auth-shell"
 import { RecoverForm } from "@/components/recover-form"
-import { isSetUp } from "@/lib/core/vault"
+import { isSetUp, ownerVault } from "@/lib/core/vault"
 
 export const metadata: Metadata = { title: "Recover" }
 export const dynamic = "force-dynamic"
@@ -12,6 +12,8 @@ export default async function RecoverPage() {
   if (!(await isSetUp())) {
     redirect("/setup")
   }
+
+  const vault = await ownerVault()
 
   return (
     <AuthShell
@@ -24,7 +26,7 @@ export default async function RecoverPage() {
         </p>
       }
     >
-      <RecoverForm />
+      <RecoverForm username={vault?.name ?? ""} />
     </AuthShell>
   )
 }

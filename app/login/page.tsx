@@ -25,7 +25,7 @@ export default async function LoginPage() {
       title={vault ? `Hello, ${vault.name}` : "Sign in"}
       intro={<p>Enter your password to unlock the vault.</p>}
     >
-      <LoginForm />
+      <LoginForm username={vault?.name ?? ""} />
     </AuthShell>
   )
 }
