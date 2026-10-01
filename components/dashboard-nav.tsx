@@ -9,6 +9,7 @@ const TABS = [
   { href: "/servers", label: "Servers" },
   { href: "/secrets", label: "Secrets" },
   { href: "/tokens", label: "API tokens" },
+  { href: "/memories", label: "Memories" },
   { href: "/settings", label: "Settings" },
 ]
 
@@ -18,7 +19,7 @@ export function DashboardNav() {
   return (
     <nav
       role="tablist"
-      className="inline-flex h-9 w-fit items-center gap-1 rounded-lg bg-muted p-1 text-muted-foreground"
+      className="inline-flex h-9 w-fit max-w-full items-center gap-1 overflow-x-auto rounded-lg bg-muted p-1 text-muted-foreground"
     >
       {TABS.map((tab) => {
         const active = pathname.startsWith(tab.href)
@@ -30,7 +31,7 @@ export function DashboardNav() {
             role="tab"
             aria-selected={active}
             className={cn(
-              "inline-flex h-7 items-center rounded-md px-3 text-sm font-medium transition-colors hover:text-foreground",
+              "inline-flex h-7 shrink-0 items-center rounded-md px-3 text-sm font-medium transition-colors hover:text-foreground",
               active && "bg-background text-foreground shadow-sm",
             )}
           >

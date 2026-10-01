@@ -52,6 +52,7 @@ export async function createTokenAction(
       allowAllServers: field(formData, "access") !== "selected",
       serverIds: fields(formData, "serverIds"),
       manageEndpoints: field(formData, "manageEndpoints") === "on",
+      keepMemories: field(formData, "keepMemories") === "on",
       expiresAt:
         days > 0 ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null,
     })
@@ -104,6 +105,7 @@ export async function updateTokenAction(
       allowAllServers: field(formData, "access") !== "selected",
       serverIds: fields(formData, "serverIds"),
       manageEndpoints: field(formData, "manageEndpoints") === "on",
+      keepMemories: field(formData, "keepMemories") === "on",
       expiresAt:
         expiresIn === "keep"
           ? undefined

@@ -66,7 +66,7 @@ export function PermissionDecision({
             type="button"
             size="sm"
             variant={
-              decision.value === "block"
+              decision.value === "block" || decision.value === "discard"
                 ? "destructive"
                 : index === 0
                   ? "default"

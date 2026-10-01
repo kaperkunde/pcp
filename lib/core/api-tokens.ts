@@ -23,6 +23,8 @@ export type ApiTokenSummary = {
   allowAllServers: boolean
   /** May read and change the API endpoints it set up (update_endpoint). */
   manageEndpoints: boolean
+  /** May keep memories (the gateway's memory tool). */
+  keepMemories: boolean
   servers: Array<{ id: string; name: string }>
   expiresAt: Date | null
   revokedAt: Date | null
@@ -38,6 +40,8 @@ export type TokenInput = {
   serverIds?: string[]
   /** Left alone on an update when undefined. */
   manageEndpoints?: boolean
+  /** Left alone on an update when undefined. */
+  keepMemories?: boolean
   expiresAt?: Date | null
 }
 
@@ -49,6 +53,8 @@ export type ResolvedToken = {
   serverIds: string[] | null
   /** May read and change the endpoints it set up (get_endpoint, update_endpoint). */
   manageEndpoints: boolean
+  /** May keep memories: its own, and the shared ones (memory). */
+  keepMemories: boolean
 }
 
 function summaryInclude(now: Date) {
@@ -70,6 +76,7 @@ type SummaryRow = {
   prefix: string
   allowAllServers: boolean
   manageEndpoints: boolean
+  keepMemories: boolean
   expiresAt: Date | null
   revokedAt: Date | null
   createdAt: Date
@@ -85,6 +92,7 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     prefix: row.prefix,
     allowAllServers: row.allowAllServers,
     manageEndpoints: row.manageEndpoints,
+    keepMemories: row.keepMemories,
     servers: row.servers.map((link) => link.server),
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
@@ -208,6 +216,7 @@ export async function createApiToken(
       prefix: token.slice(0, DISPLAY_PREFIX_LENGTH),
       allowAllServers: input.allowAllServers,
       manageEndpoints: input.manageEndpoints ?? false,
+      keepMemories: input.keepMemories ?? false,
       expiresAt: input.expiresAt ?? null,
       servers: { create: serverIds.map((serverId) => ({ serverId })) },
     },
@@ -237,6 +246,9 @@ export async function updateApiToken(
         allowAllServers: input.allowAllServers,
         ...(input.manageEndpoints !== undefined
           ? { manageEndpoints: input.manageEndpoints }
+          : {}),
+        ...(input.keepMemories !== undefined
+          ? { keepMemories: input.keepMemories }
           : {}),
         ...(input.expiresAt !== undefined
           ? { expiresAt: input.expiresAt }
@@ -306,6 +318,7 @@ export async function resolveApiToken(
       ? null
       : record.servers.map((link) => link.serverId),
     manageEndpoints: record.manageEndpoints,
+    keepMemories: record.keepMemories,
   }
 }
 

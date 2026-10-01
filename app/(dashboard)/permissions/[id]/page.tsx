@@ -53,8 +53,13 @@ export default async function PermissionPage({
   }
 
   const pending = view.status === "pending"
+  const memory = view.kind === "memory_share" || view.kind === "memory_change"
+  // A memory's outcome says what was done, whichever answer it was.
   const showOutcome =
-    (view.status === "executed" || view.status === "failed") && view.outcome
+    (view.status === "executed" ||
+      view.status === "failed" ||
+      (memory && view.status === "declined")) &&
+    view.outcome
 
   return (
     <>
@@ -76,7 +81,7 @@ export default async function PermissionPage({
           <CardTitle className="break-words">{view.title}</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          <ul className="flex list-disc flex-col gap-1 pl-5 break-words">
+          <ul className="flex list-disc flex-col gap-1 pl-5 break-words whitespace-pre-wrap">
             {view.lines.map((line, index) => (
               <li key={index}>{line}</li>
             ))}
@@ -96,6 +101,16 @@ export default async function PermissionPage({
                   Always allow and Block also decide the calls after this one.
                   You can change that on the token&apos;s page.
                 </p>
+              ) : view.kind === "memory_share" ? (
+                <p className="text-muted-foreground">
+                  Kept for this assistant only, it is saved where only the
+                  assistant that asked reads it. You can read, edit and delete
+                  every memory under{" "}
+                  <Link href="/memories" className="underline">
+                    Memories
+                  </Link>
+                  .
+                </p>
               ) : null}
               <PermissionDecision id={view.id} decisions={view.decisions} />
             </>
@@ -104,7 +119,9 @@ export default async function PermissionPage({
               className="flex flex-col gap-2"
               data-testid="permission-outcome"
             >
-              <p>{STATUS[view.status] ?? view.status}</p>
+              {memory && showOutcome ? null : (
+                <p>{STATUS[view.status] ?? view.status}</p>
+              )}
               {showOutcome ? (
                 <p
                   className={

@@ -111,6 +111,17 @@ export default defineConfig({
       },
     },
     {
+      // A token that keeps memories: its own notes, sharing one through the
+      // owner's permission, and the Memories tab.
+      name: "memories",
+      testMatch: /memories\.spec\.ts/,
+      dependencies: ["setup"],
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: "e2e/.auth/owner.json",
+      },
+    },
+    {
       // Signs every browser out, so it comes last and signs in on its own.
       name: "recovery",
       testMatch: /recovery\.spec\.ts/,

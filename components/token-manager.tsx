@@ -6,6 +6,7 @@ import { useActionState, useEffect, useState, useTransition } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
+import { KeepMemoriesField } from "@/components/keep-memories-field"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { handOffNewToken } from "@/components/new-token-handoff"
 import { ServerScopeFields } from "@/components/server-scope-fields"
@@ -125,6 +126,7 @@ function CreateTokenForm({
           </div>
           <ServerScopeFields servers={servers} />
           <ManageEndpointsField id="token-manage" />
+          <KeepMemoriesField id="token-memories" />
           <UsernameField value={username} />
           <Field
             label="Your password"
@@ -205,6 +207,9 @@ function TokenRow({ token }: { token: ApiTokenSummary }) {
           )}
           {!dead && token.manageEndpoints ? (
             <Badge variant="warning">Manages endpoints</Badge>
+          ) : null}
+          {!dead && token.keepMemories ? (
+            <Badge variant="outline">Keeps memories</Badge>
           ) : null}
           {!dead && token.openPermissions > 0 ? (
             <Badge variant="warning">{token.openPermissions} waiting</Badge>
