@@ -1,16 +1,26 @@
 "use client"
 
-import { useActionState, useOptimistic, useState, useTransition } from "react"
+import { RefreshCw } from "lucide-react"
+import {
+  useActionState,
+  useEffect,
+  useOptimistic,
+  useState,
+  useTransition,
+} from "react"
 
+import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
+import { clearNewToken, peekNewToken } from "@/components/new-token-handoff"
 import { PermissionDecision } from "@/components/permission-decision"
 import { PermissionTiersField } from "@/components/permission-tiers-field"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { refreshToolsAction } from "@/lib/actions/servers"
 import {
   Card,
   CardContent,
@@ -53,17 +63,30 @@ export function TokenDetail({
   access,
   otherTokens,
   waiting,
+  endpointUrl,
 }: {
   token: ApiTokenSummary
   servers: Array<{ id: string; name: string; kind?: ServerKind }>
   access: TokenServerAccess[]
   otherTokens: Array<{ id: string; name: string }>
   waiting: WaitingRequest[]
+  endpointUrl: string
 }) {
   const locked = token.revokedAt !== null
+  // Only right after the token list made it (new-token-handoff.ts).
+  const [made, setMade] = useState(() => peekNewToken(token.id))
+
+  useEffect(() => clearNewToken(token.id), [token.id])
 
   return (
     <div className="flex flex-col gap-6">
+      {made ? (
+        <NewTokenCard
+          token={made}
+          endpointUrl={endpointUrl}
+          onDone={() => setMade(null)}
+        />
+      ) : null}
       {waiting.length > 0 ? <WaitingCard waiting={waiting} /> : null}
       <ToolsCard tokenId={token.id} access={access} locked={locked} />
       {otherTokens.length > 0 && !locked ? (
@@ -71,6 +94,43 @@ export function TokenDetail({
       ) : null}
       <SettingsCard token={token} servers={servers} locked={locked} />
     </div>
+  )
+}
+
+function NewTokenCard({
+  token,
+  endpointUrl,
+  onDone,
+}: {
+  token: string
+  endpointUrl: string
+  onDone: () => void
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Your new token</CardTitle>
+        <CardDescription>
+          Copy it now: PCP keeps only a hash and cannot show it again. Then
+          choose below what an assistant using it may run.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <CopyableValue value={token} testId="new-token" />
+        <p className="text-muted-foreground">
+          Point an MCP client at <code>{endpointUrl}</code> with the header{" "}
+          <code>Authorization: Bearer &lt;token&gt;</code>. For Claude Code:
+        </p>
+        <CopyableValue
+          value={`claude mcp add --transport http pcp ${endpointUrl} --header "Authorization: Bearer ${token}"`}
+        />
+        <div>
+          <Button type="button" variant="outline" size="sm" onClick={onDone}>
+            I have copied it
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -168,13 +228,26 @@ function ServerTools({
   locked: boolean
 }) {
   const [pending, startTransition] = useTransition()
+  const [refreshing, startRefresh] = useTransition()
   const [bulk, setBulk] = useState<ToolAccess>("allowed")
   const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
 
   function applyAll() {
     startTransition(async () => {
       const result = await setServerToolAccessAction(tokenId, server.id, bulk)
       setError(result.status === "error" ? result.error : null)
+      setNote(null)
+    })
+  }
+
+  // Servers add and drop tools as they please: read the list again so a new
+  // one can be decided here before an assistant asks for it.
+  function refresh() {
+    startRefresh(async () => {
+      const result = await refreshToolsAction(server.id)
+      setError(result.status === "error" ? result.error : null)
+      setNote(result.status === "ok" ? (result.message ?? null) : null)
     })
   }
 
@@ -187,6 +260,23 @@ function ServerTools({
           {server.enabled ? null : (
             <Badge variant="outline">Switched off</Badge>
           )}
+          {server.refreshable && !locked ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              disabled={refreshing}
+              onClick={refresh}
+              aria-label={`Refresh tools on ${server.slug}`}
+              title="Read the server's tools again"
+            >
+              <RefreshCw
+                className={cn("size-3.5", refreshing && "animate-spin")}
+                aria-hidden
+              />
+            </Button>
+          ) : null}
         </div>
         {server.tools.length > 0 && !locked ? (
           <div className="flex items-center gap-2">
@@ -212,6 +302,7 @@ function ServerTools({
         ) : null}
       </div>
       <FormError error={error} />
+      <FormNote message={note} />
       {server.tools.length === 0 ? (
         <p className="text-muted-foreground">
           No tools known yet. Connect the server, or refresh its tools.

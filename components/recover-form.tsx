@@ -8,10 +8,11 @@ import { SubmitButton } from "@/components/submit-button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Checkbox, Input } from "@/components/ui/input"
 import { Field, Label } from "@/components/ui/label"
+import { UsernameField } from "@/components/username-field"
 import { recoverAction, type RecoverResult } from "@/lib/actions/auth"
 import { MIN_PASSWORD_LENGTH } from "@/lib/core/constants"
 
-export function RecoverForm() {
+export function RecoverForm({ username }: { username: string }) {
   const [state, action] = useActionState<RecoverResult, FormData>(
     recoverAction,
     { status: "idle" },
@@ -31,6 +32,7 @@ export function RecoverForm() {
               required
             />
           </Field>
+          <UsernameField id="recover-account" value={username} />
           <Field label="New password" htmlFor="recover-password">
             <Input
               id="recover-password"

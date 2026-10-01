@@ -6,7 +6,12 @@ import { expect, test } from "@playwright/test"
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, initialize, toolText } from "../lib/mcp"
 import { OWNER_PASSWORD } from "../lib/auth"
-import { addSecret, allowAllTools, createToken } from "../lib/ui"
+import {
+  addSecret,
+  allowAllTools,
+  confirmWithPassword,
+  createToken,
+} from "../lib/ui"
 
 // An API described by an OpenAPI schema, added like a server: PCP reads the
 // schema, an assistant finds the operations as tools through /mcp, and PCP
@@ -391,8 +396,8 @@ test("the owner can make a token that may read and change API endpoints", async 
       "Let an assistant with this token read and change API endpoints",
     )
     .check()
-  await page.getByLabel("Your password").fill(OWNER_PASSWORD)
   await page.getByRole("button", { name: "Create token" }).click()
+  await confirmWithPassword(page, OWNER_PASSWORD)
   await expect(page.getByText("Your new token")).toBeVisible()
   managerToken = (await page.getByTestId("new-token").textContent())!
 
@@ -400,7 +405,7 @@ test("the owner can make a token that may read and change API endpoints", async 
   expect(tools).toEqual([...GATEWAY_TOOLS, "update_endpoint", "get_endpoint"])
   expect(instructions).toContain("get_endpoint reads one")
 
-  await page.reload()
+  await page.goto("/tokens")
   await expect(
     page
       .getByRole("listitem")

@@ -71,10 +71,12 @@ export function SetupForm({ alreadySetUp }: { alreadySetUp: boolean }) {
       <CardContent>
         <form action={action} className="flex flex-col gap-4">
           <Field label="Your name" htmlFor="setup-name">
+            {/* The account the password is saved under; every later form
+                that asks for it names the same one (UsernameField). */}
             <Input
               id="setup-name"
               name="name"
-              autoComplete="name"
+              autoComplete="username"
               required
               maxLength={80}
             />

@@ -8,9 +8,10 @@ import { SubmitButton } from "@/components/submit-button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
+import { UsernameField } from "@/components/username-field"
 import { loginAction, type LoginResult } from "@/lib/actions/auth"
 
-export function LoginForm() {
+export function LoginForm({ username }: { username: string }) {
   const [state, action] = useActionState<LoginResult, FormData>(loginAction, {
     status: "idle",
   })
@@ -19,6 +20,7 @@ export function LoginForm() {
     <Card>
       <CardContent>
         <form action={action} className="flex flex-col gap-4">
+          <UsernameField id="login-account" value={username} />
           <Field label="Password" htmlFor="login-password">
             <Input
               id="login-password"
