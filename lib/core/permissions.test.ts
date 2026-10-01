@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createApiToken, resolveApiToken, revokeApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import { prepareRegistration } from "./endpoint-admin"
+import { prepareRegistration, updateEndpointDetails } from "./endpoint-admin"
+import { createEndpoint } from "./endpoints"
 import { loadGatewayServers, type GatewayServer } from "./gateway"
 import { listMemories } from "./memories"
 import {
@@ -797,6 +798,105 @@ describe("adding an API from OpenAPI text", () => {
     expect(Buffer.from(row.argsCiphertext).toString("utf8")).not.toContain(
       "listPets",
     )
+  })
+})
+
+describe("a change to an API endpoint of the owner's", () => {
+  async function ownersEndpoint(ctx: VaultContext) {
+    const secret = await createSecret(ctx, { name: "Pets key", value: "k" })
+    const { id } = await createEndpoint(ctx, {
+      name: "Pets",
+      specSource: "upload",
+      specText: PETS_SPEC,
+      baseUrl: "https://api.example.com/v1",
+      readOnly: false,
+      authType: "header",
+      authSecretId: secret.id,
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+    })
+
+    return id
+  }
+
+  async function asked(scope: Awaited<ReturnType<typeof setup>>["scope"]) {
+    const outcome = await updateEndpointDetails(
+      { ...scope, serverIds: null },
+      "pets",
+      {
+        addPatches: [{ op: "remove", path: "/paths/~1pets~1{petId}" }],
+        toolDescriptions: { listPets: "Every pet in the shop." },
+      },
+    )
+    if (!("ask" in outcome)) throw new Error("not asked")
+
+    return withPermission(
+      scope,
+      { kind: "endpoint_change", input: outcome.ask },
+      {},
+    )
+  }
+
+  it("shows the owner the change and makes it when they agree", async () => {
+    const { ctx, scope } = await setup()
+    const id = await ownersEndpoint(ctx)
+
+    expect(textOf(await asked(scope))).toContain("Not done yet")
+    const request = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "endpoint_change" },
+    })
+    const view = await getPermissionView(ctx, request.id, {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(view).toMatchObject({
+      title: "Change the API endpoint Pets?",
+      tool: "update_endpoint",
+      serverName: "Pets",
+      decisions: [
+        { value: "allow_once", label: "Make the change" },
+        { value: "decline", label: "Not now" },
+      ],
+    })
+    expect(view!.lines).toEqual(
+      expect.arrayContaining([
+        "New edit: remove /paths/~1pets~1{petId}",
+        "Description of listPets:\nEvery pet in the shop.",
+        "Takes out: deletePet",
+        'Asked by the token "Claude"',
+      ]),
+    )
+
+    const done = await decidePermission(ctx, request.id, "allow_once", {
+      via: "web",
+      publicUrl: PUBLIC_URL,
+    })
+    expect(textOf(done)).toBe("Changed Pets: 2 tools.")
+
+    const tools = await db().mcpTool.findMany({
+      where: { serverId: id },
+      orderBy: { name: "asc" },
+    })
+    expect(tools.map((tool) => [tool.name, tool.descriptionOverride])).toEqual([
+      ["createPet", null],
+      ["listPets", "Every pet in the shop."],
+    ])
+  })
+
+  it("changes nothing when the owner says no", async () => {
+    const { ctx, scope } = await setup()
+    const id = await ownersEndpoint(ctx)
+    await asked(scope)
+    const request = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "endpoint_change" },
+    })
+
+    await decidePermission(ctx, request.id, "decline", {
+      via: "web",
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(await db().mcpTool.count({ where: { serverId: id } })).toBe(3)
   })
 })
 

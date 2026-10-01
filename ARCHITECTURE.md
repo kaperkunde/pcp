@@ -228,10 +228,17 @@ change an endpoint decides where PCP sends requests:
 - **Whose endpoint it is.** An endpoint is the assistant's while it sends no
   secret and is still limited to public addresses. It is the owner's once it
   sends one of their secrets or they allow private addresses. The assistant can
-  rewrite its own; on the owner's it can read and turn read-only on, and
-  nothing else. A new schema could add operations the owner's key then
-  performs, and a new address, name or description could send the key, or
-  another assistant, somewhere else.
+  rewrite its own. On the owner's it can read it and turn read-only on, and it
+  can ask (a permission request of kind `endpoint_change`) for a new name or
+  description, edits, tool descriptions, or a new read of the schema URL: the
+  owner is shown every new edit and description in full and what it does to
+  the tools (added, taken out, changed, and a warning when a new tool writes
+  with their secret), and only that is made, to the endpoint as it was when
+  they were asked (`endpoint-admin.ts: applyEndpointChange`); a re-read
+  schema must still be the document they were told about. Its address and a
+  whole new schema stay the owner's alone: a new address could send the key
+  somewhere else, and a new document is not something a page of lines can
+  show them.
 - **Nothing takes effect without the owner.** A registration waits for their
   answer. A change to an endpoint that other assistants can see (its words,
   schema or address, or read-only turned off) disables it until the owner
@@ -404,10 +411,18 @@ keeps memories, both below):
   light stemming) and returns `server/tool — summary` lines.
 - `describe_tool(server, tool)` returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
-  published it, and whether the tool runs at once or asks first.
-- `call_tool(server, tool, arguments)` opens a connection to the upstream
-  with the configured credential (header secret or OAuth token, refreshed by
-  the SDK when needed), calls the tool, and passes the content back.
+  published it, whether the tool runs at once or asks first, and for an API
+  endpoint's tool, `returns`: an outline of its success answer read from the
+  schema (`openapi/outline.ts`, stored as `mcp_tool.output`).
+- `call_tool(server, tool, arguments, fields?)` opens a connection to the
+  upstream with the configured credential (header secret or OAuth token,
+  refreshed by the SDK when needed), calls the tool, and passes the content
+  back shaped for the assistant (`lib/core/answers.ts`): `fields` keeps only
+  the named paths of a JSON answer (lists are looked into), a JSON answer
+  still too long becomes a preview that is valid JSON with a note on asking
+  for less, and structured content that repeats the text is dropped. A call
+  that waits for the owner keeps its fields on the request
+  (`permission_request.fields`).
 - `check_permission(id)`, `check_server(server)` and
   `register_server(...)` belong to the permission flow below;
   `answer_permission(id, decision)` is only for PCP's panel.

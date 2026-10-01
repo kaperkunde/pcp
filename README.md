@@ -130,8 +130,8 @@ and these tools:
 | Tool               | What it does                                                                                                     |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------- |
 | `search_tools`     | Finds tools across servers from a few words ("create a github issue").                                           |
-| `describe_tool`    | Returns one tool's full description, JSON Schema and whether it asks you first.                                  |
-| `call_tool`        | Runs it, with PCP adding the credentials to the request to the server or the API.                                |
+| `describe_tool`    | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.     |
+| `call_tool`        | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs.          |
 | `check_permission` | Says whether you answered a request that was waiting for you, and how it went.                                   |
 | `check_server`     | Says whether a server is connected; offers you a Connect button where it can.                                    |
 | `register_server`  | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name. |
@@ -165,8 +165,11 @@ secret, public addresses only), and a change disables the endpoint until you
 enable it again, because the words it writes reach every other assistant. It
 can never see, choose or change a secret afterwards. Once an endpoint sends
 your secret, or you allow private addresses, it is yours: an assistant can
-read it and turn read-only on, and nothing else. Leave the option off for a
-token that does not need it.
+read it and turn read-only on, and it can ask you to fix the schema with
+edits, rename it, reword its tools or read its schema URL again. You are shown
+every edit and description in full and what it does to the tools, and nothing
+changes unless you agree. Its address and secret stay yours alone. Leave the
+option off for a token that does not need it.
 
 A token made with **Let an assistant with this token keep memories** gets a
 `memory` tool: notes that last between conversations and stay with you rather

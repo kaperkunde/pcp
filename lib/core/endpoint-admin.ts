@@ -11,6 +11,7 @@ import {
   changeEndpoint,
   createEndpoint,
   downloadSpec,
+  generateEndpointTools,
   previewEndpoint,
   readDocument,
   specHash,
@@ -23,6 +24,7 @@ import { fetchSpec } from "./openapi/fetch-spec"
 import { isObject } from "./openapi/json"
 import { readPatches, valueAt, type PatchOperation } from "./openapi/patch"
 import { readCallPlan } from "./openapi/plan"
+import { canonicalJson } from "./permission-rules"
 import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
 import {
   normalizeNameAndDescription,
@@ -213,14 +215,19 @@ function describeChanges(server: McpServer): Record<string, string> {
   if (belongsTo(server) === "owner") {
     const theirs =
       "no: the owner configured this endpoint (it sends a secret, or reaches private addresses they allowed)"
+    const asks =
+      "asks the owner: nothing changes until they agree, and then it stays on"
 
     return {
-      name: theirs,
-      description: theirs,
-      toolDescriptions: theirs,
+      name: asks,
+      description: asks,
+      toolDescriptions: asks,
+      patches: asks,
+      refreshSpec:
+        server.specSource === "url"
+          ? asks
+          : "no: the schema was given as text, so there is no URL to read",
       spec: theirs,
-      patches: theirs,
-      refreshSpec: theirs,
       baseUrl: theirs,
       readOnly: server.readOnly
         ? "already on"
@@ -649,7 +656,9 @@ export async function updateEndpointDetails(
   scope: EndpointScope,
   slug: string,
   changes: UpdateInput,
-): Promise<EndpointDetails & { updated: string }> {
+): Promise<
+  (EndpointDetails & { updated: string }) | { ask: EndpointChangeAsk }
+> {
   // Asking not to refresh is asking for nothing.
   const given = (Object.keys(changes) as Array<keyof UpdateInput>).filter(
     (key) =>
@@ -675,14 +684,21 @@ export async function updateEndpointDetails(
   // Everything is checked before anything is written.
   if (belongsTo(server) === "owner") {
     const refused = given.filter(
-      (key) => !(key === "readOnly" && (changes.readOnly === true || !widens)),
+      (key) =>
+        !PROPOSABLE.has(key) &&
+        !(key === "readOnly" && (changes.readOnly === true || !widens)),
     )
 
     if (refused.length > 0) {
       throw new PcpError(
         "forbidden",
-        `This endpoint is the owner's: it sends a secret, or reaches private addresses they allowed. You can read it and turn read-only on, but ${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} theirs to change.`,
+        `This endpoint is the owner's: it sends a secret, or reaches private addresses they allowed. You can read it, turn read-only on, and ask the owner to change its name, description, edits or tool descriptions, or to read its schema again, but ${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} theirs to change.`,
       )
+    }
+
+    // The rest of what it asks for is put to the owner.
+    if (given.some((key) => PROPOSABLE.has(key))) {
+      return proposeChange(scope, server, changes)
     }
   }
 
@@ -784,4 +800,360 @@ export async function updateEndpointDetails(
     ...details,
     updated: `Updated ${fresh.name}: ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${sync.message ? ` ${sync.message}` : ""}${unchanged}${disables ? " The endpoint is disabled until the owner enables it again in PCP." : ""}${ignored.length > 0 ? ` No tool called ${ignored.join(", ")}, so those descriptions were not set.` : ""}`,
   }
+}
+
+/**
+ * What update_endpoint may ask the owner to change on an endpoint of
+ * theirs. Never the address, a whole new schema or the credential: the
+ * owner reads every edit and description in full, while a new address or
+ * document is not something a page of lines can show them.
+ */
+const PROPOSABLE = new Set<string>([
+  "name",
+  "description",
+  "patches",
+  "addPatches",
+  "refreshSpec",
+  "toolDescriptions",
+])
+/** New edits in one request: each is a line the owner reads. */
+const MAX_PROPOSED_EDITS = 100
+/** One edit's value, as JSON, shown in full. */
+const MAX_PROPOSED_VALUE = 4000
+/** Tool descriptions in one request, each shown in full. */
+const MAX_PROPOSED_DESCRIPTIONS = 20
+/** Tools named in each of the lists the owner is shown. */
+const MAX_LISTED_TOOLS = 20
+
+/**
+ * A change to an endpoint of the owner's, as they are asked about it and as
+ * it will be made: only what is here, and only to the endpoint as it was
+ * when they were asked.
+ */
+export type EndpointChangeAsk = {
+  serverId: string
+  /** The endpoint when the owner was asked (basisOf): a change since then refuses. */
+  basis: string
+  name?: string
+  description?: string
+  readOnly?: true
+  /** Every edit, replacing the ones it has. */
+  patches?: PatchOperation[]
+  /** A new download of the schema URL, by its fingerprint: fetched again when allowed. */
+  fetched?: { hash: string }
+  toolDescriptions?: Record<string, string | null>
+  /** What the owner is shown, worked out when it was asked. */
+  shown: { title: string; lines: string[]; warning: string | null }
+}
+
+/** What a change is made against: the schema, its edits and the words. */
+function basisOf(
+  server: McpServer,
+  stored: { hash: string; patches: PatchOperation[] } | null,
+): string {
+  return specHash(
+    JSON.stringify([
+      stored?.hash ?? null,
+      stored?.patches ?? [],
+      server.readOnly,
+      server.name,
+      server.description,
+      server.url,
+    ]),
+  )
+}
+
+/** The operations in `after` that are not in `before`, and the reverse. */
+function editsDiff(before: PatchOperation[], after: PatchOperation[]) {
+  const left = new Map<string, PatchOperation[]>()
+
+  for (const op of before) {
+    const key = canonicalJson(op)
+    left.set(key, [...(left.get(key) ?? []), op])
+  }
+
+  const added: PatchOperation[] = []
+
+  for (const op of after) {
+    const same = left.get(canonicalJson(op))
+
+    if (same && same.length > 0) {
+      same.pop()
+    } else {
+      added.push(op)
+    }
+  }
+
+  return { added, removed: [...left.values()].flat() }
+}
+
+function describeEdit(op: PatchOperation): string {
+  switch (op.op) {
+    case "remove":
+      return `remove ${op.path}`
+    case "move":
+    case "copy":
+      return `${op.op} ${op.from} to ${op.path}`
+    default:
+      return `${op.op} ${op.path}: ${JSON.stringify(op.value)}`
+  }
+}
+
+function listed(names: string[]): string {
+  const shown = names.slice(0, MAX_LISTED_TOOLS)
+  const more = names.length - shown.length
+  return `${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}`
+}
+
+async function proposeChange(
+  scope: EndpointScope,
+  server: EndpointRow,
+  changes: UpdateInput,
+): Promise<
+  (EndpointDetails & { updated: string }) | { ask: EndpointChangeAsk }
+> {
+  const stored = await storedSpec(server.id)
+
+  if (!stored) {
+    throw invalid("PCP has no copy of this schema to change.")
+  }
+
+  if (changes.refreshSpec === true && server.specSource !== "url") {
+    throw new PcpError(
+      "forbidden",
+      "This endpoint's schema was given as text, so there is no URL to read again.",
+    )
+  }
+
+  const words = normalizeNameAndDescription({
+    name: changes.name ?? server.name,
+    description: changes.description ?? server.description,
+  })
+  const name =
+    changes.name !== undefined && words.name !== server.name
+      ? words.name
+      : undefined
+  const description =
+    changes.description !== undefined &&
+    words.description !== server.description
+      ? words.description
+      : undefined
+
+  const patches =
+    changes.patches !== undefined
+      ? readPatches(changes.patches)
+      : changes.addPatches !== undefined
+        ? readPatches([...stored.patches, ...readPatches(changes.addPatches)])
+        : stored.patches
+  const edits = editsDiff(stored.patches, patches)
+
+  if (edits.added.length > MAX_PROPOSED_EDITS) {
+    throw invalid(
+      `That is ${edits.added.length} new edits; the owner reads each one, so ask for at most ${MAX_PROPOSED_EDITS} at a time.`,
+    )
+  }
+
+  if (
+    edits.added.some(
+      (op) =>
+        "value" in op &&
+        (JSON.stringify(op.value)?.length ?? 0) > MAX_PROPOSED_VALUE,
+    )
+  ) {
+    throw invalid(
+      `An edit's value is longer than ${MAX_PROPOSED_VALUE} characters as JSON; the owner reads it in full, so split it into smaller edits.`,
+    )
+  }
+
+  const downloaded =
+    changes.refreshSpec === true ? await downloadSpec(server) : undefined
+  const fetched =
+    downloaded && specHash(downloaded.text) !== stored.hash
+      ? downloaded
+      : undefined
+  const readOnly =
+    changes.readOnly === true && !server.readOnly ? true : undefined
+  const toolEdits = Object.entries(changes.toolDescriptions ?? {})
+
+  if (toolEdits.length > MAX_PROPOSED_DESCRIPTIONS) {
+    throw invalid(
+      `Ask for at most ${MAX_PROPOSED_DESCRIPTIONS} tool descriptions at a time; the owner reads each one.`,
+    )
+  }
+
+  const editsChange = edits.added.length > 0 || edits.removed.length > 0
+
+  if (
+    name === undefined &&
+    description === undefined &&
+    !editsChange &&
+    !fetched &&
+    !readOnly &&
+    toolEdits.length === 0
+  ) {
+    return {
+      ...(await detailsOf(server)),
+      updated: `Nothing to change: ${server.name} already has what you asked for.${downloaded ? " The document at the schema's URL has not changed." : ""}`,
+    }
+  }
+
+  // Refused here, before the owner is asked, when it would not work.
+  const generated = generateEndpointTools(fetched?.text ?? stored.text, {
+    readOnly: readOnly ?? server.readOnly,
+    authHeaderName: server.authHeaderName,
+    patches,
+  })
+  const after = new Map(generated.tools.map((tool) => [tool.name, tool]))
+  const unknown = toolEdits
+    .map(([tool]) => tool)
+    .filter((tool) => !after.has(tool))
+
+  if (unknown.length > 0) {
+    throw invalid(
+      `No tool called ${unknown.join(", ")} after this change. get_endpoint lists the tools.`,
+    )
+  }
+
+  const before = new Map(server.tools.map((tool) => [tool.name, tool]))
+  const added = generated.tools.filter((tool) => !before.has(tool.name))
+  const removed = server.tools.filter((tool) => !after.has(tool.name))
+  const changed = generated.tools.flatMap((tool) => {
+    const old = before.get(tool.name)
+
+    if (!old) {
+      return []
+    }
+
+    const what = [
+      old.operation !== JSON.stringify(tool.operation)
+        ? "how it is called"
+        : "",
+      old.inputSchema !== JSON.stringify(tool.inputSchema) ? "arguments" : "",
+      old.description !== tool.description ? "description" : "",
+    ].filter(Boolean)
+
+    return what.length > 0 ? [`${tool.name} (${what.join(", ")})`] : []
+  })
+  const writes = added.filter((tool) => tool.operation.method !== "GET")
+  const lines = [
+    `Endpoint: ${server.name} (${server.url})`,
+    ...(name !== undefined ? [`New name: ${name}`] : []),
+    ...(description !== undefined
+      ? [`New description:\n${description || "(none)"}`]
+      : []),
+    ...(readOnly ? ["Read-only: on, so only GET operations stay tools"] : []),
+    ...(fetched
+      ? [
+          `Schema: the document at ${withoutQuery(server.specUrl)} has changed since you approved it; take the new one`,
+        ]
+      : []),
+    ...edits.added.map((op) => `New edit: ${describeEdit(op)}`),
+    ...edits.removed.map((op) => `Takes out the edit: ${describeEdit(op)}`),
+    ...toolEdits.map(([tool, text]) =>
+      text === null
+        ? `Description of ${tool}: back to the schema's own`
+        : `Description of ${tool}:\n${text.trim().slice(0, 2000)}`,
+    ),
+    `Tools: ${server.tools.length} now, ${generated.tools.length} after`,
+    ...(added.length > 0
+      ? [
+          `Adds: ${listed(added.map((tool) => `${tool.name} (${tool.operation.method} ${tool.operation.path})`))}`,
+        ]
+      : []),
+    ...(removed.length > 0
+      ? [`Takes out: ${listed(removed.map((tool) => tool.name))}`]
+      : []),
+    ...(changed.length > 0 ? [`Changes: ${listed(changed)}`] : []),
+    ...(generated.skipped.length > 0
+      ? [`Left out of the schema: ${generated.skipped.length} operations`]
+      : []),
+  ]
+
+  return {
+    ask: {
+      serverId: server.id,
+      basis: basisOf(server, stored),
+      ...(name !== undefined ? { name } : {}),
+      ...(description !== undefined ? { description } : {}),
+      ...(readOnly ? { readOnly } : {}),
+      ...(editsChange ? { patches } : {}),
+      ...(fetched ? { fetched: { hash: specHash(fetched.text) } } : {}),
+      ...(toolEdits.length > 0
+        ? { toolDescriptions: Object.fromEntries(toolEdits) }
+        : {}),
+      shown: {
+        title: `Change the API endpoint ${server.name}?`,
+        lines,
+        warning:
+          writes.length > 0
+            ? `This adds ${writes.length} tool${writes.length === 1 ? "" : "s"} that can create, change or delete things at ${new URL(server.url).host}${server.authType === "header" ? ", sending your secret" : ""}.`
+            : null,
+      },
+    },
+  }
+}
+
+/**
+ * Makes a change the owner agreed to: exactly what they were shown, to the
+ * endpoint as it was then. It stays on, since the owner just said yes.
+ */
+export async function applyEndpointChange(
+  ctx: VaultContext,
+  ask: EndpointChangeAsk,
+): Promise<string> {
+  const server = await db().mcpServer.findFirst({
+    where: { id: ask.serverId, vaultId: ctx.vaultId, kind: "openapi" },
+  })
+
+  if (!server) {
+    throw new PcpError(
+      "state",
+      "The endpoint this was for no longer exists, so nothing changed.",
+    )
+  }
+
+  if (basisOf(server, await storedSpec(server.id)) !== ask.basis) {
+    throw new PcpError(
+      "state",
+      `${server.name} has changed since this was asked, so nothing changed. The assistant can ask again.`,
+    )
+  }
+
+  let fetched: { text: string; url: string } | undefined
+
+  if (ask.fetched) {
+    fetched = await downloadSpec(server)
+
+    if (specHash(fetched.text) !== ask.fetched.hash) {
+      throw new PcpError(
+        "state",
+        "The schema at its URL has changed again since this was asked, so nothing changed. The assistant can ask again.",
+      )
+    }
+  }
+
+  const { sync } = await changeEndpoint(ctx, server.id, {
+    name: ask.name,
+    description: ask.description,
+    readOnly: ask.readOnly,
+    patches: ask.patches,
+    fetched,
+  })
+
+  for (const [tool, text] of Object.entries(ask.toolDescriptions ?? {})) {
+    const exists = await db().mcpTool.count({
+      where: { serverId: server.id, name: tool },
+    })
+
+    if (exists > 0) {
+      await setToolDescription(ctx, server.id, tool, text)
+    }
+  }
+
+  const fresh = await db().mcpServer.findUniqueOrThrow({
+    where: { id: server.id },
+    select: { name: true },
+  })
+
+  return `Changed ${fresh.name}: ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${sync.message ? ` ${sync.message}` : ""}`
 }

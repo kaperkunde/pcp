@@ -205,6 +205,10 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Allow the change",
     decline: "Not now",
   },
+  endpoint_change: {
+    allow_once: "Make the change",
+    decline: "Not now",
+  },
 }
 
 const SCHEMA_WORDS: Record<
@@ -226,6 +230,10 @@ const SCHEMA_WORDS: Record<
   },
   memory_change: {
     title: "Change this shared memory?",
+    description: "Nothing changes unless you say so.",
+  },
+  endpoint_change: {
+    title: "Change this API endpoint?",
     description: "Nothing changes unless you say so.",
   },
 }

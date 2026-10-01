@@ -23,7 +23,9 @@ import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
 import {
+  applyEndpointChange,
   createApprovedEndpoint,
+  type EndpointChangeAsk,
   type EndpointRegistration,
 } from "./endpoint-admin"
 import { isPcpError } from "./errors"
@@ -124,6 +126,7 @@ export type PermissionAsk =
       fields?: string[]
     }
   | { kind: "register"; input: RegisterArgs }
+  | { kind: "endpoint_change"; input: EndpointChangeAsk }
   | MemoryAsk
 
 /** Runs what the owner allowed. Tests swap in a stub. */
@@ -254,6 +257,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `memory:${ask.input.memoryId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "endpoint_change":
+      return {
+        target: `endpoint:${ask.input.serverId}`,
+        args: ask.input as Record<string, unknown>,
+      }
   }
 }
 
@@ -267,6 +275,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return ask.tool.name
     case "register":
       return "register_server"
+    case "endpoint_change":
+      return "update_endpoint"
     default:
       return "memory"
   }
@@ -322,6 +332,12 @@ async function summarizeRow(
     } as MemoryAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "endpoint_change") {
+    const { shown } = args as EndpointChangeAsk
+
+    return { ...shown, lines: [...shown.lines, asker] }
   }
 
   if (row.kind === "register") {
@@ -566,7 +582,12 @@ export async function withPermission(
         vaultId: scope.ctx.vaultId,
         tokenId: scope.tokenId,
         kind: ask.kind,
-        serverId: ask.kind === "call" ? ask.server.id : null,
+        serverId:
+          ask.kind === "call"
+            ? ask.server.id
+            : ask.kind === "endpoint_change"
+              ? ask.input.serverId
+              : null,
         toolName: toolNameOf(ask),
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
@@ -790,7 +811,14 @@ export async function decidePermission(
     result =
       kind === "call"
         ? await executeCall(ctx, row, publicUrl, executor)
-        : await executeRegister(ctx, row, publicUrl, executor)
+        : kind === "endpoint_change"
+          ? text(
+              await applyEndpointChange(
+                ctx,
+                readArgs(ctx, row) as EndpointChangeAsk,
+              ),
+            )
+          : await executeRegister(ctx, row, publicUrl, executor)
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {

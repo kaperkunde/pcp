@@ -127,7 +127,8 @@ export function readDocument(
     : parsed
 }
 
-function generate(
+/** The tools a schema with these edits gives, or what makes it unusable. */
+export function generateEndpointTools(
   text: string,
   options: {
     readOnly: boolean
@@ -333,7 +334,7 @@ export function previewEndpoint(
     limit?: number
   },
 ): EndpointPreview {
-  const generated = generate(text, {
+  const generated = generateEndpointTools(text, {
     readOnly: options.readOnly,
     authHeaderName: options.authHeaderName ?? null,
     patches: options.patches ?? [],
@@ -394,7 +395,7 @@ export async function createEndpoint(
   // Everything that can be wrong with the schema is found before a row
   // exists, so a bad one leaves nothing behind.
   const patches = input.patches ?? []
-  const generated = generate(text, { ...data, patches })
+  const generated = generateEndpointTools(text, { ...data, patches })
   const baseUrl = resolveBaseUrl({
     ownerBaseUrl: data.ownerBaseUrl,
     serverUrl: generated.serverUrl,
@@ -523,7 +524,7 @@ export async function updateEndpoint(
   }
 
   const patches = input.patches ?? stored?.patches ?? []
-  const generated = generate(text, { ...data, patches })
+  const generated = generateEndpointTools(text, { ...data, patches })
   const baseUrl = baseUrlForUpdate(existing, data)
   // The owner choosing the address, or keeping the one they approved.
   const specUrlFromAssistant =
@@ -660,7 +661,7 @@ export async function changeEndpoint(
   }
 
   const patches = changes.patches ?? stored?.patches ?? []
-  const generated = generate(text, {
+  const generated = generateEndpointTools(text, {
     readOnly,
     authHeaderName: existing.authHeaderName,
     patches,
@@ -744,7 +745,7 @@ export async function syncEndpointTools(
     }
 
     const patches = stored?.patches ?? []
-    const generated = generate(text, {
+    const generated = generateEndpointTools(text, {
       readOnly: server.readOnly,
       authHeaderName: server.authHeaderName,
       patches,
