@@ -12,15 +12,27 @@ const baseURL = process.env.PCP_URL ?? "http://localhost:3000"
 export const E2E_DATA_DIR = path.join(__dirname, "e2e", ".state", "data")
 
 /**
- * Each spec is its own project. `setup` creates the owner and writes the
- * signed-in storage state the others reuse, so `--project=gateway` runs
+ * Each spec is its own project. `setup` creates the owner and signs each of
+ * the others in with a session of its own, so `--project=gateway` runs
  * `setup` first by itself. See e2e/README.md.
  */
+/**
+ * A project that starts signed in, with the session `setup` signed in for it
+ * alone: typing the password again (to make a token) is limited per session,
+ * and the whole suite in one session runs out.
+ */
+function signedIn(project: string) {
+  return {
+    ...devices["Desktop Chrome"],
+    storageState: `e2e/.auth/${project}.json`,
+  }
+}
+
 export default defineConfig({
   testDir: "./e2e/tests",
   outputDir: "./e2e/.artifacts/test-results",
   globalSetup: "./e2e/global-setup.ts",
-  // Projects share one database and one signed-in owner; run them in order.
+  // Projects share one database and one owner; run them in order.
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,
@@ -63,7 +75,8 @@ export default defineConfig({
   projects: [
     {
       // First visit: setup, the recovery key, lock and unlock. Writes
-      // e2e/.auth/owner.json and e2e/.state/setup.json.
+      // e2e/.state/setup.json, and e2e/.auth/<project>.json for each project
+      // that starts signed in.
       name: "setup",
       testMatch: /setup\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
@@ -72,10 +85,7 @@ export default defineConfig({
       name: "secrets",
       testMatch: /secrets\.spec\.ts/,
       dependencies: ["setup"],
-      use: {
-        ...devices["Desktop Chrome"],
-        storageState: "e2e/.auth/owner.json",
-      },
+      use: signedIn("secrets"),
     },
     {
       // A header-authenticated upstream, an API token, and the gateway's
@@ -83,20 +93,23 @@ export default defineConfig({
       name: "gateway",
       testMatch: /gateway\.spec\.ts/,
       dependencies: ["setup"],
-      use: {
-        ...devices["Desktop Chrome"],
-        storageState: "e2e/.auth/owner.json",
-      },
+      use: signedIn("gateway"),
     },
     {
       // Connecting an OAuth upstream through the browser, then using it.
       name: "oauth",
       testMatch: /oauth\.spec\.ts/,
       dependencies: ["setup"],
-      use: {
-        ...devices["Desktop Chrome"],
-        storageState: "e2e/.auth/owner.json",
-      },
+      use: signedIn("oauth"),
+    },
+    {
+      // An API that signs in with OAuth: proposed by an assistant with the
+      // owner's client ID, the client secret typed in on the approval page,
+      // connected, and called with the token.
+      name: "endpoint-oauth",
+      testMatch: /endpoint-oauth\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("endpoint-oauth"),
     },
     {
       // An OAuth upstream that lets no app register itself: the owner's own
@@ -104,10 +117,7 @@ export default defineConfig({
       name: "oauth-client",
       testMatch: /oauth-client\.spec\.ts/,
       dependencies: ["setup"],
-      use: {
-        ...devices["Desktop Chrome"],
-        storageState: "e2e/.auth/owner.json",
-      },
+      use: signedIn("oauth-client"),
     },
     {
       // An API described by an OpenAPI schema: added from a URL and from a
@@ -115,10 +125,7 @@ export default defineConfig({
       name: "endpoints",
       testMatch: /endpoints\.spec\.ts/,
       dependencies: ["setup"],
-      use: {
-        ...devices["Desktop Chrome"],
-        storageState: "e2e/.auth/owner.json",
-      },
+      use: signedIn("endpoints"),
     },
     {
       // Per-token tool access and the owner's permission: the link, the
@@ -127,10 +134,7 @@ export default defineConfig({
       name: "permissions",
       testMatch: /permissions\.spec\.ts/,
       dependencies: ["setup"],
-      use: {
-        ...devices["Desktop Chrome"],
-        storageState: "e2e/.auth/owner.json",
-      },
+      use: signedIn("permissions"),
     },
     {
       // A token that keeps memories: its own notes, sharing one through the
@@ -138,10 +142,7 @@ export default defineConfig({
       name: "memories",
       testMatch: /memories\.spec\.ts/,
       dependencies: ["setup"],
-      use: {
-        ...devices["Desktop Chrome"],
-        storageState: "e2e/.auth/owner.json",
-      },
+      use: signedIn("memories"),
     },
     {
       // Dynamic DNS through the fake upstream's update URL, a refused login
@@ -150,10 +151,7 @@ export default defineConfig({
       name: "network",
       testMatch: /network\.spec\.ts/,
       dependencies: ["setup"],
-      use: {
-        ...devices["Desktop Chrome"],
-        storageState: "e2e/.auth/owner.json",
-      },
+      use: signedIn("network"),
     },
     {
       // Signs every browser out, so it comes last and signs in on its own.

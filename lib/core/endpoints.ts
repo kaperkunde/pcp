@@ -29,14 +29,19 @@ import {
 import { readCallPlan } from "./openapi/plan"
 import { buildRequest } from "./openapi/request"
 import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
+import { deleteManagedSecret } from "./secrets"
 import {
   getServer,
   normalizeHeaderAuth,
+  normalizeOAuthClient,
+  secretColumns,
+  withNewSecret,
   normalizeNameAndDescription,
   setServerStatus,
   slugify,
   uniqueSlug,
 } from "./servers"
+import { PCP_VERSION } from "./version"
 
 /**
  * API endpoints: HTTP APIs described by an OpenAPI schema. Each is a server
@@ -77,30 +82,74 @@ export type EndpointInput = {
   publicOnly?: boolean
   /** Off until the owner enables it. Default on. */
   enabled?: boolean
-  authType: "none" | "header"
+  authType: "none" | "header" | "oauth"
   authHeaderName?: string | null
   authValueTemplate?: string | null
+  /** A secret's id, or NEW_SECRET for one typed into the form. */
   authSecretId?: string | null
+  /** With NEW_SECRET: what to call it, and its value. */
+  authSecretName?: string | null
+  authSecretValue?: string | null
+  /**
+   * oauth: the owner's client (without one, PCP asks for it when they
+   * connect), and the scope; left empty, the scope is what the offered
+   * operations need (openapi/oauth.ts).
+   */
+  oauthClientId?: string | null
+  oauthClientSecretId?: string | null
+  /** A client secret typed into the form: saved as a new secret. */
+  oauthClientSecretValue?: string | null
+  oauthScope?: string | null
+  oauthAuthorizeParams?: string | null
+}
+
+/** The header an OAuth endpoint's token goes in. */
+const BEARER_HEADER = "Authorization"
+
+/** Whether an endpoint sends the owner something: a secret, or a token. */
+function sendsCredential(authType: string): boolean {
+  return authType === "header" || authType === "oauth"
 }
 
 async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
   const { name, description } = normalizeNameAndDescription(input)
 
-  if (input.authType !== "none" && input.authType !== "header") {
+  if (!["none", "header", "oauth"].includes(input.authType)) {
     throw invalid(
-      "An API endpoint sends a secret in a header, or no credential at all.",
+      "An API endpoint sends a secret in a header, an OAuth token, or no credential at all.",
     )
   }
 
-  const auth =
+  const noClient = {
+    oauthClientId: null,
+    oauthClientSecretId: null,
+    oauthScope: null,
+    oauthAuthorizeParams: null,
+  }
+  const { newSecret, ...auth } =
     input.authType === "header"
-      ? { authType: "header", ...(await normalizeHeaderAuth(ctx, input)) }
-      : {
-          authType: "none",
-          authSecretId: null,
-          authHeaderName: null,
-          authValueTemplate: null,
+      ? {
+          authType: "header",
+          ...(await normalizeHeaderAuth(ctx, input, { name })),
+          ...noClient,
         }
+      : input.authType === "oauth"
+        ? {
+            authType: "oauth",
+            authSecretId: null,
+            // Blocks the header from being an operation's argument.
+            authHeaderName: BEARER_HEADER,
+            authValueTemplate: null,
+            ...(await normalizeOAuthClient(ctx, input, { name })),
+          }
+        : {
+            authType: "none",
+            authSecretId: null,
+            authHeaderName: null,
+            authValueTemplate: null,
+            newSecret: null,
+            ...noClient,
+          }
 
   const specSource = input.specSource === "upload" ? "upload" : "url"
 
@@ -113,7 +162,45 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
     readOnly: input.readOnly,
     publicOnly: input.publicOnly === true,
     ownerBaseUrl: input.baseUrl?.trim() || null,
+    newSecret,
   } as const
+}
+
+/**
+ * Where an OAuth endpoint signs in, read from the schema it is being saved
+ * with, and the scope: the one given, else what the offered operations need.
+ * Every column null for an endpoint that does not use OAuth.
+ */
+function oauthColumns(
+  data: { authType: string; oauthScope: string | null },
+  generated: Generated,
+): {
+  oauthAuthorizationUrl: string | null
+  oauthTokenUrl: string | null
+  oauthScope: string | null
+} {
+  if (data.authType !== "oauth") {
+    return {
+      oauthAuthorizationUrl: null,
+      oauthTokenUrl: null,
+      oauthScope: null,
+    }
+  }
+
+  const { flow, problem } = generated.oauth
+
+  if (!flow) {
+    throw invalid(
+      problem ??
+        "The schema declares no OAuth sign-in (an oauth2 security scheme with an authorizationCode flow). Add one with an edit, or send a secret in a header.",
+    )
+  }
+
+  return {
+    oauthAuthorizationUrl: flow.authorizationUrl,
+    oauthTokenUrl: flow.tokenUrl,
+    oauthScope: data.oauthScope ?? (flow.scopes.join(" ") || null),
+  }
 }
 
 /** The schema text with the edits applied, checked again as a schema. */
@@ -127,7 +214,8 @@ export function readDocument(
     : parsed
 }
 
-function generate(
+/** The tools a schema with these edits gives, or what makes it unusable. */
+export function generateEndpointTools(
   text: string,
   options: {
     readOnly: boolean
@@ -173,7 +261,10 @@ function fallbackDescription(generated: Generated): string {
  * endpoint does not send. Empty when there is nothing to say.
  */
 function statusNotes(
-  server: Pick<McpServer, "url" | "authType">,
+  server: Pick<
+    McpServer,
+    "url" | "authType" | "oauthAuthorizationUrl" | "oauthTokenUrl"
+  >,
   generated: Generated,
   schemaServer: string | null,
 ): string {
@@ -188,6 +279,19 @@ function statusNotes(
   if (schemaServer && schemaServer !== server.url) {
     notes.push(
       `The schema names ${schemaServer} as its server; PCP sends requests to ${server.url}.`,
+    )
+  }
+
+  const flow = generated.oauth.flow
+
+  if (
+    server.authType === "oauth" &&
+    flow &&
+    (flow.authorizationUrl !== server.oauthAuthorizationUrl ||
+      flow.tokenUrl !== server.oauthTokenUrl)
+  ) {
+    notes.push(
+      "The schema's OAuth addresses have changed; PCP still signs in where you approved. Save the endpoint's settings to take the new ones.",
     )
   }
 
@@ -219,15 +323,9 @@ function schemaServerUrl(
   }
 }
 
-async function applySpec(
-  server: McpServer,
-  text: string,
-  patches: PatchOperation[],
-  generated: Generated,
-  fetchedFrom: string | null,
-): Promise<SyncResult> {
-  const toolCount = await storeTools(
-    server.id,
+function storeGenerated(serverId: string, generated: Generated) {
+  return storeTools(
+    serverId,
     generated.tools.map((tool) => ({
       name: tool.name,
       title: tool.title,
@@ -235,8 +333,19 @@ async function applySpec(
       inputSchema: tool.inputSchema,
       annotations: tool.annotations,
       operation: JSON.stringify(tool.operation),
+      output: tool.output,
     })),
   )
+}
+
+async function applySpec(
+  server: McpServer,
+  text: string,
+  patches: PatchOperation[],
+  generated: Generated,
+  fetchedFrom: string | null,
+): Promise<SyncResult> {
+  const toolCount = await storeGenerated(server.id, generated)
 
   const hash = specHash(text)
   const stored = await db().openApiSpec.findUnique({
@@ -249,13 +358,14 @@ async function applySpec(
   if (stored?.hash === hash) {
     await db().openApiSpec.update({
       where: { serverId: server.id },
-      data: { fetchedAt, patches: edits },
+      data: { fetchedAt, patches: edits, builtWith: PCP_VERSION },
     })
   } else {
+    const columns = { text, hash, fetchedAt, patches: edits }
     await db().openApiSpec.upsert({
       where: { serverId: server.id },
-      create: { serverId: server.id, text, hash, fetchedAt, patches: edits },
-      update: { text, hash, fetchedAt, patches: edits },
+      create: { serverId: server.id, ...columns, builtWith: PCP_VERSION },
+      update: { ...columns, builtWith: PCP_VERSION },
     })
   }
 
@@ -277,6 +387,66 @@ async function applySpec(
   await setServerStatus(server.id, "ok", message, { lastSyncedAt: fetchedAt })
 
   return { status: "ok", message, toolCount }
+}
+
+/**
+ * Rebuilds the tools of every endpoint another PCP version built, from the
+ * copy and edits PCP keeps: the schema the owner approved, read by today's
+ * generator. Run at boot. Without it an endpoint keeps what the PCP that
+ * added it made of its schema (no outline of its answers, a header PCP now
+ * sends itself still asked for) until its schema is read again, which for
+ * an uploaded schema, or a URL whose document has since changed, is never.
+ *
+ * Nothing is downloaded and nothing about the endpoint changes but its
+ * tools: not when it was read, not its status or what that says (that the
+ * document at its URL changed, say, or that it waits to be signed in to).
+ * An endpoint whose schema no longer builds keeps the tools it has and is
+ * tried again at the next boot.
+ */
+export async function rebuildOutdatedEndpoints(): Promise<{
+  rebuilt: number
+  failed: Array<{ serverId: string; message: string }>
+}> {
+  const outdated = await db().openApiSpec.findMany({
+    where: { OR: [{ builtWith: null }, { builtWith: { not: PCP_VERSION } }] },
+    select: { serverId: true },
+  })
+  const failed: Array<{ serverId: string; message: string }> = []
+  let rebuilt = 0
+
+  // One at a time: each holds a whole schema in memory.
+  for (const { serverId } of outdated) {
+    try {
+      const server = await db().mcpServer.findUnique({
+        where: { id: serverId },
+      })
+      const spec = await storedSpec(serverId)
+
+      if (!server || server.kind !== "openapi" || !spec) {
+        continue
+      }
+
+      const generated = generateEndpointTools(spec.text, {
+        readOnly: server.readOnly,
+        authHeaderName: server.authHeaderName,
+        patches: spec.patches,
+      })
+
+      await storeGenerated(serverId, generated)
+      await db().openApiSpec.update({
+        where: { serverId },
+        data: { builtWith: PCP_VERSION },
+      })
+      rebuilt += 1
+    } catch (error) {
+      failed.push({
+        serverId,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  return { rebuilt, failed }
 }
 
 /** The fingerprint kept with a schema's text, to tell a changed one. */
@@ -312,6 +482,13 @@ export type EndpointPreview = {
   methods: string
   /** What PCP leaves out, in words; empty when nothing. */
   skipped: string
+  /** With OAuth: where the owner signs in, where the token comes from. */
+  oauth: {
+    authorizationUrl: string
+    tokenUrl: string
+    /** The scope that will be asked for. */
+    scope: string | null
+  } | null
 }
 
 /**
@@ -326,24 +503,34 @@ export function previewEndpoint(
     ownerBaseUrl?: string | null
     hasSecret: boolean
     authHeaderName?: string | null
+    /** Signs in with the schema's OAuth flow; the scope, if one was given. */
+    oauth?: { scope: string | null }
     patches?: PatchOperation[]
     /** Where the text was downloaded from, when it was. */
     fetchedFrom?: string | null
     limit?: number
   },
 ): EndpointPreview {
-  const generated = generate(text, {
+  const generated = generateEndpointTools(text, {
     readOnly: options.readOnly,
-    authHeaderName: options.authHeaderName ?? null,
+    authHeaderName: options.oauth
+      ? BEARER_HEADER
+      : (options.authHeaderName ?? null),
     patches: options.patches ?? [],
   })
+  const oauth = options.oauth
+    ? oauthColumns(
+        { authType: "oauth", oauthScope: options.oauth.scope },
+        generated,
+      )
+    : null
   const baseUrl = resolveBaseUrl({
     ownerBaseUrl: options.ownerBaseUrl?.trim() || null,
     serverUrl: generated.serverUrl,
     serverUrlProblem: generated.serverUrlProblem,
     specUrl: options.fetchedFrom ?? null,
     fetchedFrom: options.fetchedFrom ?? null,
-    hasSecret: options.hasSecret,
+    hasSecret: options.hasSecret || oauth !== null,
   })
   const limit = options.limit ?? 12
   const counts = new Map<string, number>()
@@ -366,6 +553,11 @@ export function previewEndpoint(
       .map(([method, count]) => `${method} ${count}`)
       .join(", "),
     skipped: generated.skipped.length > 0 ? skippedList(generated) : "",
+    oauth: oauth && {
+      authorizationUrl: oauth.oauthAuthorizationUrl!,
+      tokenUrl: oauth.oauthTokenUrl!,
+      scope: oauth.oauthScope,
+    },
   }
 }
 
@@ -393,53 +585,60 @@ export async function createEndpoint(
   // Everything that can be wrong with the schema is found before a row
   // exists, so a bad one leaves nothing behind.
   const patches = input.patches ?? []
-  const generated = generate(text, { ...data, patches })
+  const generated = generateEndpointTools(text, { ...data, patches })
   const baseUrl = resolveBaseUrl({
     ownerBaseUrl: data.ownerBaseUrl,
     serverUrl: generated.serverUrl,
     serverUrlProblem: generated.serverUrlProblem,
     specUrl: data.specUrl,
     fetchedFrom,
-    hasSecret: data.authType === "header",
+    hasSecret: sendsCredential(data.authType),
   })
+  const oauth = oauthColumns(data, generated)
 
   const id = newId()
-  const server = await db().mcpServer.create({
-    data: {
-      id,
-      vaultId: ctx.vaultId,
-      kind: "openapi",
-      enabled: input.enabled !== false,
-      slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
-      name: data.name,
-      description: data.description,
-      url: baseUrl,
-      specSource: data.specSource,
-      specUrl: data.specUrl,
-      readOnly: data.readOnly,
-      publicOnly: data.publicOnly,
-      specUrlFromAssistant:
-        data.specSource === "url" && input.specUrlFromAssistant === true,
-      authType: data.authType,
-      authSecretId: data.authSecretId,
-      authHeaderName: data.authHeaderName,
-      authValueTemplate: data.authValueTemplate,
-    },
-  })
 
-  try {
-    return {
-      id,
-      sync: await applySpec(server, text, patches, generated, fetchedFrom),
+  return withNewSecret(ctx, data.newSecret, async (secretId) => {
+    const server = await db().mcpServer.create({
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        kind: "openapi",
+        enabled: input.enabled !== false,
+        slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
+        name: data.name,
+        description: data.description,
+        url: baseUrl,
+        specSource: data.specSource,
+        specUrl: data.specUrl,
+        readOnly: data.readOnly,
+        publicOnly: data.publicOnly,
+        specUrlFromAssistant:
+          data.specSource === "url" && input.specUrlFromAssistant === true,
+        authType: data.authType,
+        authHeaderName: data.authHeaderName,
+        authValueTemplate: data.authValueTemplate,
+        ...secretColumns(data, secretId),
+        oauthClientId: data.oauthClientId,
+        oauthAuthorizeParams: data.oauthAuthorizeParams,
+        ...oauth,
+      },
+    })
+
+    try {
+      return {
+        id,
+        sync: await applySpec(server, text, patches, generated, fetchedFrom),
+      }
+    } catch (error) {
+      // The row exists only for the tools that did not get stored: do not
+      // leave an endpoint with none, and a status that says nothing.
+      await db()
+        .mcpServer.delete({ where: { id } })
+        .catch(() => {})
+      throw error
     }
-  } catch (error) {
-    // The row exists only for the tools that did not get stored: do not leave
-    // an endpoint with none, and a status that says nothing.
-    await db()
-      .mcpServer.delete({ where: { id } })
-      .catch(() => {})
-    throw error
-  }
+  })
 }
 
 function originOf(address: string | null): string | null {
@@ -471,11 +670,12 @@ function baseUrlForUpdate(
     return validateBaseUrl(data.ownerBaseUrl)
   }
 
-  const attaching = data.authType === "header" && existing.authType !== "header"
+  const attaching =
+    sendsCredential(data.authType) && !sendsCredential(existing.authType)
 
   if (attaching && originOf(existing.url) !== originOf(data.specUrl)) {
     throw invalid(
-      `This endpoint's address, ${existing.url}, came from the schema, not from you. To send your secret there, enter it in Base URL to confirm.`,
+      `This endpoint's address, ${existing.url}, came from the schema, not from you. To send your ${data.authType === "oauth" ? "token" : "secret"} there, enter it in Base URL to confirm.`,
     )
   }
 
@@ -522,7 +722,7 @@ export async function updateEndpoint(
   }
 
   const patches = input.patches ?? stored?.patches ?? []
-  const generated = generate(text, { ...data, patches })
+  const generated = generateEndpointTools(text, { ...data, patches })
   const baseUrl = baseUrlForUpdate(existing, data)
   // The owner choosing the address, or keeping the one they approved.
   const specUrlFromAssistant =
@@ -530,23 +730,44 @@ export async function updateEndpoint(
     data.specSource === "url" &&
     data.specUrl === existing.specUrl
 
-  const server = await db().mcpServer.update({
-    where: { id },
-    data: {
-      name: data.name,
-      description: data.description,
-      url: baseUrl,
-      specSource: data.specSource,
-      specUrl: data.specUrl,
-      readOnly: data.readOnly,
-      publicOnly: data.publicOnly,
-      specUrlFromAssistant,
-      authType: data.authType,
-      authSecretId: data.authSecretId,
-      authHeaderName: data.authHeaderName,
-      authValueTemplate: data.authValueTemplate,
-    },
-  })
+  const oauth = oauthColumns(data, generated)
+  // Tokens belong to the sign-in they came from: another client, sign-in or
+  // token address, or API address, and they go.
+  const dropTokens =
+    existing.oauthTokensId !== null &&
+    (data.authType !== "oauth" ||
+      data.oauthClientId !== existing.oauthClientId ||
+      oauth.oauthAuthorizationUrl !== existing.oauthAuthorizationUrl ||
+      oauth.oauthTokenUrl !== existing.oauthTokenUrl ||
+      baseUrl !== existing.url)
+
+  const server = await withNewSecret(ctx, data.newSecret, (secretId) =>
+    db().mcpServer.update({
+      where: { id },
+      data: {
+        name: data.name,
+        description: data.description,
+        url: baseUrl,
+        specSource: data.specSource,
+        specUrl: data.specUrl,
+        readOnly: data.readOnly,
+        publicOnly: data.publicOnly,
+        specUrlFromAssistant,
+        authType: data.authType,
+        authHeaderName: data.authHeaderName,
+        authValueTemplate: data.authValueTemplate,
+        ...secretColumns(data, secretId),
+        oauthClientId: data.oauthClientId,
+        oauthAuthorizeParams: data.oauthAuthorizeParams,
+        ...oauth,
+        ...(dropTokens ? { oauthTokensId: null, oauthConnectedAt: null } : {}),
+      },
+    }),
+  )
+
+  if (dropTokens && existing.oauthTokensId) {
+    await deleteManagedSecret(ctx, existing.oauthTokensId)
+  }
 
   return {
     sync: await applySpec(server, text, patches, generated, fetchedFrom),
@@ -659,7 +880,7 @@ export async function changeEndpoint(
   }
 
   const patches = changes.patches ?? stored?.patches ?? []
-  const generated = generate(text, {
+  const generated = generateEndpointTools(text, {
     readOnly,
     authHeaderName: existing.authHeaderName,
     patches,
@@ -705,14 +926,25 @@ export async function downloadSpec(
  */
 export async function syncEndpointTools(
   server: McpServer,
-  { byOwner = false }: { byOwner?: boolean } = {},
+  {
+    byOwner = false,
+    fromCopy = false,
+  }: {
+    byOwner?: boolean
+    /** Rebuild from the copy PCP holds, without downloading the schema. */
+    fromCopy?: boolean
+  } = {},
 ): Promise<SyncResult> {
   try {
     let text: string
     let fetchedFrom: string | null = null
     const stored = await storedSpec(server.id)
 
-    if (server.specSource === "url" && server.specUrl) {
+    if (
+      server.specSource === "url" &&
+      server.specUrl &&
+      !(fromCopy && stored)
+    ) {
       ;({ text, url: fetchedFrom } = await downloadSpec(server))
 
       if (
@@ -743,7 +975,7 @@ export async function syncEndpointTools(
     }
 
     const patches = stored?.patches ?? []
-    const generated = generate(text, {
+    const generated = generateEndpointTools(text, {
       readOnly: server.readOnly,
       authHeaderName: server.authHeaderName,
       patches,
@@ -774,10 +1006,16 @@ export async function callEndpointTool(
   {
     authHeaders,
     redact,
+    renew,
   }: {
     authHeaders: Record<string, string>
     /** The credential's values, to keep out of what the API answers. */
     redact: string[]
+    /**
+     * A renewed credential, for one more try after a 401 (an OAuth token
+     * the API no longer takes). Built by upstream.ts, like the first.
+     */
+    renew?: () => Promise<{ headers: Record<string, string>; redact: string[] }>
   },
 ): Promise<CallToolResult> {
   const tool = await db().mcpTool.findUnique({
@@ -800,28 +1038,39 @@ export async function callEndpointTool(
     )
   }
 
-  const request = buildRequest(plan, server.url, args, authHeaders)
-  let outcome: Awaited<ReturnType<typeof executeCall>>
+  const attempt = async (
+    headers: Record<string, string>,
+    secrets: string[],
+  ): Promise<Awaited<ReturnType<typeof executeCall>>> => {
+    try {
+      return await executeCall(buildRequest(plan, server.url, args, headers), {
+        redact: secrets,
+        publicOnly: server.publicOnly,
+      })
+    } catch (error) {
+      // The endpoint refusing an address is its rule working, not an outage:
+      // say so, and leave its status alone.
+      if (isPcpError(error) && error.code === "forbidden") {
+        throw error
+      }
 
-  try {
-    outcome = await executeCall(request, {
-      redact,
-      publicOnly: server.publicOnly,
-    })
-  } catch (error) {
-    // The endpoint refusing an address is its rule working, not an outage:
-    // say so, and leave its status alone.
-    if (isPcpError(error) && error.code === "forbidden") {
-      throw error
+      const message =
+        `${server.name} could not be reached: ${error instanceof Error ? error.message : String(error)}`.slice(
+          0,
+          500,
+        )
+      await setServerStatus(server.id, "error", message)
+      throw new PcpError("upstream", message)
     }
+  }
 
-    const message =
-      `${server.name} could not be reached: ${error instanceof Error ? error.message : String(error)}`.slice(
-        0,
-        500,
-      )
-    await setServerStatus(server.id, "error", message)
-    throw new PcpError("upstream", message)
+  let outcome = await attempt(authHeaders, redact)
+
+  // Outside the attempt: a renewal that cannot happen means "connect it
+  // again", not "could not be reached".
+  if (outcome.status === 401 && renew) {
+    const renewed = await renew()
+    outcome = await attempt(renewed.headers, [...redact, ...renewed.redact])
   }
 
   if (outcome.status === 401) {

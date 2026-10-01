@@ -220,63 +220,6 @@ describe("tool access", () => {
     )
   })
 
-  it("lets every way of asking by default, and narrows them after the fact", async () => {
-    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
-    const { id, token } = await createApiToken(ctx, {
-      name: "Claude",
-      allowAllServers: true,
-    })
-
-    expect((await getApiToken(ctx, id)).permissionTiers).toEqual([
-      "app",
-      "form",
-      "url",
-      "link",
-    ])
-
-    await updateApiToken(ctx, id, {
-      name: "Claude",
-      allowAllServers: true,
-      permissionTiers: ["app"],
-    })
-    expect((await resolveApiToken(token))?.permissionTiers).toEqual([
-      "app",
-      "link",
-    ])
-
-    // Leaving them out keeps them; an empty list leaves the link alone.
-    await updateApiToken(ctx, id, { name: "Claude", allowAllServers: true })
-    expect((await getApiToken(ctx, id)).permissionTiers).toEqual([
-      "app",
-      "link",
-    ])
-    await updateApiToken(ctx, id, {
-      name: "Claude",
-      allowAllServers: true,
-      permissionTiers: [],
-    })
-    expect((await getApiToken(ctx, id)).permissionTiers).toEqual(["link"])
-
-    await expect(
-      updateApiToken(ctx, id, {
-        name: "Claude",
-        allowAllServers: true,
-        permissionTiers: ["telepathy"],
-      }),
-    ).rejects.toThrow(/options shown/)
-
-    // Refused before the token's key is copied, so nothing is left behind.
-    const grants = await db().keyGrant.count()
-    await expect(
-      createApiToken(ctx, {
-        name: "Phone",
-        allowAllServers: true,
-        permissionTiers: ["telepathy"],
-      }),
-    ).rejects.toThrow(/options shown/)
-    expect(await db().keyGrant.count()).toBe(grants)
-  })
-
   it("changes a token's name, servers and expiry after the fact", async () => {
     const ctx = await setupVault({ name: "Ada", password: PASSWORD })
     const postcards = await serverWithTools(ctx, "Postcards", ["send_postcard"])

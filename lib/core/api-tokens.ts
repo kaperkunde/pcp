@@ -1,11 +1,9 @@
-import type { PermissionTier } from "./constants"
 import type { VaultContext } from "./context"
 import { randomSecret } from "./crypto"
 import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { createCredentialGrant, unlockWithCredential } from "./keys"
-import { parsePermissionTiers, storePermissionTiers } from "./permission-rules"
 
 /**
  * API tokens: what an MCP client presents to /mcp as a bearer token. Each
@@ -27,8 +25,6 @@ export type ApiTokenSummary = {
   manageEndpoints: boolean
   /** May keep memories (the gateway's memory tool). */
   keepMemories: boolean
-  /** How PCP may ask the owner about its calls, in trying order. */
-  permissionTiers: PermissionTier[]
   servers: Array<{ id: string; name: string }>
   expiresAt: Date | null
   revokedAt: Date | null
@@ -46,11 +42,6 @@ export type TokenInput = {
   manageEndpoints?: boolean
   /** Left alone on an update when undefined. */
   keepMemories?: boolean
-  /**
-   * Which of app, form and url PCP may use to ask; the link is implied.
-   * All three on create when undefined; left alone on an update.
-   */
-  permissionTiers?: string[]
   expiresAt?: Date | null
 }
 
@@ -64,8 +55,6 @@ export type ResolvedToken = {
   manageEndpoints: boolean
   /** May keep memories: its own, and the shared ones (memory). */
   keepMemories: boolean
-  /** How PCP may ask the owner about its calls, in trying order. */
-  permissionTiers: PermissionTier[]
 }
 
 function summaryInclude(now: Date) {
@@ -88,7 +77,6 @@ type SummaryRow = {
   allowAllServers: boolean
   manageEndpoints: boolean
   keepMemories: boolean
-  permissionTiers: string
   expiresAt: Date | null
   revokedAt: Date | null
   createdAt: Date
@@ -105,7 +93,6 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     allowAllServers: row.allowAllServers,
     manageEndpoints: row.manageEndpoints,
     keepMemories: row.keepMemories,
-    permissionTiers: parsePermissionTiers(row.permissionTiers),
     servers: row.servers.map((link) => link.server),
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
@@ -174,8 +161,6 @@ async function validateTokenInput(
 ): Promise<{
   name: string
   serverIds: string[]
-  /** The stored form, or undefined to keep (or default) it. */
-  permissionTiers: string | undefined
 }> {
   const name = input.name.trim()
 
@@ -207,22 +192,14 @@ async function validateTokenInput(
     throw invalid("The expiry must be in the future.")
   }
 
-  const permissionTiers =
-    input.permissionTiers === undefined
-      ? undefined
-      : storePermissionTiers(input.permissionTiers)
-
-  return { name, serverIds, permissionTiers }
+  return { name, serverIds }
 }
 
 export async function createApiToken(
   ctx: VaultContext,
   input: TokenInput,
 ): Promise<{ id: string; token: string }> {
-  const { name, serverIds, permissionTiers } = await validateTokenInput(
-    ctx,
-    input,
-  )
+  const { name, serverIds } = await validateTokenInput(ctx, input)
 
   const token = `${TOKEN_PREFIX}${randomSecret()}`
   const grant = await createCredentialGrant(
@@ -243,7 +220,6 @@ export async function createApiToken(
       allowAllServers: input.allowAllServers,
       manageEndpoints: input.manageEndpoints ?? false,
       keepMemories: input.keepMemories ?? false,
-      ...(permissionTiers !== undefined ? { permissionTiers } : {}),
       expiresAt: input.expiresAt ?? null,
       servers: { create: serverIds.map((serverId) => ({ serverId })) },
     },
@@ -253,8 +229,8 @@ export async function createApiToken(
 }
 
 /**
- * Changes a token after the fact: its name, the servers it reaches, how
- * PCP asks the owner about its calls, and its expiry (each optional field
+ * Changes a token after the fact: its name, the servers it reaches, what
+ * else it may do, and its expiry (each optional field
  * is left alone when undefined). The token itself, and the key it unwraps,
  * stay the same.
  */
@@ -264,10 +240,7 @@ export async function updateApiToken(
   input: TokenInput,
 ): Promise<void> {
   await requireLiveToken(ctx, id)
-  const { name, serverIds, permissionTiers } = await validateTokenInput(
-    ctx,
-    input,
-  )
+  const { name, serverIds } = await validateTokenInput(ctx, input)
 
   await db().$transaction([
     db().apiToken.update({
@@ -281,7 +254,6 @@ export async function updateApiToken(
         ...(input.keepMemories !== undefined
           ? { keepMemories: input.keepMemories }
           : {}),
-        ...(permissionTiers !== undefined ? { permissionTiers } : {}),
         ...(input.expiresAt !== undefined
           ? { expiresAt: input.expiresAt }
           : {}),
@@ -351,7 +323,6 @@ export async function resolveApiToken(
       : record.servers.map((link) => link.serverId),
     manageEndpoints: record.manageEndpoints,
     keepMemories: record.keepMemories,
-    permissionTiers: parsePermissionTiers(record.permissionTiers),
   }
 }
 

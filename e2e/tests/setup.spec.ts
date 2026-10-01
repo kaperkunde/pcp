@@ -49,8 +49,6 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "PCP is already set up" }),
   ).toBeVisible()
-
-  await page.context().storageState({ path: "e2e/.auth/owner.json" })
 })
 
 test("locks, refuses a wrong password and unlocks", async ({ page }) => {
@@ -70,5 +68,30 @@ test("locks, refuses a wrong password and unlocks", async ({ page }) => {
   await expect(page.locator("p[role=alert]")).toHaveText(/not right/)
 
   await unlock(page)
-  await page.context().storageState({ path: "e2e/.auth/owner.json" })
+})
+
+// Each project that starts signed in gets a session of its own, as if it
+// were another browser: typing the password again (to make a token) is
+// limited per session, and the suite in one session runs out. Signing in is
+// limited per address, so each signs in from an address of its own.
+test("signs each project in with a session of its own", async ({
+  browser,
+  baseURL,
+}) => {
+  const projects = test
+    .info()
+    .config.projects.filter(
+      (project) => typeof project.use.storageState === "string",
+    )
+  expect(projects.length).toBeGreaterThan(0)
+
+  for (const [index, project] of projects.entries()) {
+    const context = await browser.newContext({
+      baseURL,
+      extraHTTPHeaders: { "x-forwarded-for": `198.51.100.${index + 1}` },
+    })
+    await unlock(await context.newPage())
+    await context.storageState({ path: project.use.storageState as string })
+    await context.close()
+  }
 })

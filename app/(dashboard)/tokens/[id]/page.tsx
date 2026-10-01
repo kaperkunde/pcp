@@ -62,10 +62,16 @@ export default async function TokenPage({
           .map(({ id, name }) => ({ id, name }))}
         waiting={waiting.map((request) => ({
           id: request.id,
+          review: request.kind === "access",
           title: request.title,
           lines: request.lines,
           warning: request.warning,
           decisions: request.decisions,
+          secret: request.secretToEnter,
+          every:
+            request.kind === "memory_share" && request.memory
+              ? { asked: request.memory.always }
+              : null,
         }))}
         endpointUrl={`${publicUrl}/mcp`}
       />

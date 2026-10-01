@@ -1,5 +1,7 @@
 import { z } from "zod"
 
+import { MAX_HEADER_VALUE } from "./limits"
+
 /**
  * The call plan stored with each generated tool (mcp_tool.operation): what
  * PCP needs to turn the tool's arguments into one HTTP request, and nothing
@@ -28,6 +30,11 @@ export const callPlanSchema = z.object({
       explode: z.boolean(),
       /** Declared with `content` as JSON: the value is sent as JSON text. */
       serialize: z.literal("json").optional(),
+      /**
+       * The one value the schema allows, which PCP sends itself: the
+       * parameter is not one of the tool's arguments.
+       */
+      value: z.string().max(MAX_HEADER_VALUE).optional(),
     }),
   ),
   body: z

@@ -19,6 +19,7 @@ export async function createMemoryAction(
     createMemory(ctx, {
       path: field(formData, "path"),
       text: field(formData, "text"),
+      always: field(formData, "always") === "on",
     }),
   )
 
@@ -38,6 +39,7 @@ export async function updateMemoryAction(
       path: field(formData, "path"),
       text: field(formData, "text"),
       shared: field(formData, "shared") === "on",
+      always: field(formData, "always") === "on",
     })
 
     return { message: "Saved." }

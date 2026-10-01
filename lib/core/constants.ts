@@ -9,6 +9,12 @@ export const DEFAULT_HEADER_NAME = "Authorization"
 export const DEFAULT_VALUE_TEMPLATE = "Bearer {{secret}}"
 export const SECRET_PLACEHOLDER = "{{secret}}"
 
+/**
+ * The secret picker's choice for one typed into the form there and then,
+ * saved as a new secret when the form is.
+ */
+export const NEW_SECRET = "new"
+
 /** The largest OpenAPI schema PCP reads, uploaded or downloaded. */
 export const MAX_SPEC_BYTES = 5 * 1024 * 1024
 export const SPEC_FILE_ACCEPT =
@@ -46,7 +52,12 @@ export const PERMISSION_DECISIONS = [
 export type PermissionDecision = (typeof PERMISSION_DECISIONS)[number]
 
 export type PermissionKind =
-  "call" | "register" | "memory_share" | "memory_change"
+  | "call"
+  | "register"
+  | "memory_share"
+  | "memory_change"
+  | "access"
+  | "endpoint_change"
 
 /** The longest memory, in characters. */
 export const MAX_MEMORY_CHARS = 10_000
@@ -59,38 +70,6 @@ export const MAX_SHARED_MEMORY_CHARS = 2_000
 
 /** The longest memory path, without the leading /memories/. */
 export const MAX_MEMORY_PATH = 200
-/**
- * The ways PCP can ask the owner about a call, in the order it tries them
- * (see choosePermissionTier). The link always works, so a token can turn
- * off the others but not the link.
- */
-export const PERMISSION_TIERS = ["app", "form", "url", "link"] as const
-
-export type PermissionTier = (typeof PERMISSION_TIERS)[number]
-
-export const OPTIONAL_PERMISSION_TIERS = ["app", "form", "url"] as const
-
-export const PERMISSION_TIER_LABELS: Record<
-  PermissionTier,
-  { label: string; hint: string }
-> = {
-  app: {
-    label: "PCP's panel",
-    hint: "Buttons in the conversation, in apps that show panels.",
-  },
-  form: {
-    label: "The app's own prompt",
-    hint: "Some apps say they show it and do not, which stalls the call until it times out.",
-  },
-  url: {
-    label: "The app opens PCP",
-    hint: "The app opens the request in PCP for you to answer.",
-  },
-  link: {
-    label: "A link",
-    hint: "The assistant passes on a link to the request in PCP. Always on: it is what is left when nothing above works.",
-  },
-}
 
 /**
  * Dynamic DNS services PCP can keep pointed at this machine

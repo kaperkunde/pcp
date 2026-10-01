@@ -10,7 +10,7 @@ import { db } from "./db"
  */
 
 export type SyncResult = {
-  status: "ok" | "auth_required" | "client_required" | "error"
+  status: "ok" | "auth_required" | "client_required" | "refused" | "error"
   message: string
   toolCount: number
 }
@@ -23,6 +23,8 @@ export type CatalogueTool = {
   annotations?: unknown
   /** openapi: the call plan, as JSON. */
   operation?: string | null
+  /** openapi: what a successful call answers, in outline. */
+  output?: string | null
 }
 
 const DELETE_CHUNK = 500
@@ -60,6 +62,7 @@ export async function storeTools(
             ? JSON.stringify(tool.annotations)
             : null,
           operation: tool.operation ?? null,
+          output: tool.output ?? null,
         }
 
         await tx.mcpTool.upsert({

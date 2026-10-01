@@ -16,8 +16,11 @@ import {
   oauthRedirectUrl,
 } from "./oauth-client"
 import { getServer, setServerStatus } from "./servers"
+import { syncEndpointTools } from "./endpoints"
 import {
+  endpointDiscovery,
   forgetOAuthTokens,
+  oauthFetch,
   PcpOAuthProvider,
   syncServerTools,
 } from "./upstream"
@@ -53,7 +56,19 @@ export async function startOAuth(
     publicUrl,
   })
   const storedClient = await probe.storedClient()
-  const discovery = server.oauthClientId ? undefined : await discover(server)
+  const fixed = endpointDiscovery(server)
+
+  if (server.kind === "openapi" && !fixed) {
+    throw new PcpError(
+      "state",
+      `${server.name} has no OAuth sign-in from its schema. Save its settings to read it again.`,
+    )
+  }
+
+  // An endpoint's sign-in is the one stored from its schema; an MCP server's
+  // is discovered, unless the owner's client makes that unnecessary.
+  const discovery =
+    fixed ?? (server.oauthClientId ? undefined : await discover(server))
   const method = chooseRegistration({
     clientId: server.oauthClientId,
     storedClient: storedClient !== undefined,
@@ -85,6 +100,7 @@ export async function startOAuth(
     result = await auth(provider, {
       serverUrl: server.url,
       scope: server.oauthScope ?? undefined,
+      fetchFn: oauthFetch(server),
     })
   } catch (error) {
     // A registration endpoint that refuses PCP (an allow-list of clients,
@@ -104,7 +120,7 @@ export async function startOAuth(
     return { redirectTo: provider.authorizationUrl.toString() }
   }
 
-  await syncServerTools(ctx, server, { publicUrl })
+  await afterConnecting(ctx, server, publicUrl)
 
   return { connected: true }
 }
@@ -174,7 +190,7 @@ async function needsClient(
   publicUrl: string,
   why = "it does not let apps register themselves",
 ): Promise<PcpError> {
-  const message = `${server.name} needs an OAuth client from you: ${why}. Create one in the provider's developer settings with ${oauthRedirectUrl(publicUrl)} as its redirect URI, then enter its client ID and secret under Settings below.`
+  const message = `${server.name} needs an OAuth client from you: ${why}. Create one in the provider's developer settings with ${oauthRedirectUrl(publicUrl)} as its redirect URI, then give PCP its client ID and secret on the server's page.`
 
   await setServerStatus(server.id, "client_required", message)
 
@@ -247,6 +263,7 @@ export async function finishOAuth(
       authorizationCode: code,
       iss: reconcileIssuer(params.get("iss") ?? undefined, recordedIssuer),
       scope: server.oauthScope ?? undefined,
+      fetchFn: oauthFetch(server),
     })
 
     if (result !== "AUTHORIZED") {
@@ -256,10 +273,27 @@ export async function finishOAuth(
     await db().oAuthState.deleteMany({ where: { id: stateId } })
   }
 
-  const fresh = await getServer(ctx, server.id)
-  await syncServerTools(ctx, fresh, { publicUrl })
+  await afterConnecting(ctx, await getServer(ctx, server.id), publicUrl)
 
   return { serverId: server.id }
+}
+
+/**
+ * A server just connected: an MCP server's tools are read now that PCP may.
+ * An endpoint's tools come from its schema, not the sign-in, so they are
+ * rebuilt from the copy PCP holds, which also sets its status.
+ */
+async function afterConnecting(
+  ctx: VaultContext,
+  server: Awaited<ReturnType<typeof getServer>>,
+  publicUrl: string,
+): Promise<void> {
+  if (server.kind === "openapi") {
+    await syncEndpointTools(server, { fromCopy: true })
+    return
+  }
+
+  await syncServerTools(ctx, server, { publicUrl })
 }
 
 /** Where the callback sends the owner's browser when it cannot finish. */

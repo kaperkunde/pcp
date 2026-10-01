@@ -212,7 +212,9 @@ export function buildRequest(
 
   const given = args ?? {}
   const known = [
-    ...plan.params.map((param) => param.arg),
+    ...plan.params
+      .filter((param) => param.value === undefined)
+      .map((param) => param.arg),
     ...(plan.body ? [plan.body.arg] : []),
   ]
 
@@ -235,7 +237,7 @@ export function buildRequest(
   const authNames = Object.keys(auth)
 
   for (const param of plan.params) {
-    const value = valueOf(param.arg)
+    const value = param.value ?? valueOf(param.arg)
 
     if (value === undefined) {
       if (param.required) {
