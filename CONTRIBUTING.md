@@ -58,8 +58,10 @@ pnpm version:bump major   # 0.2.0 → 1.0.0
 The next merge to `main` releases that version as written, and patches count
 up from there. Never set the patch or push a `v*` tag by hand.
 
-The workflow pushes with the workflow token, so the repository's Actions
-setting "Workflow permissions" must allow read and write.
+The workflow pushes with the workflow token and asks for `contents: write`
+itself, so the read-only default under Settings → Actions → "Workflow
+permissions" can stay. What would stop it is a branch rule on `main` that
+refuses pushes from GitHub Actions.
 
 ## Database
 
