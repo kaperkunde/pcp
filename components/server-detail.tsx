@@ -185,7 +185,9 @@ export function ServerDetail({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {notice ? (
+          {/* What the last visit to Connect said is out of date once you
+              have given the server a client. */}
+          {notice && clientState.status !== "ok" ? (
             notice.kind === "ok" ? (
               <FormNote message={notice.message} />
             ) : (

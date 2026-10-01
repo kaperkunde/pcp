@@ -60,11 +60,8 @@ export default async function ServerPage({
     () => null,
   )
 
-  // An error the status line already says (a server that needs a client
-  // from the owner) is shown once.
   const notice =
-    typeof query.error === "string" &&
-    !(query.error && server.statusMessage.startsWith(query.error))
+    typeof query.error === "string" && query.error
       ? { kind: "error" as const, message: query.error }
       : query.connected
         ? { kind: "ok" as const, message: `Connected to ${server.name}.` }
