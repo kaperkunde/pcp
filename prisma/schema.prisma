@@ -171,6 +171,9 @@ model PermissionRequest {
   /// call: the parts of the answer the assistant asked for (call_tool's
   /// fields), as a JSON list of paths. Names, never values.
   fields           String?
+  /// call: where the assistant asked for base64 text in the answer to be
+  /// decoded (call_tool's decode), as a JSON list of paths.
+  decode           String?
   /// pending | running | executed | failed | declined
   status           String     @default("pending")
   /// Where the owner answered: app | form | url | web

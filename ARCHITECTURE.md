@@ -494,16 +494,20 @@ keeps memories, both below):
   override when there is one), the JSON Schema exactly as the upstream
   published it, whether the tool runs at once or asks first, and for an API
   endpoint's tool, `returns`: an outline of its success answer read from the
-  schema (`openapi/outline.ts`, stored as `mcp_tool.output`).
-- `call_tool(server, tool, arguments, fields?)` opens a connection to the
-  upstream with the configured credential (header secret or OAuth token,
-  refreshed by the SDK when needed), calls the tool, and passes the content
-  back shaped for the assistant (`lib/core/answers.ts`): `fields` keeps only
-  the named paths of a JSON answer (lists are looked into), a JSON answer
-  still too long becomes a preview that is valid JSON with a note on asking
-  for less, and structured content that repeats the text is dropped. A call
-  that waits for the owner keeps its fields on the request
-  (`permission_request.fields`).
+  schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text the
+  schema marks base64 (`format: byte`) shows as `string (base64)`.
+- `call_tool(server, tool, arguments, fields?, decode?)` opens a connection
+  to the upstream with the configured credential (header secret or OAuth
+  token, refreshed by the SDK when needed), calls the tool, and passes the
+  content back shaped for the assistant (`lib/core/answers.ts`): `fields`
+  keeps only the named paths of a JSON answer (lists are looked into),
+  `decode` turns base64 or base64url text back into text wherever the
+  answer's keys end with one of its paths (`body.data` is every part of a
+  Gmail message; what is not text stays encoded), a JSON answer still too
+  long becomes a preview that is valid JSON with a note on asking for less,
+  and structured content that repeats the text is dropped. A call that waits
+  for the owner keeps its fields and decode paths on the request
+  (`permission_request.fields`, `permission_request.decode`).
 - `check_permission(id)`, `check_server(server)`, `register_server(...)`
   and `propose_tool_access(changes)` belong to the permission flow below.
 

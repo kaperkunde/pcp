@@ -11,6 +11,11 @@ import { canonicalJson } from "./permission-rules"
  *
  * - `fields` keeps only the parts asked for, by path ("data.number"); a list
  *   on the way is looked into, so that is the number of every item in data.
+ * - `decode` turns base64 (or base64url) text at the paths it names back
+ *   into the text it encodes: Gmail sends an email's body that way. A path
+ *   there matches wherever the answer's keys end with it, so "body.data" is
+ *   every MIME part's body, however deeply the parts nest. What does not
+ *   decode to text (an image, a PDF) is left as it was.
  * - An answer still longer than MAX_ANSWER_CHARS becomes a preview that is
  *   valid JSON (each list's first item and how many more, long text cut
  *   short) with a note on how to ask for less, rather than JSON cut off
@@ -29,11 +34,24 @@ export const MAX_FIELDS = 50
 const MAX_FIELD_LENGTH = 200
 /** Text longer than this is not parsed to be shaped; it is only cut. */
 const MAX_PARSE_CHARS = 5_000_000
+/** How deep into an answer decode looks. */
+const MAX_DECODE_DEPTH = 64
+
+/** How the assistant asked for an answer to be shaped (call_tool's options). */
+export type AnswerShape = {
+  /** The parts to keep. */
+  fields?: string[]
+  /** Where base64 text is decoded. */
+  decode?: string[]
+}
 
 const CUT = "\n… (truncated by PCP)"
 
 /** call_tool's fields, checked: a list of dotted paths. */
-export function readFields(value: unknown): string[] | undefined {
+export function readFields(
+  value: unknown,
+  name = "fields",
+): string[] | undefined {
   if (value === undefined) {
     return undefined
   }
@@ -43,7 +61,7 @@ export function readFields(value: unknown): string[] | undefined {
     value.length === 0 ||
     value.length > MAX_FIELDS
   ) {
-    throw invalid(`fields is a list of 1 to ${MAX_FIELDS} paths.`)
+    throw invalid(`${name} is a list of 1 to ${MAX_FIELDS} paths.`)
   }
 
   return value.map((field) => {
@@ -54,7 +72,7 @@ export function readFields(value: unknown): string[] | undefined {
       field.split(".").some((part) => part === "")
     ) {
       throw invalid(
-        'Each field is a path of keys joined by dots, like "data.number".',
+        `Each of ${name} is a path of keys joined by dots, like "data.number".`,
       )
     }
 
@@ -147,6 +165,133 @@ export function pickFields(
   )
 
   return { value: picked, missing }
+}
+
+const BASE64 = /^[A-Za-z0-9+/_-]+={0,2}$/
+/** Control characters other than tab and line breaks: binary, not text. */
+const NOT_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
+
+/**
+ * The text that base64 or base64url (padded or not, with MIME's line breaks
+ * or without) encodes, or null when it is not that or does not encode text.
+ */
+export function decodeBase64Text(value: string): string | null {
+  const compact = value.replace(/[\r\n]/g, "")
+
+  if (!BASE64.test(compact) || compact.replace(/=+$/, "").length % 4 === 1) {
+    return null
+  }
+
+  let text: string
+
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(
+      Buffer.from(compact, "base64"),
+    )
+  } catch {
+    return null
+  }
+
+  return NOT_TEXT.test(text) ? null : text
+}
+
+type Decoded = {
+  /** Values decoded, and values left as they were, per path asked for. */
+  decoded: Map<string, number>
+  left: Map<string, number>
+}
+
+function endsWith(keys: string[], parts: string[]): boolean {
+  return (
+    parts.length <= keys.length &&
+    parts.every(
+      (part, index) => keys[keys.length - parts.length + index] === part,
+    )
+  )
+}
+
+function decodeAt(
+  value: unknown,
+  keys: string[],
+  paths: Array<{ path: string; parts: string[] }>,
+  tally: Decoded,
+): unknown {
+  if (typeof value === "string") {
+    const match = paths.find(({ parts }) => endsWith(keys, parts))
+
+    if (!match || value === "") {
+      return value
+    }
+
+    const text = decodeBase64Text(value)
+    const counts = text === null ? tally.left : tally.decoded
+    counts.set(match.path, (counts.get(match.path) ?? 0) + 1)
+    return text ?? value
+  }
+
+  if (value === null || typeof value !== "object") {
+    return value
+  }
+
+  if (keys.length >= MAX_DECODE_DEPTH) {
+    return value
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => decodeAt(item, keys, paths, tally))
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      decodeAt(item, [...keys, key], paths, tally),
+    ]),
+  )
+}
+
+function counted(counts: Map<string, number>): string {
+  return [...counts]
+    .map(([path, count]) => `${path} (${count.toLocaleString("en")})`)
+    .join(", ")
+}
+
+/**
+ * A value with the base64 text at the paths decoded, and a note on what
+ * was: how many values at each path, which were left encoded because they
+ * are not text, and which paths the answer does not have.
+ */
+export function decodeFields(
+  value: unknown,
+  decode: string[],
+): { value: unknown; notes: string[] } {
+  const tally: Decoded = { decoded: new Map(), left: new Map() }
+  const decoded = decodeAt(
+    value,
+    [],
+    decode.map((path) => ({ path, parts: path.split(".") })),
+    tally,
+  )
+  const notes: string[] = []
+
+  if (tally.decoded.size > 0) {
+    notes.push(`Decoded from base64: ${counted(tally.decoded)}.`)
+  }
+
+  if (tally.left.size > 0) {
+    notes.push(
+      `Left as they were, not base64 text (binary data, like an attachment, stays encoded): ${counted(tally.left)}.`,
+    )
+  }
+
+  const missing = decode.filter(
+    (path) => !tally.decoded.has(path) && !tally.left.has(path),
+  )
+
+  if (missing.length > 0) {
+    notes.push(`Nothing to decode at: ${missing.join(", ")}.`)
+  }
+
+  return { value: decoded, notes }
 }
 
 type Cut = { items: number; text: number; depth: number }
@@ -270,7 +415,7 @@ function clip(text: string, max: number): string {
 /** One JSON value as the texts an assistant reads: notes, then the JSON. */
 function shapeJson(
   value: unknown,
-  fields: string[] | undefined,
+  { fields, decode }: AnswerShape,
   max: number,
 ): string[] {
   const notes: string[] = []
@@ -285,6 +430,14 @@ function shapeJson(
         `Not in the answer: ${picked.missing.join(", ")}. Kept only the fields asked for that it has.`,
       )
     }
+  }
+
+  // After fields, which keeps the answer's shape: nothing is decoded only
+  // to be dropped.
+  if (decode) {
+    const decoded = decodeFields(shaped, decode)
+    shaped = decoded.value
+    notes.push(...decoded.notes)
   }
 
   const text = JSON.stringify(shaped) ?? "null"
@@ -302,8 +455,14 @@ function shapeJson(
  */
 export function shapeAnswer(
   result: CallToolResult,
-  { fields, max = MAX_ANSWER_CHARS }: { fields?: string[]; max?: number } = {},
+  {
+    fields,
+    decode,
+    max = MAX_ANSWER_CHARS,
+  }: AnswerShape & { max?: number } = {},
 ): CallToolResult {
+  const shape = { fields, decode }
+  const shaping = fields !== undefined || decode !== undefined
   const blocks = result.content ?? []
 
   if (result.isError) {
@@ -342,24 +501,26 @@ export function shapeAnswer(
         (candidate) => canonicalJson(candidate) === canonicalJson(structured),
       )
 
-    for (const text of shapeJson(parsed.value, fields, max)) {
+    for (const text of shapeJson(parsed.value, shape, max)) {
       content.push({ type: "text", text })
     }
   }
 
-  // Asked for fields with the JSON only in structuredContent: shape that.
-  if (fields && !sawJson && structured !== undefined) {
-    for (const text of shapeJson(structured, fields, max)) {
+  // Asked for fields or decoding with the JSON only in structuredContent:
+  // shape that.
+  if (shaping && !sawJson && structured !== undefined) {
+    for (const text of shapeJson(structured, shape, max)) {
       content.push({ type: "text", text })
     }
 
     return { content }
   }
 
-  if (fields && !sawJson) {
+  if (shaping && !sawJson) {
+    const asked = [fields && "fields", decode && "decode"].filter(Boolean)
     content.unshift({
       type: "text",
-      text: "fields was not applied: the answer is not JSON.",
+      text: `${asked.join(" and ")} ${asked.length > 1 ? "were" : "was"} not applied: the answer is not JSON.`,
     })
   }
 
@@ -367,7 +528,7 @@ export function shapeAnswer(
   // text is no use: either way the text is the answer.
   const keepStructured =
     structured !== undefined &&
-    !(sawJson && (fields || repeatsStructured)) &&
+    !(sawJson && (shaping || repeatsStructured)) &&
     (JSON.stringify(structured)?.length ?? 0) <= max
 
   return {

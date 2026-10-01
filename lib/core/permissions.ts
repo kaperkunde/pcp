@@ -6,7 +6,7 @@ import type {
   PermissionRequest,
 } from "@/lib/generated/prisma/client"
 
-import { readFields, shapeAnswer } from "./answers"
+import { readFields, shapeAnswer, type AnswerShape } from "./answers"
 import {
   accessReview,
   checkAccessLevels,
@@ -113,15 +113,13 @@ export type RegisterArgs = ServerInput & {
 }
 
 export type PermissionAsk =
-  | {
+  | ({
       kind: "call"
       server: McpServer
       /** Only the name is read: the gateway keeps a slimmer tool than the row. */
       tool: Pick<McpTool, "name">
       args: Record<string, unknown>
-      /** The parts of the answer the assistant wants back. */
-      fields?: string[]
-    }
+    } & AnswerShape)
   | { kind: "register"; input: RegisterArgs }
   | { kind: "endpoint_change"; input: EndpointChangeAsk }
   | MemoryAsk
@@ -200,8 +198,8 @@ export function permissionUrl(publicUrl: string, id: string): string {
 
 /**
  * One call to an upstream tool, its answer shaped for the assistant
- * (answers.ts): only `fields` when given, and never more than it should
- * read. An OAuth server that is not connected (or whose sign-in expired)
+ * (answers.ts): only `fields` when given, base64 text at `decode` decoded,
+ * and never more than it should read. An OAuth server that is not connected (or whose sign-in expired)
  * answers with the link to connect it instead of an error.
  */
 export async function runCall(
@@ -212,13 +210,12 @@ export async function runCall(
   {
     publicUrl,
     fields,
+    decode,
     executor = defaultExecutor,
   }: {
     publicUrl: string
-    /** The parts of the answer to keep (call_tool's fields). */
-    fields?: string[]
     executor?: PermissionExecutor
-  },
+  } & AnswerShape,
 ): Promise<CallToolResult> {
   if (needsConnecting(server)) {
     return connectResult(server, publicUrl)
@@ -227,7 +224,7 @@ export async function runCall(
   try {
     return shapeAnswer(
       await executor.callTool(ctx, server, toolName, args, { publicUrl }),
-      { fields },
+      { fields, decode },
     )
   } catch (error) {
     if (
@@ -248,9 +245,10 @@ function describeAsk(ask: PermissionAsk): {
 } {
   switch (ask.kind) {
     case "call":
-      // The same call asking for other fields is another request.
+      // The same call asking for other fields, or to decode other
+      // paths, is another request.
       return {
-        target: `${ask.server.id}/${ask.tool.name}${ask.fields ? `\n${canonicalJson(ask.fields)}` : ""}`,
+        target: `${ask.server.id}/${ask.tool.name}${ask.fields ? `\n${canonicalJson(ask.fields)}` : ""}${ask.decode ? `\ndecode ${canonicalJson(ask.decode)}` : ""}`,
         args: ask.args,
       }
     case "register":
@@ -675,6 +673,8 @@ export async function withPermission(
         toolName: toolNameOf(ask),
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
+        decode:
+          ask.kind === "call" && ask.decode ? JSON.stringify(ask.decode) : null,
         argsCiphertext: asBytes(
           encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
         ),
@@ -876,11 +876,15 @@ async function executeCall(
   return runCall(ctx, row.server, row.toolName, readArgs(ctx, row), {
     publicUrl,
     fields: readStoredFields(row.fields),
+    decode: readStoredFields(row.decode),
     executor,
   })
 }
 
-/** The fields a waiting call asked for, as stored; none when unreadable. */
+/**
+ * The fields (or decode paths) a waiting call asked for, as stored; none
+ * when unreadable.
+ */
 function readStoredFields(stored: string | null): string[] | undefined {
   if (!stored) {
     return undefined

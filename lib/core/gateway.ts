@@ -643,7 +643,7 @@ export function buildGatewayServer(
     {
       title: "Call a tool",
       description:
-        'Run a tool on one of the owner\'s MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them; check_permission then waits for their answer. A long JSON answer comes back as a preview: pass fields to get only the parts you need.',
+        'Run a tool on one of the owner\'s MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them; check_permission then waits for their answer. A long JSON answer comes back as a preview: pass fields to get only the parts you need, and decode for text an API sends base64-encoded.',
       inputSchema: z.object({
         server: z.string().describe("The server, as returned by search_tools."),
         tool: z.string().describe("The tool name."),
@@ -661,6 +661,14 @@ export function buildGatewayServer(
           .describe(
             'Keep only these parts of a JSON answer, as paths of keys joined by dots: ["data.id", "data.number", "meta.pagination"]. A list on the way is looked into, so data.number is the number of every item in data. describe_tool\'s "returns" shows the keys an API answers with.',
           ),
+        decode: z
+          .array(z.string().min(1).max(200))
+          .min(1)
+          .max(MAX_FIELDS)
+          .optional()
+          .describe(
+            'Decode base64 (or base64url) text in a JSON answer back into the text it encodes, at these paths. A path matches wherever the answer\'s keys end with it, so ["body.data"] decodes the body of every part of a Gmail message, however deeply the parts nest. What is not text (an attachment) is left encoded. describe_tool\'s "returns" marks such text "string (base64)"; leave it out of fields when you do not need it, since encoded text is long.',
+          ),
       }),
       annotations: { openWorldHint: true },
     },
@@ -673,8 +681,10 @@ export function buildGatewayServer(
         tool: string
         arguments?: Record<string, unknown>
         fields?: string[]
+        decode?: string[]
       }) => {
         const fields = readFields(args.fields)
+        const decode = readFields(args.decode, "decode")
         const found = await lookup(args.server, args.tool, {
           includeBlocked: true,
         })
@@ -698,12 +708,14 @@ export function buildGatewayServer(
             tool,
             args: args.arguments ?? {},
             fields,
+            decode,
           })
         }
 
         return runCall(scope.ctx, target, tool.name, args.arguments ?? {}, {
           publicUrl: scope.publicUrl,
           fields,
+          decode,
         })
       },
     ),

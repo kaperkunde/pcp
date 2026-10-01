@@ -184,6 +184,47 @@ describe("asking the owner", () => {
     expect(textOf(result)).toBe('{"data":[{"id":1}]}')
   })
 
+  it("decodes what the assistant asked to once the owner allows the call", async () => {
+    const { ctx, scope, server } = await setup()
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              body: { data: Buffer.from("Hello").toString("base64url") },
+            }),
+          },
+        ],
+      }),
+    }
+    const asked = {
+      ...call(server, "add_numbers", { a: 1 }),
+      decode: ["body.data"],
+    }
+
+    await withPermission(scope, asked)
+    // Decoding elsewhere is another request.
+    await withPermission(scope, { ...asked, decode: ["data"] })
+    expect(await db().permissionRequest.count()).toBe(2)
+
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { decode: JSON.stringify(["body.data"]) },
+    })
+    const result = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    expect(textOf(result)).toBe(
+      'Decoded from base64: body.data (1).{"body":{"data":"Hello"}}',
+    )
+  })
+
   it("shows the owner what the call does, with a warning for destructive tools", async () => {
     const { ctx, scope, server } = await setup()
     await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))

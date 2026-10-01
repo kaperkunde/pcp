@@ -127,15 +127,15 @@ required.
 The assistant then sees a short description of the servers behind the token
 and these tools:
 
-| Tool                  | What it does                                                                                                     |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                           |
-| `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.     |
-| `call_tool`           | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs.          |
-| `check_permission`    | Waits for your answer to a request, then says how it went.                                                       |
-| `check_server`        | Says whether a server is connected; while you sign in to it, waits until you have.                               |
-| `register_server`     | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name. |
-| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers; you review and save it in PCP.          |
+| Tool                  | What it does                                                                                                                                                      |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                                                                            |
+| `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                      |
+| `call_tool`           | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs, and `decode` decodes base64 text in it (an email's body). |
+| `check_permission`    | Waits for your answer to a request, then says how it went.                                                                                                        |
+| `check_server`        | Says whether a server is connected; while you sign in to it, waits until you have.                                                                                |
+| `register_server`     | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name.                                                  |
+| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers; you review and save it in PCP.                                                           |
 
 A tool you have not decided about answers "Not done yet" and asks you: the
 assistant hands you a link to the request in PCP, and waits while you
