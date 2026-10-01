@@ -211,11 +211,9 @@ would be sent. Nothing exists until they agree; then `executeRegister` creates t
 endpoint, on, and adds it to the token's scope.
 
 A secret is named, never sent. A name PCP does not hold yet (an MCP server's
-or an API's) makes a request the owner can only agree to on PCP's own page,
-where they type the value in: the panel and the client's prompt run inside
-the assistant's app, so they are not offered for it (the client opens the
-page, or the assistant hands over the link), and an answer from either is
-refused. The value is saved as a new secret by the proposed name (a number is
+or an API's) makes a request the owner agrees to on PCP's own page, like
+every request, typing the value in there: it never passes through the
+assistant's app. The value is saved as a new secret by the proposed name (a number is
 added when that is taken by then) just before the server is made, and removed
 again if making it fails; a secret of that name the owner added in the
 meantime is used when they leave the field empty. The assistant is told the
@@ -325,10 +323,9 @@ another one reads:
   own, and changing, renaming or deleting a shared one are permission
   requests (`memory_share`, `memory_change`) through the same flow as a tool
   call, showing the owner the path and the whole text with a warning about
-  stored instructions. The ask writes nothing, so the client's retry with the
-  owner's answer finds the same request. A share is answered **Share it**,
-  **Keep it for this assistant only** (saved privately; also what declining
-  the client's own prompt means), or **Discard it**. On a yes,
+  stored instructions. The ask writes nothing, and asking again finds the
+  same request. A share is answered **Share it**, **Keep it for this
+  assistant only** (saved privately), or **Discard it**. On a yes,
   `decideMemoryAsk` re-reads the memory and writes only if it is still what
   the owner was shown. The owner writes, moves and deletes memories freely on
   the Memories page.
@@ -443,8 +440,7 @@ keeps memories, both below):
   with the configured credential (header secret or OAuth token, refreshed by
   the SDK when needed), calls the tool, and passes the content back.
 - `check_permission(id)`, `check_server(server)` and
-  `register_server(...)` belong to the permission flow below;
-  `answer_permission(id, decision)` is only for PCP's panel.
+  `register_server(...)` belong to the permission flow below.
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the
@@ -458,73 +454,49 @@ Every token has a level per tool (`api_token_tool_access`,
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
-them. The gateway loads the levels by token id; `ResolvedToken` carries the
-token's ways of asking (below).
+them. The gateway loads the levels by token id.
 
 A call to an "ask" tool becomes a `permission_request` row
 (`lib/core/permissions.ts`, ported from plekje's confirmation flow): the
 arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
-and a day to answer. The owner is asked the first way, in this order, that
-the client declares and the token allows (`choosePermissionTier`):
+and a day to answer. The result is text for the assistant: what was asked,
+the link to `/permissions/<id>` to give the owner, and to call
+`check_permission` next. The signed-in owner answers on that page, and only
+there; `decidePermission()` claims the row (pending to running, one winner)
+and runs the call once. "Always allow" and "Block" also write the tool's
+level.
 
-| Tier   | When                                            | How                                                                    |
-| ------ | ----------------------------------------------- | ---------------------------------------------------------------------- |
-| `app`  | The request declares the MCP Apps extension     | PCP's panel, shown by `check_permission`                               |
-| `form` | It declares form elicitation                    | An `input_required` result with a one-choice form                      |
-| `url`  | It declares URL elicitation (and form is off)   | An `input_required` result pointing at `/permissions/<id>`             |
-| `link` | Anything else, including every 2025-era request | Text with the link to `/permissions/<id>` for the assistant to pass on |
+Nothing can wake an assistant from outside its conversation: an MCP server
+cannot start a turn, and an answer on PCP's page reaches no app. So
+`check_permission` holds the call while the request is open
+(`lib/core/owner-wait.ts`: up to 45 seconds, under the minute at which
+clients and proxies give up, checking every second, and dropping out when
+the client goes away) and answers as soon as the owner has; the assistant,
+still in its turn, carries on by itself. A longer wait is another call; the
+text says to stop when the owner is not on it. An OAuth server that needs
+signing in (a call to it, or one the owner just agreed to add) answers with
+a link to its page in PCP, where Connect starts the sign-in, and
+`check_server` waits the same way until it is connected and its tools are
+read. A server that needs a client from the owner first (status
+`client_required`) gets the same link; its page says what to create.
 
-A declaration is all the server has to go on, and some clients declare form
-elicitation they never show; the call then hangs until the client's timeout
-(Claude Code in remote and Cowork sessions, anthropics/claude-code#94806).
-So `api_token.permission_tiers` holds the tiers a token may use, all three
-by default, and the token page lets the owner turn `app`, `form` and `url`
-off. The link cannot be turned off: it is what is left.
-
-Whichever way the owner answers, `decidePermission()` claims the row
-(pending to running, one winner) and runs the call once. "Always allow" and
-"Block" also write the tool's level. A retry that carries `requestState` is
-bound to its row by vault, token and hash, so a client cannot replay an
-answer onto another call, and it never runs a call the owner already ran.
-`answer_permission` refuses requests that do not declare the MCP Apps
-extension, and tokens with the panel off: hosts that show panels hide it from the assistant, and on any
-other client the assistant could otherwise answer for the owner.
-
-PCP's panel (`ui://pcp/panel`, `lib/core/panel.ts`) is one self-contained
-MCP App; a tool result picks its view through `structuredContent.kind`
-(`permission`, `connect`, or plain text). OAuth never runs inside it: hosts
-sandbox the panel and sign-in pages refuse to be framed. For a server that
-needs connecting, the panel's Connect button asks the host to open
-`/api/servers/<id>/oauth/start` in the owner's browser (`ui/open-link`),
-where their PCP session is, and polls `check_server` until the callback has
-landed. A server that needs a client from the owner first (status
-`client_required`) gets the same panel, and text telling the assistant so:
-the start page then lands on the server's page, which says what to create.
-
-Hosts hand the panel the tool result it was made for, and hand the same one
-again whenever they rebuild it (scrolling back, the app returning from the
-browser), so a result is a snapshot: the panel asks `check_permission` or
-`check_server` where things are now, and shows a question's buttons only
-once PCP says it is still open (if PCP does not answer, the question as given;
-answering a settled one is refused). `check_permission` answers an allowed
-request whose OAuth server still needs signing in to with the connect view,
-and once it is connected with the server's state. MCP Apps keep no state for
-a panel across rebuilds, so PCP's request is the record. Model context
-(`ui/update-model-context`) is only read on the owner's next message, so
-what the owner just did in the panel (an answer, a sign-in it saw land) goes
-to the assistant as a message in the owner's words (`ui/message`) at once;
-a change a rebuilt panel finds is offered as "Tell the assistant" instead,
-so reloading never posts. When nothing is left to do (the message went, or
-the request is more than a day old), the panel asks the host to close it
-(`ui/notifications/request-teardown`); the host decides. PCP itself cannot
-wake the assistant: nothing in MCP lets a server start a turn.
+The client's own prompts (form and URL elicitation, with `input_required`
+rounds) and an MCP Apps panel in the conversation were tried and dropped.
+Claude's apps declared both kinds of prompt and left them on "Loading…"
+until the call timed out
+([anthropics/claude-ai-mcp#1085](https://github.com/anthropics/claude-ai-mcp/issues/1085)).
+They mounted a declared panel for every result of a tool, rebuilt it from
+the original result whenever the conversation was shown again (the first
+question again, after it was answered), did not let a rebuilt panel reach
+PCP, and did not act on `ui/message` or `request-teardown`. A link and a
+check that waits work in every client.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.
 Once the owner agrees, PCP adds the server, adds it to the asking token when
 that token is scoped to chosen servers, and reads its tools, or hands back
-the connect panel for OAuth. With `openapi_schema` the request is an API
+the link to connect it for OAuth. With `openapi_schema` the request is an API
 endpoint instead: the gateway has `endpoint-admin.ts: prepareRegistration`
 read the text before asking (so the owner is only asked about something that
 works, and sees its address, tool count and operations), and

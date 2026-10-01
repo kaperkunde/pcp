@@ -64,7 +64,10 @@ export default async function ServerPage({
     typeof query.error === "string" && query.error
       ? { kind: "error" as const, message: query.error }
       : query.connected
-        ? { kind: "ok" as const, message: `Connected to ${server.name}.` }
+        ? {
+            kind: "ok" as const,
+            message: `Connected to ${server.name}. An assistant waiting for this carries on by itself; one that stopped waiting needs telling.`,
+          }
         : null
 
   return (

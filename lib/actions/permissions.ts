@@ -40,7 +40,6 @@ export async function decidePermissionAction(
       id,
       parseDecision(view.kind, decision),
       {
-        via: "web",
         publicUrl,
         secretValue: typeof secretValue === "string" ? secretValue : undefined,
       },

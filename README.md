@@ -132,22 +132,18 @@ and these tools:
 | `search_tools`     | Finds tools across servers from a few words ("create a github issue").                                           |
 | `describe_tool`    | Returns one tool's full description, JSON Schema and whether it asks you first.                                  |
 | `call_tool`        | Runs it, with PCP adding the credentials to the request to the server or the API.                                |
-| `check_permission` | Says whether you answered a request that was waiting for you, and how it went.                                   |
-| `check_server`     | Says whether a server is connected; offers you a Connect button where it can.                                    |
+| `check_permission` | Waits for your answer to a request, then says how it went.                                                       |
+| `check_server`     | Says whether a server is connected; while you sign in to it, waits until you have.                               |
 | `register_server`  | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name. |
 
-A tool you have not decided about answers "Not done yet" and asks you. Where
-the assistant's app can show it, the question appears in the conversation:
-as PCP's panel (an MCP App) or as the app's own prompt. Otherwise the
-assistant hands you a link to PCP. Each token's page says which of these PCP
-may use; turn one off if an app gets stuck on it. Claude's apps currently
-leave both kinds of prompt (their own, and the one that opens PCP) on
-"Loading…" until the call times out
-([the issue](https://github.com/anthropics/claude-ai-mcp/issues/1085)); the
-request stays open, so you can still answer it from its link. **Allow once** runs that one call,
+A tool you have not decided about answers "Not done yet" and asks you: the
+assistant hands you a link to the request in PCP, and waits while you
+answer there, so it carries on by itself once you have. If you take longer
+than it waits, tell it you answered. **Allow once** runs that one call,
 **Always allow** and **Block** also decide the calls after it, and **Not
 now** runs nothing. A server an assistant proposes is only added once you
-agree; an OAuth one is then connected from a link that opens in your browser.
+agree; an OAuth one is then connected from a link to its page in PCP, and the
+assistant waits while you sign in.
 
 An assistant can write an OpenAPI schema from an API's documentation and hand
 it to `register_server` as text. You see what it asked for before anything is

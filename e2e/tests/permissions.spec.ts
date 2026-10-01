@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test"
+import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import {
@@ -11,10 +11,11 @@ import {
 import { createToken, openToken } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
-// answers through a link, the client's own prompt or PCP's panel, and the
+// answers through a link while check_permission waits for them, and the
 // answer can settle the tool for the token. Blocked tools vanish; access
 // copies between tokens; an assistant can propose a server, which is added
-// only once the owner agrees, and an OAuth one is connected from a link.
+// only once the owner agrees, and an OAuth one is connected from a link
+// while check_server waits.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -24,15 +25,13 @@ const SLUG = `perm-${RUN}`
 const TOKEN_NAME = `Careful assistant ${RUN}`
 const SECOND_TOKEN_NAME = `Second assistant ${RUN}`
 
-// What a client that shows MCP Apps panels declares.
-const PANELS = {
+// What a client that shows prompts and MCP Apps panels declares. PCP uses
+// neither: Claude's apps stalled on prompts and rebuilt panels stale.
+const PROMPTS_AND_PANELS = {
+  elicitation: { form: {}, url: {} },
   extensions: {
     "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] },
   },
-}
-const FORM = { elicitation: { form: {} } }
-const ALLOW_ONCE = {
-  decision: { action: "accept", content: { decision: "allow_once" } },
 }
 
 let upstream: Upstream
@@ -106,9 +105,9 @@ test("a tool nobody decided on asks first, through a link", async ({
   // Asking again waits on the same request.
   const again = await callTool(baseURL!, token, "call_tool", args)
   expect(linkIn(toolText(again)).id).toBe(id)
-  const waiting = await callTool(baseURL!, token, "check_permission", { id })
-  expect(toolText(waiting)).toContain("Still waiting")
 
+  // The assistant waits on check_permission while the owner answers.
+  const waited = callTool(baseURL!, token, "check_permission", { id })
   await page.goto(path)
   await expect(page.getByText(`Allow ${SLUG}/add_numbers?`)).toBeVisible()
   await expect(page.getByText("a: 19")).toBeVisible()
@@ -116,7 +115,7 @@ test("a tool nobody decided on asks first, through a link", async ({
   await expect(page.getByTestId("permission-outcome")).toContainText("42")
   expect(callsOf("add_numbers")).toBe(1)
 
-  const outcome = await callTool(baseURL!, token, "check_permission", { id })
+  const outcome = await waited
   expect(toolText(outcome)).toContain("allowed it and it ran")
   expect(toolText(outcome)).toContain("42")
 
@@ -174,170 +173,43 @@ test("a blocked tool is hidden from the assistant and refused", async ({
   expect(callsOf("send_postcard")).toBe(0)
 })
 
-test("a client's own prompt asks, and runs the answer once", async ({
-  baseURL,
-}) => {
-  const args = { server: SLUG, tool: "echo_auth", arguments: {} }
-
-  const prompt = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: FORM,
-  })
-  expect(prompt.body.result?.resultType, JSON.stringify(prompt.body)).toBe(
-    "input_required",
-  )
-  expect(prompt.body.result?.inputRequests?.decision?.method).toBe(
-    "elicitation/create",
-  )
-  const requestState = prompt.body.result?.requestState
-
-  // The answer is bound to the call it was asked for.
-  const mismatched = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "call_tool",
-    { ...args, arguments: { extra: 1 } },
-    { capabilities: FORM, requestState, inputResponses: ALLOW_ONCE },
-  )
-  expect(mismatched.body.result?.isError).toBe(true)
-  expect(callsOf("echo_auth")).toBe(0)
-
-  const ran = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: FORM,
-    requestState,
-    inputResponses: ALLOW_ONCE,
-  })
-  expect(toolText(ran)).toBe(`Bearer ${upstream.expectedToken}`)
-  expect(callsOf("echo_auth")).toBe(1)
-
-  // Allow once decides this call only; saying no runs nothing.
-  const next = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: FORM,
-  })
-  expect(next.body.result?.resultType).toBe("input_required")
-  const declined = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: FORM,
-    requestState: next.body.result?.requestState,
-    inputResponses: { decision: { action: "decline" } },
-  })
-  expect(toolText(declined)).toContain("said no")
-  expect(callsOf("echo_auth")).toBe(1)
-})
-
-test("a way of asking turned off on the token falls back to the link", async ({
+test("a client that shows prompts and panels gets the link all the same", async ({
   page,
   baseURL,
 }) => {
-  const prompt = () => page.getByLabel("The app's own prompt")
-  const panel = () => page.getByLabel("PCP's panel")
-  const save = async () => {
-    await page.getByRole("button", { name: "Save settings" }).click()
-    await expect(
-      page.getByRole("status").filter({ hasText: "Saved." }),
-    ).toBeVisible()
-  }
+  // No panel to mount, and no tool only a panel calls.
+  const listed = await mcpRequest(baseURL!, token, "tools/list")
+  const tools = listed.body.result?.tools ?? []
+  expect(tools.map((tool) => tool.name)).not.toContain("answer_permission")
+  expect(tools.filter((tool) => tool._meta?.ui)).toEqual([])
+  const panel = await mcpRequest(baseURL!, token, "resources/read", {
+    uri: "ui://pcp/panel",
+  })
+  expect(panel.body.result?.contents ?? []).toEqual([])
 
-  await page.goto(`/tokens/${tokenId}`)
-  await expect(prompt()).toBeChecked()
-  await expect(page.getByLabel("A link")).toBeDisabled()
-  await prompt().uncheck()
-  await panel().uncheck()
-  await save()
-
-  // A client that declares a prompt is not sent one it might never show.
   const args = { server: SLUG, tool: "echo_auth", arguments: {} }
   const asked = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: { ...FORM, ...PANELS },
+    capabilities: PROMPTS_AND_PANELS,
   })
   expect(asked.body.result?.resultType).not.toBe("input_required")
   expect(toolText(asked)).toContain("Not done yet")
-  const { id } = linkIn(toolText(asked))
+  const { path, id } = linkIn(toolText(asked))
 
-  // With the panel off, a panel host gets no buttons and cannot answer.
-  const checked = await mcpToolCall2026(
+  const waited = mcpToolCall2026(
     baseURL!,
     token,
     "check_permission",
     { id },
-    { capabilities: PANELS },
+    { capabilities: PROMPTS_AND_PANELS },
   )
-  expect(checked.body.result?.structuredContent?.kind).toBe("done")
-  const clicked = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "answer_permission",
-    { id, decision: "always" },
-    { capabilities: PANELS },
+  await page.goto(path)
+  await page.getByRole("button", { name: "Always allow" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `Bearer ${upstream.expectedToken}`,
   )
-  expect(clicked.body.result?.isError).toBe(true)
+  await expect(page.getByText("carries on by itself")).toBeVisible()
+  expect(toolText(await waited)).toContain(`Bearer ${upstream.expectedToken}`)
   expect(callsOf("echo_auth")).toBe(1)
-
-  // Back on, for the tests after this one.
-  await page.reload()
-  await expect(prompt()).not.toBeChecked()
-  await prompt().check()
-  await panel().check()
-  await save()
-})
-
-test("a client that shows panels gets PCP's panel, which only the owner answers", async ({
-  baseURL,
-}) => {
-  const listed = await mcpRequest(baseURL!, token, "tools/list")
-  const tools = listed.body.result?.tools ?? []
-  expect(
-    tools.find((tool) => tool.name === "answer_permission")?._meta?.ui
-      ?.visibility,
-  ).toEqual(["app"])
-  expect(
-    tools.find((tool) => tool.name === "check_permission")?._meta?.ui
-      ?.resourceUri,
-  ).toBe("ui://pcp/panel")
-
-  const panelHtml = await mcpRequest(baseURL!, token, "resources/read", {
-    uri: "ui://pcp/panel",
-  })
-  expect(panelHtml.body.result?.contents?.[0]?.mimeType).toBe(
-    "text/html;profile=mcp-app",
-  )
-
-  const args = { server: SLUG, tool: "echo_auth", arguments: {} }
-  const asked = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: PANELS,
-  })
-  expect(toolText(asked)).toContain("check_permission")
-  const { id } = linkIn(toolText(asked))
-
-  const panel = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "check_permission",
-    { id },
-    { capabilities: PANELS },
-  )
-  expect(panel.body.result?.structuredContent?.kind).toBe("permission")
-  expect(
-    panel.body.result?.structuredContent?.permission?.decisions.map(
-      (decision) => decision.label,
-    ),
-  ).toEqual(["Allow once", "Always allow", "Block", "Not now"])
-
-  // An assistant on a client without panels cannot answer for the owner.
-  const selfApproved = await callTool(baseURL!, token, "answer_permission", {
-    id,
-    decision: "always",
-  })
-  expect(selfApproved.body.result?.isError).toBe(true)
-  expect(callsOf("echo_auth")).toBe(1)
-
-  const clicked = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "answer_permission",
-    { id, decision: "always" },
-    { capabilities: PANELS },
-  )
-  expect(toolText(clicked)).toBe(`Bearer ${upstream.expectedToken}`)
-  expect(callsOf("echo_auth")).toBe(2)
 
   const direct = await callTool(baseURL!, token, "call_tool", args)
   expect(toolText(direct)).toBe(`Bearer ${upstream.expectedToken}`)
@@ -425,35 +297,16 @@ test("an assistant can propose a server with a secret you do not have yet; you t
   const name = `Proposed new key ${RUN}`
   const secretName = `Proposed key ${RUN}`
 
-  // A client that shows panels: this request still goes to PCP's page.
-  const asked = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "register_server",
-    {
-      name,
-      url: upstream.mcpUrl,
-      auth_type: "header",
-      secret: secretName,
-    },
-    { capabilities: { ...PANELS, ...FORM } },
-  )
-  expect(asked.body.result?.structuredContent?.kind).toBe("done")
+  const asked = await callTool(baseURL!, token, "register_server", {
+    name,
+    url: upstream.mcpUrl,
+    auth_type: "header",
+    secret: secretName,
+  })
   const text = toolText(asked)
   expect(text).toContain(`sends a new secret, saved as "${secretName}"`)
   expect(text).toContain("do not ask them for it here")
   const { path, id } = linkIn(text)
-
-  // The panel's buttons cannot carry the value, so they cannot agree.
-  const fromPanel = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "answer_permission",
-    { id, decision: "allow_once" },
-    { capabilities: PANELS },
-  )
-  expect(fromPanel.body.result?.isError).toBe(true)
-  expect(toolText(fromPanel)).toContain(path)
 
   await page.goto(path)
   await expect(page.getByText(`Add the server ${name}?`)).toBeVisible()
@@ -483,51 +336,40 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   page,
   baseURL,
 }) => {
-  const asked = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "register_server",
-    {
-      name: `Proposed OAuth ${RUN}`,
-      url: upstream.oauthMcpUrl,
-      auth_type: "oauth",
-    },
-    { capabilities: PANELS },
-  )
-  expect(asked.body.result?.structuredContent?.kind).toBe("permission")
-  const id = asked.body.result?.structuredContent?.permission?.id
+  const asked = await callTool(baseURL!, token, "register_server", {
+    name: `Proposed OAuth ${RUN}`,
+    url: upstream.oauthMcpUrl,
+    auth_type: "oauth",
+  })
+  const { path, id } = linkIn(toolText(asked))
 
-  const added = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "answer_permission",
-    { id, decision: "allow_once" },
-    { capabilities: PANELS },
-  )
+  const agreed = callTool(baseURL!, token, "check_permission", { id })
+  await page.goto(path)
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText("Added")
+
+  // Added, and the assistant is told how to get it connected.
+  const added = await agreed
+  expect(toolText(added)).toContain("needs connecting")
   expect(added.body.result?.structuredContent?.kind).toBe("connect")
   const connect = added.body.result!.structuredContent!.connect!
+  expect(toolText(added)).toContain(`/servers/${connect.serverId}`)
   expect(connect.startUrl).toContain(
     `/api/servers/${connect.serverId}/oauth/start`,
   )
 
-  const before = await callTool(baseURL!, token, "check_server", {
+  // check_server waits while the owner signs in, and answers once they have.
+  const connected = callTool(baseURL!, token, "check_server", {
     server: connect.slug,
   })
-  expect(before.body.result?.structuredContent?.server?.connected).toBe(false)
-
-  // What the panel's Connect button opens in the owner's browser.
   await page.goto(connect.startUrl)
   await expect(page).toHaveURL(
     new RegExp(`/servers/${connect.serverId}\\?connected=1$`),
   )
-
-  const after = await callTool(baseURL!, token, "check_server", {
-    server: connect.slug,
-  })
-  expect(after.body.result?.structuredContent?.server).toMatchObject({
-    connected: true,
-    toolCount: 3,
-  })
+  await expect(page.getByText("carries on by itself")).toBeVisible()
+  expect(
+    (await connected).body.result?.structuredContent?.server,
+  ).toMatchObject({ connected: true, toolCount: 3 })
 
   // Its tools ask first, like any other.
   const call = await callTool(baseURL!, token, "call_tool", {
@@ -540,245 +382,4 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   await expect(page.getByTestId("permission-outcome")).toContainText(
     "Bearer access-",
   )
-})
-
-/** What the fake host saw the panel do, and switches for how it behaves. */
-type FakeHost = {
-  pcpCall: (name: string, args: unknown) => Promise<unknown>
-  sent: unknown[]
-  told: unknown[]
-  opened: string[]
-  teardowns: number
-  refuseMessages: boolean
-  toolsDown: boolean
-}
-
-/**
- * Shows PCP's panel the way an MCP Apps host does: in a sandboxed frame,
- * handed `result`, with its tool calls sent to PCP. What the panel asks of
- * the host is kept on window (FakeHost).
- */
-async function hostPanel(
-  page: Page,
-  baseURL: string,
-  html: string,
-  result: unknown,
-  { refuseMessages = false, toolsDown = false } = {},
-) {
-  await page.exposeFunction(
-    "pcpCall",
-    async (name: string, args: Record<string, unknown>) =>
-      (
-        await mcpToolCall2026(baseURL, token, name, args, {
-          capabilities: PANELS,
-        })
-      ).body.result,
-  )
-  await page.setContent('<iframe sandbox="allow-scripts"></iframe>')
-  await page.evaluate(
-    ({ html, result, refuseMessages, toolsDown }) => {
-      const frame = document.querySelector("iframe")!
-      const host = window as unknown as FakeHost
-      Object.assign(host, {
-        sent: [],
-        told: [],
-        opened: [],
-        teardowns: 0,
-        refuseMessages,
-        toolsDown,
-      })
-      const post = (message: object) =>
-        frame.contentWindow!.postMessage({ jsonrpc: "2.0", ...message }, "*")
-
-      window.addEventListener("message", async (event) => {
-        if (event.source !== frame.contentWindow) return
-        const { id, method, params } = event.data
-        if (method === "ui/notifications/initialized") {
-          post({ method: "ui/notifications/tool-result", params: result })
-        } else if (method === "ui/notifications/request-teardown") {
-          host.teardowns += 1
-        } else if (method === "tools/call") {
-          post(
-            host.toolsDown
-              ? { id, error: { code: -32000, message: "Not connected" } }
-              : {
-                  id,
-                  result: await host.pcpCall(params.name, params.arguments),
-                },
-          )
-        } else if (method === "ui/message") {
-          if (!host.refuseMessages) host.sent.push(params)
-          post({ id, result: host.refuseMessages ? { isError: true } : {} })
-        } else if (id !== undefined) {
-          if (method === "ui/update-model-context") host.told.push(params)
-          if (method === "ui/open-link") host.opened.push(params.url)
-          post({ id, result: { hostContext: {} } })
-        }
-      })
-      frame.srcdoc = html
-    },
-    { html, result, refuseMessages, toolsDown },
-  )
-
-  return {
-    panel: page.frameLocator("iframe"),
-    host: <K extends keyof FakeHost>(key: K) =>
-      page.evaluate((key) => (window as unknown as FakeHost)[key], key),
-    set: (key: "refuseMessages" | "toolsDown", value: boolean) =>
-      page.evaluate(
-        ([key, value]) => {
-          ;(window as unknown as Record<string, boolean>)[key] = value
-        },
-        [key, value] as const,
-      ),
-  }
-}
-
-test("a panel the host rebuilds shows where things are now, and tells the assistant", async ({
-  page,
-  baseURL,
-}) => {
-  const name = `Rebuilt OAuth ${RUN}`
-  const html = (
-    await mcpRequest(baseURL!, token, "resources/read", {
-      uri: "ui://pcp/panel",
-    })
-  ).body.result!.contents![0].text!
-
-  // What the host keeps, and hands again to every panel it builds.
-  const asked = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "register_server",
-    { name, url: upstream.oauthMcpUrl, auth_type: "oauth" },
-    { capabilities: PANELS },
-  )
-  expect(asked.body.result?.structuredContent?.kind).toBe("permission")
-  const id = asked.body.result!.structuredContent!.permission!.id
-
-  const added = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "answer_permission",
-    { id, decision: "allow_once" },
-    { capabilities: PANELS },
-  )
-  const connect = added.body.result!.structuredContent!.connect!
-
-  // Answered since: Connect, not the question again.
-  const first = await hostPanel(
-    await page.context().newPage(),
-    baseURL!,
-    html,
-    asked.body.result,
-  )
-  await expect(first.panel.getByText(`${name} needs connecting`)).toBeVisible()
-  await expect(
-    first.panel.getByRole("button", { name: "Add server" }),
-  ).not.toBeVisible()
-
-  // Signing in while this panel watches: it tells the assistant at once,
-  // then asks to be closed.
-  await first.panel.getByRole("button", { name: "Connect" }).click()
-  await expect.poll(() => first.host("opened")).toEqual([connect.startUrl])
-  await page.goto(connect.startUrl)
-  await expect(page).toHaveURL(
-    new RegExp(`/servers/${connect.serverId}\\?connected=1$`),
-  )
-  await expect(first.panel.getByText(`${name} is connected.`)).toBeVisible()
-  await expect
-    .poll(() => first.host("sent"))
-    .toEqual([
-      {
-        role: "user",
-        content: [
-          { type: "text", text: `I connected ${name} in PCP. Carry on.` },
-        ],
-      },
-    ])
-  await expect.poll(() => first.host("teardowns")).toBe(1)
-
-  // Rebuilt after that: connected, and a button rather than a second post.
-  const second = await hostPanel(
-    await page.context().newPage(),
-    baseURL!,
-    html,
-    asked.body.result,
-    { refuseMessages: true },
-  )
-  await expect(second.panel.getByText(`${name} is connected.`)).toBeVisible()
-  expect(JSON.stringify(await second.host("told"))).toContain(
-    `The owner connected ${name}`,
-  )
-  expect(await second.host("sent")).toEqual([])
-
-  // A host that refuses says so in its result.
-  const tell = second.panel.getByRole("button", { name: "Tell the assistant" })
-  await tell.click()
-  await expect(
-    second.panel.getByText("Your app did not send it."),
-  ).toBeVisible()
-  expect(await second.host("teardowns")).toBe(0)
-
-  await second.set("refuseMessages", false)
-  await tell.click()
-  await expect(second.panel.getByText("Sent.")).toBeVisible()
-  expect(await second.host("sent")).toHaveLength(1)
-  expect(await second.host("teardowns")).toBe(1)
-})
-
-test("a rebuilt panel shows an open question once PCP says so, and an answer goes to the assistant", async ({
-  page,
-  baseURL,
-}) => {
-  const name = `Still open ${RUN}`
-  const html = (
-    await mcpRequest(baseURL!, token, "resources/read", {
-      uri: "ui://pcp/panel",
-    })
-  ).body.result!.contents![0].text!
-  const asked = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "register_server",
-    { name, url: upstream.oauthMcpUrl, auth_type: "oauth" },
-    { capabilities: PANELS },
-  )
-
-  // PCP out of reach: the question as given.
-  const offline = await hostPanel(
-    await page.context().newPage(),
-    baseURL!,
-    html,
-    asked.body.result,
-    { toolsDown: true },
-  )
-  await expect(
-    offline.panel.getByRole("button", { name: "Add server" }),
-  ).toBeVisible()
-
-  // Still open, says PCP: the question, and answering it tells the
-  // assistant without being asked to.
-  const open = await hostPanel(
-    await page.context().newPage(),
-    baseURL!,
-    html,
-    asked.body.result,
-  )
-  await expect(open.panel.getByText(`Add the server ${name}?`)).toBeVisible()
-  await open.panel.getByRole("button", { name: "Not now" }).click()
-  await expect
-    .poll(() => open.host("sent"))
-    .toEqual([
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: `I answered in PCP ("Not now"): Add the server ${name}? Carry on.`,
-          },
-        ],
-      },
-    ])
-  await expect.poll(() => open.host("teardowns")).toBe(1)
 })

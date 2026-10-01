@@ -51,8 +51,7 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   copy), which is a permission request like any new server: the owner is shown
   the address, the tools and the secret (by name), and nothing exists until
   they agree. A secret PCP does not hold yet is typed in by the owner on PCP's
-  permission page, never in the panel or the client's prompt (those run in
-  the assistant's app), and its value never reaches the assistant. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
+  permission page, and its value never reaches the assistant. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
   It never changes a credential, never clears `publicOnly`, can only read and
@@ -80,6 +79,11 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
   (redirects and PCP's client metadata document) and the health check.
+- The owner is asked by link only: a result hands the assistant a link to
+  PCP's page and a check that waits (`check_permission`, `check_server`,
+  `lib/core/owner-wait.ts`). No client prompts (elicitation) and no MCP Apps
+  panel: Claude's apps stalled on the one and rebuilt the other stale (see
+  ARCHITECTURE.md). Anything new that needs the owner works the same way.
 - The single-user assumption lives in two places: `ownerVault()` and the
   setup page. Do not add a third.
 
@@ -96,7 +100,10 @@ the row id as associated data, same as the existing ones.
 Schema changes: edit `prisma/schema.prisma`, `pnpm db:generate`, `pnpm
 db:migrate --name <change>`, commit the migration. Migrations apply at boot
 through `lib/core/migrate.ts`; never edit an applied migration (the checksum
-check refuses to start).
+check refuses to start). Read the SQL Prisma writes: its table rebuild
+(`RedefineTables`) drops the table, and migrations run in a transaction with
+foreign keys on, so the drop cascades to every row that points at it. Drop a
+column with `ALTER TABLE … DROP COLUMN` instead.
 
 ## Tests
 
