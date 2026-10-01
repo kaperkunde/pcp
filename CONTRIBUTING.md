@@ -110,7 +110,8 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/tool-access.ts`          | Per-token tool levels: allowed, ask, blocked; copying them    |
 | `lib/core/access-requests.ts`      | Tool levels an assistant proposes; the owner's save           |
 | `lib/core/permissions.ts`          | Asking the owner before a call runs; running it once          |
-| `lib/core/panel.ts`                | PCP's MCP Apps panel and the results it renders               |
+| `lib/core/owner-wait.ts`           | Holding a check while the owner answers or signs in           |
+| `lib/core/connect.ts`              | The link an assistant hands over to connect an OAuth server   |
 | `lib/core/migrate.ts`              | Boot-time migrations                                          |
 | `lib/server/`                      | Next-specific glue: session cookie, public URL, action state  |
 | `lib/actions/`                     | Server Actions the forms call                                 |

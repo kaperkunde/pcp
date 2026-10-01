@@ -164,3 +164,57 @@ test("the Memories tab shows who wrote each one; the owner edits and deletes the
   })
   expect(gone.body.result?.isError).toBe(true)
 })
+
+test("a memory read in every conversation comes with the instructions", async ({
+  page,
+  baseURL,
+}) => {
+  const voice = `e2e-${RUN}-voice.md`
+  const style = `/memories/e2e-${RUN}/style.md`
+
+  // One the owner writes, for every assistant.
+  await page.goto("/memories")
+  const add = page.locator("form").filter({ hasText: "Save memory" })
+  await add.getByLabel("Path").fill(voice)
+  await add.getByLabel("Text").fill("Speak like a pirate.")
+  await add.getByLabel("Read in every conversation").check()
+  await add.getByRole("button", { name: "Save memory" }).click()
+  const row = page
+    .getByTestId("memory")
+    .filter({ hasText: `/memories/shared/${voice}` })
+  await expect(row.getByText("Every conversation")).toBeVisible()
+
+  // One the assistant keeps, marked by the owner.
+  await callTool(baseURL!, token, "memory", {
+    command: "create",
+    path: style,
+    file_text: "Short answers.",
+  })
+  await page.reload()
+  const kept = page.getByTestId("memory").filter({ hasText: style })
+  await kept.getByRole("button", { name: "Edit" }).click()
+  await kept.getByLabel("Read in every conversation").check()
+  await kept.getByRole("button", { name: "Save" }).click()
+  await expect(kept.getByRole("status")).toHaveText("Saved.")
+
+  const { instructions } = await initialize(baseURL!, token)
+  expect(instructions).toContain("ALWAYS VIEW /memories")
+  expect(instructions).toContain(
+    `<memory path="/memories/shared/${voice}">\nSpeak like a pirate.\n</memory>`,
+  )
+  expect(instructions).toContain(
+    `<memory path="${style}">\nShort answers.\n</memory>`,
+  )
+
+  // The assistant's change to it is not what the owner read: it drops out.
+  const changed = await callTool(baseURL!, token, "memory", {
+    command: "str_replace",
+    path: style,
+    old_str: "Short",
+    new_str: "Long",
+  })
+  expect(toolText(changed)).toContain("no longer read in every conversation")
+  const after = await initialize(baseURL!, token)
+  expect(after.instructions).not.toContain(style)
+  expect(after.instructions).toContain("Speak like a pirate.")
+})

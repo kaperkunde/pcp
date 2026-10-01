@@ -78,6 +78,8 @@ async function inputFrom(formData: FormData): Promise<EndpointInput> {
     authHeaderName: field(formData, "authHeaderName"),
     authValueTemplate: field(formData, "authValueTemplate"),
     authSecretId: field(formData, "authSecretId") || null,
+    authSecretName: field(formData, "authSecretName") || null,
+    authSecretValue: field(formData, "authSecretValue") || null,
   }
 }
 

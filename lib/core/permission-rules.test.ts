@@ -2,114 +2,14 @@ import { describe, expect, it } from "vitest"
 
 import {
   canonicalJson,
-  choosePermissionTier,
-  decisionSchema,
   decisionsFor,
   isOpen,
   parseDecision,
-  parsePermissionTiers,
   previewArgs,
   requestHash,
   storedResultText,
-  storePermissionTiers,
   summaryText,
-  tiersFor,
-  UI_EXTENSION,
 } from "./permission-rules"
-
-describe("tiersFor", () => {
-  it("never asks about proposed tool levels with a prompt or the panel", () => {
-    const everything = {
-      elicitation: { form: {}, url: {} },
-      extensions: { [UI_EXTENSION]: {} },
-    }
-
-    expect(tiersFor("access")).toEqual(["url", "link"])
-    expect(choosePermissionTier(everything, tiersFor("access"))).toBe("url")
-    expect(
-      choosePermissionTier(everything, tiersFor("access", ["app", "link"])),
-    ).toBe("link")
-    expect(tiersFor("call", ["app", "link"])).toEqual(["app", "link"])
-  })
-})
-
-describe("choosePermissionTier", () => {
-  it("falls back to a link when the client said nothing", () => {
-    // Every 2025-era request: no capabilities, and no multi-round answers.
-    expect(choosePermissionTier(undefined)).toBe("link")
-    expect(choosePermissionTier({})).toBe("link")
-  })
-
-  it("prefers the panel over a prompt", () => {
-    expect(
-      choosePermissionTier({
-        elicitation: { form: {}, url: {} },
-        extensions: { [UI_EXTENSION]: { mimeTypes: ["text/html"] } },
-      } as never),
-    ).toBe("app")
-  })
-
-  it("uses a form prompt when the client has no panels", () => {
-    expect(choosePermissionTier({ elicitation: { form: {} } })).toBe("form")
-    expect(choosePermissionTier({ elicitation: { form: {}, url: {} } })).toBe(
-      "form",
-    )
-  })
-
-  it("reads an empty elicitation object as form mode", () => {
-    expect(choosePermissionTier({ elicitation: {} })).toBe("form")
-  })
-
-  it("uses URL mode when that is all the client can do", () => {
-    expect(choosePermissionTier({ elicitation: { url: {} } })).toBe("url")
-  })
-
-  it("ignores other extensions", () => {
-    expect(
-      choosePermissionTier({
-        extensions: { "example.com/other": {} },
-      } as never),
-    ).toBe("link")
-  })
-
-  it("skips what the token turned off, down to the link", () => {
-    const everything = {
-      elicitation: { form: {}, url: {} },
-      extensions: { [UI_EXTENSION]: {} },
-    } as never
-
-    expect(choosePermissionTier(everything, ["form", "url", "link"])).toBe(
-      "form",
-    )
-    expect(choosePermissionTier(everything, ["url", "link"])).toBe("url")
-    expect(choosePermissionTier(everything, ["link"])).toBe("link")
-    // A client that only shows a prompt the token turned off gets the link.
-    expect(
-      choosePermissionTier({ elicitation: {} }, ["app", "url", "link"]),
-    ).toBe("link")
-  })
-})
-
-describe("permission tiers on a token", () => {
-  it("reads the stored list in trying order, always with the link", () => {
-    expect(parsePermissionTiers("app,form,url")).toEqual([
-      "app",
-      "form",
-      "url",
-      "link",
-    ])
-    expect(parsePermissionTiers("url, app")).toEqual(["app", "url", "link"])
-    expect(parsePermissionTiers("")).toEqual(["link"])
-    expect(parsePermissionTiers("form,telepathy")).toEqual(["form", "link"])
-  })
-
-  it("stores the ones that can be turned off, and refuses unknown names", () => {
-    expect(storePermissionTiers(["url", "app"])).toBe("app,url")
-    expect(storePermissionTiers(["link"])).toBe("")
-    expect(storePermissionTiers([])).toBe("")
-    expect(() => storePermissionTiers(["telepathy"])).toThrow(/options shown/)
-  })
-})
 
 describe("canonicalJson and requestHash", () => {
   it("does not depend on key order or undefined values", () => {
@@ -227,7 +127,7 @@ describe("decisions", () => {
     expect(() => parseDecision("memory_change", "discard")).toThrow()
   })
 
-  it("offers proposed tool levels only a no outside their page", () => {
+  it("offers proposed tool levels no answer but no", () => {
     expect(decisionsFor("access").map((decision) => decision.value)).toEqual([
       "decline",
     ])
@@ -240,15 +140,5 @@ describe("decisions", () => {
     expect(() => parseDecision("register", "always")).toThrow(/allow_once/)
     expect(() => parseDecision("call", "yes")).toThrow()
     expect(() => parseDecision("call", undefined)).toThrow()
-  })
-
-  it("builds the prompt as one titled choice", () => {
-    const schema = decisionSchema("register")
-
-    expect(schema.required).toEqual(["decision"])
-    expect(schema.properties.decision.oneOf).toEqual([
-      { const: "allow_once", title: "Add server" },
-      { const: "decline", title: "Not now" },
-    ])
   })
 })

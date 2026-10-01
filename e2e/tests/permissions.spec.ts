@@ -8,14 +8,15 @@ import {
   mcpToolCall2026,
   toolText,
 } from "../lib/mcp"
-import { addSecret, createToken, openToken } from "../lib/ui"
+import { createToken, openToken } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
-// answers through a link, the client's own prompt or PCP's panel, and the
+// answers through a link while check_permission waits for them, and the
 // answer can settle the tool for the token. Blocked tools vanish; access
 // copies between tokens; an assistant can propose tool levels, which change
 // only once the owner saves them on PCP's page, and a server, which is added
-// only once the owner agrees, and an OAuth one is connected from a link.
+// only once the owner agrees, and an OAuth one is connected from a link
+// while check_server waits.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -25,15 +26,13 @@ const SLUG = `perm-${RUN}`
 const TOKEN_NAME = `Careful assistant ${RUN}`
 const SECOND_TOKEN_NAME = `Second assistant ${RUN}`
 
-// What a client that shows MCP Apps panels declares.
-const PANELS = {
+// What a client that shows prompts and MCP Apps panels declares. PCP uses
+// neither: Claude's apps stalled on prompts and rebuilt panels stale.
+const PROMPTS_AND_PANELS = {
+  elicitation: { form: {}, url: {} },
   extensions: {
     "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] },
   },
-}
-const FORM = { elicitation: { form: {} } }
-const ALLOW_ONCE = {
-  decision: { action: "accept", content: { decision: "allow_once" } },
 }
 
 let upstream: Upstream
@@ -59,15 +58,20 @@ function callsOf(tool: string): number {
   return upstream.calls.filter((call) => call.tool === tool).length
 }
 
-test("sets up a server and a token", async ({ page }) => {
-  await addSecret(page, { name: SECRET_NAME, value: upstream.expectedToken })
-
+test("sets up a server, with its secret typed into the form, and a token", async ({
+  page,
+}) => {
+  // No trip to the Secrets page: the key is entered with the server.
   await page.goto("/servers/new")
   await page.getByLabel("Name").fill(SERVER_NAME)
   await page.getByLabel("Server URL").fill(upstream.mcpUrl)
   await page.getByLabel("Description").fill("Postcards for permission tests.")
   await page.getByLabel("Authentication").selectOption("header")
-  await page.getByLabel("Secret").selectOption({ label: SECRET_NAME })
+  await page
+    .getByLabel("Secret", { exact: true })
+    .selectOption({ label: "A new secret, entered here" })
+  await page.getByLabel("New secret's value").fill(upstream.expectedToken)
+  await page.getByLabel("Save it as (optional)").fill(SECRET_NAME)
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page.getByText("Tools (3)")).toBeVisible()
   await page.getByLabel("Short name").fill(SLUG)
@@ -102,9 +106,9 @@ test("a tool nobody decided on asks first, through a link", async ({
   // Asking again waits on the same request.
   const again = await callTool(baseURL!, token, "call_tool", args)
   expect(linkIn(toolText(again)).id).toBe(id)
-  const waiting = await callTool(baseURL!, token, "check_permission", { id })
-  expect(toolText(waiting)).toContain("Still waiting")
 
+  // The assistant waits on check_permission while the owner answers.
+  const waited = callTool(baseURL!, token, "check_permission", { id })
   await page.goto(path)
   await expect(page.getByText(`Allow ${SLUG}/add_numbers?`)).toBeVisible()
   await expect(page.getByText("a: 19")).toBeVisible()
@@ -112,7 +116,7 @@ test("a tool nobody decided on asks first, through a link", async ({
   await expect(page.getByTestId("permission-outcome")).toContainText("42")
   expect(callsOf("add_numbers")).toBe(1)
 
-  const outcome = await callTool(baseURL!, token, "check_permission", { id })
+  const outcome = await waited
   expect(toolText(outcome)).toContain("allowed it and it ran")
   expect(toolText(outcome)).toContain("42")
 
@@ -170,170 +174,43 @@ test("a blocked tool is hidden from the assistant and refused", async ({
   expect(callsOf("send_postcard")).toBe(0)
 })
 
-test("a client's own prompt asks, and runs the answer once", async ({
-  baseURL,
-}) => {
-  const args = { server: SLUG, tool: "echo_auth", arguments: {} }
-
-  const prompt = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: FORM,
-  })
-  expect(prompt.body.result?.resultType, JSON.stringify(prompt.body)).toBe(
-    "input_required",
-  )
-  expect(prompt.body.result?.inputRequests?.decision?.method).toBe(
-    "elicitation/create",
-  )
-  const requestState = prompt.body.result?.requestState
-
-  // The answer is bound to the call it was asked for.
-  const mismatched = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "call_tool",
-    { ...args, arguments: { extra: 1 } },
-    { capabilities: FORM, requestState, inputResponses: ALLOW_ONCE },
-  )
-  expect(mismatched.body.result?.isError).toBe(true)
-  expect(callsOf("echo_auth")).toBe(0)
-
-  const ran = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: FORM,
-    requestState,
-    inputResponses: ALLOW_ONCE,
-  })
-  expect(toolText(ran)).toBe(`Bearer ${upstream.expectedToken}`)
-  expect(callsOf("echo_auth")).toBe(1)
-
-  // Allow once decides this call only; saying no runs nothing.
-  const next = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: FORM,
-  })
-  expect(next.body.result?.resultType).toBe("input_required")
-  const declined = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: FORM,
-    requestState: next.body.result?.requestState,
-    inputResponses: { decision: { action: "decline" } },
-  })
-  expect(toolText(declined)).toContain("said no")
-  expect(callsOf("echo_auth")).toBe(1)
-})
-
-test("a way of asking turned off on the token falls back to the link", async ({
+test("a client that shows prompts and panels gets the link all the same", async ({
   page,
   baseURL,
 }) => {
-  const prompt = () => page.getByLabel("The app's own prompt")
-  const panel = () => page.getByLabel("PCP's panel")
-  const save = async () => {
-    await page.getByRole("button", { name: "Save settings" }).click()
-    await expect(
-      page.getByRole("status").filter({ hasText: "Saved." }),
-    ).toBeVisible()
-  }
+  // No panel to mount, and no tool only a panel calls.
+  const listed = await mcpRequest(baseURL!, token, "tools/list")
+  const tools = listed.body.result?.tools ?? []
+  expect(tools.map((tool) => tool.name)).not.toContain("answer_permission")
+  expect(tools.filter((tool) => tool._meta?.ui)).toEqual([])
+  const panel = await mcpRequest(baseURL!, token, "resources/read", {
+    uri: "ui://pcp/panel",
+  })
+  expect(panel.body.result?.contents ?? []).toEqual([])
 
-  await page.goto(`/tokens/${tokenId}`)
-  await expect(prompt()).toBeChecked()
-  await expect(page.getByLabel("A link")).toBeDisabled()
-  await prompt().uncheck()
-  await panel().uncheck()
-  await save()
-
-  // A client that declares a prompt is not sent one it might never show.
   const args = { server: SLUG, tool: "echo_auth", arguments: {} }
   const asked = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: { ...FORM, ...PANELS },
+    capabilities: PROMPTS_AND_PANELS,
   })
   expect(asked.body.result?.resultType).not.toBe("input_required")
   expect(toolText(asked)).toContain("Not done yet")
-  const { id } = linkIn(toolText(asked))
+  const { path, id } = linkIn(toolText(asked))
 
-  // With the panel off, a panel host gets no buttons and cannot answer.
-  const checked = await mcpToolCall2026(
+  const waited = mcpToolCall2026(
     baseURL!,
     token,
     "check_permission",
     { id },
-    { capabilities: PANELS },
+    { capabilities: PROMPTS_AND_PANELS },
   )
-  expect(checked.body.result?.structuredContent?.kind).toBe("done")
-  const clicked = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "answer_permission",
-    { id, decision: "always" },
-    { capabilities: PANELS },
+  await page.goto(path)
+  await page.getByRole("button", { name: "Always allow" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `Bearer ${upstream.expectedToken}`,
   )
-  expect(clicked.body.result?.isError).toBe(true)
+  await expect(page.getByText("carries on by itself")).toBeVisible()
+  expect(toolText(await waited)).toContain(`Bearer ${upstream.expectedToken}`)
   expect(callsOf("echo_auth")).toBe(1)
-
-  // Back on, for the tests after this one.
-  await page.reload()
-  await expect(prompt()).not.toBeChecked()
-  await prompt().check()
-  await panel().check()
-  await save()
-})
-
-test("a client that shows panels gets PCP's panel, which only the owner answers", async ({
-  baseURL,
-}) => {
-  const listed = await mcpRequest(baseURL!, token, "tools/list")
-  const tools = listed.body.result?.tools ?? []
-  expect(
-    tools.find((tool) => tool.name === "answer_permission")?._meta?.ui
-      ?.visibility,
-  ).toEqual(["app"])
-  expect(
-    tools.find((tool) => tool.name === "check_permission")?._meta?.ui
-      ?.resourceUri,
-  ).toBe("ui://pcp/panel")
-
-  const panelHtml = await mcpRequest(baseURL!, token, "resources/read", {
-    uri: "ui://pcp/panel",
-  })
-  expect(panelHtml.body.result?.contents?.[0]?.mimeType).toBe(
-    "text/html;profile=mcp-app",
-  )
-
-  const args = { server: SLUG, tool: "echo_auth", arguments: {} }
-  const asked = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: PANELS,
-  })
-  expect(toolText(asked)).toContain("check_permission")
-  const { id } = linkIn(toolText(asked))
-
-  const panel = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "check_permission",
-    { id },
-    { capabilities: PANELS },
-  )
-  expect(panel.body.result?.structuredContent?.kind).toBe("permission")
-  expect(
-    panel.body.result?.structuredContent?.permission?.decisions.map(
-      (decision) => decision.label,
-    ),
-  ).toEqual(["Allow once", "Always allow", "Block", "Not now"])
-
-  // An assistant on a client without panels cannot answer for the owner.
-  const selfApproved = await callTool(baseURL!, token, "answer_permission", {
-    id,
-    decision: "always",
-  })
-  expect(selfApproved.body.result?.isError).toBe(true)
-  expect(callsOf("echo_auth")).toBe(1)
-
-  const clicked = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "answer_permission",
-    { id, decision: "always" },
-    { capabilities: PANELS },
-  )
-  expect(toolText(clicked)).toBe(`Bearer ${upstream.expectedToken}`)
-  expect(callsOf("echo_auth")).toBe(2)
 
   const direct = await callTool(baseURL!, token, "call_tool", args)
   expect(toolText(direct)).toBe(`Bearer ${upstream.expectedToken}`)
@@ -415,8 +292,9 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
   ).toBeVisible()
 
   // The proposal is filled in and each change marked.
-  const addNumbers = page.getByLabel(`Access to ${SLUG}/add_numbers`)
-  await expect(addNumbers).toHaveValue("allowed")
+  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
+    "allowed",
+  )
   await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toHaveValue(
     "blocked",
   )
@@ -425,7 +303,8 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
     "Saving changes 3 tools: 2 to Allowed, 1 to Blocked.",
   )
 
-  // The owner takes one back before saving.
+  // The owner takes one back before saving, while the assistant waits.
+  const waited = callTool(baseURL!, proposer, "check_permission", { id })
   await page.getByLabel(`Access to ${SLUG}/echo_auth`).selectOption("ask")
   await expect(page.locator("li[data-changed]")).toHaveCount(2)
   await expect(page.getByTestId("access-summary")).toContainText(
@@ -436,10 +315,9 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
     "You saved these levels.",
   )
 
-  const outcome = await callTool(baseURL!, proposer, "check_permission", {
-    id,
-  })
-  expect(toolText(outcome)).toContain("They did not take 1 of the 3 levels")
+  expect(toolText(await waited)).toContain(
+    "They did not take 1 of the 3 levels",
+  )
 
   await page.goto(`/tokens/${proposerId}`)
   await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
@@ -465,15 +343,6 @@ test("an assistant can propose a server with a stored secret; it is added once y
   baseURL,
 }) => {
   const name = `Proposed ${RUN}`
-
-  const unknown = await callTool(baseURL!, token, "register_server", {
-    name,
-    url: upstream.mcpUrl,
-    auth_type: "header",
-    secret: `No such secret ${RUN}`,
-  })
-  expect(unknown.body.result?.isError).toBe(true)
-  expect(toolText(unknown)).toContain("No secret called")
 
   const asked = await callTool(baseURL!, token, "register_server", {
     name,
@@ -502,55 +371,86 @@ test("an assistant can propose a server with a stored secret; it is added once y
   )
 })
 
+test("an assistant can propose a server with a secret you do not have yet; you type it in PCP", async ({
+  page,
+  baseURL,
+}) => {
+  const name = `Proposed new key ${RUN}`
+  const secretName = `Proposed key ${RUN}`
+
+  const asked = await callTool(baseURL!, token, "register_server", {
+    name,
+    url: upstream.mcpUrl,
+    auth_type: "header",
+    secret: secretName,
+  })
+  const text = toolText(asked)
+  expect(text).toContain(`sends a new secret, saved as "${secretName}"`)
+  expect(text).toContain("do not ask them for it here")
+  const { path, id } = linkIn(text)
+
+  await page.goto(path)
+  await expect(page.getByText(`Add the server ${name}?`)).toBeVisible()
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(
+    page.getByText(`Enter the value of the secret "${secretName}" first.`),
+  ).toBeVisible()
+  await page
+    .getByLabel(`Value of the secret "${secretName}"`)
+    .fill(upstream.expectedToken)
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText("3 tools")
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `saved in PCP as "${secretName}"`,
+  )
+
+  // The assistant learns the outcome, never the value.
+  const outcome = await callTool(baseURL!, token, "check_permission", { id })
+  expect(toolText(outcome)).toContain("3 tools")
+  expect(toolText(outcome)).not.toContain(upstream.expectedToken)
+
+  await page.goto("/secrets")
+  await expect(page.getByText(secretName, { exact: true })).toBeVisible()
+})
+
 test("an OAuth server an assistant proposes is connected through a link", async ({
   page,
   baseURL,
 }) => {
-  const asked = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "register_server",
-    {
-      name: `Proposed OAuth ${RUN}`,
-      url: upstream.oauthMcpUrl,
-      auth_type: "oauth",
-    },
-    { capabilities: PANELS },
-  )
-  expect(asked.body.result?.structuredContent?.kind).toBe("permission")
-  const id = asked.body.result?.structuredContent?.permission?.id
+  const asked = await callTool(baseURL!, token, "register_server", {
+    name: `Proposed OAuth ${RUN}`,
+    url: upstream.oauthMcpUrl,
+    auth_type: "oauth",
+  })
+  const { path, id } = linkIn(toolText(asked))
 
-  const added = await mcpToolCall2026(
-    baseURL!,
-    token,
-    "answer_permission",
-    { id, decision: "allow_once" },
-    { capabilities: PANELS },
-  )
+  const agreed = callTool(baseURL!, token, "check_permission", { id })
+  await page.goto(path)
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText("Added")
+
+  // Added, and the assistant is told how to get it connected.
+  const added = await agreed
+  expect(toolText(added)).toContain("needs connecting")
   expect(added.body.result?.structuredContent?.kind).toBe("connect")
   const connect = added.body.result!.structuredContent!.connect!
+  expect(toolText(added)).toContain(`/servers/${connect.serverId}`)
   expect(connect.startUrl).toContain(
     `/api/servers/${connect.serverId}/oauth/start`,
   )
 
-  const before = await callTool(baseURL!, token, "check_server", {
+  // check_server waits while the owner signs in, and answers once they have.
+  const connected = callTool(baseURL!, token, "check_server", {
     server: connect.slug,
   })
-  expect(before.body.result?.structuredContent?.server?.connected).toBe(false)
-
-  // What the panel's Connect button opens in the owner's browser.
   await page.goto(connect.startUrl)
   await expect(page).toHaveURL(
     new RegExp(`/servers/${connect.serverId}\\?connected=1$`),
   )
-
-  const after = await callTool(baseURL!, token, "check_server", {
-    server: connect.slug,
-  })
-  expect(after.body.result?.structuredContent?.server).toMatchObject({
-    connected: true,
-    toolCount: 3,
-  })
+  await expect(page.getByText("carries on by itself")).toBeVisible()
+  expect(
+    (await connected).body.result?.structuredContent?.server,
+  ).toMatchObject({ connected: true, toolCount: 3 })
 
   // Its tools ask first, like any other.
   const call = await callTool(baseURL!, token, "call_tool", {

@@ -146,7 +146,11 @@ export default async function PermissionPage({
                   .
                 </p>
               ) : null}
-              <PermissionDecision id={view.id} decisions={view.decisions} />
+              <PermissionDecision
+                id={view.id}
+                decisions={view.decisions}
+                secret={view.secretToEnter}
+              />
             </>
           ) : (
             <div
@@ -170,6 +174,12 @@ export default async function PermissionPage({
                   {view.outcome}
                 </p>
               ) : null}
+              {view.status === "expired" ? null : (
+                <p className="text-muted-foreground">
+                  The assistant that asked carries on by itself if it is still
+                  waiting; if it stopped, tell it you answered.
+                </p>
+              )}
             </div>
           )}
           {view.connect ? (

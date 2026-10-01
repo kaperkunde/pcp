@@ -208,7 +208,18 @@ applies the edits, refuses one that cannot be used, and shows the owner the
 address, where the schema came from, how many edits it has, the tool count
 and operations, whether the tools can change things, and the secret that
 would be sent. Nothing exists until they agree; then `executeRegister` creates the
-endpoint, on, and adds it to the token's scope. An assistant can write a
+endpoint, on, and adds it to the token's scope.
+
+A secret is named, never sent. A name PCP does not hold yet (an MCP server's
+or an API's) makes a request the owner agrees to on PCP's own page, like
+every request, typing the value in there: it never passes through the
+assistant's app. The value is saved as a new secret by the proposed name (a number is
+added when that is taken by then) just before the server is made, and removed
+again if making it fails; a secret of that name the owner added in the
+meantime is used when they leave the field empty. The assistant is told the
+name it was saved as, never the value. The owner's own forms work the same
+way: the secret picker has "a new secret, entered here", saved with the
+server or endpoint once everything else on the form has been checked. An assistant can write a
 document from an API's documentation and register it in one call. What it
 registers has `public_only` set (below) and cannot carry a secret unless the
 owner approved that secret going to the address they were shown.
@@ -312,10 +323,9 @@ another one reads:
   own, and changing, renaming or deleting a shared one are permission
   requests (`memory_share`, `memory_change`) through the same flow as a tool
   call, showing the owner the path and the whole text with a warning about
-  stored instructions. The ask writes nothing, so the client's retry with the
-  owner's answer finds the same request. A share is answered **Share it**,
-  **Keep it for this assistant only** (saved privately; also what declining
-  the client's own prompt means), or **Discard it**. On a yes,
+  stored instructions. The ask writes nothing, and asking again finds the
+  same request. A share is answered **Share it**, **Keep it for this
+  assistant only** (saved privately), or **Discard it**. On a yes,
   `decideMemoryAsk` re-reads the memory and writes only if it is still what
   the owner was shown. The owner writes, moves and deletes memories freely on
   the Memories page.
@@ -324,10 +334,21 @@ another one reads:
   as zero-width spaces, direction overrides and tag characters, private-use,
   blank fillers, variation selectors that can carry bytes) is refused, and a
   shared memory is at most 2,000 characters, so it can be read whole.
-- **The instructions name shared memories, by path only.** Every one of them
-  was agreed to by the owner; a token's own memories are its words alone and
-  are only read through the tool, which labels each memory with who wrote it
-  and says that it is a note, not an instruction.
+- **The instructions name shared memories by path, and carry the ones read
+  in every conversation whole.** The memory paragraph follows the protocol
+  Claude's own memory tool adds to the system prompt (view `/memories` before
+  anything else, save as you go, assume the conversation ends at any
+  moment). The owner can mark any memory to be read in every conversation
+  (`memory.always`, from the Memories page only): a shared one goes into
+  every keeping token's instructions, a private one into its own token's.
+  Its text is at most 2,000 characters, and the instructions carry at most
+  8,000 characters of them and name the rest. Every such text is one the
+  owner read: an assistant's change to, or move of, an always memory it keeps
+  clears the mark, a change to a shared one is a `memory_change` request
+  that says it is read in every conversation, and sharing a private one
+  clears it. Any other memory of a token's own is its words alone and is
+  only read through the tool, which labels each memory with who wrote it and
+  says that it is a note, not an instruction.
 - **Bounded.** 500 memories per vault, 10,000 characters each, 60 writes and
   share requests per token per ten minutes. Path and text are encrypted
   together, so uniqueness of paths is checked in code after decrypting the
@@ -367,8 +388,9 @@ discovers the authorization server and `chooseRegistration`
    cannot be fetched.
 5. **Otherwise the owner is asked**: the server's status becomes
    `client_required`, and its page says to create a client with the
-   provider using PCP's redirect URI. A registration endpoint that refuses
-   PCP ends the same way. The gateway's connect result says so too.
+   provider using PCP's redirect URI and asks for its ID and secret right
+   there, in the status card. A registration endpoint that refuses PCP ends
+   the same way. The gateway's connect result says so too.
 
 Every flow returns to one address, `/api/oauth/callback`; the state
 parameter names the flow, and the flow the server. The owner registers that
@@ -384,8 +406,17 @@ Some providers only issue a refresh token when the sign-in asks for it. The
 server's **extra sign-in parameters** (`oauth_authorize_params`) are added
 to the sign-in address; the names the flow sets itself (client, redirect,
 state, PKCE, scope, resource) are refused when saved and skipped when used.
-When a connection came without a refresh token, the server's page says the
-owner will have to reconnect, and when.
+For providers whose needs PCP knows (`SIGN_IN_DEFAULTS` in
+`oauth-client.ts`: Google's `access_type=offline&prompt=consent`), it adds
+them itself after the owner's, so the owner's value for a name wins. When a
+connection came without a refresh token, the server's page says until when
+it lasts and offers the fix: Reconnect when PCP would now ask for renewable
+access, otherwise the parameters field and Save and reconnect.
+
+A server that answers a signed-in request with 401 or 403 gets the status
+`refused` ("Access refused"), with the HTTP status and the reason from its
+`WWW-Authenticate` challenge or error object, never its body: Google sends
+the whole answer with its refusals.
 
 Only the owner's browser registers or signs in. A tool refresh or a gateway
 call on a server that is not connected stops at "needs connecting" without
@@ -409,8 +440,7 @@ keeps memories, both below):
   with the configured credential (header secret or OAuth token, refreshed by
   the SDK when needed), calls the tool, and passes the content back.
 - `check_permission(id)`, `check_server(server)`, `register_server(...)`
-  and `propose_tool_access(changes)` belong to the permission flow below;
-  `answer_permission(id, decision)` is only for PCP's panel.
+  and `propose_tool_access(changes)` belong to the permission flow below.
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the
@@ -424,69 +454,62 @@ Every token has a level per tool (`api_token_tool_access`,
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
-them. The gateway loads the levels by token id; `ResolvedToken` carries the
-token's ways of asking (below).
+them. The gateway loads the levels by token id.
 
 A call to an "ask" tool becomes a `permission_request` row
 (`lib/core/permissions.ts`, ported from plekje's confirmation flow): the
 arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
-and a day to answer. The owner is asked the first way, in this order, that
-the client declares and the token allows (`choosePermissionTier`):
+and a day to answer. The result is text for the assistant: what was asked,
+the link to `/permissions/<id>` to give the owner, and to call
+`check_permission` next. The signed-in owner answers on that page, and only
+there; `decidePermission()` claims the row (pending to running, one winner)
+and runs the call once. "Always allow" and "Block" also write the tool's
+level.
 
-| Tier   | When                                            | How                                                                    |
-| ------ | ----------------------------------------------- | ---------------------------------------------------------------------- |
-| `app`  | The request declares the MCP Apps extension     | PCP's panel, shown by `check_permission`                               |
-| `form` | It declares form elicitation                    | An `input_required` result with a one-choice form                      |
-| `url`  | It declares URL elicitation (and form is off)   | An `input_required` result pointing at `/permissions/<id>`             |
-| `link` | Anything else, including every 2025-era request | Text with the link to `/permissions/<id>` for the assistant to pass on |
+Nothing can wake an assistant from outside its conversation: an MCP server
+cannot start a turn, and an answer on PCP's page reaches no app. So
+`check_permission` holds the call while the request is open
+(`lib/core/owner-wait.ts`: up to 45 seconds, under the minute at which
+clients and proxies give up, checking every second, and dropping out when
+the client goes away) and answers as soon as the owner has; the assistant,
+still in its turn, carries on by itself. A longer wait is another call; the
+text says to stop when the owner is not on it. An OAuth server that needs
+signing in (a call to it, or one the owner just agreed to add) answers with
+a link to its page in PCP, where Connect starts the sign-in, and
+`check_server` waits the same way until it is connected and its tools are
+read. A server that needs a client from the owner first (status
+`client_required`) gets the same link; its page says what to create.
 
-A declaration is all the server has to go on, and some clients declare form
-elicitation they never show; the call then hangs until the client's timeout
-(Claude Code in remote and Cowork sessions, anthropics/claude-code#94806).
-So `api_token.permission_tiers` holds the tiers a token may use, all three
-by default, and the token page lets the owner turn `app`, `form` and `url`
-off. The link cannot be turned off: it is what is left.
-
-Whichever way the owner answers, `decidePermission()` claims the row
-(pending to running, one winner) and runs the call once. "Always allow" and
-"Block" also write the tool's level. A retry that carries `requestState` is
-bound to its row by vault, token and hash, so a client cannot replay an
-answer onto another call, and it never runs a call the owner already ran.
-`answer_permission` refuses requests that do not declare the MCP Apps
-extension, and tokens with the panel off: hosts that show panels hide it from the assistant, and on any
-other client the assistant could otherwise answer for the owner.
-
-PCP's panel (`ui://pcp/panel`, `lib/core/panel.ts`) is one self-contained
-MCP App; a tool result picks its view through `structuredContent.kind`
-(`permission`, `connect`, or plain text). OAuth never runs inside it: hosts
-sandbox the panel and sign-in pages refuse to be framed. For a server that
-needs connecting, the panel's Connect button asks the host to open
-`/api/servers/<id>/oauth/start` in the owner's browser (`ui/open-link`),
-where their PCP session is, and polls `check_server` until the callback has
-landed. A server that needs a client from the owner first (status
-`client_required`) gets the same panel, and text telling the assistant so:
-the start page then lands on the server's page, which says what to create.
+The client's own prompts (form and URL elicitation, with `input_required`
+rounds) and an MCP Apps panel in the conversation were tried and dropped.
+Claude's apps declared both kinds of prompt and left them on "Loading…"
+until the call timed out
+([anthropics/claude-ai-mcp#1085](https://github.com/anthropics/claude-ai-mcp/issues/1085)).
+They mounted a declared panel for every result of a tool, rebuilt it from
+the original result whenever the conversation was shown again (the first
+question again, after it was answered), did not let a rebuilt panel reach
+PCP, and did not act on `ui/message` or `request-teardown`. A link and a
+check that waits work in every client.
 
 `propose_tool_access` lets an assistant suggest levels for its own token,
 many at once (`lib/core/access-requests.ts`): each change names a server,
 tool names or `*` patterns (none for the whole server) and a level, later
 changes winning, so a catalogue of hundreds of tools can be set in a call.
 Blocked tools stay hidden: no name or pattern reaches them. The proposal is
-a request of kind `access` holding one level per tool that would change, and
-it is only ever saved on its page, `/permissions/<id>`, which fills the
-levels in over the token's current ones and marks each change; the owner can
-change any of them before saving, and `applyAccessRequest` writes what they
-saved, once. No other answer saves it: the request skips the panel and the
-form prompt (`tiersFor`), offers only "Not now" anywhere else, and
-`decidePermission` refuses the rest, so no client can answer for the owner
-and raise its own access. The URL prompt only opens the page.
+a request of kind `access` holding one level per tool that would change. Its
+page fills the levels in over the token's current ones and marks each
+change; the owner can change any of them, and only their save there writes
+anything (`applyAccessRequest`, once). The kind's only decision is "Not
+now", and `decidePermission` refuses any other, so an assistant cannot raise
+its own access. `check_permission` waits for the save as for any answer and
+says what was saved, and how it differs from what was proposed.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.
 Once the owner agrees, PCP adds the server, adds it to the asking token when
 that token is scoped to chosen servers, and reads its tools, or hands back
-the connect panel for OAuth. With `openapi_schema` the request is an API
+the link to connect it for OAuth. With `openapi_schema` the request is an API
 endpoint instead: the gateway has `endpoint-admin.ts: prepareRegistration`
 read the text before asking (so the owner is only asked about something that
 works, and sees its address, tool count and operations), and

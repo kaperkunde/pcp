@@ -103,10 +103,6 @@ model ApiToken {
   /// its own, and the shared ones the owner agreed to. Sharing one always
   /// asks the owner. Off unless the owner turns it on.
   keepMemories    Boolean   @default(false) @map("keep_memories")
-  /// How PCP may ask the owner about this token's calls, comma-separated in
-  /// any order: app | form | url. The link in the result is always on, so
-  /// an empty value means the link alone.
-  permissionTiers String    @default("app,form,url") @map("permission_tiers")
   expiresAt       DateTime? @map("expires_at")
   revokedAt       DateTime? @map("revoked_at")
   createdAt       DateTime  @default(now()) @map("created_at")
@@ -205,6 +201,10 @@ model Memory {
   author     String    @default("assistant")
   /// private | shared
   visibility String    @default("private")
+  /// Read in every conversation: its text goes into the gateway's
+  /// instructions. Only the owner sets it, and an assistant's change to one
+  /// it keeps clears it (memories.ts).
+  always     Boolean   @default(false)
   /// The path and the text as JSON, AES-256-GCM under the vault's data key
   /// with "memory:<id>" as associated data.
   ciphertext Bytes

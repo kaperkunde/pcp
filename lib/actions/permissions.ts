@@ -26,6 +26,8 @@ export type DecidePermissionResult = ActionState<{
 export async function decidePermissionAction(
   id: string,
   decision: string,
+  /** A new server's secret, typed in on the page; nowhere else takes it. */
+  secretValue?: string,
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -41,7 +43,10 @@ export async function decidePermissionAction(
       ctx,
       id,
       parseDecision(view.kind, decision),
-      { via: "web", publicUrl },
+      {
+        publicUrl,
+        secretValue: typeof secretValue === "string" ? secretValue : undefined,
+      },
     )
     const message = outcome.content
       .flatMap((part) => (part.type === "text" ? [part.text] : []))

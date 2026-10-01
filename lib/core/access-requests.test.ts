@@ -1,9 +1,6 @@
 import { randomUUID } from "node:crypto"
 
-import {
-  isInputRequiredResult,
-  type CallToolResult,
-} from "@modelcontextprotocol/server"
+import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import {
@@ -23,7 +20,6 @@ import {
   getPermissionView,
   withPermission,
 } from "./permissions"
-import { UI_EXTENSION } from "./permission-rules"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { listTokenToolAccess } from "./tool-access"
@@ -150,12 +146,6 @@ describe("proposing tool levels", () => {
   })
 
   const PUBLIC_URL = "http://localhost:3000"
-  const EVERYTHING = {
-    clientCapabilities: {
-      elicitation: { form: {} },
-      extensions: { [UI_EXTENSION]: {} },
-    } as never,
-  }
 
   function textOf(result: unknown): string {
     return ((result as CallToolResult).content ?? [])
@@ -206,7 +196,7 @@ describe("proposing tool levels", () => {
     return { ctx, scope, tokenId, billing, blog }
   }
 
-  async function propose(scope: GatewayScope, request = {}) {
+  async function propose(scope: GatewayScope) {
     const servers = await loadGatewayServers(scope)
     const levels = resolveAccessChanges(servers, [
       { server: "billing", tools: ["list_*"], access: "allowed" },
@@ -214,7 +204,7 @@ describe("proposing tool levels", () => {
       { server: "blog", tools: ["read_post"], access: "allowed" },
     ])
 
-    return withPermission(scope, { kind: "access", input: { levels } }, request)
+    return withPermission(scope, { kind: "access", input: { levels } })
   }
 
   async function levelsOf(ctx: VaultContext, tokenId: string) {
@@ -228,17 +218,13 @@ describe("proposing tool levels", () => {
     )
   }
 
-  it("hands out the page's link, never a prompt or the panel, and changes nothing", async () => {
+  it("hands out the page's link and changes nothing", async () => {
     const { ctx, scope, tokenId } = await setup()
 
-    const asked = await propose(scope, EVERYTHING)
-    expect(isInputRequiredResult(asked)).toBe(false)
-    expect((asked as CallToolResult).structuredContent).toMatchObject({
-      kind: "done",
-    })
-
+    const asked = await propose(scope)
     const row = await db().permissionRequest.findFirstOrThrow()
     expect(row.kind).toBe("access")
+    expect(row.toolName).toBe("propose_tool_access")
     expect(textOf(asked)).toContain(`${PUBLIC_URL}/permissions/${row.id}`)
     expect(textOf(asked)).toContain("4 tools would change")
 
@@ -246,8 +232,7 @@ describe("proposing tool levels", () => {
     await propose(scope)
     expect(await db().permissionRequest.count()).toBe(1)
 
-    const checked = await checkPermission(scope, row.id, EVERYTHING)
-    expect(checked.structuredContent).toMatchObject({ kind: "done" })
+    const checked = await checkPermission(scope, row.id, { waitMs: 0 })
     expect(textOf(checked)).toContain("Still waiting")
 
     expect(Object.values(await levelsOf(ctx, tokenId))).toEqual(
@@ -255,37 +240,13 @@ describe("proposing tool levels", () => {
     )
   })
 
-  it("opens the page itself for a client that can, and takes no answer from it", async () => {
+  it("takes no answer but no outside its page", async () => {
     const { ctx, scope, tokenId } = await setup()
-    const urlClient = {
-      clientCapabilities: { elicitation: { url: {} } } as never,
-    }
-
-    const asked = await propose(scope, urlClient)
-    expect(isInputRequiredResult(asked)).toBe(true)
+    await propose(scope)
     const id = (await db().permissionRequest.findFirstOrThrow()).id
 
-    // A client claiming the owner said yes gets nowhere.
-    const forged = await propose(scope, {
-      ...urlClient,
-      requestState: id,
-      inputResponses: {
-        decision: { action: "accept", content: { decision: "allow_once" } },
-      },
-    })
-    expect((forged as CallToolResult).isError).toBe(true)
-
-    const opened = await propose(scope, {
-      ...urlClient,
-      requestState: id,
-      inputResponses: { decision: { action: "accept" } },
-    })
-    expect(textOf(opened)).toContain("Still waiting")
-
-    // Nor does the panel's tool, or any answer but no.
     for (const decision of ["allow_once", "always"] as const) {
       const result = await decidePermission(ctx, id, decision, {
-        via: "app",
         publicUrl: PUBLIC_URL,
         tokenId,
       })
@@ -295,6 +256,10 @@ describe("proposing tool levels", () => {
     expect(Object.values(await levelsOf(ctx, tokenId))).toEqual(
       Array(5).fill("ask"),
     )
+    expect(
+      (await db().permissionRequest.findUniqueOrThrow({ where: { id } }))
+        .status,
+    ).toBe("pending")
   })
 
   it("writes what the owner saved on the page, once", async () => {
@@ -380,7 +345,6 @@ describe("proposing tool levels", () => {
     const id = (await db().permissionRequest.findFirstOrThrow()).id
 
     const declined = await decidePermission(ctx, id, "decline", {
-      via: "web",
       publicUrl: PUBLIC_URL,
     })
     expect(textOf(declined)).toContain("no tool's level changed")

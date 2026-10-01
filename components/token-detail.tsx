@@ -16,7 +16,6 @@ import { KeepMemoriesField } from "@/components/keep-memories-field"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { clearNewToken, peekNewToken } from "@/components/new-token-handoff"
 import { PermissionDecision } from "@/components/permission-decision"
-import { PermissionTiersField } from "@/components/permission-tiers-field"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
@@ -58,6 +57,8 @@ export type WaitingRequest = {
   lines: string[]
   warning: string | null
   decisions: Array<{ value: Decision; label: string }>
+  /** A new server's secret, typed in when agreeing to it. */
+  secret: { name: string; exists: boolean } | null
 }
 
 export function TokenDetail({
@@ -172,7 +173,11 @@ function WaitingCard({ waiting }: { waiting: WaitingRequest[] }) {
                   </ButtonLink>
                 </div>
               ) : (
-                <PermissionDecision id={item.id} decisions={item.decisions} />
+                <PermissionDecision
+                  id={item.id}
+                  decisions={item.decisions}
+                  secret={item.secret}
+                />
               )}
             </li>
           ))}
@@ -528,10 +533,6 @@ function SettingsCard({
             <KeepMemoriesField
               id="token-memories"
               defaultChecked={token.keepMemories}
-            />
-            <PermissionTiersField
-              idPrefix="token-tier"
-              checked={token.permissionTiers}
             />
             <FormError error={state.status === "error" ? state.error : null} />
             <FormNote message={state.status === "ok" ? state.message : null} />
