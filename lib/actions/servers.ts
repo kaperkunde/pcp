@@ -34,6 +34,8 @@ function inputFrom(formData: FormData): ServerInput {
     authHeaderName: field(formData, "authHeaderName"),
     authValueTemplate: field(formData, "authValueTemplate"),
     authSecretId: field(formData, "authSecretId") || null,
+    authSecretName: field(formData, "authSecretName") || null,
+    authSecretValue: field(formData, "authSecretValue") || null,
     oauthClientId: field(formData, "oauthClientId") || null,
     oauthClientSecretId: field(formData, "oauthClientSecretId") || null,
     oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,

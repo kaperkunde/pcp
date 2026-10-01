@@ -50,7 +50,9 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   schema URL (downloaded at once, public addresses only, and approved as that
   copy), which is a permission request like any new server: the owner is shown
   the address, the tools and the secret (by name), and nothing exists until
-  they agree. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
+  they agree. A secret PCP does not hold yet is typed in by the owner on PCP's
+  permission page, never in the panel or the client's prompt (those run in
+  the assistant's app), and its value never reaches the assistant. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
   It never changes a credential, never clears `publicOnly`, can only read and

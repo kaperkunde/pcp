@@ -9,6 +9,12 @@ export const DEFAULT_HEADER_NAME = "Authorization"
 export const DEFAULT_VALUE_TEMPLATE = "Bearer {{secret}}"
 export const SECRET_PLACEHOLDER = "{{secret}}"
 
+/**
+ * The secret picker's choice for one typed into the form there and then,
+ * saved as a new secret when the form is.
+ */
+export const NEW_SECRET = "new"
+
 /** The largest OpenAPI schema PCP reads, uploaded or downloaded. */
 export const MAX_SPEC_BYTES = 5 * 1024 * 1024
 export const SPEC_FILE_ACCEPT =

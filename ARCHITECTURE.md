@@ -208,7 +208,20 @@ applies the edits, refuses one that cannot be used, and shows the owner the
 address, where the schema came from, how many edits it has, the tool count
 and operations, whether the tools can change things, and the secret that
 would be sent. Nothing exists until they agree; then `executeRegister` creates the
-endpoint, on, and adds it to the token's scope. An assistant can write a
+endpoint, on, and adds it to the token's scope.
+
+A secret is named, never sent. A name PCP does not hold yet (an MCP server's
+or an API's) makes a request the owner can only agree to on PCP's own page,
+where they type the value in: the panel and the client's prompt run inside
+the assistant's app, so they are not offered for it (the client opens the
+page, or the assistant hands over the link), and an answer from either is
+refused. The value is saved as a new secret by the proposed name (a number is
+added when that is taken by then) just before the server is made, and removed
+again if making it fails; a secret of that name the owner added in the
+meantime is used when they leave the field empty. The assistant is told the
+name it was saved as, never the value. The owner's own forms work the same
+way: the secret picker has "a new secret, entered here", saved with the
+server or endpoint once everything else on the form has been checked. An assistant can write a
 document from an API's documentation and register it in one call. What it
 registers has `public_only` set (below) and cannot carry a secret unless the
 owner approved that secret going to the address they were shown.
