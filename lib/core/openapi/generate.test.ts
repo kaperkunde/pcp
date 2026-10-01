@@ -288,6 +288,8 @@ describe("generateTools", () => {
               type: "object",
               properties: {
                 cost: { type: "number" },
+                // Text the API encodes is marked as such.
+                image: { type: "string", format: "byte" },
                 // A reference back into itself stops.
                 parent: { $ref: "#/components/schemas/Line" },
               },
@@ -326,7 +328,7 @@ describe("generateTools", () => {
     )
 
     expect(tools[0]!.output).toBe(
-      '{data: [{id: string, number: string, status: "draft" | "paid", lines: [{cost: number, parent: {…}}]}], meta: {…}}',
+      '{data: [{id: string, number: string, status: "draft" | "paid", lines: [{cost: number, image: string (base64), parent: {…}}]}], meta: {…}}',
     )
   })
 

@@ -1,7 +1,12 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { describe, expect, it } from "vitest"
 
-import { pickFields, readFields, shapeAnswer } from "./answers"
+import {
+  decodeBase64Text,
+  pickFields,
+  readFields,
+  shapeAnswer,
+} from "./answers"
 
 const invoices = {
   data: [
@@ -79,6 +84,98 @@ describe("fields", () => {
       '{"data":[{"number":"0001"},{"number":"0002"}]}',
     ])
     expect(shaped.structuredContent).toBeUndefined()
+  })
+})
+
+describe("decode", () => {
+  const b64url = (text: string) => Buffer.from(text).toString("base64url")
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2]).toString(
+    "base64url",
+  )
+  // A Gmail message: parts nest, and a body is base64url.
+  const message = {
+    id: "m1",
+    payload: {
+      mimeType: "multipart/mixed",
+      body: { size: 0 },
+      parts: [
+        {
+          mimeType: "multipart/alternative",
+          parts: [
+            {
+              mimeType: "text/plain",
+              body: { data: b64url("Hi Ada,\r\n¿Qué tal? 👋") },
+            },
+            { mimeType: "text/html", body: { data: b64url("<p>Hi Ada</p>") } },
+          ],
+        },
+        {
+          mimeType: "image/png",
+          body: { data: png },
+        },
+      ],
+    },
+  }
+
+  it("decodes base64 and base64url text, and nothing else", () => {
+    expect(decodeBase64Text(b64url("é?>>"))).toBe("é?>>")
+    expect(decodeBase64Text(Buffer.from("é?>>").toString("base64"))).toBe(
+      "é?>>",
+    )
+    // MIME wraps its base64 in lines.
+    expect(decodeBase64Text("SGVs\r\nbG8=")).toBe("Hello")
+    expect(decodeBase64Text("not base64!")).toBeNull()
+    expect(decodeBase64Text("abcde")).toBeNull()
+    // Bytes that are not UTF-8, and UTF-8 with control characters.
+    expect(
+      decodeBase64Text(Buffer.from([0xff, 0xfe]).toString("base64")),
+    ).toBeNull()
+    expect(
+      decodeBase64Text(Buffer.from("a\u0000b").toString("base64")),
+    ).toBeNull()
+  })
+
+  it("decodes text at every path that ends with one asked for, and says what it did", () => {
+    const shaped = shapeAnswer(json(message), {
+      decode: ["body.data", "snippet"],
+    })
+    const [decoded, left, missing, answer] = texts(shaped)
+
+    expect(decoded).toBe("Decoded from base64: body.data (2).")
+    expect(left).toMatch(
+      /^Left as they were, not base64 text .*: body\.data \(1\)\.$/,
+    )
+    expect(missing).toBe("Nothing to decode at: snippet.")
+    const parts = JSON.parse(answer!).payload.parts
+    expect(
+      parts[0].parts.map((part: { body: { data: string } }) => part.body.data),
+    ).toEqual(["Hi Ada,\r\n¿Qué tal? 👋", "<p>Hi Ada</p>"])
+    expect(parts[1].body.data).toBe(png)
+    expect(shaped.structuredContent).toBeUndefined()
+  })
+
+  it("decodes only what fields kept", () => {
+    const shaped = shapeAnswer(json(message), {
+      fields: ["id", "payload.parts.parts.body"],
+      decode: ["body.data"],
+    })
+
+    expect(texts(shaped)).toEqual([
+      "Decoded from base64: body.data (2).",
+      '{"id":"m1","payload":{"parts":[{"parts":[{"body":{"data":"Hi Ada,\\r\\n¿Qué tal? 👋"}},{"body":{"data":"<p>Hi Ada</p>"}}]},{}]}}',
+    ])
+  })
+
+  it("says so when the answer is not JSON", () => {
+    const shaped = shapeAnswer(
+      { content: [{ type: "text", text: "plain words" }] },
+      { fields: ["data"], decode: ["data"] },
+    )
+
+    expect(texts(shaped)[0]).toBe(
+      "fields and decode were not applied: the answer is not JSON.",
+    )
+    expect(() => readFields(["a..b"], "decode")).toThrow(/Each of decode/)
   })
 })
 

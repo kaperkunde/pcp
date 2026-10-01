@@ -9,6 +9,7 @@ import { resolvePointer } from "./refs"
 /**
  * What a successful call answers, as a short outline an assistant can read
  * before it calls: `{data: [{id: string, amount: number, …}], meta: {…}}`.
+ * Text the API sends base64-encoded is `string (base64)`.
  * describe_tool shows it, so the assistant knows the field names to look
  * for, and to pick with call_tool's fields, without a first call to find out.
  *
@@ -90,6 +91,16 @@ function typeWord(schema: JsonObject): string {
     : typeof type === "string"
       ? type
       : ""
+
+  // Text the API encodes, so an assistant knows to decode it (call_tool's
+  // decode) or to leave it out.
+  if (
+    named === "string" &&
+    (own(schema, "format") === "byte" ||
+      own(schema, "contentEncoding") === "base64")
+  ) {
+    return "string (base64)"
+  }
 
   return named || "any"
 }
