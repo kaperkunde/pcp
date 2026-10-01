@@ -1,6 +1,13 @@
 "use client"
 
-import { useActionState, useEffect, useState, useTransition } from "react"
+import { ChevronRight } from "lucide-react"
+import {
+  useActionState,
+  useEffect,
+  useId,
+  useState,
+  useTransition,
+} from "react"
 
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
@@ -30,6 +37,7 @@ import {
 } from "@/lib/actions/servers"
 import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
 import type { OAuthConnection } from "@/lib/core/upstream"
+import { cn } from "@/lib/utils"
 
 export type ServerDetailProps = {
   server: {
@@ -232,31 +240,7 @@ export function ServerDetail({
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Tools ({tools.length})</CardTitle>
-          <CardDescription>
-            {endpoint
-              ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
-              : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {tools.length === 0 ? (
-            <p className="text-muted-foreground">
-              {endpoint
-                ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
-                : "No tools known yet. Connect the server, or refresh its tools."}
-            </p>
-          ) : (
-            <ul className="flex flex-col divide-y divide-border">
-              {tools.map((tool) => (
-                <ToolRow key={tool.name} serverId={server.id} tool={tool} />
-              ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
+      <ToolsCard serverId={server.id} tools={tools} endpoint={endpoint} />
 
       <Card>
         <CardHeader>
@@ -283,6 +267,74 @@ export function ServerDetail({
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+/**
+ * The server's tools, folded until asked for: a server can bring hundreds,
+ * and the cards below them should stay in reach.
+ */
+function ToolsCard({
+  serverId,
+  tools,
+  endpoint,
+}: {
+  serverId: string
+  tools: ServerDetailProps["tools"]
+  endpoint: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const listId = useId()
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          {tools.length === 0 ? (
+            "Tools (0)"
+          ) : (
+            <button
+              type="button"
+              aria-expanded={open}
+              aria-controls={listId}
+              onClick={() => setOpen((value) => !value)}
+              className="-ml-1 flex cursor-pointer items-center gap-1 rounded-md px-1 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              <ChevronRight
+                className={cn(
+                  "size-4 shrink-0 text-muted-foreground transition-transform",
+                  open && "rotate-90",
+                )}
+                aria-hidden
+              />
+              Tools ({tools.length})
+            </button>
+          )}
+        </CardTitle>
+        <CardDescription>
+          {endpoint
+            ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
+            : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
+        </CardDescription>
+      </CardHeader>
+      {tools.length === 0 ? (
+        <CardContent>
+          <p className="text-muted-foreground">
+            {endpoint
+              ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
+              : "No tools known yet. Connect the server, or refresh its tools."}
+          </p>
+        </CardContent>
+      ) : open ? (
+        <CardContent>
+          <ul id={listId} className="flex flex-col divide-y divide-border">
+            {tools.map((tool) => (
+              <ToolRow key={tool.name} serverId={serverId} tool={tool} />
+            ))}
+          </ul>
+        </CardContent>
+      ) : null}
+    </Card>
   )
 }
 
