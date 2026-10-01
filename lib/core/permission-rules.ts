@@ -3,9 +3,12 @@ import { createHash } from "node:crypto"
 import type { ClientCapabilities } from "@modelcontextprotocol/server"
 
 import {
+  OPTIONAL_PERMISSION_TIERS,
   PERMISSION_DECISIONS,
+  PERMISSION_TIERS,
   type PermissionDecision,
   type PermissionKind,
+  type PermissionTier,
 } from "./constants"
 import { invalid } from "./errors"
 
@@ -43,11 +46,15 @@ export type PermissionVia = "app" | "form" | "url" | "web"
  * - link: nothing the client can show, so the text hands the assistant a
  *   link to give the owner. Every 2025-era request lands here: it carries no
  *   capabilities, and the SDK refuses a multi-round answer to it.
+ *
+ * A client's word is all there is to go on, and some clients declare form
+ * elicitation they never show. So each token says which tiers it may use
+ * (`allowed`); the first one the client declares and the token allows wins,
+ * and the link is always left.
  */
-export type PermissionTier = "app" | "form" | "url" | "link"
-
 export function choosePermissionTier(
   capabilities: ClientCapabilities | undefined,
+  allowed: readonly PermissionTier[] = PERMISSION_TIERS,
 ): PermissionTier {
   if (!capabilities) {
     return "link"
@@ -55,24 +62,44 @@ export function choosePermissionTier(
 
   const extensions = (capabilities as { extensions?: Record<string, unknown> })
     .extensions
-
-  if (extensions && extensions[UI_EXTENSION]) {
-    return "app"
-  }
-
   const elicitation = capabilities.elicitation as
     { form?: unknown; url?: unknown } | undefined
-
-  if (elicitation) {
-    // An empty elicitation object is form mode (the spec's default).
-    if (elicitation.form || !elicitation.url) {
-      return "form"
+  const declared: Record<(typeof OPTIONAL_PERMISSION_TIERS)[number], boolean> =
+    {
+      app: Boolean(extensions?.[UI_EXTENSION]),
+      // An empty elicitation object is form mode (the spec's default).
+      form: Boolean(elicitation && (elicitation.form || !elicitation.url)),
+      url: Boolean(elicitation?.url),
     }
 
-    return "url"
+  return (
+    OPTIONAL_PERMISSION_TIERS.find(
+      (tier) => declared[tier] && allowed.includes(tier),
+    ) ?? "link"
+  )
+}
+
+/**
+ * A token's stored tiers ("app,form,url") as a list in trying order. Names
+ * PCP does not know are dropped; the link is always there.
+ */
+export function parsePermissionTiers(stored: string): PermissionTier[] {
+  const named = new Set(stored.split(",").map((name) => name.trim()))
+
+  return PERMISSION_TIERS.filter((tier) => tier === "link" || named.has(tier))
+}
+
+/** The tiers to store for a token; the link is implied, not stored. */
+export function storePermissionTiers(tiers: readonly string[]): string {
+  for (const tier of tiers) {
+    if (!(PERMISSION_TIERS as readonly string[]).includes(tier)) {
+      throw invalid("Choose how PCP asks you from the options shown.")
+    }
   }
 
-  return "link"
+  return OPTIONAL_PERMISSION_TIERS.filter((tier) => tiers.includes(tier)).join(
+    ",",
+  )
 }
 
 /** JSON with sorted keys and no undefined values, so equal args hash equal. */

@@ -98,6 +98,10 @@ model ApiToken {
   /// register_server, which every token may ask for and the owner decides.
   /// Off unless the owner turns it on.
   manageEndpoints Boolean   @default(false) @map("manage_endpoints")
+  /// How PCP may ask the owner about this token's calls, comma-separated in
+  /// any order: app | form | url. The link in the result is always on, so
+  /// an empty value means the link alone.
+  permissionTiers String    @default("app,form,url") @map("permission_tiers")
   expiresAt       DateTime? @map("expires_at")
   revokedAt       DateTime? @map("revoked_at")
   createdAt       DateTime  @default(now()) @map("created_at")

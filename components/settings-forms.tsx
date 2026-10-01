@@ -86,7 +86,7 @@ export function ChangePasswordForm({ username }: { username: string }) {
       </CardHeader>
       <CardContent>
         <form action={action} className="flex flex-col gap-4">
-          <UsernameField value={username} />
+          <UsernameField id="settings-account" value={username} />
           <Field label="Current password" htmlFor="settings-current">
             <Input
               id="settings-current"
@@ -165,7 +165,7 @@ export function RecoveryKeyCard({ username }: { username: string }) {
           onSubmit={confirmRotation}
           className="flex flex-col gap-4"
         >
-          <UsernameField value={username} />
+          <UsernameField id="settings-recovery-account" value={username} />
           <Field label="Your password" htmlFor="settings-recovery-password">
             <Input
               id="settings-recovery-password"
@@ -177,8 +177,10 @@ export function RecoveryKeyCard({ username }: { username: string }) {
           </Field>
           <FormError error={state.status === "error" ? state.error : null} />
           <div>
-            <SubmitButton variant="outline" pendingText="Making a new key…">
-              Make a new recovery key
+            {/* Not "new": Safari can take a password form whose button
+                says new or create for a sign-up, and offer a new password. */}
+            <SubmitButton variant="outline" pendingText="Replacing the key…">
+              Replace the recovery key
             </SubmitButton>
           </div>
         </form>
