@@ -54,6 +54,8 @@ export default async function ServerPage({
     .filter((secret) => secret.kind === "text")
     .map(({ id, name }) => ({ id, name }))
 
+  const redirectUrl = oauthRedirectUrl(await publicUrlFor(ctx))
+
   const oauthConnection = await describeOAuthConnection(ctx, server).catch(
     () => null,
   )
@@ -109,6 +111,7 @@ export default async function ServerPage({
           }
         })}
         notice={notice}
+        redirectUrl={redirectUrl}
       />
       <h2 className="text-lg">Settings</h2>
       {endpoint ? (
@@ -154,7 +157,7 @@ export default async function ServerPage({
             oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
           }}
           secrets={secrets}
-          redirectUrl={oauthRedirectUrl(await publicUrlFor(ctx))}
+          redirectUrl={redirectUrl}
         />
       )}
     </>

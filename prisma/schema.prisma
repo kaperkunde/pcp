@@ -204,6 +204,10 @@ model Memory {
   author     String    @default("assistant")
   /// private | shared
   visibility String    @default("private")
+  /// Read in every conversation: its text goes into the gateway's
+  /// instructions. Only the owner sets it, and an assistant's change to one
+  /// it keeps clears it (memories.ts).
+  always     Boolean   @default(false)
   /// The path and the text as JSON, AES-256-GCM under the vault's data key
   /// with "memory:<id>" as associated data.
   ciphertext Bytes

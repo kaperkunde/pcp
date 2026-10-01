@@ -8,7 +8,7 @@ import {
   mcpToolCall2026,
   toolText,
 } from "../lib/mcp"
-import { addSecret, createToken, openToken } from "../lib/ui"
+import { createToken, openToken } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
 // answers through a link, the client's own prompt or PCP's panel, and the
@@ -58,15 +58,20 @@ function callsOf(tool: string): number {
   return upstream.calls.filter((call) => call.tool === tool).length
 }
 
-test("sets up a server and a token", async ({ page }) => {
-  await addSecret(page, { name: SECRET_NAME, value: upstream.expectedToken })
-
+test("sets up a server, with its secret typed into the form, and a token", async ({
+  page,
+}) => {
+  // No trip to the Secrets page: the key is entered with the server.
   await page.goto("/servers/new")
   await page.getByLabel("Name").fill(SERVER_NAME)
   await page.getByLabel("Server URL").fill(upstream.mcpUrl)
   await page.getByLabel("Description").fill("Postcards for permission tests.")
   await page.getByLabel("Authentication").selectOption("header")
-  await page.getByLabel("Secret").selectOption({ label: SECRET_NAME })
+  await page
+    .getByLabel("Secret", { exact: true })
+    .selectOption({ label: "A new secret, entered here" })
+  await page.getByLabel("New secret's value").fill(upstream.expectedToken)
+  await page.getByLabel("Save it as (optional)").fill(SECRET_NAME)
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page.getByText("Tools (3)")).toBeVisible()
   await page.getByLabel("Short name").fill(SLUG)
@@ -386,15 +391,6 @@ test("an assistant can propose a server with a stored secret; it is added once y
 }) => {
   const name = `Proposed ${RUN}`
 
-  const unknown = await callTool(baseURL!, token, "register_server", {
-    name,
-    url: upstream.mcpUrl,
-    auth_type: "header",
-    secret: `No such secret ${RUN}`,
-  })
-  expect(unknown.body.result?.isError).toBe(true)
-  expect(toolText(unknown)).toContain("No secret called")
-
   const asked = await callTool(baseURL!, token, "register_server", {
     name,
     url: upstream.mcpUrl,
@@ -420,6 +416,67 @@ test("an assistant can propose a server with a stored secret; it is added once y
   expect(after.instructions).toContain(
     `proposed-${RUN}: Proposed by an assistant. (3 tools)`,
   )
+})
+
+test("an assistant can propose a server with a secret you do not have yet; you type it in PCP", async ({
+  page,
+  baseURL,
+}) => {
+  const name = `Proposed new key ${RUN}`
+  const secretName = `Proposed key ${RUN}`
+
+  // A client that shows panels: this request still goes to PCP's page.
+  const asked = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "register_server",
+    {
+      name,
+      url: upstream.mcpUrl,
+      auth_type: "header",
+      secret: secretName,
+    },
+    { capabilities: { ...PANELS, ...FORM } },
+  )
+  expect(asked.body.result?.structuredContent?.kind).toBe("done")
+  const text = toolText(asked)
+  expect(text).toContain(`sends a new secret, saved as "${secretName}"`)
+  expect(text).toContain("do not ask them for it here")
+  const { path, id } = linkIn(text)
+
+  // The panel's buttons cannot carry the value, so they cannot agree.
+  const fromPanel = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "answer_permission",
+    { id, decision: "allow_once" },
+    { capabilities: PANELS },
+  )
+  expect(fromPanel.body.result?.isError).toBe(true)
+  expect(toolText(fromPanel)).toContain(path)
+
+  await page.goto(path)
+  await expect(page.getByText(`Add the server ${name}?`)).toBeVisible()
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(
+    page.getByText(`Enter the value of the secret "${secretName}" first.`),
+  ).toBeVisible()
+  await page
+    .getByLabel(`Value of the secret "${secretName}"`)
+    .fill(upstream.expectedToken)
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText("3 tools")
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `saved in PCP as "${secretName}"`,
+  )
+
+  // The assistant learns the outcome, never the value.
+  const outcome = await callTool(baseURL!, token, "check_permission", { id })
+  expect(toolText(outcome)).toContain("3 tools")
+  expect(toolText(outcome)).not.toContain(upstream.expectedToken)
+
+  await page.goto("/secrets")
+  await expect(page.getByText(secretName, { exact: true })).toBeVisible()
 })
 
 test("an OAuth server an assistant proposes is connected through a link", async ({

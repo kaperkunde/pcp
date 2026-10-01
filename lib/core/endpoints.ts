@@ -32,6 +32,7 @@ import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
 import {
   getServer,
   normalizeHeaderAuth,
+  withNewSecret,
   normalizeNameAndDescription,
   setServerStatus,
   slugify,
@@ -80,7 +81,11 @@ export type EndpointInput = {
   authType: "none" | "header"
   authHeaderName?: string | null
   authValueTemplate?: string | null
+  /** A secret's id, or NEW_SECRET for one typed into the form. */
   authSecretId?: string | null
+  /** With NEW_SECRET: what to call it, and its value. */
+  authSecretName?: string | null
+  authSecretValue?: string | null
 }
 
 async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
@@ -92,14 +97,18 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
     )
   }
 
-  const auth =
+  const { newSecret, ...auth } =
     input.authType === "header"
-      ? { authType: "header", ...(await normalizeHeaderAuth(ctx, input)) }
+      ? {
+          authType: "header",
+          ...(await normalizeHeaderAuth(ctx, input, { name })),
+        }
       : {
           authType: "none",
           authSecretId: null,
           authHeaderName: null,
           authValueTemplate: null,
+          newSecret: null,
         }
 
   const specSource = input.specSource === "upload" ? "upload" : "url"
@@ -113,6 +122,7 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
     readOnly: input.readOnly,
     publicOnly: input.publicOnly === true,
     ownerBaseUrl: input.baseUrl?.trim() || null,
+    newSecret,
   } as const
 }
 
@@ -404,42 +414,45 @@ export async function createEndpoint(
   })
 
   const id = newId()
-  const server = await db().mcpServer.create({
-    data: {
-      id,
-      vaultId: ctx.vaultId,
-      kind: "openapi",
-      enabled: input.enabled !== false,
-      slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
-      name: data.name,
-      description: data.description,
-      url: baseUrl,
-      specSource: data.specSource,
-      specUrl: data.specUrl,
-      readOnly: data.readOnly,
-      publicOnly: data.publicOnly,
-      specUrlFromAssistant:
-        data.specSource === "url" && input.specUrlFromAssistant === true,
-      authType: data.authType,
-      authSecretId: data.authSecretId,
-      authHeaderName: data.authHeaderName,
-      authValueTemplate: data.authValueTemplate,
-    },
-  })
 
-  try {
-    return {
-      id,
-      sync: await applySpec(server, text, patches, generated, fetchedFrom),
+  return withNewSecret(ctx, data.newSecret, async (secretId) => {
+    const server = await db().mcpServer.create({
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        kind: "openapi",
+        enabled: input.enabled !== false,
+        slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
+        name: data.name,
+        description: data.description,
+        url: baseUrl,
+        specSource: data.specSource,
+        specUrl: data.specUrl,
+        readOnly: data.readOnly,
+        publicOnly: data.publicOnly,
+        specUrlFromAssistant:
+          data.specSource === "url" && input.specUrlFromAssistant === true,
+        authType: data.authType,
+        authSecretId: secretId ?? data.authSecretId,
+        authHeaderName: data.authHeaderName,
+        authValueTemplate: data.authValueTemplate,
+      },
+    })
+
+    try {
+      return {
+        id,
+        sync: await applySpec(server, text, patches, generated, fetchedFrom),
+      }
+    } catch (error) {
+      // The row exists only for the tools that did not get stored: do not
+      // leave an endpoint with none, and a status that says nothing.
+      await db()
+        .mcpServer.delete({ where: { id } })
+        .catch(() => {})
+      throw error
     }
-  } catch (error) {
-    // The row exists only for the tools that did not get stored: do not leave
-    // an endpoint with none, and a status that says nothing.
-    await db()
-      .mcpServer.delete({ where: { id } })
-      .catch(() => {})
-    throw error
-  }
+  })
 }
 
 function originOf(address: string | null): string | null {
@@ -530,23 +543,25 @@ export async function updateEndpoint(
     data.specSource === "url" &&
     data.specUrl === existing.specUrl
 
-  const server = await db().mcpServer.update({
-    where: { id },
-    data: {
-      name: data.name,
-      description: data.description,
-      url: baseUrl,
-      specSource: data.specSource,
-      specUrl: data.specUrl,
-      readOnly: data.readOnly,
-      publicOnly: data.publicOnly,
-      specUrlFromAssistant,
-      authType: data.authType,
-      authSecretId: data.authSecretId,
-      authHeaderName: data.authHeaderName,
-      authValueTemplate: data.authValueTemplate,
-    },
-  })
+  const server = await withNewSecret(ctx, data.newSecret, (secretId) =>
+    db().mcpServer.update({
+      where: { id },
+      data: {
+        name: data.name,
+        description: data.description,
+        url: baseUrl,
+        specSource: data.specSource,
+        specUrl: data.specUrl,
+        readOnly: data.readOnly,
+        publicOnly: data.publicOnly,
+        specUrlFromAssistant,
+        authType: data.authType,
+        authSecretId: secretId ?? data.authSecretId,
+        authHeaderName: data.authHeaderName,
+        authValueTemplate: data.authValueTemplate,
+      },
+    }),
+  )
 
   return {
     sync: await applySpec(server, text, patches, generated, fetchedFrom),
