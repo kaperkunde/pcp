@@ -14,6 +14,7 @@ import {
   updateEndpointDetails,
 } from "./endpoint-admin"
 import { isPcpError } from "./errors"
+import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog } from "./request-log"
 import { searchTools, summarize, type ToolCandidate } from "./search"
 import { callServerTool, syncServerTools } from "./upstream"
@@ -27,9 +28,21 @@ import { callServerTool, syncServerTools } from "./upstream"
 
 export type GatewayScope = ResolvedToken & { publicUrl: string }
 
-export type GatewayServer = McpServerRow & { tools: McpTool[] }
+/**
+ * A tool as the gateway keeps it for a request: enough to search and list.
+ * The schema and the call plan are read when a tool is described or called,
+ * so a request does not carry every tool's schema, which for a large
+ * endpoint is megabytes.
+ */
+export type GatewayTool = Pick<
+  McpTool,
+  "id" | "name" | "title" | "description" | "descriptionOverride"
+>
+
+export type GatewayServer = McpServerRow & { tools: GatewayTool[] }
 
 const MAX_RESULT_CHARS = 60_000
+const ENDPOINT_CHANGES = { max: 20, windowMs: 10 * 60_000 }
 
 export async function loadGatewayServers(
   scope: GatewayScope,
@@ -40,13 +53,24 @@ export async function loadGatewayServers(
       enabled: true,
       ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
     },
-    include: { tools: { orderBy: { name: "asc" } } },
+    include: {
+      tools: {
+        orderBy: { name: "asc" },
+        select: {
+          id: true,
+          name: true,
+          title: true,
+          description: true,
+          descriptionOverride: true,
+        },
+      },
+    },
     orderBy: { name: "asc" },
   })
 }
 
 const MANAGE_INSTRUCTIONS =
-  "This token can also add and maintain API endpoints: register_endpoint takes OpenAPI 3 text (JSON or YAML; write one from the API's documentation if it has none), update_endpoint changes an endpoint, get_endpoint reads one. You cannot attach a credential; the owner does that in PCP."
+  "This token can also add and maintain API endpoints: register_endpoint takes OpenAPI 3 text (JSON or YAML; write one from the API's documentation if it has none), update_endpoint changes one you registered, get_endpoint reads one. A new or changed endpoint stays disabled until the owner enables it in PCP, and you cannot attach a credential; the owner does that too."
 
 export function buildInstructions(
   servers: GatewayServer[],
@@ -249,16 +273,28 @@ export function buildGatewayServer(
       }
 
       const { tool } = found
+      // The schema is not carried with the catalogue: fetch this tool's.
+      const row = await db().mcpTool.findUnique({
+        where: {
+          serverId_name: { serverId: found.server.id, name: tool.name },
+        },
+        select: { inputSchema: true, annotations: true },
+      })
+
+      if (!row) {
+        return failure(
+          `${args.server} has no tool called ${args.tool}. Use search_tools to find the right name.`,
+        )
+      }
+
       let inputSchema: unknown
       let annotations: unknown
 
       try {
-        inputSchema = JSON.parse(tool.inputSchema)
-        annotations = tool.annotations
-          ? JSON.parse(tool.annotations)
-          : undefined
+        inputSchema = JSON.parse(row.inputSchema)
+        annotations = row.annotations ? JSON.parse(row.annotations) : undefined
       } catch {
-        inputSchema = tool.inputSchema
+        inputSchema = row.inputSchema
       }
 
       return text(
@@ -348,6 +384,14 @@ export function buildGatewayServer(
   // decided in endpoint-admin.ts.
   if (scope.manageEndpoints) {
     const json = (value: unknown) => text(clip(JSON.stringify(value, null, 1)))
+    // Reading a large schema and rewriting its tools is real work, so adding
+    // and changing are limited per token, apart from the request limit.
+    const tooOften = () =>
+      checkRateLimit(`endpoint-admin:${scope.tokenId}`, ENDPOINT_CHANGES)
+        ? null
+        : failure(
+            "That is a lot of endpoint changes in a short time. Wait a few minutes.",
+          )
     const slugOf = (args: unknown) => ({
       server: (args as { endpoint?: string }).endpoint,
     })
@@ -357,7 +401,7 @@ export function buildGatewayServer(
       {
         title: "Register an API endpoint",
         description:
-          "Add an API to the owner's PCP from an OpenAPI 3 document, given as text (JSON or YAML). If the API has no OpenAPI document, write one from its documentation. Each operation becomes a tool: find it with search_tools, run it with call_tool. The endpoint sends no credential (the owner attaches a secret in PCP if the API needs one) and refuses private addresses until the owner allows them.",
+          "Add an API to the owner's PCP from an OpenAPI 3 document, given as text (JSON or YAML). If the API has no OpenAPI document, write one from its documentation. Each operation becomes a tool. The endpoint starts disabled: nothing uses it, you included, until the owner enables it in PCP. It sends no credential and refuses private addresses until the owner allows them.",
         inputSchema: z.object({
           name: z.string().min(1).max(80).describe("A name for the API."),
           spec: z
@@ -396,7 +440,7 @@ export function buildGatewayServer(
           baseUrl?: string
           description?: string
           readOnly?: boolean
-        }) => json(await registerEndpoint(scope, args)),
+        }) => tooOften() ?? json(await registerEndpoint(scope, args)),
       ),
     )
 
@@ -405,7 +449,7 @@ export function buildGatewayServer(
       {
         title: "Change an API endpoint",
         description:
-          "Change an API endpoint: its name, description, OpenAPI document (when it was added as text), base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Some changes are the owner's alone, and get_endpoint says which; you can never change the credential, and you cannot move an endpoint that sends a secret.",
+          "Change an endpoint you registered: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. A change other assistants would see disables the endpoint until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: you can read it and turn read-only on, nothing else. You can never change a credential. get_endpoint says what you may change.",
         inputSchema: z.object({
           endpoint: z
             .string()
@@ -440,7 +484,10 @@ export function buildGatewayServer(
         slugOf,
       )(async (args: { endpoint: string } & Record<string, unknown>) => {
         const { endpoint, ...changes } = args
-        return json(await updateEndpointDetails(scope, endpoint, changes))
+        return (
+          tooOften() ??
+          json(await updateEndpointDetails(scope, endpoint, changes))
+        )
       }),
     )
 
@@ -481,7 +528,7 @@ function findTool(
   bySlug: Map<string, GatewayServer>,
   slug: string,
   name: string,
-): { server: GatewayServer; tool: McpTool } | { error: string } {
+): { server: GatewayServer; tool: GatewayTool } | { error: string } {
   const server = bySlug.get(slug)
 
   if (!server) {

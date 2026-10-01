@@ -19,6 +19,7 @@ const V4: Array<[string, number]> = [
   ["10.0.0.0", 8], // private
   ["100.64.0.0", 10], // carrier-grade NAT
   ["127.0.0.0", 8], // loopback
+  ["168.63.129.16", 32], // Azure's virtual host address (a public range)
   ["169.254.0.0", 16], // link-local, cloud metadata
   ["172.16.0.0", 12], // private
   ["192.0.0.0", 24], // IETF protocol assignments
@@ -33,8 +34,8 @@ const V4: Array<[string, number]> = [
 ]
 
 const V6: Array<[string, number]> = [
-  ["::", 128], // unspecified
-  ["::1", 128], // loopback
+  ["::", 96], // unspecified, loopback, and IPv4-compatible (::7f00:1)
+  ["::ffff:0:0:0", 96], // SIIT: an IPv4 address translated into IPv6
   ["64:ff9b::", 96], // NAT64: wraps an IPv4 address
   ["64:ff9b:1::", 48], // local-use NAT64
   ["100::", 64], // discard-only
@@ -73,8 +74,10 @@ export class AddressBlockedError extends Error {
     readonly host: string,
     readonly address: string,
   ) {
+    // The address stays out of the message, which can reach an assistant:
+    // for a name it would say what the owner's DNS holds.
     super(
-      `${host} resolves to ${address}, a private or local address, and this endpoint only reaches public ones. The owner can allow private addresses in its settings.`,
+      `${host} is, or resolves to, a private or local address, and this endpoint only reaches public ones. The owner can allow private addresses in its settings.`,
     )
     this.name = "AddressBlockedError"
   }

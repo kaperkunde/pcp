@@ -193,3 +193,75 @@ describe("the checked transport itself", () => {
     ).rejects.toThrow(/ECONNREFUSED/)
   })
 })
+
+describe("a server that does not speak HTTP properly", () => {
+  const allowAll = { publicOnly: true, addressCheck: () => true }
+  const sockets = new Set<import("node:net").Socket>()
+  let raw: import("node:net").Server | null = null
+
+  afterEach(async () => {
+    for (const socket of sockets) socket.destroy()
+    sockets.clear()
+    await new Promise<void>((resolve) =>
+      raw ? raw.close(() => resolve()) : resolve(),
+    )
+    raw = null
+  })
+
+  async function serve(reply: string): Promise<string> {
+    const { createServer } = await import("node:net")
+    raw = createServer((socket) => {
+      sockets.add(socket)
+      socket.once("data", () => socket.end(reply))
+    })
+    await new Promise<void>((resolve) => raw!.listen(0, "127.0.0.1", resolve))
+    return `http://127.0.0.1:${(raw!.address() as import("node:net").AddressInfo).port}/x`
+  }
+
+  it("is a rejection at once for a status Response cannot hold, not a wait for the timeout", async () => {
+    for (const status of ["999", "600"]) {
+      const url = await serve(
+        `HTTP/1.1 ${status} Nope\r\nContent-Length: 0\r\n\r\n`,
+      )
+      const started = Date.now()
+
+      await expect(send(url, {}, allowAll), status).rejects.toThrow(
+        new RegExp(`HTTP ${status}`),
+      )
+      expect(Date.now() - started, status).toBeLessThan(2000)
+
+      await new Promise<void>((resolve) => raw!.close(() => resolve()))
+      raw = null
+    }
+  })
+
+  it("drops a reason phrase Response will not take, and keeps the answer", async () => {
+    const url = await serve(
+      "HTTP/1.1 200 Bad\u0001Text\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
+    )
+    const response = await send(url, {}, allowAll)
+
+    expect(response.status).toBe(200)
+    expect(response.statusText).toBe("")
+    expect(await response.text()).toBe("ok")
+  })
+})
+
+describe("what a refusal tells an assistant", () => {
+  it("names the host it was given, not what that name resolves to", async () => {
+    api = await startTestApi()
+    const port = new URL(api.origin).port
+    const failure = await executeCall(
+      { url: `http://localhost:${port}/x`, method: "GET", headers: {} },
+      { publicOnly: true },
+    ).then(
+      () => null,
+      (error: Error) => error,
+    )
+
+    expect(failure!.message).toMatch(
+      /^localhost is, or resolves to, a private or local address/,
+    )
+    expect(failure!.message).not.toMatch(/127\.0\.0\.1|::1/)
+  })
+})

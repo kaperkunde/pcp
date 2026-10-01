@@ -257,6 +257,8 @@ describe("headers", () => {
       "Origin",
       "Referer",
       "Via",
+      "X-Original-URL",
+      "X-Rewrite-URL",
     ]) {
       const sent = header(name, "evil")
       expect(sent[name.toLowerCase()], name).toBeUndefined()

@@ -188,11 +188,11 @@ function CreateTokenForm({
               Let an assistant with this token add and change API endpoints
             </Label>
             <p className="text-xs text-muted-foreground">
-              It can register an API from OpenAPI schema text and edit its
-              schema, description and base URL. It can never see or choose a
-              secret, and the endpoints it adds refuse private addresses until
-              you allow them. Leave this off unless the assistant needs to set
-              up APIs itself.
+              It can register an API from OpenAPI schema text and edit what it
+              registered. Those endpoints stay off until you enable them, and
+              refuse private addresses until you allow them. It can never see or
+              choose a secret, and once you attach one the endpoint is yours.
+              Leave this off unless the assistant needs to set up APIs itself.
             </p>
           </div>
           <Field

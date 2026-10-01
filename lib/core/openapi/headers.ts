@@ -29,7 +29,9 @@ const BLOCKED = new Set([
   "x-http-method",
   "x-http-method-override",
   "x-method-override",
+  "x-original-url",
   "x-real-ip",
+  "x-rewrite-url",
 ])
 
 /** RFC 9110 token characters: what a header name may contain. */

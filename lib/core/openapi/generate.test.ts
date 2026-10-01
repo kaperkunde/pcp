@@ -842,3 +842,49 @@ describe("a schema written to be expensive to read", () => {
     expect(get.operation.accept).toBe("application/json, */*;q=0.8")
   })
 })
+
+describe("what one endpoint's tools may add up to", () => {
+  it("stops storing tools past the limit, and says so", () => {
+    // Each operation takes a 700-property request body: about 15 KB of tool
+    // schema. 300 of them are 4.6 MB, past the 4 MB an endpoint may hold.
+    const mid = {
+      type: "object",
+      properties: Object.fromEntries(
+        Array.from({ length: 700 }, (_, i) => [`p${i}`, { type: "string" }]),
+      ),
+    }
+    const paths = Object.fromEntries(
+      Array.from({ length: 300 }, (_, i) => [
+        `/p${i}`,
+        {
+          post: {
+            operationId: `op${i}`,
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/Mid" },
+                },
+              },
+            },
+          },
+        },
+      ]),
+    )
+    const result = generateTools(
+      spec({ paths, components: { schemas: { Mid: mid } } }),
+      OPTIONS,
+    )
+
+    expect(result.tools.length).toBeGreaterThan(150)
+    expect(result.tools.length).toBeLessThan(300)
+    expect(result.skipped.at(-1)!.reason).toBe(
+      "the tools are larger than PCP stores for one endpoint",
+    )
+    const bytes = result.tools.reduce(
+      (sum, tool) => sum + JSON.stringify(tool.inputSchema).length,
+      0,
+    )
+    expect(bytes).toBeLessThanOrEqual(4_000_000)
+  })
+})

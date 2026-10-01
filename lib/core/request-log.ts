@@ -31,7 +31,15 @@ export async function appendRequestLog(
     return
   }
 
-  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry })
+  // Names come from the caller's arguments: cut them, so a request cannot
+  // grow the log by what it chooses to send.
+  const clamp = (value: string | undefined) => value?.slice(0, 80)
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    ...entry,
+    server: clamp(entry.server),
+    upstreamTool: clamp(entry.upstreamTool),
+  })
   const file = path.join(
     logDir(),
     `mcp-${new Date().toISOString().slice(0, 10)}.jsonl`,

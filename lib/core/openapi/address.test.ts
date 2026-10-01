@@ -64,6 +64,22 @@ describe("isPublicAddress", () => {
     expect(isPublicAddress("::ffff:8.8.8.8")).toBe(true)
   })
 
+  it("refuses the cloud hosts that live in public ranges, and the older IPv6 wrappers", () => {
+    for (const address of [
+      "168.63.129.16", // Azure's virtual host address
+      "100.100.100.200", // Alibaba's metadata service (carrier-grade NAT range)
+      "::7f00:1", // IPv4-compatible loopback
+      "::a00:1", // IPv4-compatible 10.0.0.1
+      "::ffff:0:7f00:1", // SIIT-translated loopback
+      "::ffff:0:a9fe:a9fe", // SIIT-translated 169.254.169.254
+    ]) {
+      expect(isPublicAddress(address), address).toBe(false)
+    }
+    // Its neighbours are ordinary public addresses.
+    expect(isPublicAddress("168.63.129.15")).toBe(true)
+    expect(isPublicAddress("168.63.129.17")).toBe(true)
+  })
+
   it("refuses anything that is not an address", () => {
     for (const address of [
       "",

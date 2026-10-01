@@ -10,6 +10,7 @@ import {
   MAX_TOOL_DESCRIPTION,
   MAX_TOOL_SCHEMA_CHARS,
   MAX_TOTAL_REF_NODES,
+  MAX_TOTAL_TOOL_CHARS,
   REF_MAX_CHARS,
   REF_MAX_NODES,
 } from "./limits"
@@ -260,6 +261,8 @@ export function generateTools(
   let operations = 0
   // Shared by every operation: see MAX_TOTAL_REF_NODES.
   let pool = MAX_TOTAL_REF_NODES
+  // And what the tools come to once stored: see MAX_TOTAL_TOOL_CHARS.
+  let stored = 0
 
   for (const [path, rawItem] of entries(doc.paths)) {
     // Before any pattern is run on it: some of the ones below are quadratic
@@ -333,6 +336,20 @@ export function generateTools(
           options,
           budget,
         )
+        const size =
+          JSON.stringify(tool.inputSchema).length +
+          JSON.stringify(tool.operation).length +
+          tool.description.length
+
+        if (stored + size > MAX_TOTAL_TOOL_CHARS) {
+          skipped.push({
+            operation: label,
+            reason: "the tools are larger than PCP stores for one endpoint",
+          })
+          continue
+        }
+
+        stored += size
         tools.push({ ...tool, name: uniqueName(tool.name, used) })
       } catch (error) {
         if (error instanceof Skip) {

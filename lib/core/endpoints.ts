@@ -52,6 +52,8 @@ export type EndpointInput = {
   readOnly: boolean
   /** Refuse private, loopback and link-local addresses (see address.ts). */
   publicOnly?: boolean
+  /** Off until the owner enables it. Default on. */
+  enabled?: boolean
   authType: "none" | "header"
   authHeaderName?: string | null
   authValueTemplate?: string | null
@@ -274,6 +276,7 @@ export async function createEndpoint(
       id,
       vaultId: ctx.vaultId,
       kind: "openapi",
+      enabled: input.enabled !== false,
       slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
       name: data.name,
       description: data.description,
@@ -404,6 +407,106 @@ export async function updateEndpoint(
   })
 
   return { sync: await applySpec(server, text, generated, fetchedFrom) }
+}
+
+export type EndpointChanges = {
+  name?: string
+  description?: string
+  baseUrl?: string
+  readOnly?: boolean
+  /** A whole new schema, as text. Only for an endpoint added as text. */
+  specText?: string
+}
+
+/**
+ * A change an assistant asked for. It writes only the columns it names and
+ * never the credential, the schema's source or what public-only says, so the
+ * rules about those cannot be got around by what is passed in, and an owner
+ * changing them at the same moment is not overwritten. A schema that does not
+ * read leaves everything as it was: it is parsed before anything is written.
+ */
+export async function changeEndpoint(
+  ctx: VaultContext,
+  id: string,
+  changes: EndpointChanges,
+): Promise<{ sync: SyncResult }> {
+  const existing = await getServer(ctx, id)
+
+  if (existing.kind !== "openapi") {
+    throw new PcpError("state", "This is an MCP server, not an API endpoint.")
+  }
+
+  if (changes.specText !== undefined && existing.specSource !== "upload") {
+    throw new PcpError(
+      "forbidden",
+      "This endpoint reads its schema from a URL; only the owner can replace it.",
+    )
+  }
+
+  const data: {
+    name?: string
+    description?: string
+    url?: string
+    readOnly?: boolean
+  } = {}
+
+  if (changes.name !== undefined || changes.description !== undefined) {
+    const text = normalizeNameAndDescription({
+      name: changes.name ?? existing.name,
+      description: changes.description ?? existing.description,
+    })
+
+    if (changes.name !== undefined) data.name = text.name
+    if (changes.description !== undefined) data.description = text.description
+  }
+
+  if (changes.baseUrl !== undefined) {
+    data.url = validateBaseUrl(changes.baseUrl)
+  }
+
+  const readOnly = changes.readOnly ?? existing.readOnly
+  const regenerate =
+    changes.specText !== undefined || readOnly !== existing.readOnly
+
+  if (!regenerate) {
+    const server = Object.keys(data).length
+      ? await db().mcpServer.update({ where: { id }, data })
+      : existing
+
+    return {
+      sync: {
+        status: server.status === "ok" ? "ok" : "error",
+        message: server.statusMessage,
+        toolCount: existing.tools.length,
+      },
+    }
+  }
+
+  let text = changes.specText
+
+  if (text === undefined) {
+    const stored = await db().openApiSpec.findUnique({
+      where: { serverId: id },
+      select: { text: true },
+    })
+
+    if (!stored) {
+      throw invalid("PCP has no copy of this schema to rebuild the tools from.")
+    }
+
+    text = stored.text
+  }
+
+  const generated = generate(text, {
+    readOnly,
+    authHeaderName: existing.authHeaderName,
+  })
+  const server = await db().mcpServer.update({
+    where: { id },
+    data: { ...data, readOnly },
+  })
+
+  return { sync: await applySpec(server, text, generated, null) }
 }
 
 /**

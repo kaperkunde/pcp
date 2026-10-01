@@ -116,6 +116,21 @@ async function handle(request: Request): Promise<Response> {
     )
   }
 
+  // The rate limit counts requests. A JSON-RPC batch is many calls in one, so
+  // it would get around it: the current protocol has no batches either.
+  if (request.method === "POST") {
+    const start = (await request.clone().text()).trimStart().slice(0, 1)
+
+    if (start === "[") {
+      return withCors(
+        jsonRpcError(
+          400,
+          "Send one message per request; batches are not supported.",
+        ),
+      )
+    }
+  }
+
   const scope: GatewayScope = {
     ...resolved,
     publicUrl: await publicUrlFor(resolved.ctx, request),

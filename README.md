@@ -133,11 +133,14 @@ endpoints** gets three more tools, so an assistant can set up an API itself:
 | `update_endpoint`   | Changes an endpoint's name, description, schema text, base URL, read-only setting or tool descriptions.  |
 | `get_endpoint`      | Reads an endpoint's settings and tools, and optionally its schema text, to edit and send back.           |
 
-What an assistant can do here is narrower than what you can. It can never
-see, choose or attach a secret: you attach one in the endpoint's settings. It
-cannot move an endpoint that sends a secret. What it registers refuses private
-and local addresses until you allow them. Leave the option off for a token
-that does not need it.
+What an assistant can do here is narrower than what you can. An endpoint it
+registers starts **disabled**: nothing uses it until you enable it, and a
+change it makes to one disables it again, because the words it writes reach
+every other assistant. It can never see, choose or attach a secret: you attach
+one in the endpoint's settings. It refuses private and local addresses until
+you allow them. Once you attach a secret or allow private addresses the
+endpoint is yours: an assistant can read it and turn read-only on, and nothing
+else. Leave the option off for a token that does not need it.
 
 ## How it is secured
 

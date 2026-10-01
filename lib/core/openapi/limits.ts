@@ -37,6 +37,12 @@ export const MAX_NAME_LENGTH = 256
 export const MAX_SERVER_URL_LENGTH = 2048
 export const MAX_PARAMETERS = 200
 export const MAX_TOOL_DESCRIPTION = 2000
+/**
+ * Everything one endpoint's tools may add up to once stored (schemas,
+ * descriptions, call plans). Every gateway request reads the catalogue, and
+ * a schema within every other limit can still come to tens of megabytes.
+ */
+export const MAX_TOTAL_TOOL_CHARS = 4_000_000
 export const MAX_YAML_ALIASES = 100
 
 export const SPEC_FETCH_TIMEOUT_MS = 20_000

@@ -114,6 +114,12 @@ export function normalizeNameAndDescription(input: {
     throw invalid("Keep the name under 80 characters.")
   }
 
+  // The name is shown to every assistant in the gateway's instructions: a
+  // line break there would let it start a line of its own.
+  if (/[\u0000-\u001f\u007f]/.test(name)) {
+    throw invalid("The name cannot have line breaks or control characters.")
+  }
+
   return { name, description: (input.description ?? "").trim().slice(0, 1000) }
 }
 

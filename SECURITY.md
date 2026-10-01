@@ -35,12 +35,15 @@ endpoint to GET operations, and a token scoped to other servers does not see
 it.
 
 **An assistant with a token that may manage endpoints** can register an API
-from OpenAPI text and change what it registered, and nothing that decides
-where your secrets go. It cannot see, choose or attach a secret, cannot move
-an endpoint that sends one, and what it registers refuses private and local
-addresses (checked at the moment of connecting, so a rebinding name does not
-get past it) until you allow them. The right is off unless you tick it when
-you make the token.
+from OpenAPI text and rewrite what it registered, and nothing that decides
+where your secrets go. What it registers starts disabled, and a change that
+other assistants would see disables it again until you enable it. It cannot
+see, choose or attach a secret. Once you attach a secret or allow private
+addresses the endpoint is yours: it can read it and turn read-only on, and
+nothing else, so it cannot add operations your key would then perform or move
+it. What it registers refuses private and local addresses (checked at the
+moment of connecting, so a rebinding name does not get past it) until you
+allow them. The right is off unless you tick it when you make the token.
 
 **Someone with your session cookie but not your password** can use PCP as
 you while the session lasts. They cannot make an API token or a new recovery

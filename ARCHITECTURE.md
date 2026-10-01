@@ -195,30 +195,48 @@ document from an API's documentation and register it in one call. The rules
 are in `lib/core/endpoint-admin.ts`, and they exist because an assistant that
 can register an endpoint decides where PCP sends requests:
 
+- **Whose endpoint it is.** An endpoint is the assistant's while nothing of
+  the owner's is attached (no secret) and it is still limited to public
+  addresses. It becomes the owner's when they attach a secret or allow private
+  addresses. The assistant can rewrite its own; on the owner's it can read and
+  turn read-only on, and nothing else. A new schema could add operations the
+  owner's key then performs, and a new address, name or description could send
+  the key, or another assistant, somewhere else.
+- **Nothing takes effect without the owner.** A registered endpoint starts
+  disabled. A change to one that other assistants can see (its words, schema or
+  address, or read-only turned off) disables it again until the owner enables
+  it. Text an assistant writes reaches every other assistant through
+  `search_tools`, the gateway's instructions and `describe_tool`, so it is the
+  owner's to approve. Names cannot hold line breaks, which would otherwise
+  start a line of their own in those instructions.
 - **No credential, ever.** Nothing the tools accept names a secret, a header
   or a template, and `get_endpoint` shows only whether a header is sent and
-  what it is called. An assistant cannot attach a secret to an address it
-  chose, or read one.
-- **A secret pins the destination.** With a secret attached the base URL is
-  fixed, and a new schema that names another server leaves it where it was.
-  Without a secret, only an endpoint the assistant registered (or the owner
-  limited to public addresses) can be moved.
+  what it is called. The writer these changes go through
+  (`endpoints.ts: changeEndpoint`) writes only the columns it is given and
+  never the credential, the schema's source, or public-only, so an owner
+  changing those at the same moment is not overwritten and the rules above
+  cannot be got around by what is passed in.
 - **Public addresses only.** What an assistant registers has `public_only`
   set, and only the owner can clear it. Such an endpoint refuses loopback,
-  private, link-local, carrier-grade NAT and multicast addresses and the IPv6
-  forms that wrap one (`openapi/address.ts`), for its calls and for any
-  schema download. The check is made on the address the socket connects to
-  (`openapi/transport.ts` resolves the name itself and checks every answer),
-  so a name that resolves to a public address for a check and a private one
-  for the connection cannot get through. The owner turns it off per endpoint,
-  for an API on their own network. It connects directly, not through an
-  outbound proxy (a proxy does its own name resolution, which PCP could not
-  check): a host that must use one has to turn this off for those endpoints,
-  and the proxy's own egress rules are then what protect it.
+  private, link-local, carrier-grade NAT and multicast addresses, cloud
+  host addresses and the IPv6 forms that wrap one (`openapi/address.ts`), for
+  its calls and for any schema download. The check is made on the address the
+  socket connects to (`openapi/transport.ts` resolves the name itself and
+  checks every answer), so a name that resolves to a public address for a
+  check and a private one for the connection cannot get through. The owner
+  turns it off per endpoint, for an API on their own network. It connects
+  directly, not through an outbound proxy (a proxy does its own name
+  resolution, which PCP could not check): a host that must use one has to turn
+  this off for those endpoints, and the proxy's own egress rules are then what
+  protect it. What a name resolves to is neither looked up at registration nor
+  told to the assistant, so the tools cannot be used to map the owner's DNS.
 - **Text only.** The assistant supplies the schema as text; PCP never fetches
   an address the assistant chose. An endpoint the owner reads from a URL
   keeps that URL, and its schema is the owner's to change.
-- **Read-only can be turned on, not off,** while a secret is attached.
+- **Bounded.** Fifty endpoints per vault, 4 MB of stored tools per endpoint,
+  twenty changes per token per ten minutes, no JSON-RPC batches at the
+  gateway (one POST would be many calls), and the catalogue a request loads
+  leaves out tool schemas, which are read when a tool is described or called.
 - A token limited to some servers only sees endpoints in its scope, and what
   it registers is added to that scope.
 
