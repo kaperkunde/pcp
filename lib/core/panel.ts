@@ -19,6 +19,12 @@ import { PCP_VERSION } from "./version"
  *   (ui/open-link) and polls check_server until the callback has landed.
  * - anything else: the result's text, compactly.
  *
+ * Hosts hand over the same result again whenever they rebuild the panel, so
+ * the panel asks check_permission or check_server where things are now
+ * before trusting it. When something changed, the done view offers to tell
+ * the assistant (ui/message), since model context alone waits for the
+ * owner's next message.
+ *
  * To add a view: a builder here that returns panelResult() with a new kind,
  * and a renderer for that kind in SCRIPT below.
  *
@@ -163,6 +169,7 @@ const SCRIPT = String.raw`
   let permission = null;
   let connect = null;
   let polling = null;
+  let pendingMessage = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -226,11 +233,38 @@ const SCRIPT = String.raw`
     polling = null;
   }
 
-  function renderDone(text, isError) {
+  // Model context (tell) waits for the owner's next message. A message sent
+  // for them (ui/message) is what gets the assistant going again, so when
+  // something changed here the done view offers one, in the owner's words.
+  function renderDone(text, isError, message) {
     stopPolling();
     $("outcome").textContent = text || "Done.";
     $("outcome").className = isError ? "outcome error" : "outcome";
+    pendingMessage = message || null;
+    $("d-actions").hidden = !message;
+    $("d-tell").disabled = false;
+    $("d-status").textContent = "";
     show("done");
+  }
+
+  function sendMessage() {
+    if (!pendingMessage) return;
+    $("d-tell").disabled = true;
+    request("ui/message", {
+      role: "user",
+      content: [{ type: "text", text: pendingMessage }],
+    })
+      .then(() => {
+        $("d-actions").hidden = true;
+        $("d-status").textContent = "Sent.";
+        resize();
+      })
+      .catch(() => {
+        $("d-tell").disabled = false;
+        $("d-status").textContent =
+          "Your app did not send it. Tell the assistant yourself.";
+        resize();
+      });
   }
 
   function renderPermission(asked) {
@@ -282,7 +316,7 @@ const SCRIPT = String.raw`
         'The owner chose "' + decision.label + '" for: ' +
           (permission.title || "") + "\n" + textOf(result),
       );
-      onResult(result);
+      onResult(result, answered(permission, decision.label));
     } catch (error) {
       setBusy($("p-buttons"), false);
       $("p-error").textContent =
@@ -336,10 +370,7 @@ const SCRIPT = String.raw`
         });
         const state = result && result.structuredContent &&
           result.structuredContent.server;
-        if (state && state.connected) {
-          renderDone(connect.name + " is connected.", false);
-          tell("The owner connected " + connect.name + ". Try the call again.");
-        }
+        if (state && state.connected) connected(connect);
       } catch (error) {
         // Keep polling; the next round may get through.
       } finally {
@@ -348,7 +379,24 @@ const SCRIPT = String.raw`
     }, POLL_MS);
   }
 
-  function onResult(result) {
+  function answered(asked, label) {
+    return "I answered in PCP" + (label ? ' ("' + label + '")' : "") +
+      ": " + (asked.title || "your request") + " Carry on.";
+  }
+
+  function connected(server, recent = true) {
+    if (recent) {
+      tell("The owner connected " + server.name + ' (server "' +
+        server.slug + '"). Try the call again.');
+    }
+    renderDone(
+      server.name + " is connected.",
+      false,
+      recent ? "I connected " + server.name + " in PCP. Carry on." : null,
+    );
+  }
+
+  function onResult(result, message) {
     const content = result && result.structuredContent;
     if (
       content && content.kind === "permission" && content.permission &&
@@ -358,7 +406,70 @@ const SCRIPT = String.raw`
     } else if (content && content.kind === "connect" && content.connect) {
       renderConnect(content.connect);
     } else {
-      renderDone(textOf(result), result && result.isError);
+      renderDone(textOf(result), result && result.isError, message);
+    }
+  }
+
+  // The host hands over the result the panel was made for, and hands the
+  // same one again whenever it rebuilds the panel (scrolling back, the app
+  // returning from the browser). By then the owner may have answered or
+  // signed in, so show it, then ask PCP where things are now.
+  async function fromHost(result) {
+    onResult(result);
+    const content = result && result.structuredContent;
+    try {
+      if (content && content.kind === "permission" && permission) {
+        const id = permission.id;
+        const now = await request("tools/call", {
+          name: "check_permission",
+          arguments: { id },
+        });
+        if (!permission || permission.id !== id) return;
+        const later = now && now.structuredContent;
+        if (later && later.kind === "permission") {
+          onResult(now);
+        } else {
+          // Long after, this is history rather than news.
+          const asked = permission;
+          const recent = Date.parse(asked.expires_at) > Date.now();
+          permission = null;
+          if (recent) {
+            tell("The owner answered: " + (asked.title || "") + "\n" +
+              textOf(now));
+          }
+          if (
+            asked.kind === "register" && later && later.kind === "done" &&
+            later.server && later.server.connected
+          ) {
+            connected(later.server, recent);
+          } else {
+            onResult(now, recent ? answered(asked) : null);
+            if (later && later.kind === "connect" && later.connect) {
+              checkConnected();
+            }
+          }
+        }
+      } else if (content && content.kind === "connect" && connect) {
+        checkConnected();
+      }
+    } catch (error) {
+      // Keep what the host handed over; the buttons still work.
+    }
+  }
+
+  async function checkConnected() {
+    const server = connect;
+    if (!server) return;
+    try {
+      const result = await request("tools/call", {
+        name: "check_server",
+        arguments: { server: server.slug },
+      });
+      const state = result && result.structuredContent &&
+        result.structuredContent.server;
+      if (connect === server && state && state.connected) connected(server);
+    } catch (error) {
+      // Connect still works.
     }
   }
 
@@ -391,7 +502,7 @@ const SCRIPT = String.raw`
 
     switch (message.method) {
       case "ui/notifications/tool-result":
-        onResult(message.params);
+        fromHost(message.params);
         break;
       case "ui/notifications/host-context-changed":
         applyContext(message.params);
@@ -407,6 +518,7 @@ const SCRIPT = String.raw`
   });
 
   $("c-go").addEventListener("click", startConnect);
+  $("d-tell").addEventListener("click", sendMessage);
   $("p-open").addEventListener("click", (event) => {
     event.preventDefault();
     if (permission && permission.url) {
@@ -466,6 +578,9 @@ button:disabled { opacity: 0.6; cursor: default; }
 .fallback { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
 .fallback a { color: inherit; }
 .outcome { white-space: pre-wrap; margin: 0; overflow-wrap: anywhere; }
+.actions { margin-top: 12px; }
+#d-status { margin: 8px 0 0; }
+#d-status:empty { display: none; }
 `
 
 const BODY = `
@@ -484,7 +599,11 @@ const BODY = `
   <div class="buttons"><button type="button" class="primary" id="c-go">Connect</button></div>
   <p class="muted" id="c-status" role="status"></p>
 </div>
-<div id="done" hidden><p class="outcome" id="outcome"></p></div>
+<div id="done" hidden>
+  <p class="outcome" id="outcome"></p>
+  <div class="buttons actions" id="d-actions" hidden><button type="button" class="primary" id="d-tell">Tell the assistant</button></div>
+  <p class="muted" id="d-status" role="status"></p>
+</div>
 `
 
 let cached: string | null = null

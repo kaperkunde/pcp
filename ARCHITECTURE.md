@@ -468,6 +468,18 @@ landed. A server that needs a client from the owner first (status
 `client_required`) gets the same panel, and text telling the assistant so:
 the start page then lands on the server's page, which says what to create.
 
+Hosts hand the panel the tool result it was made for, and hand the same one
+again whenever they rebuild it (scrolling back, the app returning from the
+browser), so a result is a snapshot: the panel shows it, then asks
+`check_permission` or `check_server` where things are now. `check_permission`
+answers an allowed request whose OAuth server still needs signing in to with
+the connect view, and once it is connected with the server's state. The
+panel tells the model what changed (`ui/update-model-context`, read on the
+owner's next message), and its done view offers "Tell the assistant", which
+posts a message in the owner's words (`ui/message`) so the assistant carries
+on. PCP itself cannot wake the assistant: nothing in MCP lets a server start
+a turn.
+
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.
 Once the owner agrees, PCP adds the server, adds it to the asking token when

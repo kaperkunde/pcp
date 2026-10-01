@@ -40,6 +40,7 @@ import {
   type ConnectPanel,
   type PanelContent,
   type PermissionPanel,
+  type ServerState,
 } from "./panel"
 import {
   choosePermissionTier,
@@ -1080,6 +1081,43 @@ export async function checkPermission(
   const outcome = outcomeOf(view)
   const said =
     outcome.content[0]?.type === "text" ? outcome.content[0].text : ""
+
+  // Allowed, but the server it added still needs signing in to: the panel
+  // shows Connect (a panel the host rebuilt asks here for where things are).
+  if (view.connect) {
+    const server = await getServer(scope.ctx, view.connect.serverId)
+    const connect = connectResult(server, scope.publicUrl, {
+      lead: "Not connected yet",
+    })
+    const next =
+      connect.content[0]?.type === "text" ? connect.content[0].text : ""
+
+    return { ...connect, content: [{ type: "text", text: `${said}\n${next}` }] }
+  }
+
+  // An OAuth server it added has been signed in to since: the outcome still
+  // says it needs connecting, so say where it is now.
+  const added =
+    view.kind === "register" && view.serverId
+      ? await db().mcpServer.findFirst({
+          where: { id: view.serverId, vaultId: scope.ctx.vaultId },
+          include: { _count: { select: { tools: true } } },
+        })
+      : null
+
+  if (added?.authType === "oauth") {
+    const server: ServerState = {
+      id: added.id,
+      name: added.name,
+      slug: added.slug,
+      connected: !needsConnecting(added),
+      status: added.status,
+      toolCount: added._count.tools,
+    }
+    const now = `${said}\nIt is connected now, with ${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}.`
+
+    return panelResult(now, { kind: "done", text: now, server })
+  }
 
   return panelResult(
     said,

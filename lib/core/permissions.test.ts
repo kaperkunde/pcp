@@ -478,6 +478,26 @@ describe("adding a server", () => {
     expect(after?.connect?.serverId).toBe(linear.id)
     // The server was added, which is what the owner agreed to.
     expect(after?.status).toBe("executed")
+
+    // A panel the host rebuilt asks where things are: Connect until the
+    // owner has signed in, then done.
+    const waiting = await checkPermission(scope, id)
+    expect(waiting.structuredContent).toMatchObject({
+      kind: "connect",
+      connect: { serverId: linear.id, slug: linear.slug },
+    })
+    expect(textOf(waiting)).toContain("Linear needs connecting")
+
+    await db().mcpServer.update({
+      where: { id: linear.id },
+      data: { oauthConnectedAt: new Date() },
+    })
+    const done = await checkPermission(scope, id)
+    expect(done.structuredContent).toMatchObject({
+      kind: "done",
+      server: { id: linear.id, slug: linear.slug, connected: true },
+    })
+    expect(textOf(done)).toContain("It is connected now")
   })
 
   it("names the secret a header server would get, and reads its tools once added", async () => {

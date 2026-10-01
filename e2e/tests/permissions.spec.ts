@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test"
+import { expect, test, type Page } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import {
@@ -483,4 +483,131 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   await expect(page.getByTestId("permission-outcome")).toContainText(
     "Bearer access-",
   )
+})
+
+/**
+ * Shows PCP's panel the way an MCP Apps host does: in a sandboxed frame,
+ * handed `result`, with its tool calls sent to PCP. What the panel asks the
+ * host to post (ui/message) and to tell the model are kept on window.
+ */
+async function hostPanel(
+  page: Page,
+  baseURL: string,
+  html: string,
+  result: unknown,
+) {
+  await page.exposeFunction(
+    "pcpCall",
+    async (name: string, args: Record<string, unknown>) =>
+      (
+        await mcpToolCall2026(baseURL, token, name, args, {
+          capabilities: PANELS,
+        })
+      ).body.result,
+  )
+  await page.setContent('<iframe sandbox="allow-scripts"></iframe>')
+  await page.evaluate(
+    ({ html, result }) => {
+      const frame = document.querySelector("iframe")!
+      const host = window as unknown as {
+        pcpCall: (name: string, args: unknown) => Promise<unknown>
+        sent: unknown[]
+        told: unknown[]
+      }
+      host.sent = []
+      host.told = []
+      const post = (message: object) =>
+        frame.contentWindow!.postMessage({ jsonrpc: "2.0", ...message }, "*")
+
+      window.addEventListener("message", async (event) => {
+        if (event.source !== frame.contentWindow) return
+        const { id, method, params } = event.data
+        if (method === "ui/notifications/initialized") {
+          post({ method: "ui/notifications/tool-result", params: result })
+        } else if (method === "tools/call") {
+          post({
+            id,
+            result: await host.pcpCall(params.name, params.arguments),
+          })
+        } else if (id !== undefined) {
+          if (method === "ui/message") host.sent.push(params)
+          if (method === "ui/update-model-context") host.told.push(params)
+          post({ id, result: { hostContext: {} } })
+        }
+      })
+      frame.srcdoc = html
+    },
+    { html, result },
+  )
+
+  return page.frameLocator("iframe")
+}
+
+test("a panel the host rebuilds shows where things are now, and can tell the assistant", async ({
+  page,
+  baseURL,
+}) => {
+  const name = `Rebuilt OAuth ${RUN}`
+  const html = (
+    await mcpRequest(baseURL!, token, "resources/read", {
+      uri: "ui://pcp/panel",
+    })
+  ).body.result!.contents![0].text!
+
+  // What the host keeps, and hands again to every panel it builds.
+  const asked = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "register_server",
+    { name, url: upstream.oauthMcpUrl, auth_type: "oauth" },
+    { capabilities: PANELS },
+  )
+  expect(asked.body.result?.structuredContent?.kind).toBe("permission")
+  const id = asked.body.result!.structuredContent!.permission!.id
+
+  const added = await mcpToolCall2026(
+    baseURL!,
+    token,
+    "answer_permission",
+    { id, decision: "allow_once" },
+    { capabilities: PANELS },
+  )
+  const connect = added.body.result!.structuredContent!.connect!
+
+  // Answered since: Connect, not the question again.
+  const first = await hostPanel(
+    await page.context().newPage(),
+    baseURL!,
+    html,
+    asked.body.result,
+  )
+  await expect(first.getByText(`${name} needs connecting`)).toBeVisible()
+  await expect(first.getByRole("button", { name: "Connect" })).toBeVisible()
+
+  await page.goto(connect.startUrl)
+  await expect(page).toHaveURL(
+    new RegExp(`/servers/${connect.serverId}\\?connected=1$`),
+  )
+
+  // Signed in since: connected, with a message for the assistant.
+  const hostPage = await page.context().newPage()
+  const second = await hostPanel(hostPage, baseURL!, html, asked.body.result)
+  await expect(second.getByText(`${name} is connected.`)).toBeVisible()
+  await expect(
+    second.getByRole("button", { name: "Add server" }),
+  ).not.toBeVisible()
+  expect(JSON.stringify(await hostPage.evaluate("window.told"))).toContain(
+    `The owner connected ${name}`,
+  )
+
+  await second.getByRole("button", { name: "Tell the assistant" }).click()
+  await expect(second.getByText("Sent.")).toBeVisible()
+  expect(await hostPage.evaluate("window.sent")).toEqual([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: `I connected ${name} in PCP. Carry on.` },
+      ],
+    },
+  ])
 })
