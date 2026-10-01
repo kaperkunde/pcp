@@ -29,7 +29,7 @@ export function PermissionTiersField({
       </p>
       {PERMISSION_TIERS.map((tier) => {
         const id = `${idPrefix}-${tier}`
-        const { label, hint } = PERMISSION_TIER_LABELS[tier]
+        const { label, hint, issueUrl } = PERMISSION_TIER_LABELS[tier]
 
         return (
           <div key={tier} className="flex flex-col gap-0.5">
@@ -46,7 +46,22 @@ export function PermissionTiersField({
               )}
               {label}
             </Label>
-            <p className="ml-6 text-xs text-muted-foreground">{hint}</p>
+            <p className="ml-6 text-xs text-muted-foreground">
+              {hint}
+              {issueUrl ? (
+                <>
+                  {" "}
+                  <a
+                    className="underline"
+                    href={issueUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    The issue
+                  </a>
+                </>
+              ) : null}
+            </p>
           </div>
         )
       })}

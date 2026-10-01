@@ -140,7 +140,11 @@ A tool you have not decided about answers "Not done yet" and asks you. Where
 the assistant's app can show it, the question appears in the conversation:
 as PCP's panel (an MCP App) or as the app's own prompt. Otherwise the
 assistant hands you a link to PCP. Each token's page says which of these PCP
-may use; turn one off if an app gets stuck on it. **Allow once** runs that one call,
+may use; turn one off if an app gets stuck on it. Claude's apps currently
+leave both kinds of prompt (their own, and the one that opens PCP) on
+"Loading…" until the call times out
+([the issue](https://github.com/anthropics/claude-ai-mcp/issues/1085)); the
+request stays open, so you can still answer it from its link. **Allow once** runs that one call,
 **Always allow** and **Block** also decide the calls after it, and **Not
 now** runs nothing. A server an assistant proposes is only added once you
 agree; an OAuth one is then connected from a link that opens in your browser.

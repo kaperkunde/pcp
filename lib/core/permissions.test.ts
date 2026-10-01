@@ -286,6 +286,34 @@ describe("asking the owner", () => {
       "declined",
     )
   })
+
+  it("leaves the request open when the prompt is cancelled", async () => {
+    // Claude's apps send a cancel when their own timeout gives up on a
+    // prompt they never finished showing; the owner has not answered.
+    const { scope, server } = await setup()
+    const { calls, executor } = stub()
+    const url = { clientCapabilities: { elicitation: { url: {} } } }
+    const asked = call(server, "add_numbers", { a: 1, b: 2 })
+
+    const prompt = await withPermission(scope, asked, url, { executor })
+    const cancelled = await withPermission(
+      scope,
+      asked,
+      {
+        ...url,
+        requestState: (prompt as { requestState?: string }).requestState,
+        inputResponses: { decision: { action: "cancel" } },
+      },
+      { executor },
+    )
+
+    const row = await db().permissionRequest.findFirstOrThrow()
+    expect(row.status).toBe("pending")
+    expect(textOf(cancelled)).toContain("Still waiting for the owner")
+    expect(textOf(cancelled)).toContain(`/permissions/${row.id}`)
+    expect(textOf(cancelled)).toContain(`id "${row.id}"`)
+    expect(calls).toHaveLength(0)
+  })
 })
 
 describe("the owner's answer", () => {

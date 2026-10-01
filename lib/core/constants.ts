@@ -76,21 +76,32 @@ export type PermissionTier = (typeof PERMISSION_TIERS)[number]
 
 export const OPTIONAL_PERMISSION_TIERS = ["app", "form", "url"] as const
 
+/**
+ * Claude's apps declare that they show both kinds of prompt (form and URL
+ * elicitation) and panels, then leave a prompt on "Loading…" until the call
+ * times out, and do not mount panels on mobile.
+ */
+export const CLAUDE_PROMPT_ISSUE_URL =
+  "https://github.com/anthropics/claude-ai-mcp/issues/1085"
+
 export const PERMISSION_TIER_LABELS: Record<
   PermissionTier,
-  { label: string; hint: string }
+  { label: string; hint: string; issueUrl?: string }
 > = {
   app: {
     label: "PCP's panel",
-    hint: "Buttons in the conversation, in apps that show panels.",
+    hint: "Buttons in the conversation, in apps that show panels. Claude's mobile app may not show it; the link next to it still works.",
+    issueUrl: CLAUDE_PROMPT_ISSUE_URL,
   },
   form: {
     label: "The app's own prompt",
-    hint: "Some apps say they show it and do not, which stalls the call until it times out.",
+    hint: "The app asks you itself. May cause stalls in Claude: its apps can get stuck on this until the call times out.",
+    issueUrl: CLAUDE_PROMPT_ISSUE_URL,
   },
   url: {
     label: "The app opens PCP",
-    hint: "The app opens the request in PCP for you to answer.",
+    hint: "The app asks you itself, then opens the request in PCP for you to answer. May cause stalls in Claude: its apps can get stuck on this until the call times out.",
+    issueUrl: CLAUDE_PROMPT_ISSUE_URL,
   },
   link: {
     label: "A link",

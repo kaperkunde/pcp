@@ -542,7 +542,7 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     default:
       return text(
-        `Still waiting for the owner. They can answer at ${view.url} until ${view.expiresAt.toISOString()}.`,
+        `Still waiting for the owner. They can answer at ${view.url} until ${view.expiresAt.toISOString()}. Afterwards, call check_permission with id "${view.id}" for the result.`,
       )
   }
 }
@@ -739,7 +739,10 @@ async function resumeRound(
     return outcomeFromRow(scope.ctx, row.id, scope.publicUrl)
   }
 
-  if (answer.kind === "elicit") {
+  // Only a decline is the owner saying no. A cancel is the prompt closing
+  // without an answer, which is also what a client sends when its own
+  // timeout gives up on a prompt it never showed: the request stays open.
+  if (answer.kind === "elicit" && answer.action === "decline") {
     return decidePermission(scope.ctx, row.id, "decline", options, executor)
   }
 
