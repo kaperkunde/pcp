@@ -108,9 +108,10 @@ export default async function ServerPage({
             specSource: server.specSource === "upload" ? "upload" : "url",
             specUrl: server.specUrl ?? "",
             specReadAt: spec?.fetchedAt ?? null,
-            // The stored base URL is what requests use; showing it lets
-            // the owner see, and change, where their secret is sent.
-            baseUrl: server.url,
+            // Not prefilled: a value in the field is something the owner
+            // typed, which is what lets them confirm where a secret goes.
+            baseUrl: "",
+            currentBaseUrl: server.url,
             readOnly: server.readOnly,
             publicOnly: server.publicOnly,
             authType: server.authType === "header" ? "header" : "none",

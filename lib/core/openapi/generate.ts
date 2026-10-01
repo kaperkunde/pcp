@@ -2,10 +2,15 @@ import { invalid } from "../errors"
 import { isBlockedHeader } from "./headers"
 import { entries, isObject, own, ownString, type JsonObject } from "./json"
 import {
+  MAX_NAME_LENGTH,
   MAX_OPERATIONS,
+  MAX_PARAMETERS,
+  MAX_PATH_LENGTH,
+  MAX_SERVER_URL_LENGTH,
   MAX_TOOL_DESCRIPTION,
   MAX_TOOL_SCHEMA_CHARS,
   MAX_TOTAL_REF_NODES,
+  REF_MAX_CHARS,
   REF_MAX_NODES,
 } from "./limits"
 import type { OpenApiDocument } from "./parse"
@@ -97,8 +102,21 @@ function unsafePathReason(path: string): string | null {
   return null
 }
 
+/**
+ * Text read from a schema is cut to what PCP would use before anything else
+ * touches it: a schema is untrusted, and a 4 MB summary repeated across a
+ * thousand operations is four gigabytes of copying.
+ */
+function shorten(value: string | undefined, max: number): string {
+  return value === undefined ? "" : value.slice(0, max).trim()
+}
+
+/** A media type that is safe to send as a header and show to an assistant. */
+const SAFE_MEDIA_TYPE = /^[\x21-\x7e][\x20-\x7e]{0,199}$/
+
 function sanitizeName(raw: string): string {
   return raw
+    .slice(0, MAX_NAME_LENGTH)
     .replace(/[^A-Za-z0-9_-]+/g, "_")
     .replace(/_+/g, "_")
     .replace(/^[_-]+|[_-]+$/g, "")
@@ -155,12 +173,23 @@ function serverUrlOf(doc: OpenApiDocument): {
     return { url: null, problem: null }
   }
 
+  if (template.length > MAX_SERVER_URL_LENGTH) {
+    return {
+      url: null,
+      problem:
+        "The schema's server address is too long. Enter the base URL yourself.",
+    }
+  }
+
   const variables = own(first, "variables")
   const missing: string[] = []
   const url = template.replace(/\{([^}]+)\}/g, (_, name: string) => {
     const value = own(own(variables, name), "default")
 
-    if (typeof value === "string" || typeof value === "number") {
+    if (
+      (typeof value === "string" && value.length <= MAX_NAME_LENGTH) ||
+      typeof value === "number"
+    ) {
       return String(value)
     }
 
@@ -233,6 +262,16 @@ export function generateTools(
   let pool = MAX_TOTAL_REF_NODES
 
   for (const [path, rawItem] of entries(doc.paths)) {
+    // Before any pattern is run on it: some of the ones below are quadratic
+    // in the length of a path made of braces.
+    if (path.length > MAX_PATH_LENGTH) {
+      skipped.push({
+        operation: `${path.slice(0, 60)}…`,
+        reason: "its path is longer than PCP reads",
+      })
+      continue
+    }
+
     let item: unknown
 
     try {
@@ -278,7 +317,10 @@ export function generateTools(
         continue
       }
 
-      const budget: RefBudget = { nodes: Math.min(REF_MAX_NODES, pool) }
+      const budget: RefBudget = {
+        nodes: Math.min(REF_MAX_NODES, pool),
+        chars: REF_MAX_CHARS,
+      }
       const granted = budget.nodes
 
       try {
@@ -313,8 +355,8 @@ export function generateTools(
   return {
     serverUrl: server.url,
     serverUrlProblem: server.problem,
-    title: ownString(info, "title")?.trim() ?? "",
-    description: ownString(info, "description")?.trim() ?? "",
+    title: shorten(ownString(info, "title"), 200),
+    description: shorten(ownString(info, "description"), 1000),
     security: describeSecurity(doc),
     tools,
     skipped,
@@ -333,6 +375,10 @@ function parametersOf(doc: unknown, list: unknown): RawParameter[] {
     return []
   }
 
+  if (list.length > MAX_PARAMETERS) {
+    throw new Skip(`it has more than ${MAX_PARAMETERS} parameters`)
+  }
+
   return list.flatMap((entry) => {
     const node = derefShallow(doc, entry)
     const name = ownString(node, "name")
@@ -340,6 +386,10 @@ function parametersOf(doc: unknown, list: unknown): RawParameter[] {
 
     if (!isObject(node) || !name || !location) {
       return []
+    }
+
+    if (name.length > MAX_NAME_LENGTH) {
+      throw new Skip("a parameter's name is too long")
     }
 
     return [
@@ -445,7 +495,7 @@ function buildTool(
     throw new Skip("its argument schema is larger than PCP passes on")
   }
 
-  const summary = ownString(operation, "summary")?.trim() ?? ""
+  const summary = shorten(ownString(operation, "summary"), 500)
   const title = summary && summary.length <= 100 ? summary : null
   const annotations: ToolAnnotations = {
     ...(title ? { title } : {}),
@@ -574,8 +624,15 @@ function planParameter(
     return drop(`its ${parameter.name} parameter is not plain text or JSON`)
   }
 
-  const description = ownString(parameter.node, "description")?.trim()
-  const example = own(parameter.node, "example")
+  const description = shorten(ownString(parameter.node, "description"), 1000)
+  // Only a small plain example: one can be as large as the whole file.
+  const rawExample = own(parameter.node, "example")
+  const example =
+    (typeof rawExample === "string" && rawExample.length <= 500) ||
+    typeof rawExample === "number" ||
+    typeof rawExample === "boolean"
+      ? rawExample
+      : undefined
   const property: JsonObject = {
     ...schema.schema,
     ...(description ? { description } : {}),
@@ -626,7 +683,9 @@ function planBody(
     return drop("it sends a body with GET")
   }
 
-  const content = entries(own(body, "content"))
+  const content = entries(own(body, "content")).filter(([type]) =>
+    SAFE_MEDIA_TYPE.test(type),
+  )
   const pick =
     content.find(([type]) => isJsonMediaType(type) && type !== "*/*") ??
     content.find(([type]) =>
@@ -677,7 +736,7 @@ function planBody(
     throw new Skip("its parameters already use the names body and requestBody")
   }
 
-  const description = ownString(body, "description")?.trim()
+  const description = shorten(ownString(body, "description"), 1000)
 
   return {
     plan: {
@@ -708,7 +767,9 @@ function successResponses(doc: OpenApiDocument, operation: JsonObject) {
 
 function acceptFor(doc: OpenApiDocument, operation: JsonObject): string {
   const types = successResponses(doc, operation).flatMap((response) =>
-    entries(own(response, "content")).map(([type]) => type),
+    entries(own(response, "content"))
+      .map(([type]) => type)
+      .filter((type) => SAFE_MEDIA_TYPE.test(type)),
   )
   const json = types.find((type) => isJsonMediaType(type) && type !== "*/*")
 
@@ -728,18 +789,24 @@ function describeOperation(
   path: string,
   operation: JsonObject,
 ): string {
-  const summary = ownString(operation, "summary")?.trim() ?? ""
-  const description = ownString(operation, "description")?.trim() ?? ""
-  const tags = own(operation, "tags")
+  const summary = shorten(ownString(operation, "summary"), 500)
+  const description = shorten(
+    ownString(operation, "description"),
+    MAX_TOOL_DESCRIPTION,
+  )
+  const tags = Array.isArray(own(operation, "tags"))
+    ? (own(operation, "tags") as unknown[])
+        .slice(0, 10)
+        .filter((tag): tag is string => typeof tag === "string")
+        .map((tag) => shorten(tag, 50))
+    : []
   const returns = successResponses(doc, operation)
-    .map((response) => ownString(response, "description")?.trim() ?? "")
+    .map((response) => shorten(ownString(response, "description"), 300))
     .find((text) => text.length > 0 && text.length <= 200)
 
   const tail = [
     `${method.toUpperCase()} ${path}`,
-    Array.isArray(tags) && tags.length > 0
-      ? `Tags: ${tags.filter((tag) => typeof tag === "string").join(", ")}`
-      : "",
+    tags.length > 0 ? `Tags: ${tags.join(", ")}` : "",
     returns ? `Returns: ${returns}` : "",
   ]
     .filter(Boolean)
@@ -810,14 +877,21 @@ export function resolveBaseUrl(input: {
     )
   }
 
-  if (
-    input.hasSecret &&
-    input.specUrl &&
-    absolute.origin !== new URL(input.specUrl).origin
-  ) {
-    throw invalid(
-      `The schema points at ${absolute.host}, not where it was downloaded from. Enter the base URL yourself to confirm where your secret goes.`,
-    )
+  if (input.hasSecret) {
+    // A file has no origin to compare with: the schema's author chose the
+    // address, and the owner's secret would follow it. Only an address the
+    // owner typed is one they chose.
+    if (!input.specUrl) {
+      throw invalid(
+        `The schema file names ${absolute.host} as its server. To send your secret there, enter the base URL yourself to confirm it.`,
+      )
+    }
+
+    if (absolute.origin !== new URL(input.specUrl).origin) {
+      throw invalid(
+        `The schema points at ${absolute.host}, not where it was downloaded from. Enter the base URL yourself to confirm where your secret goes.`,
+      )
+    }
   }
 
   return validateBaseUrl(absolute.toString())

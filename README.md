@@ -97,7 +97,9 @@ required.
    (file uploads, cookies). Choose a secret to send in a header, and
    **Read-only** to offer only GET operations. Requests go to the base URL
    saved on the endpoint, which PCP never changes on its own when the schema
-   does.
+   does. A secret is only sent to an address you typed, or to the origin the
+   schema was downloaded from, so with an uploaded file you enter the base URL
+   yourself.
 4. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password to make one. A token can reach every server and endpoint or only
    the ones you pick, and can expire. Revoking it destroys its copy of the

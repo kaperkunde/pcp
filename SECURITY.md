@@ -81,6 +81,10 @@ Not defended against:
   arguments of an operation it registered. A prompt injected into such an
   assistant can do the same. Give the right only to a token that needs it,
   and review what it registers (the endpoint list shows each one).
+- **Schema text on disk.** An endpoint's OpenAPI document, and the call plans
+  built from it, are stored unencrypted, like server addresses and names. A
+  copy of the disk shows them. Do not put a key or a hostname you would not
+  want seen into a schema you upload.
 - **Endpoints behind an outbound proxy.** Public-only endpoints connect
   directly so PCP can check the address it connects to. A host that must use
   a proxy has to allow private addresses on those endpoints, which turns that

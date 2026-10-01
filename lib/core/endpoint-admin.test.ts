@@ -56,6 +56,8 @@ async function ownerEndpoint(overrides: Record<string, unknown> = {}) {
     name: "Owner pets",
     specSource: "upload",
     specText: spec(api.origin),
+    // A secret goes to an address the owner typed.
+    baseUrl: `${api.origin}/api`,
     readOnly: false,
     authType: "header",
     authSecretId: secretId,

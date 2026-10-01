@@ -17,7 +17,25 @@ export const REF_MAX_NODES = 20_000
  * operation has its own budget, but 2000 operations at the full budget would
  * hold the server for seconds; past this, the rest are skipped.
  */
-export const MAX_TOTAL_REF_NODES = 2_000_000
+export const MAX_TOTAL_REF_NODES = 1_000_000
+/**
+ * String characters copied while inlining references, per operation: keys
+ * and text in schemas, examples, descriptions. Nodes are counted separately;
+ * one 4 MB example is one node.
+ */
+export const REF_MAX_CHARS = 64_000
+/**
+ * Nodes in the parsed YAML once every alias is counted as the copy it will
+ * be. A flat array aliased 100 times passes the YAML library's own alias
+ * check (it counts aliases inside a value, not its size) and is 100 times
+ * the file.
+ */
+export const MAX_SPEC_NODES = 2_000_000
+/** Lengths past which a name or address in a schema is not read at all. */
+export const MAX_PATH_LENGTH = 2048
+export const MAX_NAME_LENGTH = 256
+export const MAX_SERVER_URL_LENGTH = 2048
+export const MAX_PARAMETERS = 200
 export const MAX_TOOL_DESCRIPTION = 2000
 export const MAX_YAML_ALIASES = 100
 

@@ -21,6 +21,15 @@ const BLOCKED = new Set([
   "transfer-encoding",
   "upgrade",
   "user-agent",
+  // They change what the server thinks the request is, or who sent it.
+  "forwarded",
+  "origin",
+  "referer",
+  "via",
+  "x-http-method",
+  "x-http-method-override",
+  "x-method-override",
+  "x-real-ip",
 ])
 
 /** RFC 9110 token characters: what a header name may contain. */
@@ -34,6 +43,7 @@ export function isBlockedHeader(name: string, extra: string[] = []): boolean {
     BLOCKED.has(lower) ||
     lower.startsWith("proxy-") ||
     lower.startsWith("sec-") ||
+    lower.startsWith("x-forwarded-") ||
     extra.some((header) => header.toLowerCase() === lower)
   )
 }

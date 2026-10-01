@@ -19,7 +19,7 @@ import {
 import { parseSpecText } from "./openapi/parse"
 import { readCallPlan } from "./openapi/plan"
 import { buildRequest } from "./openapi/request"
-import { validateSpecUrl } from "./openapi/urls"
+import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
 import {
   getServer,
   normalizeHeaderAuth,
@@ -289,7 +289,56 @@ export async function createEndpoint(
     },
   })
 
-  return { id, sync: await applySpec(server, text, generated, fetchedFrom) }
+  try {
+    return { id, sync: await applySpec(server, text, generated, fetchedFrom) }
+  } catch (error) {
+    // The row exists only for the tools that did not get stored: do not leave
+    // an endpoint with none, and a status that says nothing.
+    await db()
+      .mcpServer.delete({ where: { id } })
+      .catch(() => {})
+    throw error
+  }
+}
+
+function originOf(address: string | null): string | null {
+  try {
+    return address ? new URL(address).origin : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Where an edited endpoint's requests go. An address the owner typed is
+ * used. Otherwise it stays where it is: an edit never re-reads the schema's
+ * server. And a secret is only ever attached to an address the owner has
+ * confirmed, either by typing it now, by having sent a secret there before,
+ * or because it is on the origin of the schema they gave: the address
+ * otherwise came from someone else's document, and saving the form would
+ * send the secret wherever that document says.
+ */
+function baseUrlForUpdate(
+  existing: McpServer,
+  data: {
+    ownerBaseUrl: string | null
+    authType: string
+    specUrl: string | null
+  },
+): string {
+  if (data.ownerBaseUrl) {
+    return validateBaseUrl(data.ownerBaseUrl)
+  }
+
+  const attaching = data.authType === "header" && existing.authType !== "header"
+
+  if (attaching && originOf(existing.url) !== originOf(data.specUrl)) {
+    throw invalid(
+      `This endpoint's address, ${existing.url}, came from the schema, not from you. To send your secret there, enter it in Base URL to confirm.`,
+    )
+  }
+
+  return existing.url
 }
 
 export async function updateEndpoint(
@@ -335,14 +384,7 @@ export async function updateEndpoint(
   }
 
   const generated = generate(text, data)
-  const baseUrl = resolveBaseUrl({
-    ownerBaseUrl: data.ownerBaseUrl,
-    serverUrl: generated.serverUrl,
-    serverUrlProblem: generated.serverUrlProblem,
-    specUrl: data.specUrl,
-    fetchedFrom: fetchedFrom ?? data.specUrl,
-    hasSecret: data.authType === "header",
-  })
+  const baseUrl = baseUrlForUpdate(existing, data)
 
   const server = await db().mcpServer.update({
     where: { id },

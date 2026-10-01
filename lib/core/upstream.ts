@@ -375,6 +375,16 @@ async function credential(
     secret,
   )
 
+  // fetch refuses these, and its error message quotes the whole value: the
+  // key would end up in the status shown on the Servers page, in the log and
+  // in what the assistant is told. Say it without the value.
+  if (/[\u0000\r\n]/.test(value)) {
+    throw new PcpError(
+      "state",
+      `${server.name}'s secret has a line break or another character a header cannot carry, so PCP cannot send it. Check the secret's value.`,
+    )
+  }
+
   return {
     headers: { [server.authHeaderName]: value },
     redact: [secret, value],

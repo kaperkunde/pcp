@@ -73,10 +73,55 @@ x-blob: !!binary R0lGODlhDAAMAIQAAP
     expect(typeof parsed["x-blob"]).toBe("string")
   })
 
-  it("refuses duplicate keys", () => {
+  it("takes the last of a duplicate key, as JSON does", () => {
+    // Checking for duplicates is quadratic in the number of keys, so it is
+    // off; the later value wins, the same as JSON.parse.
+    expect(
+      parseSpecText("openapi: 3.0.0\nopenapi: 3.1.0\npaths: {}").openapi,
+    ).toBe("3.1.0")
+  })
+
+  it("reads a schema with tens of thousands of keys in reasonable time", () => {
+    const keys = Array.from({ length: 40_000 }, (_, i) => `  /p${i}: {}`).join(
+      "\n",
+    )
+    const started = Date.now()
+    const doc = parseSpecText(`openapi: 3.0.0\npaths:\n${keys}\n`)
+
+    expect(Object.keys(doc.paths)).toHaveLength(40_000)
+    // 18 seconds with the duplicate check on.
+    expect(Date.now() - started).toBeLessThan(3000)
+  })
+
+  it("refuses aliases that expand to far more than the file", () => {
+    // 80 aliases of one 50,000-element array: inside the YAML library's own
+    // alias limit, and four million nodes once expanded.
+    const items = Array(50_000).fill("1").join(", ")
+    const copies = Array.from({ length: 80 }, () => "  - *a").join("\n")
+    const text = `openapi: 3.0.0\npaths: {}\nx-big: &a [${items}]\nx-copies:\n${copies}\n`
+    const started = Date.now()
+
+    expect(() => parseSpecText(text)).toThrow(/too large once its anchors/)
+    expect(Date.now() - started).toBeLessThan(3000)
+  })
+
+  it("leaves the alias limit to the YAML library past a hundred", () => {
+    const copies = Array.from({ length: 150 }, () => "  - *a").join("\n")
     expect(() =>
-      parseSpecText("openapi: 3.0.0\nopenapi: 3.1.0\npaths: {}"),
+      parseSpecText(
+        `openapi: 3.0.0\npaths: {}\nx-one: &a [1]\nx-copies:\n${copies}\n`,
+      ),
     ).toThrow(/could not be read/)
+  })
+
+  it("still reads a schema that uses a few aliases sensibly", () => {
+    const doc = parseSpecText(`openapi: 3.0.0
+paths: {}
+x-shared: &s { a: 1, b: [1, 2, 3] }
+x-one: *s
+x-two: *s
+`)
+    expect(doc["x-one"]).toEqual({ a: 1, b: [1, 2, 3] })
   })
 
   it("keeps a __proto__ key as data", () => {

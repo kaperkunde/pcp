@@ -33,7 +33,10 @@ export type EndpointFormValues = {
   specUrl: string
   /** When editing: when PCP last read the schema. */
   specReadAt?: Date | null
+  /** What the owner typed. Empty when editing: the saved address is below. */
   baseUrl: string
+  /** When editing: where requests go now. */
+  currentBaseUrl?: string
   readOnly: boolean
   /** Refuse private, local and link-local addresses. */
   publicOnly: boolean
@@ -222,7 +225,19 @@ export function EndpointForm({
           <Field
             label="Base URL (optional)"
             htmlFor={`${prefix}-base-url`}
-            hint="Where the API lives. Leave it empty to use the address in the schema. Once saved, PCP keeps this address even if the schema changes."
+            hint={
+              editing ? (
+                <>
+                  Requests go to <code>{initial.currentBaseUrl}</code>. Leave
+                  this empty to keep that. PCP only sends a secret to an address
+                  you typed here, or to the origin the schema was downloaded
+                  from, so attaching one to an address that came from the schema
+                  means typing it to confirm.
+                </>
+              ) : (
+                "Where the API lives. Leave it empty to use the address in the schema, unless you attach a secret: then enter it, so PCP knows where you mean it to go. Once saved, PCP keeps this address even if the schema changes."
+              )
+            }
           >
             <Input
               id={`${prefix}-base-url`}

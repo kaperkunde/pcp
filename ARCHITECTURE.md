@@ -170,9 +170,13 @@ must not hand it to the assistant.
 owner's own field when filled, otherwise the schema's first server, resolved
 against the address the schema was downloaded from. A refresh never changes
 it; it says in the status message when the schema now names another server.
-When a secret is attached, a schema downloaded from one origin that names
-another is refused until the owner types the address, so a schema cannot aim
-the secret somewhere the owner did not choose.
+A secret only ever goes to an address the owner chose: one they typed, or one
+on the origin of the schema URL they gave. A schema downloaded from one origin
+that names another is refused until the owner types the address; a schema file
+has no origin, so with a secret the owner always types it; and attaching a
+secret later to an address that came from the schema asks for it again. An edit
+with the field left empty keeps the saved address and never takes the schema's
+server, so a schema cannot aim the secret somewhere the owner did not choose.
 
 Private addresses are allowed, as they are for MCP servers: only the owner
 sets a schema URL or base URL, and a self-hosted PCP often talks to services

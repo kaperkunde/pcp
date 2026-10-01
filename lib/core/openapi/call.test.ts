@@ -240,3 +240,91 @@ describe("redaction when the answer is cut at the size cap", () => {
     expect(text(outcome)).not.toContain("sk-liv")
   })
 })
+
+describe("redaction in the words around the body", () => {
+  const SECRET = "sk-live-0123456789"
+  const redact = [SECRET, `Bearer ${SECRET}`]
+
+  it("covers the HTTP reason phrase", async () => {
+    api = await startTestApi((_, res) => {
+      res.statusCode = 401
+      res.statusMessage = `Invalid key ${SECRET}`
+      res.end()
+    })
+    const outcome = await executeCall(get("/x"), { redact })
+
+    expect(outcome.status).toBe(401)
+    expect(text(outcome)).toBe("HTTP 401 Invalid key [redacted]")
+  })
+
+  it("covers a redirect's target", async () => {
+    api = await startTestApi((_, res) => {
+      res.statusCode = 302
+      res.setHeader("location", `/steal/${SECRET}`)
+      res.end()
+    })
+    const outcome = await executeCall(get("/x"), { redact })
+
+    expect(text(outcome)).toMatch(
+      /redirected to http:\/\/127\.0\.0\.1:\d+\/steal\/\[redacted\]/,
+    )
+    expect(text(outcome)).not.toContain(SECRET)
+  })
+
+  it("covers the note about an answer that is not text", async () => {
+    api = await startTestApi((_, res) => {
+      res.setHeader("content-type", `application/x-${SECRET}`)
+      res.end(Buffer.from([1, 2, 3]))
+    })
+    const outcome = await executeCall(get("/x"), { redact })
+
+    expect(text(outcome)).not.toContain(SECRET)
+    expect(text(outcome)).toContain("[redacted]")
+  })
+
+  it("covers a key a JSON encoder escaped, in the text and the structured content", async () => {
+    const slashes = "sk/live/ABCDEF"
+    const html = "k&v<x>y-secret"
+    const accents = "clé-secret-1"
+    api = await startTestApi((req, res) => {
+      res.setHeader("content-type", "application/json")
+      res.end(
+        {
+          "/php": '{"h":"sk\\/live\\/ABCDEF"}',
+          "/go": '{"h":"k\\u0026v\\u003cx\\u003ey-secret"}',
+          "/python": '{"h":"cl\\u00e9-secret-1"}',
+        }[req.url] ?? "{}",
+      )
+    })
+
+    for (const [path, secret] of [
+      ["/php", slashes],
+      ["/go", html],
+      ["/python", accents],
+    ] as const) {
+      const outcome = await executeCall(get(path), { redact: [secret] })
+
+      expect(JSON.stringify(outcome.result), path).not.toContain(secret)
+      expect(outcome.result.structuredContent, path).toEqual({
+        h: "[redacted]",
+      })
+    }
+  })
+
+  it("covers a key hidden in an escape only the parser decodes", async () => {
+    api = await startTestApi((_, res) => {
+      res.setHeader("content-type", "application/json")
+      // "sk-live-0123456789" with its hyphens written as \u002d.
+      res.end(
+        '{"h":"sk\\u002dlive\\u002d0123456789","sk\\u002dlive\\u002d0123456789":1}',
+      )
+    })
+    const outcome = await executeCall(get("/x"), { redact: [SECRET] })
+
+    expect(JSON.stringify(outcome.result)).not.toContain(SECRET)
+    expect(outcome.result.structuredContent).toEqual({
+      h: "[redacted]",
+      "[redacted]": 1,
+    })
+  })
+})

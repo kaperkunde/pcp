@@ -1,9 +1,9 @@
 import YAML from "yaml"
 
 import { MAX_SPEC_BYTES } from "../constants"
-import { invalid } from "../errors"
+import { invalid, isPcpError } from "../errors"
 import { isObject, type JsonObject } from "./json"
-import { MAX_YAML_ALIASES } from "./limits"
+import { MAX_SPEC_NODES, MAX_YAML_ALIASES } from "./limits"
 
 /**
  * Turns schema text into a plain JSON value and checks it is OpenAPI 3.
@@ -16,6 +16,32 @@ import { MAX_YAML_ALIASES } from "./limits"
 export type OpenApiDocument = JsonObject & {
   openapi: string
   paths: JsonObject
+}
+
+/**
+ * Counts the nodes of a parsed value with every alias visited as often as it
+ * appears, stopping at the limit. A cycle never ends, so it stops there too.
+ */
+function withinNodeLimit(value: unknown, limit: number): boolean {
+  const stack: unknown[] = [value]
+  let seen = 0
+
+  while (stack.length > 0) {
+    const current = stack.pop()
+    seen += 1
+
+    if (seen > limit) {
+      return false
+    }
+
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item)
+    } else if (typeof current === "object" && current !== null) {
+      for (const item of Object.values(current)) stack.push(item)
+    }
+  }
+
+  return true
 }
 
 function short(error: unknown): string {
@@ -48,17 +74,30 @@ export function parseSpecText(raw: string): OpenApiDocument {
         customTags: [],
         resolveKnownTags: false,
         merge: false,
-        uniqueKeys: true,
+        // Checking keys for duplicates is quadratic in how many there are:
+        // 40,000 paths took 18 seconds. JSON takes the last of a duplicate
+        // too.
+        uniqueKeys: false,
         stringKeys: true,
         maxAliasCount: MAX_YAML_ALIASES,
         // "silent" would swallow parse errors; "error" throws them and
         // drops warnings (unknown tags come back as plain strings).
         logLevel: "error",
       })
+      if (!withinNodeLimit(value, MAX_SPEC_NODES)) {
+        throw invalid(
+          "The schema is too large once its anchors and aliases are expanded.",
+        )
+      }
+
       // Only plain JSON values from here on.
       value = JSON.parse(JSON.stringify(value ?? null))
     }
   } catch (error) {
+    if (isPcpError(error)) {
+      throw error
+    }
+
     throw invalid(
       `The schema could not be read as JSON or YAML: ${short(error)}`,
     )

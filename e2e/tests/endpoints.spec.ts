@@ -1,3 +1,4 @@
+import { readdirSync, readFileSync } from "node:fs"
 import path from "node:path"
 
 import { expect, test } from "@playwright/test"
@@ -75,6 +76,21 @@ test.afterAll(async () => {
 })
 
 const lastRequest = () => upstream.requests.at(-1)
+
+/** Everything the gateway has logged, as the dev server under test wrote it. */
+function requestLog(): string {
+  const dir = path.join(__dirname, "../.state/data/logs")
+
+  try {
+    return readdirSync(dir)
+      .filter((name) => name.startsWith("mcp-"))
+      .sort()
+      .map((name) => readFileSync(path.join(dir, name), "utf8"))
+      .join("\n")
+  } catch {
+    return ""
+  }
+}
 
 test("adds an endpoint from a schema URL, with a stored secret", async ({
   page,
@@ -242,6 +258,12 @@ test("errors reach the assistant as readable results, and bad input never leaves
   expect(missing.body.result?.isError).toBe(true)
   expect(toolText(missing)).toContain("HTTP 404")
 
+  // The log says that the call failed, never what the API answered.
+  await expect
+    .poll(() => requestLog(), { timeout: 5000 })
+    .toContain("The tool reported an error.")
+  expect(requestLog()).not.toContain("no such pet")
+
   const before = upstream.requests.length
 
   const unknown = await callTool(baseURL!, token, "call_tool", {
@@ -258,7 +280,7 @@ test("errors reach the assistant as readable results, and bad input never leaves
     arguments: { petId: ".." },
   })
   expect(dots.body.result?.isError).toBe(true)
-  expect(toolText(dots)).toContain("cannot be empty")
+  expect(toolText(dots)).toContain("between slashes")
 
   const absent = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
@@ -450,6 +472,14 @@ test("the owner sees it, allows the address and attaches the secret; the assista
   await page.getByLabel("Public addresses only").uncheck()
   await page.getByLabel("Authentication").selectOption("header")
   await page.getByLabel("Secret").selectOption({ label: SECRET_NAME })
+
+  // The address came from the assistant's schema, not from the owner, so
+  // PCP will not send a secret there until the owner types it.
+  await page.getByRole("button", { name: "Save changes" }).click()
+  await expect(page.locator("p[role=alert]")).toContainText(
+    "came from the schema, not from you",
+  )
+  await page.getByLabel("Base URL (optional)").fill(`${upstream.origin}/api`)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
     page.getByRole("status").filter({ hasText: "Saved." }),

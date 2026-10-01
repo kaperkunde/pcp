@@ -44,20 +44,43 @@ function loose(value: unknown, arg: string): string {
     : scalar(value, arg)
 }
 
+/** encodeURIComponent, with its URIError (a lone surrogate) as a message. */
+function encodePart(text: string, arg: string): string {
+  try {
+    return encodeURIComponent(text)
+  } catch {
+    throw invalid(`"${arg}" has a character that cannot be sent.`)
+  }
+}
+
 function pathValue(param: ParamPlan, value: unknown): string {
-  const encode = (item: unknown) => encodeURIComponent(scalar(item, param.arg))
+  const encode = (item: unknown) => {
+    const raw = scalar(item, param.arg)
+
+    // A slash is encoded, so the value stays one segment on the wire, but a
+    // server or proxy that decodes %2F before it tidies the path would read
+    // "../../admin" as the path it spells. Refuse a dot component, however
+    // the slashes around it are written.
+    if (raw.split(/[\\/]/).some((part) => part === "." || part === "..")) {
+      throw invalid(
+        `"${param.arg}" cannot have "." or ".." between slashes, since a server may read them as a path.`,
+      )
+    }
+
+    return encodePart(raw, param.arg)
+  }
   let encoded: string
 
   if (param.serialize === "json") {
-    encoded = encodeURIComponent(JSON.stringify(value))
+    encoded = encodePart(JSON.stringify(value), param.arg)
   } else if (Array.isArray(value)) {
     encoded = value.map(encode).join(",")
   } else if (isObject(value)) {
     encoded = entries(value)
       .map(([key, item]) =>
         param.explode
-          ? `${encodeURIComponent(key)}=${encode(item)}`
-          : `${encodeURIComponent(key)},${encode(item)}`,
+          ? `${encodePart(key, param.arg)}=${encode(item)}`
+          : `${encodePart(key, param.arg)},${encode(item)}`,
       )
       .join(",")
   } else {

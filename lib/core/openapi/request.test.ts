@@ -50,9 +50,12 @@ describe("path parameters", () => {
   })
 
   it("refuse a dot segment, which the URL parser would resolve away", () => {
-    for (const petId of ["..", ".", ""]) {
+    expect(() => buildRequest(pathPlan, BASE, { petId: "" }, {})).toThrow(
+      /cannot be empty/,
+    )
+    for (const petId of ["..", "."]) {
       expect(() => buildRequest(pathPlan, BASE, { petId }, {})).toThrow(
-        /cannot be empty/,
+        /cannot have "\." or "\.\." between slashes/,
       )
     }
     // An already-encoded dot is encoded again, so it stays a literal name.
@@ -61,10 +64,46 @@ describe("path parameters", () => {
     )
   })
 
-  it("cannot walk out of the base path or off the origin", () => {
-    const { url } = buildRequest(pathPlan, BASE, { petId: "../../admin" }, {})
-    expect(new URL(url).pathname).toBe("/v1/pets/..%2F..%2Fadmin")
-    expect(new URL(url).origin).toBe("https://api.example.com")
+  it("cannot spell a path with an encoded slash, which a decoding proxy would resolve", () => {
+    // Encoded, "../../admin" stays one segment here: ..%2F..%2Fadmin. A
+    // server or proxy that decodes %2F before it tidies the path reads it as
+    // /admin, so a dot component is refused however the slashes are written.
+    for (const petId of [
+      "../../admin",
+      "a/../b",
+      "a\\..\\b",
+      "a/./b",
+      "./x",
+      "x/..",
+    ]) {
+      expect(() => buildRequest(pathPlan, BASE, { petId }, {}), petId).toThrow(
+        /between slashes/,
+      )
+    }
+    expect(() =>
+      buildRequest(pathPlan, BASE, { petId: ["ok", "../x"] }, {}),
+    ).toThrow(/between slashes/)
+  })
+
+  it("still takes values that only look like it", () => {
+    for (const petId of [
+      "a..b",
+      "..hidden",
+      "x/.hidden/y",
+      "v1.2",
+      "...",
+      "a/b",
+    ]) {
+      const { url } = buildRequest(pathPlan, BASE, { petId }, {})
+      expect(new URL(url).origin, petId).toBe("https://api.example.com")
+      expect(new URL(url).pathname.startsWith("/v1/pets/"), petId).toBe(true)
+    }
+  })
+
+  it("reports a character that cannot be encoded, not a crash", () => {
+    expect(() =>
+      buildRequest(pathPlan, BASE, { petId: "bad\uD800" }, {}),
+    ).toThrow(/character that cannot be sent/)
   })
 
   it("take numbers and lists, and reject objects they cannot express", () => {
@@ -209,6 +248,15 @@ describe("headers", () => {
       "Sec-Fetch-Mode",
       "Proxy-Foo",
       "Bad Name",
+      "X-HTTP-Method-Override",
+      "X-Method-Override",
+      "X-Forwarded-For",
+      "X-Forwarded-Host",
+      "X-Real-IP",
+      "Forwarded",
+      "Origin",
+      "Referer",
+      "Via",
     ]) {
       const sent = header(name, "evil")
       expect(sent[name.toLowerCase()], name).toBeUndefined()

@@ -25,6 +25,8 @@ export type CatalogueTool = {
   operation?: string | null
 }
 
+const DELETE_CHUNK = 500
+
 export async function storeTools(
   serverId: string,
   tools: CatalogueTool[],
@@ -54,9 +56,22 @@ export async function storeTools(
         })
       }
 
-      await tx.mcpTool.deleteMany({
-        where: { serverId, name: { notIn: [...names] } },
-      })
+      // The names that are gone, in chunks: SQLite allows 999 variables in
+      // a query, and "NOT IN (every current name)" is one per tool.
+      const gone = (
+        await tx.mcpTool.findMany({
+          where: { serverId },
+          select: { name: true },
+        })
+      )
+        .map((tool) => tool.name)
+        .filter((name) => !names.has(name))
+
+      for (let at = 0; at < gone.length; at += DELETE_CHUNK) {
+        await tx.mcpTool.deleteMany({
+          where: { serverId, name: { in: gone.slice(at, at + DELETE_CHUNK) } },
+        })
+      }
     },
     { timeout: 60_000 },
   )

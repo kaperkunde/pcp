@@ -484,6 +484,22 @@ describe("resolveBaseUrl", () => {
     ).toThrow(/no default/)
   })
 
+  it("does not let a file aim a secret at the address it names", () => {
+    const file = { ...base, specUrl: null, fetchedFrom: null, hasSecret: true }
+
+    // A file has no origin to compare with, so the owner has to say.
+    expect(() => resolveBaseUrl(file)).toThrow(
+      /pets\.example\.com as its server\. To send your secret there, enter the base URL/,
+    )
+    expect(
+      resolveBaseUrl({ ...file, ownerBaseUrl: "https://pets.example.com/v1" }),
+    ).toBe("https://pets.example.com/v1")
+    // Without a secret nothing of the owner's is at stake.
+    expect(resolveBaseUrl({ ...file, hasSecret: false })).toBe(
+      "https://pets.example.com/v1",
+    )
+  })
+
   it("does not let a downloaded schema aim a secret at another origin", () => {
     const downloaded = {
       ...base,
@@ -636,5 +652,193 @@ describe("the budget for the whole schema", () => {
       "the schema is larger than PCP reads in full",
     )
     expect(Date.now() - started).toBeLessThan(8000)
+  })
+})
+
+describe("a schema written to be expensive to read", () => {
+  const FAST = 2000
+
+  function timed<T>(run: () => T): { result: T; ms: number } {
+    const started = Date.now()
+    const result = run()
+    return { result, ms: Date.now() - started }
+  }
+
+  it("skips a path too long to read, before any pattern runs on it", () => {
+    const path = `/${"{".repeat(60_000)}`
+    const { result, ms } = timed(() =>
+      generateTools(spec({ paths: { [path]: { get: {} } } }), OPTIONS),
+    )
+
+    expect(result.tools).toEqual([])
+    expect(result.skipped[0]!.reason).toMatch(/longer than PCP reads/)
+    // 2 seconds for 50 KB of braces, 8 for 100 KB, before the cap.
+    expect(ms).toBeLessThan(FAST)
+  })
+
+  it("cuts an operationId before it is tidied, and still names the tool", () => {
+    const operationId = `a${"-".repeat(160_000)}b`
+    const { result, ms } = timed(() =>
+      generateTools(
+        spec({ paths: { "/a": { get: { operationId } } } }),
+        OPTIONS,
+      ),
+    )
+
+    expect(result.tools).toHaveLength(1)
+    expect(result.tools[0]!.name.length).toBeLessThanOrEqual(64)
+    expect(ms).toBeLessThan(FAST)
+  })
+
+  it("does not expand a server address made of braces", () => {
+    const { result, ms } = timed(() =>
+      generateTools(
+        spec({ servers: [{ url: `https://x${"{".repeat(80_000)}` }] }),
+        OPTIONS,
+      ),
+    )
+
+    expect(result.serverUrl).toBeNull()
+    expect(result.serverUrlProblem).toMatch(/too long/)
+    expect(ms).toBeLessThan(FAST)
+  })
+
+  it("does not copy a huge shared parameter, or a huge summary, into every tool", () => {
+    // About 4.5 MB of schema: one 900 KB description and example shared by
+    // 600 operations through a $ref, and one operation with 900 KB of
+    // summary, description and tag. Copied into each tool, that is gigabytes.
+    const huge = "x".repeat(900_000)
+    const paths = Object.fromEntries(
+      Array.from({ length: 600 }, (_, i) => [
+        `/p${i}`,
+        {
+          get: {
+            operationId: `op${i}`,
+            ...(i === 0
+              ? { summary: huge, description: huge, tags: [huge] }
+              : {}),
+            parameters: [{ $ref: "#/components/parameters/Big" }],
+          },
+        },
+      ]),
+    )
+    const { result, ms } = timed(() =>
+      generateTools(
+        spec({
+          paths,
+          components: {
+            parameters: {
+              Big: {
+                name: "q",
+                in: "query",
+                description: huge,
+                example: huge,
+                schema: { type: "string" },
+              },
+            },
+          },
+        }),
+        OPTIONS,
+      ),
+    )
+
+    expect(result.tools).toHaveLength(600)
+    for (const tool of result.tools.slice(0, 3)) {
+      expect(tool.description.length).toBeLessThanOrEqual(2000)
+      const parameter = (tool.inputSchema as { properties: { q: object } })
+        .properties.q as { description: string; examples?: unknown }
+      expect(parameter.description.length).toBeLessThanOrEqual(1000)
+      expect(parameter.examples).toBeUndefined()
+    }
+    expect(ms).toBeLessThan(FAST * 2)
+  })
+
+  it("skips an operation whose request schema carries more text than PCP passes on", () => {
+    const doc = spec({
+      paths: {
+        "/a": {
+          post: {
+            operationId: "big",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": {
+                  schema: { type: "string", description: "d".repeat(100_000) },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+    const result = generateTools(doc, OPTIONS)
+
+    expect(result.tools).toEqual([])
+    expect(result.skipped[0]!.reason).toMatch(/expands to more than PCP reads/)
+  })
+
+  it("skips an operation with too many parameters, and one with a huge parameter name", () => {
+    const many = Array.from({ length: 250 }, (_, i) => ({
+      name: `p${i}`,
+      in: "query",
+      schema: { type: "string" },
+    }))
+    const long = [{ name: "n".repeat(300), in: "query", schema: {} }]
+    const result = generateTools(
+      spec({
+        paths: {
+          "/many": { get: { operationId: "many", parameters: many } },
+          "/long": { get: { operationId: "long", parameters: long } },
+        },
+      }),
+      OPTIONS,
+    )
+
+    expect(result.tools).toEqual([])
+    expect(result.skipped.map((entry) => entry.reason)).toEqual([
+      "it has more than 200 parameters",
+      "a parameter's name is too long",
+    ])
+  })
+
+  it("does not take a media type that cannot be sent as a header", () => {
+    const doc = spec({
+      paths: {
+        "/a": {
+          post: {
+            operationId: "post",
+            requestBody: {
+              required: true,
+              content: {
+                "application/json; x=\r\nX-Evil: 1": {
+                  schema: { type: "object" },
+                },
+              },
+            },
+            responses: {
+              "200": {
+                description: "ok",
+                content: { "application/json;\nX-Evil: 1": { schema: {} } },
+              },
+            },
+          },
+          get: {
+            operationId: "get",
+            responses: {
+              "200": {
+                description: "ok",
+                content: { "application/json;\nX-Evil: 1": { schema: {} } },
+              },
+            },
+          },
+        },
+      },
+    })
+    const result = generateTools(doc, OPTIONS)
+    const get = result.tools.find((tool) => tool.name === "get")!
+
+    // The required body had no usable type; the answer type is ignored.
+    expect(result.tools.map((tool) => tool.name)).toEqual(["get"])
+    expect(get.operation.accept).toBe("application/json, */*;q=0.8")
   })
 })

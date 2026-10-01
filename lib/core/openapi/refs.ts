@@ -1,5 +1,5 @@
 import { entries, isObject, own, type JsonObject } from "./json"
-import { REF_MAX_DEPTH, REF_MAX_NODES } from "./limits"
+import { REF_MAX_CHARS, REF_MAX_DEPTH, REF_MAX_NODES } from "./limits"
 
 /**
  * Local $ref resolution. Only references into the same document ("#/…")
@@ -38,10 +38,14 @@ export class UnsupportedRef extends Error {
   }
 }
 
-export type RefBudget = { nodes: number }
+/**
+ * What inlining one operation may spend: nodes visited, and characters of
+ * text copied (a node can be one 4 MB string).
+ */
+export type RefBudget = { nodes: number; chars: number }
 
 export function newBudget(): RefBudget {
-  return { nodes: REF_MAX_NODES }
+  return { nodes: REF_MAX_NODES, chars: REF_MAX_CHARS }
 }
 
 export function resolvePointer(doc: unknown, ref: string): unknown {
@@ -138,6 +142,14 @@ export function inlineRefs(
     }
 
     if (!isObject(value)) {
+      if (typeof value === "string") {
+        budget.chars -= value.length
+
+        if (budget.chars < 0) {
+          throw new UnsupportedRef(stack.at(-1) ?? "#", "too_large")
+        }
+      }
+
       return value
     }
 
@@ -164,6 +176,12 @@ export function inlineRefs(
 
     const copy: JsonObject = {}
     for (const [key, child] of entries(value)) {
+      budget.chars -= key.length
+
+      if (budget.chars < 0) {
+        throw new UnsupportedRef(stack.at(-1) ?? "#", "too_large")
+      }
+
       copy[key] = walk(child, depth + 1, stack)
     }
     return copy

@@ -347,6 +347,141 @@ describe("downloaded schemas", () => {
   })
 })
 
+describe("where a secret may go", () => {
+  const attacker = "https://attacker.example.com"
+
+  const withKey = async () => ({
+    authType: "header" as const,
+    authSecretId: (await createSecret(ctx, { name: "Pets key", value: KEY }))
+      .id,
+    authHeaderName: "X-API-Key",
+    authValueTemplate: "{{secret}}",
+  })
+
+  it("is never the address a schema file names, unless the owner types it", async () => {
+    const hostile = schema(attacker)
+    const auth = await withKey()
+
+    await expect(
+      createEndpoint(ctx, input({ ...auth, specText: hostile })),
+    ).rejects.toThrow(
+      /attacker\.example\.com as its server.*enter the base URL/,
+    )
+    expect(await db().mcpServer.count()).toBe(0)
+
+    const { id } = await createEndpoint(
+      ctx,
+      input({ ...auth, specText: hostile, baseUrl: `${api.origin}/api` }),
+    )
+    expect((await getServer(ctx, id)).url).toBe(`${api.origin}/api`)
+  })
+
+  it("is not an address that came from the schema, when attached later", async () => {
+    // Added without a secret, from a file whose server was taken as given.
+    const { id } = await createEndpoint(
+      ctx,
+      input({ specText: schema(attacker) }),
+    )
+    expect((await getServer(ctx, id)).url).toBe(`${attacker}/api`)
+
+    const auth = await withKey()
+
+    // Saving the form with a secret and nothing typed would send it there.
+    await expect(
+      updateEndpoint(ctx, id, input({ ...auth, specText: null })),
+    ).rejects.toThrow(/came from the schema, not from you/)
+    expect((await getServer(ctx, id)).authType).toBe("none")
+
+    // Typing an address is the owner's say.
+    await updateEndpoint(
+      ctx,
+      id,
+      input({ ...auth, specText: null, baseUrl: `${api.origin}/api` }),
+    )
+    expect(await getServer(ctx, id)).toMatchObject({
+      authType: "header",
+      url: `${api.origin}/api`,
+    })
+  })
+
+  it("may be attached later to an address on the schema's own origin", async () => {
+    let origin = ""
+    const docs = await startTestApi((_, res) => {
+      res.setHeader("content-type", "application/json")
+      res.end(schema(origin))
+    })
+    origin = docs.origin
+    const auth = await withKey()
+
+    try {
+      const remote = {
+        name: "Remote",
+        specSource: "url" as const,
+        specUrl: `${docs.origin}/openapi.json`,
+        readOnly: false,
+      }
+      const { id } = await createEndpoint(ctx, { ...remote, authType: "none" })
+      await updateEndpoint(ctx, id, { ...remote, ...auth })
+      expect((await getServer(ctx, id)).authType).toBe("header")
+
+      // An address on another origin has to be typed.
+      const elsewhere = {
+        ...remote,
+        name: "Elsewhere",
+        baseUrl: `${api.origin}/api`,
+      }
+      const other = await createEndpoint(ctx, {
+        ...elsewhere,
+        authType: "none",
+      })
+      await updateEndpoint(ctx, other.id, { ...elsewhere, ...auth })
+      expect(await getServer(ctx, other.id)).toMatchObject({
+        authType: "header",
+        url: `${api.origin}/api`,
+      })
+
+      // Not typed, and not the schema's origin: refused.
+      const quiet = await createEndpoint(ctx, {
+        ...remote,
+        name: "Quiet",
+        baseUrl: `${api.origin}/api`,
+        authType: "none",
+      })
+      await expect(
+        updateEndpoint(ctx, quiet.id, { ...remote, name: "Quiet", ...auth }),
+      ).rejects.toThrow(/came from the schema, not from you/)
+    } finally {
+      await docs.close()
+    }
+  })
+
+  it("stays where it is when an edit leaves the address empty, whatever the schema now says", async () => {
+    const auth = await withKey()
+    const { id } = await createEndpoint(
+      ctx,
+      input({ ...auth, baseUrl: `${api.origin}/api` }),
+    )
+
+    // A new file that names another server, saved with the field empty.
+    await updateEndpoint(
+      ctx,
+      id,
+      input({ ...auth, specText: schema(attacker) }),
+    )
+    expect((await getServer(ctx, id)).url).toBe(`${api.origin}/api`)
+
+    // Without a secret too: an edit never takes the schema's server.
+    const open = await createEndpoint(ctx, input({ name: "Open" }))
+    const before = (await getServer(ctx, open.id)).url
+    await updateEndpoint(
+      ctx,
+      open.id,
+      input({ name: "Open", specText: schema(attacker) }),
+    )
+    expect((await getServer(ctx, open.id)).url).toBe(before)
+  })
+})
+
 describe("refreshing and editing", () => {
   it("keeps the owner's description overrides and drops vanished tools", async () => {
     const { id } = await createEndpoint(ctx, input())
@@ -403,7 +538,7 @@ describe("refreshing and editing", () => {
 describe("secrets", () => {
   it("are listed as used by the endpoint, which blocks deleting them", async () => {
     const auth = await withSecret()
-    await createEndpoint(ctx, input({ ...auth }))
+    await createEndpoint(ctx, input({ ...auth, baseUrl: `${api.origin}/api` }))
 
     const secret = (await listSecrets(ctx)).find(
       (entry) => entry.id === auth.authSecretId,
@@ -418,7 +553,11 @@ describe("secrets", () => {
 describe("calling an endpoint tool", () => {
   async function endpoint(overrides: Partial<EndpointInput> = {}) {
     const auth = await withSecret()
-    const { id } = await createEndpoint(ctx, input({ ...auth, ...overrides }))
+    // A secret goes to an address the owner typed.
+    const { id } = await createEndpoint(
+      ctx,
+      input({ ...auth, baseUrl: `${api.origin}/api`, ...overrides }),
+    )
     return getServer(ctx, id)
   }
 
@@ -533,6 +672,46 @@ describe("calling an endpoint tool", () => {
     expect(after.statusMessage).toMatch(/rejected the credentials/)
   })
 
+  it("will not send a secret a header cannot carry, and never quotes it", async () => {
+    // fetch refuses a line break in a header and its error message quotes
+    // the value, which would put a multi-line key in the status, the log
+    // and what the assistant is told.
+    const multiline =
+      "-----BEGIN KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END KEY-----"
+    const { id: secretId } = await createSecret(ctx, {
+      name: "Pem key",
+      value: multiline,
+    })
+    const { id } = await createEndpoint(
+      ctx,
+      input({
+        baseUrl: `${api.origin}/api`,
+        authType: "header",
+        authSecretId: secretId,
+        authHeaderName: "X-API-Key",
+        authValueTemplate: "{{secret}}",
+      }),
+    )
+    const server = await getServer(ctx, id)
+
+    const failure = await callServerTool(
+      ctx,
+      server,
+      "listPets",
+      {},
+      PUBLIC,
+    ).then(
+      () => null,
+      (error: Error) => error,
+    )
+
+    expect(failure).toMatchObject({ code: "state" })
+    expect(failure!.message).toMatch(/cannot carry, so PCP cannot send it/)
+    expect(failure!.message).not.toContain("MIIEvQ")
+    expect(JSON.stringify(await getServer(ctx, id))).not.toContain("MIIEvQ")
+    expect(api.requests).toHaveLength(0)
+  })
+
   it("refuses bad arguments before anything is sent", async () => {
     const server = await endpoint()
     await expect(
@@ -546,7 +725,7 @@ describe("calling an endpoint tool", () => {
     ).rejects.toThrow(/Unknown argument "extra"/)
     await expect(
       callServerTool(ctx, server, "getPet", { petId: ".." }, PUBLIC),
-    ).rejects.toThrow(/cannot be empty/)
+    ).rejects.toThrow(/between slashes/)
     await expect(
       callServerTool(ctx, server, "getPet", {}, PUBLIC),
     ).rejects.toThrow(/Missing argument/)
@@ -588,5 +767,41 @@ describe("calling an endpoint tool", () => {
     ).rejects.toThrow(/could not be reached/)
     expect((await getServer(ctx, server.id)).status).toBe("error")
     api = await startTestApi()
+  })
+})
+
+describe("a schema with many operations", () => {
+  const many = (count: number, prefix = "op") =>
+    JSON.stringify({
+      openapi: "3.0.3",
+      info: { title: "Big" },
+      servers: [{ url: "https://api.example.com" }],
+      paths: Object.fromEntries(
+        Array.from({ length: count }, (_, i) => [
+          `/p${i}`,
+          { get: { operationId: `${prefix}${i}` } },
+        ]),
+      ),
+    })
+
+  it("is stored past SQLite's limit on variables, and re-read down again", async () => {
+    // 1,200 tools: "name NOT IN (every current name)" is one variable each,
+    // and SQLite allows 999.
+    const { id, sync } = await createEndpoint(
+      ctx,
+      input({ name: "Big", specText: many(1200) }),
+    )
+    expect(sync.toolCount).toBe(1200)
+    expect((await getServer(ctx, id)).tools).toHaveLength(1200)
+
+    await updateEndpoint(
+      ctx,
+      id,
+      input({ name: "Big", specText: many(1100, "other") }),
+    )
+    const tools = (await getServer(ctx, id)).tools
+    expect(tools).toHaveLength(1100)
+    // None of the old names survive: all 1,200 were removed in chunks.
+    expect(tools.every((tool) => tool.name.startsWith("other"))).toBe(true)
   })
 })

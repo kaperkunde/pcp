@@ -116,6 +116,10 @@ export function buildGatewayServer(
   const slugs = servers.map((entry) => entry.slug)
   const bySlug = new Map(servers.map((entry) => [entry.slug, entry]))
 
+  // Results an upstream wrote (an API's error body, an MCP tool's error
+  // text). The log says that a call failed, never what the upstream said.
+  const fromUpstream = new WeakSet<CallToolResult>()
+
   const logged =
     (
       tool: string,
@@ -149,11 +153,13 @@ export function buildGatewayServer(
         ms: Date.now() - started,
         ...(result.isError
           ? {
-              error: String(
-                result.content[0]?.type === "text"
-                  ? result.content[0].text
-                  : "",
-              ).slice(0, 200),
+              error: fromUpstream.has(result)
+                ? "The tool reported an error."
+                : String(
+                    result.content[0]?.type === "text"
+                      ? result.content[0].text
+                      : "",
+                  ).slice(0, 200),
             }
           : {}),
       })
@@ -315,7 +321,7 @@ export function buildGatewayServer(
           { publicUrl: scope.publicUrl },
         )
 
-        return {
+        const answer: CallToolResult = {
           content: result.content.map((block) =>
             block.type === "text"
               ? { ...block, text: clip(block.text) }
@@ -326,6 +332,12 @@ export function buildGatewayServer(
             ? { structuredContent: result.structuredContent }
             : {}),
         }
+
+        if (answer.isError) {
+          fromUpstream.add(answer)
+        }
+
+        return answer
       },
     ),
   )

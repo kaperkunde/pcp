@@ -13,7 +13,10 @@ import {
   MAX_STRUCTURED_CHARS,
 } from "./limits"
 import type { BuiltRequest } from "./request"
+import { makeRedactor } from "./redact"
 import { send, type SendOptions } from "./transport"
+
+export { redactSecrets } from "./redact"
 
 /**
  * Sends one request and turns the answer into an MCP tool result: JSON is
@@ -27,55 +30,6 @@ import { send, type SendOptions } from "./transport"
  */
 
 export type CallOutcome = { result: CallToolResult; status: number }
-
-const REDACTED = "[redacted]"
-/** Shorter values would mangle ordinary text more often than they protect. */
-const MIN_REDACTED_LENGTH = 4
-
-/**
- * An API that echoes a credential back (an error such as "Invalid key:
- * sk-…", a debugging endpoint that reflects headers) must not hand it to
- * the assistant. Each value is removed as it appears and as it would
- * appear inside a JSON string; the longest goes first so a header value
- * is not left half-redacted around the key it contains.
- */
-export function redactSecrets(
-  text: string,
-  values: string[],
-  { truncated = false }: { truncated?: boolean } = {},
-): string {
-  const variants = [
-    ...new Set(
-      values
-        .filter((value) => value.length >= MIN_REDACTED_LENGTH)
-        .flatMap((value) => [value, JSON.stringify(value).slice(1, -1)]),
-    ),
-  ].sort((a, b) => b.length - a.length)
-
-  let result = text
-  for (const variant of variants) {
-    result = result.split(variant).join(REDACTED)
-  }
-
-  // An answer cut at the size limit can end partway through the key, which
-  // the whole-value pass cannot see: drop the start of it too.
-  if (truncated) {
-    for (const variant of variants) {
-      for (
-        let length = variant.length - 1;
-        length >= MIN_REDACTED_LENGTH;
-        length--
-      ) {
-        if (result.endsWith(variant.slice(0, length))) {
-          result = `${result.slice(0, -length)}${REDACTED}`
-          break
-        }
-      }
-    }
-  }
-
-  return result
-}
 
 function statusLine(response: Response): string {
   const text = response.statusText || STATUS_CODES[response.status] || ""
@@ -125,6 +79,10 @@ export async function executeCall(
     redact?: string[]
   } & SendOptions = {},
 ): Promise<CallOutcome> {
+  // Everything below that is built from the answer goes through this: the
+  // status line, a redirect's target and an error message are the API's
+  // words as much as its body is.
+  const scrub = makeRedactor(redact)
   let response: Response
 
   try {
@@ -144,7 +102,10 @@ export async function executeCall(
       throw new PcpError("forbidden", error.message)
     }
 
-    throw new PcpError("upstream", describeFetchError(error, timeoutMs))
+    throw new PcpError(
+      "upstream",
+      scrub.text(describeFetchError(error, timeoutMs)),
+    )
   }
 
   const status = response.status
@@ -168,7 +129,9 @@ export async function executeCall(
         content: [
           {
             type: "text",
-            text: `${statusLine(response)}: the API redirected${target}. PCP does not follow redirects; the owner can set the endpoint's base URL to where it points.`,
+            text: scrub.text(
+              `${statusLine(response)}: the API redirected${target}. PCP does not follow redirects; the owner can set the endpoint's base URL to where it points.`,
+            ),
           },
         ],
         isError: true,
@@ -182,7 +145,10 @@ export async function executeCall(
   try {
     ;({ bytes, truncated } = await readCapped(response, maxResponseBytes))
   } catch (error) {
-    throw new PcpError("upstream", describeFetchError(error, timeoutMs))
+    throw new PcpError(
+      "upstream",
+      scrub.text(describeFetchError(error, timeoutMs)),
+    )
   }
 
   const ok = status >= 200 && status < 300
@@ -198,9 +164,11 @@ export async function executeCall(
         content: [
           {
             type: "text",
-            text: ok
-              ? `(no content, ${statusLine(response)})`
-              : statusLine(response),
+            text: scrub.text(
+              ok
+                ? `(no content, ${statusLine(response)})`
+                : statusLine(response),
+            ),
           },
         ],
         ...(ok ? {} : { isError: true }),
@@ -217,14 +185,16 @@ export async function executeCall(
     // Before the JSON is parsed, so the text and structuredContent are
     // both clean.
     if (text !== null) {
-      text = redactSecrets(text, redact, { truncated })
+      text = scrub.text(text, { truncated })
     }
   }
 
   if (text !== null && isJson(type) && !truncated) {
     try {
-      const value: unknown = JSON.parse(text)
-      text = JSON.stringify(value, null, 2)
+      // Parsed and walked again: the parser decodes escapes (\/, \u0026,
+      // \u00e9) that hid a key from the pass over the raw text.
+      const value = scrub.value(JSON.parse(text))
+      text = scrub.text(JSON.stringify(value, null, 2))
       const wrapped = isObject(value) ? value : { value }
       if (ok && JSON.stringify(wrapped).length <= MAX_STRUCTURED_CHARS) {
         structured = wrapped
@@ -235,14 +205,16 @@ export async function executeCall(
   }
 
   if (text === null) {
-    const note = `(The API answered with ${bytes.length}${truncated ? "+" : ""} bytes of ${type || "unlabelled binary data"}; PCP passes on text and JSON only.)`
+    const note = scrub.text(
+      `(The API answered with ${bytes.length}${truncated ? "+" : ""} bytes of ${type || "unlabelled binary data"}; PCP passes on text and JSON only.)`,
+    )
     return {
       status,
       result: {
         content: [
           {
             type: "text",
-            text: ok ? note : `${statusLine(response)}\n${note}`,
+            text: ok ? note : scrub.text(`${statusLine(response)}\n${note}`),
           },
         ],
         ...(ok ? {} : { isError: true }),
@@ -259,7 +231,10 @@ export async function executeCall(
       status,
       result: {
         content: [
-          { type: "text", text: `${statusLine(response)}\n${excerpt}` },
+          {
+            type: "text",
+            text: scrub.text(`${statusLine(response)}\n${excerpt}`),
+          },
         ],
         isError: true,
       },
