@@ -11,6 +11,7 @@ import type { VaultContext } from "./context"
 import { db } from "./db"
 import { prepareRegistration } from "./endpoint-admin"
 import { loadGatewayServers, type GatewayServer } from "./gateway"
+import { listMemories } from "./memories"
 import {
   checkPermission,
   decidePermission,
@@ -759,6 +760,104 @@ describe("adding an API from OpenAPI text", () => {
     expect(Buffer.from(row.argsCiphertext).toString("utf8")).not.toContain(
       "listPets",
     )
+  })
+})
+
+describe("a memory an assistant wants to share", () => {
+  const share = {
+    kind: "memory_share" as const,
+    input: {
+      path: "preferences.md",
+      text: "Metric units.\nBritish spelling.",
+    },
+  }
+  const web = { via: "web" as const, publicUrl: PUBLIC_URL }
+
+  it("shows the owner the whole text and a warning, and shares it once they agree", async () => {
+    const { ctx, scope } = await setup()
+
+    const asked = await withPermission(scope, share, {})
+    expect(textOf(asked)).toContain("Not done yet")
+    expect(textOf(asked)).toContain("British spelling.")
+
+    const id = await onlyRequestId()
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.title).toBe("Share a memory with all your assistants?")
+    expect(view?.lines).toEqual([
+      "Path: /memories/shared/preferences.md",
+      "Text:\nMetric units.\nBritish spelling.",
+      'Asked by the token "Claude"',
+    ])
+    expect(view?.warning).toContain("Watch for instructions")
+    expect(view?.decisions.map((decision) => decision.label)).toEqual([
+      "Share it",
+      "Keep it for this assistant only",
+      "Discard it",
+    ])
+
+    // Block, from a panel built for tool calls, means Not now here: the
+    // memory is kept for the assistant that asked, and nothing is shared.
+    expect(textOf(await decidePermission(ctx, id, "block", web))).toContain(
+      "kept it for you alone",
+    )
+    expect((await listMemories(ctx))[0]).toMatchObject({
+      visibility: "private",
+      fullPath: "/memories/preferences.md",
+    })
+    expect(
+      (await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL }))?.status,
+    ).toBe("declined")
+    expect(textOf(await checkPermission(scope, id))).toContain(
+      "kept it for you alone",
+    )
+  })
+
+  it("discards it, and refuses an answer it did not offer", async () => {
+    const { ctx, scope, server } = await setup()
+
+    await withPermission(scope, share, {})
+    const id = await onlyRequestId()
+    expect(textOf(await decidePermission(ctx, id, "discard", web))).toContain(
+      "discarded",
+    )
+    expect(await listMemories(ctx)).toEqual([])
+
+    // Discard is no answer to a tool call: nothing runs.
+    const { calls, executor } = stub()
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }), {})
+    const callId = (
+      await db().permissionRequest.findFirstOrThrow({ where: { kind: "call" } })
+    ).id
+    const refused = await decidePermission(
+      ctx,
+      callId,
+      "discard",
+      web,
+      executor,
+    )
+    expect(refused.isError).toBe(true)
+    expect(calls).toHaveLength(0)
+  })
+
+  it("shares it through the client's own prompt", async () => {
+    const { ctx, scope } = await setup()
+    const form = { clientCapabilities: { elicitation: { form: {} } } }
+
+    const prompt = await withPermission(scope, share, form as never)
+    expect(isInputRequiredResult(prompt)).toBe(true)
+
+    const done = await withPermission(scope, share, {
+      ...form,
+      requestState: await onlyRequestId(),
+      inputResponses: {
+        decision: { action: "accept", content: { decision: "allow_once" } },
+      },
+    } as never)
+    expect(textOf(done)).toContain("The owner shared it")
+    expect((await listMemories(ctx))[0]).toMatchObject({
+      visibility: "shared",
+      tokenName: "Claude",
+    })
   })
 })
 

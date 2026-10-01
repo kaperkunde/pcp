@@ -28,6 +28,12 @@ import {
 import { isPcpError } from "./errors"
 import { newId } from "./ids"
 import {
+  decideMemoryAsk,
+  describeMemoryAsk,
+  type MemoryAsk,
+  type MemoryDecision,
+} from "./memories"
+import {
   connectPanel,
   connectResult,
   panelResult,
@@ -116,6 +122,7 @@ export type PermissionAsk =
       args: Record<string, unknown>
     }
   | { kind: "register"; input: RegisterArgs }
+  | MemoryAsk
 
 /** Runs what the owner allowed. Tests swap in a stub. */
 export type PermissionExecutor = {
@@ -230,9 +237,40 @@ function describeAsk(ask: PermissionAsk): {
   target: string
   args: Record<string, unknown>
 } {
-  return ask.kind === "call"
-    ? { target: `${ask.server.id}/${ask.tool.name}`, args: ask.args }
-    : { target: ask.input.url, args: ask.input as Record<string, unknown> }
+  switch (ask.kind) {
+    case "call":
+      return { target: `${ask.server.id}/${ask.tool.name}`, args: ask.args }
+    case "register":
+      return {
+        target: ask.input.url,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "memory_share":
+      return {
+        target: `memory:${ask.input.memoryId ?? ask.input.path}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "memory_change":
+      return {
+        target: `memory:${ask.input.memoryId}`,
+        args: ask.input as Record<string, unknown>,
+      }
+  }
+}
+
+function isMemoryKind(kind: string): kind is MemoryAsk["kind"] {
+  return kind === "memory_share" || kind === "memory_change"
+}
+
+function toolNameOf(ask: PermissionAsk): string {
+  switch (ask.kind) {
+    case "call":
+      return ask.tool.name
+    case "register":
+      return "register_server"
+    default:
+      return "memory"
+  }
 }
 
 function readArgs(ctx: VaultContext, row: PermissionRequest) {
@@ -277,6 +315,15 @@ async function summarizeRow(
 ): Promise<{ title: string; lines: string[]; warning: string | null }> {
   const args = readArgs(ctx, row)
   const asker = `Asked by the token "${row.token.name}"`
+
+  if (isMemoryKind(row.kind)) {
+    const asked = describeMemoryAsk({
+      kind: row.kind,
+      input: args,
+    } as MemoryAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
 
   if (row.kind === "register") {
     const input = args as RegisterArgs
@@ -421,6 +468,11 @@ export function permissionPanel(view: PermissionView): PermissionPanel {
 
 /** What the assistant is told about a request that is no longer pending. */
 function outcomeOf(view: PermissionView): CallToolResult {
+  // A memory's outcome says in full what the owner chose and what happened.
+  if (isMemoryKind(view.kind) && view.outcome && view.status !== "running") {
+    return text(view.outcome, view.status === "failed")
+  }
+
   switch (view.status) {
     case "executed":
       return text(`The owner allowed it and it ran.\n${view.outcome ?? ""}`)
@@ -516,7 +568,7 @@ export async function withPermission(
         tokenId: scope.tokenId,
         kind: ask.kind,
         serverId: ask.kind === "call" ? ask.server.id : null,
-        toolName: ask.kind === "call" ? ask.tool.name : "register_server",
+        toolName: toolNameOf(ask),
         argsCiphertext: asBytes(
           encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
         ),
@@ -671,15 +723,20 @@ export async function decidePermission(
   }
 
   const kind = row.kind as PermissionKind
-  // A new server has no "always" or "block": the answer is about this one.
+  // Only a tool call has "always" and "block": any other answer is about
+  // this one request.
   const choice: PermissionDecision =
-    kind === "register"
+    kind !== "call"
       ? decision === "always"
         ? "allow_once"
         : decision === "block"
           ? "decline"
           : decision
       : decision
+
+  if (!decisionsFor(kind).some((offered) => offered.value === choice)) {
+    return text("That is not one of the answers to this request.", true)
+  }
 
   if (!tokenIsLive(row.token)) {
     return finishUnrun(
@@ -688,6 +745,13 @@ export async function decidePermission(
       { via, publicUrl },
       "The token that asked is no longer valid, so nothing ran.",
     )
+  }
+
+  if (isMemoryKind(kind)) {
+    return decideMemory(ctx, row, choice as MemoryDecision, {
+      via,
+      publicUrl,
+    })
   }
 
   if (choice === "block" || choice === "decline") {
@@ -861,6 +925,67 @@ async function executeRegister(
   return text(
     `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search_tools finds them.`,
   )
+}
+
+/**
+ * A memory request: every answer does something (shares it, keeps it for
+ * the assistant, discards it), so each one claims the row and records what
+ * happened, as a call that ran does.
+ */
+async function decideMemory(
+  ctx: VaultContext,
+  row: Row,
+  decision: MemoryDecision,
+  { via, publicUrl }: { via: PermissionVia; publicUrl: string },
+): Promise<CallToolResult> {
+  const claimed = await db().permissionRequest.updateMany({
+    where: { id: row.id, status: "pending", expiresAt: { gt: new Date() } },
+    data: { status: "running", via, decidedAt: new Date() },
+  })
+
+  if (claimed.count !== 1) {
+    return outcomeFromRow(ctx, row.id, publicUrl)
+  }
+
+  let outcome: { status: "executed" | "declined" | "failed"; text: string }
+
+  try {
+    outcome = await decideMemoryAsk(
+      ctx,
+      row.tokenId,
+      { kind: row.kind, input: readArgs(ctx, row) } as MemoryAsk,
+      decision,
+    )
+  } catch (error) {
+    if (!isPcpError(error)) {
+      console.error("[permissions] a memory request failed", {
+        id: row.id,
+        error,
+      })
+    }
+
+    outcome = {
+      status: "failed",
+      text: isPcpError(error)
+        ? error.message
+        : "Something went wrong inside PCP.",
+    }
+  }
+
+  const failed = outcome.status === "failed"
+
+  await db().permissionRequest.update({
+    where: { id: row.id },
+    data: {
+      status: outcome.status,
+      resultIsError: failed,
+      resultCiphertext: asBytes(
+        encryptString(ctx.dek, outcome.text, `${aad(row.id)}:result`),
+      ),
+    },
+  })
+
+  return text(outcome.text, failed)
 }
 
 /** Closes a request without running it. */

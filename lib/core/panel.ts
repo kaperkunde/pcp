@@ -252,7 +252,9 @@ const SCRIPT = String.raw`
       button.type = "button";
       button.textContent = decision.label;
       if (index === 0) button.className = "primary";
-      if (decision.value === "block") button.className = "danger";
+      if (decision.value === "block" || decision.value === "discard") {
+        button.className = "danger";
+      }
       button.addEventListener("click", () => decide(decision));
       buttons.append(button);
     });

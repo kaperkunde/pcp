@@ -199,6 +199,17 @@ describe("decisions", () => {
     ])
   })
 
+  it("offers a memory to share three ways, and a change to a shared one two", () => {
+    expect(
+      decisionsFor("memory_share").map((decision) => decision.value),
+    ).toEqual(["allow_once", "decline", "discard"])
+    expect(
+      decisionsFor("memory_change").map((decision) => decision.value),
+    ).toEqual(["allow_once", "decline"])
+    expect(() => parseDecision("call", "discard")).toThrow(/allow_once/)
+    expect(() => parseDecision("memory_change", "discard")).toThrow()
+  })
+
   it("accepts only the answers it offered", () => {
     expect(parseDecision("call", "always")).toBe("always")
     expect(() => parseDecision("register", "always")).toThrow(/allow_once/)

@@ -51,6 +51,14 @@ pull request, and nothing runs on a push.
   `changeEndpoint`, which writes only the columns it is given and never the
   credential. Keep all of that when adding to it, and add a test for each new
   field an assistant can set.
+- Memories (`lib/core/memories.ts`): an assistant writes its own
+  (`/memories/…`) without asking, but anything other assistants would read
+  (`/memories/shared/…`: creating, sharing, changing, renaming, deleting) is a
+  permission request that shows the owner the whole text, writes nothing
+  until they answer, and writes only what they were shown. Shared text stays
+  short enough to read whole and free of characters that do not show on
+  screen, and only shared memories' paths go into the instructions, never a
+  token's own memory.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
@@ -92,6 +100,8 @@ check refuses to start).
 
 The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
-OpenAPI schema is an "endpoint" ("API endpoints" in the UI). No operator
+OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a note an
+assistant keeps between conversations is a "memory", "shared" when every
+assistant reads it. No operator
 vocabulary in the UI: no "DEK", "grant", "KEK" outside code comments and
 ARCHITECTURE.md.
