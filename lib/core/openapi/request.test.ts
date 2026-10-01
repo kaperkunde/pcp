@@ -394,3 +394,32 @@ describe("paths that mean something else to some servers", () => {
     }
   })
 })
+
+describe("values PCP sends itself", () => {
+  const fixed = plan({
+    params: [
+      param({
+        arg: "X-Requested-With",
+        in: "header",
+        required: true,
+        style: "simple",
+        explode: false,
+        value: "XMLHttpRequest",
+      }),
+      param({ arg: "format", value: "json" }),
+    ],
+  })
+
+  it("sends them without an argument", () => {
+    const built = buildRequest(fixed, BASE, {}, {})
+
+    expect(built.headers["x-requested-with"]).toBe("XMLHttpRequest")
+    expect(built.url).toBe(`${BASE}/pets?format=json`)
+  })
+
+  it("does not take them as arguments", () => {
+    expect(() => buildRequest(fixed, BASE, { format: "xml" }, {})).toThrow(
+      /Unknown argument "format"/,
+    )
+  })
+})

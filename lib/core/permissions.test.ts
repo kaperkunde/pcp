@@ -150,6 +150,43 @@ describe("asking the owner", () => {
     expect(await db().permissionRequest.count()).toBe(2)
   })
 
+  it("keeps only the fields the assistant asked for once the owner allows the call", async () => {
+    const { ctx, scope, server } = await setup()
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ data: [{ id: 1, terms: "long" }] }),
+          },
+        ],
+      }),
+    }
+    const asked = {
+      ...call(server, "add_numbers", { a: 1 }),
+      fields: ["data.id"],
+    }
+
+    await withPermission(scope, asked, {})
+    // Other fields are another request.
+    await withPermission(scope, { ...asked, fields: ["data.terms"] }, {})
+    expect(await db().permissionRequest.count()).toBe(2)
+
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { fields: JSON.stringify(["data.id"]) },
+    })
+    const result = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { via: "web", publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    expect(textOf(result)).toBe('{"data":[{"id":1}]}')
+  })
+
   it("shows the owner what the call does, with a warning for destructive tools", async () => {
     const { ctx, scope, server } = await setup()
     await withPermission(

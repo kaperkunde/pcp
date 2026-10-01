@@ -31,6 +31,7 @@ import {
   prepareRegistration,
   updateEndpointDetails,
 } from "./endpoint-admin"
+import { MAX_FIELDS, readFields } from "./answers"
 import { isPcpError } from "./errors"
 import {
   isMemoryWrite,
@@ -455,7 +456,7 @@ export function buildGatewayServer(
     {
       title: "Describe a tool",
       description:
-        'The full description and JSON Schema of a tool\'s arguments, and whether it runs at once ("allowed") or asks the owner first ("ask"). Call this before call_tool.',
+        'The full description and JSON Schema of a tool\'s arguments, whether it runs at once ("allowed") or asks the owner first ("ask"), and for an API, the shape of what it answers ("returns"). Call this before call_tool.',
       inputSchema: z.object({
         server: z.string().describe("The server, as returned by search_tools."),
         tool: z.string().describe("The tool name."),
@@ -478,7 +479,7 @@ export function buildGatewayServer(
         where: {
           serverId_name: { serverId: found.server.id, name: tool.name },
         },
-        select: { inputSchema: true, annotations: true },
+        select: { inputSchema: true, annotations: true, output: true },
       })
 
       if (!row) {
@@ -505,6 +506,8 @@ export function buildGatewayServer(
           description: tool.descriptionOverride ?? tool.description,
           access: tool.access,
           inputSchema,
+          // What a successful call answers, when the API's schema says.
+          ...(row.output ? { returns: row.output } : {}),
           annotations,
         },
         null,
@@ -524,7 +527,7 @@ export function buildGatewayServer(
     {
       title: "Call a tool",
       description:
-        'Run a tool on one of the owner\'s MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" and waits for their answer.',
+        'Run a tool on one of the owner\'s MCP servers with the arguments its schema asks for. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" and waits for their answer. A long JSON answer comes back as a preview: pass fields to get only the parts you need.',
       inputSchema: z.object({
         server: z.string().describe("The server, as returned by search_tools."),
         tool: z.string().describe("The tool name."),
@@ -533,6 +536,14 @@ export function buildGatewayServer(
           .optional()
           .describe(
             "The tool's arguments, matching describe_tool's inputSchema.",
+          ),
+        fields: z
+          .array(z.string().min(1).max(200))
+          .min(1)
+          .max(MAX_FIELDS)
+          .optional()
+          .describe(
+            'Keep only these parts of a JSON answer, as paths of keys joined by dots: ["data.id", "data.number", "meta.pagination"]. A list on the way is looked into, so data.number is the number of every item in data. describe_tool\'s "returns" shows the keys an API answers with.',
           ),
       }),
       annotations: { openWorldHint: true },
@@ -546,9 +557,11 @@ export function buildGatewayServer(
           server: string
           tool: string
           arguments?: Record<string, unknown>
+          fields?: string[]
         },
         ctx,
       ) => {
+        const fields = readFields(args.fields)
         const found = await lookup(args.server, args.tool, {
           includeBlocked: true,
         })
@@ -578,18 +591,16 @@ export function buildGatewayServer(
               server: target,
               tool,
               args: args.arguments ?? {},
+              fields,
             },
             request,
           )
         }
 
-        return runCall(
-          scope.ctx,
-          target,
-          tool.name,
-          args.arguments ?? {},
-          scope.publicUrl,
-        )
+        return runCall(scope.ctx, target, tool.name, args.arguments ?? {}, {
+          publicUrl: scope.publicUrl,
+          fields,
+        })
       },
     ),
   )

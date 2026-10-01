@@ -235,6 +235,7 @@ async function applySpec(
       inputSchema: tool.inputSchema,
       annotations: tool.annotations,
       operation: JSON.stringify(tool.operation),
+      output: tool.output,
     })),
   )
 

@@ -12,6 +12,7 @@ import type {
   PermissionRequest,
 } from "@/lib/generated/prisma/client"
 
+import { readFields, shapeAnswer } from "./answers"
 import type { SyncResult } from "./catalogue"
 import type {
   PermissionDecision,
@@ -42,6 +43,7 @@ import {
   type PermissionPanel,
 } from "./panel"
 import {
+  canonicalJson,
   choosePermissionTier,
   decisionSchema,
   decisionsFor,
@@ -78,8 +80,6 @@ import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
  * difference: an answer can also settle the tool for the calls after it
  * ("Always allow", "Block").
  */
-
-const MAX_RESULT_CHARS = 60_000
 
 /** What the gateway knows about the request it is serving. */
 export type PermissionScope = {
@@ -120,6 +120,8 @@ export type PermissionAsk =
       /** Only the name is read: the gateway keeps a slimmer tool than the row. */
       tool: Pick<McpTool, "name">
       args: Record<string, unknown>
+      /** The parts of the answer the assistant wants back. */
+      fields?: string[]
     }
   | { kind: "register"; input: RegisterArgs }
   | MemoryAsk
@@ -182,43 +184,36 @@ export function permissionUrl(publicUrl: string, id: string): string {
   return `${publicUrl.replace(/\/+$/, "")}/permissions/${encodeURIComponent(id)}`
 }
 
-/** An upstream result with its text cut to what an assistant should read. */
-export function clipResult(result: CallToolResult): CallToolResult {
-  return {
-    content: result.content.map((block) =>
-      block.type === "text" && block.text.length > MAX_RESULT_CHARS
-        ? {
-            ...block,
-            text: `${block.text.slice(0, MAX_RESULT_CHARS)}\n… (truncated by PCP)`,
-          }
-        : block,
-    ),
-    ...(result.isError ? { isError: true } : {}),
-    ...(result.structuredContent
-      ? { structuredContent: result.structuredContent }
-      : {}),
-  }
-}
-
 /**
- * One call to an upstream tool. An OAuth server that is not connected (or
- * whose sign-in expired) answers with the connect panel instead of an error.
+ * One call to an upstream tool, its answer shaped for the assistant
+ * (answers.ts): only `fields` when given, and never more than it should
+ * read. An OAuth server that is not connected (or whose sign-in expired)
+ * answers with the connect panel instead of an error.
  */
 export async function runCall(
   ctx: VaultContext,
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  publicUrl: string,
-  executor: PermissionExecutor = defaultExecutor,
+  {
+    publicUrl,
+    fields,
+    executor = defaultExecutor,
+  }: {
+    publicUrl: string
+    /** The parts of the answer to keep (call_tool's fields). */
+    fields?: string[]
+    executor?: PermissionExecutor
+  },
 ): Promise<CallToolResult> {
   if (needsConnecting(server)) {
     return connectResult(server, publicUrl)
   }
 
   try {
-    return clipResult(
+    return shapeAnswer(
       await executor.callTool(ctx, server, toolName, args, { publicUrl }),
+      { fields },
     )
   } catch (error) {
     if (
@@ -239,7 +234,11 @@ function describeAsk(ask: PermissionAsk): {
 } {
   switch (ask.kind) {
     case "call":
-      return { target: `${ask.server.id}/${ask.tool.name}`, args: ask.args }
+      // The same call asking for other fields is another request.
+      return {
+        target: `${ask.server.id}/${ask.tool.name}${ask.fields ? `\n${canonicalJson(ask.fields)}` : ""}`,
+        args: ask.args,
+      }
     case "register":
       return {
         target: ask.input.url,
@@ -569,6 +568,8 @@ export async function withPermission(
         kind: ask.kind,
         serverId: ask.kind === "call" ? ask.server.id : null,
         toolName: toolNameOf(ask),
+        fields:
+          ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
         argsCiphertext: asBytes(
           encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
         ),
@@ -849,14 +850,24 @@ async function executeCall(
     )
   }
 
-  return runCall(
-    ctx,
-    row.server,
-    row.toolName,
-    readArgs(ctx, row),
+  return runCall(ctx, row.server, row.toolName, readArgs(ctx, row), {
     publicUrl,
+    fields: readStoredFields(row.fields),
     executor,
-  )
+  })
+}
+
+/** The fields a waiting call asked for, as stored; none when unreadable. */
+function readStoredFields(stored: string | null): string[] | undefined {
+  if (!stored) {
+    return undefined
+  }
+
+  try {
+    return readFields(JSON.parse(stored))
+  } catch {
+    return undefined
+  }
 }
 
 async function executeRegister(
