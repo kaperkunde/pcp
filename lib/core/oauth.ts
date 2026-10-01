@@ -174,7 +174,7 @@ async function needsClient(
   publicUrl: string,
   why = "it does not let apps register themselves",
 ): Promise<PcpError> {
-  const message = `${server.name} needs an OAuth client from you: ${why}. Create one in the provider's developer settings with ${oauthRedirectUrl(publicUrl)} as its redirect URI, then enter its client ID and secret under Settings below.`
+  const message = `${server.name} needs an OAuth client from you: ${why}. Create one in the provider's developer settings with ${oauthRedirectUrl(publicUrl)} as its redirect URI, then give PCP its client ID and secret on the server's page.`
 
   await setServerStatus(server.id, "client_required", message)
 

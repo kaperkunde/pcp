@@ -263,6 +263,14 @@ describe("registering an endpoint from text", () => {
         authSecretId: secretId,
       }),
     ).rejects.toThrow(/pass the base URL in url/)
+    // So does one the owner is to type in when they agree.
+    await expect(
+      prepareRegistration(ctx, {
+        name: "Pets",
+        spec: spec(api.origin),
+        newSecretName: "Pets key to come",
+      }),
+    ).rejects.toThrow(/pass the base URL in url/)
 
     const { details } = await approve({
       name: "Pets",

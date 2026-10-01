@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   applyAuthorizeParams,
+  applySignInDefaults,
   chooseRegistration,
   clientMetadataDocument,
   clientMetadataUrl,
@@ -174,6 +175,33 @@ describe("applyAuthorizeParams", () => {
 
     expect(url.searchParams.has("redirect_uri")).toBe(false)
     expect(url.searchParams.get("x")).toBe("1")
+  })
+})
+
+describe("applySignInDefaults", () => {
+  it("asks Google for access PCP can renew", () => {
+    const url = applySignInDefaults(
+      new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=pcp"),
+    )
+
+    expect(url.searchParams.get("access_type")).toBe("offline")
+    expect(url.searchParams.get("prompt")).toBe("consent")
+  })
+
+  it("leaves what the owner set, and other providers, alone", () => {
+    const owner = applySignInDefaults(
+      applyAuthorizeParams(
+        new URL("https://accounts.google.com/o/oauth2/v2/auth?client_id=pcp"),
+        "prompt=select_account",
+      ),
+    )
+    expect(owner.searchParams.getAll("prompt")).toEqual(["select_account"])
+    expect(owner.searchParams.get("access_type")).toBe("offline")
+
+    const other = applySignInDefaults(
+      new URL("https://as.example.com/authorize?client_id=pcp"),
+    )
+    expect(other.searchParams.has("access_type")).toBe(false)
   })
 })
 

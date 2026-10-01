@@ -127,23 +127,30 @@ required.
 The assistant then sees a short description of the servers behind the token
 and these tools:
 
-| Tool               | What it does                                                                                                     |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `search_tools`     | Finds tools across servers from a few words ("create a github issue").                                           |
-| `describe_tool`    | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.     |
-| `call_tool`        | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs.          |
-| `check_permission` | Says whether you answered a request that was waiting for you, and how it went.                                   |
-| `check_server`     | Says whether a server is connected; offers you a Connect button where it can.                                    |
-| `register_server`  | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name. |
+| Tool                  | What it does                                                                                                     |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                           |
+| `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.     |
+| `call_tool`           | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs.          |
+| `check_permission`    | Waits for your answer to a request, then says how it went.                                                       |
+| `check_server`        | Says whether a server is connected; while you sign in to it, waits until you have.                               |
+| `register_server`     | Proposes a new MCP server, or an API from OpenAPI 3 text (JSON or YAML), with no auth or a secret named by name. |
+| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers; you review and save it in PCP.          |
 
-A tool you have not decided about answers "Not done yet" and asks you. Where
-the assistant's app can show it, the question appears in the conversation:
-as PCP's panel (an MCP App) or as the app's own prompt. Otherwise the
-assistant hands you a link to PCP. Each token's page says which of these PCP
-may use; turn one off if an app gets stuck on it. **Allow once** runs that one call,
+A tool you have not decided about answers "Not done yet" and asks you: the
+assistant hands you a link to the request in PCP, and waits while you
+answer there, so it carries on by itself once you have. If you take longer
+than it waits, tell it you answered. **Allow once** runs that one call,
 **Always allow** and **Block** also decide the calls after it, and **Not
 now** runs nothing. A server an assistant proposes is only added once you
-agree; an OAuth one is then connected from a link that opens in your browser.
+agree; an OAuth one is then connected from a link to its page in PCP, and the
+assistant waits while you sign in.
+
+An assistant can also help with a large set of tools: `propose_tool_access`
+takes levels for many tools at once, by name or by pattern (`list_*`), and
+hands you a link to a page in PCP with its levels filled in and each change
+marked. Nothing changes until you save there, and you can change any level
+first, so an assistant can suggest but never raise its own access.
 
 An assistant can write an OpenAPI schema from an API's documentation and hand
 it to `register_server` as text. You see what it asked for before anything is
@@ -175,9 +182,9 @@ A token made with **Let an assistant with this token keep memories** gets a
 `memory` tool: notes that last between conversations and stay with you rather
 than with one app. It works like Claude's own memory tool (files under
 `/memories`: view, create, str_replace, insert, delete, rename, plus search),
-and PCP's instructions tell the assistant to look there before work that may
-depend on what you prefer or decided before, and to save what you would not
-want to say twice.
+and PCP's instructions, modelled on the protocol Claude's own memory tool
+uses, tell the assistant to look there before anything else and to save what
+you would not want to say twice as it goes.
 
 - `/memories/…` is the assistant's own: only the token that wrote a memory
   reads it, and writing one needs no answer from you.
@@ -191,7 +198,12 @@ want to say twice.
 Text with characters that do not show on screen is refused, so what you read
 is all there is. The **Memories** tab lists every memory with the token that
 wrote it; you can add shared ones yourself, and edit, move or delete any of
-them. Memories are encrypted like everything else.
+them. Tick **Read in every conversation** on one (up to 2,000 characters) and
+its text comes with PCP's instructions, so an assistant has it before it does
+anything rather than when it thinks to look; a shared one reaches every
+assistant, one an assistant keeps reaches only that one. If an assistant
+changes one it keeps, it is no longer read in every conversation until you
+tick it again. Memories are encrypted like everything else.
 
 ## How it is secured
 

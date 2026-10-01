@@ -10,7 +10,7 @@ import { db } from "./db"
  */
 
 export type SyncResult = {
-  status: "ok" | "auth_required" | "client_required" | "error"
+  status: "ok" | "auth_required" | "client_required" | "refused" | "error"
   message: string
   toolCount: number
 }

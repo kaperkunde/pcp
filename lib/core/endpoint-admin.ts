@@ -56,7 +56,8 @@ import {
  *
  * - No credential changes, ever. A secret only comes with a registration the
  *   owner approves, named by its NAME and shown to them with the address it
- *   goes to; update_endpoint never names, sees or attaches one, and the
+ *   goes to (a name PCP does not hold yet is a secret the owner types in on
+ *   PCP's page when they agree, never in the conversation); update_endpoint never names, sees or attaches one, and the
  *   writer its changes go through (endpoints.ts changeEndpoint) never
  *   touches the credential, the schema's source or public-only.
  * - Nothing takes effect without the owner. A registration is a request the
@@ -524,6 +525,8 @@ export type RegistrationInput = {
   readOnly?: boolean
   /** The secret by id, with the header it goes in, when there is one. */
   authSecretId?: string | null
+  /** Or a secret the owner enters when they agree, by the name it will get. */
+  newSecretName?: string | null
   authHeaderName?: string | null
 }
 
@@ -578,10 +581,11 @@ export async function prepareRegistration(
   }
 
   const patches = input.patches === undefined ? [] : readPatches(input.patches)
+  const sendsSecret = Boolean(input.authSecretId || input.newSecretName)
 
   // A secret goes where an address says, and the schema is someone else's
   // document: the address has to come from the request the owner will read.
-  if (input.authSecretId && !input.baseUrl?.trim()) {
+  if (sendsSecret && !input.baseUrl?.trim()) {
     throw invalid(
       "A secret is sent to an address you name: pass the base URL in url, so the owner sees where it will go.",
     )
@@ -604,7 +608,7 @@ export async function prepareRegistration(
     preview = previewEndpoint(text, {
       readOnly,
       ownerBaseUrl: input.baseUrl,
-      hasSecret: Boolean(input.authSecretId),
+      hasSecret: sendsSecret,
       authHeaderName: input.authHeaderName,
       patches,
       fetchedFrom: fetched?.url ?? null,
