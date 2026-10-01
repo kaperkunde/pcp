@@ -59,8 +59,13 @@ Consequences:
   wraps the same DEK, so sessions, API tokens and the recovery key keep
   working.
 - **Revoking an API token** blanks its grant; **signing out** deletes the
-  session's; **recovery** replaces the password grant and deletes every
-  session grant.
+  session's; **recovery** replaces the password grant, deletes every session
+  grant and, when asked, blanks every API token grant. **Signing out
+  everywhere** can blank them too.
+- **A session cannot outlast itself.** Making an API token or a recovery key
+  asks for the password again (`lib/server/password-attempts.ts`). A session
+  cookie can be copied, so it may use the DEK but not mint a grant that
+  survives the session.
 - **Losing every credential loses the data.** There is no back door because
   there is no key to keep one with.
 - Rotating the DEK itself (re-encrypting every row) is not implemented;

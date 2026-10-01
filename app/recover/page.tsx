@@ -19,8 +19,8 @@ export default async function RecoverPage() {
       intro={
         <p>
           The recovery key from setup unlocks the vault without the password.
-          Setting a new password signs every browser out; API tokens keep
-          working.
+          Setting a new password signs every browser out. API tokens keep
+          working unless you revoke them here too.
         </p>
       }
     >

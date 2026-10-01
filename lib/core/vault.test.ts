@@ -4,6 +4,7 @@ import {
   createApiToken,
   listApiTokens,
   resolveApiToken,
+  revokeAllApiTokens,
   revokeApiToken,
 } from "./api-tokens"
 import { db } from "./db"
@@ -27,6 +28,7 @@ import {
   rotateRecoveryKey,
   setupVault,
   unlockOwnerVault,
+  verifyPassword,
 } from "./vault"
 
 // The core against a real (scratch) SQLite database: setup, the three ways
@@ -113,6 +115,10 @@ describe("setup and sign-in", () => {
     ).toBe(true)
 
     const { cookieValue } = await createSession(ctx)
+    const { token } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+    })
     await expect(
       resetPasswordWithRecoveryKey("pcp_recovery_nope", "third long password"),
     ).rejects.toThrow(/recovery key/)
@@ -124,8 +130,43 @@ describe("setup and sign-in", () => {
     expect((await unlockOwnerVault("third long password"))?.vaultId).toBe(
       vaultId,
     )
-    // Recovery signs every browser out.
+    // Recovery signs every browser out; API tokens keep working.
     expect(await resolveSession(cookieValue)).toBeNull()
+    expect(await resolveApiToken(token)).not.toBeNull()
+  })
+
+  it("can revoke every API token while recovering", async () => {
+    const { vaultId, dek, recoveryKey } = await setupVault({
+      name: "Ada",
+      password: PASSWORD,
+    })
+    const { token } = await createApiToken(
+      { vaultId, dek },
+      { name: "Claude", allowAllServers: true },
+    )
+
+    await resetPasswordWithRecoveryKey(recoveryKey, "another long password", {
+      revokeApiTokens: true,
+    })
+
+    expect(await resolveApiToken(token)).toBeNull()
+  })
+})
+
+describe("asking for the password again", () => {
+  it("accepts the vault's password and nothing else", async () => {
+    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
+
+    await expect(verifyPassword(ctx, PASSWORD)).resolves.toBeUndefined()
+    await expect(verifyPassword(ctx, "wrong password")).rejects.toThrow(
+      /not right/,
+    )
+    await expect(verifyPassword(ctx, "")).rejects.toThrow(/not right/)
+
+    // The recovery key is not the password.
+    await expect(verifyPassword(ctx, ctx.recoveryKey)).rejects.toThrow(
+      /not right/,
+    )
   })
 })
 
@@ -295,5 +336,41 @@ describe("servers and tokens", () => {
     ).not.toBeNull()
     // The scoped token is unaffected.
     expect(await resolveApiToken(scoped.token)).not.toBeNull()
+  })
+
+  it("revokes every token at once and leaves none holding the key", async () => {
+    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
+    const first = await createApiToken(ctx, {
+      name: "Laptop",
+      allowAllServers: true,
+    })
+    const second = await createApiToken(ctx, {
+      name: "Desktop",
+      allowAllServers: true,
+    })
+    const earlier = await createApiToken(ctx, {
+      name: "Old",
+      allowAllServers: true,
+    })
+    await revokeApiToken(ctx, earlier.id)
+
+    // Only the two that still worked are counted.
+    expect(await revokeAllApiTokens(ctx)).toBe(2)
+    expect(await resolveApiToken(first.token)).toBeNull()
+    expect(await resolveApiToken(second.token)).toBeNull()
+
+    const grants = await db().keyGrant.findMany({
+      where: { kind: "api_token" },
+    })
+    expect(grants).toHaveLength(3)
+    for (const grant of grants) {
+      expect(grant.lookupHash).toBeNull()
+      expect(grant.wrappedDek.length).toBe(0)
+    }
+    expect(
+      (await listApiTokens(ctx)).every((token) => token.revokedAt !== null),
+    ).toBe(true)
+
+    expect(await revokeAllApiTokens(ctx)).toBe(0)
   })
 })

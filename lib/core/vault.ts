@@ -1,3 +1,4 @@
+import { revokeAllApiTokens } from "./api-tokens"
 import { MIN_PASSWORD_LENGTH } from "./constants"
 import type { VaultContext } from "./context"
 import { generateDek, randomSecret } from "./crypto"
@@ -140,6 +141,21 @@ export async function unlockOwnerVault(
   return dek ? { vaultId: vault.id, dek } : null
 }
 
+/**
+ * Throws unless `password` is the vault's password. For asking for it again
+ * inside a session, before something that would outlast the session.
+ */
+export async function verifyPassword(
+  ctx: VaultContext,
+  password: string,
+): Promise<void> {
+  const dek = password ? await unlockWithPassword(ctx.vaultId, password) : null
+
+  if (!dek) {
+    throw new PcpError("unauthorized", "That password is not right.")
+  }
+}
+
 export async function changePassword(
   ctx: VaultContext,
   currentPassword: string,
@@ -161,12 +177,15 @@ export async function changePassword(
 }
 
 /**
- * Sets a new password from the recovery key. Every session is signed out;
- * API tokens keep working, as they hold their own copy of the key.
+ * Sets a new password from the recovery key. Every session is signed out.
+ * API tokens hold their own copy of the key and keep working, unless
+ * `revokeApiTokens` is set: the choice for someone who thinks another
+ * person has had their password or a token.
  */
 export async function resetPasswordWithRecoveryKey(
   recoveryKey: string,
   newPassword: string,
+  { revokeApiTokens = false }: { revokeApiTokens?: boolean } = {},
 ): Promise<VaultContext> {
   const passwordProblem = validatePassword(newPassword)
 
@@ -184,10 +203,15 @@ export async function resetPasswordWithRecoveryKey(
   }
 
   const { grant, dek } = unlocked
+  const ctx = { vaultId: grant.vaultId, dek }
   await replacePasswordGrant(grant.vaultId, dek, newPassword)
   await destroyAllSessions(grant.vaultId)
 
-  return { vaultId: grant.vaultId, dek }
+  if (revokeApiTokens) {
+    await revokeAllApiTokens(ctx)
+  }
+
+  return ctx
 }
 
 /** A fresh recovery key; the previous one stops working. */

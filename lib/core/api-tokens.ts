@@ -316,14 +316,49 @@ export async function revokeApiToken(
     }),
     db().keyGrant.update({
       where: { id: record.grantId },
-      // Overwrite the wrapped key with nothing: the grant row stays because
-      // the token row points at it, but it can no longer open anything.
-      data: {
-        lookupHash: null,
-        wrappedDek: new Uint8Array(new ArrayBuffer(0)),
-      },
+      data: blankGrant(),
     }),
   ])
+}
+
+/**
+ * Revokes every token the vault still has, expired ones included, so none
+ * keeps a copy of the key. The answer to "someone else may hold a token".
+ */
+export async function revokeAllApiTokens(ctx: VaultContext): Promise<number> {
+  const live = await db().apiToken.findMany({
+    where: { vaultId: ctx.vaultId, revokedAt: null },
+    select: { id: true, grantId: true },
+  })
+
+  if (live.length === 0) {
+    return 0
+  }
+
+  await db().$transaction([
+    db().apiToken.updateMany({
+      where: { id: { in: live.map((token) => token.id) } },
+      data: { revokedAt: new Date() },
+    }),
+    db().keyGrant.updateMany({
+      where: { id: { in: live.map((token) => token.grantId) } },
+      data: blankGrant(),
+    }),
+  ])
+
+  return live.length
+}
+
+/**
+ * A revoked token's grant: the wrapped key overwritten with nothing and the
+ * lookup hash gone. The row stays because the token row points at it, but
+ * it can no longer open anything.
+ */
+function blankGrant() {
+  return {
+    lookupHash: null,
+    wrappedDek: new Uint8Array(new ArrayBuffer(0)),
+  }
 }
 
 export async function deleteApiToken(

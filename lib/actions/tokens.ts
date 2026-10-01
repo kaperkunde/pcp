@@ -20,7 +20,8 @@ import {
   fields,
   guarded,
 } from "@/lib/server/action-state"
-import { requireContext } from "@/lib/server/session"
+import { confirmPassword } from "@/lib/server/password-attempts"
+import { requireContext, requireSession } from "@/lib/server/session"
 
 export type CreateTokenResult = ActionState<{ token: string; id: string }>
 
@@ -37,19 +38,23 @@ export async function createTokenAction(
   _previous: CreateTokenResult,
   formData: FormData,
 ): Promise<CreateTokenResult> {
-  const ctx = await requireContext()
+  const session = await requireSession()
   const expiresIn = field(formData, "expiresIn")
   const days = expiresIn ? Number(expiresIn) : 0
 
-  const result = await guarded(() =>
-    createApiToken(ctx, {
+  const result = await guarded(async () => {
+    // A token is a lasting copy of the vault key: the session alone is not
+    // enough to make one.
+    await confirmPassword(session, field(formData, "password"))
+
+    return createApiToken(session.ctx, {
       name: field(formData, "name"),
       allowAllServers: field(formData, "access") !== "selected",
       serverIds: fields(formData, "serverIds"),
       expiresAt:
         days > 0 ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null,
-    }),
-  )
+    })
+  })
 
   revalidatePath("/tokens")
 

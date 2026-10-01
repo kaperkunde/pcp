@@ -1,4 +1,29 @@
-# PCP - Primary Control Provider
+<p align="center">
+  <img src="public/icons/icon-512.png" alt="The PCP logo: a lightning-blue letter P with coloured data streams flowing into it" width="200" height="200">
+</p>
+
+<h1 align="center">PCP - Primary Control Provider</h1>
+
+<p align="center">
+  <strong>One endpoint for every MCP server you use.</strong><br>
+  Self-hosted, with your secrets kept encrypted on your side.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-5ed3c3?style=flat-square&labelColor=131720"></a>
+  <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-docker%20compose-5ed3c3?style=flat-square&labelColor=131720">
+  <img alt="Single user" src="https://img.shields.io/badge/vault-single%20user-5ed3c3?style=flat-square&labelColor=131720">
+</p>
+
+<p align="center">
+  <a href="#run-it">Run it</a> ·
+  <a href="#use-it">Use it</a> ·
+  <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
+
+---
 
 A self-hosted gateway between your AI assistant and the MCP servers you use.
 PCP keeps the credentials those servers need in an encrypted store, signs in
@@ -65,11 +90,12 @@ required.
    and keeps the tokens as a managed secret. PCP reads each server's tool
    list; you can rewrite any tool's description so an assistant picks it
    correctly.
-3. **API tokens.** Create a token per assistant or machine. A token can reach
-   every server or only the ones you pick, and can expire. Revoking it
-   destroys its copy of the vault key. A token's page sets each tool to
-   **Allowed**, **Ask you first** (the default) or **Blocked**, a whole
-   server at once, or copies all of it from another token.
+3. **API tokens.** Create a token per assistant or machine; PCP asks for your
+   password to make one. A token can reach every server or only the ones you
+   pick, and can expire. Revoking it destroys its copy of the vault key. A
+   token's page sets each tool to **Allowed**, **Ask you first** (the default)
+   or **Blocked**, a whole server at once, or copies all of it from another
+   token.
 4. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
    bearer token. For Claude Code:
 
@@ -115,7 +141,10 @@ a problem.
 Consequences worth knowing:
 
 - Changing the password re-wraps the key; sessions and API tokens keep
-  working. Using the recovery key signs every browser out.
+  working. Using the recovery key signs every browser out and can revoke
+  every API token.
+- A stolen session cannot make an API token or a recovery key: both ask for
+  the password again.
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
 - The gateway never returns a secret to an assistant, only what the upstream
