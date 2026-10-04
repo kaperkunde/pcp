@@ -91,11 +91,13 @@ needs **More info → Run anyway**. The README says so where the links are.
 
 To sign, add repository secrets and the workflow picks them up:
 
-| Secret                                                     | Used for                                                                                                                           |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `CSC_LINK`, `CSC_KEY_PASSWORD`                             | A Developer ID Application certificate (macOS) or a code signing certificate (Windows), as a base64 `.p12`/`.pfx` and its password |
-| `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` | Notarization on macOS; `scripts/dist.mjs` turns it on when all three are set                                                       |
+| Secret                                                     | Used for                                                                            |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `CSC_LINK`, `CSC_KEY_PASSWORD`                             | The macOS Developer ID Application certificate, as a base64 `.p12` and its password |
+| `WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`                     | The Windows code signing certificate, as a base64 `.pfx` and its password           |
+| `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` | Notarization on macOS; `scripts/dist.mjs` turns it on when all three are set        |
 
-The macOS and Windows jobs read the same `CSC_LINK`; use `WIN_CSC_LINK` and
-`WIN_CSC_KEY_PASSWORD` for a separate Windows certificate (electron-builder
-prefers them on Windows).
+Each platform signs only with its own certificate: `scripts/dist.mjs` keeps
+`CSC_LINK` away from the Windows build, where electron-builder would otherwise
+fall back to it and sign the installer with an Apple certificate Windows does
+not trust.

@@ -9,8 +9,9 @@
 // another arch but not another OS.
 //
 // Signing is by electron-builder's usual environment: CSC_LINK and
-// CSC_KEY_PASSWORD for the certificate (WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD
-// for a separate Windows one); APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and
+// CSC_KEY_PASSWORD for the macOS certificate, WIN_CSC_LINK and
+// WIN_CSC_KEY_PASSWORD for the Windows one (never the other platform's);
+// APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and
 // APPLE_TEAM_ID to notarize on macOS. Without a certificate the build is not
 // signed by anyone, deliberately rather than by whatever identity a keychain
 // happens to hold. On macOS it is then signed ad hoc: Apple silicon refuses
@@ -83,9 +84,19 @@ function main() {
   for (const name of SIGNING_VARIABLES) {
     if (!env[name]?.trim()) delete env[name]
   }
+  // Each platform signs with its own certificate. electron-builder falls back
+  // to CSC_LINK on Windows, which would sign the installer with the Apple
+  // Developer ID that Windows does not trust.
+  if (process.platform === "win32") {
+    delete env.CSC_LINK
+    delete env.CSC_KEY_PASSWORD
+  } else {
+    delete env.WIN_CSC_LINK
+    delete env.WIN_CSC_KEY_PASSWORD
+  }
   const signing = Boolean(
     process.platform === "win32"
-      ? env.WIN_CSC_LINK || env.CSC_LINK || env.CSC_NAME
+      ? env.WIN_CSC_LINK || env.CSC_NAME
       : env.CSC_LINK || env.CSC_NAME,
   )
   if (!signing) {
