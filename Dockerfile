@@ -9,7 +9,7 @@
 # also listens on 8080 (plain HTTP, for Let's Encrypt and the redirect) and
 # 8443 (HTTPS): docker-compose.https.yaml maps them to 80 and 443.
 
-FROM node:22-bookworm-slim AS base
+FROM node:24-bookworm-slim AS base
 
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     NEXT_TELEMETRY_DISABLED=1

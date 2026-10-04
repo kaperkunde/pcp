@@ -336,7 +336,7 @@ Consequences worth knowing:
 
 ## Development
 
-Node 22 and pnpm 10. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow
+Node 24 and pnpm 10. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow
 and [CLAUDE.md](CLAUDE.md) for the conventions an agent (or a person) should
 keep to.
 
