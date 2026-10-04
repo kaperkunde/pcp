@@ -1,6 +1,6 @@
 {
   "name": "pcp",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "private": true,
   "description": "Self-hosted, single-user MCP gateway with an encrypted secret store and a search-based tool endpoint.",
   "license": "MIT",
