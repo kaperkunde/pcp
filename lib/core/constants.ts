@@ -8,11 +8,33 @@ export const MIN_PASSWORD_LENGTH = 10
 export const DEFAULT_HEADER_NAME = "Authorization"
 export const DEFAULT_VALUE_TEMPLATE = "Bearer {{secret}}"
 export const SECRET_PLACEHOLDER = "{{secret}}"
+/**
+ * The most headers a server's credential goes in, the first included: an API
+ * that takes a key and a secret key, each in its own header, needs two.
+ */
+export const MAX_AUTH_HEADERS = 5
+
+/**
+ * The secret picker's choice for one typed into the form there and then,
+ * saved as a new secret when the form is.
+ */
+export const NEW_SECRET = "new"
 
 /** The largest OpenAPI schema PCP reads, uploaded or downloaded. */
 export const MAX_SPEC_BYTES = 5 * 1024 * 1024
 export const SPEC_FILE_ACCEPT =
   ".json,.yaml,.yml,application/json,application/yaml,text/yaml"
+
+/**
+ * An export of everything PCP holds (lib/core/backup.ts): the file's
+ * extension, and the most PCP reads of one. The file is a JSON envelope
+ * around compressed, encrypted rows; the second limit is what those rows
+ * may unpack to, well under what V8 lets one string hold.
+ */
+export const EXPORT_FILE_SUFFIX = ".pcpexport"
+export const EXPORT_FILE_ACCEPT = EXPORT_FILE_SUFFIX
+export const MAX_EXPORT_FILE_BYTES = 64 * 1024 * 1024
+export const MAX_EXPORT_PAYLOAD_BYTES = 256 * 1024 * 1024
 
 /**
  * What one API token may do with one tool. `ask` is the default: the owner
@@ -46,7 +68,51 @@ export const PERMISSION_DECISIONS = [
 export type PermissionDecision = (typeof PERMISSION_DECISIONS)[number]
 
 export type PermissionKind =
-  "call" | "register" | "memory_share" | "memory_change"
+  | "call"
+  | "register"
+  | "memory_share"
+  | "memory_change"
+  | "access"
+  | "endpoint_change"
+  | "fetch"
+
+/**
+ * The HTTP methods web_fetch has a level for. Each is the default for a
+ * site without a level of its own; OTHER covers every other method it
+ * sends (HEAD, OPTIONS and the rest).
+ */
+export const FETCH_METHOD_GROUPS = [
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OTHER",
+] as const
+
+export type FetchMethodGroup = (typeof FETCH_METHOD_GROUPS)[number]
+
+export const FETCH_METHOD_LABELS: Record<
+  FetchMethodGroup,
+  { label: string; hint: string }
+> = {
+  GET: { label: "GET", hint: "Reading a page." },
+  POST: { label: "POST", hint: "Sending a form or data." },
+  PUT: { label: "PUT", hint: "Putting something at the address." },
+  PATCH: { label: "PATCH", hint: "Changing part of something." },
+  DELETE: { label: "DELETE", hint: "Deleting something." },
+  OTHER: { label: "Other methods", hint: "HEAD, OPTIONS and the rest." },
+}
+
+/** A site's level: one of the tool levels, or whatever its method has. */
+export const FETCH_SITE_LEVELS = ["default", ...TOOL_ACCESS_LEVELS] as const
+
+export type FetchSiteLevel = (typeof FETCH_SITE_LEVELS)[number]
+
+export const FETCH_SITE_LABELS: Record<FetchSiteLevel, string> = {
+  default: "Use the method settings",
+  ...TOOL_ACCESS_LABELS,
+}
 
 /** The longest memory, in characters. */
 export const MAX_MEMORY_CHARS = 10_000
@@ -59,35 +125,48 @@ export const MAX_SHARED_MEMORY_CHARS = 2_000
 
 /** The longest memory path, without the leading /memories/. */
 export const MAX_MEMORY_PATH = 200
+
 /**
- * The ways PCP can ask the owner about a call, in the order it tries them
- * (see choosePermissionTier). The link always works, so a token can turn
- * off the others but not the link.
+ * Dynamic DNS services PCP can keep pointed at this machine
+ * (lib/core/network/ddns.ts). DuckDNS is the one the setup page suggests:
+ * free, and a single token.
  */
-export const PERMISSION_TIERS = ["app", "form", "url", "link"] as const
+export const DDNS_PROVIDERS = [
+  "duckdns",
+  "dyndns2",
+  "cloudflare",
+  "custom",
+] as const
 
-export type PermissionTier = (typeof PERMISSION_TIERS)[number]
+export type DdnsProvider = (typeof DDNS_PROVIDERS)[number]
 
-export const OPTIONAL_PERMISSION_TIERS = ["app", "form", "url"] as const
-
-export const PERMISSION_TIER_LABELS: Record<
-  PermissionTier,
+export const DDNS_PROVIDER_LABELS: Record<
+  DdnsProvider,
   { label: string; hint: string }
 > = {
-  app: {
-    label: "PCP's panel",
-    hint: "Buttons in the conversation, in apps that show panels.",
+  duckdns: {
+    label: "DuckDNS",
+    hint: "Free. Sign in at duckdns.org, pick a name, and copy your token.",
   },
-  form: {
-    label: "The app's own prompt",
-    hint: "Some apps say they show it and do not, which stalls the call until it times out.",
+  dyndns2: {
+    label: "No-IP, Dynu and others",
+    hint: "Services that speak the common dyndns2 update protocol, with a username and password.",
   },
-  url: {
-    label: "The app opens PCP",
-    hint: "The app opens the request in PCP for you to answer.",
+  cloudflare: {
+    label: "Cloudflare",
+    hint: "A domain you own on Cloudflare, with an API token that may edit its DNS.",
   },
-  link: {
-    label: "A link",
-    hint: "The assistant passes on a link to the request in PCP. Always on: it is what is left when nothing above works.",
+  custom: {
+    label: "Another service (an update URL)",
+    hint: "Any service that updates when PCP opens a URL.",
   },
 }
+
+/** dyndns2 services PCP knows the update address of. */
+export const DYNDNS2_SERVERS: Record<string, string> = {
+  "dynupdate.no-ip.com": "No-IP",
+  "api.dynu.com": "Dynu",
+}
+
+/** Let's Encrypt's agreements, which turning HTTPS on accepts. */
+export const LETS_ENCRYPT_TERMS_URL = "https://letsencrypt.org/repository/"

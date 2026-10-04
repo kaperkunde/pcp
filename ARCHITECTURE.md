@@ -2,8 +2,8 @@
 
 PCP is a Next.js application with a framework-free core. This document covers
 the three things that shape it: how data is encrypted, how a request finds
-the vault it works on, and how a multi-tenant host could be built on the same
-code without changing the single-user product.
+the vault it works on, and what keeps the core usable under a different host
+without changing the single-user product.
 
 ## Layers
 
@@ -12,14 +12,17 @@ app/                 Routes and pages (Next.js App Router)
   mcp/route.ts       The gateway endpoint
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
+  api/export/…       The export download (a file needs Content-Disposition)
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
   mail/              Mail accounts: JMAP and IMAP/SMTP behind one set of mail tools
+  network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
+desktop/             The Mac and Windows app: Electron around the production build, nothing of PCP in it
 ```
 
 `lib/core` takes a `VaultContext` — `{ vaultId, dek }` — as an explicit
@@ -96,10 +99,10 @@ resolved token, serves the request and discards it. Upstream connections are
 opened per call. Nothing in the endpoint knows how many vaults exist, which
 is what makes it serve many of them at once.
 
-## Building a multi-tenant host on it
+## Running the core under another host
 
-The plan for a SaaS that serves many people from one endpoint, without
-exposing any of it in this repository:
+Nothing in the core assumes one vault, so a host that serves many people
+from one endpoint could be built on it. What that would take:
 
 1. **Embed `lib/core`.** It has no Next.js imports (ESLint rejects them), one
    database module to swap and an explicit `VaultContext`. Extracting it to a
@@ -122,9 +125,8 @@ exposing any of it in this repository:
    step instead of at boot (`instrumentation.ts` → `applyMigrations()` is
    for a single instance). Rate limits (`lib/core/rate-limit.ts`) are
    per-process and would move to a shared store.
-5. **Never expose the seams here.** No admin API, no "create vault"
-   endpoint, no tenant switch in the UI: the public product stays
-   single-user.
+5. **None of it lives in this repository.** No admin API, no "create vault"
+   endpoint, no tenant switch in the UI: PCP stays single-user.
 
 ## API endpoints
 
@@ -164,6 +166,12 @@ unchanged. Two functions in `lib/core/upstream.ts` branch on the kind:
 - The schema text is kept in `openapi_spec`, with the edits, apart from the
   server row so neither the server list nor the gateway loads it. An uploaded
   schema is regenerated from that copy when the owner changes a setting.
+  `openapi_spec.built_with` records the PCP version that built the tools; a
+  boot under another version rebuilds them from the stored copy
+  (`endpoints.ts: rebuildOutdatedEndpoints`, in the background), so an
+  endpoint gets what a newer generator makes of its schema without being
+  downloaded again. One that no longer builds keeps its tools and is tried at
+  the next boot.
 
 **Making a call** (`call.ts`, `request.ts`): `buildRequest` turns the
 assistant's arguments into a request following the plan. Arguments the plan
@@ -171,14 +179,20 @@ does not name are refused. Path values are percent-encoded and never `.` or
 `..`. Only declared header parameters are sent, never the ones PCP owns
 (Authorization, Cookie, Host, hop-by-hop headers), and a header value cannot
 carry a line break. The credential is added last, so no argument can replace
-it, and the finished URL must still be under the base URL. `executeCall`
-sends it with a timeout and a cap on the answer, **without following
-redirects** (`fetch` would repeat a custom header such as `X-API-Key` on the
-next host), turns the answer into a tool result (JSON pretty-printed and,
-when small, as `structuredContent`; text as it is; other types described, not
-dumped; an error status as an error result), and removes the credential from
-it before parsing, because an API that echoes a key back (in an error, say)
-must not hand it to the assistant.
+it, and the finished URL must still be under the base URL. A credential can
+take several headers, each with its own secret (an API that wants a key and a
+secret key, as an OpenAPI security requirement naming two `apiKey` schemes
+says): the first is on the server row, the rest in `server_auth_header`. None
+of them is ever offered as an argument, so no part of a credential passes
+through an assistant, and every secret and header value is removed from the
+answer. A schema whose requirement names a key header the endpoint does not
+send is reported in its status. `executeCall` sends it with a timeout and a
+cap on the answer, **without following redirects** (`fetch` would repeat a
+custom header such as `X-API-Key` on the next host), turns the answer into a
+tool result (JSON pretty-printed and, when small, as `structuredContent`; text
+as it is; other types described, not dumped; an error status as an error
+result), and removes the credential from it before parsing, because an API
+that echoes a key back (in an error, say) must not hand it to the assistant.
 
 **Where requests go** is the owner's choice, made once. The base URL is the
 owner's own field when filled, otherwise the schema's first server, resolved
@@ -192,6 +206,36 @@ secret later to an address that came from the schema asks for it again. An edit
 with the field left empty keeps the saved address and never takes the schema's
 server, so a schema cannot aim the secret somewhere the owner did not choose.
 
+**Signing in with OAuth.** An endpoint can send the owner's OAuth token
+instead of a secret, for APIs that take only that (Google's, Microsoft
+Graph, Spotify). Where to sign in comes from the schema: `openapi/oauth.ts`
+reads an `oauth2` security scheme's authorization code flow (the only flow
+where a person signs in; implicit, password and client credentials are not
+used, and OpenID Connect discovery is not read) and the scopes the offered
+operations require, or every scope the flow lists when none names one. The
+sign-in and token addresses are stored on the row
+(`oauth_authorization_url`, `oauth_token_url`) when the owner saves or
+approves the endpoint, and only then: a later schema that moves them is
+reported in the status, never followed, so the client secret and the refresh
+token only go where the owner was shown. Saving new ones drops the tokens.
+
+The flow is the MCP servers' (below), with the stored addresses standing in
+for discovery: `upstream.ts: endpointDiscovery` gives the SDK an
+authorization server whose metadata is those two addresses, with no issuer
+(a schema names addresses, not the server's identity, so the sign-in
+address's origin stands in for it, and the owner's client is bound to that),
+and no resource indicator (a REST API names none, and providers that do not
+know RFC 8707 refuse it). The owner's client works as for an MCP server, and
+so do Google's sign-in defaults and the renewal notice. Token requests go
+through `openapi/transport.ts` under the endpoint's address rule, like its
+calls. A call carries `Authorization: Bearer <token>`; a token that has run
+out is renewed first with the refresh token, and a 401 gets one renewed token
+and one more try (a refused request did nothing). A renewal the provider
+refuses leaves the endpoint needing connecting, which the gateway answers
+with a link to connect it. The token is redacted from what the API answers, like a
+secret, and the `Authorization` header is never one of an operation's
+arguments.
+
 Private addresses are allowed, as they are for MCP servers: only the owner
 sets a schema URL or base URL, and a self-hosted PCP often talks to services
 on its own network. A multi-tenant host must add an address policy before it
@@ -200,17 +244,37 @@ link-local and metadata ranges, and connect to the address it checked.
 
 ## Registering and managing endpoints through the gateway
 
-**Registering** is `register_server`, the tool main already had for MCP
-servers, with an OpenAPI document as text in `openapi_schema` or by its
+**Registering** is `register_server`, the same tool that adds MCP servers,
+with an OpenAPI document as text in `openapi_schema` or by its
 address in `openapi_url` (plus `spec_patches` to edit it, `url` for the base
-URL, `read_only`, and a secret named by NAME). It is an assistant's request,
+URL, `read_only`, and a secret named by NAME, or `auth_type` oauth for a
+document that declares a sign-in, with the owner's `client_id`). It is an assistant's request,
 so it goes through the same owner approval as any other new server (below):
 PCP reads the document when the request is made (downloading it, for a URL),
 applies the edits, refuses one that cannot be used, and shows the owner the
 address, where the schema came from, how many edits it has, the tool count
 and operations, whether the tools can change things, and the secret that
 would be sent. Nothing exists until they agree; then `executeRegister` creates the
-endpoint, on, and adds it to the token's scope. An assistant can write a
+endpoint, on, and adds it to the token's scope.
+
+With OAuth the owner is also shown where they will sign in, where the client
+secret goes and the redirect URI their client needs; the token goes to the
+base URL, so that has to be named in the request, as for a secret. A
+`client_id` (for an MCP server too) is the owner's client at a provider that
+lets no app register itself, and its secret is a new secret the owner types
+in on the approval page, which may be left empty for a client without one;
+`secret` can name one they stored instead.
+
+A secret is named, never sent. A name PCP does not hold yet (an MCP server's
+or an API's) makes a request the owner agrees to on PCP's own page, like
+every request, typing the value in there: it never passes through the
+assistant's app. The value is saved as a new secret by the proposed name (a number is
+added when that is taken by then) just before the server is made, and removed
+again if making it fails; a secret of that name the owner added in the
+meantime is used when they leave the field empty. The assistant is told the
+name it was saved as, never the value. The owner's own forms work the same
+way: the secret picker has "a new secret, entered here", saved with the
+server or endpoint once everything else on the form has been checked. An assistant can write a
 document from an API's documentation and register it in one call. What it
 registers has `public_only` set (below) and cannot carry a secret unless the
 owner approved that secret going to the address they were shown.
@@ -223,17 +287,28 @@ adds to them, `patches` replaces them all) rather than by sending it again,
 and read a part at a time: `get_endpoint`'s `specPointer` returns one value of
 the edited document by JSON Pointer, and a value too long to include comes
 back as its keys, to point further in with, so a schema of any size can be
-read in steps under the answer's length limit. The rules are in
+read in steps under the answer's length limit (such a read leaves out what
+the first one said). `includeProblems` lists likely mistakes in the schema
+that confuse assistants, each with the edits that fix it
+(`openapi/lint.ts`); `register_server` names them too. The rules are in
 `lib/core/endpoint-admin.ts`, and they exist because an assistant that can
 change an endpoint decides where PCP sends requests:
 
 - **Whose endpoint it is.** An endpoint is the assistant's while it sends no
-  secret and is still limited to public addresses. It is the owner's once it
-  sends one of their secrets or they allow private addresses. The assistant can
-  rewrite its own; on the owner's it can read and turn read-only on, and
-  nothing else. A new schema could add operations the owner's key then
-  performs, and a new address, name or description could send the key, or
-  another assistant, somewhere else.
+  secret or token and is still limited to public addresses. It is the owner's
+  once it sends one of their secrets or OAuth tokens, or they allow private
+  addresses. The assistant can
+  rewrite its own. On the owner's it can read it and turn read-only on, and it
+  can ask (a permission request of kind `endpoint_change`) for a new name or
+  description, edits, tool descriptions, or a new read of the schema URL: the
+  owner is shown every new edit and description in full and what it does to
+  the tools (added, taken out, changed, and a warning when a new tool writes
+  with their secret), and only that is made, to the endpoint as it was when
+  they were asked (`endpoint-admin.ts: applyEndpointChange`); a re-read
+  schema must still be the document they were told about. Its address and a
+  whole new schema stay the owner's alone: a new address could send the key
+  somewhere else, and a new document is not something a page of lines can
+  show them.
 - **Nothing takes effect without the owner.** A registration waits for their
   answer. A change to an endpoint that other assistants can see (its words,
   schema or address, or read-only turned off) disables it until the owner
@@ -244,11 +319,11 @@ change an endpoint decides where PCP sends requests:
 - **No credential changes, ever.** A secret only comes with a registration
   the owner approves, and then by name. `update_endpoint` accepts nothing that
   names a secret, a header or a template, and `get_endpoint` shows only
-  whether a header is sent and what it is called. The writer these changes go
-  through (`endpoints.ts: changeEndpoint`) writes only the columns it is given
-  and never the credential, the schema's source, or public-only, so an owner
-  changing those at the same moment is not overwritten and the rules above
-  cannot be got around by what is passed in.
+  whether headers are sent and what they are called. The writer these changes
+  go through (`endpoints.ts: changeEndpoint`) writes only the columns it is
+  given and never the credential, the schema's source, or public-only, so an
+  owner changing those at the same moment is not overwritten and the rules
+  above cannot be got around by what is passed in.
 - **Public addresses only.** What an assistant registers has `public_only`
   set, and only the owner can clear it. Such an endpoint refuses loopback,
   private, link-local, carrier-grade NAT and multicast addresses, cloud
@@ -344,18 +419,19 @@ server `error`; a request the server refuses (no such email or mailbox) is
 an error answer and leaves the account as it is.
 
 **OAuth** uses the same Connect flow as an MCP server (below), discovering
-from the session URL. Because PCP makes a mail account's calls itself rather
-than through the MCP SDK's transport, `oauthBearer` in `upstream.ts` renews
-the token through the SDK's `auth()` a minute before it runs out, and once
-more when the server refuses it; when that fails the account needs
-connecting, and the gateway answers with the connect panel.
+from the session URL. PCP makes a mail account's calls itself rather than
+through the MCP SDK's transport, so its bearer token comes from `credential()`
+in `upstream.ts`, as an OAuth API endpoint's does (`endpointToken`): renewed a
+minute before it runs out, and once more when the server refuses it. When that
+fails the account needs connecting, and the gateway answers with the link to
+connect it.
 
 ## Memories
 
 A token made with "keep memories" (`api_token.keep_memories`, off unless the
 owner turns it on) gets one more tool, `memory`, with the commands of Claude's
 memory tool (view, create, str_replace, insert, delete, rename, over files
-under `/memories`) plus search, and a paragraph in the instructions saying
+under `/memories`) plus search and every, and a paragraph in the instructions saying
 when to use it. The rules are in `lib/core/memories.ts`. Like endpoint
 management, they are drawn around the fact that what one assistant writes
 another one reads:
@@ -369,10 +445,9 @@ another one reads:
   own, and changing, renaming or deleting a shared one are permission
   requests (`memory_share`, `memory_change`) through the same flow as a tool
   call, showing the owner the path and the whole text with a warning about
-  stored instructions. The ask writes nothing, so the client's retry with the
-  owner's answer finds the same request. A share is answered **Share it**,
-  **Keep it for this assistant only** (saved privately; also what declining
-  the client's own prompt means), or **Discard it**. On a yes,
+  stored instructions. The ask writes nothing, and asking again finds the
+  same request. A share is answered **Share it**, **Keep it for this
+  assistant only** (saved privately), or **Discard it**. On a yes,
   `decideMemoryAsk` re-reads the memory and writes only if it is still what
   the owner was shown. The owner writes, moves and deletes memories freely on
   the Memories page.
@@ -381,19 +456,113 @@ another one reads:
   as zero-width spaces, direction overrides and tag characters, private-use,
   blank fillers, variation selectors that can carry bytes) is refused, and a
   shared memory is at most 2,000 characters, so it can be read whole.
-- **The instructions name shared memories, by path only.** Every one of them
-  was agreed to by the owner; a token's own memories are its words alone and
-  are only read through the tool, which labels each memory with who wrote it
-  and says that it is a note, not an instruction.
+- **The instructions name shared memories by path, and carry the ones read
+  in every conversation whole.** The memory paragraph follows the protocol
+  Claude's own memory tool adds to the system prompt (look at `/memories`
+  before anything else, save as you go, assume the conversation ends at any
+  moment). The owner can mark any memory to be read in every conversation
+  (`memory.always`): on the Memories page, or with the toggle on a
+  `memory_share` request, where it holds whether they share the memory or
+  keep it for the assistant that asked. An assistant can only ask for it
+  (`create` under `/memories/shared/` with `every: true` starts the toggle
+  ticked); the mark is the owner's answer, never the assistant's ask. A
+  shared one goes into every keeping token's instructions, a private one
+  into its own token's.
+  Its text is at most 2,000 characters, and the instructions carry at most
+  8,000 characters of them and name the rest. Clients do not always pass
+  the instructions on whole (Claude Code cuts them short; claude.ai showed
+  none of them with PCP's tools deferred), so the instructions open with a
+  line naming these memories, and the memory tool's `every` command returns
+  their text with the listing. The tool's description opens with "call
+  every before your first reply" whether or not there are any: a client that
+  defers tools shows only that first sentence, and keeps a tool list long
+  after the memories change. Every such text is one the
+  owner read: an assistant's change to, or move of, an always memory it keeps
+  clears the mark, a change to a shared one is a `memory_change` request
+  that says it is read in every conversation, and sharing a private one
+  sets it to what the owner chose on that request. Any other memory of a token's own is its words alone and is
+  only read through the tool, which labels each memory with who wrote it and
+  says that it is a note, not an instruction.
 - **Bounded.** 500 memories per vault, 10,000 characters each, 60 writes and
   share requests per token per ten minutes. Path and text are encrypted
   together, so uniqueness of paths is checked in code after decrypting the
   vault's memories, as `search.ts` scores every tool. A memory outlives the
   token that wrote it (`token_id` is set to null) and is then the owner's.
 
+## Web fetch
+
+A token made with "fetch web pages" (`api_token.web_fetch`, off unless the
+owner turns it on) gets one more tool, `web_fetch(url, method?, headers?,
+body?, raw?, max_length?, start_index?)`, and a paragraph in the
+instructions. It is the reference fetch server's interface with a method,
+headers and a body added. The code is in `lib/core/fetch/` (the request, the
+page, and which level applies; no database) and `lib/core/web-fetch.ts` (the
+levels as stored, and what the owner does with them).
+
+**Which level applies.** Every request is one method to one site, a site
+being the URL's host (with the port when it is not the scheme's own). The
+levels are rows in `web_fetch_rule`, a method's or a site's, each for one
+token or for all of them (`scope` is the token's id or `all`):
+
+1. the token's own line for the site; set to "Use the method settings"
+   (`access` null), it goes straight to step 3, past all tokens' line;
+2. all tokens' line for the site, the same way;
+3. the token's own level for the method's group (GET, POST, PUT, PATCH,
+   DELETE, OTHER);
+4. all tokens' level for it;
+5. ask.
+
+A site the token has no line for, its own or all tokens', gets one of its
+own the first time an assistant reaches for it, at the method settings and
+marked as the assistant's: that is how every site an assistant tried shows
+on the token's page. Ask goes through `permission_request` like a tool call
+(kind `fetch`, the checked request as its encrypted arguments). The owner's
+**Always allow this site** and **Block this site** write the token's own
+line for the site, as a tool's answer writes the token's own level; when
+they allow a request, `executeFetch` runs it only if the token still has web
+fetch on.
+
+**What a request may be** (`fetch/request.ts`). http and https, no user name
+or password in the address, no CONNECT or TRACE, at most twenty headers, and
+none that PCP owns or that carry a credential (`openapi/headers.ts`, apart
+from Accept and Content-Type, which are the assistant's own here). A body
+only on methods that have one, up to 1 MB. It is checked before the owner is
+asked, so what they allow is what runs.
+
+**Sending it** (`fetch/fetch.ts`). Public addresses only, always, through the
+checked transport of API endpoints (`openapi/transport.ts`): the name is
+resolved by PCP and every address checked as the socket connects. No secret
+is read; no cookie is kept. Redirects are followed by hand, at most five and
+only within the site: one to another site ends the call with where it
+points, so that site gets its own decision when the assistant fetches it. A
+303 (and a 301 or 302 after a POST) becomes a GET without the body, as in a
+browser.
+
+**What comes back** (`fetch/html.ts`). The bytes are decoded with the
+charset the answer declares (a byte order mark, the content type, a
+`<meta charset>`, then UTF-8). HTML is parsed into a document that is never
+rendered (domino), stripped of scripts, styles, frames and embedded objects,
+its links and images made absolute, and converted to Markdown (turndown);
+`raw` skips that. JSON is pretty-printed, other text passed on as it is, and
+anything else described rather than dumped. The text is handed back a part
+at a time (20,000 characters by default, 50,000 at most) after a few lines
+saying the final address, the status, the type, the title and where the
+next part starts. An error status is an error result with the page in it.
+
+**Bounded** (`fetch/limits.ts`). Thirty seconds per request with its
+redirects, 2 MB of an answer read, a thousand method and site lines per
+vault, and 120 requests per token per ten minutes, asked about or not.
+
+The sites a token reached are on its page and in `web_fetch_rule`, in the
+clear like server addresses, and never in the request log: the gateway logs
+that `web_fetch` was called and not where to.
+
 ## Data on disk
 
-`PCP_DATA_DIR` (default `./data`, `/data` in Docker):
+`PCP_DATA_DIR` (default `./data`; `/data` in Docker; in the desktop app
+`data/` under the system's folder for the app: `~/Library/Application
+Support/PCP` on macOS, `%APPDATA%\PCP` on Windows, `~/.config/PCP` on
+Linux):
 
 - `pcp.db` — the SQLite database, in WAL mode. Migrations are applied at boot
   by `lib/core/migrate.ts`, which keeps Prisma's own `_prisma_migrations`
@@ -402,6 +571,146 @@ another one reads:
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
   which tool, which upstream, how long, whether it worked. Never arguments
   or results.
+- `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
+  `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
+  PCP").
+
+The desktop app keeps its own two files beside that directory, not in it:
+`desktop.json` (the port, whether other devices may connect) and the
+server's stdout in the system's log folder (`~/Library/Logs/PCP` on macOS,
+`logs/` under the app folder elsewhere). Everything PCP remembers is in the
+database; the wrapper holds only what has to be known before the server is
+up.
+
+## Export and restore
+
+Settings offers an export of everything PCP holds, as one file, and a restore
+from such a file in place of everything here; a PCP not set up yet offers the
+restore on its setup page. The code is `lib/core/backup.ts` (making, opening
+and writing a file) and `lib/core/backup-format.ts` (what is in one).
+
+**The file never holds a plaintext secret.** It is the vault's rows as they
+are in the database: `secret.ciphertext` stays ciphertext under the DEK, bound
+to its row id, and the DEK itself travels only wrapped, in the `key_grant`
+rows of kind `password`, `recovery` and `api_token`. So the password, the
+recovery key and every API token work wherever the file is restored, which is
+what lets a PCP move to another machine without every assistant being set up
+again, and reading a secret out of the file takes what reading it off the
+disk takes: one of those credentials. Session grants are not in it (a
+session is one browser's), nor are OAuth authorizations in flight, the
+request log or the `tls/` directory.
+
+Around the rows: gzip, then AES-256-GCM under a key derived from an **export
+password** the owner chooses, with scrypt at the parameters of the password
+grant. The envelope is JSON — the format's name and version, the scrypt
+parameters, the ciphertext as base64 — with the format name and version as
+associated data, so a relabelled envelope does not decrypt. The parameters a
+file asks for are bounded before the key is derived: a file is untrusted
+input, and scrypt's memory comes from them.
+
+**What is checked before anything is written.** The envelope's version
+(a newer format is refused with "update PCP"), the password (a wrong one and
+a damaged file look alike to GCM, and are reported as one), the unpacked size
+(a cap, against a file that unpacks to more than it should), then every row
+against a strict schema naming every column of its table — a column this PCP
+does not know means a newer PCP wrote the file — and the name of the last
+migration applied where it was written, which this PCP must have. Then the
+rows must hold together: one vault, a password grant, every foreign key
+pointing at a row in the file, every row the vault's own. `backup-format.ts`
+ends with a compile-time guard that fails `pnpm typecheck` when a migration
+adds a column the format does not carry yet.
+
+**A restore replaces.** One transaction wipes the vault it is aimed at, table
+by table (not trusting cascades alone), and writes the file's rows in its
+place, parents before children, in chunks that keep under SQLite's variable
+limit; row ids and timestamps are the file's. On a PCP not set up yet the
+transaction first checks that there is no vault, as `setupVault` does. The
+host's network settings (`ddns.config`, `tls.config`, in plain text as they
+are in the database) are in the file and restored only when the owner ticks
+the box, with this machine's status rows dropped so nothing stale shows; a
+restore that brings them has `reconcileNetwork` act on them at once, and
+every restore has `rebuildOutdatedEndpoints` rebuild the tools of endpoints
+a different PCP version built, as boot does. The owner's own session goes
+with the vault; the action signs them in again when the password they typed
+opens the restored vault (their own export), and otherwise sends them to sign
+in with the exported PCP's password.
+
+**Who may.** The export asks for the owner's password again, as making a
+token does: a copied session cookie may use the vault but not walk off with
+it. The restore, when signed in, asks for it too, so a copied cookie cannot
+replace the owner's vault with one it holds the password to; on the setup
+page there is no password yet, and whoever reaches that page could set up
+instead. Both are rate-limited like password attempts. The download is a
+route handler (an action cannot send a file), so it checks the request's
+origin itself (`lib/server/same-origin.ts`), which Server Actions get built
+in.
+
+## Reaching PCP: dynamic DNS and HTTPS
+
+Both are optional, off until the owner turns them on (in the step after setup
+or under Settings), and meant for someone running PCP at home without a proxy
+of their own. While both are off, nothing in `lib/core/network/` starts:
+no timer, no listener, no outbound request.
+
+**Host settings, not vault settings.** The configuration lives in the
+`host_setting` table (`lib/core/host-settings.ts`), not in the per-vault
+`setting` table. It belongs to the machine, and the work that uses it runs
+from a timer with no request and no `VaultContext`. So it is **stored
+unencrypted**: a dynamic DNS service's token or password has to be readable
+while nobody is signed in, and reading the vault without a credential is
+exactly what PCP refuses to allow. The owner is told so where they type it.
+Such a credential can only move a DNS name. Nothing from the vault (a secret,
+a token) is ever copied into a host setting, and the page never sends a saved
+credential back to the browser. Only a signed-in owner's Server Action
+(`lib/actions/network.ts`) changes them.
+
+**One runtime per process.** `lib/core/network/runtime.ts` keeps the timers,
+the listeners and the answers to Let's Encrypt's challenges on `globalThis`,
+because `instrumentation.ts` (which calls `startNetwork()` at boot) and the
+Server Actions (which call `reconcileNetwork()` after a save) are bundled
+apart. Each reconcile reads the host settings and makes the process match.
+
+**Dynamic DNS** (`ddns.ts`): DuckDNS, dyndns2 (No-IP, Dynu, any server),
+Cloudflare (finds the zone and A record, creates the record if needed) or a
+custom URL template (`{ip}`, `{hostname}`, a login in the URL is sent as Basic
+auth). The public IPv4 address is looked up every five minutes from plain-text
+services (`PCP_PUBLIC_IP_URL` overrides them). An update is sent when it
+changed, once a day regardless, and right after a save. Failures back off
+from 5 to 60 minutes. A refused login (`badauth`, `KO`, 401/403) stops
+updates until the owner saves again, as dyndns2 services require. If the
+lookup fails, services that see the caller's address themselves still get an
+update, at most hourly.
+
+**HTTPS** (`tls.ts`, `edge.ts`, `proxy.ts`): `acme-client` gets a Let's
+Encrypt certificate (`PCP_ACME_DIRECTORY` overrides the directory) with the
+HTTP-01 challenge, for a typed name or the dynamic DNS one. The key and
+certificate are files under `tls/`: a server presenting a certificate needs
+its key before anyone signs in. While HTTPS is on, PCP opens two listeners of
+its own next to Next's:
+
+- port 80 (`PCP_HTTP_PORT`; 8080 in the Docker image, mapped by
+  `docker-compose.https.yaml`) answers `/.well-known/acme-challenge/…`. Once
+  a certificate works it redirects everything else to `https://<name>`;
+  before that it forwards to the app, so the site is not broken while waiting.
+- port 443 (`PCP_HTTPS_PORT`, 8443 in Docker) serves the certificate.
+
+Both forward to the app on `127.0.0.1:$PORT`, streaming (MCP's server-sent
+events stay open) and passing upgrades through. They are the edge, so they
+**replace** any `X-Forwarded-*` a client sent rather than trusting it.
+`originFromHeaders`, the `Secure` cookie and the rate limiter's client address
+then work unchanged.
+
+A certificate is renewed once less than a third of its life is left, which
+keeps working as Let's Encrypt shortens lifetimes. The check runs every 30
+minutes, and the new one is swapped in with `setSecureContext`, without a
+restart. A failed request is retried after 1 hour, doubling to at most a day.
+That keeps PCP well inside Let's Encrypt's limits on failed validations;
+"Try again now" skips the wait. A DNS lookup first warns, without blocking,
+when the name does not point at this network. Port 3000 keeps serving plain
+HTTP for the local network. In the desktop app the two ports stay 80 and 443
+(macOS and Windows let an ordinary program use them), and they listen on
+every interface even while the app keeps port 3000 to this computer: a
+router's forward needs exactly that.
 
 ## Connecting OAuth servers
 
@@ -424,8 +733,9 @@ discovers the authorization server and `chooseRegistration`
    cannot be fetched.
 5. **Otherwise the owner is asked**: the server's status becomes
    `client_required`, and its page says to create a client with the
-   provider using PCP's redirect URI. A registration endpoint that refuses
-   PCP ends the same way. The gateway's connect result says so too.
+   provider using PCP's redirect URI and asks for its ID and secret right
+   there, in the status card. A registration endpoint that refuses PCP ends
+   the same way. The gateway's connect result says so too.
 
 Every flow returns to one address, `/api/oauth/callback`; the state
 parameter names the flow, and the flow the server. The owner registers that
@@ -441,8 +751,17 @@ Some providers only issue a refresh token when the sign-in asks for it. The
 server's **extra sign-in parameters** (`oauth_authorize_params`) are added
 to the sign-in address; the names the flow sets itself (client, redirect,
 state, PKCE, scope, resource) are refused when saved and skipped when used.
-When a connection came without a refresh token, the server's page says the
-owner will have to reconnect, and when.
+For providers whose needs PCP knows (`SIGN_IN_DEFAULTS` in
+`oauth-client.ts`: Google's `access_type=offline&prompt=consent`), it adds
+them itself after the owner's, so the owner's value for a name wins. When a
+connection came without a refresh token, the server's page says until when
+it lasts and offers the fix: Reconnect when PCP would now ask for renewable
+access, otherwise the parameters field and Save and reconnect.
+
+A server that answers a signed-in request with 401 or 403 gets the status
+`refused` ("Access refused"), with the HTTP status and the reason from its
+`WWW-Authenticate` challenge or error object, never its body: Google sends
+the whole answer with its refusals.
 
 Only the owner's browser registers or signs in. A tool refresh or a gateway
 call on a server that is not connected stops at "needs connecting" without
@@ -453,23 +772,39 @@ contacting the registration endpoint.
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
-for a token with the right to manage endpoints, and `memory` for a token that
-keeps memories, both below):
+for a token with the right to manage endpoints, `memory` for a token that
+keeps memories, and `web_fetch` for a token that fetches web pages, all
+above):
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with
   light stemming) and returns `server/tool — summary` lines.
+- `list_tools(server, offset?)` names every tool the token sees on one
+  server, by name, with its level (`allowed` or `ask`) and a summary,
+  `LIST_PAGE_SIZE` at a time (`listTools` in `lib/core/search.ts`), so an
+  access review does not depend on what a search happens to rank.
 - `describe_tool(server, tool)` returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
-  published it, and whether the tool runs at once or asks first.
-- `call_tool(server, tool, arguments)` opens a connection to the upstream
-  with the configured credential (header secret or OAuth token, refreshed by
-  the SDK when needed), calls the tool, and passes the content back.
-- `check_permission(id)`, `check_server(server)` and
-  `register_server(...)` belong to the permission flow below;
-  `answer_permission(id, decision)` is only for PCP's panel.
-- `read_result(id, offset?, length?, find?)` reads a slice of a long answer
-  PCP kept (below).
+  published it, whether the tool runs at once or asks first, and for an API
+  endpoint's tool, `returns`: an outline of its success answer read from the
+  schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text the
+  schema marks base64 (`format: byte`) shows as `string (base64)`.
+- `call_tool(server, tool, arguments, fields?, decode?)` opens a connection
+  to the upstream with the configured credential (header secret or OAuth
+  token, refreshed by the SDK when needed), calls the tool, and passes the
+  content back shaped for the assistant (`lib/core/answers.ts`): `fields`
+  keeps only the named paths of a JSON answer (lists are looked into),
+  `decode` turns base64 or base64url text back into text wherever the
+  answer's keys end with one of its paths (`body.data` is every part of a
+  Gmail message; what is not text stays encoded), a JSON answer still too
+  long becomes a preview that is valid JSON with a note on asking for less,
+  and structured content that repeats the text is dropped. A call that waits
+  for the owner keeps its fields and decode paths on the request
+  (`permission_request.fields`, `permission_request.decode`).
+- `check_permission(id)`, `check_server(server)`, `register_server(...)`
+  and `propose_tool_access(changes)` belong to the permission flow below.
+- `read_result(id, offset?, length?, find?)` reads a slice of an answer
+  PCP shortened and kept whole (below).
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the
@@ -478,21 +813,20 @@ gateway finds a server with no tools. It is a cache of the upstream's
 
 ### Long answers
 
-An upstream's answer goes to the assistant through `runCall`
-(`lib/core/permissions.ts`), which hands each text block longer than 60,000
-characters to `lib/core/tool-results.ts`: the whole text (up to 4 million
-characters) is kept in `tool_result`, encrypted under the vault's data key
-with `tool_result:<id>` as associated data, for a day, and the assistant gets
-the first 50,000 characters and a notice with the result's id and length.
-`read_result` decrypts it and returns one slice, for the token whose call
-produced it only; another token's, another vault's or an expired id reads as
-not found. A token keeps at most 100 results and 50 million characters, its
-oldest going first, and expired ones are pruned at boot. Structured content
-too long for a page is left out, since the text carries the same answer. A
-permission request's stored outcome keeps the notice when its text is
-shortened, so `check_permission` names the result too. Mail bodies and text
-attachments use the same store from inside the mail tools. Nothing kept here
-is logged.
+`runCall` (`lib/core/permissions.ts`) shapes an upstream's answer for the
+assistant with `shapeAnswer` (above). When that left something out (a JSON
+preview, a text cut at 60,000 characters), the answer shaped the same way but
+not cut is handed to `lib/core/tool-results.ts`: up to 4 million characters
+are kept in `tool_result`, encrypted under the vault's data key with
+`tool_result:<id>` as associated data, for a day, and a notice after the
+shortened answer gives the result's id and length. `read_result` decrypts it
+and returns one slice, for the token whose call produced it only; another
+token's, another vault's or an expired id reads as not found. A token keeps
+at most 100 results and 50 million characters, its oldest going first, and
+expired ones are pruned at boot. A permission request's stored outcome keeps
+the notice when its text is shortened, so `check_permission` names the result
+too. Mail bodies and text attachments use the same store from inside the mail
+tools. Kept results are not part of an export, and nothing kept is logged.
 
 ## Tool access and the owner's permission
 
@@ -501,57 +835,82 @@ Every token has a level per tool (`api_token_tool_access`,
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
-them. The gateway loads the levels by token id; `ResolvedToken` carries the
-token's ways of asking (below).
+them. The gateway loads the levels by token id.
+
+A tool can also have a level for **all tokens** (`vault_tool_access`, the
+"All tokens" box on a token's page), and a token's own level wins over it:
+the specific line beats the general one. So a token's own `ask` is stored
+while there is a level for all tokens for it to override, and is the absence
+of a row otherwise. Ticking the box makes the level that applies to that
+token now the one for all tokens and removes the token's own; unticking
+removes the one for all tokens and leaves the token its level as its own, so
+nothing changes for it. The owner's answers to a request ("Always allow",
+"Block") write the asking token's own level, as before. The web fetch levels
+(above) work the same way.
 
 A call to an "ask" tool becomes a `permission_request` row
-(`lib/core/permissions.ts`, ported from plekje's confirmation flow): the
+(`lib/core/permissions.ts`): the
 arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
-and a day to answer. The owner is asked the first way, in this order, that
-the client declares and the token allows (`choosePermissionTier`):
+and a day to answer. The result is text for the assistant: what was asked,
+the link to `/permissions/<id>` to end its reply with, and to call
+`check_permission` once the owner says they have answered. The signed-in
+owner answers on that page, and only there (the header's bell lists every
+request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
+and runs the call once. "Always allow" and "Block" also write the tool's
+level.
 
-| Tier   | When                                            | How                                                                    |
-| ------ | ----------------------------------------------- | ---------------------------------------------------------------------- |
-| `app`  | The request declares the MCP Apps extension     | PCP's panel, shown by `check_permission`                               |
-| `form` | It declares form elicitation                    | An `input_required` result with a one-choice form                      |
-| `url`  | It declares URL elicitation (and form is off)   | An `input_required` result pointing at `/permissions/<id>`             |
-| `link` | Anything else, including every 2025-era request | Text with the link to `/permissions/<id>` for the assistant to pass on |
+Nothing can wake an assistant from outside its conversation: an MCP server
+cannot start a turn, and an answer on PCP's page reaches no app. The link
+has to be the last thing in the assistant's reply, with no tool call after
+it: Claude's apps fold the text an assistant writes before a tool call into
+that call's row and show a summary of their own, so a link followed by
+`check_permission` in the same reply was often never seen. So the result
+says to end the reply with the link (`connect.ts: linkLastText`, the link on
+its own last line) and to call `check_permission` once the owner says they
+have answered. In case they are still on it, the check holds the call while
+the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
+minute at which clients and proxies give up, checking every second, and
+dropping out when the client goes away) and answers as soon as they have.
+An OAuth server that needs signing in (a call to it, or one the owner just
+agreed to add) answers with a link to its page in PCP, handed over the same
+way, where Connect starts the sign-in; `check_server` then says whether it
+is connected, waiting the same way, and its tools are read. A server that needs a client from the owner first (status
+`client_required`) gets the same link; its page says what to create.
 
-A declaration is all the server has to go on, and some clients declare form
-elicitation they never show; the call then hangs until the client's timeout
-(Claude Code in remote and Cowork sessions, anthropics/claude-code#94806).
-So `api_token.permission_tiers` holds the tiers a token may use, all three
-by default, and the token page lets the owner turn `app`, `form` and `url`
-off. The link cannot be turned off: it is what is left.
+The client's own prompts (form and URL elicitation, with `input_required`
+rounds) and an MCP Apps panel in the conversation were tried and dropped.
+Claude's apps declared both kinds of prompt and left them on "Loading…"
+until the call timed out
+([anthropics/claude-ai-mcp#1085](https://github.com/anthropics/claude-ai-mcp/issues/1085)).
+They mounted a declared panel for every result of a tool, rebuilt it from
+the original result whenever the conversation was shown again (the first
+question again, after it was answered), did not let a rebuilt panel reach
+PCP, and did not act on `ui/message` or `request-teardown`. A link at the
+end of a reply works in every client.
 
-Whichever way the owner answers, `decidePermission()` claims the row
-(pending to running, one winner) and runs the call once. "Always allow" and
-"Block" also write the tool's level. A retry that carries `requestState` is
-bound to its row by vault, token and hash, so a client cannot replay an
-answer onto another call, and it never runs a call the owner already ran.
-`answer_permission` refuses requests that do not declare the MCP Apps
-extension, and tokens with the panel off: hosts that show panels hide it from the assistant, and on any
-other client the assistant could otherwise answer for the owner.
-
-PCP's panel (`ui://pcp/panel`, `lib/core/panel.ts`) is one self-contained
-MCP App; a tool result picks its view through `structuredContent.kind`
-(`permission`, `connect`, or plain text). OAuth never runs inside it: hosts
-sandbox the panel and sign-in pages refuse to be framed. For a server that
-needs connecting, the panel's Connect button asks the host to open
-`/api/servers/<id>/oauth/start` in the owner's browser (`ui/open-link`),
-where their PCP session is, and polls `check_server` until the callback has
-landed. A server that needs a client from the owner first (status
-`client_required`) gets the same panel, and text telling the assistant so:
-the start page then lands on the server's page, which says what to create.
+`propose_tool_access` lets an assistant suggest levels for its own token,
+many at once (`lib/core/access-requests.ts`): each change names a server,
+tool names or `*` patterns (none for the whole server) and a level, later
+changes winning, so a catalogue of hundreds of tools can be set in a call.
+Blocked tools stay hidden: no name or pattern reaches them. The proposal is
+a request of kind `access` holding one level per tool that would change;
+the assistant is told those tools by name, by server and level
+(`listAccessLevels`, up to `MAX_LISTED_TOOLS`), to check its patterns. Its
+page fills the levels in over the token's current ones and marks each
+change; the owner can change any of them, and only their save there writes
+anything (`applyAccessRequest`, once). The kind's only decision is "Not
+now", and `decidePermission` refuses any other, so an assistant cannot raise
+its own access. `check_permission` waits for the save as for any answer and
+says what was saved, and how it differs from what was proposed.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.
 Once the owner agrees, PCP adds the server, adds it to the asking token when
 that token is scoped to chosen servers, and reads its tools, or hands back
-the connect panel for OAuth. With `openapi_schema` the request is an API
-endpoint instead: the gateway has `endpoint-admin.ts: prepareRegistration`
-read the text before asking (so the owner is only asked about something that
+the link to connect it for OAuth. With `openapi_schema` or `openapi_url` the
+request is an API endpoint instead: the gateway has
+`endpoint-admin.ts: prepareRegistration` read the document before asking (so the owner is only asked about something that
 works, and sees its address, tool count and operations), and
 `executeRegister` creates it from the same text with
 `createApprovedEndpoint`: on, public addresses only. Requests are deleted at

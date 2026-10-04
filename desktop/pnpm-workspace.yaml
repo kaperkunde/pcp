@@ -1,0 +1,14 @@
+# The desktop wrapper is its own pnpm project, not a package of the root
+# workspace: a root install (the Dockerfile, CI) must not download Electron,
+# and Electron's tooling wants a plain node_modules rather than pnpm's
+# symlinked one.
+packages:
+  - .
+
+nodeLinker: hoisted
+
+# Same supply-chain guard as the root: wait a day before taking a release.
+minimumReleaseAge: 1440
+
+allowBuilds:
+  electron: true

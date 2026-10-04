@@ -13,6 +13,7 @@ import { invalid } from "@/lib/core/errors"
 import { readPatches, type PatchOperation } from "@/lib/core/openapi/patch"
 import { renameServerSlug } from "@/lib/core/servers"
 import { field, file, guarded } from "@/lib/server/action-state"
+import { extraHeadersFrom } from "@/lib/server/extra-headers"
 import { requireContext } from "@/lib/server/session"
 
 import type { ServerActionResult } from "./servers"
@@ -46,7 +47,9 @@ function patchesFrom(formData: FormData): PatchOperation[] {
 async function inputFrom(formData: FormData): Promise<EndpointInput> {
   const specSource =
     field(formData, "specSource") === "upload" ? "upload" : "url"
-  const authType = field(formData, "authType") === "header" ? "header" : "none"
+  const chosen = field(formData, "authType")
+  const authType =
+    chosen === "header" || chosen === "oauth" ? chosen : ("none" as const)
   let specText: string | null = null
 
   if (specSource === "upload") {
@@ -78,6 +81,14 @@ async function inputFrom(formData: FormData): Promise<EndpointInput> {
     authHeaderName: field(formData, "authHeaderName"),
     authValueTemplate: field(formData, "authValueTemplate"),
     authSecretId: field(formData, "authSecretId") || null,
+    authExtraHeaders: extraHeadersFrom(formData),
+    authSecretName: field(formData, "authSecretName") || null,
+    authSecretValue: field(formData, "authSecretValue") || null,
+    oauthClientId: field(formData, "oauthClientId") || null,
+    oauthClientSecretId: field(formData, "oauthClientSecretId") || null,
+    oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,
+    oauthScope: field(formData, "oauthScope") || null,
+    oauthAuthorizeParams: field(formData, "oauthAuthorizeParams") || null,
   }
 }
 

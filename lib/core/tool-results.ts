@@ -18,8 +18,6 @@ import { newId } from "./ids"
 
 /** The most an answer, or one read_result slice, carries. */
 export const RESULT_PAGE_CHARS = 60_000
-/** The first page of a long answer: room is left for the notice. */
-export const RESULT_FIRST_PAGE_CHARS = 50_000
 /** The most kept of one answer; past it the rest is dropped and said so. */
 export const MAX_KEPT_RESULT_CHARS = 4_000_000
 /** Per token: the oldest results go first once either is passed. */
@@ -226,14 +224,14 @@ export async function pruneToolResults(now = new Date()): Promise<number> {
 
 const NUMBER = new Intl.NumberFormat("en-US")
 
-/** The line that follows the first page of a long answer. */
-export function resultNotice(kept: KeptResult, shown: number): string {
+/** The line that follows a long answer's shortened text. */
+export function resultNotice(kept: KeptResult): string {
   const dropped =
     kept.dropped > 0
       ? ` Only its first ${NUMBER.format(kept.length)} characters were kept; the last ${NUMBER.format(kept.dropped)} are gone.`
       : ""
 
-  return `… (PCP kept the whole answer: ${NUMBER.format(kept.length)} characters as result ${kept.id}, readable until ${kept.expiresAt.toISOString()}. The first ${NUMBER.format(shown)} are above; call read_result with that id and an offset to read the rest.${dropped})`
+  return `… (PCP kept the whole answer: ${NUMBER.format(kept.length)} characters as result ${kept.id}, readable until ${kept.expiresAt.toISOString()}. What is above is shortened; call read_result with that id to read the whole of it, from any offset or from where a text appears.${dropped})`
 }
 
 /** The notices in a result's text, so a shortened copy can keep them. */
@@ -258,63 +256,63 @@ function mediaTypeOf(text: string): ResultMediaType {
   return "text/plain"
 }
 
-async function firstPage(
-  text: string,
-  keep: ResultKeeper,
-  context: { serverId: string | null; toolName: string },
-): Promise<string> {
-  const kept = await keep({ ...context, text, mediaType: mediaTypeOf(text) })
-  const shown = safeCut(text, RESULT_FIRST_PAGE_CHARS)
+function textOf(result: CallToolResult): string {
+  return (result.content ?? [])
+    .flatMap((block) => (block.type === "text" ? [block.text] : []))
+    .join("\n\n")
+}
 
-  return `${text.slice(0, shown)}\n${resultNotice(kept, shown)}`
+function fits(result: CallToolResult): boolean {
+  return (
+    (result.content ?? []).every(
+      (block) =>
+        block.type !== "text" || block.text.length <= RESULT_PAGE_CHARS,
+    ) &&
+    (result.structuredContent === undefined ||
+      (JSON.stringify(result.structuredContent)?.length ?? 0) <=
+        RESULT_PAGE_CHARS)
+  )
 }
 
 /**
- * An upstream result as an assistant receives it: each text block longer
- * than a page is kept whole and replaced with its first page and a notice.
- * Structured content too long for a page is left out (the text carries the
- * same answer), and kept on its own when no text block was.
+ * An upstream answer as an assistant receives it: `shown`, already shaped to
+ * fit (lib/core/answers.ts previews or cuts what is too long). When that
+ * left something out, the whole answer (`whole`, shaped the same way but not
+ * cut) is kept for the token and a notice after `shown` names it, so the
+ * assistant can read the rest with read_result instead of losing it.
  */
-export async function pageResult(
-  result: CallToolResult,
+export async function keepWholeAnswer(
+  {
+    raw,
+    shown,
+    whole,
+  }: {
+    /** What the upstream answered. */
+    raw: CallToolResult
+    shown: CallToolResult
+    /** The answer shaped as asked, but not cut: made only when needed. */
+    whole: () => CallToolResult
+  },
   keep: ResultKeeper,
   context: { serverId: string | null; toolName: string },
 ): Promise<CallToolResult> {
-  let paged = false
-  const content: CallToolResult["content"] = []
-
-  for (const block of result.content) {
-    if (block.type === "text" && block.text.length > RESULT_PAGE_CHARS) {
-      paged = true
-      content.push({
-        ...block,
-        text: await firstPage(block.text, keep, context),
-      })
-    } else {
-      content.push(block)
-    }
+  if (fits(raw)) {
+    return shown
   }
 
-  let structuredContent = result.structuredContent
+  const text = textOf(whole())
 
-  if (structuredContent) {
-    const json = JSON.stringify(structuredContent)
-
-    if (json.length > RESULT_PAGE_CHARS) {
-      structuredContent = undefined
-
-      if (!paged) {
-        content.push({
-          type: "text",
-          text: await firstPage(json, keep, context),
-        })
-      }
-    }
+  if (text.length <= RESULT_PAGE_CHARS) {
+    return shown
   }
+
+  const kept = await keep({ ...context, text, mediaType: mediaTypeOf(text) })
 
   return {
-    content,
-    ...(result.isError ? { isError: true } : {}),
-    ...(structuredContent ? { structuredContent } : {}),
+    ...shown,
+    content: [
+      ...(shown.content ?? []),
+      { type: "text", text: resultNotice(kept) },
+    ],
   }
 }

@@ -13,6 +13,7 @@ import {
   parseToolAccess,
   setServerToolAccess,
   setToolAccess,
+  setToolAccessShared,
 } from "@/lib/core/tool-access"
 import {
   type ActionState,
@@ -34,6 +35,12 @@ function revalidateToken(id: string) {
   revalidatePath(`/tokens/${id}`)
 }
 
+/** A level for all tokens shows on every token's page. */
+function revalidateEveryToken() {
+  revalidatePath("/tokens")
+  revalidatePath("/tokens/[id]", "page")
+}
+
 export async function createTokenAction(
   _previous: CreateTokenResult,
   formData: FormData,
@@ -53,6 +60,7 @@ export async function createTokenAction(
       serverIds: fields(formData, "serverIds"),
       manageEndpoints: field(formData, "manageEndpoints") === "on",
       keepMemories: field(formData, "keepMemories") === "on",
+      webFetch: field(formData, "webFetch") === "on",
       expiresAt:
         days > 0 ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null,
     })
@@ -106,8 +114,7 @@ export async function updateTokenAction(
       serverIds: fields(formData, "serverIds"),
       manageEndpoints: field(formData, "manageEndpoints") === "on",
       keepMemories: field(formData, "keepMemories") === "on",
-      // Unchecked boxes are not sent: an empty list is the link alone.
-      permissionTiers: fields(formData, "permissionTiers"),
+      webFetch: field(formData, "webFetch") === "on",
       expiresAt:
         expiresIn === "keep"
           ? undefined
@@ -144,6 +151,25 @@ export async function setToolAccessAction(
   })
 
   revalidateToken(tokenId)
+
+  return result
+}
+
+/** The "All tokens" box on a tool's row. */
+export async function setToolAccessSharedAction(
+  tokenId: string,
+  serverId: string,
+  toolName: string,
+  shared: boolean,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await setToolAccessShared(ctx, tokenId, serverId, toolName, shared === true)
+    return {}
+  })
+
+  revalidateEveryToken()
 
   return result
 }

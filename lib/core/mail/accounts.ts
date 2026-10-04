@@ -18,10 +18,13 @@ import {
   normalizeNameAndDescription,
   normalizeOAuthClient,
   oauthTokensObsolete,
+  secretColumns,
   setServerStatus,
   slugify,
   uniqueSlug,
+  withNewSecret,
   type MailKind,
+  type NewSecret,
   type OAuthClientInput,
 } from "../servers"
 import { deleteManagedSecret } from "../secrets"
@@ -115,6 +118,7 @@ async function normalizeMailAccount(
     ? parseRecipient(input.mailFrom).email
     : null
   const auth = { ...EMPTY_AUTH }
+  let newSecret: NewSecret | null = null
 
   if (imap && input.authType !== "basic") {
     throw invalid("An IMAP account signs in with a user name and password.")
@@ -124,20 +128,32 @@ async function normalizeMailAccount(
     case "basic":
       Object.assign(auth, await normalizeBasicAuth(ctx, input))
       break
-    case "header":
+    case "header": {
       // A bearer token, the way JMAP servers take one.
-      Object.assign(
-        auth,
-        await normalizeHeaderAuth(ctx, {
+      const header = await normalizeHeaderAuth(
+        ctx,
+        {
           authSecretId: input.authSecretId,
           authHeaderName: "Authorization",
           authValueTemplate: "Bearer {{secret}}",
-        }),
+        },
+        { name },
       )
+      auth.authSecretId = header.authSecretId
+      auth.authHeaderName = header.authHeaderName
+      auth.authValueTemplate = header.authValueTemplate
+      newSecret = header.newSecret
       break
-    case "oauth":
-      Object.assign(auth, await normalizeOAuthClient(ctx, input, name))
+    }
+    case "oauth": {
+      const client = await normalizeOAuthClient(ctx, input, { name })
+      auth.oauthClientId = client.oauthClientId
+      auth.oauthClientSecretId = client.oauthClientSecretId
+      auth.oauthScope = client.oauthScope
+      auth.oauthAuthorizeParams = client.oauthAuthorizeParams
+      newSecret = client.newSecret
       break
+    }
     default:
       throw invalid("Choose how PCP signs in to the mail server.")
   }
@@ -149,14 +165,18 @@ async function normalizeMailAccount(
   }
 
   return {
-    name,
-    description,
-    url,
-    smtpUrl,
-    mailFrom,
-    readOnly: input.readOnly,
-    authType: input.authType,
-    ...auth,
+    data: {
+      name,
+      description,
+      url,
+      smtpUrl,
+      mailFrom,
+      readOnly: input.readOnly,
+      authType: input.authType,
+      ...auth,
+    },
+    /** A client secret typed into the form, saved with the row. */
+    newSecret,
   }
 }
 
@@ -168,17 +188,21 @@ export async function createMailAccount(
     throw invalid("Choose JMAP or IMAP.")
   }
 
-  const data = await normalizeMailAccount(ctx, input)
+  const { data, newSecret } = await normalizeMailAccount(ctx, input)
   const id = newId()
+  const slug = await uniqueSlug(ctx.vaultId, slugify(data.name))
 
-  await db().mcpServer.create({
-    data: {
-      id,
-      vaultId: ctx.vaultId,
-      kind: input.protocol,
-      slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
-      ...data,
-    },
+  await withNewSecret(ctx, newSecret, async (secretId) => {
+    await db().mcpServer.create({
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        kind: input.protocol,
+        slug,
+        ...data,
+        ...secretColumns(data, secretId),
+      },
+    })
   })
 
   return { id }
@@ -216,31 +240,36 @@ export async function updateMailAccount(
     )
   }
 
-  const data = await normalizeMailAccount(ctx, {
+  const { data, newSecret } = await normalizeMailAccount(ctx, {
     ...input,
     protocol: existing.kind,
   })
   const dropTokens = oauthTokensObsolete(existing, data)
-  const reconnect = CONNECTION_FIELDS.some((key) => data[key] !== existing[key])
+  const reconnect =
+    newSecret !== null ||
+    CONNECTION_FIELDS.some((key) => data[key] !== existing[key])
 
-  await db().mcpServer.update({
-    where: { id },
-    data: {
-      ...data,
-      // What the last session said belongs to the old address or sign-in.
-      ...(reconnect
-        ? {
-            mailApiUrl: null,
-            mailDownloadUrl: null,
-            mailAccountId: null,
-            mailSubmission: false,
-          }
-        : {}),
-      ...(dropTokens
-        ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
-        : {}),
-    },
-  })
+  await withNewSecret(ctx, newSecret, (secretId) =>
+    db().mcpServer.update({
+      where: { id },
+      data: {
+        ...data,
+        ...secretColumns(data, secretId),
+        // What the last session said belongs to the old address or sign-in.
+        ...(reconnect
+          ? {
+              mailApiUrl: null,
+              mailDownloadUrl: null,
+              mailAccountId: null,
+              mailSubmission: false,
+            }
+          : {}),
+        ...(dropTokens
+          ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
+          : {}),
+      },
+    }),
+  )
 
   if (dropTokens && existing.oauthTokensId) {
     await deleteManagedSecret(ctx, existing.oauthTokensId)

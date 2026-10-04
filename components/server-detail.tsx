@@ -1,7 +1,15 @@
 "use client"
 
-import { useActionState, useState, useTransition } from "react"
+import { ChevronRight } from "lucide-react"
+import {
+  useActionState,
+  useEffect,
+  useId,
+  useState,
+  useTransition,
+} from "react"
 
+import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { ServerStatusBadge } from "@/components/server-status-badge"
@@ -15,16 +23,21 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Textarea } from "@/components/ui/input"
+import { Input, Textarea } from "@/components/ui/input"
+import { Field } from "@/components/ui/label"
 import {
   deleteServerAction,
   disconnectOAuthAction,
   refreshToolsAction,
+  setOAuthClientAction,
   setServerEnabledAction,
+  setSignInParamsAction,
   setToolDescriptionAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
 import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
+import type { OAuthConnection } from "@/lib/core/upstream"
+import { cn } from "@/lib/utils"
 
 export type ServerDetailProps = {
   server: {
@@ -46,7 +59,9 @@ export type ServerDetailProps = {
     connected: boolean
     lastSyncedAt: Date | null
     /** OAuth: whether PCP can renew its access, and until when it lasts. */
-    oauthConnection: { renewable: boolean; expiresAt: Date | null } | null
+    oauthConnection: OAuthConnection | null
+    /** OAuth: what the sign-in adds to its address, as the owner set it. */
+    oauthAuthorizeParams: string
   }
   tools: Array<{
     name: string
@@ -57,13 +72,26 @@ export type ServerDetailProps = {
     operation: { method: string; path: string } | null
   }>
   notice: { kind: "ok" | "error"; message: string } | null
+  /** Where OAuth servers send you back: what a provider's client lists. */
+  redirectUrl: string
 }
 
-export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
+export function ServerDetail({
+  server,
+  tools,
+  notice,
+  redirectUrl,
+}: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
   const mail = server.kind === "jmap" || server.kind === "imap"
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
+  // Kept here rather than in the form: saving moves the server on from
+  // "needs a client", which removes the form, and the note should stay.
+  const [clientState, saveClient] = useActionState<
+    ServerActionResult,
+    FormData
+  >(setOAuthClientAction, { status: "idle" })
 
   function run(action: () => Promise<ServerActionResult>) {
     startTransition(async () => {
@@ -182,7 +210,9 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {notice ? (
+          {/* What the last visit to Connect said is out of date once you
+              have given the server a client. */}
+          {notice && clientState.status !== "ok" ? (
             notice.kind === "ok" ? (
               <FormNote message={notice.message} />
             ) : (
@@ -190,18 +220,10 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
             )
           ) : null}
           {server.oauthConnection && !server.oauthConnection.renewable ? (
-            <p className="text-warning">
-              {server.name} did not give PCP a way to renew its access, so you
-              will need to reconnect when it runs out
-              {server.oauthConnection.expiresAt ? (
-                <>
-                  {" "}
-                  (<LocalDate value={server.oauthConnection.expiresAt} />)
-                </>
-              ) : null}
-              . Some servers only do that when the sign-in asks for it: see
-              Extra sign-in parameters under Settings.
-            </p>
+            <RenewalNotice
+              server={server}
+              connection={server.oauthConnection}
+            />
           ) : null}
           {server.statusMessage ? (
             <p
@@ -214,40 +236,29 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
               {server.statusMessage}
             </p>
           ) : null}
+          {server.authType === "oauth" &&
+          server.status === "client_required" ? (
+            <OAuthClientForm
+              serverId={server.id}
+              redirectUrl={redirectUrl}
+              action={saveClient}
+              error={clientState.status === "error" ? clientState.error : null}
+            />
+          ) : null}
+          <FormNote
+            message={clientState.status === "ok" ? clientState.message : null}
+          />
           <FormError error={result.status === "error" ? result.error : null} />
           <FormNote message={result.status === "ok" ? result.message : null} />
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Tools ({tools.length})</CardTitle>
-          <CardDescription>
-            {endpoint
-              ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
-              : mail
-                ? "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
-                : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {tools.length === 0 ? (
-            <p className="text-muted-foreground">
-              {endpoint
-                ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
-                : mail
-                  ? "No tools yet: PCP offers them once it has signed in. Check the settings below, then check the account again, or connect it."
-                  : "No tools known yet. Connect the server, or refresh its tools."}
-            </p>
-          ) : (
-            <ul className="flex flex-col divide-y divide-border">
-              {tools.map((tool) => (
-                <ToolRow key={tool.name} serverId={server.id} tool={tool} />
-              ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
+      <ToolsCard
+        serverId={server.id}
+        tools={tools}
+        endpoint={endpoint}
+        mail={mail}
+      />
 
       <Card>
         <CardHeader>
@@ -276,6 +287,227 @@ export function ServerDetail({ server, tools, notice }: ServerDetailProps) {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+/**
+ * The server's tools, folded until asked for: a server can bring hundreds,
+ * and the cards below them should stay in reach.
+ */
+function ToolsCard({
+  serverId,
+  tools,
+  endpoint,
+  mail,
+}: {
+  serverId: string
+  tools: ServerDetailProps["tools"]
+  endpoint: boolean
+  mail: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const listId = useId()
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          {tools.length === 0 ? (
+            "Tools (0)"
+          ) : (
+            <button
+              type="button"
+              aria-expanded={open}
+              aria-controls={listId}
+              onClick={() => setOpen((value) => !value)}
+              className="-ml-1 flex cursor-pointer items-center gap-1 rounded-md px-1 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              <ChevronRight
+                className={cn(
+                  "size-4 shrink-0 text-muted-foreground transition-transform",
+                  open && "rotate-90",
+                )}
+                aria-hidden
+              />
+              Tools ({tools.length})
+            </button>
+          )}
+        </CardTitle>
+        <CardDescription>
+          {endpoint
+            ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
+            : mail
+              ? "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
+              : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
+        </CardDescription>
+      </CardHeader>
+      {tools.length === 0 ? (
+        <CardContent>
+          <p className="text-muted-foreground">
+            {endpoint
+              ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
+              : mail
+                ? "No tools yet: PCP offers them once it has signed in. Check the settings below, then check the account again, or connect it."
+                : "No tools known yet. Connect the server, or refresh its tools."}
+          </p>
+        </CardContent>
+      ) : open ? (
+        <CardContent>
+          <ul id={listId} className="flex flex-col divide-y divide-border">
+            {tools.map((tool) => (
+              <ToolRow key={tool.name} serverId={serverId} tool={tool} />
+            ))}
+          </ul>
+        </CardContent>
+      ) : null}
+    </Card>
+  )
+}
+
+/**
+ * A sign-in PCP cannot renew: says until when it lasts, and what to do about
+ * it. Signing in again fixes it when PCP knows what the provider needs
+ * (Google); otherwise the server's documentation names the parameters, which
+ * are asked for here and applied by signing in again.
+ */
+function RenewalNotice({
+  server,
+  connection,
+}: {
+  server: ServerDetailProps["server"]
+  connection: OAuthConnection
+}) {
+  const start = `/api/servers/${server.id}/oauth/start`
+  const [state, action] = useActionState<ServerActionResult, FormData>(
+    setSignInParamsAction,
+    { status: "idle" },
+  )
+
+  // Saved: sign in again, which is when the parameters apply. A full page
+  // load, as the route redirects to the server's sign-in page.
+  useEffect(() => {
+    if (state.status === "ok") {
+      window.location.assign(start)
+    }
+  }, [state, start])
+
+  const lasts = connection.expiresAt ? (
+    <>
+      until <LocalDate value={connection.expiresAt} />
+    </>
+  ) : (
+    "for a limited time"
+  )
+
+  if (connection.reconnectRenews) {
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <p className="text-warning">
+          This sign-in to {server.name} lasts {lasts}, and PCP cannot renew it.
+          Sign in again to fix that: PCP now asks for access it can renew.
+        </p>
+        <a href={start} className={buttonVariants({ size: "sm" })}>
+          Reconnect
+        </a>
+      </div>
+    )
+  }
+
+  const prefix = `sign-in-params-${server.id}`
+
+  return (
+    <form
+      action={action}
+      className="flex flex-col gap-4 rounded-lg border border-border p-4"
+    >
+      <input type="hidden" name="id" value={server.id} />
+      <p className="text-warning">
+        This sign-in to {server.name} lasts {lasts}, and PCP cannot renew it, so
+        you would have to reconnect then. Many servers give renewable access
+        only when the sign-in asks for it: enter what the server&apos;s
+        documentation says, and sign in again.
+      </p>
+      <Field
+        label="Extra sign-in parameters"
+        htmlFor={`${prefix}-params`}
+        hint="Added to the sign-in address, like access_type=offline&prompt=consent."
+      >
+        <Input
+          id={`${prefix}-params`}
+          name="oauthAuthorizeParams"
+          defaultValue={server.oauthAuthorizeParams}
+          required
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </Field>
+      <FormError error={state.status === "error" ? state.error : null} />
+      <div>
+        <SubmitButton size="sm" pendingText="Saving…">
+          Save and reconnect
+        </SubmitButton>
+      </div>
+    </form>
+  )
+}
+
+/**
+ * The client a server that does not let PCP register itself needs, asked for
+ * where its status says so. Scope and sign-in parameters stay in Settings.
+ */
+function OAuthClientForm({
+  serverId,
+  redirectUrl,
+  action,
+  error,
+}: {
+  serverId: string
+  redirectUrl: string
+  action: (formData: FormData) => void
+  error: string | null
+}) {
+  const prefix = `oauth-client-${serverId}`
+
+  return (
+    <form
+      action={action}
+      className="flex flex-col gap-4 rounded-lg border border-border p-4"
+    >
+      <input type="hidden" name="id" value={serverId} />
+      <p className="text-muted-foreground">
+        The redirect URI to give the provider:
+      </p>
+      <CopyableValue value={redirectUrl} />
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Client ID" htmlFor={`${prefix}-id`}>
+          <Input
+            id={`${prefix}-id`}
+            name="oauthClientId"
+            required
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </Field>
+        <Field
+          label="Client secret"
+          htmlFor={`${prefix}-secret`}
+          hint="Saved as one of your secrets."
+        >
+          <Input
+            id={`${prefix}-secret`}
+            name="oauthClientSecretValue"
+            type="password"
+            autoComplete="off"
+          />
+        </Field>
+      </div>
+      <FormError error={error} />
+      <div>
+        <SubmitButton size="sm" pendingText="Saving…">
+          Save client
+        </SubmitButton>
+      </div>
+    </form>
   )
 }
 

@@ -1,4 +1,3 @@
-import { UnauthorizedError } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import type { VaultContext } from "./context"
@@ -9,12 +8,7 @@ import { oauthRedirectUrl } from "./oauth-client"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
 import { getServer } from "./servers"
 import { scratchDatabase } from "./test-db"
-import {
-  callServerTool,
-  oauthBearer,
-  PcpOAuthProvider,
-  syncServerTools,
-} from "./upstream"
+import { callServerTool, PcpOAuthProvider, syncServerTools } from "./upstream"
 import { setupVault } from "./vault"
 
 // The bearer token PCP sends to a server it calls itself (a JMAP mail
@@ -103,68 +97,8 @@ async function connected(tokens: Record<string, unknown> | null) {
   return getServer(ctx, id)
 }
 
-describe("oauthBearer", () => {
-  it("hands over a live token as it is", async () => {
-    const server = await connected({
-      access_token: "at-1",
-      expires_in: 3600,
-      refresh_token: "rt-1",
-    })
-    const bearer = await oauthBearer(ctx, server, PUBLIC)
-
-    expect(bearer.headers).toEqual({ Authorization: "Bearer at-1" })
-    expect(bearer.redact).toEqual(["at-1", "Bearer at-1"])
-    expect(tokenRequests).toHaveLength(0)
-  })
-
-  it("renews a token about to run out, before using it", async () => {
-    const server = await connected({
-      access_token: "at-1",
-      expires_in: 30,
-      refresh_token: "rt-1",
-    })
-    const bearer = await oauthBearer(ctx, server, PUBLIC)
-
-    expect(bearer.headers).toEqual({ Authorization: "Bearer at-2" })
-    expect(tokenRequests).toHaveLength(1)
-    expect(Object.fromEntries(tokenRequests[0]!)).toMatchObject({
-      grant_type: "refresh_token",
-      refresh_token: "rt-1",
-      client_id: "pcp-client",
-    })
-    expect((await getServer(ctx, server.id)).oauthConnectedAt).not.toBeNull()
-  })
-
-  it("says it needs connecting without tokens, or when they ran out and cannot be renewed", async () => {
-    await expect(
-      oauthBearer(ctx, await connected(null), PUBLIC),
-    ).rejects.toBeInstanceOf(UnauthorizedError)
-    await expect(
-      oauthBearer(
-        ctx,
-        await connected({ access_token: "at-1", expires_in: 30 }),
-        PUBLIC,
-      ),
-    ).rejects.toBeInstanceOf(UnauthorizedError)
-    expect(tokenRequests).toHaveLength(0)
-  })
-
-  it("gives up and forgets the tokens when the renewal is refused", async () => {
-    const server = await connected({
-      access_token: "at-1",
-      expires_in: 3600,
-      refresh_token: "rt-1",
-    })
-    tokenAnswer = { status: 400, body: { error: "invalid_grant" } }
-    const { refresh } = await oauthBearer(ctx, server, PUBLIC)
-
-    expect(await refresh()).toBeNull()
-    expect((await getServer(ctx, server.id)).oauthConnectedAt).toBeNull()
-  })
-})
-
 describe("a JMAP account signed in with OAuth", () => {
-  it("reads the session with the bearer token", async () => {
+  it("reads the session with a live token as it is", async () => {
     const server = await connected({
       access_token: "at-1",
       expires_in: 3600,
@@ -176,6 +110,65 @@ describe("a JMAP account signed in with OAuth", () => {
       toolCount: 10,
     })
     expect(fake.requests[0]!.authorization).toBe("Bearer at-1")
+    expect(tokenRequests).toHaveLength(0)
+  })
+
+  it("renews a token about to run out, before using it", async () => {
+    const server = await connected({
+      access_token: "at-1",
+      expires_in: 30,
+      refresh_token: "rt-1",
+    })
+    valid = "at-2"
+
+    expect(await syncServerTools(ctx, server, PUBLIC)).toMatchObject({
+      status: "ok",
+    })
+    expect(tokenRequests).toHaveLength(1)
+    expect(Object.fromEntries(tokenRequests[0]!)).toMatchObject({
+      grant_type: "refresh_token",
+      refresh_token: "rt-1",
+      client_id: "pcp-client",
+    })
+    expect(fake.requests.map((request) => request.authorization)).toEqual([
+      "Bearer at-2",
+    ])
+    expect((await getServer(ctx, server.id)).oauthConnectedAt).not.toBeNull()
+  })
+
+  it("needs connecting without tokens, or when they ran out and cannot be renewed", async () => {
+    for (const tokens of [null, { access_token: "at-1", expires_in: 30 }]) {
+      const server = await connected(tokens)
+
+      expect(await syncServerTools(ctx, server, PUBLIC)).toMatchObject({
+        status: "auth_required",
+        toolCount: 0,
+      })
+      expect((await getServer(ctx, server.id)).oauthConnectedAt).toBeNull()
+    }
+
+    expect(tokenRequests).toHaveLength(0)
+    expect(fake.requests).toHaveLength(0)
+  })
+
+  it("gives up and forgets the tokens when the renewal is refused", async () => {
+    const server = await connected({
+      access_token: "at-1",
+      expires_in: 3600,
+      refresh_token: "rt-1",
+    })
+    valid = "never"
+    tokenAnswer = { status: 400, body: { error: "invalid_grant" } }
+
+    await expect(
+      callServerTool(ctx, server, "list_mailboxes", {}, PUBLIC),
+    ).rejects.toMatchObject({ code: "unauthorized" })
+    expect(tokenRequests).toHaveLength(1)
+    const row = await db().mcpServer.findUniqueOrThrow({
+      where: { id: server.id },
+    })
+    expect(row.status).toBe("auth_required")
+    expect(row.oauthConnectedAt).toBeNull()
   })
 
   it("renews a refused token once and carries on, with neither token in the answer", async () => {

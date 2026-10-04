@@ -13,7 +13,11 @@ export type McpResponse = {
         _meta?: { ui?: { resourceUri?: string; visibility?: string[] } }
       }>
       contents?: Array<{ uri: string; mimeType?: string; text?: string }>
-      // PCP's panel reads these (lib/core/panel.ts).
+      serverInfo?: {
+        name: string
+        icons?: Array<{ src: string; mimeType?: string; sizes?: string[] }>
+      }
+      // What PCP says in fields as well as text (lib/core/connect.ts).
       structuredContent?: {
         kind?: string
         permission?: {
@@ -29,7 +33,8 @@ export type McpResponse = {
         }
         server?: { connected: boolean; toolCount: number }
       }
-      // A prompt for the owner (2026-07-28 multi-round-trip results).
+      // A prompt for the owner (2026-07-28 multi-round-trip results), which
+      // PCP never sends.
       resultType?: string
       requestState?: string
       inputRequests?: Record<string, { method: string; params: unknown }>
@@ -92,7 +97,11 @@ export async function callTool(
 export async function initialize(
   baseURL: string,
   token: string,
-): Promise<{ instructions: string; tools: string[] }> {
+): Promise<{
+  instructions: string
+  tools: string[]
+  serverInfo: NonNullable<McpResponse["body"]["result"]>["serverInfo"]
+}> {
   const init = await mcpRequest(baseURL, token, "initialize", {
     protocolVersion: "2025-06-18",
     capabilities: {},
@@ -103,14 +112,15 @@ export async function initialize(
   return {
     instructions: String(init.body.result?.instructions ?? ""),
     tools: (list.body.result?.tools ?? []).map((tool) => tool.name),
+    serverInfo: init.body.result?.serverInfo,
   }
 }
 
 /**
  * One tools/call on the stateless 2026-07-28 revision: the client's
- * capabilities travel with the request, which is what lets PCP ask the owner
- * in a prompt or a panel (lib/core/permissions.ts). Ported from plekje's
- * e2e helpers.
+ * capabilities travel with the request. PCP reads none of them to decide how
+ * to ask the owner (always a link, lib/core/permissions.ts); the spec sends
+ * them to show that.
  */
 export async function mcpToolCall2026(
   baseURL: string,

@@ -5,7 +5,11 @@ import { redirect } from "next/navigation"
 import { cache } from "react"
 
 import type { VaultContext } from "@/lib/core/context"
-import { resolveSession, type ResolvedSession } from "@/lib/core/sessions"
+import {
+  createSession,
+  resolveSession,
+  type ResolvedSession,
+} from "@/lib/core/sessions"
 import { isSetUp } from "@/lib/core/vault"
 
 /**
@@ -59,6 +63,14 @@ export async function writeSessionCookie(
     path: "/",
     expires: expiresAt,
   })
+}
+
+/** Signs the browser in: a session for the vault, its secret in the cookie. */
+export async function signIn(ctx: VaultContext): Promise<void> {
+  const { cookieValue, expiresAt } = await createSession(ctx, {
+    userAgent: (await headers()).get("user-agent"),
+  })
+  await writeSessionCookie(cookieValue, expiresAt)
 }
 
 export async function clearSessionCookie(): Promise<void> {

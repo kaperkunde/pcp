@@ -20,7 +20,8 @@ export { redactSecrets } from "./redact"
 
 /**
  * Sends one request and turns the answer into an MCP tool result: JSON is
- * pretty-printed (and passed as structuredContent when small enough), text
+ * passed on compact (and as structuredContent when small enough; the gateway
+ * shapes both for the assistant, see answers.ts), text
  * passes through, anything else is described rather than dumped. An error
  * status is an error result the assistant can read, not an exception.
  *
@@ -31,23 +32,23 @@ export { redactSecrets } from "./redact"
 
 export type CallOutcome = { result: CallToolResult; status: number }
 
-function statusLine(response: Response): string {
+export function statusLine(response: Response): string {
   const text = response.statusText || STATUS_CODES[response.status] || ""
   return `HTTP ${response.status}${text ? ` ${text}` : ""}`
 }
 
-function mediaType(response: Response): string {
+export function mediaType(response: Response): string {
   return (response.headers.get("content-type") ?? "")
     .split(";")[0]!
     .trim()
     .toLowerCase()
 }
 
-function isJson(type: string): boolean {
+export function isJson(type: string): boolean {
   return /^application\/([\w.+-]+\+)?json$/.test(type)
 }
 
-function isText(type: string): boolean {
+export function isText(type: string): boolean {
   return (
     type.startsWith("text/") ||
     /^application\/([\w.+-]+\+)?(xml|yaml|x-yaml)$/.test(type) ||
@@ -56,7 +57,7 @@ function isText(type: string): boolean {
   )
 }
 
-function decodeUtf8(bytes: Buffer): string | null {
+export function decodeUtf8(bytes: Buffer): string | null {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes)
   } catch {
@@ -194,7 +195,7 @@ export async function executeCall(
       // Parsed and walked again: the parser decodes escapes (\/, \u0026,
       // \u00e9) that hid a key from the pass over the raw text.
       const value = scrub.value(JSON.parse(text))
-      text = scrub.text(JSON.stringify(value, null, 2))
+      text = scrub.text(JSON.stringify(value))
       const wrapped = isObject(value) ? value : { value }
       if (ok && JSON.stringify(wrapped).length <= MAX_STRUCTURED_CHARS) {
         structured = wrapped

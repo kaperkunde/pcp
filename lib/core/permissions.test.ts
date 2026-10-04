@@ -1,29 +1,27 @@
 import { randomUUID } from "node:crypto"
 
-import {
-  isInputRequiredResult,
-  type CallToolResult,
-} from "@modelcontextprotocol/server"
+import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken, revokeApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import { prepareRegistration } from "./endpoint-admin"
+import { prepareRegistration, updateEndpointDetails } from "./endpoint-admin"
+import { createEndpoint } from "./endpoints"
 import { loadGatewayServers, type GatewayServer } from "./gateway"
 import { listMemories } from "./memories"
 import {
   checkPermission,
   decidePermission,
   getPermissionView,
+  listPendingRequests,
   prunePermissionRequests,
   withPermission,
   type PermissionExecutor,
   type PermissionScope,
   type RegisterArgs,
 } from "./permissions"
-import { UI_EXTENSION } from "./permission-rules"
-import { createSecret } from "./secrets"
+import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
@@ -122,15 +120,21 @@ describe("asking the owner", () => {
     const { scope, server } = await setup()
     const asked = call(server, "send_postcard", { to: "Ada", message: "Hi" })
 
-    const first = await withPermission(scope, asked, {})
+    const first = await withPermission(scope, asked)
     const id = await onlyRequestId()
 
     expect(textOf(first)).toContain("Not done yet")
     expect(textOf(first)).toContain(`${PUBLIC_URL}/permissions/${id}`)
-    // No buttons where answer_permission would refuse them.
-    expect((first as CallToolResult).structuredContent).toMatchObject({
-      kind: "done",
-    })
+    // The link comes last, with nothing after it: some apps hide the text
+    // written before a tool call, so check_permission waits for the owner.
+    expect(textOf(first)).toContain("End your reply with this link")
+    expect(textOf(first).split("\n").at(-1)).toBe(
+      `${PUBLIC_URL}/permissions/${id}`,
+    )
+    expect(textOf(first)).toContain(
+      `When they say they have answered, call check_permission with id "${id}"`,
+    )
+    expect((first as CallToolResult).structuredContent).toBeUndefined()
 
     const row = await db().permissionRequest.findUniqueOrThrow({
       where: { id },
@@ -140,23 +144,96 @@ describe("asking the owner", () => {
     )
 
     // The same request again finds the same row; other arguments do not.
-    await withPermission(scope, asked, {})
+    await withPermission(scope, asked)
     expect(await db().permissionRequest.count()).toBe(1)
     await withPermission(
       scope,
       call(server, "send_postcard", { to: "Bob", message: "Hi" }),
-      {},
     )
     expect(await db().permissionRequest.count()).toBe(2)
   })
 
+  it("keeps only the fields the assistant asked for once the owner allows the call", async () => {
+    const { ctx, scope, server } = await setup()
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ data: [{ id: 1, terms: "long" }] }),
+          },
+        ],
+      }),
+    }
+    const asked = {
+      ...call(server, "add_numbers", { a: 1 }),
+      fields: ["data.id"],
+    }
+
+    await withPermission(scope, asked)
+    // Other fields are another request.
+    await withPermission(scope, { ...asked, fields: ["data.terms"] })
+    expect(await db().permissionRequest.count()).toBe(2)
+
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { fields: JSON.stringify(["data.id"]) },
+    })
+    const result = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    expect(textOf(result)).toBe('{"data":[{"id":1}]}')
+  })
+
+  it("decodes what the assistant asked to once the owner allows the call", async () => {
+    const { ctx, scope, server } = await setup()
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              body: { data: Buffer.from("Hello").toString("base64url") },
+            }),
+          },
+        ],
+      }),
+    }
+    const asked = {
+      ...call(server, "add_numbers", { a: 1 }),
+      decode: ["body.data"],
+    }
+
+    await withPermission(scope, asked)
+    // Decoding elsewhere is another request.
+    await withPermission(scope, { ...asked, decode: ["data"] })
+    expect(await db().permissionRequest.count()).toBe(2)
+
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { decode: JSON.stringify(["body.data"]) },
+    })
+    const result = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    expect(textOf(result)).toBe(
+      'Decoded from base64: body.data (1).{"body":{"data":"Hello"}}',
+    )
+  })
+
   it("shows the owner what the call does, with a warning for destructive tools", async () => {
     const { ctx, scope, server } = await setup()
-    await withPermission(
-      scope,
-      call(server, "send_postcard", { to: "Ada" }),
-      {},
-    )
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
 
     const view = await getPermissionView(ctx, await onlyRequestId(), {
       publicUrl: PUBLIC_URL,
@@ -167,124 +244,117 @@ describe("asking the owner", () => {
     expect(view?.lines).toContain('Asked by the token "Claude"')
     expect(view?.warning).toMatch(/destructive/)
   })
+})
 
-  it("asks with the link when the token turned off what the client declares", async () => {
-    const { scope, server } = await setup()
+describe("check_permission", () => {
+  it("waits while the owner answers, then gives the outcome", async () => {
+    const { ctx, scope, server } = await setup()
     const { calls, executor } = stub()
-    const limited = { ...scope, permissionTiers: ["url", "link"] as const }
-    const panelAndForm = {
-      clientCapabilities: {
-        elicitation: { form: {} },
-        extensions: { [UI_EXTENSION]: {} },
-      } as never,
-    }
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    const id = await onlyRequestId()
 
-    const asked = await withPermission(
-      limited,
-      call(server, "add_numbers", { a: 1, b: 2 }),
-      panelAndForm,
-      { executor },
+    const checked = checkPermission(scope, id, { waitMs: 10_000 })
+    // The owner answers on PCP's page while the call is held.
+    setTimeout(() => {
+      void decidePermission(
+        ctx,
+        id,
+        "allow_once",
+        { publicUrl: PUBLIC_URL },
+        executor,
+      )
+    }, 200)
+
+    expect(textOf(await checked)).toBe(
+      "The owner allowed it and it ran.\nran add_numbers",
     )
-
-    // No prompt that could stall the call: the text carries the link.
-    expect(isInputRequiredResult(asked)).toBe(false)
-    expect(textOf(asked)).toMatch(/Ask the owner to open .*\/permissions\//)
-    expect(calls).toHaveLength(0)
-
-    // check_permission shows no buttons either, only where to answer.
-    const checked = await checkPermission(
-      limited,
-      await onlyRequestId(),
-      panelAndForm,
-    )
-    expect(checked.structuredContent).toMatchObject({ kind: "done" })
-    expect(textOf(checked)).toMatch(/answer at .*\/permissions\//)
-  })
-
-  it("runs a form prompt's answer once, bound to the call it was asked for", async () => {
-    const { scope, server, tokenId } = await setup()
-    const { calls, executor } = stub()
-    const form = { clientCapabilities: { elicitation: { form: {} } } }
-    const asked = call(server, "add_numbers", { a: 1, b: 2 })
-
-    const prompt = await withPermission(scope, asked, form, { executor })
-    expect(isInputRequiredResult(prompt)).toBe(true)
-    const requestState = (prompt as { requestState?: string }).requestState!
-    expect(requestState).toBe(await onlyRequestId())
-
-    // An answer carried on a different call is refused.
-    const mismatched = await withPermission(
-      scope,
-      call(server, "add_numbers", { a: 9, b: 9 }),
-      {
-        ...form,
-        requestState,
-        inputResponses: {
-          decision: { action: "accept", content: { decision: "allow_once" } },
-        },
-      },
-      { executor },
-    )
-    expect((mismatched as CallToolResult).isError).toBe(true)
-    expect(calls).toHaveLength(0)
-
-    const ran = await withPermission(
-      scope,
-      asked,
-      {
-        ...form,
-        requestState,
-        inputResponses: {
-          decision: { action: "accept", content: { decision: "allow_once" } },
-        },
-      },
-      { executor },
-    )
-    expect(textOf(ran)).toBe("ran add_numbers")
-    expect(calls).toEqual([{ tool: "add_numbers", args: { a: 1, b: 2 } }])
-    // Allow once leaves the tool asking.
-    expect(await db().apiTokenToolAccess.count({ where: { tokenId } })).toBe(0)
-
-    // Replaying the answer does not run it again.
-    const replay = await withPermission(
-      scope,
-      asked,
-      {
-        ...form,
-        requestState,
-        inputResponses: {
-          decision: { action: "accept", content: { decision: "allow_once" } },
-        },
-      },
-      { executor },
-    )
-    expect(textOf(replay)).toContain("allowed it and it ran")
     expect(calls).toHaveLength(1)
   })
 
-  it("treats a declined prompt as no", async () => {
+  it("stops waiting after a while, and when the client goes away", async () => {
     const { scope, server } = await setup()
-    const { calls, executor } = stub()
-    const form = { clientCapabilities: { elicitation: { form: {} } } }
-    const asked = call(server, "add_numbers", { a: 1, b: 2 })
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    const id = await onlyRequestId()
 
-    const prompt = await withPermission(scope, asked, form, { executor })
-    const declined = await withPermission(
-      scope,
-      asked,
-      {
-        ...form,
-        requestState: (prompt as { requestState?: string }).requestState,
-        inputResponses: { decision: { action: "decline" } },
-      },
-      { executor },
+    const late = await checkPermission(scope, id, { waitMs: 50 })
+    expect(textOf(late)).toContain("Still waiting for the owner")
+    expect(textOf(late)).toContain(
+      "call check_permission again when they say they have answered",
+    )
+    expect(textOf(late).split("\n").at(-1)).toBe(
+      `${PUBLIC_URL}/permissions/${id}`,
     )
 
-    expect(textOf(declined)).toContain("said no")
-    expect(calls).toHaveLength(0)
-    expect((await db().permissionRequest.findFirstOrThrow()).status).toBe(
-      "declined",
+    const gone = new AbortController()
+    const started = Date.now()
+    const checked = checkPermission(scope, id, {
+      waitMs: 10_000,
+      signal: gone.signal,
+    })
+    setTimeout(() => gone.abort(), 100)
+    expect(textOf(await checked)).toContain("Still waiting for the owner")
+    expect(Date.now() - started).toBeLessThan(5_000)
+  })
+
+  it("answers at once for a request that is settled already", async () => {
+    const { ctx, scope, server } = await setup()
+    const { executor } = stub()
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    const id = await onlyRequestId()
+    await decidePermission(
+      ctx,
+      id,
+      "decline",
+      { publicUrl: PUBLIC_URL },
+      executor,
     )
+
+    const started = Date.now()
+    expect(textOf(await checkPermission(scope, id))).toContain("said no")
+    expect(Date.now() - started).toBeLessThan(1_000)
+  })
+})
+
+describe("what is waiting for the owner", () => {
+  it("counts open requests, newest first, and leaves out answered ones and dead tokens", async () => {
+    const { ctx, scope, server } = await setup()
+    const { executor } = stub()
+
+    expect(await listPendingRequests(ctx, PUBLIC_URL)).toEqual({
+      total: 0,
+      requests: [],
+    })
+
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+
+    const both = await listPendingRequests(ctx, PUBLIC_URL)
+    expect(both.total).toBe(2)
+    expect(both.requests.map((request) => request.title)).toEqual([
+      "Allow postcards/send_postcard?",
+      "Allow postcards/add_numbers?",
+    ])
+    expect(both.requests[0]!.tokenName).toBe("Claude")
+    // The arguments stay on the request's own page.
+    expect(JSON.stringify(both)).not.toContain("Ada")
+
+    const limited = await listPendingRequests(ctx, PUBLIC_URL, { limit: 1 })
+    expect(limited.total).toBe(2)
+    expect(limited.requests).toHaveLength(1)
+
+    await decidePermission(
+      ctx,
+      both.requests[1]!.id,
+      "decline",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).total).toBe(1)
+
+    // A revoked token's request can no longer be answered.
+    await revokeApiToken(ctx, scope.tokenId)
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).total).toBe(0)
   })
 })
 
@@ -292,14 +362,14 @@ describe("the owner's answer", () => {
   it("Always allow runs the call once and allows the tool from then on", async () => {
     const { ctx, scope, server, tokenId } = await setup()
     const { calls, executor } = stub()
-    await withPermission(scope, call(server, "add_numbers", { a: 1 }), {})
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
     const id = await onlyRequestId()
 
     const ran = await decidePermission(
       ctx,
       id,
       "always",
-      { via: "web", publicUrl: PUBLIC_URL },
+      { publicUrl: PUBLIC_URL },
       executor,
     )
     expect(textOf(ran)).toBe("ran add_numbers")
@@ -319,7 +389,7 @@ describe("the owner's answer", () => {
       ctx,
       id,
       "allow_once",
-      { via: "app", publicUrl: PUBLIC_URL },
+      { publicUrl: PUBLIC_URL },
       executor,
     )
     expect(textOf(again)).toContain("allowed it and it ran")
@@ -333,14 +403,14 @@ describe("the owner's answer", () => {
       callTool: async () => ({ content: [{ type: "text", text: long }] }),
       syncTools: async () => ({ status: "ok", message: "", toolCount: 3 }),
     }
-    await withPermission(scope, call(server, "add_numbers", { a: 1 }), {})
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
     const id = await onlyRequestId()
 
     const ran = await decidePermission(
       ctx,
       id,
       "allow_once",
-      { via: "web", publicUrl: PUBLIC_URL },
+      { publicUrl: PUBLIC_URL },
       executor,
     )
     expect(textOf(ran)).not.toContain("THE END")
@@ -358,14 +428,14 @@ describe("the owner's answer", () => {
   it("runs once however many answers race for it", async () => {
     const { ctx, scope, server } = await setup()
     const { calls, executor } = stub()
-    await withPermission(scope, call(server, "add_numbers", { a: 1 }), {})
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
     const id = await onlyRequestId()
     const answer = () =>
       decidePermission(
         ctx,
         id,
         "allow_once",
-        { via: "web", publicUrl: PUBLIC_URL },
+        { publicUrl: PUBLIC_URL },
         executor,
       )
 
@@ -377,18 +447,14 @@ describe("the owner's answer", () => {
   it("Block declines without running and blocks the tool for the token", async () => {
     const { ctx, scope, server, tokenId } = await setup()
     const { calls, executor } = stub()
-    await withPermission(
-      scope,
-      call(server, "send_postcard", { to: "Ada" }),
-      {},
-    )
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
     const id = await onlyRequestId()
 
     const blocked = await decidePermission(
       ctx,
       id,
       "block",
-      { via: "app", publicUrl: PUBLIC_URL, tokenId },
+      { publicUrl: PUBLIC_URL, tokenId },
       executor,
     )
 
@@ -397,17 +463,17 @@ describe("the owner's answer", () => {
     expect(
       await db().apiTokenToolAccess.findFirst({ where: { tokenId } }),
     ).toMatchObject({ toolName: "send_postcard", access: "blocked" })
-    expect((await checkPermission(scope, id)).structuredContent).toMatchObject({
-      kind: "done",
-    })
+    expect(textOf(await checkPermission(scope, id))).toContain(
+      "blocked postcards/send_postcard",
+    )
   })
 
   it("does not run expired requests, other tokens' requests, or revoked tokens' requests", async () => {
     const { ctx, scope, server, tokenId } = await setup()
     const { calls, executor } = stub()
-    const web = { via: "web" as const, publicUrl: PUBLIC_URL }
+    const web = { publicUrl: PUBLIC_URL }
 
-    await withPermission(scope, call(server, "add_numbers", { a: 1 }), {})
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
     const expired = await onlyRequestId()
     await db().permissionRequest.update({
       where: { id: expired },
@@ -417,7 +483,7 @@ describe("the owner's answer", () => {
       textOf(await decidePermission(ctx, expired, "allow_once", web, executor)),
     ).toContain("expired")
 
-    await withPermission(scope, call(server, "add_numbers", { a: 2 }), {})
+    await withPermission(scope, call(server, "add_numbers", { a: 2 }))
     const other = (
       await db().permissionRequest.findFirstOrThrow({
         where: { id: { not: expired } },
@@ -446,27 +512,19 @@ describe("adding a server", () => {
     const { ctx, scope, tokenId } = await setup({ allowAllServers: false })
     const { executor } = stub()
 
-    const asked = await withPermission(
-      scope,
-      {
-        kind: "register",
-        input: {
-          name: "Linear",
-          url: "https://mcp.linear.example/mcp",
-          description: "Issues.",
-          authType: "oauth",
-          oauthScope: "read",
-        },
+    const asked = await withPermission(scope, {
+      kind: "register",
+      input: {
+        name: "Linear",
+        url: "https://mcp.linear.example/mcp",
+        description: "Issues.",
+        authType: "oauth",
+        oauthScope: "read",
       },
-      // A client that shows panels, calling a tool that shows one.
-      {
-        clientCapabilities: {
-          extensions: { [UI_EXTENSION]: { mimeTypes: ["text/html"] } },
-        } as never,
-      },
-      { toolShowsPanel: true },
+    })
+    expect(textOf(asked)).toMatch(
+      /End your reply with this link.*\n.*\/permissions\//,
     )
-    expect(textOf(asked)).toContain("answer in the panel above")
     expect(await db().mcpServer.count()).toBe(1)
 
     const id = await onlyRequestId()
@@ -482,7 +540,7 @@ describe("adding a server", () => {
       ctx,
       id,
       "always",
-      { via: "web", publicUrl: PUBLIC_URL },
+      { publicUrl: PUBLIC_URL },
       executor,
     )
     const linear = await db().mcpServer.findFirstOrThrow({
@@ -507,6 +565,26 @@ describe("adding a server", () => {
     expect(after?.connect?.serverId).toBe(linear.id)
     // The server was added, which is what the owner agreed to.
     expect(after?.status).toBe("executed")
+
+    // A panel the host rebuilt asks where things are: Connect until the
+    // owner has signed in, then done.
+    const waiting = await checkPermission(scope, id)
+    expect(waiting.structuredContent).toMatchObject({
+      kind: "connect",
+      connect: { serverId: linear.id, slug: linear.slug },
+    })
+    expect(textOf(waiting)).toContain("Linear needs connecting")
+
+    await db().mcpServer.update({
+      where: { id: linear.id },
+      data: { oauthConnectedAt: new Date() },
+    })
+    const done = await checkPermission(scope, id)
+    expect(done.structuredContent).toMatchObject({
+      kind: "done",
+      server: { id: linear.id, slug: linear.slug, connected: true },
+    })
+    expect(textOf(done)).toContain("It is connected now")
   })
 
   it("names the secret a header server would get, and reads its tools once added", async () => {
@@ -514,22 +592,18 @@ describe("adding a server", () => {
     const { executor } = stub()
     const secret = await createSecret(ctx, { name: "weather key", value: "k" })
 
-    await withPermission(
-      scope,
-      {
-        kind: "register",
-        input: {
-          name: "Weather",
-          url: "https://weather.example.com/mcp",
-          authType: "header",
-          authSecretId: secret.id,
-          authHeaderName: "Authorization",
-          authValueTemplate: "Bearer {{secret}}",
-          secretName: "weather key",
-        },
+    await withPermission(scope, {
+      kind: "register",
+      input: {
+        name: "Weather",
+        url: "https://weather.example.com/mcp",
+        authType: "header",
+        authSecretId: secret.id,
+        authHeaderName: "Authorization",
+        authValueTemplate: "Bearer {{secret}}",
+        secretName: "weather key",
       },
-      {},
-    )
+    })
     const id = await onlyRequestId()
     const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
     expect(view?.lines).toContain(
@@ -541,13 +615,95 @@ describe("adding a server", () => {
       ctx,
       id,
       "allow_once",
-      { via: "web", publicUrl: PUBLIC_URL },
+      { publicUrl: PUBLIC_URL },
       executor,
     )
     expect(textOf(added)).toMatch(/Added Weather as "weather" with 3 tools/)
     expect(
       await db().mcpServer.findFirstOrThrow({ where: { name: "Weather" } }),
     ).toMatchObject({ authType: "header", authSecretId: secret.id })
+  })
+
+  it("names every secret when the credential has several headers, and adds them all", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const key = await createSecret(ctx, { name: "domains key", value: "k" })
+    const secretKey = await createSecret(ctx, {
+      name: "domains secret key",
+      value: "s",
+    })
+
+    const extra = {
+      secretId: secretKey.id,
+      secretName: "domains secret key",
+      headerName: "X-Secret-API-Key",
+      valueTemplate: "{{secret}}",
+    }
+
+    // With the first secret to be typed in by the owner, the stored one is
+    // still named as theirs.
+    await withPermission(scope, {
+      kind: "register",
+      input: {
+        name: "Typed domains",
+        url: "https://domains.example.com/mcp",
+        authType: "header",
+        authHeaderName: "X-API-Key",
+        authValueTemplate: "{{secret}}",
+        secretName: "new domains key",
+        newSecretName: "new domains key",
+        authExtraHeaders: [extra],
+      },
+    })
+    const typed = await onlyRequestId()
+    expect(
+      (await getPermissionView(ctx, typed, { publicUrl: PUBLIC_URL }))?.lines,
+    ).toContain(
+      'Authentication: sends a new secret, saved as "new domains key", in the X-API-Key header, and your secret "domains secret key" in the X-Secret-API-Key header; you enter its value here when you agree',
+    )
+    await db().permissionRequest.deleteMany()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: {
+        name: "Domains",
+        url: "https://domains.example.com/mcp",
+        authType: "header",
+        authSecretId: key.id,
+        authHeaderName: "X-API-Key",
+        authValueTemplate: "{{secret}}",
+        secretName: "domains key",
+        authExtraHeaders: [extra],
+      },
+    })
+    const id = await onlyRequestId()
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.lines).toContain(
+      'Authentication: sends your secret "domains key" in the X-API-Key header, and "domains secret key" in the X-Secret-API-Key header',
+    )
+    expect(view?.warning).toMatch(
+      /the secrets "domains key" and "domains secret key"/,
+    )
+
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    const added = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Domains" },
+      include: { authHeaders: true },
+    })
+    expect(added.authHeaders).toMatchObject([
+      {
+        position: 1,
+        secretId: secretKey.id,
+        headerName: "X-Secret-API-Key",
+        valueTemplate: "{{secret}}",
+      },
+    ])
   })
 })
 
@@ -620,7 +776,7 @@ describe("adding an API from OpenAPI text", () => {
     edited.endpoint!.specUrl = "https://raw.example.com/pets/openapi.yaml"
 
     for (const input of [fromText, edited]) {
-      await withPermission(scope, { kind: "register", input }, {})
+      await withPermission(scope, { kind: "register", input })
     }
     const views = await Promise.all(
       (await db().permissionRequest.findMany()).map((row) =>
@@ -646,11 +802,10 @@ describe("adding an API from OpenAPI text", () => {
     const { ctx, scope, tokenId } = await setup({ allowAllServers: false })
     const { executor } = stub()
 
-    const asked = await withPermission(
-      scope,
-      { kind: "register", input: await apiRegistration(ctx) },
-      {},
-    )
+    const asked = await withPermission(scope, {
+      kind: "register",
+      input: await apiRegistration(ctx),
+    })
     expect(textOf(asked)).toContain("needs the owner's permission")
     // Only the server the token started with.
     expect(await db().mcpServer.count()).toBe(1)
@@ -677,7 +832,7 @@ describe("adding an API from OpenAPI text", () => {
       ctx,
       id,
       "always",
-      { via: "web", publicUrl: PUBLIC_URL },
+      { publicUrl: PUBLIC_URL },
       executor,
     )
     expect(textOf(added)).toMatch(/Added Pets as "pets" with 3 tools/)
@@ -713,16 +868,15 @@ describe("adding an API from OpenAPI text", () => {
     const { ctx, scope } = await setup()
     const { executor } = stub()
 
-    await withPermission(
-      scope,
-      { kind: "register", input: await apiRegistration(ctx) },
-      {},
-    )
+    await withPermission(scope, {
+      kind: "register",
+      input: await apiRegistration(ctx),
+    })
     const declined = await decidePermission(
       ctx,
       await onlyRequestId(),
       "decline",
-      { via: "web", publicUrl: PUBLIC_URL },
+      { publicUrl: PUBLIC_URL },
       executor,
     )
 
@@ -735,18 +889,14 @@ describe("adding an API from OpenAPI text", () => {
     const { executor } = stub()
     const secret = await createSecret(ctx, { name: "pets key", value: "k-123" })
 
-    await withPermission(
-      scope,
-      {
-        kind: "register",
-        input: await apiRegistration(ctx, {
-          secret: { id: secret.id, name: "pets key" },
-          baseUrl: "https://api.example.com/v1",
-          readOnly: true,
-        }),
-      },
-      {},
-    )
+    await withPermission(scope, {
+      kind: "register",
+      input: await apiRegistration(ctx, {
+        secret: { id: secret.id, name: "pets key" },
+        baseUrl: "https://api.example.com/v1",
+        readOnly: true,
+      }),
+    })
     const id = await onlyRequestId()
     const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
 
@@ -764,7 +914,7 @@ describe("adding an API from OpenAPI text", () => {
       ctx,
       id,
       "allow_once",
-      { via: "web", publicUrl: PUBLIC_URL },
+      { publicUrl: PUBLIC_URL },
       executor,
     )
     expect(
@@ -781,14 +931,452 @@ describe("adding an API from OpenAPI text", () => {
     const { ctx, scope } = await setup()
     const input = await apiRegistration(ctx)
 
-    await withPermission(scope, { kind: "register", input }, {})
-    await withPermission(scope, { kind: "register", input }, {})
+    await withPermission(scope, { kind: "register", input })
+    await withPermission(scope, { kind: "register", input })
 
     expect(await db().permissionRequest.count()).toBe(1)
     const row = await db().permissionRequest.findFirstOrThrow()
     expect(Buffer.from(row.argsCiphertext).toString("utf8")).not.toContain(
       "listPets",
     )
+  })
+})
+
+describe("a change to an API endpoint of the owner's", () => {
+  async function ownersEndpoint(ctx: VaultContext) {
+    const secret = await createSecret(ctx, { name: "Pets key", value: "k" })
+    const { id } = await createEndpoint(ctx, {
+      name: "Pets",
+      specSource: "upload",
+      specText: PETS_SPEC,
+      baseUrl: "https://api.example.com/v1",
+      readOnly: false,
+      authType: "header",
+      authSecretId: secret.id,
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+    })
+
+    return id
+  }
+
+  async function asked(scope: Awaited<ReturnType<typeof setup>>["scope"]) {
+    const outcome = await updateEndpointDetails(
+      { ...scope, serverIds: null },
+      "pets",
+      {
+        addPatches: [{ op: "remove", path: "/paths/~1pets~1{petId}" }],
+        toolDescriptions: { listPets: "Every pet in the shop." },
+      },
+    )
+    if (!("ask" in outcome)) throw new Error("not asked")
+
+    return withPermission(scope, {
+      kind: "endpoint_change",
+      input: outcome.ask,
+    })
+  }
+
+  it("shows the owner the change and makes it when they agree", async () => {
+    const { ctx, scope } = await setup()
+    const id = await ownersEndpoint(ctx)
+
+    expect(textOf(await asked(scope))).toContain("Not done yet")
+    const request = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "endpoint_change" },
+    })
+    const view = await getPermissionView(ctx, request.id, {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(view).toMatchObject({
+      title: "Change the API endpoint Pets?",
+      tool: "update_endpoint",
+      serverName: "Pets",
+      decisions: [
+        { value: "allow_once", label: "Make the change" },
+        { value: "decline", label: "Not now" },
+      ],
+    })
+    expect(view!.lines).toEqual(
+      expect.arrayContaining([
+        "New edit: remove /paths/~1pets~1{petId}",
+        "Description of listPets:\nEvery pet in the shop.",
+        "Takes out: deletePet",
+        'Asked by the token "Claude"',
+      ]),
+    )
+
+    const done = await decidePermission(ctx, request.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(textOf(done)).toBe("Changed Pets: 2 tools.")
+
+    const tools = await db().mcpTool.findMany({
+      where: { serverId: id },
+      orderBy: { name: "asc" },
+    })
+    expect(tools.map((tool) => [tool.name, tool.descriptionOverride])).toEqual([
+      ["createPet", null],
+      ["listPets", "Every pet in the shop."],
+    ])
+  })
+
+  it("changes nothing when the owner says no", async () => {
+    const { ctx, scope } = await setup()
+    const id = await ownersEndpoint(ctx)
+    await asked(scope)
+    const request = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "endpoint_change" },
+    })
+
+    await decidePermission(ctx, request.id, "decline", {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(await db().mcpTool.count({ where: { serverId: id } })).toBe(3)
+  })
+})
+
+describe("a new secret the owner types in", () => {
+  /** register_server naming a secret PCP does not hold yet. */
+  async function withNewSecret(ctx: VaultContext): Promise<RegisterArgs> {
+    const prepared = await prepareRegistration(ctx, {
+      name: "Pets",
+      spec: PETS_SPEC,
+      baseUrl: "https://api.example.com/v1",
+      newSecretName: "Pets API key",
+    })
+
+    return {
+      name: prepared.name,
+      description: prepared.description,
+      url: prepared.url,
+      authType: "header",
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+      authSecretId: null,
+      secretName: "Pets API key",
+      newSecretName: "Pets API key",
+      oauthScope: null,
+      endpoint: prepared.registration,
+    }
+  }
+
+  it("is asked for on PCP's page, where the owner types the value in", async () => {
+    const { ctx, scope } = await setup()
+
+    const asked = await withPermission(scope, {
+      kind: "register",
+      input: await withNewSecret(ctx),
+    })
+    expect(textOf(asked)).toMatch(
+      /End your reply with this link.*\n.*\/permissions\//,
+    )
+    expect(textOf(asked)).toMatch(
+      /type the value of the secret "Pets API key" in there; do not ask them for it here/,
+    )
+
+    const id = await onlyRequestId()
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.secretToEnter).toEqual({
+      name: "Pets API key",
+      exists: false,
+      optional: false,
+      clientId: null,
+    })
+    expect(view?.lines).toContain(
+      'Authentication: sends a new secret, saved as "Pets API key", in the X-API-Key header; you enter its value here when you agree',
+    )
+    expect(view?.warning).toMatch(/"Pets API key" to this address/)
+  })
+
+  it("cannot be agreed to without the value; declining needs none", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const input = await withNewSecret(ctx)
+    const web = { publicUrl: PUBLIC_URL }
+
+    await withPermission(scope, { kind: "register", input })
+    const id = await onlyRequestId()
+
+    const empty = await decidePermission(ctx, id, "allow_once", web, executor)
+    expect(empty.isError).toBe(true)
+    expect(textOf(empty)).toMatch(/Enter the secret's value/)
+
+    // Still waiting, and nothing was made.
+    expect(
+      (await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL }))?.status,
+    ).toBe("pending")
+    expect(await db().secret.count()).toBe(0)
+    expect(await db().mcpServer.count()).toBe(1)
+
+    await withPermission(scope, {
+      kind: "register",
+      input: { ...input, name: "Other pets" },
+    })
+    const other = (
+      await db().permissionRequest.findFirstOrThrow({
+        where: { id: { not: id } },
+      })
+    ).id
+    const declined = await decidePermission(
+      ctx,
+      other,
+      "decline",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(textOf(declined)).toMatch(/said no/)
+  })
+
+  it("saves the value the owner typed under the proposed name and sends it, without telling the assistant", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: await withNewSecret(ctx),
+    })
+    const id = await onlyRequestId()
+    const added = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, secretValue: "k-123" },
+      executor,
+    )
+
+    expect(textOf(added)).toMatch(/Added Pets as "pets" with 3 tools/)
+    expect(textOf(added)).toMatch(/saved in PCP as "Pets API key"/)
+    expect(textOf(added)).not.toContain("k-123")
+
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "Pets API key" },
+    })
+    expect(await revealSecret(ctx, secret.id)).toBe("k-123")
+    expect(secret.description).toBe("Sent to Pets in the X-API-Key header.")
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
+    ).toMatchObject({
+      authType: "header",
+      authSecretId: secret.id,
+      authHeaderName: "X-API-Key",
+      url: "https://api.example.com/v1",
+      publicOnly: true,
+    })
+    // The value is on no request row.
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    expect(
+      Buffer.from(row.resultCiphertext ?? []).toString("utf8"),
+    ).not.toContain("k-123")
+  })
+
+  it("uses a secret of that name the owner added meanwhile, or saves a typed one beside it", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const web = { publicUrl: PUBLIC_URL }
+    const input = await withNewSecret(ctx)
+
+    await withPermission(scope, { kind: "register", input })
+    const first = await onlyRequestId()
+    const added = await createSecret(ctx, {
+      name: "Pets API key",
+      value: "from-secrets-page",
+    })
+    expect(
+      (await getPermissionView(ctx, first, { publicUrl: PUBLIC_URL }))
+        ?.secretToEnter,
+    ).toMatchObject({ name: "Pets API key", exists: true })
+
+    await decidePermission(ctx, first, "allow_once", web, executor)
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
+    ).toMatchObject({ authSecretId: added.id })
+
+    await withPermission(scope, {
+      kind: "register",
+      input: { ...input, name: "More pets" },
+    })
+    const second = (
+      await db().permissionRequest.findFirstOrThrow({
+        where: { status: "pending" },
+      })
+    ).id
+    const typed = await decidePermission(
+      ctx,
+      second,
+      "allow_once",
+      { ...web, secretValue: "typed-again" },
+      executor,
+    )
+    expect(textOf(typed)).toMatch(/saved in PCP as "Pets API key 2"/)
+    expect(await revealSecret(ctx, added.id)).toBe("from-secrets-page")
+  })
+})
+
+describe("an API that signs in with OAuth", () => {
+  const OAUTH_SPEC = JSON.stringify({
+    openapi: "3.0.3",
+    info: { title: "Mail" },
+    servers: [{ url: "https://mail.example.com/v1" }],
+    components: {
+      securitySchemes: {
+        oauth: {
+          type: "oauth2",
+          flows: {
+            authorizationCode: {
+              authorizationUrl: "https://accounts.example.com/authorize",
+              tokenUrl: "https://accounts.example.com/token",
+              scopes: { "mail.read": "", "mail.send": "" },
+            },
+          },
+        },
+      },
+    },
+    paths: {
+      "/me": {
+        get: { operationId: "me", security: [{ oauth: ["mail.read"] }] },
+      },
+    },
+  })
+
+  /** register_server with auth_type oauth and the owner's client_id. */
+  async function withClient(ctx: VaultContext): Promise<RegisterArgs> {
+    const prepared = await prepareRegistration(ctx, {
+      name: "Mail",
+      spec: OAUTH_SPEC,
+      baseUrl: "https://mail.example.com/v1",
+      oauth: { scope: null },
+    })
+
+    return {
+      name: prepared.name,
+      description: prepared.description,
+      url: prepared.url,
+      authType: "oauth",
+      oauthClientId: "owner-client",
+      oauthClientSecretId: null,
+      secretName: "Mail OAuth client secret",
+      newSecretName: "Mail OAuth client secret",
+      newSecretOptional: true,
+      oauthScope: prepared.registration.preview.oauth?.scope ?? null,
+      endpoint: prepared.registration,
+    }
+  }
+
+  it("needs the base URL named, and a schema with a sign-in", async () => {
+    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
+
+    await expect(
+      prepareRegistration(ctx, {
+        name: "Mail",
+        spec: OAUTH_SPEC,
+        oauth: { scope: null },
+      }),
+    ).rejects.toThrow(/OAuth token is sent to an address you name/)
+    await expect(
+      prepareRegistration(ctx, {
+        name: "Pets",
+        spec: PETS_SPEC,
+        baseUrl: "https://api.example.com/v1",
+        oauth: { scope: null },
+      }),
+    ).rejects.toThrow(/declares no OAuth sign-in/)
+  })
+
+  it("shows the owner where they sign in, where the client secret goes and the redirect URI", async () => {
+    const { ctx, scope } = await setup()
+
+    const asked = await withPermission(scope, {
+      kind: "register",
+      input: await withClient(ctx),
+    })
+    expect(textOf(asked)).toMatch(
+      /type the client secret of their OAuth client in there/,
+    )
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(view?.secretToEnter).toEqual({
+      name: "Mail OAuth client secret",
+      exists: false,
+      optional: true,
+      clientId: "owner-client",
+    })
+    expect(view?.lines).toEqual(
+      expect.arrayContaining([
+        'Authentication: OAuth with your client "owner-client"; enter its client secret here when you agree (leave it empty for a client without one); you sign in when you connect it (scope mail.read)',
+        "Sign-in at: https://accounts.example.com/authorize",
+        "Tokens from: https://accounts.example.com/token; your client secret goes there",
+        `Redirect URI your client needs: ${PUBLIC_URL}/api/oauth/callback`,
+      ]),
+    )
+    expect(view?.warning).toMatch(/OAuth token for this account/)
+  })
+
+  it("adds it with the client and the secret typed in, and asks the owner to connect it", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: await withClient(ctx),
+    })
+    const added = await decidePermission(
+      ctx,
+      await onlyRequestId(),
+      "allow_once",
+      { publicUrl: PUBLIC_URL, secretValue: "client-s3cret" },
+      executor,
+    )
+
+    expect(textOf(added)).toMatch(/Added Mail as "mail"/)
+    expect(textOf(added)).not.toContain("client-s3cret")
+    const server = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Mail" },
+    })
+    expect(server).toMatchObject({
+      kind: "openapi",
+      authType: "oauth",
+      oauthClientId: "owner-client",
+      oauthScope: "mail.read",
+      oauthAuthorizationUrl: "https://accounts.example.com/authorize",
+      oauthTokenUrl: "https://accounts.example.com/token",
+      oauthConnectedAt: null,
+    })
+    expect(await revealSecret(ctx, server.oauthClientSecretId!)).toBe(
+      "client-s3cret",
+    )
+  })
+
+  it("can be agreed to with the client secret left empty", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: await withClient(ctx),
+    })
+    const added = await decidePermission(
+      ctx,
+      await onlyRequestId(),
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    expect(added.isError ?? false).toBe(false)
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
+    ).toMatchObject({
+      oauthClientId: "owner-client",
+      oauthClientSecretId: null,
+    })
+    expect(await db().secret.count()).toBe(0)
   })
 })
 
@@ -800,12 +1388,12 @@ describe("a memory an assistant wants to share", () => {
       text: "Metric units.\nBritish spelling.",
     },
   }
-  const web = { via: "web" as const, publicUrl: PUBLIC_URL }
+  const web = { publicUrl: PUBLIC_URL }
 
   it("shows the owner the whole text and a warning, and shares it once they agree", async () => {
     const { ctx, scope } = await setup()
 
-    const asked = await withPermission(scope, share, {})
+    const asked = await withPermission(scope, share)
     expect(textOf(asked)).toContain("Not done yet")
     expect(textOf(asked)).toContain("British spelling.")
 
@@ -818,6 +1406,13 @@ describe("a memory an assistant wants to share", () => {
       'Asked by the token "Claude"',
     ])
     expect(view?.warning).toContain("Watch for instructions")
+    expect(view?.memory).toEqual({
+      path: "/memories/shared/preferences.md",
+      newPath: null,
+      text: "Metric units.\nBritish spelling.",
+      before: null,
+      always: false,
+    })
     expect(view?.decisions.map((decision) => decision.label)).toEqual([
       "Share it",
       "Keep it for this assistant only",
@@ -841,10 +1436,37 @@ describe("a memory an assistant wants to share", () => {
     )
   })
 
+  it("reads it in every conversation when the owner ticks that with the answer", async () => {
+    const { ctx, scope } = await setup()
+
+    await withPermission(scope, {
+      ...share,
+      input: { ...share.input, always: true },
+    })
+    const id = await onlyRequestId()
+    expect(
+      (await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL }))?.memory
+        ?.always,
+    ).toBe(true)
+
+    expect(
+      textOf(
+        await decidePermission(ctx, id, "allow_once", {
+          ...web,
+          always: true,
+        }),
+      ),
+    ).toContain("It is read in every conversation.")
+    expect((await listMemories(ctx))[0]).toMatchObject({
+      visibility: "shared",
+      always: true,
+    })
+  })
+
   it("discards it, and refuses an answer it did not offer", async () => {
     const { ctx, scope, server } = await setup()
 
-    await withPermission(scope, share, {})
+    await withPermission(scope, share)
     const id = await onlyRequestId()
     expect(textOf(await decidePermission(ctx, id, "discard", web))).toContain(
       "discarded",
@@ -853,7 +1475,7 @@ describe("a memory an assistant wants to share", () => {
 
     // Discard is no answer to a tool call: nothing runs.
     const { calls, executor } = stub()
-    await withPermission(scope, call(server, "add_numbers", { a: 1 }), {})
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
     const callId = (
       await db().permissionRequest.findFirstOrThrow({ where: { kind: "call" } })
     ).id
@@ -867,34 +1489,13 @@ describe("a memory an assistant wants to share", () => {
     expect(refused.isError).toBe(true)
     expect(calls).toHaveLength(0)
   })
-
-  it("shares it through the client's own prompt", async () => {
-    const { ctx, scope } = await setup()
-    const form = { clientCapabilities: { elicitation: { form: {} } } }
-
-    const prompt = await withPermission(scope, share, form as never)
-    expect(isInputRequiredResult(prompt)).toBe(true)
-
-    const done = await withPermission(scope, share, {
-      ...form,
-      requestState: await onlyRequestId(),
-      inputResponses: {
-        decision: { action: "accept", content: { decision: "allow_once" } },
-      },
-    } as never)
-    expect(textOf(done)).toContain("The owner shared it")
-    expect((await listMemories(ctx))[0]).toMatchObject({
-      visibility: "shared",
-      tokenName: "Claude",
-    })
-  })
 })
 
 describe("pruning", () => {
   it("drops requests a week past their expiry and keeps the rest", async () => {
     const { scope, server } = await setup()
-    await withPermission(scope, call(server, "add_numbers", { a: 1 }), {})
-    await withPermission(scope, call(server, "add_numbers", { a: 2 }), {})
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    await withPermission(scope, call(server, "add_numbers", { a: 2 }))
     const [old, recent] = await db().permissionRequest.findMany({
       orderBy: { createdAt: "asc" },
     })

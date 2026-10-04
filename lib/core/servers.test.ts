@@ -143,7 +143,7 @@ describe("with a vault", () => {
   })
 
   describe("normalizeOAuthClient", () => {
-    it("keeps a typed client secret as one of the owner's secrets", async () => {
+    it("holds a typed client secret back, to be saved with the row", async () => {
       const data = await normalizeOAuthClient(
         ctx,
         {
@@ -151,24 +151,29 @@ describe("with a vault", () => {
           oauthClientSecretValue: "client-secret",
           oauthScope: " openid offline_access ",
         },
-        "Mail",
+        { name: "Mail" },
       )
 
       expect(data).toMatchObject({
         oauthClientId: "pcp",
+        oauthClientSecretId: null,
         oauthScope: "openid offline_access",
         oauthAuthorizeParams: null,
+        newSecret: {
+          base: "Mail OAuth client secret",
+          value: "client-secret",
+        },
       })
-      const secrets = await listSecrets(ctx)
-      expect(secrets.map((secret) => secret.name)).toEqual([
-        "Mail OAuth client secret",
-      ])
-      expect(data.oauthClientSecretId).toBe(secrets[0]!.id)
+      expect(await listSecrets(ctx)).toEqual([])
     })
 
     it("refuses a client secret without a client ID", async () => {
       await expect(
-        normalizeOAuthClient(ctx, { oauthClientSecretValue: "x" }, "Mail"),
+        normalizeOAuthClient(
+          ctx,
+          { oauthClientSecretValue: "x" },
+          { name: "Mail" },
+        ),
       ).rejects.toThrow(/client ID/)
     })
   })

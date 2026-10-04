@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { shapeAnswer } from "./answers"
 import { createApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
 import { db } from "./db"
@@ -8,10 +9,9 @@ import {
   keepResult,
   MAX_KEPT_RESULT_CHARS,
   MAX_KEPT_RESULTS_PER_TOKEN,
-  pageResult,
+  keepWholeAnswer,
   pruneToolResults,
   readResult,
-  RESULT_FIRST_PAGE_CHARS,
   RESULT_PAGE_CHARS,
   RESULT_TTL_MS,
   resultKeeper,
@@ -187,62 +187,84 @@ describe("keeping and reading", () => {
   })
 })
 
-describe("pageResult", () => {
+describe("keepWholeAnswer", () => {
   const context = { serverId: null, toolName: "long" }
 
-  it("leaves an answer that fits alone", async () => {
-    const result: CallToolResult = {
-      content: [{ type: "text", text: "short" }],
-      structuredContent: { ok: true },
-    }
-
-    expect(
-      await pageResult(result, resultKeeper(ctx, tokenId), context),
-    ).toEqual(result)
-    expect(await db().toolResult.count()).toBe(0)
-  })
-
-  it("hands over the first page and a notice, and keeps the whole text", async () => {
-    const text = `${"a".repeat(RESULT_PAGE_CHARS)}THE END`
-    const paged = await pageResult(
-      { content: [{ type: "text", text }], isError: true },
-      resultKeeper(ctx, tokenId),
-      context,
-    )
-    const shown = textOf(paged)
-
-    expect(paged.isError).toBe(true)
-    expect(shown.startsWith("a".repeat(RESULT_FIRST_PAGE_CHARS))).toBe(true)
-    expect(shown).not.toContain("THE END")
-
-    const [notice] = resultNotices([shown])
-    expect(notice).toContain(
-      `${text.length.toLocaleString("en-US")} characters`,
-    )
-    const id = /as result ([0-9a-f-]+),/.exec(notice!)![1]!
-    const rest = await readResult(ctx, {
-      tokenId,
-      id,
-      offset: RESULT_FIRST_PAGE_CHARS,
-    })
-    expect(rest.text.endsWith("THE END")).toBe(true)
-    expect(rest.mediaType).toBe("text/plain")
-  })
-
-  it("leaves out structured content too long for a page, keeping it when no text was", async () => {
-    const big = { items: Array.from({ length: 20_000 }, (_, i) => ({ i })) }
-    const paged = await pageResult(
+  async function shown(raw: CallToolResult, fields?: string[]) {
+    return keepWholeAnswer(
       {
-        content: [{ type: "text", text: "see the data" }],
-        structuredContent: big,
+        raw,
+        shown: shapeAnswer(raw, { fields }),
+        whole: () => shapeAnswer(raw, { fields, max: MAX_KEPT_RESULT_CHARS }),
       },
       resultKeeper(ctx, tokenId),
       context,
     )
+  }
 
-    expect(paged.structuredContent).toBeUndefined()
-    expect(textOf(paged)).toContain("see the data")
+  it("leaves an answer that fits alone, and keeps nothing", async () => {
+    const raw: CallToolResult = { content: [{ type: "text", text: "short" }] }
+
+    expect(await shown(raw)).toEqual(shapeAnswer(raw))
+    expect(await db().toolResult.count()).toBe(0)
+  })
+
+  it("keeps a long text whole behind the cut, and says where", async () => {
+    const text = `${"a".repeat(RESULT_PAGE_CHARS)}THE END`
+    const answer = await shown({
+      content: [{ type: "text", text }],
+      isError: true,
+    })
+    const visible = textOf(answer)
+
+    expect(answer.isError).toBe(true)
+    expect(visible).toContain("truncated by PCP")
+    expect(visible).not.toContain("THE END")
+
+    const [notice] = resultNotices([visible])
+    expect(notice).toContain(
+      `${text.length.toLocaleString("en-US")} characters`,
+    )
+    const id = /as result ([0-9a-f-]+),/.exec(notice!)![1]!
+    const rest = await readResult(ctx, { tokenId, id, find: "THE END" })
+    expect(rest.text).toBe("THE END")
+    expect(rest.mediaType).toBe("text/plain")
+  })
+
+  it("keeps a long JSON answer whole beside its preview", async () => {
+    const items = Array.from({ length: 5_000 }, (_, i) => ({
+      id: i,
+      note: "x".repeat(20),
+    }))
+    const raw: CallToolResult = {
+      content: [{ type: "text", text: JSON.stringify({ items }) }],
+    }
+    const answer = await shown(raw)
     const [kept] = await db().toolResult.findMany()
+
+    expect(textOf(answer)).toContain("so this is a preview")
+    expect(textOf(answer)).toContain(`as result ${kept!.id}`)
     expect(kept!.mediaType).toBe("application/json")
+    const whole = await readResult(ctx, {
+      tokenId,
+      id: kept!.id,
+      find: '"id":4999',
+      length: 9,
+    })
+    expect(whole.text).toBe('"id":4999')
+  })
+
+  it("keeps nothing when the fields asked for already fit", async () => {
+    const items = Array.from({ length: 3_000 }, (_, i) => ({
+      id: i,
+      note: "x".repeat(40),
+    }))
+    const answer = await shown(
+      { content: [{ type: "text", text: JSON.stringify({ items }) }] },
+      ["items.id"],
+    )
+
+    expect(textOf(answer)).not.toContain("PCP kept the whole answer")
+    expect(await db().toolResult.count()).toBe(0)
   })
 })

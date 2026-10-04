@@ -1,0 +1,24 @@
+{
+  "name": "pcp-desktop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "PCP as a Mac and Windows app: the production server in a window, with its data in the system's application data folder.",
+  "author": "Kaperkunde <https://kaperkunde.com>",
+  "homepage": "https://github.com/kaperkunde/pcp",
+  "license": "MIT",
+  "main": "main.mjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "stage": "node scripts/stage.mjs",
+    "start": "node scripts/stage.mjs && electron .",
+    "dist": "node scripts/dist.mjs"
+  },
+  "devDependencies": {
+    "electron": "^42.11.10",
+    "electron-builder": "^26.17.0",
+    "node-gyp": "^13.1.0"
+  }
+}

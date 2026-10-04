@@ -9,6 +9,7 @@ import { isPcpError } from "@/lib/core/errors"
 import { listOpenPermissions } from "@/lib/core/permissions"
 import { listServers } from "@/lib/core/servers"
 import { listTokenToolAccess } from "@/lib/core/tool-access"
+import { listFetchRules } from "@/lib/core/web-fetch"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -35,11 +36,12 @@ export default async function TokenPage({
   }
 
   const publicUrl = await publicUrlFor(ctx)
-  const [servers, access, tokens, waiting] = await Promise.all([
+  const [servers, access, tokens, waiting, fetchRules] = await Promise.all([
     listServers(ctx),
     listTokenToolAccess(ctx, id),
     listApiTokens(ctx),
     listOpenPermissions(ctx, id, publicUrl),
+    token.webFetch ? listFetchRules(ctx, id) : null,
   ])
 
   return (
@@ -62,12 +64,19 @@ export default async function TokenPage({
           .map(({ id, name }) => ({ id, name }))}
         waiting={waiting.map((request) => ({
           id: request.id,
+          review: request.kind === "access",
           title: request.title,
           lines: request.lines,
           warning: request.warning,
           decisions: request.decisions,
+          secret: request.secretToEnter,
+          every:
+            request.kind === "memory_share" && request.memory
+              ? { asked: request.memory.always }
+              : null,
         }))}
         endpointUrl={`${publicUrl}/mcp`}
+        fetchRules={fetchRules}
       />
     </>
   )

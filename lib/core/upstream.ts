@@ -1,11 +1,13 @@
 import {
   auth,
   Client,
+  SdkHttpError,
   StreamableHTTPClientTransport,
   UnauthorizedError,
   type CallToolResult,
   type OAuthClientMetadata,
   type OAuthClientProvider,
+  type FetchLike,
   type OAuthDiscoveryState,
   type StoredOAuthClientInformation,
   type StoredOAuthTokens,
@@ -20,12 +22,14 @@ import { db } from "./db"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { isPcpError, PcpError } from "./errors"
 import { callMailTool, syncMailTools } from "./mail/accounts"
-import { OAUTH_REFRESH_MARGIN_MS } from "./mail/limits"
 import type { MailCredential } from "./mail/types"
+import { send } from "./openapi/transport"
 import {
   applyAuthorizeParams,
+  applySignInDefaults,
   oauthRedirectUrl,
   registrationMetadata,
+  signInDefaults,
   tokenLifetime,
 } from "./oauth-client"
 import {
@@ -34,7 +38,12 @@ import {
   revealSecret,
   writeManagedSecret,
 } from "./secrets"
-import { isMailKind, renderAuthValue, setServerStatus } from "./servers"
+import {
+  extraAuthHeaders,
+  isMailKind,
+  renderAuthValue,
+  setServerStatus,
+} from "./servers"
 import type { ResultKeeper } from "./tool-results"
 import { PCP_VERSION } from "./version"
 
@@ -103,6 +112,14 @@ export class PcpOAuthProvider implements OAuthClientProvider {
   /** Set when the flow needs the person's browser: where to send it. */
   authorizationUrl: URL | null = null
 
+  /**
+   * An API endpoint's token is not bound to a resource (RFC 8707): the
+   * schema names no resource identifier, and providers that do not know the
+   * parameter can refuse it. Left undefined for MCP servers, where the SDK
+   * uses the resource their metadata names.
+   */
+  validateResourceURL?: OAuthClientProvider["validateResourceURL"]
+
   constructor(
     private readonly ctx: VaultContext,
     private readonly server: McpServer,
@@ -116,7 +133,11 @@ export class PcpOAuthProvider implements OAuthClientProvider {
        */
       clientMetadataUrl?: string
     },
-  ) {}
+  ) {
+    if (server.kind === "openapi") {
+      this.validateResourceURL = async () => undefined
+    }
+  }
 
   get redirectUrl(): string {
     return this.options.redirectUrl
@@ -223,9 +244,18 @@ export class PcpOAuthProvider implements OAuthClientProvider {
   async tokenSet(): Promise<{
     tokens: StoredOAuthTokens | undefined
     savedAt: string | undefined
+    /** The authorization server the client is bound to, when known. */
+    issuer: string | undefined
   }> {
     const store = await this.readStore()
-    return { tokens: store.tokens, savedAt: store.tokensSavedAt }
+    const issuer =
+      store.clientIssuer?.issuer ??
+      (store.client as { issuer?: unknown } | undefined)?.issuer
+    return {
+      tokens: store.tokens,
+      savedAt: store.tokensSavedAt,
+      issuer: typeof issuer === "string" ? issuer : undefined,
+    }
   }
 
   async saveTokens(tokens: StoredOAuthTokens): Promise<void> {
@@ -247,9 +277,8 @@ export class PcpOAuthProvider implements OAuthClientProvider {
       )
     }
 
-    this.authorizationUrl = applyAuthorizeParams(
-      authorizationUrl,
-      this.server.oauthAuthorizeParams,
+    this.authorizationUrl = applySignInDefaults(
+      applyAuthorizeParams(authorizationUrl, this.server.oauthAuthorizeParams),
     )
   }
 
@@ -267,6 +296,13 @@ export class PcpOAuthProvider implements OAuthClientProvider {
   }
 
   async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
+    // An endpoint's sign-in is the one its owner approved, never discovered.
+    const fixed = endpointDiscovery(this.server)
+
+    if (fixed) {
+      return fixed
+    }
+
     if (this.interactive) {
       return (await this.readFlowState())?.discovery ?? this.pendingDiscovery
     }
@@ -410,13 +446,153 @@ export class PcpOAuthProvider implements OAuthClientProvider {
 }
 
 /**
+ * An API endpoint's sign-in, as discovery would have found it: the addresses
+ * stored from its schema's oauth2 flow when the owner approved it. There is
+ * no issuer: a schema names addresses, not the server's identity, so the SDK
+ * takes the sign-in address's origin as the authorization server, which is
+ * also what the owner's client is bound to (SEP-2352). And a resource of the
+ * API's own address, so the SDK does not look for metadata the API does not
+ * publish.
+ */
+export function endpointDiscovery(
+  server: Pick<
+    McpServer,
+    "kind" | "url" | "oauthAuthorizationUrl" | "oauthTokenUrl"
+  >,
+): OAuthDiscoveryState | undefined {
+  if (
+    server.kind !== "openapi" ||
+    !server.oauthAuthorizationUrl ||
+    !server.oauthTokenUrl
+  ) {
+    return undefined
+  }
+
+  return {
+    authorizationServerUrl: new URL(server.oauthAuthorizationUrl).origin,
+    authorizationServerMetadata: {
+      authorization_endpoint: server.oauthAuthorizationUrl,
+      token_endpoint: server.oauthTokenUrl,
+      response_types_supported: ["code"],
+    } as OAuthDiscoveryState["authorizationServerMetadata"],
+    resourceMetadata: { resource: server.url },
+  }
+}
+
+/**
+ * How PCP talks to an endpoint's authorization server: under the endpoint's
+ * address rule, like its calls, since the token address came from a schema.
+ * Undefined means the SDK's own fetch.
+ */
+export function oauthFetch(
+  server: Pick<McpServer, "kind" | "publicOnly">,
+): FetchLike | undefined {
+  if (server.kind !== "openapi" || !server.publicOnly) {
+    return undefined
+  }
+
+  return (url, init) => {
+    const body = init?.body
+
+    return send(
+      String(url),
+      {
+        method: init?.method,
+        headers: Object.fromEntries(new Headers(init?.headers)),
+        body:
+          typeof body === "string"
+            ? body
+            : body instanceof URLSearchParams
+              ? body.toString()
+              : undefined,
+        signal: init?.signal ?? undefined,
+      },
+      { publicOnly: true },
+    )
+  }
+}
+
+/** Renewed this long before it runs out, so a call does not race the clock. */
+const RENEW_MARGIN_MS = 60_000
+
+/**
+ * The access token an OAuth endpoint's call carries, renewed first when it
+ * has run out (or `renew` says the API refused it). Without a token, or one
+ * that cannot be renewed, the endpoint needs connecting: UnauthorizedError,
+ * as for an MCP server.
+ */
+async function endpointToken(
+  ctx: VaultContext,
+  server: McpServer,
+  { publicUrl, renew = false }: { publicUrl: string; renew?: boolean },
+): Promise<{ access: string; refresh: string | undefined }> {
+  const provider = new PcpOAuthProvider(ctx, server, {
+    redirectUrl: oauthRedirectUrl(publicUrl),
+    publicUrl,
+  })
+  const held = await provider.tokenSet()
+  let tokens = held.tokens
+  const signIn = `${server.name} needs to be connected in PCP.`
+
+  if (!server.oauthConnectedAt || !tokens?.access_token) {
+    throw new UnauthorizedError(signIn)
+  }
+
+  const { expiresAt } = tokenLifetime(tokens, held.savedAt)
+  const expired =
+    expiresAt !== null && expiresAt.getTime() - RENEW_MARGIN_MS <= Date.now()
+
+  if (renew || expired) {
+    if (!tokens.refresh_token) {
+      // Nothing to renew with: what PCP holds is over, and saying it is
+      // connected would be untrue.
+      if (expired) {
+        await db().mcpServer.update({
+          where: { id: server.id },
+          data: { oauthConnectedAt: null },
+        })
+      }
+
+      throw new UnauthorizedError(signIn)
+    }
+
+    // A refresh token is spent on the way: the SDK saves the new set, or
+    // forgets the old one and asks for a sign-in nobody can give here.
+    const result = await auth(provider, {
+      serverUrl: server.url,
+      scope: server.oauthScope ?? undefined,
+      fetchFn: oauthFetch(server),
+    })
+
+    if (result !== "AUTHORIZED") {
+      throw new UnauthorizedError(signIn)
+    }
+
+    ;({ tokens } = await provider.tokenSet())
+
+    if (!tokens?.access_token) {
+      throw new UnauthorizedError(signIn)
+    }
+  }
+
+  return { access: tokens.access_token, refresh: tokens.refresh_token }
+}
+
+/**
  * What the owner is told about a connection: whether PCP can renew it on
  * its own, and when the access it has runs out. Null when not connected.
  */
+export type OAuthConnection = {
+  renewable: boolean
+  expiresAt: Date | null
+  /** Not renewable, but a new sign-in would be: PCP asks for it now. */
+  reconnectRenews: boolean
+}
+
 export async function describeOAuthConnection(
   ctx: VaultContext,
   server: McpServer,
-): Promise<{ renewable: boolean; expiresAt: Date | null } | null> {
+): Promise<OAuthConnection | null> {
   if (server.authType !== "oauth" || !server.oauthConnectedAt) {
     return null
   }
@@ -425,9 +601,21 @@ export async function describeOAuthConnection(
     redirectUrl: "",
     publicUrl: "",
   })
-  const { tokens, savedAt } = await provider.tokenSet()
+  const { tokens, savedAt, issuer } = await provider.tokenSet()
 
-  return tokens ? tokenLifetime(tokens, savedAt) : null
+  if (!tokens) {
+    return null
+  }
+
+  const lifetime = tokenLifetime(tokens, savedAt)
+
+  return {
+    ...lifetime,
+    // A sign-in from before PCP asked this provider for renewable access
+    // (signInDefaults) is fixed by signing in again.
+    reconnectRenews:
+      !lifetime.renewable && issuer !== undefined && !!signInDefaults(issuer),
+  }
 }
 
 export async function forgetOAuthTokens(
@@ -457,11 +645,12 @@ async function authHeaders(
 }
 
 /**
- * What PCP sends to authenticate to a server: the header to add to each
- * request, and the values that would give the secret away if an answer
- * repeated them (the secret itself, and the header as sent). A login
- * (basic authentication) also carries the user name and password, for a
- * protocol that signs in with them rather than with a header (IMAP, SMTP).
+ * What PCP sends to authenticate to a server: the headers its secrets go in
+ * (the first on the server row, any further ones after it), and the values
+ * that would give a secret away if an answer repeated them (each secret
+ * itself, and each header as sent). A login (basic authentication) also
+ * carries the user name and password, for a protocol that signs in with
+ * them rather than with a header (IMAP, SMTP).
  */
 export type Credential = {
   headers: Record<string, string>
@@ -472,9 +661,36 @@ export type Credential = {
 async function credential(
   ctx: VaultContext,
   server: McpServer,
+  {
+    publicUrl,
+    renew = false,
+  }: {
+    /** Needed for an OAuth token PCP sends itself, which may be renewed. */
+    publicUrl?: string
+    renew?: boolean
+  } = {},
 ): Promise<Credential> {
   if (server.authType === "basic") {
     return basicCredential(ctx, server)
+  }
+
+  // An MCP server's OAuth token is the SDK transport's to send; an API
+  // endpoint's and a mail account's, PCP's own.
+  if (
+    server.authType === "oauth" &&
+    (server.kind === "openapi" || isMailKind(server.kind))
+  ) {
+    const token = await endpointToken(ctx, server, {
+      publicUrl: publicUrl ?? "",
+      renew,
+    })
+    const value = `Bearer ${token.access}`
+
+    return {
+      headers: { Authorization: value },
+      redact: [token.access, value, ...(token.refresh ? [token.refresh] : [])],
+      login: null,
+    }
   }
 
   if (server.authType !== "header") {
@@ -485,27 +701,44 @@ async function credential(
     throw new PcpError("state", `${server.name} has no secret configured.`)
   }
 
-  const secret = await readSecretValue(ctx, server.authSecretId)
-  const value = renderAuthValue(
-    server.authValueTemplate ?? "{{secret}}",
-    secret,
-  )
+  const parts = [
+    {
+      secretId: server.authSecretId,
+      headerName: server.authHeaderName,
+      valueTemplate: server.authValueTemplate ?? "{{secret}}",
+    },
+    ...(await extraAuthHeaders(server.id)),
+  ]
+  const headers: Record<string, string> = {}
+  const redact: string[] = []
 
-  // fetch refuses these, and its error message quotes the whole value: the
-  // key would end up in the status shown on the Servers page, in the log and
-  // in what the assistant is told. Say it without the value.
-  if (/[\u0000\r\n]/.test(value)) {
-    throw new PcpError(
-      "state",
-      `${server.name}'s secret has a line break or another character a header cannot carry, so PCP cannot send it. Check the secret's value.`,
-    )
+  for (const part of parts) {
+    // A secret deleted from under a header leaves it without one.
+    if (!part.secretId) {
+      throw new PcpError(
+        "state",
+        `${server.name} has no secret configured for its ${part.headerName} header.`,
+      )
+    }
+
+    const secret = await readSecretValue(ctx, part.secretId)
+    const value = renderAuthValue(part.valueTemplate, secret)
+
+    // fetch refuses these, and its error message quotes the whole value: the
+    // key would end up in the status shown on the Servers page, in the log
+    // and in what the assistant is told. Say it without the value.
+    if (/[\u0000\r\n]/.test(value)) {
+      throw new PcpError(
+        "state",
+        `${server.name}'s secret has a line break or another character a header cannot carry, so PCP cannot send it. Check the secret's value.`,
+      )
+    }
+
+    headers[part.headerName] = value
+    redact.push(secret, value)
   }
 
-  return {
-    headers: { [server.authHeaderName]: value },
-    redact: [secret, value],
-    login: null,
-  }
+  return { headers, redact, login: null }
 }
 
 async function basicCredential(
@@ -541,112 +774,64 @@ async function basicCredential(
   }
 }
 
-type Bearer = { headers: Record<string, string>; redact: string[] }
-
-function bearerOf(accessToken: string): Bearer {
-  const value = `Bearer ${accessToken}`
-  return { headers: { Authorization: value }, redact: [accessToken, value] }
-}
-
 /**
- * A bearer header from the OAuth tokens PCP holds for a server it calls
- * itself rather than through the MCP SDK's transport (which renews its own):
- * a JMAP mail account. Renewed first when the token has run out or is about
- * to, and by `refresh` when the server refuses it; null from `refresh`, and
- * UnauthorizedError here, mean the owner has to connect it again.
+ * What a mail account signs in with: its login, its bearer token, or the
+ * OAuth token PCP holds for it, renewed by onUnauthorized when the server
+ * refuses it (null then means the owner has to connect it again).
  */
-export async function oauthBearer(
-  ctx: VaultContext,
-  server: McpServer,
-  { publicUrl }: { publicUrl: string },
-): Promise<Bearer & { refresh: () => Promise<Bearer | null> }> {
-  const provider = () =>
-    new PcpOAuthProvider(ctx, server, {
-      redirectUrl: oauthRedirectUrl(publicUrl),
-      publicUrl,
-    })
-
-  const refresh = async (): Promise<Bearer | null> => {
-    try {
-      // With a refresh token, auth() asks for a new access token; without
-      // one (or when it is refused) it would start a sign-in, which a call
-      // has no browser for: the provider says so with UnauthorizedError.
-      const result = await auth(provider(), {
-        serverUrl: server.url,
-        scope: server.oauthScope ?? undefined,
-      })
-
-      if (result !== "AUTHORIZED") {
-        return null
-      }
-    } catch (error) {
-      if (error instanceof UnauthorizedError) {
-        return null
-      }
-
-      if (isPcpError(error)) {
-        throw error
-      }
-
-      throw new PcpError(
-        "upstream",
-        `PCP could not renew the sign-in to ${server.name}: ${error instanceof Error ? error.message : String(error)}`.slice(
-          0,
-          500,
-        ),
-      )
-    }
-
-    const { tokens } = await provider().tokenSet()
-    return tokens?.access_token ? bearerOf(tokens.access_token) : null
-  }
-
-  const { tokens, savedAt } = await provider().tokenSet()
-
-  if (!tokens?.access_token) {
-    throw new UnauthorizedError(`${server.name} needs to be connected in PCP.`)
-  }
-
-  const { expiresAt } = tokenLifetime(tokens, savedAt)
-
-  if (expiresAt && expiresAt.getTime() - Date.now() < OAUTH_REFRESH_MARGIN_MS) {
-    const renewed = tokens.refresh_token ? await refresh() : null
-
-    if (!renewed) {
-      throw new UnauthorizedError(
-        `${server.name} needs to be connected in PCP.`,
-      )
-    }
-
-    return { ...renewed, refresh }
-  }
-
-  return { ...bearerOf(tokens.access_token), refresh }
-}
-
-/** What a mail account signs in with, made from its secret or its tokens. */
 async function mailCredential(
   ctx: VaultContext,
   server: McpServer,
   { publicUrl }: { publicUrl: string },
 ): Promise<MailCredential> {
-  if (server.authType === "oauth") {
-    const { headers, redact, refresh } = await oauthBearer(ctx, server, {
-      publicUrl,
-    })
-    return { headers, redact, login: null, onUnauthorized: refresh }
+  const { headers, redact, login } = await credential(ctx, server, {
+    publicUrl,
+  })
+
+  if (server.authType !== "oauth") {
+    return { headers, redact, login }
   }
 
-  const { headers, redact, login } = await credential(ctx, server)
-  return { headers, redact, login }
+  return {
+    headers,
+    redact,
+    login: null,
+    onUnauthorized: async () => {
+      try {
+        const renewed = await credential(ctx, server, {
+          publicUrl,
+          renew: true,
+        })
+        return { headers: renewed.headers, redact: renewed.redact }
+      } catch (error) {
+        if (error instanceof UnauthorizedError) {
+          return null
+        }
+
+        throw error
+      }
+    },
+  }
 }
 
 export type UpstreamConnection = {
   client: Client
   transport: StreamableHTTPClientTransport
   provider: PcpOAuthProvider | null
+  /** The server's last answer that was not a success, if any. */
+  refusal: () => Refusal | undefined
   close: () => Promise<void>
 }
+
+/**
+ * What the server said when it turned a request down. The SDK's error keeps
+ * the status and the body, but not the WWW-Authenticate header, which is
+ * where a server says why it refused a token.
+ */
+type Refusal = { status: number; challenge: string | null }
+
+/** The refusal behind an error thrown while connecting. */
+const refusals = new WeakMap<object, Refusal>()
 
 /**
  * A connected client for one server. The caller closes it. An OAuth server
@@ -666,12 +851,28 @@ export async function openUpstream(
       : null
 
   const headers = await authHeaders(ctx, server)
-  const transport = new StreamableHTTPClientTransport(new URL(server.url), {
+  const endpoint = new URL(server.url)
+  let refusal: Refusal | undefined
+  const transport = new StreamableHTTPClientTransport(endpoint, {
     // Never cached: these are live calls carrying credentials. It also keeps
     // a host that wraps fetch with a cache (Next.js) out of the way when the
     // SDK aborts its event stream on close.
     requestInit: { headers, cache: "no-store" },
     ...(provider ? { authProvider: provider } : {}),
+    fetch: async (url, init) => {
+      const response = await fetch(url, init)
+
+      // Only the server's own answers: not the sign-in's discovery or token
+      // requests, which the SDK reports itself.
+      if (!response.ok && String(url) === endpoint.href) {
+        refusal = {
+          status: response.status,
+          challenge: response.headers.get("www-authenticate"),
+        }
+      }
+
+      return response
+    },
   })
   const client = new Client(PCP_CLIENT_INFO)
 
@@ -679,6 +880,11 @@ export async function openUpstream(
     await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS })
   } catch (error) {
     await transport.close().catch(() => {})
+
+    if (refusal && error !== null && typeof error === "object") {
+      refusals.set(error, refusal)
+    }
+
     throw error
   }
 
@@ -686,6 +892,7 @@ export async function openUpstream(
     client,
     transport,
     provider,
+    refusal: () => refusal,
     close: async () => {
       await client.close().catch(() => {})
     },
@@ -720,7 +927,7 @@ export async function syncServerTools(
     try {
       signIn = await mailCredential(ctx, server, { publicUrl })
     } catch (error) {
-      const result = describeFailure(server, error)
+      const result = describeFailure(server, error, null)
       await setServerStatus(server.id, result.status, result.message)
       return { ...result, toolCount: 0 }
     }
@@ -760,12 +967,48 @@ export async function syncServerTools(
 
     return { status: "ok", message: "", toolCount }
   } catch (error) {
-    const result = describeFailure(server, error)
+    const result = describeFailure(server, error, connection)
     await setServerStatus(server.id, result.status, result.message)
 
     return { ...result, toolCount: 0 }
   } finally {
     await connection?.close()
+  }
+}
+
+/**
+ * One API endpoint call with its credential. An OAuth endpoint whose token
+ * the API refuses (401) gets one renewed token and one more try: a refused
+ * request did nothing, so sending it again is safe.
+ */
+async function callEndpoint(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  { publicUrl }: { publicUrl: string },
+): Promise<CallToolResult> {
+  try {
+    const { headers, redact } = await credential(ctx, server, { publicUrl })
+
+    return await callEndpointTool(server, toolName, args, {
+      authHeaders: headers,
+      redact,
+      ...(server.authType === "oauth"
+        ? {
+            renew: async () =>
+              credential(ctx, server, { publicUrl, renew: true }),
+          }
+        : {}),
+    })
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      const message = `${server.name} needs to be connected: open it in PCP and choose Connect.`
+      await setServerStatus(server.id, "auth_required", message)
+      throw new PcpError("unauthorized", message)
+    }
+
+    throw error
   }
 }
 
@@ -784,11 +1027,7 @@ export async function callServerTool(
   },
 ): Promise<CallToolResult> {
   if (server.kind === "openapi") {
-    const { headers, redact } = await credential(ctx, server)
-    return callEndpointTool(server, toolName, args, {
-      authHeaders: headers,
-      redact,
-    })
+    return callEndpoint(ctx, server, toolName, args, { publicUrl })
   }
 
   if (isMailKind(server.kind)) {
@@ -801,10 +1040,13 @@ export async function callServerTool(
         throw error
       }
 
-      const failure = describeFailure(server, error)
+      const failure = describeFailure(server, error, null)
       await setServerStatus(server.id, failure.status, failure.message)
       throw new PcpError(
-        failure.status === "error" ? "upstream" : "unauthorized",
+        failure.status === "auth_required" ||
+          failure.status === "client_required"
+          ? "unauthorized"
+          : "upstream",
         failure.message,
       )
     }
@@ -822,13 +1064,17 @@ export async function callServerTool(
       { timeout: CALL_TIMEOUT_MS },
     )
   } catch (error) {
-    const failure = describeFailure(server, error)
+    const failure = describeFailure(server, error, connection)
     await setServerStatus(server.id, failure.status, failure.message)
 
     // "unauthorized" tells the gateway the server needs connecting (or its
-    // credential was refused), not that it could not be reached.
+    // credential was refused), not that it could not be reached. A server
+    // that turned a signed-in request down needs the owner, but not a
+    // sign-in.
     throw new PcpError(
-      failure.status === "error" ? "upstream" : "unauthorized",
+      failure.status === "auth_required" || failure.status === "client_required"
+        ? "unauthorized"
+        : "upstream",
       failure.message,
     )
   } finally {
@@ -839,10 +1085,32 @@ export async function callServerTool(
 function describeFailure(
   server: McpServer,
   error: unknown,
+  connection: UpstreamConnection | null,
 ): {
-  status: "auth_required" | "client_required" | "error"
+  status: "auth_required" | "client_required" | "refused" | "error"
   message: string
 } {
+  if (SdkHttpError.isInstance(error)) {
+    const { status, text } = error.data ?? { status: 0 }
+    const refusal =
+      connection?.refusal() ??
+      (typeof error === "object" ? refusals.get(error) : undefined)
+    const reason = refusalReason(
+      refusal?.status === status ? refusal.challenge : null,
+      typeof text === "string" ? text : null,
+    )
+    const said = `HTTP ${status}${reason ? `: ${reason}` : ""}`
+
+    if (status === 401 || status === 403) {
+      return { status: "refused", message: refusedMessage(server, said) }
+    }
+
+    return {
+      status: "error",
+      message: `${server.name} could not be reached (${said}).`,
+    }
+  }
+
   if (error instanceof UnauthorizedError) {
     // Still true until the owner gives it a client: a sync or a call does
     // not change what the server allows.
@@ -869,4 +1137,62 @@ function describeFailure(
     status: "error",
     message: `${server.name} could not be reached: ${message}`.slice(0, 500),
   }
+}
+
+/**
+ * Why a server turned a request down, in its own words: the reason in its
+ * WWW-Authenticate challenge, or an error object in the body. Never the body
+ * itself, which can be a whole answer (Google sends the tool list with its
+ * 401).
+ */
+export function refusalReason(
+  challenge: string | null,
+  body: string | null,
+): string | null {
+  const fromChallenge =
+    challenge?.match(/error_description="([^"]*)"/)?.[1] ??
+    challenge?.match(/error="([^"]*)"/)?.[1]
+  let fromBody: unknown
+
+  try {
+    const parsed = JSON.parse(body ?? "") as {
+      error?: unknown
+      error_description?: unknown
+    }
+    fromBody =
+      typeof parsed.error === "string"
+        ? (parsed.error_description ?? parsed.error)
+        : (parsed.error as { message?: unknown } | undefined)?.message
+  } catch {
+    // Not JSON: nothing PCP can quote safely.
+  }
+
+  const reason = fromChallenge ?? (typeof fromBody === "string" ? fromBody : "")
+  const clean = reason
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .trim()
+    .slice(0, 200)
+
+  return clean || null
+}
+
+/** What to tell the owner about a server that refused a request. */
+function refusedMessage(server: McpServer, said: string): string {
+  if (server.authType === "header") {
+    return `${server.name} refused the secret PCP sent (${said}). Check the secret under Settings, then choose Refresh tools.`
+  }
+
+  if (server.authType !== "oauth") {
+    return `${server.name} refused PCP's request (${said}). It may need a secret or a sign-in: set one under Settings.`
+  }
+
+  // Google's MCP servers are APIs of their own (gmailmcp.googleapis.com
+  // next to gmail.googleapis.com), and refuse with a bare 403 until both
+  // are enabled in the project of the client the token came from.
+  const host = new URL(server.url).hostname
+  const google = host.endsWith(".googleapis.com")
+    ? ` With Google, enable both the service's API and its MCP API (${host}) in the Google Cloud project your OAuth client belongs to (APIs & Services, then Library); some MCP APIs need the project enrolled in Google's preview first.`
+    : ""
+
+  return `${server.name} refused PCP's request although PCP is signed in (${said}). The account or OAuth client you signed in with is not allowed to use it yet.${google} Once that is fixed, choose Refresh tools.`
 }

@@ -78,6 +78,31 @@ export async function openToken(page: Page, name: string): Promise<string> {
 }
 
 /**
+ * Unfolds the tool list on a server's own page, which starts folded.
+ */
+export async function showServerTools(page: Page) {
+  const toggle = page.getByRole("button", { name: /^Tools \(\d+\)$/ })
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+    await toggle.click()
+  }
+  await expect(toggle).toHaveAttribute("aria-expanded", "true")
+}
+
+/**
+ * Unfolds a server's tools on a token's page: each server shows only a
+ * count of its tools until it is opened.
+ */
+export async function showTools(page: Page, slug: string) {
+  const toggle = page
+    .locator("button[aria-expanded]")
+    .filter({ has: page.getByText(slug, { exact: true }) })
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+    await toggle.click()
+  }
+  await expect(toggle).toHaveAttribute("aria-expanded", "true")
+}
+
+/**
  * Lets a token run every tool on one server without asking the owner
  * first (tools ask by default).
  */
@@ -93,6 +118,7 @@ export async function allowAllTools(
   await page
     .getByRole("button", { name: `Set all tools on ${slug}`, exact: true })
     .click()
+  await showTools(page, slug)
 
   // Slugs are lower-case letters, digits and dashes: safe in a pattern.
   const tools = page.getByRole("combobox", {

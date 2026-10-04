@@ -34,6 +34,8 @@ model Vault {
 
   permissionRequests PermissionRequest[]
   memories           Memory[]
+  sharedToolAccess   VaultToolAccess[]
+  webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
 
   @@map("vault")
@@ -104,10 +106,10 @@ model ApiToken {
   /// its own, and the shared ones the owner agreed to. Sharing one always
   /// asks the owner. Off unless the owner turns it on.
   keepMemories    Boolean   @default(false) @map("keep_memories")
-  /// How PCP may ask the owner about this token's calls, comma-separated in
-  /// any order: app | form | url. The link in the result is always on, so
-  /// an empty value means the link alone.
-  permissionTiers String    @default("app,form,url") @map("permission_tiers")
+  /// Whether the assistant may fetch web pages through the gateway
+  /// (web_fetch), following the token's site and method levels
+  /// (WebFetchRule). Off unless the owner turns it on.
+  webFetch        Boolean   @default(false) @map("web_fetch")
   expiresAt       DateTime? @map("expires_at")
   revokedAt       DateTime? @map("revoked_at")
   createdAt       DateTime  @default(now()) @map("created_at")
@@ -117,6 +119,7 @@ model ApiToken {
   toolAccess         ApiTokenToolAccess[]
   permissionRequests PermissionRequest[]
   memories           Memory[]
+  webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
 
   @@index([vaultId])
@@ -133,22 +136,72 @@ model ApiTokenServer {
   @@map("api_token_server")
 }
 
-/// What one token may do with one tool. Only allowed and blocked are stored;
-/// no row means the owner is asked first. Keyed by tool name, not by the
-/// catalogue row, so a tool that drops out of a refresh and comes back keeps
-/// its setting.
+/// What one token may do with one tool. No row means the tool's level for
+/// all tokens (VaultToolAccess), and without one of those the owner is asked
+/// first. An `ask` row is only kept while there is a level for all tokens
+/// to override. Keyed by tool name, not by the catalogue row, so a tool that
+/// drops out of a refresh and comes back keeps its setting.
 model ApiTokenToolAccess {
   tokenId   String    @map("token_id")
   token     ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   serverId  String    @map("server_id")
   server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
   toolName  String    @map("tool_name")
-  /// allowed | blocked
+  /// allowed | ask | blocked
   access    String
   updatedAt DateTime  @updatedAt @map("updated_at")
 
   @@id([tokenId, serverId, toolName])
   @@map("api_token_tool_access")
+}
+
+/// A tool's level for every token of the vault ("All tokens" on a token's
+/// page). A token's own level (ApiTokenToolAccess) wins over it.
+model VaultToolAccess {
+  vaultId   String    @map("vault_id")
+  vault     Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  serverId  String    @map("server_id")
+  server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  toolName  String    @map("tool_name")
+  /// allowed | ask | blocked
+  access    String
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@id([serverId, toolName])
+  @@index([vaultId])
+  @@map("vault_tool_access")
+}
+
+/// A level web_fetch follows (lib/core/web-fetch.ts): for one HTTP method
+/// (the default for sites without a level of their own) or for one site,
+/// for one token or for all of them. A token's own rule wins over the one
+/// for all tokens, and a site's over a method's.
+model WebFetchRule {
+  id            String    @id
+  vaultId       String    @map("vault_id")
+  vault         Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// The token it is for; null for a rule for all tokens.
+  tokenId       String?   @map("token_id")
+  token         ApiToken? @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  /// The token's id, or "all": what makes a rule unique, since SQLite lets
+  /// any number of rows share a null token id.
+  scope         String
+  /// method | site
+  kind          String
+  /// A method: GET | POST | PUT | PATCH | DELETE | OTHER. A site: its host,
+  /// lower-case, with the port when it is not the scheme's own.
+  key           String
+  /// allowed | ask | blocked. Null on a site: it follows the method rules.
+  access        String?
+  /// assistant (first seen in a fetch) | owner (added in PCP)
+  addedBy       String    @default("assistant") @map("added_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  lastFetchedAt DateTime? @map("last_fetched_at")
+
+  @@unique([vaultId, scope, kind, key])
+  @@index([tokenId])
+  @@map("web_fetch_rule")
 }
 
 /// A tool call (or a new server) an assistant asked for that waits for the
@@ -160,12 +213,15 @@ model PermissionRequest {
   vault            Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   tokenId          String     @map("token_id")
   token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
-  /// call | register | memory_share | memory_change
+  /// call | register | memory_share | memory_change | access | endpoint_change
+  /// | fetch
   kind             String
   serverId         String?    @map("server_id")
   server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
   /// The upstream tool for a call; "register_server" for a new server;
-  /// "memory" for a memory to share or a shared one to change.
+  /// "memory" for a memory to share or a shared one to change;
+  /// "propose_tool_access" for tool levels an assistant proposes;
+  /// "web_fetch" for a web request.
   toolName         String     @map("tool_name")
   /// The arguments (or the new server's settings) as JSON, AES-256-GCM under
   /// the vault's data key with "permission_request:<id>" as associated data.
@@ -173,6 +229,12 @@ model PermissionRequest {
   /// sha256 of the kind, the target and the canonical arguments, so the same
   /// request asked twice finds the row it already has.
   argsHash         String     @map("args_hash")
+  /// call: the parts of the answer the assistant asked for (call_tool's
+  /// fields), as a JSON list of paths. Names, never values.
+  fields           String?
+  /// call: where the assistant asked for base64 text in the answer to be
+  /// decoded (call_tool's decode), as a JSON list of paths.
+  decode           String?
   /// pending | running | executed | failed | declined
   status           String     @default("pending")
   /// Where the owner answered: app | form | url | web
@@ -206,6 +268,10 @@ model Memory {
   author     String    @default("assistant")
   /// private | shared
   visibility String    @default("private")
+  /// Read in every conversation: its text goes into the gateway's
+  /// instructions. Only the owner sets it, and an assistant's change to one
+  /// it keeps clears it (memories.ts).
+  always     Boolean   @default(false)
   /// The path and the text as JSON, AES-256-GCM under the vault's data key
   /// with "memory:<id>" as associated data.
   ciphertext Bytes
@@ -237,6 +303,7 @@ model Secret {
   lastUsedAt  DateTime? @map("last_used_at")
 
   authFor       McpServer[] @relation("ServerAuthSecret")
+  authHeaderFor ServerAuthHeader[]
   oauthClientFor McpServer[] @relation("ServerOAuthClientSecret")
   oauthTokensFor McpServer[] @relation("ServerOAuthTokens")
 
@@ -294,10 +361,16 @@ model McpServer {
   oauthTokens         Secret? @relation("ServerOAuthTokens", fields: [oauthTokensId], references: [id], onDelete: SetNull)
   /// oauth: when the current token set was obtained; null until connected.
   oauthConnectedAt    DateTime? @map("oauth_connected_at")
+  /// openapi + oauth: where the owner signs in and where PCP exchanges the
+  /// code and renews the token, from the schema's oauth2 flow as the owner
+  /// approved it. MCP servers discover theirs instead.
+  oauthAuthorizationUrl String? @map("oauth_authorization_url")
+  oauthTokenUrl         String? @map("oauth_token_url")
 
   /// What the last contact with the server found: unknown | ok |
   /// auth_required | client_required (an OAuth server PCP cannot register
-  /// with, waiting for the owner's client) | error.
+  /// with, waiting for the owner's client) | refused (it turned down the
+  /// credentials PCP sent) | error.
   status        String    @default("unknown")
   statusMessage String    @default("") @map("status_message")
   lastSyncedAt  DateTime? @map("last_synced_at")
@@ -345,12 +418,33 @@ model McpServer {
   tokens             ApiTokenServer[]
   oauthStates        OAuthState[]
   toolAccess         ApiTokenToolAccess[]
+  sharedToolAccess   VaultToolAccess[]
   permissionRequests PermissionRequest[]
   spec               OpenApiSpec?
+  authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
 
   @@unique([vaultId, slug])
   @@map("mcp_server")
+}
+
+/// header auth: a further header carrying a secret, sent with the one on
+/// the server row, for a server or API that wants several at once (a key and
+/// a secret key, each in its own header). The first header stays on the
+/// server row; these follow it in `position` order.
+model ServerAuthHeader {
+  id            String    @id
+  serverId      String    @map("server_id")
+  server        McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  position      Int
+  headerName    String    @map("header_name")
+  valueTemplate String    @map("value_template")
+  secretId      String?   @map("secret_id")
+  secret        Secret?   @relation(fields: [secretId], references: [id], onDelete: SetNull)
+
+  @@unique([serverId, position])
+  @@index([secretId])
+  @@map("server_auth_header")
 }
 
 /// The catalogue of one server's tools, as last read from it. search_tools
@@ -371,6 +465,9 @@ model McpTool {
   /// openapi: the call plan (JSON) that turns the tool's arguments into an
   /// HTTP request. Null for MCP and mail tools.
   operation   String?
+  /// openapi: an outline of what a successful call answers, from the
+  /// schema; describe_tool shows it. Null when the schema does not say.
+  output      String?
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
@@ -392,6 +489,10 @@ model OpenApiSpec {
   /// SHA-256 of text, hex.
   hash      String
   fetchedAt DateTime  @map("fetched_at")
+  /// The PCP_VERSION that built the endpoint's tools from it. A boot under
+  /// another version rebuilds them from this copy (endpoints.ts
+  /// rebuildOutdatedEndpoints). Null for tools built before it was kept.
+  builtWith String?   @map("built_with")
 
   @@map("openapi_spec")
 }
@@ -421,6 +522,18 @@ model Setting {
 
   @@id([vaultId, key])
   @@map("setting")
+}
+
+// Settings of the machine PCP runs on rather than of a vault: dynamic DNS and
+// HTTPS (lib/core/network/). They are read by background work that runs
+// while nobody is signed in, so they are not encrypted, and nothing from a
+// vault is ever copied into them. See ARCHITECTURE.md, "Reaching PCP".
+model HostSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("host_setting")
 }
 
 /// A tool answer too long to hand to an assistant in one piece, kept whole

@@ -5,6 +5,7 @@ import { useActionState, useState } from "react"
 import { FormError, FormNote } from "@/components/form-status"
 import {
   HeaderAuthFields,
+  type ExtraHeaderValues,
   type SecretOption,
 } from "@/components/header-auth-fields"
 import { OAuthClientFields } from "@/components/oauth-client-fields"
@@ -35,6 +36,7 @@ export type ServerFormValues = {
   authHeaderName: string
   authValueTemplate: string
   authSecretId: string
+  authExtraHeaders: ExtraHeaderValues[]
   oauthClientId: string
   oauthClientSecretId: string
   oauthScope: string
@@ -49,6 +51,7 @@ export const EMPTY_SERVER: ServerFormValues = {
   authHeaderName: DEFAULT_HEADER_NAME,
   authValueTemplate: DEFAULT_VALUE_TEMPLATE,
   authSecretId: "",
+  authExtraHeaders: [],
   oauthClientId: "",
   oauthClientSecretId: "",
   oauthScope: "",
@@ -173,6 +176,16 @@ export function ServerForm({
               secrets={secrets}
               initial={initial}
               redirectUrl={redirectUrl}
+              scopeHint="Leave empty to let the server decide."
+              intro={
+                <>
+                  After saving, choose <strong>Connect</strong> on the server
+                  page to sign in. PCP registers itself with the server when the
+                  server allows it. When it does not, create an OAuth client in
+                  the provider&apos;s developer settings with this redirect URI,
+                  and enter its client ID and secret here:
+                </>
+              }
             />
           ) : null}
 

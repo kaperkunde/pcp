@@ -57,6 +57,9 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
     where: { vaultId: ctx.vaultId },
     include: {
       authFor: { select: { id: true, name: true } },
+      authHeaderFor: {
+        select: { server: { select: { id: true, name: true } } },
+      },
       oauthClientFor: { select: { id: true, name: true } },
       oauthTokensFor: { select: { id: true, name: true } },
     },
@@ -68,6 +71,7 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
 
     for (const server of [
       ...row.authFor,
+      ...row.authHeaderFor.map((header) => header.server),
       ...row.oauthClientFor,
       ...row.oauthTokensFor,
     ]) {
@@ -98,26 +102,32 @@ export async function findTextSecretByName(
   })
 }
 
-export async function createSecret(
+export function validateSecretValue(value: string): string | null {
+  if (!value) {
+    return "Enter the secret's value."
+  }
+
+  if (value.length > MAX_VALUE) {
+    return "That value is too large for a secret."
+  }
+
+  return null
+}
+
+/**
+ * Everything createSecret checks, without writing: a form that saves a new
+ * secret along with something else checks it before either is written.
+ */
+export async function checkNewSecret(
   ctx: VaultContext,
-  input: { name: string; value: string; description?: string },
-): Promise<{ id: string }> {
+  input: { name: string; value: string },
+): Promise<void> {
   const name = input.name.trim()
-  const nameProblem = validateSecretName(name)
+  const problem = validateSecretName(name) ?? validateSecretValue(input.value)
 
-  if (nameProblem) {
-    throw invalid(nameProblem)
+  if (problem) {
+    throw invalid(problem)
   }
-
-  if (!input.value) {
-    throw invalid("Enter the secret's value.")
-  }
-
-  if (input.value.length > MAX_VALUE) {
-    throw invalid("That value is too large for a secret.")
-  }
-
-  const description = (input.description ?? "").trim().slice(0, MAX_DESCRIPTION)
 
   const existing = await db().secret.findUnique({
     where: { vaultId_name: { vaultId: ctx.vaultId, name } },
@@ -127,7 +137,16 @@ export async function createSecret(
   if (existing) {
     throw new PcpError("conflict", `A secret named "${name}" already exists.`)
   }
+}
 
+export async function createSecret(
+  ctx: VaultContext,
+  input: { name: string; value: string; description?: string },
+): Promise<{ id: string }> {
+  await checkNewSecret(ctx, input)
+
+  const name = input.name.trim()
+  const description = (input.description ?? "").trim().slice(0, MAX_DESCRIPTION)
   const id = newId()
 
   await db().secret.create({
@@ -256,6 +275,7 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
     where: { id, vaultId: ctx.vaultId },
     include: {
       authFor: { select: { name: true } },
+      authHeaderFor: { select: { server: { select: { name: true } } } },
       oauthClientFor: { select: { name: true } },
       oauthTokensFor: { select: { name: true } },
     },
@@ -265,9 +285,15 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
     throw notFound("That secret")
   }
 
-  const users = [...row.authFor, ...row.oauthClientFor].map(
-    (server) => server.name,
-  )
+  const users = [
+    ...new Set(
+      [
+        ...row.authFor,
+        ...row.authHeaderFor.map((header) => header.server),
+        ...row.oauthClientFor,
+      ].map((server) => server.name),
+    ),
+  ]
 
   if (users.length > 0) {
     throw new PcpError(

@@ -34,11 +34,28 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   the client secret at the token endpoint, and hands out a refresh token
  *   only when the sign-in asked for `access_type=offline`.
  *
+ * - `/closed-api/openapi.json` and `/closed-api/*` — a REST API that signs
+ *   in with OAuth: its document declares an oauth2 authorization code flow
+ *   at the closed authorization server above, and `/closed-api/whoami`
+ *   takes only a token that server issued. Requests are recorded in
+ *   `closedApiRequests`.
+ *
  * - `/openapi.json` and `/api/*` — a small REST API (a pet store) with its
  *   OpenAPI document, for PCP's API endpoints. `/api/*` wants the same
  *   bearer token as `/mcp` and records every request in `requests`, which is
  *   how the tests assert what PCP actually sent. `/openapi.json` is open,
  *   like most published schemas, and its server is `${origin}/api`.
+ * - `/keyed/openapi.json` and `/keyed/*` — an API whose credential comes in
+ *   two parts, a key and a secret key each in its own header, as Porkbun's
+ *   does (`keyedKeys`). `/keyed/ping` answers with the secret key it got,
+ *   as an API that echoes a credential back would, and records every
+ *   request's headers in `keyedRequests`.
+ * - `/page` — an HTML page for web_fetch, recording each request in
+ *   `pageHits`. The server is on 127.0.0.1, which web_fetch refuses, so the
+ *   tests show that `pageHits` stays empty.
+ *
+ * - `/ddns/update` — a dynamic DNS service's update URL. It records every
+ *   update in `ddns.updates` and answers with `ddns.status`.
  * - `/jmap/*` — a JMAP mail server (lib/core/mail/fake-jmap.ts) for mail
  *   accounts, signing in ada@example.com with `expectedToken` as the
  *   password (Basic). `/oauth/jmap/*` is the same behind the OAuth
@@ -79,8 +96,18 @@ export type Upstream = {
     args: Record<string, unknown>
     authorization: string | null
   }>
+  /** The OpenAPI document of the API behind the closed authorization server. */
+  closedApiSpecUrl: string
+  /** Where its requests go. */
+  closedApiUrl: string
+  /** Every request to /closed-api/* past the document, with its token. */
+  closedApiRequests: Array<{ path: string; authorization: string | null }>
   /** The OpenAPI document of the pet store. */
   openapiUrl: string
+  /** The key and secret key /keyed/* wants, in their two headers. */
+  keyedKeys: { apiKey: string; secretKey: string }
+  /** The two key headers of every request to /keyed/*, in order. */
+  keyedRequests: Array<{ apiKey: string | null; secretKey: string | null }>
   /** The JMAP session URLs: Basic sign-in, and OAuth. */
   jmapSessionUrl: string
   oauthJmapSessionUrl: string
@@ -100,7 +127,55 @@ export type Upstream = {
     contentType: string | null
     body: string
   }>
+  /** The dynamic DNS service: what it was sent, and how it answers. */
+  ddns: {
+    updateUrl: string
+    updates: Array<{
+      query: Record<string, string>
+      authorization: string | null
+    }>
+    status: number
+  }
+  /** The HTML page for web_fetch. */
+  pageUrl: string
+  /** Every request to /page, by method; web_fetch should make none. */
+  pageHits: string[]
   close: () => Promise<void>
+}
+
+/** The OAuth API's document: one operation, and where to sign in. */
+function closedApiSpec(origin: string) {
+  return {
+    openapi: "3.0.3",
+    info: {
+      title: "Closed whoami",
+      description: "Says who signed in, behind OAuth.",
+    },
+    servers: [{ url: `${origin}/closed-api` }],
+    components: {
+      securitySchemes: {
+        closed: {
+          type: "oauth2",
+          flows: {
+            authorizationCode: {
+              authorizationUrl: `${origin}/closed/authorize`,
+              tokenUrl: `${origin}/closed/token`,
+              scopes: { "whoami.read": "Read who you are" },
+            },
+          },
+        },
+      },
+    },
+    paths: {
+      "/whoami": {
+        get: {
+          operationId: "whoami",
+          summary: "Who signed in",
+          security: [{ closed: ["whoami.read"] }],
+        },
+      },
+    },
+  }
 }
 
 type Pet = { id: number; name: string; status: string }
@@ -388,12 +463,47 @@ function json(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body))
 }
 
+/** The two-key API's OpenAPI document: both keys, required together. */
+export function keyedSpec(origin: string) {
+  return {
+    openapi: "3.0.3",
+    info: { title: "Domains", description: "Domains for sale.", version: "1" },
+    servers: [{ url: `${origin}/keyed` }],
+    security: [{ ApiKeyHeader: [], SecretApiKeyHeader: [] }],
+    components: {
+      securitySchemes: {
+        ApiKeyHeader: { type: "apiKey", in: "header", name: "X-API-Key" },
+        SecretApiKeyHeader: {
+          type: "apiKey",
+          in: "header",
+          name: "X-Secret-API-Key",
+        },
+      },
+    },
+    paths: {
+      "/ping": {
+        post: {
+          operationId: "ping",
+          summary: "Check the keys",
+          responses: { "200": { description: "The keys work" } },
+        },
+      },
+    },
+  }
+}
+
 export async function startUpstream({
   expectedToken = `upstream-secret-${randomBytes(6).toString("hex")}`,
 }: { expectedToken?: string } = {}): Promise<Upstream> {
   const calls: Upstream["calls"] = []
   const lateTools = new Set<string>()
   const requests: Upstream["requests"] = []
+  const keyedKeys = {
+    apiKey: `pk1_${randomBytes(6).toString("hex")}`,
+    secretKey: `sk1_${randomBytes(6).toString("hex")}`,
+  }
+  const keyedRequests: Upstream["keyedRequests"] = []
+  const pageHits: string[] = []
   const pets: Pet[] = [
     { id: 1, name: "Fido", status: "available" },
     { id: 2, name: "Tom", status: "sold" },
@@ -407,6 +517,8 @@ export async function startUpstream({
     redirectUris: new Set<string>(),
   }
   const closedSignIns: Upstream["closedSignIns"] = []
+  const ddns: Upstream["ddns"] = { updateUrl: "", updates: [], status: 200 }
+  const closedApiRequests: Upstream["closedApiRequests"] = []
   const tokenLifetime = { seconds: 3600 }
   const tokenRequests: Upstream["tokenRequests"] = []
   const jmap = createFakeJmap({
@@ -573,8 +685,74 @@ export async function startUpstream({
         })
       }
 
+      if (url.pathname === "/ddns/update") {
+        ddns.updates.push({
+          query: Object.fromEntries(url.searchParams),
+          authorization,
+        })
+        res.statusCode = ddns.status
+        return res.end(ddns.status === 200 ? "good" : "refused")
+      }
+
+      if (url.pathname === "/closed-api/openapi.json") {
+        return json(res, 200, closedApiSpec(origin))
+      }
+
+      if (url.pathname.startsWith("/closed-api/")) {
+        closedApiRequests.push({ path: url.pathname, authorization })
+        const token = authorization?.startsWith("Bearer ")
+          ? authorization.slice(7)
+          : ""
+
+        if (!issuedTokens.has(token)) {
+          res.setHeader("www-authenticate", 'Bearer error="invalid_token"')
+          return json(res, 401, { error: "invalid_token" })
+        }
+
+        if (url.pathname === "/closed-api/whoami") {
+          return json(res, 200, { you: "the owner", scope: "whoami.read" })
+        }
+      }
+
       if (url.pathname === "/openapi.json") {
         return json(res, 200, petstoreSpec(origin))
+      }
+
+      if (url.pathname === "/keyed/openapi.json") {
+        return json(res, 200, keyedSpec(origin))
+      }
+
+      if (url.pathname.startsWith("/keyed/")) {
+        const header = (name: string) => {
+          const value = req.headers[name]
+          return typeof value === "string" ? value : null
+        }
+        const sent = {
+          apiKey: header("x-api-key"),
+          secretKey: header("x-secret-api-key"),
+        }
+        keyedRequests.push(sent)
+
+        if (
+          sent.apiKey !== keyedKeys.apiKey ||
+          sent.secretKey !== keyedKeys.secretKey
+        ) {
+          return json(res, 401, { status: "ERROR", message: "Invalid keys." })
+        }
+
+        if (url.pathname === "/keyed/ping" && req.method === "POST") {
+          return json(res, 200, { status: "SUCCESS", yourKey: sent.secretKey })
+        }
+
+        return json(res, 404, { error: "not_found" })
+      }
+
+      if (url.pathname === "/page") {
+        pageHits.push(req.method ?? "")
+        res.setHeader("content-type", "text/html; charset=utf-8")
+        return res.end(
+          "<!doctype html><title>Upstream page</title><h1>Only for the owner's network</h1>",
+        )
       }
 
       if (url.pathname.startsWith("/api/")) {
@@ -773,6 +951,7 @@ export async function startUpstream({
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const { port } = server.address() as AddressInfo
   origin = `http://127.0.0.1:${port}`
+  ddns.updateUrl = `${origin}/ddns/update`
 
   return {
     origin,
@@ -781,7 +960,14 @@ export async function startUpstream({
     closedMcpUrl: `${origin}/closed/mcp`,
     closedClient,
     closedSignIns,
+    closedApiSpecUrl: `${origin}/closed-api/openapi.json`,
+    closedApiUrl: `${origin}/closed-api`,
+    closedApiRequests,
     openapiUrl: `${origin}/openapi.json`,
+    keyedKeys,
+    keyedRequests,
+    pageUrl: `${origin}/page`,
+    pageHits,
     jmapSessionUrl: `${origin}/jmap/session`,
     oauthJmapSessionUrl: `${origin}/oauth/jmap/session`,
     jmap,
@@ -793,6 +979,7 @@ export async function startUpstream({
     lateTools,
     calls,
     requests,
+    ddns,
     close: () =>
       new Promise((resolve, reject) => {
         for (const handler of Object.values(handlers)) void handler.close()

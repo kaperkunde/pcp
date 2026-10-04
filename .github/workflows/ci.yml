@@ -32,6 +32,9 @@ jobs:
         run: pnpm lint
       - name: Format check
         run: pnpm format:check
+      - name: Shellcheck
+        # The runner image ships shellcheck; install.sh is POSIX sh.
+        run: shellcheck --shell=sh install.sh
       - name: Typecheck
         run: pnpm typecheck
       - name: Build

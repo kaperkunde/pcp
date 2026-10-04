@@ -4,6 +4,7 @@
 const ROUTES = [
   "/",
   "/setup",
+  "/setup/restore",
   "/login",
   "/recover",
   "/servers",
