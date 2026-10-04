@@ -43,12 +43,52 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
-- **Nothing to configure.** `docker compose up`, open the site, choose a
-  password. No environment variables. Dynamic DNS and HTTPS with Let's
-  Encrypt are built in for a home server, and off for anyone with a proxy.
+- **Nothing to configure.** Open the Mac or Windows app, or
+  `docker compose up` and open the site; choose a password. No environment
+  variables. Dynamic DNS and HTTPS with Let's Encrypt are built in for a home
+  server, and off for anyone with a proxy.
 - **Single user, by design.** PCP is yours: one owner, one encrypted vault.
 
 ## Run it
+
+### On your own computer
+
+Download the app and open it. It runs PCP on your computer, keeps the vault in
+your user folder, and opens a window on it. An assistant on the same computer
+reaches it at `http://localhost:3000/mcp`.
+
+- **Mac**:
+  [Apple silicon](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-mac-arm64.dmg) ·
+  [Intel](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-mac-x64.dmg)
+- **Windows**:
+  [Installer](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-windows-x64.exe)
+
+The apps are not signed with a developer certificate, so the first start
+needs a nod. macOS: open it, dismiss the warning, then System Settings →
+Privacy & Security → **Open Anyway**. Windows: SmartScreen → **More info** →
+**Run anyway**.
+
+The app answers this computer only until you turn on **Accept connections
+from other devices** in its menu. It keeps running when you close its window
+(quit from the menu, or the tray icon on Windows) and can start when you sign
+in. Its data is in `~/Library/Application Support/PCP` on a Mac and
+`%APPDATA%\PCP` on Windows; back that folder up like a Docker volume.
+
+**From outside your home.** An assistant that runs elsewhere (Claude on the
+web, a phone) needs an address that reaches your computer from the internet,
+which a home router does not give it on its own. While PCP is at a home
+address, its **Settings** page explains the two ways:
+
+- **A tunnel** (Cloudflare Tunnel, Tailscale Funnel, ngrok) runs on your
+  computer, needs no router changes, works on shared (CGNAT) connections and
+  comes with `https`. The easier way.
+- **PCP's own Dynamic DNS and HTTPS**, with ports 80 and 443 forwarded on your
+  router to this computer, as in
+  [the self-hosting guide](docs/self-hosting.md#4-reach-pcp-from-outside-your-home-optional).
+  The app opens those ports itself once HTTPS is on; Windows asks to let it
+  through the firewall.
+
+### On a server, with Docker
 
 New to self-hosting? **[The self-hosting guide](docs/self-hosting.md)** walks
 through it step by step, from installing Docker to reaching PCP from your phone

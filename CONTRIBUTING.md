@@ -34,6 +34,10 @@ GitHub Actions runs the checks on pull requests only
 unit tests in another, the Playwright suite in a third, side by side. The one
 thing a push runs is the release workflow, on `main` (below).
 
+`pnpm lint`, `pnpm format:check` and `pnpm test` cover `desktop/` too (its
+scripts and the settings module's test); the app itself is built by hand or
+by the release workflow, see "Desktop app" below.
+
 ## Branches and releases
 
 `main` is the stable line; every push to it is a release. Work happens on
@@ -43,10 +47,15 @@ into `main` when it is ready to ship.
 Versions are `MAJOR.MINOR.PATCH`, held in `package.json` and read by the app
 (`lib/core/version.ts`). On each push to `main`, `.github/workflows/release.yml`
 raises the patch (`0.1.0` → `0.1.1`), commits it to `main` as
-`Release vX.Y.Z`, tags it, publishes a GitHub Release with generated notes, and
+`Release vX.Y.Z`, tags it, drafts a GitHub Release with generated notes, and
 fast-forwards `develop` to it. If `develop` has commits `main` lacks by then,
 the fast-forward is skipped; merge `main` into `develop` before the next
-release.
+release. The desktop apps are then built on macOS and Windows runners and
+attached to the draft under stable names (`PCP-mac-arm64.dmg`,
+`PCP-mac-x64.dmg`, `PCP-windows-x64.exe`, so the README's
+`releases/latest/download/…` links keep working), and the release is
+published. An app build that fails does not hold the release back: the
+publish job warns, and re-running the failed job attaches the app.
 
 MAJOR and MINOR are raised by hand, in a commit on `develop`:
 
@@ -62,6 +71,30 @@ The workflow pushes with the workflow token and asks for `contents: write`
 itself, so the read-only default under Settings → Actions → "Workflow
 permissions" can stay. What would stop it is a branch rule on `main` that
 refuses pushes from GitHub Actions.
+
+## Desktop app
+
+`desktop/` wraps the production build in Electron for Mac and Windows: the
+same `next build --output standalone` the Docker image runs, started as a
+child process with its data in the system's application data folder, and a
+window on it. It is its own pnpm project, so Electron is never part of a
+root install. The wrapper imports nothing from the app and the app knows the
+wrapper only as `PCP_DESKTOP=1`; a change to PCP reaches the app through
+`pnpm build`, and a change to how the server is laid out (what the Dockerfile
+copies) is mirrored in `desktop/scripts/stage.mjs`.
+
+```bash
+pnpm install --frozen-lockfile --config.node-linker=hoisted   # flat node_modules: no symlinks in the output
+pnpm db:generate && pnpm build
+cd desktop && pnpm install
+pnpm start                     # stage the server and open the app
+pnpm dist                      # an installer for this machine, in desktop/dist
+```
+
+`desktop/README.md` has the details: where the data lives per system, what
+the menu offers, how better-sqlite3 is rebuilt for Electron, why Electron is
+pinned to the major it is, and which repository secrets sign and notarize
+the release builds (unsigned without them).
 
 ## Database
 
@@ -93,40 +126,45 @@ A bug that regressed gets a test that fails before the fix and passes after
 
 ## Key files
 
-| Path                               | Purpose                                                       |
-| ---------------------------------- | ------------------------------------------------------------- |
-| `lib/core/crypto.ts`               | Envelope encryption, KEK derivation, wrapping the data key    |
-| `lib/core/keys.ts`                 | Key grants: password, recovery, session, API token            |
-| `lib/core/vault.ts`                | Setup, sign-in, password change, recovery                     |
-| `lib/core/sessions.ts`             | Browser sessions (cookie secret → grant)                      |
-| `lib/core/api-tokens.ts`           | Bearer tokens for the gateway and their scope                 |
-| `lib/core/secrets.ts`              | The secret store; the only place values are decrypted         |
-| `lib/core/servers.ts`              | The MCP server registry and its auth configuration            |
-| `lib/core/upstream.ts`             | Connecting to upstreams; the OAuth client provider            |
-| `lib/core/oauth.ts`                | The authorization flow (start, callback, disconnect)          |
-| `lib/core/oauth-client.ts`         | How PCP gets a client ID; redirect URI; sign-in parameters    |
-| `lib/core/endpoints.ts`            | API endpoints: reading a schema, creating them, calling them  |
-| `lib/core/openapi/`                | OpenAPI → tools and call plans; building and sending requests |
-| `lib/core/answers.ts`              | Shaping an answer for the assistant: fields, decode, preview  |
-| `lib/core/endpoint-admin.ts`       | What an assistant may do to endpoints through the gateway     |
-| `lib/core/memories.ts`             | Memories an assistant keeps; what needs the owner to share    |
-| `lib/core/catalogue.ts`            | Writing a server's tool list into the catalogue               |
-| `lib/core/search.ts`, `gateway.ts` | Ranking tools; the MCP server the gateway serves              |
-| `lib/core/tool-access.ts`          | Per-token tool levels: allowed, ask, blocked; copying them    |
-| `lib/core/access-requests.ts`      | Tool levels an assistant proposes; the owner's save           |
-| `lib/core/permissions.ts`          | Asking the owner before a call runs; running it once          |
-| `lib/core/owner-wait.ts`           | Holding a check while the owner answers or signs in           |
-| `lib/core/connect.ts`              | The link an assistant hands over to connect an OAuth server   |
-| `lib/core/migrate.ts`              | Boot-time migrations                                          |
-| `lib/core/host-settings.ts`        | Settings of the machine (not a vault), stored unencrypted     |
-| `lib/core/network/`                | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
-| `lib/server/`                      | Next-specific glue: session cookie, public URL, action state  |
-| `lib/actions/`                     | Server Actions the forms call                                 |
-| `app/mcp/route.ts`                 | The gateway endpoint                                          |
-| `app/api/oauth/`                   | OAuth callback; PCP's client metadata document                |
-| `app/api/servers/[id]/oauth/`      | OAuth start; the per-server callback older clients use        |
-| `e2e/fixtures/upstream.ts`         | The fake MCP + OAuth server the e2e suite talks to            |
-| `app/manifest.ts`, `public/icons/` | The manifest and icon set; `assets/icon.png` is the master    |
+| Path                                 | Purpose                                                       |
+| ------------------------------------ | ------------------------------------------------------------- |
+| `lib/core/crypto.ts`                 | Envelope encryption, KEK derivation, wrapping the data key    |
+| `lib/core/keys.ts`                   | Key grants: password, recovery, session, API token            |
+| `lib/core/vault.ts`                  | Setup, sign-in, password change, recovery                     |
+| `lib/core/sessions.ts`               | Browser sessions (cookie secret → grant)                      |
+| `lib/core/api-tokens.ts`             | Bearer tokens for the gateway and their scope                 |
+| `lib/core/secrets.ts`                | The secret store; the only place values are decrypted         |
+| `lib/core/servers.ts`                | The MCP server registry and its auth configuration            |
+| `lib/core/upstream.ts`               | Connecting to upstreams; the OAuth client provider            |
+| `lib/core/oauth.ts`                  | The authorization flow (start, callback, disconnect)          |
+| `lib/core/oauth-client.ts`           | How PCP gets a client ID; redirect URI; sign-in parameters    |
+| `lib/core/endpoints.ts`              | API endpoints: reading a schema, creating them, calling them  |
+| `lib/core/openapi/`                  | OpenAPI → tools and call plans; building and sending requests |
+| `lib/core/answers.ts`                | Shaping an answer for the assistant: fields, decode, preview  |
+| `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
+| `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
+| `lib/core/catalogue.ts`              | Writing a server's tool list into the catalogue               |
+| `lib/core/search.ts`, `gateway.ts`   | Ranking tools; the MCP server the gateway serves              |
+| `lib/core/tool-access.ts`            | Per-token tool levels: allowed, ask, blocked; copying them    |
+| `lib/core/access-requests.ts`        | Tool levels an assistant proposes; the owner's save           |
+| `lib/core/permissions.ts`            | Asking the owner before a call runs; running it once          |
+| `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in           |
+| `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server   |
+| `lib/core/migrate.ts`                | Boot-time migrations                                          |
+| `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
+| `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
+| `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |
+| `lib/actions/`                       | Server Actions the forms call                                 |
+| `app/mcp/route.ts`                   | The gateway endpoint                                          |
+| `app/api/oauth/`                     | OAuth callback; PCP's client metadata document                |
+| `app/api/servers/[id]/oauth/`        | OAuth start; the per-server callback older clients use        |
+| `e2e/fixtures/upstream.ts`           | The fake MCP + OAuth server the e2e suite talks to            |
+| `app/manifest.ts`, `public/icons/`   | The manifest and icon set; `assets/icon.png` is the master    |
+| `lib/core/local-address.ts`          | Whether PCP's own address is one only a home network reaches  |
+| `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                  |
+| `desktop/main.mjs`                   | The desktop app: starts the server, opens the window          |
+| `desktop/scripts/stage.mjs`          | Stages the server for the app, as the Dockerfile lays it out  |
+| `.github/workflows/release.yml`      | Tags, builds the desktop apps, publishes the release          |
 
 ## Licence
 

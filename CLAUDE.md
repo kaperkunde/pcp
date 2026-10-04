@@ -110,6 +110,14 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   the machine, are read with no credential, and are stored unencrypted. Never
   copy anything from the vault into one. `lib/core/network/` starts nothing
   (timer, listener, request) while both features are off.
+- `desktop/` is a host for the production build, not part of the app. It
+  imports nothing from `lib/`, `app/` or `components/`; the app knows it only
+  as `PCP_DESKTOP=1` (`lib/server/desktop.ts`), for copy that says how the
+  app is reached. `desktop/scripts/stage.mjs` copies what the Dockerfile
+  copies: a change to one is a change to both. (Its environment is the
+  wrapper's own: the HTTPS ports stay 80 and 443, which the image moves.) It is its own pnpm project
+  (`desktop/pnpm-workspace.yaml`); do not add it to the root workspace, or
+  every install downloads Electron.
 
 ## Cryptography
 

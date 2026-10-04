@@ -20,6 +20,7 @@ lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
+desktop/             The Mac and Windows app: Electron around the production build, nothing of PCP in it
 ```
 
 `lib/core` takes a `VaultContext` — `{ vaultId, dek }` — as an explicit
@@ -425,7 +426,10 @@ another one reads:
 
 ## Data on disk
 
-`PCP_DATA_DIR` (default `./data`, `/data` in Docker):
+`PCP_DATA_DIR` (default `./data`; `/data` in Docker; in the desktop app
+`data/` under the system's folder for the app: `~/Library/Application
+Support/PCP` on macOS, `%APPDATA%\PCP` on Windows, `~/.config/PCP` on
+Linux):
 
 - `pcp.db` — the SQLite database, in WAL mode. Migrations are applied at boot
   by `lib/core/migrate.ts`, which keeps Prisma's own `_prisma_migrations`
@@ -437,6 +441,13 @@ another one reads:
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
+
+The desktop app keeps its own two files beside that directory, not in it:
+`desktop.json` (the port, whether other devices may connect) and the
+server's stdout in the system's log folder (`~/Library/Logs/PCP` on macOS,
+`logs/` under the app folder elsewhere). Everything PCP remembers is in the
+database; the wrapper holds only what has to be known before the server is
+up.
 
 ## Reaching PCP: dynamic DNS and HTTPS
 
@@ -500,7 +511,10 @@ restart. A failed request is retried after 1 hour, doubling to at most a day.
 That keeps PCP well inside Let's Encrypt's limits on failed validations;
 "Try again now" skips the wait. A DNS lookup first warns, without blocking,
 when the name does not point at this network. Port 3000 keeps serving plain
-HTTP for the local network.
+HTTP for the local network. In the desktop app the two ports stay 80 and 443
+(macOS and Windows let an ordinary program use them), and they listen on
+every interface even while the app keeps port 3000 to this computer: a
+router's forward needs exactly that.
 
 ## Connecting OAuth servers
 

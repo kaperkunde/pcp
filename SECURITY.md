@@ -134,6 +134,13 @@ Not defended against:
   backups of the data volume accordingly.
 - PCP's own HTTPS listeners face the internet directly and overwrite any
   `X-Forwarded-*` header a client sends.
+- The desktop app's own port (3000) answers this computer only
+  (`127.0.0.1`) until its owner turns on **Accept connections from other
+  devices** in the app's menu; then it listens on every interface, like the
+  Docker image, for other devices on the home network. PCP's built-in HTTPS,
+  once turned on under Settings, listens on ports 80 and 443 on every
+  interface whatever that menu says, since a router's port forward needs
+  exactly that. A tunnel needs neither.
 - Back up the data volume. Losing it loses the vault.
 - Keep the recovery key somewhere safe. Losing it and the password loses the
   data; that is the design.
