@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { logoutAction } from "@/lib/actions/auth"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { getVault } from "@/lib/core/vault"
+import { PCP_VERSION } from "@/lib/core/version"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireSession } from "@/lib/server/session"
 
@@ -29,7 +30,8 @@ export default async function DashboardLayout({
       <header className="flex flex-wrap items-center justify-between gap-4">
         <Link href="/servers" className="flex items-center gap-3">
           <PcpMark />
-          <span className="text-lg font-medium">PCP</span>
+          <span className="text-lg font-medium">PCP</span>{" "}
+          <span className="text-xs text-muted-foreground">v{PCP_VERSION}</span>
         </Link>
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <PendingRequests

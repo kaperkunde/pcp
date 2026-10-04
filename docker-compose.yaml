@@ -16,8 +16,11 @@
 # docs/self-hosting.md walks through both.
 services:
   pcp:
-    # Built from this checkout. No image is published yet; once one is,
-    # replace `build: .` with its `image:` reference.
+    # The published image, which install.sh runs without a checkout. With
+    # both lines, `docker compose up -d` builds from this checkout when the
+    # image is not on this computer yet and gives the build this name, and
+    # `docker compose pull` fetches the published one instead.
+    image: ghcr.io/kaperkunde/pcp:latest
     build: .
     restart: unless-stopped
     ports:
