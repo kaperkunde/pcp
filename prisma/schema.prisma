@@ -235,6 +235,7 @@ model Secret {
   lastUsedAt  DateTime? @map("last_used_at")
 
   authFor       McpServer[] @relation("ServerAuthSecret")
+  authHeaderFor ServerAuthHeader[]
   oauthClientFor McpServer[] @relation("ServerOAuthClientSecret")
   oauthTokensFor McpServer[] @relation("ServerOAuthTokens")
 
@@ -322,9 +323,29 @@ model McpServer {
   toolAccess         ApiTokenToolAccess[]
   permissionRequests PermissionRequest[]
   spec               OpenApiSpec?
+  authHeaders        ServerAuthHeader[]
 
   @@unique([vaultId, slug])
   @@map("mcp_server")
+}
+
+/// header auth: a further header carrying a secret, sent with the one on
+/// the server row, for a server or API that wants several at once (a key and
+/// a secret key, each in its own header). The first header stays on the
+/// server row; these follow it in `position` order.
+model ServerAuthHeader {
+  id            String    @id
+  serverId      String    @map("server_id")
+  server        McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  position      Int
+  headerName    String    @map("header_name")
+  valueTemplate String    @map("value_template")
+  secretId      String?   @map("secret_id")
+  secret        Secret?   @relation(fields: [secretId], references: [id], onDelete: SetNull)
+
+  @@unique([serverId, position])
+  @@index([secretId])
+  @@map("server_auth_header")
 }
 
 /// The catalogue of one server's tools, as last read from it. search_tools

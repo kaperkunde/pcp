@@ -87,7 +87,8 @@ required.
    need. Each is stored encrypted and can be revealed, rotated or deleted.
 2. **Servers.** Add an MCP server by URL, describe what it is for in a
    sentence, and choose how PCP authenticates to it: nothing, a secret in a
-   header (`Authorization: Bearer {{secret}}` by default), or OAuth. For
+   header (`Authorization: Bearer {{secret}}` by default, with further
+   headers when the credential has several parts), or OAuth. For
    OAuth, choose **Connect** on the server page: PCP discovers the
    authorization server, registers itself if it can, sends you to sign in
    and keeps the tokens as a managed secret. Many large providers (Google,
@@ -101,8 +102,9 @@ required.
 3. **API endpoints.** Add an API by giving PCP its OpenAPI 3 schema, as a URL
    or an uploaded JSON or YAML file. PCP turns each operation into a tool,
    with the arguments the schema describes, and tells you what it left out
-   (file uploads, cookies). Choose a secret to send in a header, and
-   **Read-only** to offer only GET operations. Requests go to the base URL
+   (file uploads, cookies). Choose a secret to send in a header (more than
+   one, each in its own header, for an API that wants a key and a secret
+   key), and **Read-only** to offer only GET operations. Requests go to the base URL
    saved on the endpoint, which PCP never changes on its own when the schema
    does. A secret is only sent to an address you typed, or to the origin the
    schema was downloaded from, so with an uploaded file you enter the base URL

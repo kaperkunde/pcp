@@ -25,8 +25,10 @@ import { readPatches, valueAt, type PatchOperation } from "./openapi/patch"
 import { readCallPlan } from "./openapi/plan"
 import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
 import {
+  authHeaderNames,
   normalizeNameAndDescription,
   setToolDescription,
+  type ExtraAuthHeaderInput,
   type ServerStatus,
 } from "./servers"
 
@@ -109,7 +111,15 @@ export type EndpointDetails = {
     /** How many edits are applied to it. */
     edits: number
   }
-  authentication: { type: "none" | "header"; header: string | null }
+  /**
+   * The headers the credential goes in, the first in `header`; never which
+   * secrets or what they hold.
+   */
+  authentication: {
+    type: "none" | "header"
+    header: string | null
+    headers: string[]
+  }
   status: ServerStatus
   statusMessage: string
   /** What this token can and cannot change on this endpoint right now. */
@@ -270,12 +280,13 @@ async function detailsOf(
     unedited = false,
   }: ReadOptions = {},
 ): Promise<EndpointDetails> {
-  const [row, spec] = await Promise.all([
+  const [row, spec, headers] = await Promise.all([
     db().openApiSpec.findUnique({
       where: { serverId: server.id },
       select: { fetchedAt: true },
     }),
     storedSpec(server.id),
+    authHeaderNames(server),
   ])
 
   const details: EndpointDetails = {
@@ -295,11 +306,11 @@ async function detailsOf(
       characters: spec?.text.length ?? null,
       edits: spec?.patches.length ?? 0,
     },
-    // The header's name, never which secret or what it holds.
+    // The headers' names, never which secrets or what they hold.
     authentication:
       server.authType === "header"
-        ? { type: "header", header: server.authHeaderName }
-        : { type: "none", header: null },
+        ? { type: "header", header: server.authHeaderName, headers }
+        : { type: "none", header: null, headers: [] },
     status: server.status as ServerStatus,
     statusMessage: server.statusMessage,
     changes: describeChanges(server),
@@ -461,9 +472,9 @@ export type RegistrationInput = {
   /** Where requests go; empty means the address in the schema. */
   baseUrl?: string | null
   readOnly?: boolean
-  /** The secret by id, with the header it goes in, when there is one. */
+  /** The secret by id, when there is one, and every header it goes in. */
   authSecretId?: string | null
-  authHeaderName?: string | null
+  authHeaderNames?: string[]
 }
 
 async function assertRoomForEndpoint(ctx: VaultContext) {
@@ -542,7 +553,7 @@ export async function prepareRegistration(
       readOnly,
       ownerBaseUrl: input.baseUrl,
       hasSecret: Boolean(input.authSecretId),
-      authHeaderName: input.authHeaderName,
+      authHeaderNames: input.authHeaderNames,
       patches,
       fetchedFrom: fetched?.url ?? null,
     })
@@ -597,6 +608,7 @@ export async function createApprovedEndpoint(
     authHeaderName?: string | null
     authValueTemplate?: string | null
     authSecretId?: string | null
+    authExtraHeaders?: ExtraAuthHeaderInput[] | null
     endpoint: EndpointRegistration
   },
 ): Promise<{ id: string; sync: SyncResult }> {
@@ -626,6 +638,7 @@ export async function createApprovedEndpoint(
     authHeaderName: asked.authHeaderName,
     authValueTemplate: asked.authValueTemplate,
     authSecretId: asked.authSecretId,
+    authExtraHeaders: asked.authExtraHeaders,
   })
 }
 

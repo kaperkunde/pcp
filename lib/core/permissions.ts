@@ -57,7 +57,12 @@ import {
   type PermissionVia,
 } from "./permission-rules"
 import { summarize } from "./search"
-import { createServer, getServer, type ServerInput } from "./servers"
+import {
+  createServer,
+  getServer,
+  type ExtraAuthHeader,
+  type ServerInput,
+} from "./servers"
 import { writeToolAccess } from "./tool-access"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 
@@ -108,8 +113,10 @@ export type ToolRequest = {
  * A new server as an assistant asked for it; never a secret's value. With
  * `endpoint` it is an API from OpenAPI text, and `url` is its base URL.
  */
-export type RegisterArgs = ServerInput & {
+export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   secretName?: string | null
+  /** Further headers, each with its secret's name for the owner to read. */
+  authExtraHeaders?: Array<ExtraAuthHeader & { secretName: string }>
   endpoint?: EndpointRegistration
 }
 
@@ -327,15 +334,28 @@ async function summarizeRow(
 
   if (row.kind === "register") {
     const input = args as RegisterArgs
+    const sent = [
+      {
+        secretName: input.secretName ?? "?",
+        headerName: input.authHeaderName || "Authorization",
+      },
+      ...(input.authExtraHeaders ?? []),
+    ]
+    const secrets = sent.map((header) => `"${header.secretName}"`)
     const auth =
       input.authType === "header"
-        ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header`
+        ? `Authentication: sends ${sent
+            .map(
+              (header, index) =>
+                `${index === 0 ? "your secret " : ""}"${header.secretName}" in the ${header.headerName} header`,
+            )
+            .join(", and ")}`
         : input.authType === "oauth"
           ? `Authentication: OAuth; you sign in when you connect it${input.oauthScope ? ` (scope ${input.oauthScope})` : ""}`
           : "Authentication: none"
     const warning =
       input.authType === "header"
-        ? `PCP will send the secret "${input.secretName ?? "?"}" to this address with every call. Only add it if you trust the address.`
+        ? `PCP will send the ${secrets.length === 1 ? "secret" : "secrets"} ${secrets.join(" and ")} to this address with every call. Only add it if you trust the address.`
         : null
 
     if (input.endpoint) {
@@ -875,6 +895,7 @@ async function executeRegister(
         authHeaderName: asked.authHeaderName,
         authValueTemplate: asked.authValueTemplate,
         authSecretId: asked.authSecretId,
+        authExtraHeaders: asked.authExtraHeaders,
         endpoint: asked.endpoint,
       })
     : await createServer(ctx, {
@@ -885,6 +906,7 @@ async function executeRegister(
         authHeaderName: asked.authHeaderName,
         authValueTemplate: asked.authValueTemplate,
         authSecretId: asked.authSecretId,
+        authExtraHeaders: asked.authExtraHeaders,
         oauthScope: asked.oauthScope,
       })
   const { id } = created

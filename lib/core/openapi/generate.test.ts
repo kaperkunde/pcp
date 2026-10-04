@@ -429,6 +429,32 @@ describe("what the schema says about credentials", () => {
     ).toMatch(/query string, which PCP does not send/)
     expect(generateTools(spec(), OPTIONS).security).toBeNull()
   })
+
+  it("names every header of a requirement that combines several keys", () => {
+    const schemes = {
+      components: {
+        securitySchemes: {
+          key: { type: "apiKey", in: "header", name: "X-API-Key" },
+          secret: { type: "apiKey", in: "header", name: "X-Secret-API-Key" },
+          bearer: { type: "http", scheme: "bearer" },
+        },
+      },
+    }
+    const both = generateTools(
+      spec({ ...schemes, security: [{ key: [], secret: [] }] }),
+      OPTIONS,
+    )
+
+    expect(both.security).toBe(
+      "a key in the X-API-Key header and a key in the X-Secret-API-Key header",
+    )
+    expect(both.securityHeaders).toEqual(["X-API-Key", "X-Secret-API-Key"])
+    expect(
+      generateTools(spec({ ...schemes, security: [{ bearer: [] }] }), OPTIONS)
+        .securityHeaders,
+    ).toEqual([])
+    expect(generateTools(spec(), OPTIONS).securityHeaders).toEqual([])
+  })
 })
 
 describe("resolveBaseUrl", () => {

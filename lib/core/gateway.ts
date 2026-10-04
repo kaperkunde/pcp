@@ -17,6 +17,7 @@ import type {
 import type { ResolvedToken } from "./api-tokens"
 import {
   DEFAULT_HEADER_NAME,
+  MAX_AUTH_HEADERS,
   DEFAULT_VALUE_TEMPLATE,
   MAX_MEMORY_CHARS,
   MAX_SHARED_MEMORY_CHARS,
@@ -712,7 +713,7 @@ export function buildGatewayServer(
     {
       title: "Add a server or an API",
       description:
-        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document: as text (openapi_schema), or the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. PCP turns each operation into a tool and makes the HTTP calls itself. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation. Authentication is none, OAuth for an MCP server (the owner signs in once they agree), or a header carrying a secret the owner already stored in PCP, named by its NAME. Never pass a secret's value: PCP does not take one here.",
+        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document: as text (openapi_schema), or the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. PCP turns each operation into a tool and makes the HTTP calls itself. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation. Authentication is none, OAuth for an MCP server (the owner signs in once they agree), or a header carrying a secret the owner already stored in PCP, named by its NAME; a credential in several parts (a key and a secret key) sends each in its own header with extra_headers. Never pass a secret's value: PCP does not take one here.",
       inputSchema: z.object({
         name: z
           .string()
@@ -777,6 +778,26 @@ export function buildGatewayServer(
           .describe(
             `For header: the header's value with ${SECRET_PLACEHOLDER} where the secret goes (default "${DEFAULT_VALUE_TEMPLATE}").`,
           ),
+        extra_headers: z
+          .array(
+            z.object({
+              secret: z
+                .string()
+                .describe("The name of a secret the owner stored in PCP."),
+              header_name: z.string().describe("The header to send it in."),
+              value_template: z
+                .string()
+                .optional()
+                .describe(
+                  `The header's value with ${SECRET_PLACEHOLDER} where the secret goes (default "${SECRET_PLACEHOLDER}").`,
+                ),
+            }),
+          )
+          .max(MAX_AUTH_HEADERS - 1)
+          .optional()
+          .describe(
+            "For header, when the credential has several parts each in its own header (an API key and a secret key, say, as an OpenAPI security requirement naming several apiKey schemes does): the headers sent besides the first, each with its own secret by NAME. Every part of a credential goes here, never in a tool argument.",
+          ),
         oauth_scope: z
           .string()
           .optional()
@@ -801,6 +822,11 @@ export function buildGatewayServer(
           secret?: string
           header_name?: string
           value_template?: string
+          extra_headers?: Array<{
+            secret: string
+            header_name: string
+            value_template?: string
+          }>
           oauth_scope?: string
         },
         ctx,
@@ -834,6 +860,12 @@ export function buildGatewayServer(
         let secretName: string | null = null
         let authHeaderName: string | null = null
         let authValueTemplate: string | null = null
+        const authExtraHeaders: NonNullable<RegisterArgs["authExtraHeaders"]> =
+          []
+
+        if (args.extra_headers?.length && authType !== "header") {
+          return failure("extra_headers are for auth_type header.")
+        }
 
         if (authType === "header") {
           if (!args.secret?.trim()) {
@@ -868,6 +900,49 @@ export function buildGatewayServer(
               `The header value must be one line containing ${SECRET_PLACEHOLDER}.`,
             )
           }
+
+          const names = new Set([authHeaderName.toLowerCase()])
+
+          for (const extra of args.extra_headers ?? []) {
+            const headerName = extra.header_name.trim()
+            const template = extra.value_template?.trim() || SECRET_PLACEHOLDER
+
+            if (!HEADER_NAME.test(headerName)) {
+              return failure(
+                "Header names use letters, digits and dashes only.",
+              )
+            }
+
+            if (names.has(headerName.toLowerCase())) {
+              return failure(`The ${headerName} header is named twice.`)
+            }
+
+            names.add(headerName.toLowerCase())
+
+            if (
+              !template.includes(SECRET_PLACEHOLDER) ||
+              /[\r\n]/.test(template)
+            ) {
+              return failure(
+                `The value of ${headerName} must be one line containing ${SECRET_PLACEHOLDER}.`,
+              )
+            }
+
+            const found = await findTextSecretByName(scope.ctx, extra.secret)
+
+            if (!found) {
+              return failure(
+                `No secret called "${extra.secret.trim()}". The owner can add one in PCP; then ask again with its name.`,
+              )
+            }
+
+            authExtraHeaders.push({
+              secretId: found.id,
+              secretName: found.name,
+              headerName,
+              valueTemplate: template,
+            })
+          }
         }
 
         const common = {
@@ -877,6 +952,7 @@ export function buildGatewayServer(
           authValueTemplate,
           authSecretId,
           secretName,
+          authExtraHeaders,
         }
         let input: RegisterArgs
 
@@ -904,7 +980,12 @@ export function buildGatewayServer(
             baseUrl: args.url,
             readOnly: args.read_only,
             authSecretId,
-            authHeaderName,
+            authHeaderNames: authHeaderName
+              ? [
+                  authHeaderName,
+                  ...authExtraHeaders.map((extra) => extra.headerName),
+                ]
+              : [],
           })
 
           input = {

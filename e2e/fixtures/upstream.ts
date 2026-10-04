@@ -36,6 +36,11 @@ import { z } from "zod"
  *   bearer token as `/mcp` and records every request in `requests`, which is
  *   how the tests assert what PCP actually sent. `/openapi.json` is open,
  *   like most published schemas, and its server is `${origin}/api`.
+ * - `/keyed/openapi.json` and `/keyed/*` — an API whose credential comes in
+ *   two parts, a key and a secret key each in its own header, as Porkbun's
+ *   does (`keyedKeys`). `/keyed/ping` answers with the secret key it got,
+ *   as an API that echoes a credential back would, and records every
+ *   request's headers in `keyedRequests`.
  *
  * Everything is in memory. Start one per test file.
  */
@@ -73,6 +78,10 @@ export type Upstream = {
   }>
   /** The OpenAPI document of the pet store. */
   openapiUrl: string
+  /** The key and secret key /keyed/* wants, in their two headers. */
+  keyedKeys: { apiKey: string; secretKey: string }
+  /** The two key headers of every request to /keyed/*, in order. */
+  keyedRequests: Array<{ apiKey: string | null; secretKey: string | null }>
   /** Every request to /api/*, in order, whether or not it was allowed. */
   requests: Array<{
     method: string
@@ -332,12 +341,46 @@ function json(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body))
 }
 
+/** The two-key API's OpenAPI document: both keys, required together. */
+export function keyedSpec(origin: string) {
+  return {
+    openapi: "3.0.3",
+    info: { title: "Domains", description: "Domains for sale.", version: "1" },
+    servers: [{ url: `${origin}/keyed` }],
+    security: [{ ApiKeyHeader: [], SecretApiKeyHeader: [] }],
+    components: {
+      securitySchemes: {
+        ApiKeyHeader: { type: "apiKey", in: "header", name: "X-API-Key" },
+        SecretApiKeyHeader: {
+          type: "apiKey",
+          in: "header",
+          name: "X-Secret-API-Key",
+        },
+      },
+    },
+    paths: {
+      "/ping": {
+        post: {
+          operationId: "ping",
+          summary: "Check the keys",
+          responses: { "200": { description: "The keys work" } },
+        },
+      },
+    },
+  }
+}
+
 export async function startUpstream({
   expectedToken = `upstream-secret-${randomBytes(6).toString("hex")}`,
 }: { expectedToken?: string } = {}): Promise<Upstream> {
   const calls: Upstream["calls"] = []
   const lateTools = new Set<string>()
   const requests: Upstream["requests"] = []
+  const keyedKeys = {
+    apiKey: `pk1_${randomBytes(6).toString("hex")}`,
+    secretKey: `sk1_${randomBytes(6).toString("hex")}`,
+  }
+  const keyedRequests: Upstream["keyedRequests"] = []
   const pets: Pet[] = [
     { id: 1, name: "Fido", status: "available" },
     { id: 2, name: "Tom", status: "sold" },
@@ -504,6 +547,35 @@ export async function startUpstream({
 
       if (url.pathname === "/openapi.json") {
         return json(res, 200, petstoreSpec(origin))
+      }
+
+      if (url.pathname === "/keyed/openapi.json") {
+        return json(res, 200, keyedSpec(origin))
+      }
+
+      if (url.pathname.startsWith("/keyed/")) {
+        const header = (name: string) => {
+          const value = req.headers[name]
+          return typeof value === "string" ? value : null
+        }
+        const sent = {
+          apiKey: header("x-api-key"),
+          secretKey: header("x-secret-api-key"),
+        }
+        keyedRequests.push(sent)
+
+        if (
+          sent.apiKey !== keyedKeys.apiKey ||
+          sent.secretKey !== keyedKeys.secretKey
+        ) {
+          return json(res, 401, { status: "ERROR", message: "Invalid keys." })
+        }
+
+        if (url.pathname === "/keyed/ping" && req.method === "POST") {
+          return json(res, 200, { status: "SUCCESS", yourKey: sent.secretKey })
+        }
+
+        return json(res, 404, { error: "not_found" })
       }
 
       if (url.pathname.startsWith("/api/")) {
@@ -679,6 +751,8 @@ export async function startUpstream({
     closedClient,
     closedSignIns,
     openapiUrl: `${origin}/openapi.json`,
+    keyedKeys,
+    keyedRequests,
     expectedToken,
     issuedTokens,
     lateTools,

@@ -169,14 +169,20 @@ does not name are refused. Path values are percent-encoded and never `.` or
 `..`. Only declared header parameters are sent, never the ones PCP owns
 (Authorization, Cookie, Host, hop-by-hop headers), and a header value cannot
 carry a line break. The credential is added last, so no argument can replace
-it, and the finished URL must still be under the base URL. `executeCall`
-sends it with a timeout and a cap on the answer, **without following
-redirects** (`fetch` would repeat a custom header such as `X-API-Key` on the
-next host), turns the answer into a tool result (JSON pretty-printed and,
-when small, as `structuredContent`; text as it is; other types described, not
-dumped; an error status as an error result), and removes the credential from
-it before parsing, because an API that echoes a key back (in an error, say)
-must not hand it to the assistant.
+it, and the finished URL must still be under the base URL. A credential can
+take several headers, each with its own secret (an API that wants a key and a
+secret key, as an OpenAPI security requirement naming two `apiKey` schemes
+says): the first is on the server row, the rest in `server_auth_header`. None
+of them is ever offered as an argument, so no part of a credential passes
+through an assistant, and every secret and header value is removed from the
+answer. A schema whose requirement names a key header the endpoint does not
+send is reported in its status. `executeCall` sends it with a timeout and a
+cap on the answer, **without following redirects** (`fetch` would repeat a
+custom header such as `X-API-Key` on the next host), turns the answer into a
+tool result (JSON pretty-printed and, when small, as `structuredContent`; text
+as it is; other types described, not dumped; an error status as an error
+result), and removes the credential from it before parsing, because an API
+that echoes a key back (in an error, say) must not hand it to the assistant.
 
 **Where requests go** is the owner's choice, made once. The base URL is the
 owner's own field when filled, otherwise the schema's first server, resolved
@@ -242,11 +248,11 @@ change an endpoint decides where PCP sends requests:
 - **No credential changes, ever.** A secret only comes with a registration
   the owner approves, and then by name. `update_endpoint` accepts nothing that
   names a secret, a header or a template, and `get_endpoint` shows only
-  whether a header is sent and what it is called. The writer these changes go
-  through (`endpoints.ts: changeEndpoint`) writes only the columns it is given
-  and never the credential, the schema's source, or public-only, so an owner
-  changing those at the same moment is not overwritten and the rules above
-  cannot be got around by what is passed in.
+  whether headers are sent and what they are called. The writer these changes
+  go through (`endpoints.ts: changeEndpoint`) writes only the columns it is
+  given and never the credential, the schema's source, or public-only, so an
+  owner changing those at the same moment is not overwritten and the rules
+  above cannot be got around by what is passed in.
 - **Public addresses only.** What an assistant registers has `public_only`
   set, and only the owner can clear it. Such an endpoint refuses loopback,
   private, link-local, carrier-grade NAT and multicast addresses, cloud

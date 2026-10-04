@@ -5,6 +5,7 @@ import { useActionState, useState } from "react"
 import { FormError, FormNote } from "@/components/form-status"
 import {
   HeaderAuthFields,
+  type ExtraHeaderValues,
   type SecretOption,
 } from "@/components/header-auth-fields"
 import { LocalDate } from "@/components/local-date"
@@ -48,6 +49,7 @@ export type EndpointFormValues = {
   authHeaderName: string
   authValueTemplate: string
   authSecretId: string
+  authExtraHeaders: ExtraHeaderValues[]
 }
 
 export const EMPTY_ENDPOINT: EndpointFormValues = {
@@ -63,6 +65,7 @@ export const EMPTY_ENDPOINT: EndpointFormValues = {
   authHeaderName: DEFAULT_HEADER_NAME,
   authValueTemplate: DEFAULT_VALUE_TEMPLATE,
   authSecretId: "",
+  authExtraHeaders: [],
 }
 
 /**

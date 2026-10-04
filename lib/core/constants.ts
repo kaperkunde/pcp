@@ -8,6 +8,11 @@ export const MIN_PASSWORD_LENGTH = 10
 export const DEFAULT_HEADER_NAME = "Authorization"
 export const DEFAULT_VALUE_TEMPLATE = "Bearer {{secret}}"
 export const SECRET_PLACEHOLDER = "{{secret}}"
+/**
+ * The most headers a server's credential goes in, the first included: an API
+ * that takes a key and a secret key, each in its own header, needs two.
+ */
+export const MAX_AUTH_HEADERS = 5
 
 /** The largest OpenAPI schema PCP reads, uploaded or downloaded. */
 export const MAX_SPEC_BYTES = 5 * 1024 * 1024

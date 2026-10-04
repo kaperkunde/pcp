@@ -6,6 +6,7 @@ import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import {
   HeaderAuthFields,
+  type ExtraHeaderValues,
   type SecretOption,
 } from "@/components/header-auth-fields"
 import { SubmitButton } from "@/components/submit-button"
@@ -35,6 +36,7 @@ export type ServerFormValues = {
   authHeaderName: string
   authValueTemplate: string
   authSecretId: string
+  authExtraHeaders: ExtraHeaderValues[]
   oauthClientId: string
   oauthClientSecretId: string
   oauthScope: string
@@ -49,6 +51,7 @@ export const EMPTY_SERVER: ServerFormValues = {
   authHeaderName: DEFAULT_HEADER_NAME,
   authValueTemplate: DEFAULT_VALUE_TEMPLATE,
   authSecretId: "",
+  authExtraHeaders: [],
   oauthClientId: "",
   oauthClientSecretId: "",
   oauthScope: "",

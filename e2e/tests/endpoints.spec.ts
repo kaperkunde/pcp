@@ -668,7 +668,7 @@ test("then it is the owner's: the assistant can read it, and turn read-only on, 
   const details = JSON.parse(toolText(read)) as {
     publicOnly: boolean
     belongsTo: string
-    authentication: { type: string; header: string }
+    authentication: { type: string; header: string; headers: string[] }
     changes: Record<string, string>
     spec: string
   }
@@ -677,6 +677,7 @@ test("then it is the owner's: the assistant can read it, and turn read-only on, 
   expect(details.authentication).toEqual({
     type: "header",
     header: "Authorization",
+    headers: ["Authorization"],
   })
   expect(details.changes.baseUrl).toMatch(/the owner configured this endpoint/)
   expect(JSON.parse(details.spec)).toMatchObject({ openapi: "3.0.3" })

@@ -520,6 +520,69 @@ describe("adding a server", () => {
       await db().mcpServer.findFirstOrThrow({ where: { name: "Weather" } }),
     ).toMatchObject({ authType: "header", authSecretId: secret.id })
   })
+
+  it("names every secret when the credential has several headers, and adds them all", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const key = await createSecret(ctx, { name: "domains key", value: "k" })
+    const secretKey = await createSecret(ctx, {
+      name: "domains secret key",
+      value: "s",
+    })
+
+    await withPermission(
+      scope,
+      {
+        kind: "register",
+        input: {
+          name: "Domains",
+          url: "https://domains.example.com/mcp",
+          authType: "header",
+          authSecretId: key.id,
+          authHeaderName: "X-API-Key",
+          authValueTemplate: "{{secret}}",
+          secretName: "domains key",
+          authExtraHeaders: [
+            {
+              secretId: secretKey.id,
+              secretName: "domains secret key",
+              headerName: "X-Secret-API-Key",
+              valueTemplate: "{{secret}}",
+            },
+          ],
+        },
+      },
+      {},
+    )
+    const id = await onlyRequestId()
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.lines).toContain(
+      'Authentication: sends your secret "domains key" in the X-API-Key header, and "domains secret key" in the X-Secret-API-Key header',
+    )
+    expect(view?.warning).toMatch(
+      /the secrets "domains key" and "domains secret key"/,
+    )
+
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { via: "web", publicUrl: PUBLIC_URL },
+      executor,
+    )
+    const added = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Domains" },
+      include: { authHeaders: true },
+    })
+    expect(added.authHeaders).toMatchObject([
+      {
+        position: 1,
+        secretId: secretKey.id,
+        headerName: "X-Secret-API-Key",
+        valueTemplate: "{{secret}}",
+      },
+    ])
+  })
 })
 
 const PETS_SPEC = JSON.stringify({

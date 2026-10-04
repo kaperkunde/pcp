@@ -66,6 +66,11 @@ export type Generated = {
   description: string
   /** What the schema says requests need, in words, or null. */
   security: string | null
+  /**
+   * The headers the schema's keys go in (apiKey schemes "in": "header"),
+   * all of them, when one requirement combines several.
+   */
+  securityHeaders: string[]
   tools: GeneratedTool[]
   skipped: Array<{ operation: string; reason: string }>
 }
@@ -208,22 +213,51 @@ function serverUrlOf(doc: OpenApiDocument): {
   return { url, problem: null }
 }
 
-function describeSecurity(doc: OpenApiDocument): string | null {
-  const requirements = own(doc, "security")
+/**
+ * The schemes of the requirement PCP reads: the document's first, or, when
+ * it declares none, the first an operation declares. Every scheme in one
+ * requirement is needed at once (a key and a secret key, say).
+ */
+function requiredSchemes(doc: OpenApiDocument): Array<[string, unknown]> {
+  const first = (requirements: unknown) =>
+    Array.isArray(requirements) && isObject(requirements[0])
+      ? Object.keys(requirements[0])
+      : []
+  let names = first(own(doc, "security"))
 
-  if (!Array.isArray(requirements) || requirements.length === 0) {
-    return null
+  if (names.length === 0) {
+    search: for (const [, item] of entries(doc.paths)) {
+      for (const method of METHODS) {
+        names = first(own(own(item, method), "security"))
+        if (names.length > 0) break search
+      }
+    }
   }
 
   const schemes = own(own(doc, "components"), "securitySchemes")
-  const names = Object.keys(isObject(requirements[0]) ? requirements[0] : {})
+  return names.map((name) => [name, own(schemes, name)])
+}
 
-  if (names.length === 0) {
+function securityHeaders(doc: OpenApiDocument): string[] {
+  return requiredSchemes(doc).flatMap(([, scheme]) => {
+    const header = ownString(scheme, "name")
+
+    return ownString(scheme, "type") === "apiKey" &&
+      ownString(scheme, "in") === "header" &&
+      header
+      ? [header.slice(0, 100)]
+      : []
+  })
+}
+
+function describeSecurity(doc: OpenApiDocument): string | null {
+  const required = requiredSchemes(doc)
+
+  if (required.length === 0) {
     return null
   }
 
-  const described = names.map((name) => {
-    const scheme = own(schemes, name)
+  const described = required.map(([name, scheme]) => {
     const type = ownString(scheme, "type")
     const where = ownString(scheme, "in")
     const header = ownString(scheme, "name")
@@ -375,6 +409,7 @@ export function generateTools(
     title: shorten(ownString(info, "title"), 200),
     description: shorten(ownString(info, "description"), 1000),
     security: describeSecurity(doc),
+    securityHeaders: securityHeaders(doc),
     tools,
     skipped,
   }

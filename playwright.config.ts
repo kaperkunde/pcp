@@ -133,6 +133,17 @@ export default defineConfig({
       },
     },
     {
+      // An API whose credential is a key and a secret key in two headers:
+      // added by the owner, called through /mcp, proposed by an assistant.
+      name: "secret-headers",
+      testMatch: /secret-headers\.spec\.ts/,
+      dependencies: ["setup"],
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: "e2e/.auth/owner.json",
+      },
+    },
+    {
       // Signs every browser out, so it comes last and signs in on its own.
       name: "recovery",
       testMatch: /recovery\.spec\.ts/,

@@ -18,6 +18,7 @@ import {
 } from "@/lib/core/servers"
 import { syncServerTools } from "@/lib/core/upstream"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
+import { extraHeadersFrom } from "@/lib/server/extra-headers"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -34,6 +35,7 @@ function inputFrom(formData: FormData): ServerInput {
     authHeaderName: field(formData, "authHeaderName"),
     authValueTemplate: field(formData, "authValueTemplate"),
     authSecretId: field(formData, "authSecretId") || null,
+    authExtraHeaders: extraHeadersFrom(formData),
     oauthClientId: field(formData, "oauthClientId") || null,
     oauthClientSecretId: field(formData, "oauthClientSecretId") || null,
     oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,
