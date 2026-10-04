@@ -16,6 +16,11 @@ import { addSecret, createToken } from "../lib/ui"
 // on its own.
 test.describe.configure({ mode: "serial" })
 
+// Signing in is limited per address (10 tries in 15 minutes), and `setup`
+// and `recovery` sign in from the default one before this runs: from an
+// address of its own, like the sessions `setup` makes for each project.
+test.use({ extraHTTPHeaders: { "x-forwarded-for": "198.51.100.201" } })
+
 const RUN = Date.now().toString(36)
 const EXPORT_PASSWORD = "e2e-export-password-9!"
 const EXPORT_FILE = path.join(__dirname, "..", ".state", "backup.pcpexport")
