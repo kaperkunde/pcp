@@ -4,6 +4,7 @@ import { describeFetchError, discard, readCapped } from "../openapi/http"
 import { send } from "../openapi/transport"
 import { PCP_VERSION } from "../version"
 import { onSameOrigin } from "./addresses"
+import { findMailbox, mailboxByRole } from "./mailboxes"
 import { htmlToText } from "./html"
 import {
   MAIL_CALL_TIMEOUT_MS,
@@ -465,26 +466,6 @@ export function openJmapBackend(
       }))
   }
 
-  function findMailbox(boxes: MailboxSummary[], ref: string): MailboxSummary {
-    const wanted = ref.trim().toLowerCase()
-    const found =
-      boxes.find((box) => box.id === ref) ??
-      boxes.find((box) => box.role === wanted) ??
-      boxes.find((box) => box.name.toLowerCase() === wanted)
-
-    if (!found) {
-      throw new MailRequestError(
-        `No mailbox called ${ref.slice(0, 100)}; list_mailboxes lists them.`,
-      )
-    }
-
-    return found
-  }
-
-  function byRole(boxes: MailboxSummary[], wanted: MailboxRole) {
-    return boxes.find((box) => box.role === wanted) ?? null
-  }
-
   async function summaries(ids: string[]): Promise<MailMessageSummary[]> {
     if (ids.length === 0) {
       return []
@@ -531,7 +512,7 @@ export function openJmapBackend(
       const boxes = await mailboxes()
       const box = query.mailbox
         ? findMailbox(boxes, query.mailbox)
-        : (byRole(boxes, "inbox") ?? findMailbox(boxes, "inbox"))
+        : (mailboxByRole(boxes, "inbox") ?? findMailbox(boxes, "inbox"))
       const conditions: Json[] = [{ inMailbox: box.id }]
 
       for (const key of ["text", "from", "to", "subject"] as const) {
@@ -882,7 +863,7 @@ export function openJmapBackend(
     },
 
     async deleteEmail(id): Promise<MoveResult> {
-      const trash = byRole(await mailboxes(), "trash")
+      const trash = mailboxByRole(await mailboxes(), "trash")
 
       if (!trash) {
         throw new MailRequestError(

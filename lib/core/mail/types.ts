@@ -170,8 +170,11 @@ export type SendResult = {
 }
 
 export type MoveResult = {
-  /** The email's id now; an IMAP message gets a new one when it moves. */
-  id: string
+  /**
+   * The email's id now; an IMAP message gets a new one when it moves. Null
+   * when the server does not say what it is (IMAP without UIDPLUS).
+   */
+  id: string | null
   previousId: string
   mailboxId: string
 }

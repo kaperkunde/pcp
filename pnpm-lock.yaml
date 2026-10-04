@@ -87,9 +87,6 @@ importers:
       '@types/node':
         specifier: ^22
         version: 22.20.4
-      '@types/nodemailer':
-        specifier: ^8.0.2
-        version: 8.0.2
       '@types/react':
         specifier: ^19
         version: 19.3.0
@@ -1106,9 +1103,6 @@ packages:
 
   '@types/node@22.20.4':
     resolution: {integrity: sha512-zJRE40jpHtKqE/C4fgHrAKQLJuSpzEnP9ff9Y7YtoR3Wd2pwqzlekDeEuUQXjRd+QCYnVnNwuJYmhdk9XV8gvA==}
-
-  '@types/nodemailer@8.0.2':
-    resolution: {integrity: sha512-c7M5ox8p0nEOfbJ2E9Qcmt8/QCu/VzsiAhzBiZbvky2PhKZDHpKB3sQHBM5MEZNkCfBOaS6S9//AGPRTNB7IaA==}
 
   '@types/react-dom@19.3.0':
     resolution: {integrity: sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==}
@@ -4984,10 +4978,6 @@ snapshots:
   '@types/node@22.20.4':
     dependencies:
       undici-types: 6.21.0
-
-  '@types/nodemailer@8.0.2':
-    dependencies:
-      '@types/node': 22.20.4
 
   '@types/react-dom@19.3.0(@types/react@19.3.0)':
     dependencies:
