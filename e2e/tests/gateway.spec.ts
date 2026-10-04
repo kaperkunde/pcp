@@ -114,6 +114,7 @@ test("issues an API token and describes the servers behind it", async ({
     "check_permission",
     "answer_permission",
     "check_server",
+    "read_result",
     "register_server",
   ])
   expect(instructions).toContain(

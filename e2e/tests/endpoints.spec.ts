@@ -364,6 +364,7 @@ const GATEWAY_TOOLS = [
   "check_permission",
   "answer_permission",
   "check_server",
+  "read_result",
   "register_server",
 ]
 

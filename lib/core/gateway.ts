@@ -64,6 +64,7 @@ import { searchTools, summarize, type ToolCandidate } from "./search"
 import { findTextSecretByName } from "./secrets"
 import { validateServerUrl, type AuthType } from "./servers"
 import { effectiveAccess, loadToolAccess } from "./tool-access"
+import { readResult, RESULT_PAGE_CHARS } from "./tool-results"
 import { needsConnecting, syncServerTools } from "./upstream"
 import { PCP_VERSION } from "./version"
 
@@ -219,6 +220,7 @@ export function buildInstructions(
   return [
     "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
     'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: pass it on, and call check_permission with the id it gives for the result. A server that needs them to sign in answers with a link to connect it; check_server says when it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees.',
+    "An answer too long to pass on in one piece ends with a result id: read_result reads the rest of it, a slice at a time.",
     "Servers:",
     ...lines,
     ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
@@ -583,13 +585,10 @@ export function buildGatewayServer(
           )
         }
 
-        return runCall(
-          scope.ctx,
-          target,
-          tool.name,
-          args.arguments ?? {},
-          scope.publicUrl,
-        )
+        return runCall(scope.ctx, target, tool.name, args.arguments ?? {}, {
+          publicUrl: scope.publicUrl,
+          tokenId: scope.tokenId,
+        })
       },
     ),
   )
@@ -705,6 +704,100 @@ export function buildGatewayServer(
 
       return panelResult(said, { kind: "done", text: said, server: state })
     }),
+  )
+
+  server.registerTool(
+    "read_result",
+    {
+      title: "Read the rest of a long answer",
+      description: `Reads a slice of an answer PCP kept because it was too long to pass on whole. A long answer ends with a notice naming the result id and how long it is. Results are kept for a day, for this token only.`,
+      inputSchema: z.object({
+        id: z
+          .string()
+          .min(1)
+          .max(64)
+          .describe("The result id from the notice at the end of the answer."),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Where to start, in characters (default 0)."),
+        length: z
+          .number()
+          .int()
+          .min(1)
+          .max(RESULT_PAGE_CHARS)
+          .optional()
+          .describe(`How many characters (default ${RESULT_PAGE_CHARS}).`),
+        find: z
+          .string()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe(
+            "Start at the first place this text appears, at or after offset.",
+          ),
+      }),
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    logged("read_result", () => ({}), { quiet: true })(
+      async (args: {
+        id: string
+        offset?: number
+        length?: number
+        find?: string
+      }) => {
+        let slice: Awaited<ReturnType<typeof readResult>>
+
+        try {
+          slice = await readResult(scope.ctx, {
+            tokenId: scope.tokenId,
+            ...args,
+          })
+        } catch (error) {
+          if (isPcpError(error) && error.code === "not_found") {
+            return failure(
+              "No result with that id for this token, or it has expired (results are kept for a day). Call the tool again for a fresh one.",
+            )
+          }
+
+          throw error
+        }
+
+        const until = slice.expiresAt.toISOString()
+
+        if (args.find !== undefined && slice.foundAt === null) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `[result ${slice.id}: that text does not appear at or after character ${slice.offset} of ${slice.total}; readable until ${until}]`,
+              },
+            ],
+          }
+        }
+
+        const end = slice.offset + slice.text.length
+        const more =
+          end < slice.total
+            ? `; the next slice starts at offset ${end}`
+            : "; this is the end"
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `[result ${slice.id}: characters ${slice.offset}–${end} of ${slice.total}, ${slice.mediaType}, readable until ${until}${more}]\n${slice.text}`,
+            },
+          ],
+        }
+      },
+    ),
   )
 
   server.registerTool(

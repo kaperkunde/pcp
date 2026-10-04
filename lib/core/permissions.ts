@@ -59,6 +59,7 @@ import {
 import { summarize } from "./search"
 import { createServer, getServer, type ServerInput } from "./servers"
 import { writeToolAccess } from "./tool-access"
+import { pageResult, resultKeeper, resultNotices } from "./tool-results"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 
 /**
@@ -78,8 +79,6 @@ import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
  * difference: an answer can also settle the tool for the calls after it
  * ("Always allow", "Block").
  */
-
-const MAX_RESULT_CHARS = 60_000
 
 /** What the gateway knows about the request it is serving. */
 export type PermissionScope = {
@@ -182,34 +181,19 @@ export function permissionUrl(publicUrl: string, id: string): string {
   return `${publicUrl.replace(/\/+$/, "")}/permissions/${encodeURIComponent(id)}`
 }
 
-/** An upstream result with its text cut to what an assistant should read. */
-export function clipResult(result: CallToolResult): CallToolResult {
-  return {
-    content: result.content.map((block) =>
-      block.type === "text" && block.text.length > MAX_RESULT_CHARS
-        ? {
-            ...block,
-            text: `${block.text.slice(0, MAX_RESULT_CHARS)}\n… (truncated by PCP)`,
-          }
-        : block,
-    ),
-    ...(result.isError ? { isError: true } : {}),
-    ...(result.structuredContent
-      ? { structuredContent: result.structuredContent }
-      : {}),
-  }
-}
-
 /**
- * One call to an upstream tool. An OAuth server that is not connected (or
- * whose sign-in expired) answers with the connect panel instead of an error.
+ * One call to an upstream tool, for the token that asked. An answer too
+ * long for one piece is kept for that token and handed over a page at a
+ * time (lib/core/tool-results.ts). An OAuth server that is not connected
+ * (or whose sign-in expired) answers with the connect panel instead of an
+ * error.
  */
 export async function runCall(
   ctx: VaultContext,
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  publicUrl: string,
+  { publicUrl, tokenId }: { publicUrl: string; tokenId: string },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
   if (needsConnecting(server)) {
@@ -217,8 +201,12 @@ export async function runCall(
   }
 
   try {
-    return clipResult(
+    const keep = resultKeeper(ctx, tokenId)
+
+    return await pageResult(
       await executor.callTool(ctx, server, toolName, args, { publicUrl }),
+      keep,
+      { serverId: server.id, toolName },
     )
   } catch (error) {
     if (
@@ -811,9 +799,10 @@ export async function decidePermission(
   // now needs connecting was added, which is what the owner agreed to.
   const failed =
     result.isError === true || (kind === "call" && kindOfResult === "connect")
-  const stored = storedResultText(
-    result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])),
+  const texts = result.content.flatMap((part) =>
+    part.type === "text" ? [part.text] : [],
   )
+  const stored = storedResultText(texts, undefined, resultNotices(texts))
 
   await db().permissionRequest.update({
     where: { id: row.id },
@@ -854,7 +843,7 @@ async function executeCall(
     row.server,
     row.toolName,
     readArgs(ctx, row),
-    publicUrl,
+    { publicUrl, tokenId: row.tokenId },
     executor,
   )
 }

@@ -134,11 +134,26 @@ export function requestHash(
     .digest("hex")
 }
 
-/** A result's text, cut to what is worth keeping on the row. */
-export function storedResultText(texts: string[], max = 20_000): string {
+/**
+ * A result's text, cut to what is worth keeping on the row. `notes` (where
+ * the whole answer was kept) survive the cut, so the assistant that asks
+ * how it went can still read the rest.
+ */
+export function storedResultText(
+  texts: string[],
+  max = 20_000,
+  notes: string[] = [],
+): string {
   const joined = texts.join("\n")
 
-  return joined.length > max ? `${joined.slice(0, max)}\n… (truncated)` : joined
+  if (joined.length <= max) {
+    return joined
+  }
+
+  const kept = joined.slice(0, max)
+  const lost = notes.filter((note) => !kept.includes(note))
+
+  return [`${kept}\n… (truncated)`, ...lost].join("\n")
 }
 
 /** Whether a pending request can still be answered. */
