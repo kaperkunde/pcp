@@ -430,6 +430,74 @@ another one reads:
   vault's memories, as `search.ts` scores every tool. A memory outlives the
   token that wrote it (`token_id` is set to null) and is then the owner's.
 
+## Web fetch
+
+A token made with "fetch web pages" (`api_token.web_fetch`, off unless the
+owner turns it on) gets one more tool, `web_fetch(url, method?, headers?,
+body?, raw?, max_length?, start_index?)`, and a paragraph in the
+instructions. It is the reference fetch server's interface with a method,
+headers and a body added. The code is in `lib/core/fetch/` (the request, the
+page, and which level applies; no database) and `lib/core/web-fetch.ts` (the
+levels as stored, and what the owner does with them).
+
+**Which level applies.** Every request is one method to one site, a site
+being the URL's host (with the port when it is not the scheme's own). The
+levels are rows in `web_fetch_rule`, a method's or a site's, each for one
+token or for all of them (`scope` is the token's id or `all`):
+
+1. the token's own line for the site; set to "Use the method settings"
+   (`access` null), it goes straight to step 3, past all tokens' line;
+2. all tokens' line for the site, the same way;
+3. the token's own level for the method's group (GET, POST, PUT, PATCH,
+   DELETE, OTHER);
+4. all tokens' level for it;
+5. ask.
+
+A site the token has no line for, its own or all tokens', gets one of its
+own the first time an assistant reaches for it, at the method settings and
+marked as the assistant's: that is how every site an assistant tried shows
+on the token's page. Ask goes through `permission_request` like a tool call
+(kind `fetch`, the checked request as its encrypted arguments). The owner's
+**Always allow this site** and **Block this site** write the token's own
+line for the site, as a tool's answer writes the token's own level; when
+they allow a request, `executeFetch` runs it only if the token still has web
+fetch on.
+
+**What a request may be** (`fetch/request.ts`). http and https, no user name
+or password in the address, no CONNECT or TRACE, at most twenty headers, and
+none that PCP owns or that carry a credential (`openapi/headers.ts`, apart
+from Accept and Content-Type, which are the assistant's own here). A body
+only on methods that have one, up to 1 MB. It is checked before the owner is
+asked, so what they allow is what runs.
+
+**Sending it** (`fetch/fetch.ts`). Public addresses only, always, through the
+checked transport of API endpoints (`openapi/transport.ts`): the name is
+resolved by PCP and every address checked as the socket connects. No secret
+is read; no cookie is kept. Redirects are followed by hand, at most five and
+only within the site: one to another site ends the call with where it
+points, so that site gets its own decision when the assistant fetches it. A
+303 (and a 301 or 302 after a POST) becomes a GET without the body, as in a
+browser.
+
+**What comes back** (`fetch/html.ts`). The bytes are decoded with the
+charset the answer declares (a byte order mark, the content type, a
+`<meta charset>`, then UTF-8). HTML is parsed into a document that is never
+rendered (domino), stripped of scripts, styles, frames and embedded objects,
+its links and images made absolute, and converted to Markdown (turndown);
+`raw` skips that. JSON is pretty-printed, other text passed on as it is, and
+anything else described rather than dumped. The text is handed back a part
+at a time (20,000 characters by default, 50,000 at most) after a few lines
+saying the final address, the status, the type, the title and where the
+next part starts. An error status is an error result with the page in it.
+
+**Bounded** (`fetch/limits.ts`). Thirty seconds per request with its
+redirects, 2 MB of an answer read, a thousand method and site lines per
+vault, and 120 requests per token per ten minutes, asked about or not.
+
+The sites a token reached are on its page and in `web_fetch_rule`, in the
+clear like server addresses, and never in the request log: the gateway logs
+that `web_fetch` was called and not where to.
+
 ## Data on disk
 
 `PCP_DATA_DIR` (default `./data`; `/data` in Docker; in the desktop app
@@ -582,8 +650,9 @@ contacting the registration endpoint.
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
-for a token with the right to manage endpoints, and `memory` for a token that
-keeps memories, both below):
+for a token with the right to manage endpoints, `memory` for a token that
+keeps memories, and `web_fetch` for a token that fetches web pages, all
+above):
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with
@@ -626,6 +695,17 @@ row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
 them. The gateway loads the levels by token id.
+
+A tool can also have a level for **all tokens** (`vault_tool_access`, the
+"All tokens" box on a token's page), and a token's own level wins over it:
+the specific line beats the general one. So a token's own `ask` is stored
+while there is a level for all tokens for it to override, and is the absence
+of a row otherwise. Ticking the box makes the level that applies to that
+token now the one for all tokens and removes the token's own; unticking
+removes the one for all tokens and leaves the token its level as its own, so
+nothing changes for it. The owner's answers to a request ("Always allow",
+"Block") write the asking token's own level, as before. The web fetch levels
+(above) work the same way.
 
 A call to an "ask" tool becomes a `permission_request` row
 (`lib/core/permissions.ts`): the

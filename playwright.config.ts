@@ -162,6 +162,15 @@ export default defineConfig({
       use: signedIn("secret-headers"),
     },
     {
+      // A token that fetches web pages: the tool and its instructions, a new
+      // site asking first and listed on the token's page, method and site
+      // levels, All tokens, and public addresses only.
+      name: "web-fetch",
+      testMatch: /web-fetch\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("web-fetch"),
+    },
+    {
       // Signs every browser out, so it comes last and signs in on its own.
       name: "recovery",
       testMatch: /recovery\.spec\.ts/,

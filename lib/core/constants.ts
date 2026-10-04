@@ -63,6 +63,45 @@ export type PermissionKind =
   | "memory_change"
   | "access"
   | "endpoint_change"
+  | "fetch"
+
+/**
+ * The HTTP methods web_fetch has a level for. Each is the default for a
+ * site without a level of its own; OTHER covers every other method it
+ * sends (HEAD, OPTIONS and the rest).
+ */
+export const FETCH_METHOD_GROUPS = [
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OTHER",
+] as const
+
+export type FetchMethodGroup = (typeof FETCH_METHOD_GROUPS)[number]
+
+export const FETCH_METHOD_LABELS: Record<
+  FetchMethodGroup,
+  { label: string; hint: string }
+> = {
+  GET: { label: "GET", hint: "Reading a page." },
+  POST: { label: "POST", hint: "Sending a form or data." },
+  PUT: { label: "PUT", hint: "Putting something at the address." },
+  PATCH: { label: "PATCH", hint: "Changing part of something." },
+  DELETE: { label: "DELETE", hint: "Deleting something." },
+  OTHER: { label: "Other methods", hint: "HEAD, OPTIONS and the rest." },
+}
+
+/** A site's level: one of the tool levels, or whatever its method has. */
+export const FETCH_SITE_LEVELS = ["default", ...TOOL_ACCESS_LEVELS] as const
+
+export type FetchSiteLevel = (typeof FETCH_SITE_LEVELS)[number]
+
+export const FETCH_SITE_LABELS: Record<FetchSiteLevel, string> = {
+  default: "Use the method settings",
+  ...TOOL_ACCESS_LABELS,
+}
 
 /** The longest memory, in characters. */
 export const MAX_MEMORY_CHARS = 10_000

@@ -93,6 +93,16 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
+- Web fetch (`lib/core/fetch/`, `lib/core/web-fetch.ts`) reaches public
+  addresses only, always, never reads a secret, never sends a header PCP owns
+  or one that carries a credential, and never follows a redirect to another
+  site: that site gets its own decision. A site the token has no line for
+  gets one of its own on first sight, so the owner sees every site it tried.
+  Its limits go in `fetch/limits.ts`. Sites stay out of the request log.
+- A level can be a token's own or for all tokens (tools in
+  `vault_tool_access`, web fetch in `web_fetch_rule` with scope `all`), and
+  the token's own always wins. An owner's answer to a request writes the
+  token's own level.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
@@ -155,6 +165,7 @@ The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
 OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a note an
 assistant keeps between conversations is a "memory", "shared" when every
-assistant reads it. No operator
+assistant reads it; what web_fetch reaches is a "site" (a host), and a level
+every token follows is "for all tokens" ("All tokens" in the UI). No operator
 vocabulary in the UI: no "DEK", "grant", "KEK" outside code comments and
 ARCHITECTURE.md.

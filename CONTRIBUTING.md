@@ -143,9 +143,11 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/answers.ts`                | Shaping an answer for the assistant: fields, decode, preview  |
 | `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
+| `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
+| `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits  |
 | `lib/core/catalogue.ts`              | Writing a server's tool list into the catalogue               |
 | `lib/core/search.ts`, `gateway.ts`   | Ranking tools; the MCP server the gateway serves              |
-| `lib/core/tool-access.ts`            | Per-token tool levels: allowed, ask, blocked; copying them    |
+| `lib/core/tool-access.ts`            | Tool levels per token and for all tokens; copying them        |
 | `lib/core/access-requests.ts`        | Tool levels an assistant proposes; the owner's save           |
 | `lib/core/permissions.ts`            | Asking the owner before a call runs; running it once          |
 | `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in           |

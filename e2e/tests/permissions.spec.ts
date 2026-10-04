@@ -26,6 +26,7 @@ const SERVER_NAME = `Permission postcards ${RUN}`
 const SLUG = `perm-${RUN}`
 const TOKEN_NAME = `Careful assistant ${RUN}`
 const SECOND_TOKEN_NAME = `Second assistant ${RUN}`
+const THIRD_TOKEN_NAME = `Third assistant ${RUN}`
 
 // What a client that shows prompts and MCP Apps panels declares. PCP uses
 // neither: Claude's apps stalled on prompts and rebuilt panels stale.
@@ -365,6 +366,60 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
     arguments: { a: 2, b: 3 },
   })
   expect(toolText(ran)).toBe("5")
+})
+
+test("All tokens on a tool's row decides it for every token without a level of its own", async ({
+  page,
+  baseURL,
+}) => {
+  const allTokens = () =>
+    page.getByLabel(`All tokens for ${SLUG}/add_numbers`, { exact: true })
+  const access = () =>
+    page.getByLabel(`Access to ${SLUG}/add_numbers`, { exact: true })
+  const add = { server: SLUG, tool: "add_numbers", arguments: { a: 2, b: 3 } }
+  // Each server's tools start folded on a token's page.
+  const open = async (path: string) => {
+    await page.goto(path)
+    await showTools(page, SLUG)
+  }
+
+  const third = await createToken(page, THIRD_TOKEN_NAME)
+  const thirdId = await openToken(page, THIRD_TOKEN_NAME)
+  await open(`/tokens/${thirdId}`)
+  await expect(access()).toHaveValue("ask")
+  await expect(allTokens()).not.toBeChecked()
+
+  // The first token allows it: ticking makes that every token's level.
+  await open(`/tokens/${tokenId}`)
+  await allTokens().check()
+  await expect(allTokens()).toBeEnabled()
+  await open(`/tokens/${tokenId}`)
+  await expect(allTokens()).toBeChecked()
+  await expect(access()).toHaveValue("allowed")
+
+  await open(`/tokens/${thirdId}`)
+  await expect(allTokens()).toBeChecked()
+  await expect(access()).toHaveValue("allowed")
+  expect(toolText(await callTool(baseURL!, third, "call_tool", add))).toBe("5")
+
+  // A token's own level wins: the third one asks again for itself.
+  await access().selectOption("ask")
+  await expect(access()).toBeEnabled()
+  await open(`/tokens/${thirdId}`)
+  await expect(allTokens()).not.toBeChecked()
+  await expect(page.getByText("(all tokens: Allowed)")).toBeVisible()
+  expect(toolText(await callTool(baseURL!, third, "call_tool", add))).toContain(
+    "Not done yet",
+  )
+
+  // Unticking takes it from all tokens; the first one keeps it as its own.
+  await open(`/tokens/${tokenId}`)
+  await allTokens().uncheck()
+  await expect(allTokens()).toBeEnabled()
+  await open(`/tokens/${tokenId}`)
+  await expect(allTokens()).not.toBeChecked()
+  await expect(access()).toHaveValue("allowed")
+  await expect(page.getByText("(all tokens: Allowed)")).toHaveCount(0)
 })
 
 test("an assistant can propose a server with a stored secret; it is added once you agree", async ({

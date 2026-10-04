@@ -29,6 +29,8 @@ import {
   type EndpointRegistration,
 } from "./endpoint-admin"
 import { invalid, isPcpError, notFound, PcpError } from "./errors"
+import { fetchWeb } from "./fetch/fetch"
+import type { FetchArgs } from "./fetch/request"
 import { newId } from "./ids"
 import {
   decideMemoryAsk,
@@ -75,6 +77,12 @@ import {
 } from "./servers"
 import { writeToolAccess } from "./tool-access"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
+import {
+  describeFetchAsk,
+  fetchHostOf,
+  runFetch,
+  writeSiteAccess,
+} from "./web-fetch"
 
 /**
  * The owner's say before an assistant's call runs. A call to a tool the
@@ -95,7 +103,8 @@ import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
  * question again, unable to ask PCP for the answer.
  *
  * An answer can also settle the tool for the calls after it ("Always
- * allow", "Block").
+ * allow", "Block"), and for a web request the site ("Always allow this
+ * site", "Block this site").
  */
 
 /** What the gateway knows about the request it is serving. */
@@ -137,11 +146,14 @@ export type PermissionAsk =
   | { kind: "endpoint_change"; input: EndpointChangeAsk }
   | MemoryAsk
   | AccessAsk
+  | { kind: "fetch"; input: FetchArgs }
 
 /** Runs what the owner allowed. Tests swap in a stub. */
 export type PermissionExecutor = {
   callTool: typeof callServerTool
   syncTools: typeof syncServerTools
+  /** web_fetch's request; the real one when left out. */
+  fetchWeb?: typeof fetchWeb
 }
 
 const defaultExecutor: PermissionExecutor = {
@@ -288,6 +300,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `endpoint:${ask.input.serverId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "fetch":
+      return {
+        target: `fetch:${ask.input.method} ${ask.input.url}`,
+        args: ask.input as Record<string, unknown>,
+      }
   }
 }
 
@@ -305,6 +322,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "propose_tool_access"
     case "endpoint_change":
       return "update_endpoint"
+    case "fetch":
+      return "web_fetch"
     default:
       return "memory"
   }
@@ -401,6 +420,12 @@ async function summarizeRow(
     const { shown } = args as EndpointChangeAsk
 
     return { ...shown, lines: [...shown.lines, asker] }
+  }
+
+  if (row.kind === "fetch") {
+    const asked = describeFetchAsk(args as FetchArgs)
+
+    return { ...asked, lines: [...asked.lines, asker] }
   }
 
   if (row.kind === "access") {
@@ -784,16 +809,16 @@ export async function decidePermission(
   }
 
   const kind = row.kind as PermissionKind
-  // Only a tool call has "always" and "block": any other answer is about
-  // this one request.
-  const choice: PermissionDecision =
-    kind !== "call"
-      ? decision === "always"
-        ? "allow_once"
-        : decision === "block"
-          ? "decline"
-          : decision
-      : decision
+  // Only a tool call (for the tool) and a web request (for the site) have
+  // "always" and "block": any other answer is about this one request.
+  const settles = kind === "call" || kind === "fetch"
+  const choice: PermissionDecision = !settles
+    ? decision === "always"
+      ? "allow_once"
+      : decision === "block"
+        ? "decline"
+        : decision
+    : decision
 
   if (!decisionsFor(kind).some((offered) => offered.value === choice)) {
     return text("That is not one of the answers to this request.", true)
@@ -814,8 +839,14 @@ export async function decidePermission(
     })
   }
 
+  // The site a web request goes to, for the answers that settle it.
+  const host =
+    kind === "fetch" ? fetchHostOf(readArgs(ctx, row) as FetchArgs) : null
+
   if (choice === "block" || choice === "decline") {
-    if (choice === "block" && row.serverId) {
+    if (choice === "block" && host) {
+      await writeSiteAccess(ctx.vaultId, row.tokenId, host, "blocked")
+    } else if (choice === "block" && row.serverId) {
       await writeToolAccess(row.tokenId, row.serverId, row.toolName, "blocked")
     }
 
@@ -824,7 +855,7 @@ export async function decidePermission(
       row,
       publicUrl,
       choice === "block"
-        ? `The owner blocked ${toolLabel(row)} for this token, so nothing ran.`
+        ? `The owner blocked ${host ?? toolLabel(row)} for this token, so nothing ran.`
         : kind === "access"
           ? "The owner said no, so no tool's level changed."
           : "The owner said no, so nothing ran.",
@@ -853,7 +884,9 @@ export async function decidePermission(
     }
   }
 
-  if (choice === "always" && row.serverId) {
+  if (choice === "always" && host) {
+    await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
+  } else if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
   }
 
@@ -877,7 +910,9 @@ export async function decidePermission(
                 readArgs(ctx, row) as EndpointChangeAsk,
               ),
             )
-          : await executeRegister(ctx, row, publicUrl, executor, secretValue)
+          : kind === "fetch"
+            ? await executeFetch(ctx, row, executor)
+            : await executeRegister(ctx, row, publicUrl, executor, secretValue)
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -940,6 +975,32 @@ async function executeCall(
     decode: readStoredFields(row.decode),
     executor,
   })
+}
+
+/** A web request the owner allowed, if the token may still make one. */
+async function executeFetch(
+  ctx: VaultContext,
+  row: Row,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  const token = await db().apiToken.findUnique({
+    where: { id: row.tokenId },
+    select: { webFetch: true },
+  })
+
+  if (!token?.webFetch) {
+    return text(
+      "This token can no longer fetch web pages (the owner turned it off), so nothing ran.",
+      true,
+    )
+  }
+
+  return runFetch(
+    ctx,
+    row.tokenId,
+    readArgs(ctx, row) as FetchArgs,
+    executor.fetchWeb ?? fetchWeb,
+  )
 }
 
 /**

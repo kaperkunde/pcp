@@ -324,7 +324,24 @@ export async function writeAccessLevels(
     ])
   }
 
-  const stored = levels.filter((level) => level.access !== "ask")
+  // Ask is stored only where it overrides a level for all tokens; anywhere
+  // else it is the absence of a row (lib/core/tool-access.ts).
+  const overridden = new Set(
+    (
+      await db().vaultToolAccess.findMany({
+        where: {
+          vaultId: ctx.vaultId,
+          serverId: { in: [...byServer.keys()] },
+        },
+        select: { serverId: true, toolName: true },
+      })
+    ).map((row) => accessKey(row.serverId, row.toolName)),
+  )
+  const stored = levels.filter(
+    (level) =>
+      level.access !== "ask" ||
+      overridden.has(accessKey(level.serverId, level.tool)),
+  )
 
   await db().$transaction([
     ...[...byServer.entries()].map(([serverId, names]) =>
