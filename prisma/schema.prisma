@@ -34,6 +34,7 @@ model Vault {
 
   permissionRequests PermissionRequest[]
   memories           Memory[]
+  toolResults        ToolResult[]
 
   @@map("vault")
 }
@@ -116,6 +117,7 @@ model ApiToken {
   toolAccess         ApiTokenToolAccess[]
   permissionRequests PermissionRequest[]
   memories           Memory[]
+  toolResults        ToolResult[]
 
   @@index([vaultId])
   @@map("api_token")
@@ -242,8 +244,9 @@ model Secret {
   @@map("secret")
 }
 
-/// A remote MCP server (Streamable HTTP) the gateway can reach on the
-/// owner's behalf, with how to authenticate to it.
+/// Something the gateway can reach on the owner's behalf, with how to
+/// authenticate to it: a remote MCP server (Streamable HTTP), an API
+/// endpoint or a mail account (see kind).
 model McpServer {
   id          String @id
   vaultId     String @map("vault_id")
@@ -257,21 +260,26 @@ model McpServer {
   /// upstream's own description is often missing or written for developers.
   description String @default("")
   /// mcp: the Streamable HTTP endpoint. openapi: the API's base URL, which
-  /// every operation's path is appended to.
+  /// every operation's path is appended to. jmap: the session URL. imap:
+  /// imaps://host:port, or imap://host:port for STARTTLS.
   url         String
   enabled     Boolean @default(true)
 
-  /// none | header | oauth
+  /// none | header | oauth | basic
   authType String @default("none") @map("auth_type")
   /// header auth: the header to send and how the secret goes into it.
   authHeaderName    String? @map("auth_header_name")
   authValueTemplate String? @map("auth_value_template")
   authSecretId      String? @map("auth_secret_id")
   authSecret        Secret? @relation("ServerAuthSecret", fields: [authSecretId], references: [id], onDelete: SetNull)
+  /// basic auth: the user name sent with the secret (a JMAP server's Basic
+  /// authentication, an IMAP and SMTP login).
+  authUsername      String? @map("auth_username")
 
-  /// oauth: an optional pre-registered client. Without one PCP registers
-  /// itself (dynamically, RFC 7591, or with its client metadata document)
-  /// when the server allows it.
+  /// oauth (an MCP server, or a jmap account that signs in with OAuth): an
+  /// optional pre-registered client. Without one PCP registers itself
+  /// (dynamically, RFC 7591, or with its client metadata document) when the
+  /// server allows it.
   oauthClientId       String? @map("oauth_client_id")
   oauthClientSecretId String? @map("oauth_client_secret_id")
   oauthClientSecret   Secret? @relation("ServerOAuthClientSecret", fields: [oauthClientSecretId], references: [id], onDelete: SetNull)
@@ -296,15 +304,17 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  /// mcp | openapi. An openapi server is an HTTP API described by an
-  /// OpenAPI schema; its tools are the schema's operations and PCP calls
-  /// them directly (lib/core/endpoints.ts).
+  /// mcp | openapi | jmap | imap. An openapi server is an HTTP API
+  /// described by an OpenAPI schema; its tools are the schema's operations
+  /// and PCP calls them directly (lib/core/endpoints.ts). jmap and imap are
+  /// mail accounts with a fixed set of mail tools (lib/core/mail/).
   kind       String  @default("mcp")
   /// openapi: where the schema came from, url | upload.
   specSource String? @map("spec_source")
   /// openapi: the schema's address, when it came from one.
   specUrl    String? @map("spec_url")
-  /// openapi: offer GET operations only.
+  /// openapi: offer GET operations only. jmap/imap: offer the tools that
+  /// read mail only.
   readOnly   Boolean @default(false) @map("read_only")
   /// openapi: refuse private, loopback and link-local addresses, for the
   /// schema download and for every call. Set on endpoints an assistant
@@ -316,12 +326,28 @@ model McpServer {
   /// for it with update_endpoint while the endpoint is theirs.
   specUrlFromAssistant Boolean @default(false) @map("spec_url_from_assistant")
 
+  /// jmap: what the session document said when it was last read. The API
+  /// and download addresses are accepted only on the session URL's origin,
+  /// so the credential goes nowhere the owner did not type.
+  mailApiUrl      String? @map("mail_api_url")
+  mailDownloadUrl String? @map("mail_download_url")
+  /// jmap: the account the session names for mail.
+  mailAccountId   String? @map("mail_account_id")
+  /// jmap: whether the server lets this account send (submission).
+  mailSubmission  Boolean @default(false) @map("mail_submission")
+  /// imap: where mail is sent, smtps://host:port or smtp://host:port
+  /// (STARTTLS), with the same login. Null: the account cannot send.
+  smtpUrl         String? @map("smtp_url")
+  /// jmap/imap: the From address when sending, when the user name is not one.
+  mailFrom        String? @map("mail_from")
+
   tools              McpTool[]
   tokens             ApiTokenServer[]
   oauthStates        OAuthState[]
   toolAccess         ApiTokenToolAccess[]
   permissionRequests PermissionRequest[]
   spec               OpenApiSpec?
+  toolResults        ToolResult[]
 
   @@unique([vaultId, slug])
   @@map("mcp_server")
@@ -343,7 +369,7 @@ model McpTool {
   /// JSON, when the server sent annotations (readOnlyHint and friends).
   annotations String?
   /// openapi: the call plan (JSON) that turns the tool's arguments into an
-  /// HTTP request. Null for MCP tools.
+  /// HTTP request. Null for MCP and mail tools.
   operation   String?
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
@@ -395,4 +421,32 @@ model Setting {
 
   @@id([vaultId, key])
   @@map("setting")
+}
+
+/// A tool answer too long to hand to an assistant in one piece, kept whole
+/// for a day so it can read the rest with read_result
+/// (lib/core/tool-results.ts). Only the token whose call produced it can
+/// read it.
+model ToolResult {
+  id         String     @id
+  vaultId    String     @map("vault_id")
+  vault      Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId    String     @map("token_id")
+  token      ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  serverId   String?    @map("server_id")
+  server     McpServer? @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  toolName   String     @map("tool_name")
+  /// text/plain | application/json: how the text reads.
+  mediaType  String     @map("media_type")
+  /// The whole text's length in UTF-16 code units, which offsets count.
+  length     Int
+  /// The text, AES-256-GCM under the vault's data key with
+  /// "tool_result:<id>" as associated data.
+  ciphertext Bytes
+  createdAt  DateTime   @default(now()) @map("created_at")
+  expiresAt  DateTime   @map("expires_at")
+
+  @@index([tokenId, createdAt])
+  @@index([expiresAt])
+  @@map("tool_result")
 }

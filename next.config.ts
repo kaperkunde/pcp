@@ -8,8 +8,15 @@ const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: path.join(__dirname),
   poweredByHeader: false,
-  // Native module: must be required at runtime, not bundled.
-  serverExternalPackages: ["better-sqlite3", "@prisma/adapter-better-sqlite3"],
+  // Required at runtime, not bundled: better-sqlite3 is a native module;
+  // the mail libraries (lib/core/mail/imap.ts) load parts of themselves
+  // dynamically and only ever run on the server.
+  serverExternalPackages: [
+    "better-sqlite3",
+    "@prisma/adapter-better-sqlite3",
+    "imapflow",
+    "nodemailer",
+  ],
   experimental: {
     // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) travels in a
     // Server Action's body; Next's default limit is 1 MB. This applies to

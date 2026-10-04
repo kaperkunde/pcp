@@ -450,16 +450,28 @@ async function authHeaders(
 }
 
 /**
- * The header a server's secret goes in, and the values that would give the
- * secret away if an answer repeated them (the secret itself, and the header
- * as sent).
+ * What PCP sends to authenticate to a server: the header to add to each
+ * request, and the values that would give the secret away if an answer
+ * repeated them (the secret itself, and the header as sent). A login
+ * (basic authentication) also carries the user name and password, for a
+ * protocol that signs in with them rather than with a header (IMAP, SMTP).
  */
+export type Credential = {
+  headers: Record<string, string>
+  redact: string[]
+  login: { username: string; password: string } | null
+}
+
 async function credential(
   ctx: VaultContext,
   server: McpServer,
-): Promise<{ headers: Record<string, string>; redact: string[] }> {
+): Promise<Credential> {
+  if (server.authType === "basic") {
+    return basicCredential(ctx, server)
+  }
+
   if (server.authType !== "header") {
-    return { headers: {}, redact: [] }
+    return { headers: {}, redact: [], login: null }
   }
 
   if (!server.authSecretId || !server.authHeaderName) {
@@ -485,6 +497,40 @@ async function credential(
   return {
     headers: { [server.authHeaderName]: value },
     redact: [secret, value],
+    login: null,
+  }
+}
+
+async function basicCredential(
+  ctx: VaultContext,
+  server: McpServer,
+): Promise<Credential> {
+  if (!server.authSecretId || !server.authUsername) {
+    throw new PcpError(
+      "state",
+      `${server.name} has no user name and secret configured.`,
+    )
+  }
+
+  const password = await readSecretValue(ctx, server.authSecretId)
+
+  // A line break would end an IMAP login line early, and a header cannot
+  // carry one: say so without the value.
+  if (/[\u0000\r\n]/.test(password)) {
+    throw new PcpError(
+      "state",
+      `${server.name}'s secret has a line break or another character PCP cannot send. Check the secret's value.`,
+    )
+  }
+
+  const token = Buffer.from(`${server.authUsername}:${password}`).toString(
+    "base64",
+  )
+
+  return {
+    headers: { Authorization: `Basic ${token}` },
+    redact: [password, token, `Basic ${token}`],
+    login: { username: server.authUsername, password },
   }
 }
 
