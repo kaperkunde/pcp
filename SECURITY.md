@@ -162,7 +162,15 @@ Not defended against:
   once turned on under Settings, listens on ports 80 and 443 on every
   interface whatever that menu says, since a router's port forward needs
   exactly that. A tunnel needs neither.
-- Back up the data volume. Losing it loses the vault.
+- Back up the data volume, or export from Settings. Losing both loses the
+  vault.
+- An export file (Settings → Export) holds the vault's rows as they are: the
+  ciphertext, and the data key wrapped under your password, the recovery key
+  and each API token, all encrypted again under the export password you chose
+  (scrypt, as for the password). Reading a secret out of it takes the export
+  password and one of those credentials. With dynamic DNS on, its token or
+  password is in the file in plain text, as it is in the database; the
+  certificate's key is not in it.
 - Keep the recovery key somewhere safe. Losing it and the password loses the
   data; that is the design.
 - The request log (`logs/*.jsonl` in the data directory) records which tools

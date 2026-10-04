@@ -153,6 +153,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in           |
 | `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server   |
 | `lib/core/migrate.ts`                | Boot-time migrations                                          |
+| `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts     |
 | `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
 | `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
 | `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |

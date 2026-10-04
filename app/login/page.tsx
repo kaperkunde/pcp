@@ -9,7 +9,11 @@ import { currentSession } from "@/lib/server/session"
 export const metadata: Metadata = { title: "Sign in" }
 export const dynamic = "force-dynamic"
 
-export default async function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}) {
   if (!(await isSetUp())) {
     redirect("/setup")
   }
@@ -19,11 +23,20 @@ export default async function LoginPage() {
   }
 
   const vault = await ownerVault()
+  const restored = (await searchParams).restored === "1"
 
   return (
     <AuthShell
       title={vault ? `Hello, ${vault.name}` : "Sign in"}
-      intro={<p>Enter your password to unlock the vault.</p>}
+      intro={
+        restored ? (
+          <p>
+            Restored. Sign in with the password of the PCP the export came from.
+          </p>
+        ) : (
+          <p>Enter your password to unlock the vault.</p>
+        )
+      }
     >
       <LoginForm username={vault?.name ?? ""} />
     </AuthShell>

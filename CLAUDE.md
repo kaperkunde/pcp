@@ -106,7 +106,10 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
-  (redirects and PCP's client metadata document) and the health check.
+  (redirects and PCP's client metadata document), the health check and the
+  export download (`app/api/export/route.ts`: a file needs
+  `Content-Disposition`, which an action cannot send; it checks the request's
+  origin itself, `lib/server/same-origin.ts`).
 - The owner is asked by link only: a result hands the assistant a link to
   PCP's page, to end its reply with (`linkLastText`: nothing after it, or
   Claude's apps fold it out of sight), and a check to call once the owner
@@ -115,7 +118,14 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
   ARCHITECTURE.md). Anything new that needs the owner works the same way.
 - The single-user assumption lives in two places: `ownerVault()` and the
-  setup page. Do not add a third.
+  setup page (its restore step included). Do not add a third.
+- An export (`lib/core/backup.ts`) is the vault's rows as they are, under the
+  export password: nothing is decrypted to make it, and it never carries a
+  session grant. A restore replaces the vault whole, in one transaction,
+  after the owner has seen what the file holds and typed their password. A
+  migration that adds a column fails `pnpm typecheck` in
+  `lib/core/backup-format.ts` until the format carries it, with the column's
+  default so older files still restore.
 - Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS) belong to
   the machine, are read with no credential, and are stored unencrypted. Never
   copy anything from the vault into one. `lib/core/network/` starts nothing

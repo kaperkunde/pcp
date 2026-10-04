@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import { redirect } from "next/navigation"
 
 import { AuthShell } from "@/components/auth-shell"
+import { RestoreInsteadLink } from "@/components/backup-cards"
 import { SetupForm } from "@/components/setup-form"
 import { isSetUp } from "@/lib/core/vault"
 import { currentSession } from "@/lib/server/session"
@@ -31,6 +32,7 @@ export default async function SetupPage() {
       }
     >
       <SetupForm alreadySetUp={alreadySetUp} />
+      {alreadySetUp ? null : <RestoreInsteadLink />}
     </AuthShell>
   )
 }

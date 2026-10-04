@@ -12,6 +12,7 @@ app/                 Routes and pages (Next.js App Router)
   mcp/route.ts       The gateway endpoint
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
+  api/export/…       The export download (a file needs Content-Disposition)
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
@@ -522,6 +523,69 @@ server's stdout in the system's log folder (`~/Library/Logs/PCP` on macOS,
 `logs/` under the app folder elsewhere). Everything PCP remembers is in the
 database; the wrapper holds only what has to be known before the server is
 up.
+
+## Export and restore
+
+Settings offers an export of everything PCP holds, as one file, and a restore
+from such a file in place of everything here; a PCP not set up yet offers the
+restore on its setup page. The code is `lib/core/backup.ts` (making, opening
+and writing a file) and `lib/core/backup-format.ts` (what is in one).
+
+**The file never holds a plaintext secret.** It is the vault's rows as they
+are in the database: `secret.ciphertext` stays ciphertext under the DEK, bound
+to its row id, and the DEK itself travels only wrapped, in the `key_grant`
+rows of kind `password`, `recovery` and `api_token`. So the password, the
+recovery key and every API token work wherever the file is restored, which is
+what lets a PCP move to another machine without every assistant being set up
+again, and reading a secret out of the file takes what reading it off the
+disk takes: one of those credentials. Session grants are not in it (a
+session is one browser's), nor are OAuth authorizations in flight, the
+request log or the `tls/` directory.
+
+Around the rows: gzip, then AES-256-GCM under a key derived from an **export
+password** the owner chooses, with scrypt at the parameters of the password
+grant. The envelope is JSON — the format's name and version, the scrypt
+parameters, the ciphertext as base64 — with the format name and version as
+associated data, so a relabelled envelope does not decrypt. The parameters a
+file asks for are bounded before the key is derived: a file is untrusted
+input, and scrypt's memory comes from them.
+
+**What is checked before anything is written.** The envelope's version
+(a newer format is refused with "update PCP"), the password (a wrong one and
+a damaged file look alike to GCM, and are reported as one), the unpacked size
+(a cap, against a file that unpacks to more than it should), then every row
+against a strict schema naming every column of its table — a column this PCP
+does not know means a newer PCP wrote the file — and the name of the last
+migration applied where it was written, which this PCP must have. Then the
+rows must hold together: one vault, a password grant, every foreign key
+pointing at a row in the file, every row the vault's own. `backup-format.ts`
+ends with a compile-time guard that fails `pnpm typecheck` when a migration
+adds a column the format does not carry yet.
+
+**A restore replaces.** One transaction wipes the vault it is aimed at, table
+by table (not trusting cascades alone), and writes the file's rows in its
+place, parents before children, in chunks that keep under SQLite's variable
+limit; row ids and timestamps are the file's. On a PCP not set up yet the
+transaction first checks that there is no vault, as `setupVault` does. The
+host's network settings (`ddns.config`, `tls.config`, in plain text as they
+are in the database) are in the file and restored only when the owner ticks
+the box, with this machine's status rows dropped so nothing stale shows; a
+restore that brings them has `reconcileNetwork` act on them at once, and
+every restore has `rebuildOutdatedEndpoints` rebuild the tools of endpoints
+a different PCP version built, as boot does. The owner's own session goes
+with the vault; the action signs them in again when the password they typed
+opens the restored vault (their own export), and otherwise sends them to sign
+in with the exported PCP's password.
+
+**Who may.** The export asks for the owner's password again, as making a
+token does: a copied session cookie may use the vault but not walk off with
+it. The restore, when signed in, asks for it too, so a copied cookie cannot
+replace the owner's vault with one it holds the password to; on the setup
+page there is no password yet, and whoever reaches that page could set up
+instead. Both are rate-limited like password attempts. The download is a
+route handler (an action cannot send a file), so it checks the request's
+origin itself (`lib/server/same-origin.ts`), which Server Actions get built
+in.
 
 ## Reaching PCP: dynamic DNS and HTTPS
 
