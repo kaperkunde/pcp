@@ -1,0 +1,61 @@
+# How electron-builder packages the wrapper. The server it runs is staged by
+# scripts/stage.mjs into ./server and travels outside the asar archive: Node
+# reads the files from disk, and better-sqlite3's binary cannot be loaded
+# from an archive. scripts/dist.mjs runs the build and sets the version from
+# the root package.json.
+appId: com.kaperkunde.pcp
+productName: PCP
+copyright: Copyright © Kaperkunde
+directories:
+  output: dist
+  buildResources: build
+files:
+  - main.mjs
+  - settings.mjs
+  - package.json
+extraResources:
+  - from: server
+    to: server
+  # electron-builder leaves out a directory's own top-level node_modules
+  # whatever the filter says; the server's is most of it, so it goes
+  # separately.
+  - from: server/node_modules
+    to: server/node_modules
+# The wrapper has no native dependencies of its own; the server's are handled
+# when it is staged.
+npmRebuild: false
+publish: null
+
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.png
+  target:
+    - target: dmg
+  artifactName: PCP-mac-${arch}.${ext}
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # scripts/dist.mjs turns this on when the Apple credentials are set.
+  notarize: false
+dmg:
+  artifactName: PCP-mac-${arch}.${ext}
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+  artifactName: PCP-windows-${arch}.${ext}
+nsis:
+  artifactName: PCP-windows-${arch}.${ext}
+  oneClick: true
+  perMachine: false
+  # The vault stays when the app is uninstalled.
+  deleteAppDataOnUninstall: false
+
+linux:
+  icon: build/icon.png
+  category: Development
+  target:
+    - target: AppImage
+  artifactName: PCP-linux-${arch}.${ext}

@@ -14,6 +14,12 @@ export const SECRET_PLACEHOLDER = "{{secret}}"
  */
 export const MAX_AUTH_HEADERS = 5
 
+/**
+ * The secret picker's choice for one typed into the form there and then,
+ * saved as a new secret when the form is.
+ */
+export const NEW_SECRET = "new"
+
 /** The largest OpenAPI schema PCP reads, uploaded or downloaded. */
 export const MAX_SPEC_BYTES = 5 * 1024 * 1024
 export const SPEC_FILE_ACCEPT =
@@ -51,7 +57,12 @@ export const PERMISSION_DECISIONS = [
 export type PermissionDecision = (typeof PERMISSION_DECISIONS)[number]
 
 export type PermissionKind =
-  "call" | "register" | "memory_share" | "memory_change"
+  | "call"
+  | "register"
+  | "memory_share"
+  | "memory_change"
+  | "access"
+  | "endpoint_change"
 
 /** The longest memory, in characters. */
 export const MAX_MEMORY_CHARS = 10_000
@@ -64,35 +75,48 @@ export const MAX_SHARED_MEMORY_CHARS = 2_000
 
 /** The longest memory path, without the leading /memories/. */
 export const MAX_MEMORY_PATH = 200
+
 /**
- * The ways PCP can ask the owner about a call, in the order it tries them
- * (see choosePermissionTier). The link always works, so a token can turn
- * off the others but not the link.
+ * Dynamic DNS services PCP can keep pointed at this machine
+ * (lib/core/network/ddns.ts). DuckDNS is the one the setup page suggests:
+ * free, and a single token.
  */
-export const PERMISSION_TIERS = ["app", "form", "url", "link"] as const
+export const DDNS_PROVIDERS = [
+  "duckdns",
+  "dyndns2",
+  "cloudflare",
+  "custom",
+] as const
 
-export type PermissionTier = (typeof PERMISSION_TIERS)[number]
+export type DdnsProvider = (typeof DDNS_PROVIDERS)[number]
 
-export const OPTIONAL_PERMISSION_TIERS = ["app", "form", "url"] as const
-
-export const PERMISSION_TIER_LABELS: Record<
-  PermissionTier,
+export const DDNS_PROVIDER_LABELS: Record<
+  DdnsProvider,
   { label: string; hint: string }
 > = {
-  app: {
-    label: "PCP's panel",
-    hint: "Buttons in the conversation, in apps that show panels.",
+  duckdns: {
+    label: "DuckDNS",
+    hint: "Free. Sign in at duckdns.org, pick a name, and copy your token.",
   },
-  form: {
-    label: "The app's own prompt",
-    hint: "Some apps say they show it and do not, which stalls the call until it times out.",
+  dyndns2: {
+    label: "No-IP, Dynu and others",
+    hint: "Services that speak the common dyndns2 update protocol, with a username and password.",
   },
-  url: {
-    label: "The app opens PCP",
-    hint: "The app opens the request in PCP for you to answer.",
+  cloudflare: {
+    label: "Cloudflare",
+    hint: "A domain you own on Cloudflare, with an API token that may edit its DNS.",
   },
-  link: {
-    label: "A link",
-    hint: "The assistant passes on a link to the request in PCP. Always on: it is what is left when nothing above works.",
+  custom: {
+    label: "Another service (an update URL)",
+    hint: "Any service that updates when PCP opens a URL.",
   },
 }
+
+/** dyndns2 services PCP knows the update address of. */
+export const DYNDNS2_SERVERS: Record<string, string> = {
+  "dynupdate.no-ip.com": "No-IP",
+  "api.dynu.com": "Dynu",
+}
+
+/** Let's Encrypt's agreements, which turning HTTPS on accepts. */
+export const LETS_ENCRYPT_TERMS_URL = "https://letsencrypt.org/repository/"

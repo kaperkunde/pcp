@@ -47,7 +47,9 @@ function patchesFrom(formData: FormData): PatchOperation[] {
 async function inputFrom(formData: FormData): Promise<EndpointInput> {
   const specSource =
     field(formData, "specSource") === "upload" ? "upload" : "url"
-  const authType = field(formData, "authType") === "header" ? "header" : "none"
+  const chosen = field(formData, "authType")
+  const authType =
+    chosen === "header" || chosen === "oauth" ? chosen : ("none" as const)
   let specText: string | null = null
 
   if (specSource === "upload") {
@@ -80,6 +82,13 @@ async function inputFrom(formData: FormData): Promise<EndpointInput> {
     authValueTemplate: field(formData, "authValueTemplate"),
     authSecretId: field(formData, "authSecretId") || null,
     authExtraHeaders: extraHeadersFrom(formData),
+    authSecretName: field(formData, "authSecretName") || null,
+    authSecretValue: field(formData, "authSecretValue") || null,
+    oauthClientId: field(formData, "oauthClientId") || null,
+    oauthClientSecretId: field(formData, "oauthClientSecretId") || null,
+    oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,
+    oauthScope: field(formData, "oauthScope") || null,
+    oauthAuthorizeParams: field(formData, "oauthAuthorizeParams") || null,
   }
 }
 

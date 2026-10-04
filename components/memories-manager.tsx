@@ -139,6 +139,7 @@ function AddMemoryForm() {
               className="min-h-24"
             />
           </Field>
+          <AlwaysField id="memory-always" defaultChecked={false} />
           <FormError error={state.status === "error" ? state.error : null} />
           <div>
             <SubmitButton pendingText="Saving…">Save memory</SubmitButton>
@@ -146,6 +147,31 @@ function AddMemoryForm() {
         </form>
       </CardContent>
     </Card>
+  )
+}
+
+/** Whether a memory is read in every conversation. */
+function AlwaysField({
+  id,
+  defaultChecked,
+}: {
+  id: string
+  defaultChecked: boolean
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label className="font-normal" htmlFor={id}>
+        <Checkbox id={id} name="always" defaultChecked={defaultChecked} />
+        Read in every conversation
+      </Label>
+      <p className="text-xs text-muted-foreground">
+        It comes with PCP&apos;s instructions, so an assistant has it before it
+        does anything, without having to look. Up to{" "}
+        {MAX_SHARED_MEMORY_CHARS.toLocaleString("en")} characters. If an
+        assistant changes one it keeps for itself, it stops being read in every
+        conversation until you tick this again.
+      </p>
+    </div>
   )
 }
 
@@ -204,6 +230,9 @@ function MemoryRow({ memory }: { memory: MemorySummary }) {
           ) : memory.tokenName ? (
             <Badge variant="outline">Only {memory.tokenName}</Badge>
           ) : null}
+          {memory.always ? (
+            <Badge variant="outline">Every conversation</Badge>
+          ) : null}
         </div>
         <div className="flex gap-1">
           <Button
@@ -249,7 +278,7 @@ function MemoryRow({ memory }: { memory: MemorySummary }) {
           <Field
             label="Text"
             htmlFor={`${id}-text`}
-            hint={`Up to ${MAX_SHARED_MEMORY_CHARS.toLocaleString("en")} characters when shared, ${MAX_MEMORY_CHARS.toLocaleString("en")} otherwise.`}
+            hint={`Up to ${MAX_SHARED_MEMORY_CHARS.toLocaleString("en")} characters when shared or read in every conversation, ${MAX_MEMORY_CHARS.toLocaleString("en")} otherwise.`}
           >
             <Textarea
               id={`${id}-text`}
@@ -280,6 +309,7 @@ function MemoryRow({ memory }: { memory: MemorySummary }) {
                 : "No assistant's token is behind this one, so it stays shared."}
             </p>
           </div>
+          <AlwaysField id={`${id}-always`} defaultChecked={memory.always} />
           <FormError error={state.status === "error" ? state.error : null} />
           <FormNote message={state.status === "ok" ? state.message : null} />
           <div>

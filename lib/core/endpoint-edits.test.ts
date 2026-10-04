@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { db } from "./db"
 import {
+  applyEndpointChange,
   createApprovedEndpoint,
   getEndpoint,
   prepareRegistration,
-  updateEndpointDetails,
+  updateEndpointDetails as updateOrAsk,
   type EndpointScope,
   type RegistrationInput,
 } from "./endpoint-admin"
@@ -15,6 +16,19 @@ import { createSecret } from "./secrets"
 import { getServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
+
+/** A change made at once; one put to the owner fails the test. */
+async function updateEndpointDetails(
+  ...args: Parameters<typeof updateOrAsk>
+): Promise<Exclude<Awaited<ReturnType<typeof updateOrAsk>>, { ask: unknown }>> {
+  const result = await updateOrAsk(...args)
+
+  if ("ask" in result) {
+    throw new Error(`The owner was asked: ${result.ask.shown.title}`)
+  }
+
+  return result
+}
 
 /**
  * Schemas registered by URL, and edits (a JSON Patch kept beside a schema).
@@ -462,20 +476,93 @@ describe("changing an endpoint with edits", () => {
       authHeaderNames: ["X-API-TOKEN"],
     })
 
+    // Edits are put to the owner rather than made.
     for (const change of [
       { patches: [] },
       { addPatches: [{ op: "remove", path: "/paths/~1pets/post" }] },
-      { refreshSpec: true },
     ]) {
-      await expect(updateEndpointDetails(scope, slug, change)).rejects.toThrow(
-        /owner's/,
-      )
+      const asked = await updateOrAsk(scope, slug, change)
+      expect("ask" in asked, Object.keys(change)[0]).toBe(true)
     }
+    expect(await toolNames(slug)).toEqual(["createPet", "listPets"])
 
-    expect((await getEndpoint(scope, slug)).changes).toMatchObject({
-      patches: expect.stringMatching(/^no: the owner/),
-      refreshSpec: expect.stringMatching(/^no: the owner/),
+    // Reading the schema again finds the same document: nothing to ask.
+    await expect(
+      updateOrAsk(scope, slug, { refreshSpec: true }),
+    ).resolves.toMatchObject({ updated: expect.stringMatching(/not changed/) })
+
+    expect((await getEndpoint(scope, slug)).changes).toEqual({
+      "name, description, toolDescriptions, patches, refreshSpec":
+        expect.stringMatching(/^asks the owner/),
+      "spec, baseUrl": expect.stringMatching(/^no: the owner/),
+      readOnly: expect.stringMatching(/on only/),
+      authentication: expect.stringMatching(/only the owner/),
     })
+  })
+})
+
+describe("asking the owner to read their endpoint's schema again", () => {
+  async function ownersFromUrl() {
+    const { id: secretId } = await createSecret(ctx, {
+      name: "Pets key",
+      value: "sk-live-0123456789",
+    })
+
+    return approve({
+      name: "Pets",
+      specUrl: specUrl(),
+      patches: fixes(),
+      baseUrl: `${api.origin}/api`,
+      authSecretId: secretId,
+      authHeaderNames: ["X-API-TOKEN"],
+    })
+  }
+
+  /** The schema with one more operation, as its makers might ship it. */
+  const withSearch = () =>
+    spec({
+      paths: {
+        ...(JSON.parse(spec()) as { paths: object }).paths,
+        "/pets/search": { get: { operationId: "searchPets" } },
+      },
+    })
+
+  it("asks to take a changed document, and takes the one the owner was told about", async () => {
+    const { slug } = await ownersFromUrl()
+    published = withSearch()
+
+    const result = await updateOrAsk(scope, slug, { refreshSpec: true })
+    if (!("ask" in result)) throw new Error("not asked")
+
+    expect(result.ask.shown.lines).toEqual(
+      expect.arrayContaining([
+        `Schema: the document at ${specUrl()} has changed since you approved it; take the new one`,
+        "Adds: searchPets (GET /pets/search)",
+      ]),
+    )
+    expect(await toolNames(slug)).toEqual(["createPet", "listPets"])
+
+    await applyEndpointChange(ctx, result.ask)
+    expect(await toolNames(slug)).toEqual([
+      "createPet",
+      "listPets",
+      "searchPets",
+    ])
+  })
+
+  it("changes nothing when the document changed again before the owner agreed", async () => {
+    const { slug } = await ownersFromUrl()
+    published = withSearch()
+
+    const result = await updateOrAsk(scope, slug, { refreshSpec: true })
+    if (!("ask" in result)) throw new Error("not asked")
+
+    published = spec({ paths: { "/everything": { delete: {} } } })
+
+    await expect(applyEndpointChange(ctx, result.ask)).rejects.toThrow(
+      /changed again/,
+    )
+    expect(await toolNames(slug)).toEqual(["createPet", "listPets"])
   })
 })
 
@@ -497,8 +584,11 @@ describe("reading a schema a part at a time", () => {
     expect(stored.specPart).toMatchObject({
       value: "https://demo.example.com/api",
     })
-    // The tool list is left out so the part has room.
+    // The tool list is left out so the part has room, and what was said on
+    // the first read is not said again.
     expect(edited.tools).toBeUndefined()
+    expect(edited.changes).toBeUndefined()
+    expect(edited.description).toBeUndefined()
     expect(edited.toolCount).toBe(2)
   })
 

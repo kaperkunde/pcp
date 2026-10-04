@@ -8,8 +8,14 @@ const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: path.join(__dirname),
   poweredByHeader: false,
-  // Native module: must be required at runtime, not bundled.
-  serverExternalPackages: ["better-sqlite3", "@prisma/adapter-better-sqlite3"],
+  // Native module: must be required at runtime, not bundled. acme-client
+  // (HTTPS, lib/core/network/tls.ts) brings axios and node-forge, which are
+  // happier required than bundled.
+  serverExternalPackages: [
+    "better-sqlite3",
+    "@prisma/adapter-better-sqlite3",
+    "acme-client",
+  ],
   experimental: {
     // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) travels in a
     // Server Action's body; Next's default limit is 1 MB. This applies to

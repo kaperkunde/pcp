@@ -4,13 +4,20 @@ import { createApiToken, resolveApiToken } from "./api-tokens"
 import { db } from "./db"
 import {
   createEndpoint,
+  rebuildOutdatedEndpoints,
   syncEndpointTools,
   updateEndpoint,
   type EndpointInput,
 } from "./endpoints"
 import { buildInstructions, loadGatewayServers } from "./gateway"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
-import { createSecret, deleteSecret, listSecrets } from "./secrets"
+import { NEW_SECRET } from "./constants"
+import {
+  createSecret,
+  deleteSecret,
+  listSecrets,
+  revealSecret,
+} from "./secrets"
 import {
   getServer,
   listServers,
@@ -20,6 +27,7 @@ import {
 import { scratchDatabase } from "./test-db"
 import { callServerTool, syncServerTools } from "./upstream"
 import { setupVault } from "./vault"
+import { PCP_VERSION } from "./version"
 
 let cleanup: () => Promise<void>
 let api: TestApi
@@ -239,13 +247,95 @@ describe("createEndpoint", () => {
     ])
   })
 
-  it("sends only a header secret, and only one that exists", async () => {
+  it("sends a secret that exists, or a token from the schema's sign-in", async () => {
     await expect(
       createEndpoint(ctx, input({ authType: "header", authSecretId: "nope" })),
     ).rejects.toThrow(/does not exist/)
     await expect(
-      createEndpoint(ctx, input({ authType: "oauth" as never })),
-    ).rejects.toThrow(/header, or no credential/)
+      createEndpoint(ctx, input({ authType: "basic" as never })),
+    ).rejects.toThrow(/an OAuth token, or no credential/)
+    // This schema's only scheme is an API key: there is no sign-in to use.
+    await expect(
+      createEndpoint(
+        ctx,
+        input({ authType: "oauth", baseUrl: `${api.origin}/api` }),
+      ),
+    ).rejects.toThrow(/declares no OAuth sign-in/)
+  })
+
+  it("saves a secret typed into the form with it, and none when it is refused", async () => {
+    const typed = {
+      baseUrl: `${api.origin}/api`,
+      authType: "header" as const,
+      authSecretId: NEW_SECRET,
+      authSecretValue: KEY,
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+    }
+
+    // Refused for the schema after the secret was checked: nothing is kept.
+    await expect(
+      createEndpoint(ctx, input({ ...typed, specText: "{ nope" })),
+    ).rejects.toThrow()
+    await expect(
+      createEndpoint(ctx, input({ ...typed, authSecretValue: "" })),
+    ).rejects.toThrow(/Enter the secret's value/)
+    expect(await listSecrets(ctx)).toEqual([])
+
+    const { id } = await createEndpoint(ctx, input(typed))
+    const [secret] = await listSecrets(ctx)
+    expect(secret).toMatchObject({
+      name: "Petstore key",
+      description: "Sent to Petstore in the X-API-Key header.",
+      usedBy: [{ id, name: "Petstore" }],
+    })
+    expect(await revealSecret(ctx, secret!.id)).toBe(KEY)
+
+    // Named by the owner; a name that is taken is refused before anything.
+    await expect(
+      createEndpoint(ctx, input({ ...typed, authSecretName: "Petstore key" })),
+    ).rejects.toThrow(/already exists/)
+    const named = await createEndpoint(
+      ctx,
+      input({ ...typed, authSecretName: "Pets live key" }),
+    )
+    expect((await getServer(ctx, named.id)).authSecretId).toBe(
+      (await listSecrets(ctx)).find((each) => each.name === "Pets live key")
+        ?.id,
+    )
+    expect(await db().mcpServer.count()).toBe(2)
+  })
+
+  it("switches to a secret typed in on an edit, saved beside the old one", async () => {
+    const auth = await withSecret()
+    const { id } = await createEndpoint(
+      ctx,
+      input({ ...auth, baseUrl: `${api.origin}/api` }),
+    )
+
+    await updateEndpoint(
+      ctx,
+      id,
+      input({
+        ...auth,
+        baseUrl: `${api.origin}/api`,
+        authSecretId: NEW_SECRET,
+        authSecretName: "Pets rotated key",
+        authSecretValue: "sk-live-rotated",
+      }),
+    )
+
+    const rotated = (await listSecrets(ctx)).find(
+      (each) => each.name === "Pets rotated key",
+    )
+    expect(rotated?.usedBy).toEqual([{ id, name: "Petstore" }])
+    expect((await getServer(ctx, id)).authSecretId).toBe(rotated?.id)
+    expect(await revealSecret(ctx, rotated!.id)).toBe("sk-live-rotated")
+    // The old one stays, no longer used by it.
+    expect(
+      (await listSecrets(ctx)).find((each) => each.id === auth.authSecretId)
+        ?.usedBy,
+    ).toEqual([])
   })
 
   it("names the second endpoint with the same name differently", async () => {
@@ -535,6 +625,112 @@ describe("refreshing and editing", () => {
   })
 })
 
+describe("tools an earlier PCP built", () => {
+  /** The pet store, with an answer to outline, as an older PCP left it. */
+  async function builtByEarlierPcp() {
+    const described = JSON.parse(schema(api.origin))
+    described.paths["/pets"].get.responses = {
+      "200": {
+        description: "The pets",
+        content: {
+          "application/json": {
+            schema: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: { name: { type: "string" } },
+              },
+            },
+          },
+        },
+      },
+    }
+    const { id } = await createEndpoint(
+      ctx,
+      input({ specText: JSON.stringify(described) }),
+    )
+
+    await db().mcpTool.updateMany({
+      where: { serverId: id },
+      data: { description: "stale", output: null },
+    })
+    await db().openApiSpec.update({
+      where: { serverId: id },
+      data: { builtWith: "0.0.1" },
+    })
+    await db().mcpServer.update({
+      where: { id },
+      data: {
+        status: "ok",
+        statusMessage:
+          "The schema at its URL has changed since it was approved.",
+      },
+    })
+
+    return id
+  }
+
+  it("are rebuilt from the kept copy once, and nothing else about the endpoint changes", async () => {
+    const id = await builtByEarlierPcp()
+    const before = await db().openApiSpec.findUniqueOrThrow({
+      where: { serverId: id },
+    })
+
+    expect(await rebuildOutdatedEndpoints()).toEqual({ rebuilt: 1, failed: [] })
+
+    const server = await getServer(ctx, id)
+    const listPets = server.tools.find((tool) => tool.name === "listPets")!
+    expect(listPets.description).not.toBe("stale")
+    expect(listPets.output).toMatch(/name/)
+    expect(server.status).toBe("ok")
+    expect(server.statusMessage).toBe(
+      "The schema at its URL has changed since it was approved.",
+    )
+
+    const after = await db().openApiSpec.findUniqueOrThrow({
+      where: { serverId: id },
+    })
+    expect(after.builtWith).toBe(PCP_VERSION)
+    expect(after.fetchedAt).toEqual(before.fetchedAt)
+
+    expect(await rebuildOutdatedEndpoints()).toEqual({ rebuilt: 0, failed: [] })
+  })
+
+  it("stay as they are when the kept schema no longer builds, to be tried again", async () => {
+    const id = await builtByEarlierPcp()
+    await db().openApiSpec.update({
+      where: { serverId: id },
+      data: {
+        patches: JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
+      },
+    })
+
+    const result = await rebuildOutdatedEndpoints()
+    expect(result.rebuilt).toBe(0)
+    expect(result.failed).toEqual([
+      { serverId: id, message: expect.any(String) },
+    ])
+
+    const server = await getServer(ctx, id)
+    expect(server.tools).toHaveLength(3)
+    expect(server.tools.every((tool) => tool.description === "stale")).toBe(
+      true,
+    )
+    expect(
+      (await db().openApiSpec.findUniqueOrThrow({ where: { serverId: id } }))
+        .builtWith,
+    ).toBe("0.0.1")
+  })
+
+  it("are marked with the version that built them", async () => {
+    const { id } = await createEndpoint(ctx, input())
+    expect(
+      (await db().openApiSpec.findUniqueOrThrow({ where: { serverId: id } }))
+        .builtWith,
+    ).toBe(PCP_VERSION)
+  })
+})
+
 describe("secrets", () => {
   it("are listed as used by the endpoint, which blocks deleting them", async () => {
     const auth = await withSecret()
@@ -727,7 +923,11 @@ describe("a credential in several headers", () => {
       attempt([{ ...extra, headerName: "x-api-key" }]),
     ).rejects.toThrow(/named twice/)
     await expect(attempt([{ ...extra, secretId: "" }])).rejects.toThrow(
-      /Choose the secret/,
+      /Choose a stored secret/,
+    )
+    // Only the first header's secret can be typed into the form.
+    await expect(attempt([{ ...extra, secretId: "new" }])).rejects.toThrow(
+      /Choose a stored secret/,
     )
     await expect(
       attempt([{ ...extra, secretId: "not-a-secret" }]),
