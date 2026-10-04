@@ -1,0 +1,11 @@
+# Installed by `pnpm install` here (Electron and its tooling).
+/node_modules
+
+# Written by scripts/stage.mjs: the staged copy of the server, the icon it
+# copies for electron-builder, and better-sqlite3 binaries built for Electron.
+/server
+/build/icon.png
+/.cache
+
+# Written by electron-builder.
+/dist

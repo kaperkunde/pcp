@@ -77,6 +77,13 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   (redirects and PCP's client metadata document) and the health check.
 - The single-user assumption lives in two places: `ownerVault()` and the
   setup page. Do not add a third.
+- `desktop/` is a host for the production build, not part of the app. It
+  imports nothing from `lib/`, `app/` or `components/`; the app knows it only
+  as `PCP_DESKTOP=1` (`lib/server/desktop.ts`), for copy that says how the
+  app is reached. `desktop/scripts/stage.mjs` copies what the Dockerfile
+  copies: a change to one is a change to both. It is its own pnpm project
+  (`desktop/pnpm-workspace.yaml`); do not add it to the root workspace, or
+  every install downloads Electron.
 
 ## Cryptography
 

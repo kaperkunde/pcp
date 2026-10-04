@@ -65,3 +65,40 @@ test("locks, refuses a wrong password and unlocks", async ({ page }) => {
   await unlock(page)
   await page.context().storageState({ path: "e2e/.auth/owner.json" })
 })
+
+// A PCP at a home address (localhost here) is one an assistant running
+// elsewhere cannot reach; Settings explains tunnels and port forwarding until
+// a public address is set. Against a deployed PCP (PCP_URL) there is nothing
+// to explain.
+test("Settings explains how to reach a PCP at home from outside", async ({
+  page,
+  baseURL,
+}) => {
+  const host = new URL(baseURL!).hostname
+  test.skip(
+    !["localhost", "127.0.0.1", "[::1]"].includes(host),
+    "PCP is not at a local address",
+  )
+
+  await unlock(page)
+  await page.goto("/settings")
+
+  const card = page.locator("[data-slot=card]").filter({
+    has: page.getByRole("heading", {
+      name: "Reaching PCP from outside your home",
+    }),
+  })
+  await expect(card).toBeVisible()
+  await expect(card.getByText("A tunnel: no router changes")).toBeVisible()
+  await expect(
+    card.getByText(/cloudflared tunnel --url http:\/\/localhost/),
+  ).toBeVisible()
+
+  // The router steps are folded away until asked for. Outside the desktop
+  // app there is no menu to mention.
+  await card.getByText("Port forwarding on your router").click()
+  await expect(card.getByText(/The Docker image does/)).toBeVisible()
+  await expect(
+    card.getByText("Accept connections from other devices"),
+  ).toHaveCount(0)
+})

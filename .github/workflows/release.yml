@@ -7,6 +7,12 @@
 # fast-forwarded to the release when it has nothing main lacks; otherwise it
 # is left for a person to merge.
 #
+# The release is created as a draft, the desktop apps (desktop/) are built on
+# macOS and Windows runners and attached to it under stable names, and it is
+# then published: releases/latest/download/<name> always points at a complete
+# release. A failed app build does not hold the release; the publish job
+# warns, and re-running the failed job attaches the missing app.
+#
 # Pushes made with the workflow token start no workflows, so the release
 # commit does not release itself again.
 
@@ -26,9 +32,12 @@ permissions:
 
 jobs:
   release:
-    name: tag and publish
+    name: tag and draft
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      skip: ${{ steps.version.outputs.skip }}
     steps:
       # The tip of main rather than the pushed commit: a run that waited
       # behind another must build on that one's release commit.
@@ -68,9 +77,96 @@ jobs:
         run: |
           git push origin HEAD:develop ||
             echo "::notice::develop has commits main lacks; merge main into develop by hand."
-      - name: Publish the release
+      - name: Draft the release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: gh release create "v$VERSION" --verify-tag --title "v$VERSION" --generate-notes
+        run: gh release create "v$VERSION" --verify-tag --title "v$VERSION" --generate-notes --draft
+
+  desktop:
+    name: ${{ matrix.name }}
+    needs: release
+    if: needs.release.outputs.skip != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS app (Apple silicon)
+            os: macos-latest
+            arch: arm64
+            asset: PCP-mac-arm64.dmg
+          - name: macOS app (Intel)
+            os: macos-latest
+            arch: x64
+            asset: PCP-mac-x64.dmg
+          - name: Windows app
+            os: windows-latest
+            arch: x64
+            asset: PCP-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install pnpm
+        run: npm install -g --no-update-notifier pnpm@10.33.0
+      - name: Install dependencies
+        # Hoisted, so the standalone output holds files rather than pnpm's
+        # symlinks, which an installer cannot carry (desktop/README.md).
+        run: pnpm install --frozen-lockfile --config.node-linker=hoisted
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Build
+        run: pnpm build
+      - name: Install Electron and electron-builder
+        run: pnpm install --frozen-lockfile
+        working-directory: desktop
+      - name: Package
+        # Signed and notarized when the secrets exist, unsigned otherwise
+        # (desktop/README.md, "Signing").
+        run: pnpm dist --arch ${{ matrix.arch }}
+        working-directory: desktop
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          ls -la desktop/dist
+          gh release upload "v$VERSION" "desktop/dist/$ASSET" --clobber
+
+  publish:
+    name: publish
+    needs: [release, desktop]
+    if: always() && needs.release.result == 'success' && needs.release.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+          APPS: ${{ needs.desktop.result }}
+        run: |
+          if [ "$APPS" != "success" ]; then
+            echo "::warning::A desktop app build did not succeed; v$VERSION is published without it. Re-run the failed job to attach it."
+          fi
+          gh release edit "v$VERSION" --draft=false

@@ -19,6 +19,7 @@ lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
+desktop/             The Mac and Windows app: Electron around the production build, nothing of PCP in it
 ```
 
 `lib/core` takes a `VaultContext` — `{ vaultId, dek }` — as an explicit
@@ -336,7 +337,10 @@ another one reads:
 
 ## Data on disk
 
-`PCP_DATA_DIR` (default `./data`, `/data` in Docker):
+`PCP_DATA_DIR` (default `./data`; `/data` in Docker; in the desktop app
+`data/` under the system's folder for the app: `~/Library/Application
+Support/PCP` on macOS, `%APPDATA%\PCP` on Windows, `~/.config/PCP` on
+Linux):
 
 - `pcp.db` — the SQLite database, in WAL mode. Migrations are applied at boot
   by `lib/core/migrate.ts`, which keeps Prisma's own `_prisma_migrations`
@@ -345,6 +349,13 @@ another one reads:
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
   which tool, which upstream, how long, whether it worked. Never arguments
   or results.
+
+The desktop app keeps its own two files beside that directory, not in it:
+`desktop.json` (the port, whether other devices may connect) and the
+server's stdout in the system's log folder (`~/Library/Logs/PCP` on macOS,
+`logs/` under the app folder elsewhere). Everything PCP remembers is in the
+database; the wrapper holds only what has to be known before the server is
+up.
 
 ## Connecting OAuth servers
 

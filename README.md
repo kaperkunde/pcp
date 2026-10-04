@@ -42,13 +42,39 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
-- **Nothing to configure.** `docker compose up`, open the site, choose a
-  password. No environment variables.
+- **Nothing to configure.** Open the Mac or Windows app, or
+  `docker compose up` and open the site; choose a password. No environment
+  variables.
 - **Single user, by design.** PCP is yours. The architecture keeps every row
   behind a vault id so a multi-user host can be built on it later, but the
   product exposes none of that.
 
 ## Run it
+
+### On your own computer
+
+Download the app and open it. It runs PCP on your computer, keeps the vault in
+your user folder, and opens a window on it; an assistant on the same computer
+reaches it at `http://localhost:3000/mcp`.
+
+- **Mac**:
+  [Apple silicon](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-mac-arm64.dmg) ·
+  [Intel](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-mac-x64.dmg)
+- **Windows**:
+  [Installer](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-windows-x64.exe)
+
+The apps are not code-signed, so the first start needs a nod. macOS: open
+it, dismiss the warning, then System Settings → Privacy & Security → **Open
+Anyway**. Windows: SmartScreen → **More info** → **Run anyway**.
+
+The app answers this computer only until you turn on **Accept connections
+from other devices** in its menu, keeps running when you close its window
+(quit from the menu, or the tray icon on Windows), and can start when you
+sign in. Its data is in `~/Library/Application Support/PCP` on a Mac and
+`%APPDATA%\PCP` on Windows; back that folder up like a Docker volume. For
+reaching it from the internet, see [From home](#from-home) below.
+
+### On a server, with Docker
 
 ```bash
 git clone https://github.com/kaperkunde/pcp.git
@@ -78,8 +104,30 @@ pnpm build
 pnpm start          # http://localhost:3000, data in ./data
 ```
 
-`PCP_DATA_DIR` moves the data directory; `PORT` changes the port. Neither is
+`PCP_DATA_DIR` moves the data directory; `PORT` changes the port; `HOSTNAME`
+changes the address it listens on (every interface unless set). None is
 required.
+
+### From home
+
+An assistant that runs on your computer reaches `http://localhost:3000/mcp`
+as it is. One that runs elsewhere — Claude's own servers, a phone — needs an
+address that reaches your computer from the internet, and a home router does
+not give it one on its own. While PCP's address is one only your network can
+reach, its **Settings** page explains the two ways in full:
+
+- **A tunnel** (Cloudflare Tunnel, Tailscale Funnel, ngrok) runs on your
+  computer, needs no router changes, works on shared (CGNAT) connections and
+  comes with `https`. The easier way.
+- **Port forwarding** on the router to your computer's fixed address, a
+  dynamic DNS name for your changing public address, and Caddy in front for
+  `https`. In the desktop app, turn on **Accept connections from other
+  devices** first.
+
+Either way, enter the resulting address under **Public address** in
+Settings, so OAuth redirects and the endpoint address PCP shows you use it.
+Test from outside your network (a phone on mobile data): many home routers
+cannot reach their own public address from inside.
 
 ## Use it
 

@@ -108,6 +108,11 @@ Not defended against:
 
 - Run behind TLS. Most OAuth servers require an `https` redirect URL, and the
   session cookie is only marked `Secure` when the request arrived over TLS.
+- The desktop app listens on this computer only (`127.0.0.1`) until its owner
+  turns on **Accept connections from other devices**; then it listens on every
+  interface, like the Docker image, for port forwarding from a router. A tunnel
+  does not need that. PCP's Settings page explains both while its address is
+  one only a home network reaches.
 - Back up the data volume. Losing it loses the vault.
 - Keep the recovery key somewhere safe. Losing it and the password loses the
   data; that is the design.

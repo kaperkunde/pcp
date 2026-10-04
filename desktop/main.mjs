@@ -1,0 +1,556 @@
+// PCP as a desktop app. The main process starts the same production server
+// the Docker image runs (scripts/stage.mjs puts it in resources/server),
+// with its data in the system's application data folder, waits until it
+// answers, and shows it in a window. Nothing of PCP runs in here: the
+// wrapper knows the server's address and its data directory, and no more.
+//
+// The server listens on this computer only until the owner turns on
+// "Accept connections from other devices" (then on every interface, for port
+// forwarding from a router). Closing the window leaves the server running,
+// so assistants keep reaching it; Quit stops it.
+
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Menu,
+  nativeImage,
+  Notification,
+  shell,
+  Tray,
+  utilityProcess,
+} from "electron"
+import { createWriteStream, mkdirSync } from "node:fs"
+import http from "node:http"
+import net from "node:net"
+import path from "node:path"
+
+import { lanAddresses, readSettings, writeSettings } from "./settings.mjs"
+
+const APP_ID = "com.kaperkunde.pcp"
+const REPOSITORY_URL = "https://github.com/kaperkunde/pcp"
+const README_URL = `${REPOSITORY_URL}#readme`
+const ISSUES_URL = `${REPOSITORY_URL}/issues`
+const THEME_COLOR = "#131720"
+const STARTUP_TIMEOUT_MS = 90_000
+
+// The same folder whether packaged (PCP.app) or started from a checkout
+// (`electron .`, where the name would otherwise be the package's).
+app.setName("PCP")
+app.setAppUserModelId(APP_ID)
+
+const serverDir = app.isPackaged
+  ? path.join(process.resourcesPath, "server")
+  : path.join(import.meta.dirname, "server")
+const userData = app.getPath("userData")
+const dataDir = path.join(userData, "data")
+const settingsFile = path.join(userData, "desktop.json")
+
+let settings = readSettings(settingsFile)
+/** @type {import("electron").UtilityProcess | null} */
+let server = null
+let stoppingServer = false
+/** @type {BrowserWindow | null} */
+let window = null
+/** @type {Tray | null} */
+let tray = null
+let quitting = false
+
+if (!app.requestSingleInstanceLock()) {
+  // The first instance shows its window (see second-instance below).
+  app.quit()
+} else {
+  main()
+}
+
+function main() {
+  // OAuth providers refuse sign-ins from browsers they can tell are embedded
+  // ("this browser may not be secure"); the window is a plain Chromium to
+  // them, which is what it is.
+  app.userAgentFallback = app.userAgentFallback.replace(
+    /\s(PCP|pcp-desktop|Electron)\/\S+/g,
+    "",
+  )
+
+  app.setAboutPanelOptions({
+    applicationName: "PCP",
+    applicationVersion: app.getVersion(),
+    version: `Electron ${process.versions.electron}`,
+    copyright: "Kaperkunde, MIT licence",
+    website: REPOSITORY_URL,
+  })
+
+  app.on("second-instance", showWindow)
+  app.on("activate", showWindow)
+  app.on("window-all-closed", () => {
+    // Keep serving: the window is a view of the server, not the server.
+  })
+  app.on("before-quit", () => {
+    quitting = true
+  })
+  app.on("will-quit", () => {
+    stopServer()
+  })
+
+  app.whenReady().then(start)
+}
+
+async function start() {
+  app.setAppLogsPath()
+  Menu.setApplicationMenu(buildMenu())
+
+  try {
+    await startServer()
+  } catch (error) {
+    await showFatal(
+      "PCP could not start.",
+      error instanceof Error ? error.message : String(error),
+    )
+    app.exit(1)
+    return
+  }
+
+  if (process.platform !== "darwin") {
+    createTray()
+  }
+  createWindow()
+}
+
+// --- The server -----------------------------------------------------------
+
+function logFile() {
+  return path.join(app.getPath("logs"), "server.log")
+}
+
+async function startServer() {
+  mkdirSync(dataDir, { recursive: true })
+  mkdirSync(path.dirname(logFile()), { recursive: true })
+
+  const host = settings.acceptConnectionsFromNetwork ? "0.0.0.0" : "127.0.0.1"
+  const inUse = await portInUse(settings.port, host)
+  if (inUse) {
+    const pcp = await isHealthy(settings.port)
+    throw new Error(
+      `${pcp ? "Another PCP" : "Another program"} is already answering on port ${settings.port}.\n\n` +
+        `Quit it, or give this PCP a different port: put {"port": 3001} in ${settingsFile} and open PCP again.`,
+    )
+  }
+
+  const log = createWriteStream(logFile(), { flags: "a" })
+  log.write(
+    `\n[${new Date().toISOString()}] starting PCP ${app.getVersion()} on ${host}:${settings.port}, data in ${dataDir}\n`,
+  )
+
+  const child = utilityProcess.fork(path.join(serverDir, "server.js"), [], {
+    cwd: serverDir,
+    serviceName: "PCP server",
+    stdio: "pipe",
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      PORT: String(settings.port),
+      HOSTNAME: host,
+      PCP_DATA_DIR: dataDir,
+      // Lets PCP's own pages say how this app is reached and configured.
+      PCP_DESKTOP: "1",
+    },
+  })
+  child.stdout?.on("data", (chunk) => log.write(chunk))
+  child.stderr?.on("data", (chunk) => log.write(chunk))
+
+  let exited = false
+  child.on("exit", (code) => {
+    exited = true
+    log.write(`[${new Date().toISOString()}] server exited with code ${code}\n`)
+    log.end()
+    if (server === child) server = null
+    if (!stoppingServer && !quitting) {
+      serverDied(code)
+    }
+  })
+  server = child
+
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS
+  while (!(await isHealthy(settings.port))) {
+    if (exited) {
+      throw new Error(
+        `The server stopped while starting. Its log is at ${logFile()}.`,
+      )
+    }
+    if (Date.now() > deadline) {
+      stopServer()
+      throw new Error(
+        `The server did not answer within ${STARTUP_TIMEOUT_MS / 1000} seconds. Its log is at ${logFile()}.`,
+      )
+    }
+    await sleep(250)
+  }
+}
+
+function stopServer() {
+  if (!server) return
+  stoppingServer = true
+  server.kill()
+  server = null
+}
+
+async function restartServer() {
+  const previous = server
+  if (previous) {
+    const exited = new Promise((resolve) => previous.once("exit", resolve))
+    stopServer()
+    await exited
+  }
+  stoppingServer = false
+  await startServer()
+  window?.reload()
+}
+
+async function serverDied(code) {
+  const choice = await dialog.showMessageBox({
+    type: "error",
+    message: "PCP's server stopped unexpectedly.",
+    detail: `It exited with code ${code}. The log may say why.\n\n${logFile()}`,
+    buttons: ["Show the log", "Quit"],
+    defaultId: 0,
+    cancelId: 1,
+  })
+  if (choice.response === 0) {
+    shell.showItemInFolder(logFile())
+  }
+  app.exit(1)
+}
+
+/** @param {number} port @param {string} host */
+function portInUse(port, host) {
+  return new Promise((resolve) => {
+    const probe = net.createServer()
+    probe.unref()
+    probe.once("error", () => resolve(true))
+    probe.listen(port, host, () => probe.close(() => resolve(false)))
+  })
+}
+
+/** @param {number} port */
+function isHealthy(port) {
+  return new Promise((resolve) => {
+    const request = http.get(
+      `http://127.0.0.1:${port}/api/health`,
+      { timeout: 2_000 },
+      (response) => {
+        response.resume()
+        resolve(response.statusCode === 200)
+      },
+    )
+    request.on("timeout", () => request.destroy())
+    request.on("error", () => resolve(false))
+  })
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// --- The window -----------------------------------------------------------
+
+function localUrl() {
+  return `http://localhost:${settings.port}/`
+}
+
+function createWindow() {
+  window = new BrowserWindow({
+    width: 1120,
+    height: 820,
+    minWidth: 640,
+    minHeight: 480,
+    show: false,
+    backgroundColor: THEME_COLOR,
+    title: "PCP",
+    // Packaged builds carry the icon in the executable; this is for a
+    // checkout, and the taskbar on Linux.
+    icon: path.join(serverDir, "public", "icons", "icon-512.png"),
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+
+  // target=_blank links (the footer, documentation) open in the browser.
+  // Top-level navigation is left alone: an OAuth sign-in leaves for the
+  // provider and comes back to the callback.
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url)
+    return { action: "deny" }
+  })
+
+  // While the server restarts (network access toggled) a load fails; try
+  // again rather than show Chromium's error page.
+  window.webContents.on("did-fail-load", (_event, code, _description, url) => {
+    if (code !== -3 && url.startsWith(localUrl())) {
+      setTimeout(() => window?.loadURL(localUrl()), 500)
+    }
+  })
+
+  window.once("ready-to-show", () => window?.show())
+  window.on("close", (event) => {
+    if (quitting || process.platform === "darwin") return
+    // Windows and Linux: close hides, the tray icon stays. On macOS the
+    // Dock icon already says the app is running.
+    event.preventDefault()
+    window?.hide()
+    hintAboutTray()
+  })
+  window.on("closed", () => {
+    window = null
+  })
+
+  window.loadURL(localUrl())
+}
+
+function showWindow() {
+  if (!window) {
+    if (server) createWindow()
+    return
+  }
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+}
+
+function hintAboutTray() {
+  if (settings.toldAboutTray || !Notification.isSupported()) return
+  settings = { ...settings, toldAboutTray: true }
+  writeSettings(settingsFile, settings)
+  new Notification({
+    title: "PCP is still running",
+    body: "Your assistants can still reach it. Open or quit PCP from its icon in the system tray.",
+  }).show()
+}
+
+function createTray() {
+  try {
+    const mark = nativeImage.createFromPath(
+      path.join(serverDir, "public", "icons", "mark.png"),
+    )
+    const icon = nativeImage.createEmpty()
+    icon.addRepresentation({
+      scaleFactor: 1,
+      buffer: mark.resize({ width: 16, height: 16 }).toPNG(),
+    })
+    icon.addRepresentation({
+      scaleFactor: 2,
+      buffer: mark.resize({ width: 32, height: 32 }).toPNG(),
+    })
+    tray = new Tray(icon)
+    tray.setToolTip("PCP")
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: "Open PCP", click: showWindow },
+        { type: "separator" },
+        ...pcpMenuItems(),
+        { type: "separator" },
+        { label: "Quit PCP", click: () => app.quit() },
+      ]),
+    )
+    tray.on("click", showWindow)
+  } catch (error) {
+    // A desktop without a tray (some Linux sessions): the window's menu has
+    // the same items.
+    console.error("No tray icon:", error)
+  }
+}
+
+// --- Menus ----------------------------------------------------------------
+
+function pcpMenuItems() {
+  return [
+    {
+      label: "Accept connections from other devices",
+      type: "checkbox",
+      checked: settings.acceptConnectionsFromNetwork,
+      click: (item) => setNetworkAccess(item.checked),
+    },
+    ...(process.platform === "linux"
+      ? []
+      : [
+          {
+            label: "Start PCP when you sign in",
+            type: "checkbox",
+            checked: app.getLoginItemSettings().openAtLogin,
+            click: (item) =>
+              app.setLoginItemSettings({ openAtLogin: item.checked }),
+          },
+        ]),
+    { type: "separator" },
+    { label: "Change the port…", click: changePort },
+    { label: "Show the data folder", click: () => shell.openPath(dataDir) },
+    {
+      label: "Show the server log",
+      click: () => shell.showItemInFolder(logFile()),
+    },
+  ]
+}
+
+function buildMenu() {
+  const isMac = process.platform === "darwin"
+  /** @type {import("electron").MenuItemConstructorOptions[]} */
+  const template = [
+    isMac
+      ? {
+          label: app.name,
+          submenu: [
+            { role: "about" },
+            { type: "separator" },
+            ...pcpMenuItems(),
+            { type: "separator" },
+            { role: "services" },
+            { type: "separator" },
+            { role: "hide" },
+            { role: "hideOthers" },
+            { role: "unhide" },
+            { type: "separator" },
+            { role: "quit" },
+          ],
+        }
+      : {
+          label: "PCP",
+          submenu: [
+            { label: "Open PCP", click: showWindow },
+            { type: "separator" },
+            ...pcpMenuItems(),
+            { type: "separator" },
+            {
+              label: "Quit PCP",
+              accelerator: "CmdOrCtrl+Q",
+              click: () => app.quit(),
+            },
+          ],
+        },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+      ],
+    },
+    {
+      label: "Window",
+      submenu: [
+        { role: "minimize" },
+        { role: "zoom" },
+        ...(isMac
+          ? [{ type: "separator" }, { role: "front" }]
+          : [{ role: "close" }]),
+      ],
+    },
+    {
+      role: "help",
+      submenu: [
+        {
+          label: "PCP documentation",
+          click: () => shell.openExternal(README_URL),
+        },
+        {
+          label: "Report a problem",
+          click: () => shell.openExternal(ISSUES_URL),
+        },
+        ...(isMac
+          ? []
+          : [
+              { type: "separator" },
+              { label: "About PCP", click: () => app.showAboutPanel() },
+            ]),
+      ],
+    },
+  ]
+  return Menu.buildFromTemplate(template)
+}
+
+function refreshMenus() {
+  Menu.setApplicationMenu(buildMenu())
+  tray?.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "Open PCP", click: showWindow },
+      { type: "separator" },
+      ...pcpMenuItems(),
+      { type: "separator" },
+      { label: "Quit PCP", click: () => app.quit() },
+    ]),
+  )
+}
+
+/** @param {boolean} enabled */
+async function setNetworkAccess(enabled) {
+  settings = { ...settings, acceptConnectionsFromNetwork: enabled }
+  writeSettings(settingsFile, settings)
+
+  try {
+    await restartServer()
+  } catch (error) {
+    await showFatal(
+      "PCP could not restart its server.",
+      error instanceof Error ? error.message : String(error),
+    )
+    app.exit(1)
+    return
+  }
+  refreshMenus()
+
+  if (enabled) {
+    const addresses = lanAddresses()
+    await dialog.showMessageBox(window ?? undefined, {
+      type: "info",
+      message: "PCP now accepts connections from other devices.",
+      detail:
+        (addresses.length > 0
+          ? `On your network it answers at:\n${addresses.map((address) => `http://${address}:${settings.port}`).join("\n")}\n\n`
+          : "") +
+        "To reach it from the internet, forward the port on your router to this computer, or run a tunnel; PCP's Settings page explains both. " +
+        (process.platform === "win32"
+          ? "If Windows asks whether to allow PCP through the firewall, allow it on private networks."
+          : ""),
+    })
+  }
+}
+
+async function changePort() {
+  const choice = await dialog.showMessageBox(window ?? undefined, {
+    type: "info",
+    message: `PCP listens on port ${settings.port}.`,
+    detail: `To change it, put the port in the settings file and open PCP again:\n\n${settingsFile}\n\n{"port": 3001}\n\nAssistants connected to the old address need the new one.`,
+    buttons: ["Show the settings file", "OK"],
+    defaultId: 1,
+    cancelId: 1,
+  })
+  if (choice.response === 0) {
+    writeSettings(settingsFile, settings)
+    shell.showItemInFolder(settingsFile)
+  }
+}
+
+async function showFatal(message, detail) {
+  await dialog.showMessageBox({
+    type: "error",
+    message,
+    detail,
+    buttons: ["Quit"],
+  })
+}

@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 
 import { CopyableValue } from "@/components/copyable-value"
+import { OutsideAccessCard } from "@/components/outside-access-card"
 import { PageHeader } from "@/components/page-header"
 import {
   ChangePasswordForm,
@@ -15,8 +16,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { isLocalAddress } from "@/lib/core/local-address"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { getVault } from "@/lib/core/vault"
+import { isDesktopApp } from "@/lib/server/desktop"
 import { publicUrlFor, requestOrigin } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -48,6 +51,9 @@ export default async function SettingsPage() {
         </CardContent>
       </Card>
       <PublicUrlForm pinned={pinned ?? ""} detected={detected} />
+      {isLocalAddress(publicUrl) ? (
+        <OutsideAccessCard address={publicUrl} desktop={isDesktopApp()} />
+      ) : null}
       <ChangePasswordForm username={vault.name} />
       <RecoveryKeyCard username={vault.name} />
       <SessionsCard />
