@@ -110,6 +110,18 @@ export default defineConfig({
       },
     },
     {
+      // A mail account: JMAP with an app password and with OAuth, read-only,
+      // a refused password, an unreachable IMAP server; its tools called
+      // through the gateway.
+      name: "mail",
+      testMatch: /mail\.spec\.ts/,
+      dependencies: ["setup"],
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: "e2e/.auth/owner.json",
+      },
+    },
+    {
       // Per-token tool access and the owner's permission: the link, the
       // client's own prompt, PCP's panel, copying access, and servers an
       // assistant proposes.

@@ -13,13 +13,16 @@ import {
 } from "@modelcontextprotocol/server"
 import { z } from "zod"
 
+import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
+
 /**
  * A stand-in for the MCP servers PCP proxies to, for the e2e suite:
  *
  * - `/mcp` — an MCP server with a few tools, protected by a bearer token
  *   (`expectedToken`) when one is set. `echo_auth` returns the Authorization
  *   header it received, which is how the tests prove the secret PCP holds
- *   reached the upstream and nothing else did.
+ *   reached the upstream and nothing else did. `lateTools` holding
+ *   "long_text" adds a tool whose answer is as long as it is asked to be.
  * - `/oauth/mcp` — the same server behind OAuth: an authorization server
  *   with metadata, dynamic client registration, an authorize page that
  *   approves at once, and a token endpoint. Enough for the real SDK flow
@@ -36,6 +39,11 @@ import { z } from "zod"
  *   bearer token as `/mcp` and records every request in `requests`, which is
  *   how the tests assert what PCP actually sent. `/openapi.json` is open,
  *   like most published schemas, and its server is `${origin}/api`.
+ * - `/jmap/*` — a JMAP mail server (lib/core/mail/fake-jmap.ts) for mail
+ *   accounts, signing in ada@example.com with `expectedToken` as the
+ *   password (Basic). `/oauth/jmap/*` is the same behind the OAuth
+ *   authorization server above; `tokenLifetime.seconds` sets how long the
+ *   tokens it hands out last, and `tokenRequests` records each grant.
  *
  * Everything is in memory. Start one per test file.
  */
@@ -73,6 +81,16 @@ export type Upstream = {
   }>
   /** The OpenAPI document of the pet store. */
   openapiUrl: string
+  /** The JMAP session URLs: Basic sign-in, and OAuth. */
+  jmapSessionUrl: string
+  oauthJmapSessionUrl: string
+  /** The JMAP servers' mail, what they sent and every request they saw. */
+  jmap: FakeJmap
+  oauthJmap: FakeJmap
+  /** How long the tokens /token hands out last; tests shorten it. */
+  tokenLifetime: { seconds: number }
+  /** Every grant /token was asked for, in order. */
+  tokenRequests: Array<{ grant_type: string | null }>
   /** Every request to /api/*, in order, whether or not it was allowed. */
   requests: Array<{
     method: string
@@ -267,6 +285,13 @@ function buildServer(
   )
 
   for (const name of lateTools) {
+    // "long_text" is a late tool with a long answer: how the tests show PCP
+    // keeping an answer too long to pass on in one piece.
+    if (name === "long_text") {
+      registerLongText(server, calls, authorization)
+      continue
+    }
+
     server.registerTool(
       name,
       {
@@ -282,6 +307,37 @@ function buildServer(
   }
 
   return server
+}
+
+function registerLongText(
+  server: McpServer,
+  calls: Upstream["calls"],
+  authorization: () => string | null,
+) {
+  server.registerTool(
+    "long_text",
+    {
+      title: "Long text",
+      description:
+        "Answers with a long text of the length asked for, ending in THE END.",
+      inputSchema: z.object({
+        length: z.number().int().min(10).max(500_000),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ length }) => {
+      calls.push({
+        tool: "long_text",
+        args: { length },
+        authorization: authorization(),
+      })
+      const words = "All work and no play makes Jack a dull boy. "
+      const text = words
+        .repeat(Math.ceil(length / words.length))
+        .slice(0, length - 7)
+      return { content: [{ type: "text", text: `${text}THE END` }] }
+    },
+  )
 }
 
 async function readBody(request: IncomingMessage): Promise<string> {
@@ -351,6 +407,21 @@ export async function startUpstream({
     redirectUris: new Set<string>(),
   }
   const closedSignIns: Upstream["closedSignIns"] = []
+  const tokenLifetime = { seconds: 3600 }
+  const tokenRequests: Upstream["tokenRequests"] = []
+  const jmap = createFakeJmap({
+    base: "/jmap",
+    authorize: (header) =>
+      header ===
+      `Basic ${Buffer.from(`ada@example.com:${expectedToken}`).toString("base64")}`,
+  })
+  const oauthJmap = createFakeJmap({
+    base: "/oauth/jmap",
+    authorize: (header) => {
+      const token = header?.replace(/^Bearer\s+/i, "")
+      return Boolean(token && issuedTokens.has(token))
+    },
+  })
   let origin = ""
 
   // The Authorization header of the request being served, read by the
@@ -563,6 +634,37 @@ export async function startUpstream({
         return json(res, 404, { error: "not_found" })
       }
 
+      if (
+        url.pathname ===
+        "/.well-known/oauth-protected-resource/oauth/jmap/session"
+      ) {
+        return json(res, 200, {
+          resource: `${origin}/oauth/jmap/session`,
+          authorization_servers: [origin],
+        })
+      }
+
+      for (const fake of [jmap, oauthJmap]) {
+        const answer = fake.handle({
+          method: req.method ?? "GET",
+          url: req.url ?? "/",
+          headers: req.headers,
+          body,
+        })
+
+        if (answer) {
+          if (answer.status === 401 && fake === oauthJmap) {
+            res.setHeader(
+              "WWW-Authenticate",
+              `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/oauth/jmap/session"`,
+            )
+          }
+          res.statusCode = answer.status
+          res.setHeader("content-type", answer.type)
+          return res.end(answer.body)
+        }
+      }
+
       if (url.pathname === "/.well-known/oauth-protected-resource/oauth/mcp") {
         return json(res, 200, {
           resource: `${origin}/oauth/mcp`,
@@ -625,6 +727,7 @@ export async function startUpstream({
 
       if (url.pathname === "/token" && req.method === "POST") {
         const form = new URLSearchParams(body)
+        tokenRequests.push({ grant_type: form.get("grant_type") })
         if (form.get("grant_type") === "authorization_code") {
           const code = codes.get(form.get("code") ?? "")
           const verifier = form.get("code_verifier") ?? ""
@@ -653,7 +756,7 @@ export async function startUpstream({
         return json(res, 200, {
           access_token: access,
           token_type: "Bearer",
-          expires_in: 3600,
+          expires_in: tokenLifetime.seconds,
           refresh_token: refresh,
           scope: "postcards",
         })
@@ -679,6 +782,12 @@ export async function startUpstream({
     closedClient,
     closedSignIns,
     openapiUrl: `${origin}/openapi.json`,
+    jmapSessionUrl: `${origin}/jmap/session`,
+    oauthJmapSessionUrl: `${origin}/oauth/jmap/session`,
+    jmap,
+    oauthJmap,
+    tokenLifetime,
+    tokenRequests,
     expectedToken,
     issuedTokens,
     lateTools,
