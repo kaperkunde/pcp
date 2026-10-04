@@ -150,6 +150,15 @@ export default async function PermissionPage({
                   Always allow and Block also decide the calls after this one.
                   You can change that on the token&apos;s page.
                 </p>
+              ) : view.kind === "fetch" ? (
+                <p className="text-muted-foreground">
+                  Always allow this site and Block this site also decide this
+                  token&apos;s later requests to the site.{" "}
+                  <Link href={`/tokens/${view.tokenId}`} className="underline">
+                    The token&apos;s page
+                  </Link>{" "}
+                  lists every site it reached for, and its method settings.
+                </p>
               ) : view.kind === "memory_share" ? (
                 <p className="text-sm text-muted-foreground">
                   Kept for this assistant only, it is saved where only the

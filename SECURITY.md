@@ -68,6 +68,16 @@ agree to: you are shown the whole text, nothing is written before you answer,
 and text with characters that do not show on screen is refused, so what you
 read is all there is. The right to keep memories is off unless you tick it.
 
+**An assistant with a token that may fetch web pages** can have PCP request
+public addresses, as far as the token's method and site levels allow: a site
+it has not reached before asks you first unless you allow that method
+everywhere, and every site it tried is listed on the token's page. It cannot
+reach a private, loopback or link-local address (checked at the moment of
+connecting, as for an API an assistant proposes), cannot send one of your
+secrets or any Authorization or Cookie header, and a redirect to another site
+is reported to it rather than followed. The right is off unless you tick it
+when you make the token or on its page.
+
 **Someone with your session cookie but not your password** can use PCP as
 you while the session lasts. They cannot make an API token or a new recovery
 key, because both ask for the password again, so they cannot keep a way in
@@ -109,6 +119,17 @@ Not defended against:
   shows the address, the operations and whether they can change things),
   turn on Read-only where it is enough, and give a token the right to change
   endpoints only if it needs it.
+- **Egress through web fetch.** A token you let fetch web pages can send
+  what it holds to any public site you allow, in the address or, with a
+  method that has one, in a body; a prompt injected into the assistant can do
+  the same, and what a page says reaches the assistant as the page's words.
+  Allow GET only where you can, keep POST and the other methods at Ask you
+  first or Blocked, and read the address and the body before you allow a
+  request. PCP's own address is the one the site sees, so a site that trusts
+  PCP's network more than the assistant's trusts this too.
+- **Site names on disk.** The sites a token reached, with when, are stored
+  unencrypted, like server addresses, so the token's page can list them. A
+  copy of the disk shows them.
 - **Schema text on disk.** An endpoint's OpenAPI document, and the call plans
   built from it, are stored unencrypted, like server addresses and names. A
   copy of the disk shows them. Do not put a key or a hostname you would not

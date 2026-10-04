@@ -40,6 +40,9 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **APIs without an MCP server.** Give PCP an OpenAPI schema, as a URL or a
   file, and each operation becomes a tool. PCP makes the HTTP calls itself,
   with your secret or OAuth sign-in, and hands the assistant the answer.
+- **Web pages, on your terms.** A token can be given a `web_fetch` tool that
+  reads public web pages as Markdown. You decide per method and per site, and
+  every site an assistant tried is listed for you to allow or block.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
@@ -176,7 +179,8 @@ required.
    the ones you pick, and can expire. Revoking it destroys its copy of the
    vault key. A token's page sets each tool to **Allowed**, **Ask you first**
    (the default) or **Blocked**, a whole server at once, or copies all of it
-   from another token.
+   from another token. Tick **All tokens** beside a level to make it the one
+   every token follows; a token's own level still wins over it.
 5. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
    bearer token. For Claude Code:
 
@@ -273,6 +277,32 @@ anything rather than when it thinks to look; a shared one reaches every
 assistant, one an assistant keeps reaches only that one. If an assistant
 changes one it keeps, it is no longer read in every conversation until you
 tick it again. Memories are encrypted like everything else.
+
+A token made with **Let an assistant with this token fetch web pages** gets a
+`web_fetch` tool, like the web fetch Claude has: it takes an address and
+returns the page, HTML as Markdown and JSON or text as they are, a part at a
+time for a long page. With a method, headers and a body it can send other
+requests too. What it may do is on the token's page, in two parts:
+
+- **Methods.** GET, POST, PUT, PATCH, DELETE and Other methods, each
+  **Allowed**, **Ask you first** (the default) or **Blocked**. They decide
+  for every site that has no level of its own.
+- **Sites.** Every site an assistant with the token tried to reach is listed
+  the first time it tries, set to **Use the method settings**, and asks you
+  then unless that method is allowed. Give a site a level of its own and it
+  decides every request there, whatever the method. You can add a site before
+  any assistant asks for it, and remove one.
+
+A request that asks you offers **Allow once**, **Always allow this site**,
+**Block this site** and **Not now**. A site is its host: `example.com` and
+`www.example.com` are two sites, and a redirect from one to the other is
+reported to the assistant rather than followed, so you decide the second one
+too. Every line, method or site, has an **All tokens** box like the tools do.
+
+`web_fetch` reaches public addresses only, never your own network, and sends
+none of your secrets or cookies; it never sends an Authorization or Cookie
+header at all. The sites a token reached are on its page, not in the request
+log.
 
 ## How it is secured
 

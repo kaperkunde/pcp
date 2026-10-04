@@ -10,6 +10,7 @@ import {
   useTransition,
 } from "react"
 
+import { AllTokensCheckbox } from "@/components/all-tokens-checkbox"
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
@@ -19,6 +20,8 @@ import { clearNewToken, peekNewToken } from "@/components/new-token-handoff"
 import { PermissionDecision } from "@/components/permission-decision"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
+import { WebFetchCard } from "@/components/web-fetch-card"
+import { WebFetchField } from "@/components/web-fetch-field"
 import { Badge } from "@/components/ui/badge"
 import { Button, ButtonLink } from "@/components/ui/button"
 import { refreshToolsAction } from "@/lib/actions/servers"
@@ -35,6 +38,7 @@ import {
   copyTokenAccessAction,
   setServerToolAccessAction,
   setToolAccessAction,
+  setToolAccessSharedAction,
   updateTokenAction,
   type UpdateTokenResult,
 } from "@/lib/actions/tokens"
@@ -47,6 +51,7 @@ import {
   type ToolAccess,
 } from "@/lib/core/constants"
 import type { TokenServerAccess, TokenToolAccess } from "@/lib/core/tool-access"
+import type { TokenFetchRules } from "@/lib/core/web-fetch"
 import type { ActionState } from "@/lib/server/action-state"
 import { cn } from "@/lib/utils"
 
@@ -76,6 +81,7 @@ export function TokenDetail({
   otherTokens,
   waiting,
   endpointUrl,
+  fetchRules,
 }: {
   token: ApiTokenSummary
   servers: Array<{ id: string; name: string; kind?: ServerKind }>
@@ -83,6 +89,8 @@ export function TokenDetail({
   otherTokens: Array<{ id: string; name: string }>
   waiting: WaitingRequest[]
   endpointUrl: string
+  /** Only for a token that may fetch web pages. */
+  fetchRules: TokenFetchRules | null
 }) {
   const locked = token.revokedAt !== null
   // Only right after the token list made it (new-token-handoff.ts).
@@ -104,6 +112,9 @@ export function TokenDetail({
         <CopyCard tokenId={token.id} otherTokens={otherTokens} />
       ) : null}
       <ToolsCard tokenId={token.id} access={access} locked={locked} />
+      {token.webFetch && fetchRules ? (
+        <WebFetchCard tokenId={token.id} rules={fetchRules} locked={locked} />
+      ) : null}
       <SettingsCard token={token} servers={servers} locked={locked} />
     </div>
   )
@@ -401,17 +412,34 @@ function ToolAccessRow({
   locked: boolean
 }) {
   const [pending, startTransition] = useTransition()
-  const [shown, setShown] = useOptimistic(tool.access)
+  const [shown, setShown] = useOptimistic({
+    access: tool.access,
+    shared: tool.own === null && tool.shared !== null,
+  })
   const [error, setError] = useState<string | null>(null)
 
+  // A change here is this token's own level, which wins over all tokens'.
   function change(access: ToolAccess) {
     startTransition(async () => {
-      setShown(access)
+      setShown({ access, shared: false })
       const result = await setToolAccessAction(
         tokenId,
         serverId,
         tool.name,
         access,
+      )
+      setError(result.status === "error" ? result.error : null)
+    })
+  }
+
+  function share(shared: boolean) {
+    startTransition(async () => {
+      setShown({ ...shown, shared })
+      const result = await setToolAccessSharedAction(
+        tokenId,
+        serverId,
+        tool.name,
+        shared,
       )
       setError(result.status === "error" ? result.error : null)
     })
@@ -425,19 +453,28 @@ function ToolAccessRow({
           <span className="text-xs text-muted-foreground">{tool.title}</span>
         ) : null}
       </div>
-      <Select
-        aria-label={`Access to ${slug}/${tool.name}`}
-        value={shown}
-        disabled={locked || pending}
-        onChange={(event) => change(event.target.value as ToolAccess)}
-        className={cn(
-          "h-8 w-auto",
-          shown === "blocked" && "text-destructive",
-          shown === "allowed" && "text-primary",
-        )}
-      >
-        <AccessOptions />
-      </Select>
+      <div className="flex flex-wrap items-center gap-3">
+        <AllTokensCheckbox
+          checked={shown.shared}
+          disabled={locked || pending}
+          label={`All tokens for ${slug}/${tool.name}`}
+          sharedLevel={tool.shared ? TOOL_ACCESS_LABELS[tool.shared] : null}
+          onChange={share}
+        />
+        <Select
+          aria-label={`Access to ${slug}/${tool.name}`}
+          value={shown.access}
+          disabled={locked || pending}
+          onChange={(event) => change(event.target.value as ToolAccess)}
+          className={cn(
+            "h-8 w-auto",
+            shown.access === "blocked" && "text-destructive",
+            shown.access === "allowed" && "text-primary",
+          )}
+        >
+          <AccessOptions />
+        </Select>
+      </div>
       <FormError error={error} className="basis-full" />
     </li>
   )
@@ -459,7 +496,7 @@ function CopyCard({
 
     if (
       !window.confirm(
-        `Replace this token's servers and tool access with those of "${name}"?`,
+        `Replace this token's servers, tool access and web fetch settings with those of "${name}"?`,
       )
     ) {
       return
@@ -475,8 +512,9 @@ function CopyCard({
       <CardHeader>
         <CardTitle>Copy access</CardTitle>
         <CardDescription>
-          Give this token the same servers and tool access as another one. What
-          it has now is replaced.
+          Give this token the same servers, tool access and web fetch settings
+          as another one. What it has now is replaced; settings for all tokens
+          stay as they are.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
@@ -580,6 +618,7 @@ function SettingsCard({
               id="token-memories"
               defaultChecked={token.keepMemories}
             />
+            <WebFetchField id="token-fetch" defaultChecked={token.webFetch} />
             <FormError error={state.status === "error" ? state.error : null} />
             <FormNote message={state.status === "ok" ? state.message : null} />
             {locked ? null : (

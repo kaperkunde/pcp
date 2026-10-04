@@ -47,6 +47,9 @@ import { z } from "zod"
  *   does (`keyedKeys`). `/keyed/ping` answers with the secret key it got,
  *   as an API that echoes a credential back would, and records every
  *   request's headers in `keyedRequests`.
+ * - `/page` — an HTML page for web_fetch, recording each request in
+ *   `pageHits`. The server is on 127.0.0.1, which web_fetch refuses, so the
+ *   tests show that `pageHits` stays empty.
  *
  * - `/ddns/update` — a dynamic DNS service's update URL. It records every
  *   update in `ddns.updates` and answers with `ddns.status`.
@@ -115,6 +118,10 @@ export type Upstream = {
     }>
     status: number
   }
+  /** The HTML page for web_fetch. */
+  pageUrl: string
+  /** Every request to /page, by method; web_fetch should make none. */
+  pageHits: string[]
   close: () => Promise<void>
 }
 
@@ -440,6 +447,7 @@ export async function startUpstream({
     secretKey: `sk1_${randomBytes(6).toString("hex")}`,
   }
   const keyedRequests: Upstream["keyedRequests"] = []
+  const pageHits: string[] = []
   const pets: Pet[] = [
     { id: 1, name: "Fido", status: "available" },
     { id: 2, name: "Tom", status: "sold" },
@@ -668,6 +676,14 @@ export async function startUpstream({
         return json(res, 404, { error: "not_found" })
       }
 
+      if (url.pathname === "/page") {
+        pageHits.push(req.method ?? "")
+        res.setHeader("content-type", "text/html; charset=utf-8")
+        return res.end(
+          "<!doctype html><title>Upstream page</title><h1>Only for the owner's network</h1>",
+        )
+      }
+
       if (url.pathname.startsWith("/api/")) {
         requests.push({
           method: req.method ?? "GET",
@@ -847,6 +863,8 @@ export async function startUpstream({
     openapiUrl: `${origin}/openapi.json`,
     keyedKeys,
     keyedRequests,
+    pageUrl: `${origin}/page`,
+    pageHits,
     expectedToken,
     issuedTokens,
     lateTools,
