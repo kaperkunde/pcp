@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { NEW_SECRET } from "./constants"
 import { CATALOGUE_MAX_AGE_MS, gatewayIcons, rereadDue } from "./gateway"
-import { listSecrets, revealSecret } from "./secrets"
+import { createSecret, listSecrets, revealSecret } from "./secrets"
 import { createServer, updateServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
@@ -125,6 +125,46 @@ describe("updateServer", () => {
         url: "https://elsewhere.example.com/mcp",
         authType: "oauth",
       }),
+    ).toEqual({ reconnect: true })
+  })
+
+  it("says so when a further secret header changes, and only then", async () => {
+    const { vaultId, dek } = await setupVault({
+      name: "Owner",
+      password: "correct horse battery staple",
+    })
+    const ctx = { vaultId, dek }
+    const key = await createSecret(ctx, { name: "key", value: "k" })
+    const secretKey = await createSecret(ctx, {
+      name: "secret key",
+      value: "s",
+    })
+    const input = {
+      name: "Tools",
+      url: "https://tools.example.com/mcp",
+      authType: "header" as const,
+      authSecretId: key.id,
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+      authExtraHeaders: [
+        { secretId: secretKey.id, headerName: "X-Secret-API-Key" },
+      ],
+    }
+    const { id } = await createServer(ctx, input)
+
+    expect(
+      await updateServer(ctx, id, { ...input, description: "Renamed" }),
+    ).toEqual({ reconnect: false })
+    expect(
+      await updateServer(ctx, id, {
+        ...input,
+        authExtraHeaders: [
+          { secretId: key.id, headerName: "X-Secret-API-Key" },
+        ],
+      }),
+    ).toEqual({ reconnect: true })
+    expect(
+      await updateServer(ctx, id, { ...input, authExtraHeaders: [] }),
     ).toEqual({ reconnect: true })
   })
 

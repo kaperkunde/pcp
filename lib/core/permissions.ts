@@ -12,6 +12,7 @@ import {
   checkAccessLevels,
   describeAccessAsk,
   describeSavedAccess,
+  listAccessLevels,
   writeAccessLevels,
   type AccessAsk,
   type AccessLevel,
@@ -28,6 +29,8 @@ import {
   type EndpointRegistration,
 } from "./endpoint-admin"
 import { invalid, isPcpError, notFound, PcpError } from "./errors"
+import { fetchWeb } from "./fetch/fetch"
+import type { FetchArgs } from "./fetch/request"
 import { newId } from "./ids"
 import {
   decideMemoryAsk,
@@ -41,6 +44,7 @@ import {
   connectLinks,
   connectResult,
   isConnectResult,
+  linkLastText,
   type ConnectLinks,
   type ServerState,
 } from "./connect"
@@ -65,9 +69,20 @@ import {
   validateSecretValue,
 } from "./secrets"
 import { oauthRedirectUrl } from "./oauth-client"
-import { createServer, getServer, type ServerInput } from "./servers"
+import {
+  createServer,
+  getServer,
+  type ExtraAuthHeader,
+  type ServerInput,
+} from "./servers"
 import { writeToolAccess } from "./tool-access"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
+import {
+  describeFetchAsk,
+  fetchHostOf,
+  runFetch,
+  writeSiteAccess,
+} from "./web-fetch"
 
 /**
  * The owner's say before an assistant's call runs. A call to a tool the
@@ -77,15 +92,19 @@ import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
  * owner answers; decidePermission() runs the call, once. Nothing here
  * trusts the assistant: only the owner's answer on that page runs anything.
  *
- * The assistant passes the link on and calls check_permission, which holds
- * the call until the owner has answered (lib/core/owner-wait.ts), so the
- * conversation carries on without them coming back to say so. Prompts in
- * the client (elicitation) and PCP's own panel (MCP Apps) were tried first
- * and dropped: Claude's apps stalled on prompts, and showed a panel they
- * rebuilt with its first question again, unable to ask PCP for the answer.
+ * The assistant ends its reply with the link and calls check_permission
+ * once the owner says they have answered; it holds the call while they are
+ * still on it (lib/core/owner-wait.ts). The link has to come last: Claude's
+ * apps fold the text written before a tool call into the tool's row and
+ * show a summary of their own, so a link followed by check_permission in
+ * the same reply was often never seen. Prompts in the client (elicitation)
+ * and PCP's own panel (MCP Apps) were tried first and dropped: Claude's
+ * apps stalled on prompts, and showed a panel they rebuilt with its first
+ * question again, unable to ask PCP for the answer.
  *
  * An answer can also settle the tool for the calls after it ("Always
- * allow", "Block").
+ * allow", "Block"), and for a web request the site ("Always allow this
+ * site", "Block this site").
  */
 
 /** What the gateway knows about the request it is serving. */
@@ -101,8 +120,10 @@ export type PermissionScope = {
  * `newSecretName` it sends a secret PCP does not hold yet: the owner types
  * its value in on PCP's page when they agree, and it is saved by that name.
  */
-export type RegisterArgs = ServerInput & {
+export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   secretName?: string | null
+  /** Further headers, each with its stored secret's name for the owner. */
+  authExtraHeaders?: Array<ExtraAuthHeader & { secretName: string }>
   newSecretName?: string | null
   /**
    * The new secret may be left empty: an OAuth client's secret, for a client
@@ -125,11 +146,14 @@ export type PermissionAsk =
   | { kind: "endpoint_change"; input: EndpointChangeAsk }
   | MemoryAsk
   | AccessAsk
+  | { kind: "fetch"; input: FetchArgs }
 
 /** Runs what the owner allowed. Tests swap in a stub. */
 export type PermissionExecutor = {
   callTool: typeof callServerTool
   syncTools: typeof syncServerTools
+  /** web_fetch's request; the real one when left out. */
+  fetchWeb?: typeof fetchWeb
 }
 
 const defaultExecutor: PermissionExecutor = {
@@ -276,6 +300,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `endpoint:${ask.input.serverId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "fetch":
+      return {
+        target: `fetch:${ask.input.method} ${ask.input.url}`,
+        args: ask.input as Record<string, unknown>,
+      }
   }
 }
 
@@ -293,6 +322,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "propose_tool_access"
     case "endpoint_change":
       return "update_endpoint"
+    case "fetch":
+      return "web_fetch"
     default:
       return "memory"
   }
@@ -391,6 +422,12 @@ async function summarizeRow(
     return { ...shown, lines: [...shown.lines, asker] }
   }
 
+  if (row.kind === "fetch") {
+    const asked = describeFetchAsk(args as FetchArgs)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
   if (row.kind === "access") {
     const { levels } = args as AccessAsk["input"]
     const servers = await db().mcpServer.findMany({
@@ -409,17 +446,31 @@ async function summarizeRow(
     const input = args as RegisterArgs
     const oauthLines =
       input.authType === "oauth" ? registerOAuthLines(input, publicUrl) : []
+    const extras = input.authExtraHeaders ?? []
+    // A credential in several parts: every secret, and the header it goes in.
+    const andExtras = extras
+      .map(
+        (extra) =>
+          `, and ${input.newSecretName ? "your secret " : ""}"${extra.secretName}" in the ${extra.headerName} header`,
+      )
+      .join("")
+    const secrets = [
+      input.secretName ?? "?",
+      ...extras.map((e) => e.secretName),
+    ]
+      .map((name) => `"${name}"`)
+      .join(" and ")
     const auth =
       input.authType === "header" && input.newSecretName
-        ? `Authentication: sends a new secret, saved as "${input.newSecretName}", in the ${input.authHeaderName || "Authorization"} header; you enter its value here when you agree`
+        ? `Authentication: sends a new secret, saved as "${input.newSecretName}", in the ${input.authHeaderName || "Authorization"} header${andExtras}; you enter its value here when you agree`
         : input.authType === "header"
-          ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header`
+          ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header${andExtras}`
           : input.authType === "oauth"
             ? oauthLines[0]!
             : "Authentication: none"
     const warning =
       input.authType === "header"
-        ? `PCP will send the secret "${input.secretName ?? "?"}" to this address with every call. Only add it if you trust the address.`
+        ? `PCP will send the ${extras.length > 0 ? "secrets" : "secret"} ${secrets} to this address with every call. Only add it if you trust the address.`
         : input.authType === "oauth" && input.endpoint
           ? "PCP will send your OAuth token for this account to this address with every call. Only add it if you trust the address and the sign-in addresses."
           : null
@@ -607,7 +658,7 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     default:
       return text(
-        `Still waiting for the owner. They can answer at ${view.url} until ${view.expiresAt.toISOString()}. Afterwards, call check_permission with id "${view.id}" for the result.`,
+        `Still waiting for the owner. They can answer until ${view.expiresAt.toISOString()}. When they say they have, call check_permission with id "${view.id}" for the result.\n\n${linkLastText(view.url)}`,
       )
   }
 }
@@ -624,9 +675,9 @@ async function outcomeFromRow(
     : text("There is no permission request with that id.", true)
 }
 
-function pendingText(view: PermissionView): string {
+function pendingText(view: PermissionView, detail?: string): string {
   if (view.kind === "access") {
-    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}\n\nGive the owner this link, to open signed in to PCP: ${view.url} Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. Then call check_permission with id "${view.id}": it waits while they review, and says what they saved. The request stays open until ${view.expiresAt.toISOString()}.`
+    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}${detail ? `\n\n${detail}` : ""}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. When they say they have saved, call check_permission with id "${view.id}": it says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
   }
 
   const typed = view.secretToEnter
@@ -635,7 +686,7 @@ function pendingText(view: PermissionView): string {
       : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
     : ""
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nGive the owner this link, to open signed in to PCP and answer there: ${view.url}${typed} Then call check_permission with id "${view.id}": it waits while they answer, and gives the result. The request stays open until ${view.expiresAt.toISOString()}.`
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
 }
 
 /**
@@ -694,8 +745,29 @@ export async function withPermission(
   }
 
   const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
+  // The assistant hears which tools it named, to check its own patterns;
+  // the page shows the owner the same levels in full.
+  const detail =
+    ask.kind === "access"
+      ? listAccessLevels(
+          ask.input.levels,
+          await db().mcpServer.findMany({
+            where: {
+              vaultId: scope.ctx.vaultId,
+              id: {
+                in: [
+                  ...new Set(ask.input.levels.map((level) => level.serverId)),
+                ],
+              },
+            },
+            select: { id: true, slug: true },
+          }),
+        )
+      : undefined
 
-  return text(pendingText(await toView(scope.ctx, row!, scope.publicUrl)))
+  return text(
+    pendingText(await toView(scope.ctx, row!, scope.publicUrl), detail),
+  )
 }
 
 /**
@@ -737,16 +809,16 @@ export async function decidePermission(
   }
 
   const kind = row.kind as PermissionKind
-  // Only a tool call has "always" and "block": any other answer is about
-  // this one request.
-  const choice: PermissionDecision =
-    kind !== "call"
-      ? decision === "always"
-        ? "allow_once"
-        : decision === "block"
-          ? "decline"
-          : decision
-      : decision
+  // Only a tool call (for the tool) and a web request (for the site) have
+  // "always" and "block": any other answer is about this one request.
+  const settles = kind === "call" || kind === "fetch"
+  const choice: PermissionDecision = !settles
+    ? decision === "always"
+      ? "allow_once"
+      : decision === "block"
+        ? "decline"
+        : decision
+    : decision
 
   if (!decisionsFor(kind).some((offered) => offered.value === choice)) {
     return text("That is not one of the answers to this request.", true)
@@ -767,8 +839,14 @@ export async function decidePermission(
     })
   }
 
+  // The site a web request goes to, for the answers that settle it.
+  const host =
+    kind === "fetch" ? fetchHostOf(readArgs(ctx, row) as FetchArgs) : null
+
   if (choice === "block" || choice === "decline") {
-    if (choice === "block" && row.serverId) {
+    if (choice === "block" && host) {
+      await writeSiteAccess(ctx.vaultId, row.tokenId, host, "blocked")
+    } else if (choice === "block" && row.serverId) {
       await writeToolAccess(row.tokenId, row.serverId, row.toolName, "blocked")
     }
 
@@ -777,7 +855,7 @@ export async function decidePermission(
       row,
       publicUrl,
       choice === "block"
-        ? `The owner blocked ${toolLabel(row)} for this token, so nothing ran.`
+        ? `The owner blocked ${host ?? toolLabel(row)} for this token, so nothing ran.`
         : kind === "access"
           ? "The owner said no, so no tool's level changed."
           : "The owner said no, so nothing ran.",
@@ -806,7 +884,9 @@ export async function decidePermission(
     }
   }
 
-  if (choice === "always" && row.serverId) {
+  if (choice === "always" && host) {
+    await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
+  } else if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
   }
 
@@ -830,7 +910,9 @@ export async function decidePermission(
                 readArgs(ctx, row) as EndpointChangeAsk,
               ),
             )
-          : await executeRegister(ctx, row, publicUrl, executor, secretValue)
+          : kind === "fetch"
+            ? await executeFetch(ctx, row, executor)
+            : await executeRegister(ctx, row, publicUrl, executor, secretValue)
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -893,6 +975,32 @@ async function executeCall(
     decode: readStoredFields(row.decode),
     executor,
   })
+}
+
+/** A web request the owner allowed, if the token may still make one. */
+async function executeFetch(
+  ctx: VaultContext,
+  row: Row,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  const token = await db().apiToken.findUnique({
+    where: { id: row.tokenId },
+    select: { webFetch: true },
+  })
+
+  if (!token?.webFetch) {
+    return text(
+      "This token can no longer fetch web pages (the owner turned it off), so nothing ran.",
+      true,
+    )
+  }
+
+  return runFetch(
+    ctx,
+    row.tokenId,
+    readArgs(ctx, row) as FetchArgs,
+    executor.fetchWeb ?? fetchWeb,
+  )
 }
 
 /**
@@ -986,6 +1094,7 @@ async function executeRegister(
           authType: asked.authType,
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
+          authExtraHeaders: asked.authExtraHeaders,
           ...secretFields(asked, secret.id),
           endpoint: asked.endpoint,
         })
@@ -996,6 +1105,7 @@ async function executeRegister(
           authType: asked.authType,
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
+          authExtraHeaders: asked.authExtraHeaders,
           ...secretFields(asked, secret.id),
         })
   } catch (error) {
@@ -1179,6 +1289,59 @@ export async function listOpenPermissions(
   return Promise.all(rows.map((row) => toView(ctx, row, publicUrl)))
 }
 
+/** A request waiting for the owner, as the header's list shows it. */
+export type PendingRequest = {
+  id: string
+  title: string
+  tokenName: string
+  createdAt: Date
+}
+
+/**
+ * Every request in the vault still waiting for the owner, newest first: how
+ * many there are, and the first `limit` of them with their titles.
+ */
+export async function listPendingRequests(
+  ctx: VaultContext,
+  publicUrl: string,
+  { limit = 10 }: { limit?: number } = {},
+): Promise<{ total: number; requests: PendingRequest[] }> {
+  const now = new Date()
+  // A revoked or expired token's requests can no longer be answered.
+  const where = {
+    vaultId: ctx.vaultId,
+    status: "pending",
+    expiresAt: { gt: now },
+    token: {
+      revokedAt: null,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+    },
+  }
+  const [total, rows] = await Promise.all([
+    db().permissionRequest.count({ where }),
+    db().permissionRequest.findMany({
+      where,
+      include: ROW_INCLUDE,
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    }),
+  ])
+  const requests = await Promise.all(
+    rows.map(async (row) => {
+      const { title } = await summarizeRow(ctx, row, publicUrl)
+
+      return {
+        id: row.id,
+        title,
+        tokenName: row.token.name,
+        createdAt: row.createdAt,
+      }
+    }),
+  )
+
+  return { total, requests }
+}
+
 /**
  * check_permission: where a request stands. While it is still waiting for
  * the owner, the call is held until they answer or `waitMs` pass.
@@ -1213,7 +1376,7 @@ export async function checkPermission(
 
   if (view.status === "pending") {
     return text(
-      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey answer at ${view.url} until ${view.expiresAt.toISOString()}. If they are still on it, call check_permission again to keep waiting; otherwise stop here, and check again when they say they have answered.`,
+      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer until ${view.expiresAt.toISOString()}. Stop here, and call check_permission again when they say they have answered.\n\n${linkLastText(view.url)}`,
     )
   }
 

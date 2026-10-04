@@ -4,6 +4,10 @@
 #
 # Nothing has to be configured: the first visit to the site sets up the
 # owner. Keep the /data volume — it is the vault.
+#
+# HTTPS is optional and off until turned on in Settings. When it is on, PCP
+# also listens on 8080 (plain HTTP, for Let's Encrypt and the redirect) and
+# 8443 (HTTPS): docker-compose.https.yaml maps them to 80 and 443.
 
 FROM node:22-bookworm-slim AS base
 
@@ -43,10 +47,14 @@ FROM base AS runner
 
 WORKDIR /app
 
+# PCP runs as an unprivileged user, so its own HTTPS listeners use ports
+# above 1024; the compose file maps 80 and 443 onto them.
 ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
-    PCP_DATA_DIR=/data
+    PCP_DATA_DIR=/data \
+    PCP_HTTP_PORT=8080 \
+    PCP_HTTPS_PORT=8443
 
 RUN groupadd --system --gid 1001 nodejs \
   && useradd --system --uid 1001 --gid nodejs pcp \
@@ -62,7 +70,7 @@ COPY --from=builder /app/prisma/migrations ./prisma/migrations
 USER pcp
 
 VOLUME ["/data"]
-EXPOSE 3000
+EXPOSE 3000 8080 8443
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3000/api/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"

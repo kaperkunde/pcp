@@ -57,6 +57,9 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
     where: { vaultId: ctx.vaultId },
     include: {
       authFor: { select: { id: true, name: true } },
+      authHeaderFor: {
+        select: { server: { select: { id: true, name: true } } },
+      },
       oauthClientFor: { select: { id: true, name: true } },
       oauthTokensFor: { select: { id: true, name: true } },
     },
@@ -68,6 +71,7 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
 
     for (const server of [
       ...row.authFor,
+      ...row.authHeaderFor.map((header) => header.server),
       ...row.oauthClientFor,
       ...row.oauthTokensFor,
     ]) {
@@ -271,6 +275,7 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
     where: { id, vaultId: ctx.vaultId },
     include: {
       authFor: { select: { name: true } },
+      authHeaderFor: { select: { server: { select: { name: true } } } },
       oauthClientFor: { select: { name: true } },
       oauthTokensFor: { select: { name: true } },
     },
@@ -280,9 +285,15 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
     throw notFound("That secret")
   }
 
-  const users = [...row.authFor, ...row.oauthClientFor].map(
-    (server) => server.name,
-  )
+  const users = [
+    ...new Set(
+      [
+        ...row.authFor,
+        ...row.authHeaderFor.map((header) => header.server),
+        ...row.oauthClientFor,
+      ].map((server) => server.name),
+    ),
+  ]
 
   if (users.length > 0) {
     throw new PcpError(

@@ -8,3 +8,7 @@ data
 e2e/.artifacts
 e2e/.auth
 e2e/.state
+desktop/server
+desktop/.cache
+desktop/dist
+desktop/pnpm-lock.yaml

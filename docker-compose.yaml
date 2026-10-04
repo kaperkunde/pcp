@@ -3,11 +3,17 @@
 #
 #   docker compose up -d
 #
-# Put a TLS-terminating proxy in front of it for anything beyond a LAN:
-# the session cookie is only marked Secure when requests arrive over https
-# (X-Forwarded-Proto), and OAuth servers generally require https redirect
-# URLs. If PCP guesses its public address wrong behind the proxy, pin it
-# under Settings.
+# For anything beyond a LAN, PCP needs HTTPS: the session cookie is only
+# marked Secure over https, and OAuth servers generally require https
+# redirect URLs. Either turn on HTTPS under Settings and start PCP with the
+# ports for it:
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.https.yaml up -d
+#
+# or put a TLS-terminating proxy of your own in front of port 3000 (Caddy,
+# Traefik, nginx, Coolify) and leave PCP's HTTPS off. If PCP guesses its
+# public address wrong behind the proxy, pin it under Settings.
+# docs/self-hosting.md walks through both.
 services:
   pcp:
     # Built from this checkout. No image is published yet; once one is,

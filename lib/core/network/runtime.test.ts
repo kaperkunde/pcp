@@ -1,0 +1,119 @@
+import http from "node:http"
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+
+import { scratchDatabase } from "../test-db"
+import { clearDdnsConfig, saveDdnsConfig } from "./ddns"
+import {
+  edgePorts,
+  networkIdle,
+  networkOverview,
+  reconcileNetwork,
+  setNetworkIssuer,
+} from "./runtime"
+import { clearTlsConfig, saveTlsConfig } from "./tls"
+
+// The background side as the Server Actions drive it: nothing runs while
+// both features are off, turning HTTPS on opens port 80 and reports what
+// Let's Encrypt said, turning it off closes it again.
+
+const saved = { ...process.env }
+let cleanup: () => Promise<void>
+
+beforeEach(async () => {
+  ;({ cleanup } = await scratchDatabase())
+  process.env.PCP_HTTP_PORT = "0"
+  process.env.PCP_HTTPS_PORT = "0"
+  // A Let's Encrypt that refuses, at once.
+  setNetworkIssuer(async () => {
+    throw new Error("connect ECONNREFUSED")
+  })
+  process.env.PCP_PUBLIC_IP_URL = "http://127.0.0.1:9/ip"
+})
+
+afterEach(async () => {
+  await clearTlsConfig()
+  await clearDdnsConfig()
+  await reconcileNetwork()
+  await networkIdle()
+  setNetworkIssuer()
+  process.env = { ...saved }
+  await cleanup()
+})
+
+function get(port: number, path: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    http
+      .get({ host: "127.0.0.1", port, path }, (res) => {
+        res.resume()
+        resolve(res.statusCode ?? 0)
+      })
+      .on("error", reject)
+  })
+}
+
+describe("the network runtime", () => {
+  it("opens nothing while both features are off", async () => {
+    await reconcileNetwork()
+    await networkIdle()
+
+    expect(edgePorts()).toBeNull()
+    expect(await networkOverview()).toMatchObject({ ddns: null, https: null })
+  })
+
+  it("opens port 80 for HTTPS, reports the failure, and closes it again", async () => {
+    await saveTlsConfig(
+      {
+        domain: "pcp.example.com",
+        useDdnsName: false,
+        email: "",
+        agreed: true,
+      },
+      null,
+    )
+    await reconcileNetwork({ tlsNow: true })
+    await networkIdle()
+
+    const port = edgePorts()?.http
+    expect(port).toBeGreaterThan(0)
+    expect(await get(port!, "/.well-known/acme-challenge/none")).toBe(404)
+
+    const { https } = await networkOverview()
+    expect(https?.domain).toBe("pcp.example.com")
+    expect(https?.status.state).toBe("failed")
+    expect(https?.status.lastError).toMatch(/Let's Encrypt did not issue/)
+    expect(https?.edge?.http.listening).toBe(true)
+
+    await clearTlsConfig()
+    await reconcileNetwork()
+    expect(edgePorts()).toBeNull()
+  })
+
+  it("sends the first dynamic DNS update when the owner saves", async () => {
+    const hits: string[] = []
+    const service = http.createServer((req, res) => {
+      hits.push(req.url ?? "")
+      res.end("ok")
+    })
+    await new Promise<void>((resolve) =>
+      service.listen(0, "127.0.0.1", resolve),
+    )
+    const { port } = service.address() as { port: number }
+
+    try {
+      await saveDdnsConfig({
+        provider: "custom",
+        url: `http://127.0.0.1:${port}/update?host={hostname}`,
+        hostname: "pcp.example.com",
+      })
+      await reconcileNetwork({ ddnsNow: true })
+
+      expect(hits).toEqual(["/update?host=pcp.example.com"])
+      const { ddns } = await networkOverview()
+      expect(ddns?.status.lastUpdatedAt).toBeDefined()
+      expect(ddns?.name).toBe("pcp.example.com")
+    } finally {
+      await new Promise((resolve) => service.close(resolve))
+    }
+  })
+})

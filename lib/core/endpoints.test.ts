@@ -746,6 +746,207 @@ describe("secrets", () => {
   })
 })
 
+describe("a credential in several headers", () => {
+  const SECRET_KEY = "sk-secret-9876543210"
+
+  // An API that wants a key and a secret key at once, as Porkbun's does,
+  // and also declares the second as a parameter an assistant could fill.
+  function twoKeySchema(security: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      openapi: "3.0.3",
+      info: { title: "Domains" },
+      servers: [{ url: `${api.origin}/api` }],
+      components: {
+        securitySchemes: {
+          ApiKeyHeader: { type: "apiKey", in: "header", name: "X-API-Key" },
+          SecretApiKeyHeader: {
+            type: "apiKey",
+            in: "header",
+            name: "X-Secret-API-Key",
+          },
+        },
+      },
+      paths: {
+        "/ping": {
+          post: {
+            operationId: "ping",
+            parameters: [
+              {
+                name: "X-Secret-API-Key",
+                in: "header",
+                required: true,
+                schema: { type: "string" },
+              },
+            ],
+          },
+        },
+      },
+      ...security,
+    })
+  }
+
+  async function bothKeys() {
+    const first = await withSecret()
+    const { id } = await createSecret(ctx, {
+      name: "Pets secret key",
+      value: SECRET_KEY,
+    })
+    return {
+      ...first,
+      authExtraHeaders: [{ secretId: id, headerName: "X-Secret-API-Key" }],
+    }
+  }
+
+  it("sends every part, never offers one as an argument, and keeps them all out of the answer", async () => {
+    const auth = await bothKeys()
+    const { id, sync } = await createEndpoint(
+      ctx,
+      input({
+        ...auth,
+        specText: twoKeySchema({
+          security: [{ ApiKeyHeader: [], SecretApiKeyHeader: [] }],
+        }),
+        baseUrl: `${api.origin}/api`,
+      }),
+    )
+    expect(sync.message).toBe("")
+
+    const server = await getServer(ctx, id)
+    const [ping] = server.tools
+    expect(JSON.stringify(ping!.inputSchema)).not.toMatch(/secret/i)
+
+    const echo = await startTestApi((req, res) =>
+      json(res, 200, { echoed: req.headers["x-secret-api-key"] }),
+    )
+    await db().mcpServer.update({
+      where: { id },
+      data: { url: `${echo.origin}/api` },
+    })
+
+    try {
+      const result = await callServerTool(
+        ctx,
+        await getServer(ctx, id),
+        "ping",
+        {},
+        PUBLIC,
+      )
+      expect(echo.requests[0]!.headers["x-api-key"]).toBe(KEY)
+      expect(echo.requests[0]!.headers["x-secret-api-key"]).toBe(SECRET_KEY)
+      expect(JSON.stringify(result)).not.toContain(SECRET_KEY)
+      expect(JSON.stringify(result)).toContain("[redacted]")
+    } finally {
+      await echo.close()
+    }
+  })
+
+  it("says which part of the schema's credential the endpoint does not send", async () => {
+    // Required by each operation rather than the whole document.
+    const doc = JSON.parse(twoKeySchema()) as {
+      paths: { "/ping": { post: Record<string, unknown> } }
+    }
+    doc.paths["/ping"].post.security = [
+      { ApiKeyHeader: [], SecretApiKeyHeader: [] },
+    ]
+
+    const { sync } = await createEndpoint(
+      ctx,
+      input({
+        ...(await withSecret()),
+        specText: JSON.stringify(doc),
+        baseUrl: `${api.origin}/api`,
+      }),
+    )
+    expect(sync.message).toContain(
+      "The schema says requests also need a key in X-Secret-API-Key; this endpoint does not send that header.",
+    )
+  })
+
+  it("is replaced on an edit, and dropped with the credential", async () => {
+    const auth = await bothKeys()
+    const created = input({
+      ...auth,
+      specText: twoKeySchema(),
+      baseUrl: `${api.origin}/api`,
+    })
+    const { id } = await createEndpoint(ctx, created)
+    const headers = () =>
+      db().serverAuthHeader.findMany({ where: { serverId: id } })
+
+    await updateEndpoint(ctx, id, {
+      ...created,
+      authExtraHeaders: [
+        { ...auth.authExtraHeaders[0]!, headerName: "X-Other-Key" },
+      ],
+    })
+    expect((await headers()).map((row) => row.headerName)).toEqual([
+      "X-Other-Key",
+    ])
+
+    await updateEndpoint(ctx, id, {
+      ...created,
+      authType: "none",
+      baseUrl: null,
+    })
+    expect(await headers()).toEqual([])
+  })
+
+  it("lists the endpoint as using each secret, which blocks deleting any", async () => {
+    const auth = await bothKeys()
+    await createEndpoint(
+      ctx,
+      input({
+        ...auth,
+        specText: twoKeySchema(),
+        baseUrl: `${api.origin}/api`,
+      }),
+    )
+    const second = auth.authExtraHeaders[0]!.secretId
+
+    const secret = (await listSecrets(ctx)).find(
+      (entry) => entry.id === second,
+    )!
+    expect(secret.usedBy.map((server) => server.name)).toEqual(["Petstore"])
+    await expect(deleteSecret(ctx, second)).rejects.toThrow(/used by Petstore/)
+  })
+
+  it("refuses a header named twice, one without a secret, or too many", async () => {
+    const auth = await bothKeys()
+    const extra = auth.authExtraHeaders[0]!
+    const attempt = (authExtraHeaders: EndpointInput["authExtraHeaders"]) =>
+      createEndpoint(
+        ctx,
+        input({ ...auth, authExtraHeaders, baseUrl: `${api.origin}/api` }),
+      )
+
+    await expect(
+      attempt([{ ...extra, headerName: "x-api-key" }]),
+    ).rejects.toThrow(/named twice/)
+    await expect(attempt([{ ...extra, secretId: "" }])).rejects.toThrow(
+      /Choose a stored secret/,
+    )
+    // Only the first header's secret can be typed into the form.
+    await expect(attempt([{ ...extra, secretId: "new" }])).rejects.toThrow(
+      /Choose a stored secret/,
+    )
+    await expect(
+      attempt([{ ...extra, secretId: "not-a-secret" }]),
+    ).rejects.toThrow(/does not exist/)
+    await expect(
+      attempt([{ ...extra, valueTemplate: "no placeholder" }]),
+    ).rejects.toThrow(/must contain/)
+    await expect(
+      attempt(
+        ["A", "B", "C", "D", "E"].map((name) => ({
+          ...extra,
+          headerName: `X-${name}`,
+        })),
+      ),
+    ).rejects.toThrow(/at most 5/)
+    expect(await db().mcpServer.count()).toBe(0)
+  })
+})
+
 describe("calling an endpoint tool", () => {
   async function endpoint(overrides: Partial<EndpointInput> = {}) {
     const auth = await withSecret()

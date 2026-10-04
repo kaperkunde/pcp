@@ -32,23 +32,23 @@ export { redactSecrets } from "./redact"
 
 export type CallOutcome = { result: CallToolResult; status: number }
 
-function statusLine(response: Response): string {
+export function statusLine(response: Response): string {
   const text = response.statusText || STATUS_CODES[response.status] || ""
   return `HTTP ${response.status}${text ? ` ${text}` : ""}`
 }
 
-function mediaType(response: Response): string {
+export function mediaType(response: Response): string {
   return (response.headers.get("content-type") ?? "")
     .split(";")[0]!
     .trim()
     .toLowerCase()
 }
 
-function isJson(type: string): boolean {
+export function isJson(type: string): boolean {
   return /^application\/([\w.+-]+\+)?json$/.test(type)
 }
 
-function isText(type: string): boolean {
+export function isText(type: string): boolean {
   return (
     type.startsWith("text/") ||
     /^application\/([\w.+-]+\+)?(xml|yaml|x-yaml)$/.test(type) ||
@@ -57,7 +57,7 @@ function isText(type: string): boolean {
   )
 }
 
-function decodeUtf8(bytes: Buffer): string | null {
+export function decodeUtf8(bytes: Buffer): string | null {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes)
   } catch {

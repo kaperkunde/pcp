@@ -58,8 +58,8 @@ export function SetupForm({ alreadySetUp }: { alreadySetUp: boolean }) {
             this key means the secrets in PCP can never be read again — that is
             the point of how they are stored.
           </p>
-          <ButtonLink href="/servers" size="lg">
-            I have saved it — open PCP
+          <ButtonLink href="/setup/network" size="lg">
+            I have saved it — continue
           </ButtonLink>
         </CardContent>
       </Card>

@@ -14,6 +14,7 @@ import {
   checkPermission,
   decidePermission,
   getPermissionView,
+  listPendingRequests,
   prunePermissionRequests,
   withPermission,
   type PermissionExecutor,
@@ -124,9 +125,14 @@ describe("asking the owner", () => {
 
     expect(textOf(first)).toContain("Not done yet")
     expect(textOf(first)).toContain(`${PUBLIC_URL}/permissions/${id}`)
-    // Passed on, then waited for: check_permission holds the call.
+    // The link comes last, with nothing after it: some apps hide the text
+    // written before a tool call, so check_permission waits for the owner.
+    expect(textOf(first)).toContain("End your reply with this link")
+    expect(textOf(first).split("\n").at(-1)).toBe(
+      `${PUBLIC_URL}/permissions/${id}`,
+    )
     expect(textOf(first)).toContain(
-      `Then call check_permission with id "${id}": it waits while they answer`,
+      `When they say they have answered, call check_permission with id "${id}"`,
     )
     expect((first as CallToolResult).structuredContent).toBeUndefined()
 
@@ -272,7 +278,12 @@ describe("check_permission", () => {
 
     const late = await checkPermission(scope, id, { waitMs: 50 })
     expect(textOf(late)).toContain("Still waiting for the owner")
-    expect(textOf(late)).toContain("call check_permission again")
+    expect(textOf(late)).toContain(
+      "call check_permission again when they say they have answered",
+    )
+    expect(textOf(late).split("\n").at(-1)).toBe(
+      `${PUBLIC_URL}/permissions/${id}`,
+    )
 
     const gone = new AbortController()
     const started = Date.now()
@@ -301,6 +312,49 @@ describe("check_permission", () => {
     const started = Date.now()
     expect(textOf(await checkPermission(scope, id))).toContain("said no")
     expect(Date.now() - started).toBeLessThan(1_000)
+  })
+})
+
+describe("what is waiting for the owner", () => {
+  it("counts open requests, newest first, and leaves out answered ones and dead tokens", async () => {
+    const { ctx, scope, server } = await setup()
+    const { executor } = stub()
+
+    expect(await listPendingRequests(ctx, PUBLIC_URL)).toEqual({
+      total: 0,
+      requests: [],
+    })
+
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+
+    const both = await listPendingRequests(ctx, PUBLIC_URL)
+    expect(both.total).toBe(2)
+    expect(both.requests.map((request) => request.title)).toEqual([
+      "Allow postcards/send_postcard?",
+      "Allow postcards/add_numbers?",
+    ])
+    expect(both.requests[0]!.tokenName).toBe("Claude")
+    // The arguments stay on the request's own page.
+    expect(JSON.stringify(both)).not.toContain("Ada")
+
+    const limited = await listPendingRequests(ctx, PUBLIC_URL, { limit: 1 })
+    expect(limited.total).toBe(2)
+    expect(limited.requests).toHaveLength(1)
+
+    await decidePermission(
+      ctx,
+      both.requests[1]!.id,
+      "decline",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).total).toBe(1)
+
+    // A revoked token's request can no longer be answered.
+    await revokeApiToken(ctx, scope.tokenId)
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).total).toBe(0)
   })
 })
 
@@ -439,7 +493,9 @@ describe("adding a server", () => {
         oauthScope: "read",
       },
     })
-    expect(textOf(asked)).toMatch(/Give the owner this link.*\/permissions\//)
+    expect(textOf(asked)).toMatch(
+      /End your reply with this link.*\n.*\/permissions\//,
+    )
     expect(await db().mcpServer.count()).toBe(1)
 
     const id = await onlyRequestId()
@@ -537,6 +593,88 @@ describe("adding a server", () => {
     expect(
       await db().mcpServer.findFirstOrThrow({ where: { name: "Weather" } }),
     ).toMatchObject({ authType: "header", authSecretId: secret.id })
+  })
+
+  it("names every secret when the credential has several headers, and adds them all", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+    const key = await createSecret(ctx, { name: "domains key", value: "k" })
+    const secretKey = await createSecret(ctx, {
+      name: "domains secret key",
+      value: "s",
+    })
+
+    const extra = {
+      secretId: secretKey.id,
+      secretName: "domains secret key",
+      headerName: "X-Secret-API-Key",
+      valueTemplate: "{{secret}}",
+    }
+
+    // With the first secret to be typed in by the owner, the stored one is
+    // still named as theirs.
+    await withPermission(scope, {
+      kind: "register",
+      input: {
+        name: "Typed domains",
+        url: "https://domains.example.com/mcp",
+        authType: "header",
+        authHeaderName: "X-API-Key",
+        authValueTemplate: "{{secret}}",
+        secretName: "new domains key",
+        newSecretName: "new domains key",
+        authExtraHeaders: [extra],
+      },
+    })
+    const typed = await onlyRequestId()
+    expect(
+      (await getPermissionView(ctx, typed, { publicUrl: PUBLIC_URL }))?.lines,
+    ).toContain(
+      'Authentication: sends a new secret, saved as "new domains key", in the X-API-Key header, and your secret "domains secret key" in the X-Secret-API-Key header; you enter its value here when you agree',
+    )
+    await db().permissionRequest.deleteMany()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: {
+        name: "Domains",
+        url: "https://domains.example.com/mcp",
+        authType: "header",
+        authSecretId: key.id,
+        authHeaderName: "X-API-Key",
+        authValueTemplate: "{{secret}}",
+        secretName: "domains key",
+        authExtraHeaders: [extra],
+      },
+    })
+    const id = await onlyRequestId()
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.lines).toContain(
+      'Authentication: sends your secret "domains key" in the X-API-Key header, and "domains secret key" in the X-Secret-API-Key header',
+    )
+    expect(view?.warning).toMatch(
+      /the secrets "domains key" and "domains secret key"/,
+    )
+
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    const added = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Domains" },
+      include: { authHeaders: true },
+    })
+    expect(added.authHeaders).toMatchObject([
+      {
+        position: 1,
+        secretId: secretKey.id,
+        headerName: "X-Secret-API-Key",
+        valueTemplate: "{{secret}}",
+      },
+    ])
   })
 })
 
@@ -903,7 +1041,9 @@ describe("a new secret the owner types in", () => {
       kind: "register",
       input: await withNewSecret(ctx),
     })
-    expect(textOf(asked)).toMatch(/Give the owner this link.*\/permissions\//)
+    expect(textOf(asked)).toMatch(
+      /End your reply with this link.*\n.*\/permissions\//,
+    )
     expect(textOf(asked)).toMatch(
       /type the value of the secret "Pets API key" in there; do not ask them for it here/,
     )

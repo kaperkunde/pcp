@@ -12,6 +12,7 @@ import {
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { buildInstructions, loadGatewayServers } from "./gateway"
+import { writeAccessLevels } from "./access-requests"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import {
@@ -19,6 +20,7 @@ import {
   listTokenToolAccess,
   setServerToolAccess,
   setToolAccess,
+  setToolAccessShared,
 } from "./tool-access"
 import { setupVault } from "./vault"
 
@@ -76,6 +78,128 @@ async function levels(ctx: VaultContext, tokenId: string) {
     ),
   )
 }
+
+async function rows(ctx: VaultContext, tokenId: string) {
+  return Object.fromEntries(
+    (await listTokenToolAccess(ctx, tokenId)).flatMap((server) =>
+      server.tools.map((tool) => [
+        `${server.slug}/${tool.name}`,
+        { access: tool.access, own: tool.own, shared: tool.shared },
+      ]),
+    ),
+  )
+}
+
+describe("levels for all tokens", () => {
+  it("ticking makes the token's level everyone's; a token's own still wins", async () => {
+    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
+    const postcards = await serverWithTools(ctx, "Postcards", [
+      "add_numbers",
+      "send_postcard",
+    ])
+    const laptop = await createApiToken(ctx, {
+      name: "Laptop",
+      allowAllServers: true,
+    })
+    const phone = await createApiToken(ctx, {
+      name: "Phone",
+      allowAllServers: true,
+    })
+
+    await setToolAccess(ctx, laptop.id, postcards, "add_numbers", "allowed")
+    await setToolAccessShared(ctx, laptop.id, postcards, "add_numbers", true)
+
+    expect((await rows(ctx, laptop.id))["postcards/add_numbers"]).toEqual({
+      access: "allowed",
+      own: null,
+      shared: "allowed",
+    })
+    expect(await levels(ctx, phone.id)).toEqual({
+      "postcards/add_numbers": "allowed",
+      "postcards/send_postcard": "ask",
+    })
+
+    // The phone asks for itself: an own ask is kept, since it overrides.
+    await setToolAccess(ctx, phone.id, postcards, "add_numbers", "ask")
+    expect((await rows(ctx, phone.id))["postcards/add_numbers"]).toEqual({
+      access: "ask",
+      own: "ask",
+      shared: "allowed",
+    })
+    const resolved = await resolveApiToken(phone.token)
+    const [server] = await loadGatewayServers({
+      ...resolved!,
+      publicUrl: PUBLIC_URL,
+    })
+    expect(
+      server.tools.find((tool) => tool.name === "add_numbers"),
+    ).toMatchObject({ access: "ask" })
+
+    // Set all at ask keeps that override too, and only where there is one.
+    await setServerToolAccess(ctx, phone.id, postcards, "ask")
+    expect(
+      await db().apiTokenToolAccess.findMany({
+        where: { tokenId: phone.id },
+        select: { toolName: true, access: true },
+      }),
+    ).toEqual([{ toolName: "add_numbers", access: "ask" }])
+
+    // Unticking takes it from all tokens; the laptop keeps it as its own.
+    await setToolAccessShared(ctx, laptop.id, postcards, "add_numbers", false)
+    expect((await rows(ctx, laptop.id))["postcards/add_numbers"]).toEqual({
+      access: "allowed",
+      own: "allowed",
+      shared: null,
+    })
+    expect(await db().vaultToolAccess.count()).toBe(0)
+  })
+
+  it("a proposal the owner saves at ask still overrides all tokens' level", async () => {
+    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
+    const postcards = await serverWithTools(ctx, "Postcards", ["add_numbers"])
+    const laptop = await createApiToken(ctx, {
+      name: "Laptop",
+      allowAllServers: true,
+    })
+    const phone = await createApiToken(ctx, {
+      name: "Phone",
+      allowAllServers: true,
+    })
+
+    await setToolAccess(ctx, laptop.id, postcards, "add_numbers", "allowed")
+    await setToolAccessShared(ctx, laptop.id, postcards, "add_numbers", true)
+    await writeAccessLevels(ctx, phone.id, [
+      { serverId: postcards, tool: "add_numbers", access: "ask" },
+    ])
+
+    expect((await rows(ctx, phone.id))["postcards/add_numbers"]).toEqual({
+      access: "ask",
+      own: "ask",
+      shared: "allowed",
+    })
+  })
+
+  it("a level for all tokens at ask needs no row of a token's own to say ask", async () => {
+    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
+    const postcards = await serverWithTools(ctx, "Postcards", ["add_numbers"])
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+    })
+
+    await setToolAccessShared(ctx, tokenId, postcards, "add_numbers", true)
+    expect(await db().vaultToolAccess.findFirst()).toMatchObject({
+      access: "ask",
+    })
+
+    await setToolAccessShared(ctx, tokenId, postcards, "add_numbers", false)
+    expect(await db().apiTokenToolAccess.count({ where: { tokenId } })).toBe(0)
+
+    await expect(
+      setToolAccessShared(ctx, tokenId, postcards, "no_such_tool", true),
+    ).rejects.toThrow(/tool was not found/)
+  })
+})
 
 describe("tool access", () => {
   it("asks by default, stores allowed and blocked, and forgets back to ask", async () => {

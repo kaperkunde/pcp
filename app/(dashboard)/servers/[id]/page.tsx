@@ -11,7 +11,12 @@ import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import { readStoredPatches } from "@/lib/core/openapi/patch"
 import { readCallPlan } from "@/lib/core/openapi/plan"
 import { listSecrets } from "@/lib/core/secrets"
-import { getServer, type AuthType, type ServerStatus } from "@/lib/core/servers"
+import {
+  extraAuthHeaders,
+  getServer,
+  type AuthType,
+  type ServerStatus,
+} from "@/lib/core/servers"
 import { describeOAuthConnection } from "@/lib/core/upstream"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
@@ -50,6 +55,8 @@ export default async function ServerPage({
     : null
   const patches = readStoredPatches(spec?.patches)
 
+  const authExtraHeaders = await extraAuthHeaders(server.id)
+
   const secrets = (await listSecrets(ctx))
     .filter((secret) => secret.kind === "text")
     .map(({ id, name }) => ({ id, name }))
@@ -66,7 +73,7 @@ export default async function ServerPage({
       : query.connected
         ? {
             kind: "ok" as const,
-            message: `Connected to ${server.name}. An assistant waiting for this carries on by itself; one that stopped waiting needs telling.`,
+            message: `Connected to ${server.name}. Tell the assistant that asked that it is connected, and it carries on.`,
           }
         : null
 
@@ -140,6 +147,7 @@ export default async function ServerPage({
             authHeaderName: server.authHeaderName ?? "Authorization",
             authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
             authSecretId: server.authSecretId ?? "",
+            authExtraHeaders,
             oauthClientId: server.oauthClientId ?? "",
             oauthClientSecretId: server.oauthClientSecretId ?? "",
             oauthScope: server.oauthScope ?? "",
@@ -160,6 +168,7 @@ export default async function ServerPage({
             authHeaderName: server.authHeaderName ?? "Authorization",
             authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
             authSecretId: server.authSecretId ?? "",
+            authExtraHeaders,
             oauthClientId: server.oauthClientId ?? "",
             oauthClientSecretId: server.oauthClientSecretId ?? "",
             oauthScope: server.oauthScope ?? "",

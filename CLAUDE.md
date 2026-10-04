@@ -93,17 +93,41 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
+- Web fetch (`lib/core/fetch/`, `lib/core/web-fetch.ts`) reaches public
+  addresses only, always, never reads a secret, never sends a header PCP owns
+  or one that carries a credential, and never follows a redirect to another
+  site: that site gets its own decision. A site the token has no line for
+  gets one of its own on first sight, so the owner sees every site it tried.
+  Its limits go in `fetch/limits.ts`. Sites stay out of the request log.
+- A level can be a token's own or for all tokens (tools in
+  `vault_tool_access`, web fetch in `web_fetch_rule` with scope `all`), and
+  the token's own always wins. An owner's answer to a request writes the
+  token's own level.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
   (redirects and PCP's client metadata document) and the health check.
 - The owner is asked by link only: a result hands the assistant a link to
-  PCP's page and a check that waits (`check_permission`, `check_server`,
-  `lib/core/owner-wait.ts`). No client prompts (elicitation) and no MCP Apps
+  PCP's page, to end its reply with (`linkLastText`: nothing after it, or
+  Claude's apps fold it out of sight), and a check to call once the owner
+  says they answered (`check_permission`, `check_server`,
+  `lib/core/owner-wait.ts`). The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
   ARCHITECTURE.md). Anything new that needs the owner works the same way.
 - The single-user assumption lives in two places: `ownerVault()` and the
   setup page. Do not add a third.
+- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS) belong to
+  the machine, are read with no credential, and are stored unencrypted. Never
+  copy anything from the vault into one. `lib/core/network/` starts nothing
+  (timer, listener, request) while both features are off.
+- `desktop/` is a host for the production build, not part of the app. It
+  imports nothing from `lib/`, `app/` or `components/`; the app knows it only
+  as `PCP_DESKTOP=1` (`lib/server/desktop.ts`), for copy that says how the
+  app is reached. `desktop/scripts/stage.mjs` copies what the Dockerfile
+  copies: a change to one is a change to both. (Its environment is the
+  wrapper's own: the HTTPS ports stay 80 and 443, which the image moves.) It is its own pnpm project
+  (`desktop/pnpm-workspace.yaml`); do not add it to the root workspace, or
+  every install downloads Electron.
 
 ## Cryptography
 
@@ -141,6 +165,7 @@ The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
 OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a note an
 assistant keeps between conversations is a "memory", "shared" when every
-assistant reads it. No operator
+assistant reads it; what web_fetch reaches is a "site" (a host), and a level
+every token follows is "for all tokens" ("All tokens" in the UI). No operator
 vocabulary in the UI: no "DEK", "grant", "KEK" outside code comments and
 ARCHITECTURE.md.

@@ -31,6 +31,8 @@ import { buildRequest } from "./openapi/request"
 import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
 import { deleteManagedSecret } from "./secrets"
 import {
+  authHeaderNames,
+  extraAuthHeadersWrite,
   getServer,
   normalizeHeaderAuth,
   normalizeOAuthClient,
@@ -40,6 +42,8 @@ import {
   setServerStatus,
   slugify,
   uniqueSlug,
+  type ExtraAuthHeader,
+  type ExtraAuthHeaderInput,
 } from "./servers"
 import { PCP_VERSION } from "./version"
 
@@ -90,6 +94,8 @@ export type EndpointInput = {
   /** With NEW_SECRET: what to call it, and its value. */
   authSecretName?: string | null
   authSecretValue?: string | null
+  /** Further headers, each with a stored secret, sent with the first. */
+  authExtraHeaders?: ExtraAuthHeaderInput[] | null
   /**
    * oauth: the owner's client (without one, PCP asks for it when they
    * connect), and the scope; left empty, the scope is what the offered
@@ -140,6 +146,7 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
             // Blocks the header from being an operation's argument.
             authHeaderName: BEARER_HEADER,
             authValueTemplate: null,
+            authExtraHeaders: [] as ExtraAuthHeader[],
             ...(await normalizeOAuthClient(ctx, input, { name })),
           }
         : {
@@ -147,6 +154,7 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
             authSecretId: null,
             authHeaderName: null,
             authValueTemplate: null,
+            authExtraHeaders: [] as ExtraAuthHeader[],
             newSecret: null,
             ...noClient,
           }
@@ -164,6 +172,19 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
     ownerBaseUrl: input.baseUrl?.trim() || null,
     newSecret,
   } as const
+}
+
+/** The headers a normalized credential goes in, first to last. */
+function sentHeaders(auth: {
+  authHeaderName: string | null
+  authExtraHeaders: ExtraAuthHeader[]
+}): string[] {
+  return auth.authHeaderName
+    ? [
+        auth.authHeaderName,
+        ...auth.authExtraHeaders.map((extra) => extra.headerName),
+      ]
+    : []
 }
 
 /**
@@ -219,13 +240,14 @@ export function generateEndpointTools(
   text: string,
   options: {
     readOnly: boolean
-    authHeaderName: string | null
+    /** Where the credential goes: never a header an argument sets. */
+    authHeaderNames: string[]
     patches: PatchOperation[]
   },
 ): Generated {
   const generated = generateTools(readDocument(text, options.patches), {
     readOnly: options.readOnly,
-    blockedHeaders: options.authHeaderName ? [options.authHeaderName] : [],
+    blockedHeaders: options.authHeaderNames,
   })
 
   if (generated.tools.length === 0) {
@@ -265,6 +287,7 @@ function statusNotes(
     McpServer,
     "url" | "authType" | "oauthAuthorizationUrl" | "oauthTokenUrl"
   >,
+  sent: string[],
   generated: Generated,
   schemaServer: string | null,
 ): string {
@@ -299,6 +322,17 @@ function statusNotes(
     notes.push(
       `The schema says requests need ${generated.security}; this endpoint sends none.`,
     )
+  } else if (server.authType === "header") {
+    const lower = new Set(sent.map((name) => name.toLowerCase()))
+    const missing = generated.securityHeaders.filter(
+      (name) => !lower.has(name.toLowerCase()),
+    )
+
+    if (missing.length > 0) {
+      notes.push(
+        `The schema says requests also need a key in ${missing.join(" and ")}; this endpoint does not send ${missing.length === 1 ? "that header" : "those headers"}.`,
+      )
+    }
   }
 
   return notes.join(" ")
@@ -381,6 +415,7 @@ async function applySpec(
 
   const message = statusNotes(
     server,
+    await authHeaderNames(server),
     generated,
     schemaServerUrl(generated, fetchedFrom ?? server.specUrl),
   )
@@ -428,7 +463,7 @@ export async function rebuildOutdatedEndpoints(): Promise<{
 
       const generated = generateEndpointTools(spec.text, {
         readOnly: server.readOnly,
-        authHeaderName: server.authHeaderName,
+        authHeaderNames: await authHeaderNames(server),
         patches: spec.patches,
       })
 
@@ -502,7 +537,8 @@ export function previewEndpoint(
     readOnly: boolean
     ownerBaseUrl?: string | null
     hasSecret: boolean
-    authHeaderName?: string | null
+    /** The headers the credential goes in. */
+    authHeaderNames?: string[]
     /** Signs in with the schema's OAuth flow; the scope, if one was given. */
     oauth?: { scope: string | null }
     patches?: PatchOperation[]
@@ -513,9 +549,9 @@ export function previewEndpoint(
 ): EndpointPreview {
   const generated = generateEndpointTools(text, {
     readOnly: options.readOnly,
-    authHeaderName: options.oauth
-      ? BEARER_HEADER
-      : (options.authHeaderName ?? null),
+    authHeaderNames: options.oauth
+      ? [BEARER_HEADER]
+      : (options.authHeaderNames ?? []),
     patches: options.patches ?? [],
   })
   const oauth = options.oauth
@@ -585,7 +621,11 @@ export async function createEndpoint(
   // Everything that can be wrong with the schema is found before a row
   // exists, so a bad one leaves nothing behind.
   const patches = input.patches ?? []
-  const generated = generateEndpointTools(text, { ...data, patches })
+  const generated = generateEndpointTools(text, {
+    readOnly: data.readOnly,
+    authHeaderNames: sentHeaders(data),
+    patches,
+  })
   const baseUrl = resolveBaseUrl({
     ownerBaseUrl: data.ownerBaseUrl,
     serverUrl: generated.serverUrl,
@@ -619,6 +659,9 @@ export async function createEndpoint(
         authHeaderName: data.authHeaderName,
         authValueTemplate: data.authValueTemplate,
         ...secretColumns(data, secretId),
+        authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
+          replace: false,
+        }),
         oauthClientId: data.oauthClientId,
         oauthAuthorizeParams: data.oauthAuthorizeParams,
         ...oauth,
@@ -722,7 +765,11 @@ export async function updateEndpoint(
   }
 
   const patches = input.patches ?? stored?.patches ?? []
-  const generated = generateEndpointTools(text, { ...data, patches })
+  const generated = generateEndpointTools(text, {
+    readOnly: data.readOnly,
+    authHeaderNames: sentHeaders(data),
+    patches,
+  })
   const baseUrl = baseUrlForUpdate(existing, data)
   // The owner choosing the address, or keeping the one they approved.
   const specUrlFromAssistant =
@@ -757,6 +804,9 @@ export async function updateEndpoint(
         authHeaderName: data.authHeaderName,
         authValueTemplate: data.authValueTemplate,
         ...secretColumns(data, secretId),
+        authHeaders: extraAuthHeadersWrite(data.authExtraHeaders, {
+          replace: true,
+        }),
         oauthClientId: data.oauthClientId,
         oauthAuthorizeParams: data.oauthAuthorizeParams,
         ...oauth,
@@ -882,7 +932,7 @@ export async function changeEndpoint(
   const patches = changes.patches ?? stored?.patches ?? []
   const generated = generateEndpointTools(text, {
     readOnly,
-    authHeaderName: existing.authHeaderName,
+    authHeaderNames: await authHeaderNames(existing),
     patches,
   })
   const server = await db().mcpServer.update({
@@ -977,7 +1027,7 @@ export async function syncEndpointTools(
     const patches = stored?.patches ?? []
     const generated = generateEndpointTools(text, {
       readOnly: server.readOnly,
-      authHeaderName: server.authHeaderName,
+      authHeaderNames: await authHeaderNames(server),
       patches,
     })
 
@@ -995,7 +1045,7 @@ export async function syncEndpointTools(
 }
 
 /**
- * One call. `authHeaders` is the endpoint's credential as a header, built
+ * One call. `authHeaders` is the endpoint's credential as headers, built
  * by upstream.ts; nothing here reads a secret. `redact` lists the values an
  * answer must not repeat back to the assistant.
  */

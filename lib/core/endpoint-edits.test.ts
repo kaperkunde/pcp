@@ -113,7 +113,7 @@ async function approve(input: RegistrationInput) {
     description: prepared.description,
     url: prepared.url,
     authType: input.authSecretId ? "header" : "none",
-    authHeaderName: input.authHeaderName ?? null,
+    authHeaderName: input.authHeaderNames?.[0] ?? null,
     authValueTemplate: input.authSecretId ? "{{secret}}" : null,
     authSecretId: input.authSecretId ?? null,
     endpoint: prepared.registration,
@@ -473,7 +473,7 @@ describe("changing an endpoint with edits", () => {
       patches: fixes(),
       baseUrl: `${api.origin}/api`,
       authSecretId: secretId,
-      authHeaderName: "X-API-TOKEN",
+      authHeaderNames: ["X-API-TOKEN"],
     })
 
     // Edits are put to the owner rather than made.
@@ -514,7 +514,7 @@ describe("asking the owner to read their endpoint's schema again", () => {
       patches: fixes(),
       baseUrl: `${api.origin}/api`,
       authSecretId: secretId,
-      authHeaderName: "X-API-TOKEN",
+      authHeaderNames: ["X-API-TOKEN"],
     })
   }
 

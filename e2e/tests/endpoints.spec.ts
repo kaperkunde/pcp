@@ -385,6 +385,7 @@ test("a schema that cannot be read is refused and the form keeps what was typed"
 
 const GATEWAY_TOOLS = [
   "search_tools",
+  "list_tools",
   "describe_tool",
   "call_tool",
   "check_permission",
@@ -697,7 +698,7 @@ test("then it is the owner's: the assistant turns read-only on, and asks the own
   const details = JSON.parse(toolText(read)) as {
     publicOnly: boolean
     belongsTo: string
-    authentication: { type: string; header: string }
+    authentication: { type: string; header: string; headers: string[] }
     changes: Record<string, string>
     spec: string
   }
@@ -706,6 +707,7 @@ test("then it is the owner's: the assistant turns read-only on, and asks the own
   expect(details.authentication).toEqual({
     type: "header",
     header: "Authorization",
+    headers: ["Authorization"],
   })
   expect(JSON.stringify(details.changes)).toMatch(
     /baseUrl[^"]*":"no: the owner configured this endpoint/,

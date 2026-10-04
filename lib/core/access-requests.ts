@@ -175,6 +175,47 @@ function tools(count: number): string {
 }
 
 const MAX_SERVER_LINES = 20
+/** How many tool names the assistant is told a proposal would change. */
+export const MAX_LISTED_TOOLS = 500
+
+/**
+ * What the assistant reads of its own proposal: each tool that would change,
+ * by server and level, so it can check its patterns caught what it meant.
+ */
+export function listAccessLevels(
+  levels: AccessLevel[],
+  servers: Array<{ id: string; slug: string }>,
+): string {
+  const slugs = new Map(servers.map((server) => [server.id, server.slug]))
+  const groups = new Map<string, { label: string; names: string[] }>()
+  let listed = 0
+
+  for (const level of levels) {
+    if (listed === MAX_LISTED_TOOLS) {
+      break
+    }
+
+    const key = `${level.serverId}\n${level.access}`
+    const group = groups.get(key) ?? {
+      label: `${slugs.get(level.serverId) ?? "A server that was removed"}, to ${TOOL_ACCESS_LABELS[level.access]}`,
+      names: [],
+    }
+
+    group.names.push(level.tool)
+    groups.set(key, group)
+    listed++
+  }
+
+  return [
+    "Tools that would change (those already at the level you asked for are left out):",
+    ...[...groups.values()].map(
+      (group) => `- ${group.label}: ${group.names.join(", ")}`,
+    ),
+    ...(levels.length > listed
+      ? [`- and ${levels.length - listed} more, shown to the owner on the page`]
+      : []),
+  ].join("\n")
+}
 
 /** What the owner and the assistant read about a proposal. */
 export function describeAccessAsk(
@@ -283,7 +324,24 @@ export async function writeAccessLevels(
     ])
   }
 
-  const stored = levels.filter((level) => level.access !== "ask")
+  // Ask is stored only where it overrides a level for all tokens; anywhere
+  // else it is the absence of a row (lib/core/tool-access.ts).
+  const overridden = new Set(
+    (
+      await db().vaultToolAccess.findMany({
+        where: {
+          vaultId: ctx.vaultId,
+          serverId: { in: [...byServer.keys()] },
+        },
+        select: { serverId: true, toolName: true },
+      })
+    ).map((row) => accessKey(row.serverId, row.toolName)),
+  )
+  const stored = levels.filter(
+    (level) =>
+      level.access !== "ask" ||
+      overridden.has(accessKey(level.serverId, level.tool)),
+  )
 
   await db().$transaction([
     ...[...byServer.entries()].map(([serverId, names]) =>

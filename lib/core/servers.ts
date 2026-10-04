@@ -1,6 +1,9 @@
+import type { McpServer } from "@/lib/generated/prisma/client"
+
 import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
+  MAX_AUTH_HEADERS,
   NEW_SECRET,
   SECRET_PLACEHOLDER,
 } from "./constants"
@@ -37,6 +40,25 @@ export type ServerKind = "mcp" | "openapi"
 export type ServerStatus =
   "unknown" | "ok" | "auth_required" | "client_required" | "refused" | "error"
 
+/**
+ * A further header carrying a secret, sent with the first one, for a server
+ * that wants several at once (a key and a secret key, each in its own
+ * header). Stored in server_auth_header.
+ */
+export type ExtraAuthHeader = {
+  secretId: string
+  headerName: string
+  valueTemplate: string
+}
+
+/** An extra header as a form or an assistant gives it. */
+export type ExtraAuthHeaderInput = {
+  secretId?: string | null
+  headerName?: string | null
+  /** Default {{secret}}: the secret as it is. */
+  valueTemplate?: string | null
+}
+
 export type ServerInput = {
   name: string
   url: string
@@ -50,6 +72,11 @@ export type ServerInput = {
   authSecretName?: string | null
   /** With NEW_SECRET: its value, saved as a new secret. */
   authSecretValue?: string | null
+  /**
+   * Header auth: headers sent with the first, each with a secret the owner
+   * already stored.
+   */
+  authExtraHeaders?: ExtraAuthHeaderInput[] | null
   oauthClientId?: string | null
   oauthClientSecretId?: string | null
   /** A client secret typed into the form: stored as a new secret. */
@@ -161,14 +188,77 @@ export type HeaderAuth = {
   authSecretId: string | null
   authHeaderName: string
   authValueTemplate: string
+  /** Sent with the first header, in this order. */
+  authExtraHeaders: ExtraAuthHeader[]
   newSecret: NewSecret | null
 }
 
+function validateValueTemplate(template: string): string {
+  if (!template.includes(SECRET_PLACEHOLDER)) {
+    throw invalid(`The header value must contain ${SECRET_PLACEHOLDER}.`)
+  }
+
+  if (/[\r\n]/.test(template)) {
+    throw invalid("The header value cannot span lines.")
+  }
+
+  return template
+}
+
 /**
- * Header authentication: which secret, in which header, in what form. A
- * secret typed into the form is checked here with everything else and saved
- * by saveNewSecret just before the row that sends it, so a form refused for
- * another reason leaves no secret behind.
+ * The headers sent with the first, each with a secret the owner stored.
+ * Every part of a credential is a secret PCP sends, so none is ever left for
+ * an assistant to pass as an argument.
+ */
+async function normalizeExtraHeaders(
+  ctx: VaultContext,
+  first: string,
+  given: ExtraAuthHeaderInput[],
+): Promise<ExtraAuthHeader[]> {
+  if (given.length + 1 > MAX_AUTH_HEADERS) {
+    throw invalid(
+      `A server can be sent at most ${MAX_AUTH_HEADERS} headers with secrets.`,
+    )
+  }
+
+  const names = new Set([first.toLowerCase()])
+  const extras: ExtraAuthHeader[] = []
+
+  for (const extra of given) {
+    if (!extra.secretId || extra.secretId === NEW_SECRET) {
+      throw invalid("Choose a stored secret to send in each header.")
+    }
+
+    if (!extra.headerName?.trim()) {
+      throw invalid("Name each header a secret is sent in.")
+    }
+
+    await requireTextSecret(ctx, extra.secretId)
+    const headerName = validateHeaderName(extra.headerName)
+
+    if (names.has(headerName.toLowerCase())) {
+      throw invalid(`The ${headerName} header is named twice.`)
+    }
+
+    names.add(headerName.toLowerCase())
+    extras.push({
+      secretId: extra.secretId,
+      headerName,
+      valueTemplate: validateValueTemplate(
+        extra.valueTemplate?.trim() || SECRET_PLACEHOLDER,
+      ),
+    })
+  }
+
+  return extras
+}
+
+/**
+ * Header authentication: which secret, in which header, in what form, and
+ * the further headers sent with it. A secret typed into the form is checked
+ * here with everything else and saved by saveNewSecret just before the row
+ * that sends it, so a form refused for another reason leaves no secret
+ * behind.
  */
 export async function normalizeHeaderAuth(
   ctx: VaultContext,
@@ -179,6 +269,7 @@ export async function normalizeHeaderAuth(
     | "authValueTemplate"
     | "authSecretName"
     | "authSecretValue"
+    | "authExtraHeaders"
   >,
   sender: { name: string },
 ): Promise<HeaderAuth> {
@@ -189,15 +280,14 @@ export async function normalizeHeaderAuth(
   const authHeaderName = validateHeaderName(
     input.authHeaderName?.trim() || DEFAULT_HEADER_NAME,
   )
-  const template = input.authValueTemplate?.trim() || DEFAULT_VALUE_TEMPLATE
-
-  if (!template.includes(SECRET_PLACEHOLDER)) {
-    throw invalid(`The header value must contain ${SECRET_PLACEHOLDER}.`)
-  }
-
-  if (/[\r\n]/.test(template)) {
-    throw invalid("The header value cannot span lines.")
-  }
+  const template = validateValueTemplate(
+    input.authValueTemplate?.trim() || DEFAULT_VALUE_TEMPLATE,
+  )
+  const authExtraHeaders = await normalizeExtraHeaders(
+    ctx,
+    authHeaderName,
+    input.authExtraHeaders ?? [],
+  )
 
   let newSecret: NewSecret | null = null
 
@@ -225,8 +315,56 @@ export async function normalizeHeaderAuth(
     authSecretId: newSecret ? null : input.authSecretId,
     authHeaderName,
     authValueTemplate: template,
+    authExtraHeaders,
     newSecret,
   }
+}
+
+/** A server's further secret headers, in the order they are sent. */
+export async function extraAuthHeaders(
+  serverId: string,
+): Promise<ExtraAuthHeader[]> {
+  const rows = await db().serverAuthHeader.findMany({
+    where: { serverId },
+    orderBy: { position: "asc" },
+    select: { secretId: true, headerName: true, valueTemplate: true },
+  })
+
+  return rows.map((row) => ({ ...row, secretId: row.secretId ?? "" }))
+}
+
+/**
+ * Every header a server's credential goes in: a secret's headers, or the
+ * one an OAuth endpoint's token goes in; none without a credential. An
+ * assistant's argument may never set one of them.
+ */
+export async function authHeaderNames(
+  server: Pick<McpServer, "id" | "authType" | "authHeaderName">,
+): Promise<string[]> {
+  if (!server.authHeaderName) {
+    return []
+  }
+
+  const extras =
+    server.authType === "header" ? await extraAuthHeaders(server.id) : []
+  return [server.authHeaderName, ...extras.map((extra) => extra.headerName)]
+}
+
+/**
+ * The nested write that makes a server's further headers these. `replace`
+ * removes the ones it had first (an update; a new row has none).
+ */
+export function extraAuthHeadersWrite(
+  extras: ExtraAuthHeader[],
+  { replace }: { replace: boolean },
+) {
+  const create = extras.map((extra, index) => ({
+    id: newId(),
+    position: index + 1,
+    ...extra,
+  }))
+
+  return replace ? { deleteMany: {}, create } : { create }
 }
 
 /** Saves a secret typed into a form; its id, and the name it got. */
@@ -387,6 +525,7 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
     oauthScope: null as string | null,
     oauthAuthorizeParams: null as string | null,
   }
+  let authExtraHeaders: ExtraAuthHeader[] = []
   let newSecret: NewSecret | null = null
 
   switch (input.authType) {
@@ -397,6 +536,7 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
       data.authSecretId = auth.authSecretId
       data.authHeaderName = auth.authHeaderName
       data.authValueTemplate = auth.authValueTemplate
+      authExtraHeaders = auth.authExtraHeaders
       newSecret = auth.newSecret
       break
     }
@@ -413,7 +553,7 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
       throw invalid("Unknown authentication type.")
   }
 
-  return { data, newSecret }
+  return { data, authExtraHeaders, newSecret }
 }
 
 async function requireTextSecret(ctx: VaultContext, id: string) {
@@ -525,7 +665,7 @@ export async function createServer(
   ctx: VaultContext,
   input: ServerInput,
 ): Promise<{ id: string }> {
-  const { data, newSecret } = await normalizeInput(ctx, input)
+  const { data, authExtraHeaders, newSecret } = await normalizeInput(ctx, input)
   const id = newId()
 
   await withNewSecret(ctx, newSecret, async (secretId) =>
@@ -536,6 +676,9 @@ export async function createServer(
         slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
         ...data,
         ...secretColumns(data, secretId),
+        authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
+          replace: false,
+        }),
       },
     }),
   )
@@ -573,7 +716,8 @@ export async function updateServer(
     )
   }
 
-  const { data, newSecret } = await normalizeInput(ctx, input)
+  const { data, authExtraHeaders, newSecret } = await normalizeInput(ctx, input)
+  const extrasBefore = await extraAuthHeaders(id)
 
   // Switching away from OAuth, or to a different client, drops the tokens
   // PCP obtained: they belong to the old configuration.
@@ -589,6 +733,9 @@ export async function updateServer(
       where: { id },
       data: {
         ...data,
+        authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
+          replace: true,
+        }),
         ...(dropTokens
           ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
           : {}),
@@ -601,7 +748,9 @@ export async function updateServer(
   }
 
   return {
-    reconnect: CONNECTION_FIELDS.some((key) => data[key] !== existing[key]),
+    reconnect:
+      CONNECTION_FIELDS.some((key) => data[key] !== existing[key]) ||
+      JSON.stringify(authExtraHeaders) !== JSON.stringify(extrasBefore),
   }
 }
 

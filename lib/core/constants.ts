@@ -8,6 +8,11 @@ export const MIN_PASSWORD_LENGTH = 10
 export const DEFAULT_HEADER_NAME = "Authorization"
 export const DEFAULT_VALUE_TEMPLATE = "Bearer {{secret}}"
 export const SECRET_PLACEHOLDER = "{{secret}}"
+/**
+ * The most headers a server's credential goes in, the first included: an API
+ * that takes a key and a secret key, each in its own header, needs two.
+ */
+export const MAX_AUTH_HEADERS = 5
 
 /**
  * The secret picker's choice for one typed into the form there and then,
@@ -58,6 +63,45 @@ export type PermissionKind =
   | "memory_change"
   | "access"
   | "endpoint_change"
+  | "fetch"
+
+/**
+ * The HTTP methods web_fetch has a level for. Each is the default for a
+ * site without a level of its own; OTHER covers every other method it
+ * sends (HEAD, OPTIONS and the rest).
+ */
+export const FETCH_METHOD_GROUPS = [
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OTHER",
+] as const
+
+export type FetchMethodGroup = (typeof FETCH_METHOD_GROUPS)[number]
+
+export const FETCH_METHOD_LABELS: Record<
+  FetchMethodGroup,
+  { label: string; hint: string }
+> = {
+  GET: { label: "GET", hint: "Reading a page." },
+  POST: { label: "POST", hint: "Sending a form or data." },
+  PUT: { label: "PUT", hint: "Putting something at the address." },
+  PATCH: { label: "PATCH", hint: "Changing part of something." },
+  DELETE: { label: "DELETE", hint: "Deleting something." },
+  OTHER: { label: "Other methods", hint: "HEAD, OPTIONS and the rest." },
+}
+
+/** A site's level: one of the tool levels, or whatever its method has. */
+export const FETCH_SITE_LEVELS = ["default", ...TOOL_ACCESS_LEVELS] as const
+
+export type FetchSiteLevel = (typeof FETCH_SITE_LEVELS)[number]
+
+export const FETCH_SITE_LABELS: Record<FetchSiteLevel, string> = {
+  default: "Use the method settings",
+  ...TOOL_ACCESS_LABELS,
+}
 
 /** The longest memory, in characters. */
 export const MAX_MEMORY_CHARS = 10_000
@@ -70,3 +114,48 @@ export const MAX_SHARED_MEMORY_CHARS = 2_000
 
 /** The longest memory path, without the leading /memories/. */
 export const MAX_MEMORY_PATH = 200
+
+/**
+ * Dynamic DNS services PCP can keep pointed at this machine
+ * (lib/core/network/ddns.ts). DuckDNS is the one the setup page suggests:
+ * free, and a single token.
+ */
+export const DDNS_PROVIDERS = [
+  "duckdns",
+  "dyndns2",
+  "cloudflare",
+  "custom",
+] as const
+
+export type DdnsProvider = (typeof DDNS_PROVIDERS)[number]
+
+export const DDNS_PROVIDER_LABELS: Record<
+  DdnsProvider,
+  { label: string; hint: string }
+> = {
+  duckdns: {
+    label: "DuckDNS",
+    hint: "Free. Sign in at duckdns.org, pick a name, and copy your token.",
+  },
+  dyndns2: {
+    label: "No-IP, Dynu and others",
+    hint: "Services that speak the common dyndns2 update protocol, with a username and password.",
+  },
+  cloudflare: {
+    label: "Cloudflare",
+    hint: "A domain you own on Cloudflare, with an API token that may edit its DNS.",
+  },
+  custom: {
+    label: "Another service (an update URL)",
+    hint: "Any service that updates when PCP opens a URL.",
+  },
+}
+
+/** dyndns2 services PCP knows the update address of. */
+export const DYNDNS2_SERVERS: Record<string, string> = {
+  "dynupdate.no-ip.com": "No-IP",
+  "api.dynu.com": "Dynu",
+}
+
+/** Let's Encrypt's agreements, which turning HTTPS on accepts. */
+export const LETS_ENCRYPT_TERMS_URL = "https://letsencrypt.org/repository/"

@@ -137,6 +137,13 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Make the change",
     decline: "Not now",
   },
+  // A site's answer, not the method's: the owner decides where it goes.
+  fetch: {
+    allow_once: "Allow once",
+    always: "Always allow this site",
+    block: "Block this site",
+    decline: "Not now",
+  },
 }
 
 /** The answers the owner is offered, in order, with their labels. */

@@ -7,18 +7,18 @@ describe("connectResult", () => {
   const said = (result: ReturnType<typeof connectResult>) =>
     (result.content[0] as { text: string }).text
 
-  it("hands over the server's page to connect it, and check_server to wait", () => {
+  it("hands over the server's page last, and check_server for later", () => {
     const result = connectResult(
       { ...server, status: "auth_required" },
       "https://pcp.x/",
     )
 
     expect(said(result)).toMatch(/Mail needs connecting/)
+    expect(said(result)).toContain("chooses Connect")
+    expect(said(result)).toContain("End your reply with this link")
+    expect(said(result).split("\n").at(-1)).toBe("https://pcp.x/servers/s1")
     expect(said(result)).toContain(
-      "Give the owner this link, to open signed in to PCP and choose Connect: https://pcp.x/servers/s1",
-    )
-    expect(said(result)).toContain(
-      'call check_server with server "mail": it waits while they do',
+      'When they say they have, call check_server with server "mail"',
     )
     expect(result.structuredContent).toMatchObject({
       kind: "connect",

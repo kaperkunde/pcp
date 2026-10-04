@@ -32,7 +32,14 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
       recoveryKey: recoveryKey!,
     } satisfies SetupState)
 
-    await page.getByRole("link", { name: /open PCP/ }).click()
+    // Then the optional step for reaching PCP from outside, skipped here
+    // (the network project walks it).
+    await page.getByRole("link", { name: "I have saved it — continue" }).click()
+    await expect(
+      page.getByRole("heading", { name: "Reach PCP from anywhere (optional)" }),
+    ).toBeVisible()
+    await expect(page.getByRole("form", { name: "Dynamic DNS" })).toBeVisible()
+    await page.getByRole("link", { name: "Skip for now — open PCP" }).click()
     await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
   }
 
@@ -87,4 +94,49 @@ test("signs each project in with a session of its own", async ({
     await context.storageState({ path: project.use.storageState as string })
     await context.close()
   }
+})
+
+// A PCP at a home address (localhost here) is one an assistant running
+// elsewhere cannot reach; Settings explains a tunnel and the router until a
+// public address is set. Against a deployed PCP (PCP_URL) there is nothing to
+// explain. Signs in from an address of its own, like the sessions above.
+test("Settings explains how to reach a PCP at home from outside", async ({
+  browser,
+  baseURL,
+}) => {
+  const host = new URL(baseURL!).hostname
+  test.skip(
+    !["localhost", "127.0.0.1", "[::1]"].includes(host),
+    "PCP is not at a local address",
+  )
+
+  const context = await browser.newContext({
+    baseURL,
+    extraHTTPHeaders: { "x-forwarded-for": "198.51.100.200" },
+  })
+  const page = await context.newPage()
+  await unlock(page)
+  await page.goto("/settings")
+
+  const card = page.locator("[data-slot=card]").filter({
+    has: page.getByRole("heading", {
+      name: "Reaching PCP from outside your home",
+    }),
+  })
+  await expect(card).toBeVisible()
+  await expect(card.getByText("A tunnel: no router changes")).toBeVisible()
+  await expect(
+    card.getByText(/cloudflared tunnel --url http:\/\/localhost/),
+  ).toBeVisible()
+
+  // The router steps are folded away until asked for. They lead to the
+  // Dynamic DNS and HTTPS cards; outside the desktop app there is no menu
+  // to mention.
+  await card.getByText("Through your router").click()
+  await expect(card.getByText(/Forward ports 80 and 443/)).toBeVisible()
+  await expect(
+    card.getByText("Accept connections from other devices"),
+  ).toHaveCount(0)
+
+  await context.close()
 })

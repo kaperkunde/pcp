@@ -21,7 +21,7 @@ import {
 import { loadGatewayServers } from "./gateway"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
 import { createSecret } from "./secrets"
-import { createServer, getServer } from "./servers"
+import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { callServerTool } from "./upstream"
 import { setupVault } from "./vault"
@@ -89,16 +89,20 @@ const rowOf = (slug: string) =>
  * text: the request is prepared when it is made, and the endpoint created
  * when it is approved.
  */
-async function approve(input: RegistrationInput) {
+async function approve(
+  input: RegistrationInput,
+  authExtraHeaders: ExtraAuthHeaderInput[] = [],
+) {
   const prepared = await prepareRegistration(ctx, input)
   const { id } = await createApprovedEndpoint(ctx, {
     name: prepared.name,
     description: prepared.description,
     url: prepared.url,
     authType: input.authSecretId ? "header" : "none",
-    authHeaderName: input.authHeaderName ?? null,
+    authHeaderName: input.authHeaderNames?.[0] ?? null,
     authValueTemplate: input.authSecretId ? "{{secret}}" : null,
     authSecretId: input.authSecretId ?? null,
+    authExtraHeaders,
     endpoint: prepared.registration,
   })
   const slug = (await getServer(ctx, id)).slug
@@ -277,7 +281,7 @@ describe("registering an endpoint from text", () => {
       spec: spec(api.origin),
       baseUrl: `${api.origin}/api`,
       authSecretId: secretId,
-      authHeaderName: "X-API-Key",
+      authHeaderNames: ["X-API-Key"],
     })
 
     expect(details).toMatchObject({
@@ -286,6 +290,36 @@ describe("registering an endpoint from text", () => {
       publicOnly: true,
     })
     expect(JSON.stringify(details)).not.toContain(secretId)
+  })
+
+  it("reads every header of a credential in several parts, and never which secrets", async () => {
+    const key = await createSecret(ctx, { name: "Domains key", value: KEY })
+    const secretKey = await createSecret(ctx, {
+      name: "Domains secret key",
+      value: "sk-second",
+    })
+
+    const { details } = await approve(
+      {
+        name: "Domains",
+        spec: spec(api.origin),
+        baseUrl: `${api.origin}/api`,
+        authSecretId: key.id,
+        authHeaderNames: ["X-API-Key", "X-Secret-API-Key"],
+      },
+      [{ secretId: secretKey.id, headerName: "X-Secret-API-Key" }],
+    )
+
+    expect(details).toMatchObject({
+      belongsTo: "owner",
+      authentication: {
+        type: "header",
+        header: "X-API-Key",
+        headers: ["X-API-Key", "X-Secret-API-Key"],
+      },
+    })
+    expect(JSON.stringify(details)).not.toContain(key.id)
+    expect(JSON.stringify(details)).not.toContain(secretKey.id)
   })
 
   it("notes a private address it can see, and does not look up names", async () => {

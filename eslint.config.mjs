@@ -60,6 +60,10 @@ const eslintConfig = [
       "e2e/.artifacts/**",
       "e2e/.auth/**",
       "e2e/.state/**",
+      // The desktop app's staged server, native-module cache and installers.
+      "desktop/server/**",
+      "desktop/.cache/**",
+      "desktop/dist/**",
     ],
   },
 ]

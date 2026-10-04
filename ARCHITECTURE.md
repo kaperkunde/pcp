@@ -17,8 +17,10 @@ lib/actions/         Server Actions: read the session, call lib/core, return a s
 lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
+  network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
+desktop/             The Mac and Windows app: Electron around the production build, nothing of PCP in it
 ```
 
 `lib/core` takes a `VaultContext` — `{ vaultId, dek }` — as an explicit
@@ -174,14 +176,20 @@ does not name are refused. Path values are percent-encoded and never `.` or
 `..`. Only declared header parameters are sent, never the ones PCP owns
 (Authorization, Cookie, Host, hop-by-hop headers), and a header value cannot
 carry a line break. The credential is added last, so no argument can replace
-it, and the finished URL must still be under the base URL. `executeCall`
-sends it with a timeout and a cap on the answer, **without following
-redirects** (`fetch` would repeat a custom header such as `X-API-Key` on the
-next host), turns the answer into a tool result (JSON pretty-printed and,
-when small, as `structuredContent`; text as it is; other types described, not
-dumped; an error status as an error result), and removes the credential from
-it before parsing, because an API that echoes a key back (in an error, say)
-must not hand it to the assistant.
+it, and the finished URL must still be under the base URL. A credential can
+take several headers, each with its own secret (an API that wants a key and a
+secret key, as an OpenAPI security requirement naming two `apiKey` schemes
+says): the first is on the server row, the rest in `server_auth_header`. None
+of them is ever offered as an argument, so no part of a credential passes
+through an assistant, and every secret and header value is removed from the
+answer. A schema whose requirement names a key header the endpoint does not
+send is reported in its status. `executeCall` sends it with a timeout and a
+cap on the answer, **without following redirects** (`fetch` would repeat a
+custom header such as `X-API-Key` on the next host), turns the answer into a
+tool result (JSON pretty-printed and, when small, as `structuredContent`; text
+as it is; other types described, not dumped; an error status as an error
+result), and removes the credential from it before parsing, because an API
+that echoes a key back (in an error, say) must not hand it to the assistant.
 
 **Where requests go** is the owner's choice, made once. The base URL is the
 owner's own field when filled, otherwise the schema's first server, resolved
@@ -308,11 +316,11 @@ change an endpoint decides where PCP sends requests:
 - **No credential changes, ever.** A secret only comes with a registration
   the owner approves, and then by name. `update_endpoint` accepts nothing that
   names a secret, a header or a template, and `get_endpoint` shows only
-  whether a header is sent and what it is called. The writer these changes go
-  through (`endpoints.ts: changeEndpoint`) writes only the columns it is given
-  and never the credential, the schema's source, or public-only, so an owner
-  changing those at the same moment is not overwritten and the rules above
-  cannot be got around by what is passed in.
+  whether headers are sent and what they are called. The writer these changes
+  go through (`endpoints.ts: changeEndpoint`) writes only the columns it is
+  given and never the credential, the schema's source, or public-only, so an
+  owner changing those at the same moment is not overwritten and the rules
+  above cannot be got around by what is passed in.
 - **Public addresses only.** What an assistant registers has `public_only`
   set, and only the owner can clear it. Such an endpoint refuses loopback,
   private, link-local, carrier-grade NAT and multicast addresses, cloud
@@ -422,9 +430,80 @@ another one reads:
   vault's memories, as `search.ts` scores every tool. A memory outlives the
   token that wrote it (`token_id` is set to null) and is then the owner's.
 
+## Web fetch
+
+A token made with "fetch web pages" (`api_token.web_fetch`, off unless the
+owner turns it on) gets one more tool, `web_fetch(url, method?, headers?,
+body?, raw?, max_length?, start_index?)`, and a paragraph in the
+instructions. It is the reference fetch server's interface with a method,
+headers and a body added. The code is in `lib/core/fetch/` (the request, the
+page, and which level applies; no database) and `lib/core/web-fetch.ts` (the
+levels as stored, and what the owner does with them).
+
+**Which level applies.** Every request is one method to one site, a site
+being the URL's host (with the port when it is not the scheme's own). The
+levels are rows in `web_fetch_rule`, a method's or a site's, each for one
+token or for all of them (`scope` is the token's id or `all`):
+
+1. the token's own line for the site; set to "Use the method settings"
+   (`access` null), it goes straight to step 3, past all tokens' line;
+2. all tokens' line for the site, the same way;
+3. the token's own level for the method's group (GET, POST, PUT, PATCH,
+   DELETE, OTHER);
+4. all tokens' level for it;
+5. ask.
+
+A site the token has no line for, its own or all tokens', gets one of its
+own the first time an assistant reaches for it, at the method settings and
+marked as the assistant's: that is how every site an assistant tried shows
+on the token's page. Ask goes through `permission_request` like a tool call
+(kind `fetch`, the checked request as its encrypted arguments). The owner's
+**Always allow this site** and **Block this site** write the token's own
+line for the site, as a tool's answer writes the token's own level; when
+they allow a request, `executeFetch` runs it only if the token still has web
+fetch on.
+
+**What a request may be** (`fetch/request.ts`). http and https, no user name
+or password in the address, no CONNECT or TRACE, at most twenty headers, and
+none that PCP owns or that carry a credential (`openapi/headers.ts`, apart
+from Accept and Content-Type, which are the assistant's own here). A body
+only on methods that have one, up to 1 MB. It is checked before the owner is
+asked, so what they allow is what runs.
+
+**Sending it** (`fetch/fetch.ts`). Public addresses only, always, through the
+checked transport of API endpoints (`openapi/transport.ts`): the name is
+resolved by PCP and every address checked as the socket connects. No secret
+is read; no cookie is kept. Redirects are followed by hand, at most five and
+only within the site: one to another site ends the call with where it
+points, so that site gets its own decision when the assistant fetches it. A
+303 (and a 301 or 302 after a POST) becomes a GET without the body, as in a
+browser.
+
+**What comes back** (`fetch/html.ts`). The bytes are decoded with the
+charset the answer declares (a byte order mark, the content type, a
+`<meta charset>`, then UTF-8). HTML is parsed into a document that is never
+rendered (domino), stripped of scripts, styles, frames and embedded objects,
+its links and images made absolute, and converted to Markdown (turndown);
+`raw` skips that. JSON is pretty-printed, other text passed on as it is, and
+anything else described rather than dumped. The text is handed back a part
+at a time (20,000 characters by default, 50,000 at most) after a few lines
+saying the final address, the status, the type, the title and where the
+next part starts. An error status is an error result with the page in it.
+
+**Bounded** (`fetch/limits.ts`). Thirty seconds per request with its
+redirects, 2 MB of an answer read, a thousand method and site lines per
+vault, and 120 requests per token per ten minutes, asked about or not.
+
+The sites a token reached are on its page and in `web_fetch_rule`, in the
+clear like server addresses, and never in the request log: the gateway logs
+that `web_fetch` was called and not where to.
+
 ## Data on disk
 
-`PCP_DATA_DIR` (default `./data`, `/data` in Docker):
+`PCP_DATA_DIR` (default `./data`; `/data` in Docker; in the desktop app
+`data/` under the system's folder for the app: `~/Library/Application
+Support/PCP` on macOS, `%APPDATA%\PCP` on Windows, `~/.config/PCP` on
+Linux):
 
 - `pcp.db` — the SQLite database, in WAL mode. Migrations are applied at boot
   by `lib/core/migrate.ts`, which keeps Prisma's own `_prisma_migrations`
@@ -433,6 +512,83 @@ another one reads:
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
   which tool, which upstream, how long, whether it worked. Never arguments
   or results.
+- `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
+  `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
+  PCP").
+
+The desktop app keeps its own two files beside that directory, not in it:
+`desktop.json` (the port, whether other devices may connect) and the
+server's stdout in the system's log folder (`~/Library/Logs/PCP` on macOS,
+`logs/` under the app folder elsewhere). Everything PCP remembers is in the
+database; the wrapper holds only what has to be known before the server is
+up.
+
+## Reaching PCP: dynamic DNS and HTTPS
+
+Both are optional, off until the owner turns them on (in the step after setup
+or under Settings), and meant for someone running PCP at home without a proxy
+of their own. While both are off, nothing in `lib/core/network/` starts:
+no timer, no listener, no outbound request.
+
+**Host settings, not vault settings.** The configuration lives in the
+`host_setting` table (`lib/core/host-settings.ts`), not in the per-vault
+`setting` table. It belongs to the machine, and the work that uses it runs
+from a timer with no request and no `VaultContext`. So it is **stored
+unencrypted**: a dynamic DNS service's token or password has to be readable
+while nobody is signed in, and reading the vault without a credential is
+exactly what PCP refuses to allow. The owner is told so where they type it.
+Such a credential can only move a DNS name. Nothing from the vault (a secret,
+a token) is ever copied into a host setting, and the page never sends a saved
+credential back to the browser. Only a signed-in owner's Server Action
+(`lib/actions/network.ts`) changes them.
+
+**One runtime per process.** `lib/core/network/runtime.ts` keeps the timers,
+the listeners and the answers to Let's Encrypt's challenges on `globalThis`,
+because `instrumentation.ts` (which calls `startNetwork()` at boot) and the
+Server Actions (which call `reconcileNetwork()` after a save) are bundled
+apart. Each reconcile reads the host settings and makes the process match.
+
+**Dynamic DNS** (`ddns.ts`): DuckDNS, dyndns2 (No-IP, Dynu, any server),
+Cloudflare (finds the zone and A record, creates the record if needed) or a
+custom URL template (`{ip}`, `{hostname}`, a login in the URL is sent as Basic
+auth). The public IPv4 address is looked up every five minutes from plain-text
+services (`PCP_PUBLIC_IP_URL` overrides them). An update is sent when it
+changed, once a day regardless, and right after a save. Failures back off
+from 5 to 60 minutes. A refused login (`badauth`, `KO`, 401/403) stops
+updates until the owner saves again, as dyndns2 services require. If the
+lookup fails, services that see the caller's address themselves still get an
+update, at most hourly.
+
+**HTTPS** (`tls.ts`, `edge.ts`, `proxy.ts`): `acme-client` gets a Let's
+Encrypt certificate (`PCP_ACME_DIRECTORY` overrides the directory) with the
+HTTP-01 challenge, for a typed name or the dynamic DNS one. The key and
+certificate are files under `tls/`: a server presenting a certificate needs
+its key before anyone signs in. While HTTPS is on, PCP opens two listeners of
+its own next to Next's:
+
+- port 80 (`PCP_HTTP_PORT`; 8080 in the Docker image, mapped by
+  `docker-compose.https.yaml`) answers `/.well-known/acme-challenge/…`. Once
+  a certificate works it redirects everything else to `https://<name>`;
+  before that it forwards to the app, so the site is not broken while waiting.
+- port 443 (`PCP_HTTPS_PORT`, 8443 in Docker) serves the certificate.
+
+Both forward to the app on `127.0.0.1:$PORT`, streaming (MCP's server-sent
+events stay open) and passing upgrades through. They are the edge, so they
+**replace** any `X-Forwarded-*` a client sent rather than trusting it.
+`originFromHeaders`, the `Secure` cookie and the rate limiter's client address
+then work unchanged.
+
+A certificate is renewed once less than a third of its life is left, which
+keeps working as Let's Encrypt shortens lifetimes. The check runs every 30
+minutes, and the new one is swapped in with `setSecureContext`, without a
+restart. A failed request is retried after 1 hour, doubling to at most a day.
+That keeps PCP well inside Let's Encrypt's limits on failed validations;
+"Try again now" skips the wait. A DNS lookup first warns, without blocking,
+when the name does not point at this network. Port 3000 keeps serving plain
+HTTP for the local network. In the desktop app the two ports stay 80 and 443
+(macOS and Windows let an ordinary program use them), and they listen on
+every interface even while the app keeps port 3000 to this computer: a
+router's forward needs exactly that.
 
 ## Connecting OAuth servers
 
@@ -494,12 +650,17 @@ contacting the registration endpoint.
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
-for a token with the right to manage endpoints, and `memory` for a token that
-keeps memories, both below):
+for a token with the right to manage endpoints, `memory` for a token that
+keeps memories, and `web_fetch` for a token that fetches web pages, all
+above):
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with
   light stemming) and returns `server/tool — summary` lines.
+- `list_tools(server, offset?)` names every tool the token sees on one
+  server, by name, with its level (`allowed` or `ask`) and a summary,
+  `LIST_PAGE_SIZE` at a time (`listTools` in `lib/core/search.ts`), so an
+  access review does not depend on what a search happens to rank.
 - `describe_tool(server, tool)` returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
   published it, whether the tool runs at once or asks first, and for an API
@@ -535,29 +696,45 @@ a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
 them. The gateway loads the levels by token id.
 
+A tool can also have a level for **all tokens** (`vault_tool_access`, the
+"All tokens" box on a token's page), and a token's own level wins over it:
+the specific line beats the general one. So a token's own `ask` is stored
+while there is a level for all tokens for it to override, and is the absence
+of a row otherwise. Ticking the box makes the level that applies to that
+token now the one for all tokens and removes the token's own; unticking
+removes the one for all tokens and leaves the token its level as its own, so
+nothing changes for it. The owner's answers to a request ("Always allow",
+"Block") write the asking token's own level, as before. The web fetch levels
+(above) work the same way.
+
 A call to an "ask" tool becomes a `permission_request` row
 (`lib/core/permissions.ts`): the
 arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
 and a day to answer. The result is text for the assistant: what was asked,
-the link to `/permissions/<id>` to give the owner, and to call
-`check_permission` next. The signed-in owner answers on that page, and only
-there; `decidePermission()` claims the row (pending to running, one winner)
+the link to `/permissions/<id>` to end its reply with, and to call
+`check_permission` once the owner says they have answered. The signed-in
+owner answers on that page, and only there (the header's bell lists every
+request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
 
 Nothing can wake an assistant from outside its conversation: an MCP server
-cannot start a turn, and an answer on PCP's page reaches no app. So
-`check_permission` holds the call while the request is open
-(`lib/core/owner-wait.ts`: up to 45 seconds, under the minute at which
-clients and proxies give up, checking every second, and dropping out when
-the client goes away) and answers as soon as the owner has; the assistant,
-still in its turn, carries on by itself. A longer wait is another call; the
-text says to stop when the owner is not on it. An OAuth server that needs
-signing in (a call to it, or one the owner just agreed to add) answers with
-a link to its page in PCP, where Connect starts the sign-in, and
-`check_server` waits the same way until it is connected and its tools are
-read. A server that needs a client from the owner first (status
+cannot start a turn, and an answer on PCP's page reaches no app. The link
+has to be the last thing in the assistant's reply, with no tool call after
+it: Claude's apps fold the text an assistant writes before a tool call into
+that call's row and show a summary of their own, so a link followed by
+`check_permission` in the same reply was often never seen. So the result
+says to end the reply with the link (`connect.ts: linkLastText`, the link on
+its own last line) and to call `check_permission` once the owner says they
+have answered. In case they are still on it, the check holds the call while
+the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
+minute at which clients and proxies give up, checking every second, and
+dropping out when the client goes away) and answers as soon as they have.
+An OAuth server that needs signing in (a call to it, or one the owner just
+agreed to add) answers with a link to its page in PCP, handed over the same
+way, where Connect starts the sign-in; `check_server` then says whether it
+is connected, waiting the same way, and its tools are read. A server that needs a client from the owner first (status
 `client_required`) gets the same link; its page says what to create.
 
 The client's own prompts (form and URL elicitation, with `input_required`
@@ -568,15 +745,17 @@ until the call timed out
 They mounted a declared panel for every result of a tool, rebuilt it from
 the original result whenever the conversation was shown again (the first
 question again, after it was answered), did not let a rebuilt panel reach
-PCP, and did not act on `ui/message` or `request-teardown`. A link and a
-check that waits work in every client.
+PCP, and did not act on `ui/message` or `request-teardown`. A link at the
+end of a reply works in every client.
 
 `propose_tool_access` lets an assistant suggest levels for its own token,
 many at once (`lib/core/access-requests.ts`): each change names a server,
 tool names or `*` patterns (none for the whole server) and a level, later
 changes winning, so a catalogue of hundreds of tools can be set in a call.
 Blocked tools stay hidden: no name or pattern reaches them. The proposal is
-a request of kind `access` holding one level per tool that would change. Its
+a request of kind `access` holding one level per tool that would change;
+the assistant is told those tools by name, by server and level
+(`listAccessLevels`, up to `MAX_LISTED_TOOLS`), to check its patterns. Its
 page fills the levels in over the token's current ones and marks each
 change; the owner can change any of them, and only their save there writes
 anything (`applyAccessRequest`, once). The kind's only decision is "Not

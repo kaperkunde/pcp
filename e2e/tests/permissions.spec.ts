@@ -11,7 +11,8 @@ import {
 import { createToken, openToken, showTools } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
-// answers through a link while check_permission waits for them, and the
+// answers through a link (or the header's bell) and check_permission gives
+// the assistant the outcome, waiting while they are still on it, and the
 // answer can settle the tool for the token. Blocked tools vanish; access
 // copies between tokens; an assistant can propose tool levels, which change
 // only once the owner saves them on PCP's page, and a server, which is added
@@ -25,6 +26,7 @@ const SERVER_NAME = `Permission postcards ${RUN}`
 const SLUG = `perm-${RUN}`
 const TOKEN_NAME = `Careful assistant ${RUN}`
 const SECOND_TOKEN_NAME = `Second assistant ${RUN}`
+const THIRD_TOKEN_NAME = `Third assistant ${RUN}`
 
 // What a client that shows prompts and MCP Apps panels declares. PCP uses
 // neither: Claude's apps stalled on prompts and rebuilt panels stale.
@@ -115,16 +117,31 @@ test("a tool nobody decided on asks first, through a link", async ({
   const again = await callTool(baseURL!, token, "call_tool", args)
   expect(linkIn(toolText(again)).id).toBe(id)
 
-  // The assistant waits on check_permission while the owner answers.
-  const waited = callTool(baseURL!, token, "check_permission", { id })
-  await page.goto(path)
+  // The link comes last, on a line of its own: some apps hide what an
+  // assistant writes before its next tool call.
+  expect(toolText(asked)).toContain("End your reply with this link")
+  expect(toolText(asked).trim().split("\n").at(-1)).toMatch(
+    new RegExp(`${path}$`),
+  )
+
+  // The owner sees it waiting from any page: the bell in the header has a
+  // count, and its list leads to the request.
+  await page.goto("/servers")
+  const bell = page.getByRole("button", { name: /waiting for you/ })
+  await expect(bell).toBeVisible()
+  await bell.click()
+  await page
+    .getByRole("menuitem", { name: new RegExp(`Allow ${SLUG}/add_numbers\\?`) })
+    .click()
+  await expect(page).toHaveURL(new RegExp(`${path}$`))
   await expect(page.getByText(`Allow ${SLUG}/add_numbers?`)).toBeVisible()
   await expect(page.getByText("a: 19")).toBeVisible()
   await page.getByRole("button", { name: "Always allow" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText("42")
   expect(callsOf("add_numbers")).toBe(1)
 
-  const outcome = await waited
+  // Told they answered, the assistant checks, and has the result at once.
+  const outcome = await callTool(baseURL!, token, "check_permission", { id })
   expect(toolText(outcome)).toContain("allowed it and it ran")
   expect(toolText(outcome)).toContain("42")
 
@@ -219,7 +236,7 @@ test("a client that shows prompts and panels gets the link all the same", async 
   await expect(page.getByTestId("permission-outcome")).toContainText(
     `Bearer ${upstream.expectedToken}`,
   )
-  await expect(page.getByText("carries on by itself")).toBeVisible()
+  await expect(page.getByText("Tell the assistant that asked")).toBeVisible()
   expect(toolText(await waited)).toContain(`Bearer ${upstream.expectedToken}`)
   expect(callsOf("echo_auth")).toBe(1)
 
@@ -351,6 +368,60 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
   expect(toolText(ran)).toBe("5")
 })
 
+test("All tokens on a tool's row decides it for every token without a level of its own", async ({
+  page,
+  baseURL,
+}) => {
+  const allTokens = () =>
+    page.getByLabel(`All tokens for ${SLUG}/add_numbers`, { exact: true })
+  const access = () =>
+    page.getByLabel(`Access to ${SLUG}/add_numbers`, { exact: true })
+  const add = { server: SLUG, tool: "add_numbers", arguments: { a: 2, b: 3 } }
+  // Each server's tools start folded on a token's page.
+  const open = async (path: string) => {
+    await page.goto(path)
+    await showTools(page, SLUG)
+  }
+
+  const third = await createToken(page, THIRD_TOKEN_NAME)
+  const thirdId = await openToken(page, THIRD_TOKEN_NAME)
+  await open(`/tokens/${thirdId}`)
+  await expect(access()).toHaveValue("ask")
+  await expect(allTokens()).not.toBeChecked()
+
+  // The first token allows it: ticking makes that every token's level.
+  await open(`/tokens/${tokenId}`)
+  await allTokens().check()
+  await expect(allTokens()).toBeEnabled()
+  await open(`/tokens/${tokenId}`)
+  await expect(allTokens()).toBeChecked()
+  await expect(access()).toHaveValue("allowed")
+
+  await open(`/tokens/${thirdId}`)
+  await expect(allTokens()).toBeChecked()
+  await expect(access()).toHaveValue("allowed")
+  expect(toolText(await callTool(baseURL!, third, "call_tool", add))).toBe("5")
+
+  // A token's own level wins: the third one asks again for itself.
+  await access().selectOption("ask")
+  await expect(access()).toBeEnabled()
+  await open(`/tokens/${thirdId}`)
+  await expect(allTokens()).not.toBeChecked()
+  await expect(page.getByText("(all tokens: Allowed)")).toBeVisible()
+  expect(toolText(await callTool(baseURL!, third, "call_tool", add))).toContain(
+    "Not done yet",
+  )
+
+  // Unticking takes it from all tokens; the first one keeps it as its own.
+  await open(`/tokens/${tokenId}`)
+  await allTokens().uncheck()
+  await expect(allTokens()).toBeEnabled()
+  await open(`/tokens/${tokenId}`)
+  await expect(allTokens()).not.toBeChecked()
+  await expect(access()).toHaveValue("allowed")
+  await expect(page.getByText("(all tokens: Allowed)")).toHaveCount(0)
+})
+
 test("an assistant can propose a server with a stored secret; it is added once you agree", async ({
   page,
   baseURL,
@@ -460,7 +531,7 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   await expect(page).toHaveURL(
     new RegExp(`/servers/${connect.serverId}\\?connected=1$`),
   )
-  await expect(page.getByText("carries on by itself")).toBeVisible()
+  await expect(page.getByText("Tell the assistant that asked")).toBeVisible()
   expect(
     (await connected).body.result?.structuredContent?.server,
   ).toMatchObject({ connected: true, toolCount: 3 })

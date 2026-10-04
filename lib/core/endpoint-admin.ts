@@ -28,8 +28,10 @@ import { readCallPlan } from "./openapi/plan"
 import { canonicalJson } from "./permission-rules"
 import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
 import {
+  authHeaderNames,
   normalizeNameAndDescription,
   setToolDescription,
+  type ExtraAuthHeaderInput,
   type ServerStatus,
 } from "./servers"
 
@@ -114,7 +116,15 @@ export type EndpointDetails = {
     /** How many edits are applied to it. */
     edits: number
   }
-  authentication: { type: "none" | "header" | "oauth"; header: string | null }
+  /**
+   * The headers the credential goes in, the first in `header`; never which
+   * secrets or what they hold.
+   */
+  authentication: {
+    type: "none" | "header" | "oauth"
+    header: string | null
+    headers: string[]
+  }
   status: ServerStatus
   statusMessage?: string
   /**
@@ -303,12 +313,13 @@ async function detailsOf(
     includeProblems = false,
   }: ReadOptions = {},
 ): Promise<EndpointDetails> {
-  const [row, spec] = await Promise.all([
+  const [row, spec, headers] = await Promise.all([
     db().openApiSpec.findUnique({
       where: { serverId: server.id },
       select: { fetchedAt: true },
     }),
     storedSpec(server.id),
+    authHeaderNames(server),
   ])
 
   const details: EndpointDetails = {
@@ -328,13 +339,17 @@ async function detailsOf(
       characters: spec?.text.length ?? null,
       edits: spec?.patches.length ?? 0,
     },
-    // The header's name, never which secret or what it holds.
+    // The headers' names, never which secrets or what they hold.
     authentication:
       server.authType === "header"
-        ? { type: "header", header: server.authHeaderName }
+        ? { type: "header", header: server.authHeaderName, headers }
         : server.authType === "oauth"
-          ? { type: "oauth", header: "Authorization" }
-          : { type: "none", header: null },
+          ? {
+              type: "oauth",
+              header: "Authorization",
+              headers: ["Authorization"],
+            }
+          : { type: "none", header: null, headers: [] },
     status: server.status as ServerStatus,
     statusMessage: server.statusMessage,
     changes: groupChanges(describeChanges(server)),
@@ -403,7 +418,7 @@ async function detailsOf(
   if (includeProblems && spec) {
     const { problems, more } = lintDocument(
       readDocument(spec.text, spec.patches),
-      { blockedHeaders: server.authHeaderName ? [server.authHeaderName] : [] },
+      { blockedHeaders: headers },
     )
     details.problems = problems
     if (more > 0) {
@@ -529,7 +544,8 @@ export type RegistrationInput = {
   authSecretId?: string | null
   /** Or a secret the owner enters when they agree, by the name it will get. */
   newSecretName?: string | null
-  authHeaderName?: string | null
+  /** Every header the credential goes in, first to last. */
+  authHeaderNames?: string[]
   /** Signs in with the schema's OAuth flow; the scope, if one was given. */
   oauth?: { scope: string | null } | null
 }
@@ -617,7 +633,7 @@ export async function prepareRegistration(
       readOnly,
       ownerBaseUrl: input.baseUrl,
       hasSecret: sendsSecret,
-      authHeaderName: input.authHeaderName,
+      authHeaderNames: input.authHeaderNames,
       oauth: input.oauth ?? undefined,
       patches,
       fetchedFrom: fetched?.url ?? null,
@@ -644,7 +660,7 @@ export async function prepareRegistration(
     description,
     url: preview.baseUrl,
     problems: lintDocument(readDocument(text, patches), {
-      blockedHeaders: input.authHeaderName ? [input.authHeaderName] : [],
+      blockedHeaders: input.authHeaderNames ?? [],
     }).problems,
     registration: {
       spec: text,
@@ -676,6 +692,7 @@ export async function createApprovedEndpoint(
     authHeaderName?: string | null
     authValueTemplate?: string | null
     authSecretId?: string | null
+    authExtraHeaders?: ExtraAuthHeaderInput[] | null
     /** oauth: the owner's client, and the scope they were shown. */
     oauthClientId?: string | null
     oauthClientSecretId?: string | null
@@ -709,6 +726,7 @@ export async function createApprovedEndpoint(
     authHeaderName: asked.authHeaderName,
     authValueTemplate: asked.authValueTemplate,
     authSecretId: asked.authSecretId,
+    authExtraHeaders: asked.authExtraHeaders,
     oauthClientId: asked.oauthClientId,
     oauthClientSecretId: asked.oauthClientSecretId,
     // The scope the owner was shown, which is what the schema asked for when
@@ -1081,7 +1099,7 @@ async function proposeChange(
   // Refused here, before the owner is asked, when it would not work.
   const generated = generateEndpointTools(fetched?.text ?? stored.text, {
     readOnly: readOnly ?? server.readOnly,
-    authHeaderName: server.authHeaderName,
+    authHeaderNames: await authHeaderNames(server),
     patches,
   })
   const after = new Map(generated.tools.map((tool) => [tool.name, tool]))

@@ -68,6 +68,16 @@ agree to: you are shown the whole text, nothing is written before you answer,
 and text with characters that do not show on screen is refused, so what you
 read is all there is. The right to keep memories is off unless you tick it.
 
+**An assistant with a token that may fetch web pages** can have PCP request
+public addresses, as far as the token's method and site levels allow: a site
+it has not reached before asks you first unless you allow that method
+everywhere, and every site it tried is listed on the token's page. It cannot
+reach a private, loopback or link-local address (checked at the moment of
+connecting, as for an API an assistant proposes), cannot send one of your
+secrets or any Authorization or Cookie header, and a redirect to another site
+is reported to it rather than followed. The right is off unless you tick it
+when you make the token or on its page.
+
 **Someone with your session cookie but not your password** can use PCP as
 you while the session lasts. They cannot make an API token or a new recovery
 key, because both ask for the password again, so they cannot keep a way in
@@ -109,6 +119,17 @@ Not defended against:
   shows the address, the operations and whether they can change things),
   turn on Read-only where it is enough, and give a token the right to change
   endpoints only if it needs it.
+- **Egress through web fetch.** A token you let fetch web pages can send
+  what it holds to any public site you allow, in the address or, with a
+  method that has one, in a body; a prompt injected into the assistant can do
+  the same, and what a page says reaches the assistant as the page's words.
+  Allow GET only where you can, keep POST and the other methods at Ask you
+  first or Blocked, and read the address and the body before you allow a
+  request. PCP's own address is the one the site sees, so a site that trusts
+  PCP's network more than the assistant's trusts this too.
+- **Site names on disk.** The sites a token reached, with when, are stored
+  unencrypted, like server addresses, so the token's page can list them. A
+  copy of the disk shows them.
 - **Schema text on disk.** An endpoint's OpenAPI document, and the call plans
   built from it, are stored unencrypted, like server addresses and names. A
   copy of the disk shows them. Do not put a key or a hostname you would not
@@ -122,8 +143,25 @@ Not defended against:
 
 ## Operational notes
 
-- Run behind TLS. Most OAuth servers require an `https` redirect URL, and the
-  session cookie is only marked `Secure` when the request arrived over TLS.
+- Run behind TLS: your own proxy, or PCP's built-in HTTPS (Settings). Most
+  OAuth servers require an `https` redirect URL, and the session cookie is
+  only marked `Secure` when the request arrived over TLS. Port 3000 stays
+  plain HTTP either way; do not expose it to the internet.
+- With dynamic DNS on, the service's token or password is stored
+  **unencrypted** in the database (the `host_setting` table), because PCP uses
+  it while nobody is signed in. Someone who reads the data directory can move
+  your DNS name. With HTTPS on, the certificate's private key and the ACME
+  account key are files under `tls/` in the data directory (mode 0600). Treat
+  backups of the data volume accordingly.
+- PCP's own HTTPS listeners face the internet directly and overwrite any
+  `X-Forwarded-*` header a client sends.
+- The desktop app's own port (3000) answers this computer only
+  (`127.0.0.1`) until its owner turns on **Accept connections from other
+  devices** in the app's menu; then it listens on every interface, like the
+  Docker image, for other devices on the home network. PCP's built-in HTTPS,
+  once turned on under Settings, listens on ports 80 and 443 on every
+  interface whatever that menu says, since a router's port forward needs
+  exactly that. A tunnel needs neither.
 - Back up the data volume. Losing it loses the vault.
 - Keep the recovery key somewhere safe. Losing it and the password loses the
   data; that is the design.
