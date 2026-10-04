@@ -104,7 +104,10 @@ the release builds (unsigned without them).
   image has no Prisma CLI). It writes the same `_prisma_migrations` rows the
   CLI does, so both can be used on one database.
 - Keep migrations additive where you can; SQLite's `ALTER TABLE` is limited
-  and Prisma rewrites tables for anything else.
+  and Prisma rewrites tables for anything else. Read the SQL it writes: a
+  rewrite (`RedefineTables`) drops the table, and with foreign keys on the
+  drop cascades to every row that points at it. Drop a column with
+  `ALTER TABLE … DROP COLUMN` instead.
 
 ## Tests
 
@@ -114,8 +117,9 @@ Two kinds, held to different bars:
   crypto, the migrator, tool search, the core against a scratch SQLite file.
   New code gets one when it has logic worth pinning down, not by default.
 - **E2E tests** (`e2e/`) for the happy paths a person actually walks: setup,
-  secrets, adding a server and calling it through the gateway, OAuth,
-  recovery. One project per spec; `e2e/README.md` has the mechanics.
+  secrets, adding a server and calling it through the gateway, OAuth, API
+  endpoints, permission requests, memories, recovery. One project per spec;
+  `e2e/README.md` has the mechanics.
 
 A bug that regressed gets a test that fails before the fix and passes after
 (red, then green), whichever kind fits. That bar is low on purpose.
@@ -136,14 +140,19 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/oauth-client.ts`           | How PCP gets a client ID; redirect URI; sign-in parameters    |
 | `lib/core/endpoints.ts`              | API endpoints: reading a schema, creating them, calling them  |
 | `lib/core/openapi/`                  | OpenAPI → tools and call plans; building and sending requests |
+| `lib/core/answers.ts`                | Shaping an answer for the assistant: fields, decode, preview  |
 | `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/catalogue.ts`              | Writing a server's tool list into the catalogue               |
 | `lib/core/search.ts`, `gateway.ts`   | Ranking tools; the MCP server the gateway serves              |
 | `lib/core/tool-access.ts`            | Per-token tool levels: allowed, ask, blocked; copying them    |
+| `lib/core/access-requests.ts`        | Tool levels an assistant proposes; the owner's save           |
 | `lib/core/permissions.ts`            | Asking the owner before a call runs; running it once          |
-| `lib/core/panel.ts`                  | PCP's MCP Apps panel and the results it renders               |
+| `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in           |
+| `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server   |
 | `lib/core/migrate.ts`                | Boot-time migrations                                          |
+| `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
+| `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
 | `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |
 | `lib/actions/`                       | Server Actions the forms call                                 |
 | `app/mcp/route.ts`                   | The gateway endpoint                                          |
@@ -152,7 +161,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `e2e/fixtures/upstream.ts`           | The fake MCP + OAuth server the e2e suite talks to            |
 | `app/manifest.ts`, `public/icons/`   | The manifest and icon set; `assets/icon.png` is the master    |
 | `lib/core/local-address.ts`          | Whether PCP's own address is one only a home network reaches  |
-| `components/outside-access-card.tsx` | The Settings guide to tunnels and port forwarding             |
+| `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                  |
 | `desktop/main.mjs`                   | The desktop app: starts the server, opens the window          |
 | `desktop/scripts/stage.mjs`          | Stages the server for the app, as the Dockerfile lays it out  |
 | `.github/workflows/release.yml`      | Tags, builds the desktop apps, publishes the release          |

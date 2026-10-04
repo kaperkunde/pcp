@@ -523,7 +523,7 @@ async function setNetworkAccess(enabled) {
         (addresses.length > 0
           ? `On your network it answers at:\n${addresses.map((address) => `http://${address}:${settings.port}`).join("\n")}\n\n`
           : "") +
-        "To reach it from the internet, forward the port on your router to this computer, or run a tunnel; PCP's Settings page explains both. " +
+        "The internet needs neither this nor port forwarding to this port: use a tunnel, or PCP's own HTTPS on ports 80 and 443. PCP's Settings page explains both. " +
         (process.platform === "win32"
           ? "If Windows asks whether to allow PCP through the firewall, allow it on private networks."
           : ""),

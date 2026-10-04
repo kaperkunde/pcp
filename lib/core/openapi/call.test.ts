@@ -37,11 +37,11 @@ describe("executeCall", () => {
     })
   })
 
-  it("passes JSON on as pretty text and as structured content", async () => {
+  it("passes JSON on as compact text and as structured content", async () => {
     api = await startTestApi((_, res) => json(res, 200, { id: 1, tags: ["a"] }))
     const outcome = await executeCall(get("/pets/1"))
     expect(outcome.status).toBe(200)
-    expect(text(outcome)).toBe('{\n  "id": 1,\n  "tags": [\n    "a"\n  ]\n}')
+    expect(text(outcome)).toBe('{"id":1,"tags":["a"]}')
     expect(outcome.result.structuredContent).toEqual({ id: 1, tags: ["a"] })
     expect(outcome.result.isError).toBeUndefined()
   })

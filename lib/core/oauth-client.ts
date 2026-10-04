@@ -272,6 +272,30 @@ export function applyAuthorizeParams(url: URL, stored: string | null): URL {
 }
 
 /**
+ * Parameters a provider needs before it gives PCP access it can renew, by
+ * the host of its sign-in address. Google hands out a refresh token only for
+ * access_type=offline, and only on a consent screen. They are added after
+ * the owner's own, so a value the owner set wins.
+ */
+const SIGN_IN_DEFAULTS: Record<string, string> = {
+  "accounts.google.com": "access_type=offline&prompt=consent",
+}
+
+/** What PCP adds to a sign-in at this authorization server, if anything. */
+export function signInDefaults(authorizationServer: string): string | null {
+  try {
+    return SIGN_IN_DEFAULTS[new URL(authorizationServer).hostname] ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Adds the provider's defaults (above) to a sign-in address. */
+export function applySignInDefaults(url: URL): URL {
+  return applyAuthorizeParams(url, signInDefaults(url.href))
+}
+
+/**
  * Whether a token set can be renewed without the owner, and until when the
  * access it gives lasts (null when the server did not say).
  */

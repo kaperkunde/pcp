@@ -20,6 +20,11 @@ Playwright projects your change touches (`pnpm exec playwright test
 --project=<name>`; dependencies run first) — CI runs the whole suite on the
 pull request, and nothing runs on a push.
 
+When pushing straight to `develop`, skip the Playwright run: it is slow, and
+the suite runs on the pull request from `develop` to `main` anyway. Still
+update the specs your change affects, and say in the commit or your summary
+that e2e was not run.
+
 ## Branches and versions
 
 Branch from `develop` and target it with pull requests; `main` only takes
@@ -50,24 +55,41 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   schema URL (downloaded at once, public addresses only, and approved as that
   copy), which is a permission request like any new server: the owner is shown
   the address, the tools and the secret (by name), and nothing exists until
-  they agree. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
+  they agree. A secret PCP does not hold yet is typed in by the owner on PCP's
+  permission page, and its value never reaches the assistant. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
-  It never changes a credential, never clears `publicOnly`, can only read and
-  turn read-only on for an endpoint that is the owner's (it sends a secret, or
-  private addresses are allowed), and a change others would see disables the
-  endpoint until the owner enables it. Its changes go through
-  `changeEndpoint`, which writes only the columns it is given and never the
-  credential. Keep all of that when adding to it, and add a test for each new
-  field an assistant can set.
+  It never changes a credential and never clears `publicOnly`. On an
+  endpoint that is the owner's (it sends a secret or an OAuth token, or private
+  addresses are allowed) it can turn read-only on, and anything else it may change there
+  (name, description, edits, tool descriptions, a re-read of the schema URL)
+  is a permission request (`endpoint_change`) that shows the owner every new
+  edit and description in full and what it does to the tools, and makes only
+  that, to the endpoint as it was when they were asked; never the address or
+  a whole new schema. On its own endpoint a change others would see disables
+  it until the owner enables it. Its changes go through `changeEndpoint`,
+  which writes only the columns it is given and never the credential. Keep
+  all of that when adding to it, and add a test for each new field an
+  assistant can set.
 - Memories (`lib/core/memories.ts`): an assistant writes its own
   (`/memories/…`) without asking, but anything other assistants would read
   (`/memories/shared/…`: creating, sharing, changing, renaming, deleting) is a
   permission request that shows the owner the whole text, writes nothing
-  until they answer, and writes only what they were shown. Shared text stays
+  until they answer, and writes only what they were shown. Only the owner
+  marks a memory to be read in every conversation (the Memories page, or the
+  toggle on a share request; an assistant's `every` only ticks it to start).
+  Shared text stays
   short enough to read whole and free of characters that do not show on
-  screen, and only shared memories' paths go into the instructions, never a
-  token's own memory.
+  screen. The instructions name shared memories by path, and carry the text
+  of the ones the owner marked to be read in every conversation (`always`):
+  only the owner sets that mark, and an assistant's change to an always
+  memory it keeps clears it, so every text in the instructions is one the
+  owner read. Never a token's own memory the owner did not mark.
+- Tool levels an assistant proposes for its token (`propose_tool_access`,
+  `lib/core/access-requests.ts`) are written only by the owner's save on the
+  request's page (`applyAccessRequest`), with what they chose there. No
+  decision and nothing the assistant sends writes them, and blocked tools
+  stay out of what it can name.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
@@ -75,13 +97,25 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
   (redirects and PCP's client metadata document) and the health check.
+- The owner is asked by link only: a result hands the assistant a link to
+  PCP's page, to end its reply with (`linkLastText`: nothing after it, or
+  Claude's apps fold it out of sight), and a check to call once the owner
+  says they answered (`check_permission`, `check_server`,
+  `lib/core/owner-wait.ts`). The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
+  panel: Claude's apps stalled on the one and rebuilt the other stale (see
+  ARCHITECTURE.md). Anything new that needs the owner works the same way.
 - The single-user assumption lives in two places: `ownerVault()` and the
   setup page. Do not add a third.
+- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS) belong to
+  the machine, are read with no credential, and are stored unencrypted. Never
+  copy anything from the vault into one. `lib/core/network/` starts nothing
+  (timer, listener, request) while both features are off.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` (`lib/server/desktop.ts`), for copy that says how the
   app is reached. `desktop/scripts/stage.mjs` copies what the Dockerfile
-  copies: a change to one is a change to both. It is its own pnpm project
+  copies: a change to one is a change to both. (Its environment is the
+  wrapper's own: the HTTPS ports stay 80 and 443, which the image moves.) It is its own pnpm project
   (`desktop/pnpm-workspace.yaml`); do not add it to the root workspace, or
   every install downloads Electron.
 
@@ -98,7 +132,10 @@ the row id as associated data, same as the existing ones.
 Schema changes: edit `prisma/schema.prisma`, `pnpm db:generate`, `pnpm
 db:migrate --name <change>`, commit the migration. Migrations apply at boot
 through `lib/core/migrate.ts`; never edit an applied migration (the checksum
-check refuses to start).
+check refuses to start). Read the SQL Prisma writes: its table rebuild
+(`RedefineTables`) drops the table, and migrations run in a transaction with
+foreign keys on, so the drop cascades to every row that points at it. Drop a
+column with `ALTER TABLE … DROP COLUMN` instead.
 
 ## Tests
 

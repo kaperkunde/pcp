@@ -2,6 +2,7 @@ import { invalid } from "../errors"
 import { isBlockedHeader } from "./headers"
 import { entries, isObject, own, ownString, type JsonObject } from "./json"
 import {
+  MAX_HEADER_VALUE,
   MAX_NAME_LENGTH,
   MAX_OPERATIONS,
   MAX_PARAMETERS,
@@ -14,6 +15,8 @@ import {
   REF_MAX_CHARS,
   REF_MAX_NODES,
 } from "./limits"
+import { readOAuth, type OAuthReading } from "./oauth"
+import { outlineAnswer } from "./outline"
 import type { OpenApiDocument } from "./parse"
 import type { BodyPlan, CallPlan, ParamPlan } from "./plan"
 import {
@@ -54,6 +57,8 @@ export type GeneratedTool = {
   inputSchema: JsonObject
   annotations: ToolAnnotations
   operation: CallPlan
+  /** What a successful call answers, in outline (outline.ts), or null. */
+  output: string | null
 }
 
 export type Generated = {
@@ -66,6 +71,8 @@ export type Generated = {
   description: string
   /** What the schema says requests need, in words, or null. */
   security: string | null
+  /** The OAuth sign-in it declares, for the operations offered (oauth.ts). */
+  oauth: OAuthReading
   tools: GeneratedTool[]
   skipped: Array<{ operation: string; reason: string }>
 }
@@ -258,6 +265,8 @@ export function generateTools(
   const tools: GeneratedTool[] = []
   const skipped: Generated["skipped"] = []
   const used = new Set<string>()
+  /** The security requirements of the operations offered. */
+  const requirements: unknown[] = []
   let operations = 0
   // Shared by every operation: see MAX_TOTAL_REF_NODES.
   let pool = MAX_TOTAL_REF_NODES
@@ -339,7 +348,8 @@ export function generateTools(
         const size =
           JSON.stringify(tool.inputSchema).length +
           JSON.stringify(tool.operation).length +
-          tool.description.length
+          tool.description.length +
+          (tool.output?.length ?? 0)
 
         if (stored + size > MAX_TOTAL_TOOL_CHARS) {
           skipped.push({
@@ -351,6 +361,7 @@ export function generateTools(
 
         stored += size
         tools.push({ ...tool, name: uniqueName(tool.name, used) })
+        requirements.push(own(operation, "security") ?? own(doc, "security"))
       } catch (error) {
         if (error instanceof Skip) {
           skipped.push({ operation: label, reason: error.reason })
@@ -375,6 +386,7 @@ export function generateTools(
     title: shorten(ownString(info, "title"), 200),
     description: shorten(ownString(info, "description"), 1000),
     security: describeSecurity(doc),
+    oauth: readOAuth(doc, requirements),
     tools,
     skipped,
   }
@@ -470,6 +482,12 @@ function buildTool(
       continue
     }
 
+    // A value PCP sends itself is not the assistant's to give.
+    if (plan.param.value !== undefined) {
+      params.push({ ...plan.param, arg: parameter.name })
+      continue
+    }
+
     let arg = parameter.name
     if (Object.hasOwn(properties, arg) || arg === "__proto__") {
       arg = `${parameter.in}_${parameter.name}`
@@ -540,6 +558,7 @@ function buildTool(
     inputSchema,
     annotations,
     operation: plan,
+    output: outlineAnswer(doc, operation),
   }
 }
 
@@ -642,14 +661,7 @@ function planParameter(
   }
 
   const description = shorten(ownString(parameter.node, "description"), 1000)
-  // Only a small plain example: one can be as large as the whole file.
-  const rawExample = own(parameter.node, "example")
-  const example =
-    (typeof rawExample === "string" && rawExample.length <= 500) ||
-    typeof rawExample === "number" ||
-    typeof rawExample === "boolean"
-      ? rawExample
-      : undefined
+  const example = parameterExample(own(parameter.node, "example"))
   const property: JsonObject = {
     ...schema.schema,
     ...(description ? { description } : {}),
@@ -660,6 +672,10 @@ function planParameter(
   }
 
   const explode = own(parameter.node, "explode")
+  const fixed =
+    parameter.in === "path" || schema.serialize
+      ? null
+      : onlyValue(schema.schema, parameter.required)
 
   return {
     param: {
@@ -669,9 +685,73 @@ function planParameter(
       style,
       explode: typeof explode === "boolean" ? explode : style === "form",
       ...(schema.serialize ? { serialize: schema.serialize } : {}),
+      ...(fixed !== null ? { value: fixed } : {}),
     },
     schema: property,
   }
+}
+
+/**
+ * A parameter's example as an assistant should pass it, or undefined. Only a
+ * small plain one: one can be as large as the whole file. Schemas often write
+ * the example as the query string ("?status=paid"), which an assistant
+ * copies whole into the value; that is read as what follows "=", and
+ * dropped when nothing does or only a placeholder ("{client_id}").
+ */
+export function parameterExample(
+  raw: unknown,
+): string | number | boolean | undefined {
+  if (typeof raw === "number" || typeof raw === "boolean") {
+    return raw
+  }
+
+  if (typeof raw !== "string" || raw.length > 500) {
+    return undefined
+  }
+
+  const query = /^\?[^=]*=(.*)$/s.exec(raw)
+
+  if (!query) {
+    return raw
+  }
+
+  const value = query[1]!
+  return value === "" || /^\{[^}]*\}$/.test(value) ? undefined : value
+}
+
+const SENDABLE_VALUE = new RegExp(`^[\\x20-\\x7e]{1,${MAX_HEADER_VALUE}}$`)
+
+/**
+ * The one value a header or query parameter can take, when PCP should send
+ * it rather than ask for it: the schema allows a single value (const, or an
+ * enum of one), and the parameter is required or defaults to that value. An
+ * optional one without a default is left to the assistant, since leaving it
+ * out may mean something.
+ */
+function onlyValue(schema: JsonObject, required: boolean): string | null {
+  const constant = own(schema, "const")
+  const choices = own(schema, "enum")
+  const value =
+    constant !== undefined
+      ? constant
+      : Array.isArray(choices) && choices.length === 1
+        ? choices[0]
+        : undefined
+
+  if (
+    typeof value !== "string" &&
+    typeof value !== "number" &&
+    typeof value !== "boolean"
+  ) {
+    return null
+  }
+
+  if (!required && own(schema, "default") !== value) {
+    return null
+  }
+
+  const text = String(value)
+  return SENDABLE_VALUE.test(text) ? text : null
 }
 
 function planBody(
@@ -800,6 +880,33 @@ function acceptFor(doc: OpenApiDocument, operation: JsonObject): string {
     : "application/json, */*;q=0.8"
 }
 
+/** Letters and digits only, lower case: what two phrasings share. */
+function sameWords(a: string, b: string): boolean {
+  const plain = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "")
+  return plain(a) !== "" && plain(a) === plain(b)
+}
+
+/**
+ * The description without lines that only say the method and path again
+ * ("## GET /pets"), which the description ends with anyway.
+ */
+function withoutRestatedLine(
+  description: string,
+  method: Method,
+  path: string,
+): string {
+  const plain = (text: string) =>
+    text.toLowerCase().replace(/[^a-z0-9{}/_-]+/g, "")
+  const restated = plain(`${method}${path}`)
+
+  return description
+    .split("\n")
+    .filter((line) => plain(line) !== restated)
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
 function describeOperation(
   doc: OpenApiDocument,
   method: Method,
@@ -829,9 +936,10 @@ function describeOperation(
     .filter(Boolean)
     .join("\n")
 
+  const body = withoutRestatedLine(description, method, path)
   let head = [
-    summary,
-    description && description !== summary ? description : "",
+    sameWords(body.slice(0, summary.length), summary) ? "" : summary,
+    body,
   ]
     .filter(Boolean)
     .join("\n\n")

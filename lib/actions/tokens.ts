@@ -106,8 +106,6 @@ export async function updateTokenAction(
       serverIds: fields(formData, "serverIds"),
       manageEndpoints: field(formData, "manageEndpoints") === "on",
       keepMemories: field(formData, "keepMemories") === "on",
-      // Unchecked boxes are not sent: an empty list is the link alone.
-      permissionTiers: fields(formData, "permissionTiers"),
       expiresAt:
         expiresIn === "keep"
           ? undefined

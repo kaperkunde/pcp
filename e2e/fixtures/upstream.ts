@@ -31,11 +31,20 @@ import { z } from "zod"
  *   the client secret at the token endpoint, and hands out a refresh token
  *   only when the sign-in asked for `access_type=offline`.
  *
+ * - `/closed-api/openapi.json` and `/closed-api/*` — a REST API that signs
+ *   in with OAuth: its document declares an oauth2 authorization code flow
+ *   at the closed authorization server above, and `/closed-api/whoami`
+ *   takes only a token that server issued. Requests are recorded in
+ *   `closedApiRequests`.
+ *
  * - `/openapi.json` and `/api/*` — a small REST API (a pet store) with its
  *   OpenAPI document, for PCP's API endpoints. `/api/*` wants the same
  *   bearer token as `/mcp` and records every request in `requests`, which is
  *   how the tests assert what PCP actually sent. `/openapi.json` is open,
  *   like most published schemas, and its server is `${origin}/api`.
+ *
+ * - `/ddns/update` — a dynamic DNS service's update URL. It records every
+ *   update in `ddns.updates` and answers with `ddns.status`.
  *
  * Everything is in memory. Start one per test file.
  */
@@ -71,6 +80,12 @@ export type Upstream = {
     args: Record<string, unknown>
     authorization: string | null
   }>
+  /** The OpenAPI document of the API behind the closed authorization server. */
+  closedApiSpecUrl: string
+  /** Where its requests go. */
+  closedApiUrl: string
+  /** Every request to /closed-api/* past the document, with its token. */
+  closedApiRequests: Array<{ path: string; authorization: string | null }>
   /** The OpenAPI document of the pet store. */
   openapiUrl: string
   /** Every request to /api/*, in order, whether or not it was allowed. */
@@ -82,7 +97,51 @@ export type Upstream = {
     contentType: string | null
     body: string
   }>
+  /** The dynamic DNS service: what it was sent, and how it answers. */
+  ddns: {
+    updateUrl: string
+    updates: Array<{
+      query: Record<string, string>
+      authorization: string | null
+    }>
+    status: number
+  }
   close: () => Promise<void>
+}
+
+/** The OAuth API's document: one operation, and where to sign in. */
+function closedApiSpec(origin: string) {
+  return {
+    openapi: "3.0.3",
+    info: {
+      title: "Closed whoami",
+      description: "Says who signed in, behind OAuth.",
+    },
+    servers: [{ url: `${origin}/closed-api` }],
+    components: {
+      securitySchemes: {
+        closed: {
+          type: "oauth2",
+          flows: {
+            authorizationCode: {
+              authorizationUrl: `${origin}/closed/authorize`,
+              tokenUrl: `${origin}/closed/token`,
+              scopes: { "whoami.read": "Read who you are" },
+            },
+          },
+        },
+      },
+    },
+    paths: {
+      "/whoami": {
+        get: {
+          operationId: "whoami",
+          summary: "Who signed in",
+          security: [{ closed: ["whoami.read"] }],
+        },
+      },
+    },
+  }
 }
 
 type Pet = { id: number; name: string; status: string }
@@ -351,6 +410,8 @@ export async function startUpstream({
     redirectUris: new Set<string>(),
   }
   const closedSignIns: Upstream["closedSignIns"] = []
+  const ddns: Upstream["ddns"] = { updateUrl: "", updates: [], status: 200 }
+  const closedApiRequests: Upstream["closedApiRequests"] = []
   let origin = ""
 
   // The Authorization header of the request being served, read by the
@@ -500,6 +561,35 @@ export async function startUpstream({
           expires_in: 3600,
           ...(refresh ? { refresh_token: refresh } : {}),
         })
+      }
+
+      if (url.pathname === "/ddns/update") {
+        ddns.updates.push({
+          query: Object.fromEntries(url.searchParams),
+          authorization,
+        })
+        res.statusCode = ddns.status
+        return res.end(ddns.status === 200 ? "good" : "refused")
+      }
+
+      if (url.pathname === "/closed-api/openapi.json") {
+        return json(res, 200, closedApiSpec(origin))
+      }
+
+      if (url.pathname.startsWith("/closed-api/")) {
+        closedApiRequests.push({ path: url.pathname, authorization })
+        const token = authorization?.startsWith("Bearer ")
+          ? authorization.slice(7)
+          : ""
+
+        if (!issuedTokens.has(token)) {
+          res.setHeader("www-authenticate", 'Bearer error="invalid_token"')
+          return json(res, 401, { error: "invalid_token" })
+        }
+
+        if (url.pathname === "/closed-api/whoami") {
+          return json(res, 200, { you: "the owner", scope: "whoami.read" })
+        }
       }
 
       if (url.pathname === "/openapi.json") {
@@ -670,6 +760,7 @@ export async function startUpstream({
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const { port } = server.address() as AddressInfo
   origin = `http://127.0.0.1:${port}`
+  ddns.updateUrl = `${origin}/ddns/update`
 
   return {
     origin,
@@ -678,12 +769,16 @@ export async function startUpstream({
     closedMcpUrl: `${origin}/closed/mcp`,
     closedClient,
     closedSignIns,
+    closedApiSpecUrl: `${origin}/closed-api/openapi.json`,
+    closedApiUrl: `${origin}/closed-api`,
+    closedApiRequests,
     openapiUrl: `${origin}/openapi.json`,
     expectedToken,
     issuedTokens,
     lateTools,
     calls,
     requests,
+    ddns,
     close: () =>
       new Promise((resolve, reject) => {
         for (const handler of Object.values(handlers)) void handler.close()

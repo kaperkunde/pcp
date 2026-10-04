@@ -7,12 +7,17 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { REPOSITORY_URL } from "@/lib/operator-identity"
+
+const SELF_HOSTING_GUIDE = `${REPOSITORY_URL}/blob/main/docs/self-hosting.md#4-reach-pcp-from-outside-your-home-optional`
 
 /**
  * How to reach PCP from the internet when it runs at home. Shown on the
  * Settings page while PCP's address is one only the owner's own network can
  * reach (lib/core/local-address.ts): the usual case for the desktop app and
- * for Docker on a machine behind a home router.
+ * for Docker on a machine behind a home router. It sits above the Dynamic DNS
+ * and HTTPS cards and leads to them; the tunnel and the troubleshooting are
+ * what those cards do not cover.
  */
 export function OutsideAccessCard({
   address,
@@ -20,7 +25,7 @@ export function OutsideAccessCard({
 }: {
   /** Where PCP is reached now, e.g. http://localhost:3000. */
   address: string
-  /** Started by the desktop app, which listens on this computer only until told otherwise. */
+  /** Started by the desktop app, whose menu decides who reaches its port. */
   desktop: boolean
 }) {
   const port = portOf(address)
@@ -33,9 +38,10 @@ export function OutsideAccessCard({
           PCP answers at <code>{address}</code>, an address only this computer
           or your own network can reach. An assistant that runs here, such as
           Claude Code or a desktop app, can use it as it is. One that runs
-          somewhere else, including Claude&apos;s own servers, needs an address
-          that reaches this computer from the internet. There are two ways to
-          get one; a tunnel is the easier.
+          somewhere else, such as Claude on the web or on a phone, needs an
+          address that reaches this computer from the internet, and a home
+          router does not give it one by itself. There are two ways; a tunnel is
+          the easier.
         </CardDescription>
       </CardHeader>
       <CardContent className="gap-5">
@@ -43,8 +49,8 @@ export function OutsideAccessCard({
           <p>
             A tunnel program runs on this computer, connects out to a service
             and gives you a public <code>https</code> address that forwards to
-            PCP. It works behind any router, on a shared connection too, and
-            brings its own certificate.
+            PCP. It works behind any router, on a connection shared with other
+            customers too, and brings its own certificate.
           </p>
           <ul className="list-disc space-y-1.5 pl-5">
             <li>
@@ -63,94 +69,109 @@ export function OutsideAccessCard({
             </li>
           </ul>
           <p>
-            Then enter the address it gave you under{" "}
-            <strong>Public address</strong> above, so the endpoint address and
-            OAuth redirects use it.
+            Enter the address it gives you under <strong>Public address</strong>{" "}
+            above, so the endpoint address and OAuth redirects use it, and leave{" "}
+            <strong>Dynamic DNS</strong> and <strong>HTTPS</strong> below off.
           </p>
         </Section>
 
-        <Section title="Port forwarding on your router" collapsed>
+        <Section title="Through your router: Dynamic DNS and HTTPS" collapsed>
           <p>
             Your router gives this computer a private address and hides it
-            behind the one your provider gave you. Forwarding a port lets a
-            connection to your public address through to PCP.
+            behind the one your provider gave you. Forwarding ports lets
+            connections to your public address through to PCP, which then serves
+            itself over HTTPS.
           </p>
           <ol className="list-decimal space-y-1.5 pl-5">
             <li>
+              In the router&apos;s settings, give this computer a fixed address
+              on your network (a DHCP reservation, or static lease), so the
+              forwards keep pointing at it.
+            </li>
+            <li>
+              Forward ports 80 and 443 (TCP) to this computer. Routers call this
+              port forwarding, virtual servers, NAT or applications. Do not
+              forward port {port}: it is plain HTTP, for your own network.{" "}
               {desktop ? (
                 <>
-                  In the PCP app&apos;s menu, turn on{" "}
-                  <strong>Accept connections from other devices</strong>. Until
-                  then PCP answers this computer only.
+                  PCP opens 80 and 443 itself once HTTPS is on; Windows asks
+                  whether to let it through the firewall.
                 </>
               ) : (
                 <>
-                  Make sure PCP accepts connections from other devices. The
-                  Docker image does; with <code>pnpm start</code> it does unless{" "}
-                  <code>HOSTNAME</code> says otherwise.
+                  In Docker, start PCP with{" "}
+                  <code>docker-compose.https.yaml</code> as well, which opens
+                  them.
                 </>
               )}
             </li>
             <li>
-              Give this computer a fixed address on your network: a DHCP
-              reservation in the router&apos;s settings, so the forward keeps
-              pointing at it.
+              Under <strong>Dynamic DNS</strong> below, get a name that follows
+              your connection&apos;s address when your provider changes it.
+              DuckDNS is free.
             </li>
             <li>
-              In the router, forward a port to this computer&apos;s address,
-              port {port}. Routers call this port forwarding, virtual server,
-              NAT or applications. Use the same number outside unless you have a
-              reason not to.
+              Under <strong>HTTPS</strong> below, turn it on for that name. PCP
+              gets a certificate from Let&apos;s Encrypt and renews it.
             </li>
             <li>
-              Your public address changes now and then. A dynamic DNS name
-              (DuckDNS, No-IP, or your router&apos;s own) keeps a name pointing
-              at it; use the name, not the number.
-            </li>
-            <li>
-              OAuth servers require <code>https</code>, and your password should
-              not cross the internet in the clear: put a TLS proxy in front.
-              Caddy does it in one line and fetches the certificate itself,{" "}
-              <code>
-                caddy reverse-proxy --from pcp.yourname.duckdns.org --to
-                localhost:{port}
-              </code>
-              , with ports 80 and 443 forwarded to this computer.
-            </li>
-            <li>
-              Enter the address under <strong>Public address</strong> above.
+              When the HTTPS card offers it, make the <code>https</code> address
+              PCP&apos;s public address.
             </li>
           </ol>
+          <p>
+            <a
+              href={SELF_HOSTING_GUIDE}
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              The self-hosting guide
+            </a>{" "}
+            walks through each step.
+          </p>
         </Section>
+
+        {desktop ? (
+          <Section title="Other devices on your network" collapsed>
+            <p>
+              Port {port} answers this computer only until you turn on{" "}
+              <strong>Accept connections from other devices</strong> in the PCP
+              app&apos;s menu. Then a laptop or phone on the same network
+              reaches PCP at this computer&apos;s address, port {port}. The
+              tunnel and HTTPS above do not need it.
+            </p>
+          </Section>
+        ) : null}
 
         <Section title="If it does not work" collapsed>
           <ul className="list-disc space-y-1.5 pl-5">
             <li>
               <strong>Test from outside</strong>: a phone on mobile data, not
-              your wifi. Many home routers cannot reach their own public address
-              from inside, so a test from your own network can fail while the
-              forward works.
+              your Wi-Fi. Many home routers cannot reach their own public
+              address from inside, so a test from your own network can fail
+              while the forward works.
             </li>
             <li>
-              <strong>A shared connection</strong>: if your router&apos;s
-              internet address starts with 100.64 to 100.127 or 10., or your
-              provider mentions CGNAT or DS-Lite, there is no port of yours to
-              forward. Use a tunnel.
+              <strong>A shared connection</strong>: if the internet address on
+              your router&apos;s status page differs from the one{" "}
+              <code>api.ipify.org</code> shows, or starts with 100.64 to
+              100.127, your provider shares it between customers (CGNAT) and
+              there is no port of yours to forward. Ask the provider for a
+              public IPv4 address, or use a tunnel.
             </li>
             <li>
-              <strong>Two routers</strong>: a modem with a router of its own, or
-              a mesh system, needs the forward on each, or the first one in
-              bridge mode.
+              <strong>Port 80 blocked</strong>: some providers block it on home
+              plans, and Let&apos;s Encrypt needs it. Use a tunnel.
             </li>
             <li>
-              <strong>This computer&apos;s firewall</strong> has to let the port
-              through. Windows asks the first time PCP listens; allow it on
-              private networks.
+              <strong>Two routers</strong>: a provider&apos;s modem with a
+              router of its own in front of yours, or a mesh system, needs the
+              forwards on each, or the first one in bridge mode.
             </li>
             <li>
-              <strong>Public address</strong>: once PCP is reachable, the
-              address above must be the public one, or OAuth servers send you
-              back to an address that only works here.
+              <strong>This computer&apos;s firewall</strong> has to let ports 80
+              and 443 through.
             </li>
           </ul>
         </Section>
@@ -184,9 +205,12 @@ function Section({
   }
 
   return (
-    <details className="group flex flex-col gap-3">
+    <details className="group">
       <summary className="cursor-pointer list-none font-medium marker:hidden">
-        <span className="mr-2 inline-block transition-transform group-open:rotate-90">
+        <span
+          aria-hidden
+          className="mr-2 inline-block transition-transform group-open:rotate-90"
+        >
           ›
         </span>
         {title}

@@ -19,10 +19,16 @@ health check.
 
 ## What the wrapper adds
 
-- **Localhost by default.** The server listens on `127.0.0.1` until
-  **Accept connections from other devices** is turned on in the PCP menu
-  (then `0.0.0.0`, for port forwarding from a home router). A tunnel
-  (Cloudflare Tunnel, Tailscale Funnel, ngrok) does not need it.
+- **Localhost by default.** The server's port (3000) listens on `127.0.0.1`
+  until **Accept connections from other devices** is turned on in the PCP
+  menu, then on `0.0.0.0`, for other devices on the home network. Reaching
+  PCP from the internet needs neither: a tunnel (Cloudflare Tunnel, Tailscale
+  Funnel, ngrok) connects out, and PCP's built-in HTTPS (Settings), once
+  turned on, listens on ports 80 and 443 on every interface by itself.
+  Unlike the Docker image, the app leaves `PCP_HTTP_PORT` and
+  `PCP_HTTPS_PORT` at 80 and 443: macOS and Windows let an ordinary program
+  use them, and a router forwards to them as they are. Settings explains
+  both ways while PCP's address is a home one.
 - **Keeps running.** On Windows and Linux, closing the window hides it; the
   tray icon opens or quits PCP. On macOS the Dock does the same. Assistants
   keep reaching the gateway while the window is closed. **Start PCP when

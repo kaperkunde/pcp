@@ -20,7 +20,7 @@ const eslintConfig = [
   },
   {
     // lib/core is the embeddable domain layer (see ARCHITECTURE.md): it must
-    // stay free of Next.js and React so another host — a multi-tenant SaaS,
+    // stay free of Next.js and React so another host — a multi-tenant one,
     // a CLI, a test — can drive it with an explicit VaultContext.
     files: ["lib/core/**/*.ts"],
     rules: {

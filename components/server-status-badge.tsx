@@ -16,9 +16,17 @@ export function ServerStatusBadge({
     return <Badge variant="outline">Disabled</Badge>
   }
 
-  // An API endpoint is never "connected": PCP has read its schema, and calls
-  // it only when an assistant does.
+  // An API endpoint is "connected" only when it signs in with OAuth: PCP has
+  // read its schema, and calls it only when an assistant does.
   if (kind === "openapi") {
+    if (status === "client_required") {
+      return <Badge variant="warning">Needs an OAuth client</Badge>
+    }
+
+    if (!connected) {
+      return <Badge variant="warning">Needs connecting</Badge>
+    }
+
     switch (status) {
       case "ok":
         return <Badge>Ready</Badge>
@@ -42,6 +50,8 @@ export function ServerStatusBadge({
   switch (status) {
     case "ok":
       return <Badge>Connected</Badge>
+    case "refused":
+      return <Badge variant="destructive">Access refused</Badge>
     case "error":
       return <Badge variant="destructive">Unreachable</Badge>
     default:

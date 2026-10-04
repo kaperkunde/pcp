@@ -32,7 +32,14 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
       recoveryKey: recoveryKey!,
     } satisfies SetupState)
 
-    await page.getByRole("link", { name: /open PCP/ }).click()
+    // Then the optional step for reaching PCP from outside, skipped here
+    // (the network project walks it).
+    await page.getByRole("link", { name: "I have saved it — continue" }).click()
+    await expect(
+      page.getByRole("heading", { name: "Reach PCP from anywhere (optional)" }),
+    ).toBeVisible()
+    await expect(page.getByRole("form", { name: "Dynamic DNS" })).toBeVisible()
+    await page.getByRole("link", { name: "Skip for now — open PCP" }).click()
     await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
   }
 
@@ -42,8 +49,6 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "PCP is already set up" }),
   ).toBeVisible()
-
-  await page.context().storageState({ path: "e2e/.auth/owner.json" })
 })
 
 test("locks, refuses a wrong password and unlocks", async ({ page }) => {
@@ -63,15 +68,40 @@ test("locks, refuses a wrong password and unlocks", async ({ page }) => {
   await expect(page.locator("p[role=alert]")).toHaveText(/not right/)
 
   await unlock(page)
-  await page.context().storageState({ path: "e2e/.auth/owner.json" })
+})
+
+// Each project that starts signed in gets a session of its own, as if it
+// were another browser: typing the password again (to make a token) is
+// limited per session, and the suite in one session runs out. Signing in is
+// limited per address, so each signs in from an address of its own.
+test("signs each project in with a session of its own", async ({
+  browser,
+  baseURL,
+}) => {
+  const projects = test
+    .info()
+    .config.projects.filter(
+      (project) => typeof project.use.storageState === "string",
+    )
+  expect(projects.length).toBeGreaterThan(0)
+
+  for (const [index, project] of projects.entries()) {
+    const context = await browser.newContext({
+      baseURL,
+      extraHTTPHeaders: { "x-forwarded-for": `198.51.100.${index + 1}` },
+    })
+    await unlock(await context.newPage())
+    await context.storageState({ path: project.use.storageState as string })
+    await context.close()
+  }
 })
 
 // A PCP at a home address (localhost here) is one an assistant running
-// elsewhere cannot reach; Settings explains tunnels and port forwarding until
-// a public address is set. Against a deployed PCP (PCP_URL) there is nothing
-// to explain.
+// elsewhere cannot reach; Settings explains a tunnel and the router until a
+// public address is set. Against a deployed PCP (PCP_URL) there is nothing to
+// explain. Signs in from an address of its own, like the sessions above.
 test("Settings explains how to reach a PCP at home from outside", async ({
-  page,
+  browser,
   baseURL,
 }) => {
   const host = new URL(baseURL!).hostname
@@ -80,6 +110,11 @@ test("Settings explains how to reach a PCP at home from outside", async ({
     "PCP is not at a local address",
   )
 
+  const context = await browser.newContext({
+    baseURL,
+    extraHTTPHeaders: { "x-forwarded-for": "198.51.100.200" },
+  })
+  const page = await context.newPage()
   await unlock(page)
   await page.goto("/settings")
 
@@ -94,11 +129,14 @@ test("Settings explains how to reach a PCP at home from outside", async ({
     card.getByText(/cloudflared tunnel --url http:\/\/localhost/),
   ).toBeVisible()
 
-  // The router steps are folded away until asked for. Outside the desktop
-  // app there is no menu to mention.
-  await card.getByText("Port forwarding on your router").click()
-  await expect(card.getByText(/The Docker image does/)).toBeVisible()
+  // The router steps are folded away until asked for. They lead to the
+  // Dynamic DNS and HTTPS cards; outside the desktop app there is no menu
+  // to mention.
+  await card.getByText("Through your router").click()
+  await expect(card.getByText(/Forward ports 80 and 443/)).toBeVisible()
   await expect(
     card.getByText("Accept connections from other devices"),
   ).toHaveCount(0)
+
+  await context.close()
 })

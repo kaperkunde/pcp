@@ -2,7 +2,9 @@ import type { Metadata } from "next"
 
 import { EMPTY_ENDPOINT, EndpointForm } from "@/components/endpoint-form"
 import { PageHeader } from "@/components/page-header"
+import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import { listSecrets } from "@/lib/core/secrets"
+import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Add an endpoint" }
@@ -17,9 +19,13 @@ export default async function NewEndpointPage() {
     <>
       <PageHeader
         title="Add an endpoint"
-        description="PCP reads the OpenAPI schema as soon as it is added and turns each operation into a tool. When an assistant calls one, PCP sends the request straight to the API with the secret you choose."
+        description="PCP reads the OpenAPI schema as soon as it is added and turns each operation into a tool. When an assistant calls one, PCP sends the request straight to the API with the secret you choose, or the token from signing in."
       />
-      <EndpointForm initial={EMPTY_ENDPOINT} secrets={secrets} />
+      <EndpointForm
+        initial={EMPTY_ENDPOINT}
+        secrets={secrets}
+        redirectUrl={oauthRedirectUrl(await publicUrlFor(ctx))}
+      />
     </>
   )
 }
