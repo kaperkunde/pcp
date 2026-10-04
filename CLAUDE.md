@@ -68,6 +68,19 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   short enough to read whole and free of characters that do not show on
   screen, and only shared memories' paths go into the instructions, never a
   token's own memory.
+- Mail accounts (`lib/core/mail/`) never read a secret: `upstream.ts` hands
+  in a `MailCredential` (the header, the login, or an OAuth bearer it renews
+  through `oauthBearer`). Mail travels encrypted only (TLS, or STARTTLS that
+  is required, never optional); a JMAP session's API and download addresses
+  are taken only on the session URL's origin, and redirects are not
+  followed. Nothing deletes mail for good: delete moves to the Trash. Only
+  the owner adds or changes an account. A new mail tool goes in
+  `mail/tools.ts`, for both protocols where they allow, with its arguments
+  checked before anything connects, and is left out of a read-only account
+  and refused there if called anyway.
+- Long tool answers are kept only through `lib/core/tool-results.ts`:
+  encrypted with `tool_result:<id>`, readable by the token whose call
+  produced them, gone after a day, never logged.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
@@ -109,7 +122,8 @@ check refuses to start).
 
 The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
-OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a note an
+OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
+signs in to is a "mail account"; a note an
 assistant keeps between conversations is a "memory", "shared" when every
 assistant reads it. No operator
 vocabulary in the UI: no "DEK", "grant", "KEK" outside code comments and

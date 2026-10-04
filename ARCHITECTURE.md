@@ -17,6 +17,7 @@ lib/actions/         Server Actions: read the session, call lib/core, return a s
 lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
+  mail/              Mail accounts: JMAP and IMAP/SMTP behind one set of mail tools
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
 ```
@@ -38,6 +39,7 @@ associated data (a ciphertext cannot be moved to another row):
   owner gives PCP is one of their own `text` secrets,
 - the PKCE verifier of an authorization in flight (`oauth_state`).
 - a memory's path and text (`memory.ciphertext`, as one JSON value).
+- a tool answer kept for `read_result` (`tool_result.ciphertext`).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -293,6 +295,61 @@ address it names, as a schema: what it learns back is whether that was an
 OpenAPI document and, if so, what the owner would be asked, which matters
 only for a service that trusts PCP's own address more than the assistant's.
 
+## Mail accounts
+
+A mail account is a server row of kind `jmap` or `imap` with a fixed set of
+tools (`lib/core/mail/tools.ts`), the same names and answers for both, so an
+assistant learns one set: `list_mailboxes`, `search_emails`, `get_email`,
+`get_attachment`, `move_email`, `mark_email`, `delete_email`, `send_email`,
+and on JMAP `get_thread` and `list_identities`. Which ones an account has
+depends on read-only (the tools that change mail are left out, and refused if
+called anyway), and on whether it can send (JMAP: the session offers
+submission; IMAP: the owner gave an SMTP server). `mcp_tool.operation` is
+null; a call is dispatched by name. Only the owner adds or changes an
+account; `register_server` and the endpoint tools do not touch them.
+
+`upstream.ts` builds the credential and hands it to `mail/accounts.ts` as a
+`MailCredential`: the `Authorization` header for JMAP, the login for IMAP and
+SMTP, and the values to remove from every answer. Nothing under `mail/` reads
+a secret. Authentication is `basic` (a user name, in `auth_username`, and a
+secret: Basic for JMAP, LOGIN for IMAP and SMTP), `header` (a bearer token,
+JMAP only) or `oauth` (JMAP only).
+
+**JMAP** (`mail/jmap.ts`): `url` is the session URL the owner typed. Reading
+the account GETs it with the credential, and the API and download addresses
+it names are accepted only on that URL's origin, so the credential goes
+nowhere the owner did not type; they are kept (`mail_api_url`,
+`mail_download_url`, `mail_account_id`, `mail_submission`) and forgotten when
+the address or sign-in changes. Redirects are never followed: PCP names
+where the server pointed, for the owner to enter instead. A call is one or
+two POSTs of method calls. Sending creates the email in Drafts and submits
+it in the same request, moving it to Sent when it went.
+
+**IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
+`imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
+SMTP. A connection that is not encrypted after it is made is dropped, and
+STARTTLS is required, never optional. Each call connects, signs in, works
+and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
+from before a mailbox was rebuilt is refused rather than naming another
+email. Sending goes over SMTP and a copy (Bcc kept) is appended to Sent.
+
+**What an assistant gets back** is JSON PCP writes: addresses, dates, flags,
+the text of a body (the HTML one made plain when there is no text one) and
+the list of attachments; `get_attachment` reads text attachments and
+refuses the rest without downloading them. A body or attachment longer than
+20,000 characters is kept for `read_result` (below). Delete moves to the
+Trash and nothing deletes for good. Failures: refused credentials mark the
+account `auth_required` (with OAuth, "needs connecting"), an unreachable
+server `error`; a request the server refuses (no such email or mailbox) is
+an error answer and leaves the account as it is.
+
+**OAuth** uses the same Connect flow as an MCP server (below), discovering
+from the session URL. Because PCP makes a mail account's calls itself rather
+than through the MCP SDK's transport, `oauthBearer` in `upstream.ts` renews
+the token through the SDK's `auth()` a minute before it runs out, and once
+more when the server refuses it; when that fails the account needs
+connecting, and the gateway answers with the connect panel.
+
 ## Memories
 
 A token made with "keep memories" (`api_token.keep_memories`, off unless the
@@ -411,11 +468,31 @@ keeps memories, both below):
 - `check_permission(id)`, `check_server(server)` and
   `register_server(...)` belong to the permission flow below;
   `answer_permission(id, decision)` is only for PCP's panel.
+- `read_result(id, offset?, length?, find?)` reads a slice of a long answer
+  PCP kept (below).
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the
 gateway finds a server with no tools. It is a cache of the upstream's
 `tools/list`; the owner's description overrides survive a refresh.
+
+### Long answers
+
+An upstream's answer goes to the assistant through `runCall`
+(`lib/core/permissions.ts`), which hands each text block longer than 60,000
+characters to `lib/core/tool-results.ts`: the whole text (up to 4 million
+characters) is kept in `tool_result`, encrypted under the vault's data key
+with `tool_result:<id>` as associated data, for a day, and the assistant gets
+the first 50,000 characters and a notice with the result's id and length.
+`read_result` decrypts it and returns one slice, for the token whose call
+produced it only; another token's, another vault's or an expired id reads as
+not found. A token keeps at most 100 results and 50 million characters, its
+oldest going first, and expired ones are pruned at boot. Structured content
+too long for a page is left out, since the text carries the same answer. A
+permission request's stored outcome keeps the notice when its text is
+shortened, so `check_permission` names the result too. Mail bodies and text
+attachments use the same store from inside the mail tools. Nothing kept here
+is logged.
 
 ## Tool access and the owner's permission
 

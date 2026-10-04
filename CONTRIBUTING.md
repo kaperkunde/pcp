@@ -104,6 +104,8 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/endpoints.ts`            | API endpoints: reading a schema, creating them, calling them  |
 | `lib/core/openapi/`                | OpenAPI → tools and call plans; building and sending requests |
 | `lib/core/endpoint-admin.ts`       | What an assistant may do to endpoints through the gateway     |
+| `lib/core/mail/`                   | Mail accounts: JMAP and IMAP/SMTP behind one set of tools     |
+| `lib/core/tool-results.ts`         | Long answers kept, encrypted, for `read_result`               |
 | `lib/core/memories.ts`             | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/catalogue.ts`            | Writing a server's tool list into the catalogue               |
 | `lib/core/search.ts`, `gateway.ts` | Ranking tools; the MCP server the gateway serves              |
@@ -116,7 +118,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `app/mcp/route.ts`                 | The gateway endpoint                                          |
 | `app/api/oauth/`                   | OAuth callback; PCP's client metadata document                |
 | `app/api/servers/[id]/oauth/`      | OAuth start; the per-server callback older clients use        |
-| `e2e/fixtures/upstream.ts`         | The fake MCP + OAuth server the e2e suite talks to            |
+| `e2e/fixtures/upstream.ts`         | The fake MCP, OAuth, REST and JMAP servers the e2e suite uses |
 | `app/manifest.ts`, `public/icons/` | The manifest and icon set; `assets/icon.png` is the master    |
 
 ## Licence
