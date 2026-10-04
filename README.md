@@ -46,8 +46,8 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
-- **Nothing to configure.** Open the Mac or Windows app, or
-  `docker compose up` and open the site; choose a password. No environment
+- **Nothing to configure.** Open the Mac or Windows app, or run one line on
+  a Linux server and open the site; choose a password. No environment
   variables. Dynamic DNS and HTTPS with Let's Encrypt are built in for a home
   server, and off for anyone with a proxy.
 - **Single user, by design.** PCP is yours: one owner, one encrypted vault.
@@ -91,11 +91,25 @@ address, its **Settings** page explains the two ways:
   The app opens those ports itself once HTTPS is on; Windows asks to let it
   through the firewall.
 
-### On a server, with Docker
+### On a Linux server, with Docker or Podman
 
 New to self-hosting? **[The self-hosting guide](docs/self-hosting.md)** walks
 through it step by step, from installing Docker to reaching PCP from your phone
 over HTTPS.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh
+```
+
+The installer finds Docker or Podman on the computer (Bazzite and other
+Fedora Atomic systems come with Podman), pulls the published image
+(`ghcr.io/kaperkunde/pcp`) and keeps PCP running on port 3000 across reboots:
+as a container Docker restarts, or as a systemd unit under Podman. Run the
+same line again to update PCP. The top of [`install.sh`](install.sh) lists
+its settings (`PCP_PORT`, `PCP_HTTPS` and a few more), and
+`… | sh -s -- uninstall` removes it and keeps your data.
+
+From a checkout, `docker compose` does the same with the file in it:
 
 ```bash
 git clone https://github.com/kaperkunde/pcp.git
@@ -119,6 +133,8 @@ require an `https` redirect URL, and the session cookie is only marked
   and 443 on your router:
 
   ```bash
+  curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | PCP_HTTPS=1 sh
+  # or, from a checkout:
   docker compose -f docker-compose.yaml -f docker-compose.https.yaml up -d
   ```
 

@@ -23,6 +23,7 @@ pnpm typecheck       # tsc --noEmit
 pnpm build           # next build
 pnpm test            # unit tests (vitest)
 pnpm test:e2e        # Playwright against a fresh e2e database
+shellcheck --shell=sh install.sh   # the install script, which the tests run
 ```
 
 Husky runs lint-staged (eslint --fix + prettier on the staged files) on every
@@ -30,9 +31,9 @@ commit, then `pnpm typecheck` and `pnpm format:check` over the whole tree.
 Fix what the hook reports; `pnpm format` settles the formatting ones.
 
 GitHub Actions runs the checks on pull requests only
-(`.github/workflows/ci.yml`): lint, format, typecheck and build in one job,
-unit tests in another, the Playwright suite in a third, side by side. The one
-thing a push runs is the release workflow, on `main` (below).
+(`.github/workflows/ci.yml`): lint, format, shellcheck, typecheck and build in
+one job, unit tests in another, the Playwright suite in a third, side by side.
+The one thing a push runs is the release workflow, on `main` (below).
 
 `pnpm lint`, `pnpm format:check` and `pnpm test` cover `desktop/` too (its
 scripts and the settings module's test); the app itself is built by hand or
@@ -56,6 +57,14 @@ attached to the draft under stable names (`PCP-mac-arm64.dmg`,
 `releases/latest/download/…` links keep working), and the release is
 published. An app build that fails does not hold the release back: the
 publish job warns, and re-running the failed job attaches the app.
+
+The same run builds the container image from the tag, for amd64 and arm64,
+and pushes it to `ghcr.io/kaperkunde/pcp` as `<version>` and `latest`, which
+`install.sh` and `docker-compose.yaml` pull. It is held to the same rule: a
+failed build warns and `latest` stays at the previous release until the job
+is re-run. The package's visibility is set on GitHub, not here: a package
+takes the repository's visibility when it is first pushed, and anonymous
+pulls need it public.
 
 MAJOR and MINOR are raised by hand, in a commit on `develop`:
 
@@ -166,7 +175,8 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                  |
 | `desktop/main.mjs`                   | The desktop app: starts the server, opens the window          |
 | `desktop/scripts/stage.mjs`          | Stages the server for the app, as the Dockerfile lays it out  |
-| `.github/workflows/release.yml`      | Tags, builds the desktop apps, publishes the release          |
+| `.github/workflows/release.yml`      | Tags, builds the apps and the image, publishes the release    |
+| `install.sh`                         | The one-line Linux install: Docker or Podman, published image |
 
 ## Licence
 
