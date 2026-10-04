@@ -1,4 +1,5 @@
 import {
+  auth,
   Client,
   StreamableHTTPClientTransport,
   UnauthorizedError,
@@ -17,7 +18,10 @@ import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
-import { PcpError } from "./errors"
+import { isPcpError, PcpError } from "./errors"
+import { callMailTool, syncMailTools } from "./mail/accounts"
+import { OAUTH_REFRESH_MARGIN_MS } from "./mail/limits"
+import type { MailCredential } from "./mail/types"
 import {
   applyAuthorizeParams,
   oauthRedirectUrl,
@@ -30,14 +34,17 @@ import {
   revealSecret,
   writeManagedSecret,
 } from "./secrets"
-import { renderAuthValue, setServerStatus } from "./servers"
+import { isMailKind, renderAuthValue, setServerStatus } from "./servers"
+import type { ResultKeeper } from "./tool-results"
 import { PCP_VERSION } from "./version"
 
 /**
  * Talking to the servers in the registry: opening a connection with the
  * right credentials, reading their tool lists and calling their tools. API
  * endpoints (kind "openapi") branch off to lib/core/endpoints.ts, which
- * makes plain HTTP calls with the header this module builds.
+ * makes plain HTTP calls with the header this module builds; mail accounts
+ * (kinds "jmap" and "imap") to lib/core/mail/accounts.ts, with the header
+ * or login this module builds, or an OAuth token it renews.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -534,6 +541,106 @@ async function basicCredential(
   }
 }
 
+type Bearer = { headers: Record<string, string>; redact: string[] }
+
+function bearerOf(accessToken: string): Bearer {
+  const value = `Bearer ${accessToken}`
+  return { headers: { Authorization: value }, redact: [accessToken, value] }
+}
+
+/**
+ * A bearer header from the OAuth tokens PCP holds for a server it calls
+ * itself rather than through the MCP SDK's transport (which renews its own):
+ * a JMAP mail account. Renewed first when the token has run out or is about
+ * to, and by `refresh` when the server refuses it; null from `refresh`, and
+ * UnauthorizedError here, mean the owner has to connect it again.
+ */
+export async function oauthBearer(
+  ctx: VaultContext,
+  server: McpServer,
+  { publicUrl }: { publicUrl: string },
+): Promise<Bearer & { refresh: () => Promise<Bearer | null> }> {
+  const provider = () =>
+    new PcpOAuthProvider(ctx, server, {
+      redirectUrl: oauthRedirectUrl(publicUrl),
+      publicUrl,
+    })
+
+  const refresh = async (): Promise<Bearer | null> => {
+    try {
+      // With a refresh token, auth() asks for a new access token; without
+      // one (or when it is refused) it would start a sign-in, which a call
+      // has no browser for: the provider says so with UnauthorizedError.
+      const result = await auth(provider(), {
+        serverUrl: server.url,
+        scope: server.oauthScope ?? undefined,
+      })
+
+      if (result !== "AUTHORIZED") {
+        return null
+      }
+    } catch (error) {
+      if (error instanceof UnauthorizedError) {
+        return null
+      }
+
+      if (isPcpError(error)) {
+        throw error
+      }
+
+      throw new PcpError(
+        "upstream",
+        `PCP could not renew the sign-in to ${server.name}: ${error instanceof Error ? error.message : String(error)}`.slice(
+          0,
+          500,
+        ),
+      )
+    }
+
+    const { tokens } = await provider().tokenSet()
+    return tokens?.access_token ? bearerOf(tokens.access_token) : null
+  }
+
+  const { tokens, savedAt } = await provider().tokenSet()
+
+  if (!tokens?.access_token) {
+    throw new UnauthorizedError(`${server.name} needs to be connected in PCP.`)
+  }
+
+  const { expiresAt } = tokenLifetime(tokens, savedAt)
+
+  if (expiresAt && expiresAt.getTime() - Date.now() < OAUTH_REFRESH_MARGIN_MS) {
+    const renewed = tokens.refresh_token ? await refresh() : null
+
+    if (!renewed) {
+      throw new UnauthorizedError(
+        `${server.name} needs to be connected in PCP.`,
+      )
+    }
+
+    return { ...renewed, refresh }
+  }
+
+  return { ...bearerOf(tokens.access_token), refresh }
+}
+
+/** What a mail account signs in with, made from its secret or its tokens. */
+async function mailCredential(
+  ctx: VaultContext,
+  server: McpServer,
+  { publicUrl }: { publicUrl: string },
+): Promise<MailCredential> {
+  if (server.authType === "oauth") {
+    const { headers, redact, refresh } = await oauthBearer(ctx, server, {
+      publicUrl,
+    })
+    return { headers, redact, login: null, onUnauthorized: refresh }
+  }
+
+  const { headers, redact, login } = await credential(ctx, server)
+  return { headers, redact, login }
+}
+
 export type UpstreamConnection = {
   client: Client
   transport: StreamableHTTPClientTransport
@@ -607,6 +714,20 @@ export async function syncServerTools(
     return syncEndpointTools(server, { byOwner })
   }
 
+  if (isMailKind(server.kind)) {
+    let signIn: MailCredential
+
+    try {
+      signIn = await mailCredential(ctx, server, { publicUrl })
+    } catch (error) {
+      const result = describeFailure(server, error)
+      await setServerStatus(server.id, result.status, result.message)
+      return { ...result, toolCount: 0 }
+    }
+
+    return syncMailTools(server, signIn)
+  }
+
   let connection: UpstreamConnection | null = null
 
   try {
@@ -653,7 +774,14 @@ export async function callServerTool(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl }: { publicUrl: string },
+  {
+    publicUrl,
+    keep,
+  }: {
+    publicUrl: string
+    /** Keeps a long text whole for read_result (mail bodies, attachments). */
+    keep?: ResultKeeper
+  },
 ): Promise<CallToolResult> {
   if (server.kind === "openapi") {
     const { headers, redact } = await credential(ctx, server)
@@ -661,6 +789,27 @@ export async function callServerTool(
       authHeaders: headers,
       redact,
     })
+  }
+
+  if (isMailKind(server.kind)) {
+    let signIn: MailCredential
+
+    try {
+      signIn = await mailCredential(ctx, server, { publicUrl })
+    } catch (error) {
+      if (isPcpError(error)) {
+        throw error
+      }
+
+      const failure = describeFailure(server, error)
+      await setServerStatus(server.id, failure.status, failure.message)
+      throw new PcpError(
+        failure.status === "error" ? "upstream" : "unauthorized",
+        failure.message,
+      )
+    }
+
+    return callMailTool(server, toolName, args, { credential: signIn, keep })
   }
 
   let connection: UpstreamConnection | null = null

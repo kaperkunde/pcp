@@ -205,7 +205,7 @@ export function buildInstructions(
 ): string {
   if (servers.length === 0) {
     return [
-      "PCP is a gateway to the owner's MCP servers and APIs, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, or an API from OpenAPI text).",
+      "PCP is a gateway to the owner's MCP servers, APIs and mail accounts, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, or an API from OpenAPI text).",
       ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
       ...memoryInstructions(sharedMemories),
     ].join("\n")
@@ -218,7 +218,7 @@ export function buildInstructions(
   })
 
   return [
-    "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
+    "PCP is a gateway to the owner's MCP servers, APIs and mail accounts. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
     'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: pass it on, and call check_permission with the id it gives for the result. A server that needs them to sign in answers with a link to connect it; check_server says when it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees.',
     "An answer too long to pass on in one piece ends with a result id: read_result reads the rest of it, a slice at a time.",
     "Servers:",

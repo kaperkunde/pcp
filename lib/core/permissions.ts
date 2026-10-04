@@ -204,7 +204,7 @@ export async function runCall(
     const keep = resultKeeper(ctx, tokenId)
 
     return await pageResult(
-      await executor.callTool(ctx, server, toolName, args, { publicUrl }),
+      await executor.callTool(ctx, server, toolName, args, { publicUrl, keep }),
       keep,
       { serverId: server.id, toolName },
     )
