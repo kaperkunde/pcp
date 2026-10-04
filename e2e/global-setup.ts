@@ -9,6 +9,7 @@ const ROUTES = [
   "/servers",
   "/servers/new",
   "/servers/endpoints/new",
+  "/servers/mail/new",
   "/secrets",
   "/tokens",
   "/settings",
