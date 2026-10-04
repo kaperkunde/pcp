@@ -17,10 +17,12 @@ const nextConfig: NextConfig = {
     "acme-client",
   ],
   experimental: {
-    // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) travels in a
+    // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) and an export
+    // file to restore (up to MAX_EXPORT_FILE_BYTES, 64 MB) travel in a
     // Server Action's body; Next's default limit is 1 MB. This applies to
-    // every action, and is checked again per file in lib/actions/endpoints.
-    serverActions: { bodySizeLimit: "6mb" },
+    // every action, and each checks its own file's size again before
+    // reading it (lib/actions/endpoints.ts, lib/actions/backup.ts).
+    serverActions: { bodySizeLimit: "70mb" },
   },
   async headers() {
     return [

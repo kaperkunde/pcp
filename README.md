@@ -50,6 +50,9 @@ on its own, what it has to ask you about first, and what it cannot touch.
   a Linux server and open the site; choose a password. No environment
   variables. Dynamic DNS and HTTPS with Let's Encrypt are built in for a home
   server, and off for anyone with a proxy.
+- **Take it with you.** Export everything to one encrypted file and restore it
+  on another PCP; your password, recovery key and API tokens keep working, so
+  assistants carry on.
 - **Single user, by design.** PCP is yours: one owner, one encrypted vault.
 
 ## Run it
@@ -340,13 +343,16 @@ Consequences worth knowing:
   the password again.
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
+- An export is the encrypted vault as it is, under an export password of
+  your own on top: reading one takes that password and your PCP password (or
+  the recovery key, or a token). Nothing is decrypted to make it.
 - The gateway never returns a secret to an assistant, only what the upstream
   server answered. An API's answer is scrubbed of the secret or token first,
   in case it echoes the key back in an error.
 
 ## Development
 
-Node 22 and pnpm 10. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow
+Node 24 and pnpm 10. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow
 and [CLAUDE.md](CLAUDE.md) for the conventions an agent (or a person) should
 keep to.
 

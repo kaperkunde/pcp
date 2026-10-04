@@ -177,5 +177,13 @@ export default defineConfig({
       dependencies: ["setup"],
       use: { ...devices["Desktop Chrome"] },
     },
+    {
+      // Exports the vault to a file and restores it, which signs every
+      // browser out too: after recovery, signing in on its own.
+      name: "backup",
+      testMatch: /backup\.spec\.ts/,
+      dependencies: ["setup"],
+      use: { ...devices["Desktop Chrome"] },
+    },
   ],
 })

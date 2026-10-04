@@ -20,6 +20,15 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
       page.getByRole("heading", { name: "Welcome to PCP" }),
     ).toBeVisible()
 
+    // The other way to start: with another PCP's export. Looked at, not
+    // taken (the backup project restores a running PCP's own).
+    await page.getByRole("link", { name: "Restore an export instead" }).click()
+    await expect(
+      page.getByRole("heading", { name: "Restore an export", level: 1 }),
+    ).toBeVisible()
+    await expect(page.getByLabel("Export file")).toBeVisible()
+    await page.goto("/setup")
+
     await page.getByLabel("Your name").fill(OWNER_NAME)
     await page.getByLabel("Password", { exact: true }).fill(OWNER_PASSWORD)
     await page.getByLabel("Repeat password").fill(OWNER_PASSWORD)

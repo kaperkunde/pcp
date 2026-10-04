@@ -179,8 +179,16 @@ git pull
 docker compose -f docker-compose.yaml -f docker-compose.https.yaml up -d --build
 ```
 
-**Backing up.** Everything PCP keeps is in one volume: the vault, the
-settings and the certificate. Copy it to a file now and then:
+**Backing up.** Settings → Export writes everything PCP holds to one file,
+locked with an export password you choose; Settings → Restore (or "Restore an
+export instead" on a fresh PCP's setup page) puts it back, on this machine or
+another, and your password, recovery key and API tokens keep working. Restoring
+replaces everything on the PCP it is done on, so export that one first if you
+may want it back. Keep the file with your other backups: it holds the vault as
+encrypted as it is here, but the dynamic DNS token in plain text.
+
+Everything PCP keeps is also in one volume: the vault, the settings and the
+certificate. Copying it is the other way to back up:
 
 ```bash
 docker run --rm -v pcp-data:/data -v "$PWD":/backup busybox \

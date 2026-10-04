@@ -2,7 +2,11 @@
 
 ## Setup
 
-Node 22 (`nvm use` reads `.nvmrc`) and pnpm 10.
+Node 24 (`nvm use` reads `.nvmrc`) and pnpm 10. The desktop app runs the
+server on the Node inside Electron (24 in Electron 42), so `.nvmrc`, the
+Docker image and `engines` follow Electron's Node major: what CI tests is
+what both ship. `.npmrc` has `engine-strict`, so an older Node stops the
+install rather than half-working.
 
 ```bash
 pnpm install
@@ -162,6 +166,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in           |
 | `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server   |
 | `lib/core/migrate.ts`                | Boot-time migrations                                          |
+| `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts     |
 | `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
 | `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
 | `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |

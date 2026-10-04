@@ -9,6 +9,7 @@ import {
   SETTING_PUBLIC_URL,
 } from "@/lib/core/settings"
 import { ownerVault } from "@/lib/core/vault"
+import { originFromHeaders } from "@/lib/server/same-origin"
 
 /**
  * Where PCP is reachable from outside, for OAuth redirect URIs and the
@@ -17,15 +18,7 @@ import { ownerVault } from "@/lib/core/vault"
  * came in. The owner can pin it in Settings when that guess is wrong.
  */
 
-export function originFromHeaders(hdrs: Headers): string {
-  const proto = hdrs.get("x-forwarded-proto")?.split(",")[0]?.trim() || "http"
-  const host =
-    hdrs.get("x-forwarded-host")?.split(",")[0]?.trim() ||
-    hdrs.get("host") ||
-    "localhost:3000"
-
-  return `${proto}://${host}`
-}
+export { originFromHeaders }
 
 export async function requestOrigin(): Promise<string> {
   return originFromHeaders(await headers())
