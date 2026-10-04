@@ -568,6 +568,10 @@ keeps memories, both below):
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with
   light stemming) and returns `server/tool — summary` lines.
+- `list_tools(server, offset?)` names every tool the token sees on one
+  server, by name, with its level (`allowed` or `ask`) and a summary,
+  `LIST_PAGE_SIZE` at a time (`listTools` in `lib/core/search.ts`), so an
+  access review does not depend on what a search happens to rank.
 - `describe_tool(server, tool)` returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
   published it, whether the tool runs at once or asks first, and for an API
@@ -649,7 +653,9 @@ many at once (`lib/core/access-requests.ts`): each change names a server,
 tool names or `*` patterns (none for the whole server) and a level, later
 changes winning, so a catalogue of hundreds of tools can be set in a call.
 Blocked tools stay hidden: no name or pattern reaches them. The proposal is
-a request of kind `access` holding one level per tool that would change. Its
+a request of kind `access` holding one level per tool that would change;
+the assistant is told those tools by name, by server and level
+(`listAccessLevels`, up to `MAX_LISTED_TOOLS`), to check its patterns. Its
 page fills the levels in over the token's current ones and marks each
 change; the owner can change any of them, and only their save there writes
 anything (`applyAccessRequest`, once). The kind's only decision is "Not

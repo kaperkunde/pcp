@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest"
 
-import { searchTools, summarize, tokenize, type ToolCandidate } from "./search"
+import {
+  listTools,
+  searchTools,
+  summarize,
+  tokenize,
+  type ListedTool,
+  type ToolCandidate,
+} from "./search"
 
 const tools: ToolCandidate[] = [
   {
@@ -90,5 +97,48 @@ describe("helpers", () => {
     )
     expect(summarize("x".repeat(200), 50)).toHaveLength(50)
     expect(summarize("First line\nSecond line")).toBe("First line")
+  })
+})
+
+describe("listTools", () => {
+  const many: ListedTool[] = Array.from({ length: 5 }, (_, index) => ({
+    name: `tool_${5 - index}`,
+    title: null,
+    description: `Does thing ${5 - index}.`,
+    access: index === 0 ? "allowed" : "ask",
+  }))
+
+  it("names every tool by name order, with its level", () => {
+    expect(listTools("porkbun", many).split("\n")).toEqual([
+      "porkbun: 5 tools, 1 allowed and 4 ask the owner first.",
+      "porkbun/tool_1 [ask] — Does thing 1.",
+      "porkbun/tool_2 [ask] — Does thing 2.",
+      "porkbun/tool_3 [ask] — Does thing 3.",
+      "porkbun/tool_4 [ask] — Does thing 4.",
+      "porkbun/tool_5 [allowed] — Does thing 5.",
+    ])
+  })
+
+  it("pages through a long list without losing a tool", () => {
+    const first = listTools("porkbun", many, { size: 2 }).split("\n")
+    expect(first[0]).toContain("These are 1–2.")
+    expect(first.at(-1)).toBe("More: call list_tools again with offset 2.")
+
+    const seen = [0, 2, 4].flatMap((offset) =>
+      listTools("porkbun", many, { offset, size: 2 })
+        .split("\n")
+        .filter((line) => line.startsWith("porkbun/")),
+    )
+    expect(seen).toHaveLength(5)
+    expect(listTools("porkbun", many, { offset: 4, size: 2 })).not.toContain(
+      "More:",
+    )
+  })
+
+  it("says so for an empty server or an offset past the end", () => {
+    expect(listTools("porkbun", [])).toBe("porkbun has no tools you can see.")
+    expect(listTools("porkbun", many, { offset: 5 })).toContain(
+      "nothing from offset 5",
+    )
   })
 })

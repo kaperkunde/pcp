@@ -51,7 +51,13 @@ import type { SchemaProblem } from "./openapi/lint"
 import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog } from "./request-log"
 import { canRereadTools, type SyncResult } from "./catalogue"
-import { searchTools, summarize, type ToolCandidate } from "./search"
+import {
+  LIST_PAGE_SIZE,
+  listTools,
+  searchTools,
+  summarize,
+  type ToolCandidate,
+} from "./search"
 import { findTextSecretByName, validateSecretName } from "./secrets"
 import { validateServerUrl, type AuthType } from "./servers"
 import { effectiveAccess, loadToolAccess } from "./tool-access"
@@ -309,7 +315,7 @@ export function buildInstructions(
 
   return [
     ...memoryLead(memories),
-    "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it. Refer to tools as server/tool.",
+    "PCP is a gateway to the owner's MCP servers and APIs. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it; list_tools names every tool on one server. Refer to tools as server/tool.",
     'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
     "Servers:",
     ...lines,
@@ -520,7 +526,7 @@ export function buildGatewayServer(
     {
       title: "Search tools",
       description:
-        'Find tools across the owner\'s MCP servers by describing what you want to do (e.g. "create a github issue", "send email"). Returns matching tools as server/tool with a one-line summary; call describe_tool before using one.',
+        'Find tools across the owner\'s MCP servers by describing what you want to do (e.g. "create a github issue", "send email"). Returns matching tools as server/tool with a one-line summary; call describe_tool before using one. To see every tool on a server, use list_tools.',
       inputSchema: z.object({
         query: z
           .string()
@@ -553,7 +559,7 @@ export function buildGatewayServer(
           return text(
             servers.every((entry) => visibleTools(entry).length === 0)
               ? "No tools are known yet. The owner can refresh each server's tools in PCP."
-              : `No tools match "${args.query}". Try other words, or search with an empty query to list everything.`,
+              : `No tools match "${args.query}". Try other words, or list_tools for every tool on a server.`,
           )
         }
 
@@ -565,6 +571,52 @@ export function buildGatewayServer(
         return text(lines.join("\n"))
       },
     ),
+  )
+
+  server.registerTool(
+    "list_tools",
+    {
+      title: "List a server's tools",
+      description: `Every tool on one server, by name, with whether it runs at once ("allowed") or asks the owner first ("ask") and a one-line summary; ${LIST_PAGE_SIZE} at a time, the rest with offset. For reviewing what a server offers, or checking names and patterns for propose_tool_access; search_tools finds a tool for a task.`,
+      inputSchema: z.object({
+        server: z
+          .string()
+          .describe(
+            `The server: ${slugs.length ? slugs.join(", ") : "(none)"}.`,
+          ),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Skip this many tools, by name order (default 0)."),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    logged("list_tools", (args) => ({
+      server: (args as { server?: string }).server,
+    }))(async (args: { server: string; offset?: number }) => {
+      const entry = bySlug.get(args.server)
+
+      if (!entry) {
+        return failure(
+          `No server called ${args.server}. Servers: ${slugs.join(", ") || "(none)"}.`,
+        )
+      }
+
+      return text(
+        listTools(
+          entry.slug,
+          visibleTools(entry).map((tool) => ({
+            name: tool.name,
+            title: tool.title,
+            description: tool.descriptionOverride ?? tool.description,
+            access: tool.access === "allowed" ? "allowed" : "ask",
+          })),
+          { offset: args.offset },
+        ),
+      )
+    }),
   )
 
   server.registerTool(

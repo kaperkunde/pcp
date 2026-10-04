@@ -115,6 +115,7 @@ test("issues an API token and describes the servers behind it", async ({
   const { instructions, tools, serverInfo } = await initialize(baseURL!, token)
   expect(tools).toEqual([
     "search_tools",
+    "list_tools",
     "describe_tool",
     "call_tool",
     "check_permission",
@@ -159,6 +160,18 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
     server: SLUG,
   })
   expect(toolText(scoped)).toContain(`${SLUG}/add_numbers`)
+
+  // Every tool on the server, with its level, without searching for each.
+  const listed = await callTool(baseURL!, token, "list_tools", {
+    server: SLUG,
+  })
+  expect(listed.body.result?.isError ?? false, toolText(listed)).toBe(false)
+  expect(toolText(listed).split("\n")).toEqual([
+    `${SLUG}: 3 tools, 3 allowed and 0 ask the owner first.`,
+    expect.stringMatching(new RegExp(`^${SLUG}/add_numbers \\[allowed\\]`)),
+    expect.stringMatching(new RegExp(`^${SLUG}/echo_auth \\[allowed\\]`)),
+    expect.stringMatching(new RegExp(`^${SLUG}/send_postcard \\[allowed\\]`)),
+  ])
 
   const described = await callTool(baseURL!, token, "describe_tool", {
     server: SLUG,

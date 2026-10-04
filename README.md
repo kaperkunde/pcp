@@ -152,12 +152,13 @@ and these tools:
 | Tool                  | What it does                                                                                                                                                      |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                                                                            |
+| `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                          |
 | `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                      |
 | `call_tool`           | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs, and `decode` decodes base64 text in it (an email's body). |
 | `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                         |
 | `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                   |
 | `register_server`     | Proposes a new MCP server, or an API from an OpenAPI 3 schema (text or a URL), with no auth, a secret named by name, or OAuth.                                    |
-| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers; you review and save it in PCP.                                                           |
+| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                       |
 
 A tool you have not decided about answers "Not done yet" and asks you: the
 assistant ends its reply with a link to the request in PCP. Answer there,

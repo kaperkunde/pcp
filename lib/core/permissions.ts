@@ -12,6 +12,7 @@ import {
   checkAccessLevels,
   describeAccessAsk,
   describeSavedAccess,
+  listAccessLevels,
   writeAccessLevels,
   type AccessAsk,
   type AccessLevel,
@@ -628,9 +629,9 @@ async function outcomeFromRow(
     : text("There is no permission request with that id.", true)
 }
 
-function pendingText(view: PermissionView): string {
+function pendingText(view: PermissionView, detail?: string): string {
   if (view.kind === "access") {
-    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. When they say they have saved, call check_permission with id "${view.id}": it says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
+    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}${detail ? `\n\n${detail}` : ""}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. When they say they have saved, call check_permission with id "${view.id}": it says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
   }
 
   const typed = view.secretToEnter
@@ -698,8 +699,29 @@ export async function withPermission(
   }
 
   const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
+  // The assistant hears which tools it named, to check its own patterns;
+  // the page shows the owner the same levels in full.
+  const detail =
+    ask.kind === "access"
+      ? listAccessLevels(
+          ask.input.levels,
+          await db().mcpServer.findMany({
+            where: {
+              vaultId: scope.ctx.vaultId,
+              id: {
+                in: [
+                  ...new Set(ask.input.levels.map((level) => level.serverId)),
+                ],
+              },
+            },
+            select: { id: true, slug: true },
+          }),
+        )
+      : undefined
 
-  return text(pendingText(await toView(scope.ctx, row!, scope.publicUrl)))
+  return text(
+    pendingText(await toView(scope.ctx, row!, scope.publicUrl), detail),
+  )
 }
 
 /**

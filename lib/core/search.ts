@@ -154,3 +154,56 @@ export function summarize(description: string, max = 140): string {
 
   return `${sentence.slice(0, max - 1).trimEnd()}…`
 }
+
+/** How many tools one list_tools answer names. */
+export const LIST_PAGE_SIZE = 200
+
+export type ListedTool = {
+  name: string
+  title: string | null
+  description: string
+  access: "allowed" | "ask"
+}
+
+/**
+ * Every tool on one server, by name, for list_tools: a page at a time, so a
+ * server with hundreds of tools is listed whole in a few calls rather than
+ * glimpsed through searches. Each line says whether the tool runs at once.
+ */
+export function listTools(
+  server: string,
+  tools: ListedTool[],
+  {
+    offset = 0,
+    size = LIST_PAGE_SIZE,
+  }: { offset?: number; size?: number } = {},
+): string {
+  if (tools.length === 0) {
+    return `${server} has no tools you can see.`
+  }
+
+  const sorted = tools.slice().sort((a, b) => a.name.localeCompare(b.name))
+
+  if (offset >= sorted.length) {
+    return `${server} has ${sorted.length} tool${sorted.length === 1 ? "" : "s"}; there is nothing from offset ${offset}.`
+  }
+
+  const allowed = sorted.filter((tool) => tool.access === "allowed").length
+  const page = sorted.slice(offset, offset + size)
+  const end = offset + page.length
+
+  return [
+    `${server}: ${sorted.length} tool${sorted.length === 1 ? "" : "s"}, ${allowed} allowed and ${sorted.length - allowed} ask the owner first.${
+      offset > 0 || end < sorted.length
+        ? ` These are ${offset + 1}–${end}.`
+        : ""
+    }`,
+    ...page.map(
+      (tool) =>
+        `${server}/${tool.name} [${tool.access}]${tool.title ? ` (${tool.title})` : ""} — ${summarize(tool.description) || "no description"}`,
+    ),
+    ...(end < sorted.length
+      ? [`More: call list_tools again with offset ${end}.`]
+      : []),
+  ].join("\n")
+}

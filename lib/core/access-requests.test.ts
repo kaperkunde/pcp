@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import {
   describeSavedAccess,
+  listAccessLevels,
+  MAX_LISTED_TOOLS,
   resolveAccessChanges,
   type AccessServer,
 } from "./access-requests"
@@ -109,6 +111,45 @@ describe("resolveAccessChanges", () => {
         { server: "blog", tools: ["read.post"], access: "allowed" },
       ]),
     ).toThrow()
+  })
+})
+
+describe("listAccessLevels", () => {
+  const servers = [
+    { id: "s1", slug: "billing" },
+    { id: "s2", slug: "blog" },
+  ]
+
+  it("names each tool that would change, by server and level", () => {
+    expect(
+      listAccessLevels(
+        [
+          { serverId: "s1", tool: "delete_invoice", access: "blocked" },
+          { serverId: "s1", tool: "list_invoices", access: "allowed" },
+          { serverId: "s1", tool: "list_clients", access: "allowed" },
+          { serverId: "s2", tool: "read_post", access: "allowed" },
+        ],
+        servers,
+      ).split("\n"),
+    ).toEqual([
+      "Tools that would change (those already at the level you asked for are left out):",
+      "- billing, to Blocked: delete_invoice",
+      "- billing, to Allowed: list_invoices, list_clients",
+      "- blog, to Allowed: read_post",
+    ])
+  })
+
+  it("stops naming them past the limit and says how many more", () => {
+    const levels = Array.from({ length: MAX_LISTED_TOOLS + 3 }, (_, i) => ({
+      serverId: "s1",
+      tool: `tool_${i}`,
+      access: "ask" as const,
+    }))
+    const listed = listAccessLevels(levels, servers)
+
+    expect(listed).toContain("tool_0, tool_1")
+    expect(listed).not.toContain(`tool_${MAX_LISTED_TOOLS},`)
+    expect(listed).toContain("- and 3 more, shown to the owner on the page")
   })
 })
 
@@ -227,6 +268,14 @@ describe("proposing tool levels", () => {
     expect(row.toolName).toBe("propose_tool_access")
     expect(textOf(asked)).toContain(`${PUBLIC_URL}/permissions/${row.id}`)
     expect(textOf(asked)).toContain("4 tools would change")
+    // The assistant can check what its patterns caught, and the link is
+    // still last.
+    expect(textOf(asked)).toContain(
+      "- billing, to Allowed: list_clients, list_invoices",
+    )
+    expect(textOf(asked)).toContain("- billing, to Blocked: delete_invoice")
+    expect(textOf(asked)).toContain("- blog, to Allowed: read_post")
+    expect(textOf(asked).trimEnd()).toMatch(/permissions\/[\w-]+\S*$/)
 
     // The same proposal again finds the same request.
     await propose(scope)
