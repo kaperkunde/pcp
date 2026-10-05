@@ -159,6 +159,19 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     block: "Block this site",
     decline: "Not now",
   },
+  // The browser opening a site: the same lines as web fetch decide it.
+  // Allow once lets that tab open the site's pages while it is open.
+  browse: {
+    allow_once: "Allow once",
+    always: "Always allow this site",
+    block: "Block this site",
+    decline: "Not now",
+  },
+  // A tab the assistant handed over: the owner says when they are done.
+  browser_handover: {
+    allow_once: "Done",
+    decline: "Not now",
+  },
 }
 
 /** The answers the owner is offered, in order, with their labels. */

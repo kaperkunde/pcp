@@ -85,6 +85,13 @@ import {
   resultNotices,
   resultOpener,
 } from "./tool-results"
+import { finishHandover, performNavigate } from "./browser/call"
+import { describeBrowseAsk, describeHandoverAsk } from "./browser/describe"
+import {
+  isOwnerNeeded,
+  type BrowseAsk,
+  type HandoverAsk,
+} from "./browser/types"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
   describeFetchAsk,
@@ -157,6 +164,8 @@ export type PermissionAsk =
   | MemoryAsk
   | AccessAsk
   | { kind: "fetch"; input: FetchArgs }
+  | { kind: "browse"; input: BrowseAsk }
+  | { kind: "browser_handover"; input: HandoverAsk }
 
 /** Runs what the owner allowed. Tests swap in a stub. */
 export type PermissionExecutor = {
@@ -164,6 +173,8 @@ export type PermissionExecutor = {
   syncTools: typeof syncServerTools
   /** web_fetch's request; the real one when left out. */
   fetchWeb?: typeof fetchWeb
+  /** The browser opening a site the owner allowed; the real one when left out. */
+  browse?: typeof performNavigate
 }
 
 const defaultExecutor: PermissionExecutor = {
@@ -185,6 +196,8 @@ export type PermissionView = {
   warning: string | null
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
+  /** The browser tab a request is about, for the page to show it live. */
+  browserTabId: string | null
   url: string
   createdAt: Date
   expiresAt: Date
@@ -271,6 +284,7 @@ export async function runCall(
     const context = { serverId: server.id, toolName }
     const answer = await executor.callTool(ctx, server, toolName, args, {
       publicUrl,
+      tokenId,
       keep: keepers.text,
       keepBytes: keepers.bytes,
       open: resultOpener(ctx, tokenId),
@@ -291,6 +305,12 @@ export async function runCall(
       context,
     )
   } catch (error) {
+    // The browser needs the owner first: a site to allow, or a tab handed
+    // over. Asked like any other request.
+    if (isOwnerNeeded(error)) {
+      return withPermission({ ctx, tokenId, publicUrl }, error.ask)
+    }
+
     if (
       isPcpError(error) &&
       error.code === "unauthorized" &&
@@ -342,6 +362,16 @@ function describeAsk(ask: PermissionAsk): {
         target: `fetch:${ask.input.method} ${ask.input.url}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "browse":
+      return {
+        target: `browse:${ask.input.tabId ?? "new"} ${ask.input.url}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "browser_handover":
+      return {
+        target: `handover:${ask.input.tabId}`,
+        args: ask.input as Record<string, unknown>,
+      }
   }
 }
 
@@ -361,6 +391,10 @@ function toolNameOf(ask: PermissionAsk): string {
       return "update_endpoint"
     case "fetch":
       return "web_fetch"
+    case "browse":
+      return ask.input.toolName
+    case "browser_handover":
+      return "hand_over"
     default:
       return "memory"
   }
@@ -457,6 +491,20 @@ async function summarizeRow(
     const { shown } = args as EndpointChangeAsk
 
     return { ...shown, lines: [...shown.lines, asker] }
+  }
+
+  if (row.kind === "browse") {
+    const asked = describeBrowseAsk(args as BrowseAsk, {
+      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+    })
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "browser_handover") {
+    const asked = describeHandoverAsk(args as HandoverAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
   }
 
   if (row.kind === "fetch") {
@@ -669,6 +717,7 @@ async function toView(
     tool: row.toolName,
     ...summary,
     memory,
+    browserTabId: browserTabOf(ctx, row),
     url: permissionUrl(publicUrl, row.id),
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
@@ -681,6 +730,19 @@ async function toView(
         : null,
     secretToEnter: await secretToEnter(ctx, row),
   }
+}
+
+/** The tab a browser request is about, if it names one. */
+function browserTabOf(
+  ctx: VaultContext,
+  row: PermissionRequest,
+): string | null {
+  if (row.kind !== "browse" && row.kind !== "browser_handover") {
+    return null
+  }
+
+  const tabId = (readArgs(ctx, row) as { tabId?: unknown }).tabId
+  return typeof tabId === "string" ? tabId : null
 }
 
 /** A secret the owner types in to agree to a new server, if there is one. */
@@ -817,7 +879,9 @@ export async function withPermission(
         serverId:
           ask.kind === "call"
             ? ask.server.id
-            : ask.kind === "endpoint_change"
+            : ask.kind === "endpoint_change" ||
+                ask.kind === "browse" ||
+                ask.kind === "browser_handover"
               ? ask.input.serverId
               : null,
         toolName: toolNameOf(ask),
@@ -902,7 +966,7 @@ export async function decidePermission(
   const kind = row.kind as PermissionKind
   // Only a tool call (for the tool) and a web request (for the site) have
   // "always" and "block": any other answer is about this one request.
-  const settles = kind === "call" || kind === "fetch"
+  const settles = kind === "call" || kind === "fetch" || kind === "browse"
   const choice: PermissionDecision = !settles
     ? decision === "always"
       ? "allow_once"
@@ -932,13 +996,28 @@ export async function decidePermission(
 
   // The site a web request goes to, for the answers that settle it.
   const host =
-    kind === "fetch" ? fetchHostOf(readArgs(ctx, row) as FetchArgs) : null
+    kind === "fetch"
+      ? fetchHostOf(readArgs(ctx, row) as FetchArgs)
+      : kind === "browse"
+        ? fetchHostOf(readArgs(ctx, row) as BrowseAsk)
+        : null
 
   if (choice === "block" || choice === "decline") {
     if (choice === "block" && host) {
       await writeSiteAccess(ctx.vaultId, row.tokenId, host, "blocked")
     } else if (choice === "block" && row.serverId) {
       await writeToolAccess(row.tokenId, row.serverId, row.toolName, "blocked")
+    }
+
+    if (kind === "browser_handover") {
+      await finishHandover(ctx, (readArgs(ctx, row) as HandoverAsk).tabId)
+
+      return finishUnrun(
+        ctx,
+        row,
+        publicUrl,
+        "The owner said not now, so they did not do it, and the tab is back with the browser tools.",
+      )
     }
 
     return finishUnrun(
@@ -1003,7 +1082,17 @@ export async function decidePermission(
             )
           : kind === "fetch"
             ? await executeFetch(ctx, row, publicUrl, executor)
-            : await executeRegister(ctx, row, publicUrl, executor, secretValue)
+            : kind === "browse"
+              ? await executeBrowse(ctx, row, publicUrl, executor)
+              : kind === "browser_handover"
+                ? await executeHandover(ctx, row)
+                : await executeRegister(
+                    ctx,
+                    row,
+                    publicUrl,
+                    executor,
+                    secretValue,
+                  )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -1069,6 +1158,51 @@ async function executeCall(
     keep: readStoredFields(row.keep),
     executor,
   })
+}
+
+/**
+ * A site the owner let the browser open: opened in the tab the assistant
+ * asked for (or a new one), which may then open that site's pages while
+ * it is open, if the browser is still there for the token.
+ */
+async function executeBrowse(
+  ctx: VaultContext,
+  row: Row,
+  publicUrl: string,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  if (!row.server || row.server.kind !== "browser") {
+    return text("The browser was removed from PCP, so nothing ran.", true)
+  }
+
+  if (!row.server.enabled) {
+    return text("The browser is switched off in PCP, so nothing ran.", true)
+  }
+
+  const asked = readArgs(ctx, row) as BrowseAsk
+
+  return (executor.browse ?? performNavigate)(
+    { ctx, tokenId: row.tokenId, publicUrl, serverId: row.server.id },
+    { tabId: asked.tabId, url: asked.url },
+    { allowedByOwner: true },
+  )
+}
+
+/** The owner is done in a tab an assistant handed them. */
+async function executeHandover(
+  ctx: VaultContext,
+  row: Row,
+): Promise<CallToolResult> {
+  const { tabId } = readArgs(ctx, row) as HandoverAsk
+
+  return (await finishHandover(ctx, tabId))
+    ? text(
+        `The owner is done in tab ${tabId}, and it is back with the browser tools. Take a snapshot to see where it is now.`,
+      )
+    : text(
+        `Tab ${tabId} is gone (it was closed, or the browser has closed since), so there is nothing to go on from. Open the page again.`,
+        true,
+      )
 }
 
 /** A web request the owner allowed, if the token may still make one. */

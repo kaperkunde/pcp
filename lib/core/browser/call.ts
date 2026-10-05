@@ -9,6 +9,7 @@ import { isPcpSite } from "../fetch/fetch"
 import { htmlToMarkdown, sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
 import { hiddenCharacter } from "../memories"
+import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "../rate-limit"
 import { decideSite, loadFetchRules } from "../web-fetch"
 import {
@@ -129,6 +130,22 @@ async function driveAs(
   tab.lastUsedAt = Date.now()
   vault.lastTabByToken.set(scope.tokenId, tab.id)
   recomputePrivate(vault)
+}
+
+/**
+ * Whether the owner has the tab. A hand-over nobody answered goes back to
+ * the assistants once its request has expired.
+ */
+function ownerHas(tab: Tab): boolean {
+  if (
+    tab.control === "owner" &&
+    tab.handoverSince !== null &&
+    Date.now() - tab.handoverSince > PERMISSION_TTL_MS
+  ) {
+    setControl(tab, "assistant")
+  }
+
+  return tab.control === "owner"
 }
 
 function ownerHolds(tab: Tab): CallToolResult {
@@ -275,7 +292,7 @@ export async function performNavigate(
   return withVault(vault, async () => {
     let tab = ask.tabId ? (vault.tabs.get(ask.tabId) ?? null) : null
 
-    if (tab && tab.control === "owner") {
+    if (tab && ownerHas(tab)) {
       return ownerHolds(tab)
     }
 
@@ -408,7 +425,7 @@ async function tabs(
     return picked
   }
 
-  if (picked.control === "owner") {
+  if (ownerHas(picked)) {
     return ownerHolds(picked)
   }
 
@@ -435,7 +452,7 @@ async function onTab(
     return picked
   }
 
-  if (picked.control === "owner") {
+  if (ownerHas(picked)) {
     return ownerHolds(picked)
   }
 
