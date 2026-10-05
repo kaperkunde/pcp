@@ -1,7 +1,11 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { PcpError } from "../errors"
-import { AddressBlockedError } from "../openapi/address"
+import {
+  AddressBlockedError,
+  isOwnAddress,
+  isPublicAddress,
+} from "../openapi/address"
 import {
   decodeUtf8,
   isJson,
@@ -32,11 +36,13 @@ import { siteKey } from "./rules"
 /**
  * Sends one web_fetch request and turns the answer into a tool result.
  *
- * Public addresses only, always: the name is resolved by PCP and every
+ * Public addresses only, unless the owner allowed private ones for the token
+ * (a "private" line, fetch/rules.ts): the name is resolved by PCP and every
  * address it answers with is checked as the socket connects
  * (openapi/transport.ts), so a page cannot be used to reach the owner's own
- * network. No secret is read and no cookie is kept: what goes out is what
- * the assistant wrote, with PCP's user agent.
+ * network behind their back. PCP's own address is never reached, allowed or
+ * not. No secret is read and no cookie is kept: what goes out is what the
+ * assistant wrote, with PCP's user agent.
  *
  * Redirects are followed by hand and only within the site the owner decided
  * about. One to another site ends the call with where it pointed, so that
@@ -46,7 +52,37 @@ import { siteKey } from "./rules"
 const USER_AGENT = `pcp/${PCP_VERSION} (web_fetch)`
 const REDIRECTS = new Set([301, 302, 303, 307, 308])
 
-export type FetchOptions = Pick<SendOptions, "addressCheck">
+export type FetchOptions = Pick<SendOptions, "addressCheck"> & {
+  /** The owner allowed private addresses for the token. */
+  allowPrivate?: boolean
+  /** PCP's own address, which is refused whatever the levels say. */
+  publicUrl?: string
+}
+
+/** The check every address a request connects to passes. */
+export function addressCheckFor(
+  allowPrivate: boolean,
+): (address: string, port: number) => boolean {
+  // PCP's own address can be a public one (a server's interface): it is
+  // refused either way.
+  return allowPrivate
+    ? (address, port) => !isOwnAddress(address, port)
+    : (address, port) =>
+        isPublicAddress(address) && !isOwnAddress(address, port)
+}
+
+/** Whether an address is PCP's own public one (its site). */
+export function isPcpSite(url: URL, publicUrl: string | undefined): boolean {
+  if (!publicUrl) {
+    return false
+  }
+
+  try {
+    return siteKey(url) === siteKey(new URL(publicUrl))
+  } catch {
+    return false
+  }
+}
 
 function result(text: string, isError: boolean): CallToolResult {
   return {
@@ -82,10 +118,18 @@ function headersFor(args: FetchArgs): Record<string, string> {
 
 export async function fetchWeb(
   args: FetchArgs,
-  { addressCheck }: FetchOptions = {},
+  { addressCheck, allowPrivate = false, publicUrl }: FetchOptions = {},
 ): Promise<CallToolResult> {
   const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS)
   const site = siteKey(new URL(args.url))
+  const check = addressCheck ?? addressCheckFor(allowPrivate)
+
+  if (isPcpSite(new URL(args.url), publicUrl)) {
+    throw new PcpError(
+      "forbidden",
+      `${site} is PCP's own address, which web_fetch never reaches.`,
+    )
+  }
   const headers = headersFor(args)
   let url = new URL(args.url)
   let method = args.method
@@ -98,13 +142,15 @@ export async function fetchWeb(
       response = await send(
         url.toString(),
         { method, headers, body, signal },
-        { publicOnly: true, addressCheck },
+        { publicOnly: true, addressCheck: check },
       )
     } catch (error) {
       if (error instanceof AddressBlockedError) {
         throw new PcpError(
           "forbidden",
-          `${error.host} is, or resolves to, a private or local address, and web_fetch only reaches public ones.`,
+          allowPrivate
+            ? `${error.host} is, or resolves to, PCP's own address, which web_fetch never reaches.`
+            : `${error.host} is, or resolves to, a private or local address, which the owner has not allowed for this token. They can allow private addresses on the token's page in PCP.`,
         )
       }
 

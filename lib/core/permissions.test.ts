@@ -16,6 +16,7 @@ import {
   getPermissionView,
   listPendingRequests,
   prunePermissionRequests,
+  runCall,
   withPermission,
   type PermissionExecutor,
   type PermissionScope,
@@ -26,6 +27,7 @@ import { startTestApi, type TestApi } from "./openapi/test-api"
 import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
+import { keepBytes } from "./tool-results"
 import { callServerTool, syncServerTools } from "./upstream"
 import { setupVault } from "./vault"
 
@@ -193,6 +195,50 @@ describe("asking the owner", () => {
     expect(textOf(result)).toBe('{"data":[{"id":1}]}')
   })
 
+  it("keeps what the assistant asked to once the owner allows the call", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              report: `${"x".repeat(300)} THE END`,
+              n: 1,
+            }),
+          },
+        ],
+      }),
+    }
+    const asked = {
+      ...call(server, "add_numbers", { a: 1 }),
+      keep: ["report"],
+    }
+
+    await withPermission(scope, asked)
+    // Keeping something else is another request.
+    await withPermission(scope, { ...asked, keep: ["n"] })
+    expect(await db().permissionRequest.count()).toBe(2)
+
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { keep: JSON.stringify(["report"]) },
+    })
+    const result = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    const kept = await db().toolResult.findFirstOrThrow()
+
+    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect(textOf(result)).toContain(`report → ${kept.id} (text/plain`)
+    expect(textOf(result)).toContain(`"report":{"$result":"${kept.id}"`)
+    expect(textOf(result)).not.toContain("THE END")
+  })
+
   it("decodes what the assistant asked to once the owner allows the call", async () => {
     const { ctx, scope, server } = await setup()
     const executor: PermissionExecutor = {
@@ -246,6 +292,112 @@ describe("asking the owner", () => {
     expect(view?.lines).toContain("to: Ada")
     expect(view?.lines).toContain('Asked by the token "Claude"')
     expect(view?.warning).toMatch(/destructive/)
+  })
+})
+
+describe("kept results in a call", () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+  async function keepFile(
+    ctx: VaultContext,
+    serverId: string,
+    tokenId: string,
+  ) {
+    return (
+      await keepBytes(ctx, {
+        tokenId,
+        serverId,
+        toolName: "get_attachment",
+        bytes: PNG,
+        mediaType: "image/png",
+        name: "dot.png",
+      })
+    ).id
+  }
+
+  it("shows the owner what each handle is, and warns when one is gone", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const id = await keepFile(ctx, server.id, tokenId)
+    await withPermission(
+      scope,
+      call(server, "send_postcard", {
+        attachments: [{ $result: id }, { $result: "gone" }],
+      }),
+    )
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(view?.lines).toContain(
+      `attachments: [{"$result":"${id}"},{"$result":"gone"}]`,
+    )
+    expect(
+      view?.lines.find((line) => line.startsWith(`Kept result ${id}:`)),
+    ).toMatch(
+      /^Kept result [^:]+: dot\.png, image\/png, 8 bytes, from postcards\/get_attachment, readable until \d{4}-/,
+    )
+    expect(view?.lines).toContain(
+      "Kept result gone: no longer available for this token; the call will fail",
+    )
+  })
+
+  it("hands the upstream a way to open the token's own results, and no other's", async () => {
+    const { ctx, server, tokenId } = await setup()
+    const id = await keepFile(ctx, server.id, tokenId)
+    const seen: Array<{ own: unknown; other: unknown }> = []
+    const executor: PermissionExecutor = {
+      callTool: async (_ctx, _server, _tool, _args, options) => {
+        const opened = await options.open?.(id)
+        seen.push({ own: opened?.bytes().equals(PNG), other: null })
+
+        return { content: [{ type: "text", text: "ok" }] }
+      },
+      syncTools: async () => ({ status: "ok", message: "", toolCount: 3 }),
+    }
+
+    const row = await db().mcpServer.findFirstOrThrow()
+    await runCall(
+      ctx,
+      row,
+      "add_numbers",
+      {},
+      {
+        publicUrl: PUBLIC_URL,
+        tokenId,
+        executor,
+      },
+    )
+
+    const { id: other } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const foreign: PermissionExecutor = {
+      callTool: async (_ctx, _server, _tool, _args, options) => {
+        seen.push({ own: null, other: await options.open?.(id) })
+
+        return { content: [{ type: "text", text: "ok" }] }
+      },
+      syncTools: executor.syncTools,
+    }
+    await runCall(
+      ctx,
+      row,
+      "add_numbers",
+      {},
+      {
+        publicUrl: PUBLIC_URL,
+        tokenId: other,
+        executor: foreign,
+      },
+    )
+
+    expect(seen).toEqual([
+      { own: true, other: null },
+      { own: null, other: null },
+    ])
   })
 })
 

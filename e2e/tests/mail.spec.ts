@@ -146,11 +146,11 @@ test("an assistant reads, files and sends mail through the gateway", async ({
   )
   const body = long.body as {
     truncated: boolean
-    result: { id: string; length: number }
+    result: { $result: string; length: number }
   }
   expect(body.truncated).toBe(true)
   const end = await callTool(baseURL!, token, "read_result", {
-    id: body.result.id,
+    id: body.result.$result,
     offset: body.result.length - 14,
   })
   expect(toolText(end)).toMatch(/this is the end\]\nYours, Charles$/)
@@ -163,13 +163,24 @@ test("an assistant reads, files and sends mail through the gateway", async ({
     }),
   )
   expect(csv).toMatchObject({ name: "parts.csv", text: "part,count\ncog,42\n" })
-  const png = await callTool(baseURL!, token, "call_tool", {
-    server: SLUG,
-    tool: "get_attachment",
-    arguments: { id: "e1", attachment: "blob-png" },
+  // A file is not shown: it is kept, and its handle stands for it.
+  const png = json(
+    await callTool(baseURL!, token, "call_tool", {
+      server: SLUG,
+      tool: "get_attachment",
+      arguments: { id: "e1", attachment: "blob-png" },
+    }),
+  )
+  expect(png).toMatchObject({
+    name: "drawing.png",
+    result: { type: "image/png", size: 12, name: "drawing.png" },
   })
-  expect(png.body.result?.isError).toBe(true)
-  expect(toolText(png)).toContain("text attachments only")
+  expect(png).not.toHaveProperty("text")
+  const described = await callTool(baseURL!, token, "read_result", {
+    id: (png.result as { $result: string }).$result,
+  })
+  expect(toolText(described)).toMatch(/drawing\.png, image\/png, 12 bytes/)
+  expect(toolText(described)).toContain("PCP does not show binary data")
 
   const sent = json(
     await callTool(baseURL!, token, "call_tool", {

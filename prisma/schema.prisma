@@ -37,6 +37,7 @@ model Vault {
   sharedToolAccess   VaultToolAccess[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
+  browserProfile     BrowserProfile?
 
   @@map("vault")
 }
@@ -214,7 +215,7 @@ model PermissionRequest {
   tokenId          String     @map("token_id")
   token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   /// call | register | memory_share | memory_change | access | endpoint_change
-  /// | fetch
+  /// | fetch | browse | browser_handover
   kind             String
   serverId         String?    @map("server_id")
   server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
@@ -235,6 +236,9 @@ model PermissionRequest {
   /// call: where the assistant asked for base64 text in the answer to be
   /// decoded (call_tool's decode), as a JSON list of paths.
   decode           String?
+  /// call: the parts of the answer the assistant asked to be kept as results
+  /// and handed back as handles (call_tool's keep), as a JSON list of paths.
+  keep             String?
   /// pending | running | executed | failed | declined
   status           String     @default("pending")
   /// Where the owner answered: app | form | url | web
@@ -328,7 +332,8 @@ model McpServer {
   description String @default("")
   /// mcp: the Streamable HTTP endpoint. openapi: the API's base URL, which
   /// every operation's path is appended to. jmap: the session URL. imap:
-  /// imaps://host:port, or imap://host:port for STARTTLS.
+  /// imaps://host:port, or imap://host:port for STARTTLS. browser: the
+  /// fixed "pcp:browser", which no request is ever sent to.
   url         String
   enabled     Boolean @default(true)
 
@@ -377,10 +382,11 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  /// mcp | openapi | jmap | imap. An openapi server is an HTTP API
+  /// mcp | openapi | jmap | imap | browser. An openapi server is an HTTP API
   /// described by an OpenAPI schema; its tools are the schema's operations
   /// and PCP calls them directly (lib/core/endpoints.ts). jmap and imap are
-  /// mail accounts with a fixed set of mail tools (lib/core/mail/).
+  /// mail accounts with a fixed set of mail tools (lib/core/mail/); browser
+  /// is the vault's headless browser, with its own (lib/core/browser/).
   kind       String  @default("mcp")
   /// openapi: where the schema came from, url | upload.
   specSource String? @map("spec_source")
@@ -404,6 +410,8 @@ model McpServer {
   /// so the credential goes nowhere the owner did not type.
   mailApiUrl      String? @map("mail_api_url")
   mailDownloadUrl String? @map("mail_download_url")
+  /// jmap: where attachments to send are uploaded, on the same origin.
+  mailUploadUrl   String? @map("mail_upload_url")
   /// jmap: the account the session names for mail.
   mailAccountId   String? @map("mail_account_id")
   /// jmap: whether the server lets this account send (submission).
@@ -569,4 +577,27 @@ model ToolResult {
   @@index([tokenId, createdAt])
   @@index([expiresAt])
   @@map("tool_result")
+}
+
+/// The browser's sign-ins (lib/core/browser/): the cookies, local storage
+/// and IndexedDB of every site the vault's headless browser has visited,
+/// as Playwright's storage state. One per vault, kept apart from the
+/// browser's server row, which every gateway request reads, and kept when
+/// that row is removed, until the owner forgets the sites.
+model BrowserProfile {
+  vaultId    String   @id @map("vault_id")
+  vault      Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// The storage state as JSON, AES-256-GCM under the vault's data key
+  /// with "browser_profile:<vaultId>" as associated data.
+  ciphertext Bytes
+  /// For the Browser page, without decrypting: how many sites and cookies,
+  /// and how large the JSON was.
+  sites      Int      @default(0)
+  cookies    Int      @default(0)
+  size       Int      @default(0)
+  /// IndexedDB was left out because the whole would not fit.
+  partial    Boolean  @default(false)
+  savedAt    DateTime @map("saved_at")
+
+  @@map("browser_profile")
 }

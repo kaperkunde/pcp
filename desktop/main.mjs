@@ -8,6 +8,12 @@
 // "Accept connections from other devices" (then on every interface, for port
 // forwarding from a router). Closing the window leaves the server running,
 // so assistants keep reaching it; Quit stops it.
+//
+// Updates: PCP's Settings page offers "Install and restart" when this build
+// can replace itself (updates.mjs, updaterMode). The page cannot reach the
+// wrapper, so the server says in /api/health that the owner asked, and the
+// wrapper, reading it every few seconds, downloads the release from GitHub
+// with electron-updater and restarts into it.
 
 import {
   app,
@@ -22,17 +28,27 @@ import {
 } from "electron"
 import { createWriteStream, mkdirSync } from "node:fs"
 import http from "node:http"
+import { createRequire } from "node:module"
 import net from "node:net"
 import path from "node:path"
 
 import { lanAddresses, readSettings, writeSettings } from "./settings.mjs"
+import {
+  isNewer,
+  parseHealth,
+  pendingInstall,
+  updaterMode,
+} from "./updates.mjs"
 
 const APP_ID = "com.kaperkunde.pcp"
 const REPOSITORY_URL = "https://github.com/kaperkunde/pcp"
 const README_URL = `${REPOSITORY_URL}#readme`
 const ISSUES_URL = `${REPOSITORY_URL}/issues`
+const RELEASES_URL = `${REPOSITORY_URL}/releases/latest`
 const THEME_COLOR = "#131720"
 const STARTUP_TIMEOUT_MS = 90_000
+/** How often the wrapper looks whether the owner asked for an update. */
+const UPDATE_POLL_MS = 15_000
 
 // The same folder whether packaged (PCP.app) or started from a checkout
 // (`electron .`, where the name would otherwise be the package's).
@@ -55,6 +71,17 @@ let window = null
 /** @type {Tray | null} */
 let tray = null
 let quitting = false
+
+// "auto" when this build can replace itself (dist.mjs writes pcpUpdater into
+// the packaged package.json), "manual" otherwise.
+const updater = updaterMode(
+  createRequire(import.meta.url)("./package.json"),
+  app.isPackaged,
+)
+const startedAt = Date.now()
+/** Install requests already acted on, so none is acted on twice. */
+const handledInstalls = new Set()
+let installing = false
 
 if (!app.requestSingleInstanceLock()) {
   // The first instance shows its window (see second-instance below).
@@ -114,6 +141,7 @@ async function start() {
     createTray()
   }
   createWindow()
+  watchForUpdateRequests()
 }
 
 // --- The server -----------------------------------------------------------
@@ -151,8 +179,10 @@ async function startServer() {
       PORT: String(settings.port),
       HOSTNAME: host,
       PCP_DATA_DIR: dataDir,
-      // Lets PCP's own pages say how this app is reached and configured.
+      // Lets PCP's own pages say how this app is reached and configured,
+      // and whether it can install an update itself.
       PCP_DESKTOP: "1",
+      PCP_DESKTOP_UPDATER: updater,
     },
   })
   child.stdout?.on("data", (chunk) => log.write(chunk))
@@ -244,6 +274,31 @@ function isHealthy(port) {
     )
     request.on("timeout", () => request.destroy())
     request.on("error", () => resolve(false))
+  })
+}
+
+/**
+ * What the server says in /api/health, or null.
+ *
+ * @param {number} port
+ */
+function readHealth(port) {
+  return new Promise((resolve) => {
+    const request = http.get(
+      `http://127.0.0.1:${port}/api/health`,
+      { timeout: 2_000 },
+      (response) => {
+        let body = ""
+        response.setEncoding("utf8")
+        response.on("data", (chunk) => {
+          if (body.length < 16_384) body += chunk
+        })
+        response.on("end", () => resolve(parseHealth(body)))
+        response.on("error", () => resolve(null))
+      },
+    )
+    request.on("timeout", () => request.destroy())
+    request.on("error", () => resolve(null))
   })
 }
 
@@ -361,6 +416,103 @@ function createTray() {
   }
 }
 
+// --- Updates --------------------------------------------------------------
+
+function watchForUpdateRequests() {
+  if (updater !== "auto") return
+
+  setInterval(async () => {
+    if (installing || !server) return
+    const request = pendingInstall(await readHealth(settings.port), {
+      startedAt,
+      handled: handledInstalls,
+      current: app.getVersion(),
+    })
+    if (request) void installUpdate(request)
+  }, UPDATE_POLL_MS)
+}
+
+/**
+ * Downloads the release the owner asked for and restarts into it. The files
+ * come from the GitHub Release (the publish settings in electron-builder.yml),
+ * checked against the sizes and hashes in its update file.
+ *
+ * @param {{ id: string, version: string }} request
+ */
+async function installUpdate(request) {
+  installing = true
+  handledInstalls.add(request.id)
+
+  try {
+    const updaterModule = await import("electron-updater")
+    const autoUpdater =
+      updaterModule.autoUpdater ?? updaterModule.default.autoUpdater
+    autoUpdater.autoDownload = false
+    autoUpdater.autoInstallOnAppQuit = false
+    // The release's files keep the same names from one version to the next,
+    // so there is no earlier file to download only the difference against.
+    autoUpdater.disableDifferentialDownload = true
+    // One update file per architecture (dist.mjs): the two Mac builds would
+    // otherwise both write latest-mac.yml. Setting a channel allows a
+    // downgrade, which an update never is.
+    autoUpdater.channel = `latest-${process.arch}`
+    autoUpdater.allowDowngrade = false
+
+    const result = await autoUpdater.checkForUpdates()
+    const found = result?.updateInfo?.version
+
+    if (!found || !isNewer(found, app.getVersion())) {
+      await dialog.showMessageBox(window ?? undefined, {
+        type: "info",
+        message: "There is no newer version of the app to install yet.",
+        detail: `The release may still be on its way. Try again in a few minutes, or download it from ${RELEASES_URL}.`,
+      })
+      return
+    }
+
+    if (Notification.isSupported()) {
+      new Notification({
+        title: `Updating PCP to v${found}`,
+        body: "PCP restarts by itself when the download is done.",
+      }).show()
+    }
+
+    const onProgress = (progress) =>
+      window?.setProgressBar(Math.min(1, Math.max(0, progress.percent / 100)))
+    autoUpdater.on("download-progress", onProgress)
+    try {
+      await autoUpdater.downloadUpdate()
+    } finally {
+      autoUpdater.removeListener("download-progress", onProgress)
+      window?.setProgressBar(-1)
+    }
+
+    // will-quit stops the server, as for any quit.
+    quitting = true
+    autoUpdater.quitAndInstall(true, true)
+  } catch (error) {
+    quitting = false
+    window?.setProgressBar(-1)
+    const choice = await dialog.showMessageBox(window ?? undefined, {
+      type: "error",
+      message: "PCP could not install the update.",
+      detail: `${error instanceof Error ? error.message : String(error)}\n\nDownload the new version and open it instead; your vault stays where it is.`,
+      buttons: ["Open the download page", "OK"],
+      defaultId: 0,
+      cancelId: 1,
+    })
+    if (choice.response === 0) shell.openExternal(RELEASES_URL)
+  } finally {
+    installing = false
+  }
+}
+
+/** Settings → Updates in the window: the version, what is new, how to update. */
+function openUpdates() {
+  showWindow()
+  window?.loadURL(`${localUrl()}settings#updates`)
+}
+
 // --- Menus ----------------------------------------------------------------
 
 function pcpMenuItems() {
@@ -383,6 +535,7 @@ function pcpMenuItems() {
           },
         ]),
     { type: "separator" },
+    { label: "Check for updates…", click: openUpdates },
     { label: "Change the port…", click: changePort },
     { label: "Show the data folder", click: () => shell.openPath(dataDir) },
     {

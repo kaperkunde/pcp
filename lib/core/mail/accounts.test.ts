@@ -10,7 +10,15 @@ import { runCall } from "../permissions"
 import { createSecret, deleteSecret, listSecrets } from "../secrets"
 import { getServer, listServers, updateServer } from "../servers"
 import { scratchDatabase } from "../test-db"
-import { readResult, resultKeeper } from "../tool-results"
+import {
+  keepBytes,
+  keepResult,
+  openResult,
+  readResult,
+  resultKeeper,
+  resultKeepers,
+  resultOpener,
+} from "../tool-results"
 import { callServerTool, syncServerTools } from "../upstream"
 import { setupVault } from "../vault"
 import { createMailAccount, updateMailAccount } from "./accounts"
@@ -87,6 +95,7 @@ describe("adding an account", () => {
       kind: "jmap",
       status: "ok",
       mailApiUrl: `${api.origin}/jmap/api`,
+      mailUploadUrl: `${api.origin}/jmap/upload/{accountId}`,
       mailAccountId: "acct-1",
       mailSubmission: true,
     })
@@ -207,6 +216,7 @@ describe("adding an account", () => {
         oauthTokensId: tokens.id,
         oauthConnectedAt: new Date(),
         mailApiUrl: "x",
+        mailUploadUrl: "z",
         mailAccountId: "y",
       },
     })
@@ -226,6 +236,7 @@ describe("adding an account", () => {
       oauthTokensId: null,
       oauthConnectedAt: null,
       mailApiUrl: null,
+      mailUploadUrl: null,
     })
     expect(
       await db().secret.findUnique({ where: { id: "managed" } }),
@@ -280,22 +291,68 @@ describe("calling its tools", () => {
         body: {
           text: string
           truncated: boolean
-          result: { id: string; length: number }
+          result: { $result: string; length: number; type: string }
         }
       }
     ).body
 
     expect(body.truncated).toBe(true)
     expect(body.text).toHaveLength(20_000)
+    expect(body.result.type).toBe("text/plain")
     const whole = await readResult(ctx, {
       tokenId,
-      id: body.result.id,
+      id: body.result.$result,
       offset: body.result.length - 14,
     })
     expect(whole.text).toBe("Yours, Charles")
   })
 
-  it("reads a text attachment, and says what it will not read", async () => {
+  it("keeps an attachment of any kind for the token, and shows a text one's start", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const keepers = resultKeepers(ctx, tokenId)
+    const options = { ...PUBLIC, keep: keepers.text, keepBytes: keepers.bytes }
+
+    const csv = await callServerTool(
+      ctx,
+      server,
+      "get_attachment",
+      { id: "e1", attachment: "blob-csv" },
+      options,
+    )
+    expect(csv.structuredContent).toMatchObject({
+      name: "parts.csv",
+      text: "part,count\ncog,42\n",
+      truncated: false,
+      result: { type: "text/csv; charset=utf-8", size: 18, name: "parts.csv" },
+    })
+
+    const png = await callServerTool(
+      ctx,
+      server,
+      "get_attachment",
+      { id: "e1", attachment: "blob-png" },
+      options,
+    )
+    const answer = png.structuredContent as {
+      result: { $result: string; type: string; size: number }
+      text?: string
+    }
+
+    expect(answer.result).toMatchObject({ type: "image/png", size: 12 })
+    expect(answer.text).toBeUndefined()
+
+    const opened = await openResult(ctx, { tokenId, id: answer.result.$result })
+    expect(opened?.bytes().subarray(0, 4)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    )
+  })
+
+  it("refuses a file it cannot keep, and reads a text one without a keeper", async () => {
     const server = await ready()
 
     const csv = await callServerTool(
@@ -306,7 +363,6 @@ describe("calling its tools", () => {
       PUBLIC,
     )
     expect(csv.structuredContent).toMatchObject({
-      name: "parts.csv",
       text: "part,count\ncog,42\n",
     })
 
@@ -318,7 +374,7 @@ describe("calling its tools", () => {
       PUBLIC,
     )
     expect(png.isError).toBe(true)
-    expect(textOf(png)).toMatch(/text attachments only/)
+    expect(textOf(png)).toMatch(/only as a kept result/)
   })
 
   it("sends, and files the email in Sent", async () => {
@@ -339,6 +395,145 @@ describe("calling its tools", () => {
       sent: { savedTo: "Sent", subject: "Hello" },
     })
     expect(fake.sent).toHaveLength(1)
+  })
+
+  it("sends the text a handle stands for, and refuses an unknown one before anything is sent", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const kept = await keepResult(ctx, {
+      tokenId,
+      serverId: server.id,
+      toolName: "get_attachment",
+      text: "The whole report, kept.",
+      mediaType: "text/plain",
+    })
+    const open = resultOpener(ctx, tokenId)
+
+    await callServerTool(
+      ctx,
+      server,
+      "send_email",
+      {
+        to: ["charles@example.com"],
+        subject: "Report",
+        text: { $result: kept.id },
+      },
+      { ...PUBLIC, open },
+    )
+    expect(fake.sent).toHaveLength(1)
+    expect(fake.emails.at(-1)).toMatchObject({
+      subject: "Report",
+      text: "The whole report, kept.",
+    })
+
+    const before = fake.requests.length
+
+    await expect(
+      callServerTool(
+        ctx,
+        server,
+        "send_email",
+        { to: ["charles@example.com"], subject: "x", text: { $result: "no" } },
+        { ...PUBLIC, open },
+      ),
+    ).rejects.toThrow(/No kept result "no" for this token/)
+    expect(fake.requests.length).toBe(before)
+  })
+
+  it("forwards an attachment it read, by its handle, under its own name or another", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const keepers = resultKeepers(ctx, tokenId)
+    const options = {
+      ...PUBLIC,
+      keep: keepers.text,
+      keepBytes: keepers.bytes,
+      open: resultOpener(ctx, tokenId),
+    }
+    const read = await callServerTool(
+      ctx,
+      server,
+      "get_attachment",
+      { id: "e1", attachment: "blob-png" },
+      options,
+    )
+    const id = (read.structuredContent as { result: { $result: string } })
+      .result.$result
+
+    const sent = await callServerTool(
+      ctx,
+      server,
+      "send_email",
+      {
+        to: ["charles@example.com"],
+        subject: "The drawing",
+        text: "As promised.",
+        attachments: [{ $result: id }, { $result: id, name: "copy.png" }],
+      },
+      options,
+    )
+
+    expect(sent.isError).toBeUndefined()
+    expect(fake.uploads).toHaveLength(2)
+    expect(fake.uploads[0]!.content.subarray(0, 4)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    )
+    expect(fake.emails.at(-1)!.attachments).toEqual([
+      expect.objectContaining({ name: "drawing.png", type: "image/png" }),
+      expect.objectContaining({ name: "copy.png", type: "image/png" }),
+    ])
+  })
+
+  it("refuses attachments it cannot send, before anything is sent", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const open = resultOpener(ctx, tokenId)
+    const kept = await keepBytes(ctx, {
+      tokenId,
+      serverId: server.id,
+      toolName: "get_attachment",
+      bytes: Buffer.alloc(8 * 1024 * 1024, 1),
+      mediaType: "application/octet-stream",
+      name: "big.bin",
+    })
+    const send = (attachments: unknown[], withOpen = true) =>
+      callServerTool(
+        ctx,
+        server,
+        "send_email",
+        { to: ["charles@example.com"], subject: "s", text: "t", attachments },
+        { ...PUBLIC, ...(withOpen ? { open } : {}) },
+      )
+    const before = fake.requests.length
+
+    await expect(send([{ $result: "gone" }])).rejects.toThrow(
+      /No kept result "gone" for this token/,
+    )
+    await expect(
+      send(Array.from({ length: 11 }, () => ({ $result: kept.id }))),
+    ).rejects.toMatchObject({ code: "validation" })
+    await expect(
+      send([{ $result: kept.id }, { $result: kept.id }, { $result: kept.id }]),
+    ).rejects.toThrow(/more than 20 MB/)
+    await expect(
+      send([{ $result: kept.id, name: "../evil" }]),
+    ).rejects.toMatchObject({ code: "validation" })
+    await expect(send([{ $result: kept.id }], false)).rejects.toThrow(
+      /cannot read them/,
+    )
+    expect(fake.requests.length).toBe(before)
   })
 
   it("refuses bad arguments before anything is sent", async () => {

@@ -82,7 +82,11 @@ The app answers this computer only until you turn on **Accept connections
 from other devices** in its menu. It keeps running when you close its window
 (quit from the menu, or the tray icon on Windows) and can start when you sign
 in. Its data is in `~/Library/Application Support/PCP` on a Mac and
-`%APPDATA%\PCP` on Windows; back that folder up like a Docker volume.
+`%APPDATA%\PCP` on Windows; back that folder up like a Docker volume. When a
+new version is out, PCP says so in its header, and **Settings → Updates →
+Install and restart** downloads it and restarts the app. A Mac app that is not
+signed with a developer certificate cannot replace itself, so there the page
+links to the download instead; open it, and your vault stays where it is.
 
 **From outside your home.** An assistant that runs elsewhere (Claude on the
 web, a phone) needs an address that reaches your computer from the internet,
@@ -163,7 +167,18 @@ pnpm start          # http://localhost:3000, data in ./data
 ```
 
 `PCP_DATA_DIR` moves the data directory; `PORT` changes the port. Neither is
-required.
+required. To update, `git pull` and run the first three commands again, then
+start it.
+
+### Knowing when to update
+
+PCP asks GitHub once a day which release is the latest, and says so in its
+header when a newer one is out. **Settings → Updates** shows what it found,
+with the release notes, and says how to update the PCP you are looking at:
+the app, the container or a checkout. GitHub sees this PCP's address and
+version, nothing else. Turn the daily check off there (or in the step after
+setup) and PCP asks only when you choose **Check now**. PCP never updates
+itself in a container or a checkout.
 
 ## Use it
 

@@ -122,7 +122,9 @@ so in the summary; the bump itself waits for the request.
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
 - Web fetch (`lib/core/fetch/`, `lib/core/web-fetch.ts`) reaches public
-  addresses only, always, never reads a secret, never sends a header PCP owns
+  addresses, and private ones only where the owner allowed them for the
+  token (a `private` line in `web_fetch_rule`, never an assistant's to set
+  or ask for), never PCP's own address (`isOwnAddress`), never reads a secret, never sends a header PCP owns
   or one that carries a credential, and never follows a redirect to another
   site: that site gets its own decision. A site the token has no line for
   gets one of its own on first sight, so the owner sees every site it tried.
@@ -134,8 +136,9 @@ so in the summary; the bump itself waits for the request.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
-  (redirects and PCP's client metadata document), the health check and the
-  export download (`app/api/export/route.ts`: a file needs
+  (redirects and PCP's client metadata document), the health check (which, in
+  the desktop app only, also carries the version and the owner's install
+  request for the wrapper to read) and the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
   origin itself, `lib/server/same-origin.ts`).
 - The owner is asked by link only: a result hands the assistant a link to
@@ -158,10 +161,18 @@ so in the summary; the bump itself waits for the request.
   the machine, are read with no credential, and are stored unencrypted. Never
   copy anything from the vault into one. `lib/core/network/` starts nothing
   (timer, listener, request) while both features are off.
+- The update check (`lib/core/updates/`) asks GitHub's latest-release address
+  and nothing else, sends nothing but PCP's version in its user agent, reads
+  the answer as untrusted input (never rendered as HTML, never a link taken
+  from it), and runs no timer and no request while the owner has it off; it
+  asks nothing before setup. It tells the owner how to update for the way PCP
+  was installed; in a container or a checkout PCP never pulls, builds or
+  restarts itself.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
-  as `PCP_DESKTOP=1` (`lib/server/desktop.ts`), for copy that says how the
-  app is reached. `desktop/scripts/stage.mjs` copies what the Dockerfile
+  as `PCP_DESKTOP=1` and `PCP_DESKTOP_UPDATER` (`lib/server/desktop.ts`), for
+  copy that says how the app is reached and whether it installs an update
+  itself, and never addresses it: the wrapper reads `/api/health`. `desktop/scripts/stage.mjs` copies what the Dockerfile
   copies: a change to one is a change to both. (Its environment is the
   wrapper's own: the HTTPS ports stay 80 and 443, which the image moves.) It is its own pnpm project
   (`desktop/pnpm-workspace.yaml`); do not add it to the root workspace, or

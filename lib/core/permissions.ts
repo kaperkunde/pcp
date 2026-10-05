@@ -6,7 +6,7 @@ import type {
   PermissionRequest,
 } from "@/lib/generated/prisma/client"
 
-import { readFields, shapeAnswer, type AnswerShape } from "./answers"
+import { readFields, shapeAnswerKeeping, type AnswerShape } from "./answers"
 import {
   accessReview,
   checkAccessLevels,
@@ -78,15 +78,19 @@ import {
   type ServerInput,
 } from "./servers"
 import { writeToolAccess } from "./tool-access"
+import { collectHandleIds } from "./result-handles"
 import {
+  describeResults,
   keepWholeAnswer,
   MAX_KEPT_RESULT_CHARS,
-  resultKeeper,
+  resultKeepers,
   resultNotices,
+  resultOpener,
 } from "./tool-results"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
   describeFetchAsk,
+  privateAllowedFor,
   fetchHostOf,
   runFetch,
   writeSiteAccess,
@@ -240,7 +244,8 @@ export function permissionUrl(publicUrl: string, id: string): string {
 /**
  * One call to an upstream tool, its answer shaped for the assistant
  * (answers.ts): only `fields` when given, base64 text at `decode` decoded,
- * and never more than it should read. When shaping had to leave something
+ * the parts at `keep`, files and texts too long to read kept as results and
+ * shown as handles, and never more than it should read. When shaping had to leave something
  * out, the whole answer is kept for the token that asked and the assistant
  * is told how to read it (lib/core/tool-results.ts). An OAuth server that is
  * not connected (or whose sign-in expired) answers with the link to connect
@@ -256,6 +261,7 @@ export async function runCall(
     tokenId,
     fields,
     decode,
+    keep,
     executor = defaultExecutor,
   }: {
     publicUrl: string
@@ -269,21 +275,28 @@ export async function runCall(
   }
 
   try {
-    const keep = resultKeeper(ctx, tokenId)
+    const keepers = resultKeepers(ctx, tokenId)
+    const context = { serverId: server.id, toolName }
     const answer = await executor.callTool(ctx, server, toolName, args, {
       publicUrl,
-      keep,
+      keep: keepers.text,
+      keepBytes: keepers.bytes,
+      open: resultOpener(ctx, tokenId),
     })
+    const { shown, whole } = await shapeAnswerKeeping(
+      answer,
+      { fields, decode, keep },
+      {
+        text: (input) => keepers.text({ ...input, ...context }),
+        bytes: (input) => keepers.bytes({ ...input, ...context }),
+      },
+      { wholeMax: MAX_KEPT_RESULT_CHARS },
+    )
 
     return await keepWholeAnswer(
-      {
-        raw: answer,
-        shown: shapeAnswer(answer, { fields, decode }),
-        whole: () =>
-          shapeAnswer(answer, { fields, decode, max: MAX_KEPT_RESULT_CHARS }),
-      },
-      keep,
-      { serverId: server.id, toolName },
+      { raw: answer, shown, whole },
+      keepers.text,
+      context,
     )
   } catch (error) {
     if (
@@ -304,10 +317,10 @@ function describeAsk(ask: PermissionAsk): {
 } {
   switch (ask.kind) {
     case "call":
-      // The same call asking for other fields, or to decode other
+      // The same call asking for other fields, or to decode or keep other
       // paths, is another request.
       return {
-        target: `${ask.server.id}/${ask.tool.name}${ask.fields ? `\n${canonicalJson(ask.fields)}` : ""}${ask.decode ? `\ndecode ${canonicalJson(ask.decode)}` : ""}`,
+        target: `${ask.server.id}/${ask.tool.name}${ask.fields ? `\n${canonicalJson(ask.fields)}` : ""}${ask.decode ? `\ndecode ${canonicalJson(ask.decode)}` : ""}${ask.keep ? `\nkeep ${canonicalJson(ask.keep)}` : ""}`,
         args: ask.args,
       }
     case "register":
@@ -463,7 +476,9 @@ async function summarizeRow(
   }
 
   if (row.kind === "fetch") {
-    const asked = describeFetchAsk(args as FetchArgs)
+    const asked = describeFetchAsk(args as FetchArgs, {
+      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+    })
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -640,11 +655,62 @@ async function summarizeRow(
       ...(about ? [`What it does: ${about}`] : []),
       asker,
       ...previewArgs(args),
+      ...(await handleLines(ctx, row.tokenId, args)),
     ],
     warning: destructive
       ? "The server marks this tool as destructive: it can change or delete things for good."
       : null,
   }
+}
+
+const COUNT = new Intl.NumberFormat("en-US")
+
+/**
+ * What each kept result a call's arguments name is, so the owner sees what
+ * the call carries without its content: its name, type and size, which
+ * server's tool kept it, and until when. An id the token no longer has is
+ * said too, since the call would fail.
+ */
+async function handleLines(
+  ctx: VaultContext,
+  tokenId: string,
+  args: Record<string, unknown>,
+): Promise<string[]> {
+  let ids: string[]
+
+  try {
+    ids = collectHandleIds(args, { loose: true })
+  } catch {
+    return []
+  }
+
+  const infos = await describeResults(ctx, tokenId, ids)
+  const serverIds = infos.flatMap((info) =>
+    info.found && info.serverId ? [info.serverId] : [],
+  )
+  const servers = serverIds.length
+    ? await db().mcpServer.findMany({
+        where: { id: { in: serverIds }, vaultId: ctx.vaultId },
+        select: { id: true, slug: true },
+      })
+    : []
+  const slugs = new Map(servers.map((server) => [server.id, server.slug]))
+
+  return infos.map((info) => {
+    if (!info.found) {
+      return `Kept result ${info.id}: no longer available for this token; the call will fail`
+    }
+
+    const size =
+      info.kind === "bytes"
+        ? `${COUNT.format(info.length)} bytes`
+        : `${COUNT.format(info.length)} characters`
+    const from = info.serverId
+      ? `${slugs.get(info.serverId) ?? "(removed server)"}/${info.toolName}`
+      : info.toolName
+
+    return `Kept result ${info.id}: ${info.name ?? "(unnamed)"}, ${info.mediaType}, ${size}, from ${from}, readable until ${info.expiresAt.toISOString()}`
+  })
 }
 
 async function toView(
@@ -835,6 +901,7 @@ export async function withPermission(
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
         decode:
           ask.kind === "call" && ask.decode ? JSON.stringify(ask.decode) : null,
+        keep: ask.kind === "call" && ask.keep ? JSON.stringify(ask.keep) : null,
         argsCiphertext: asBytes(
           encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
         ),
@@ -1011,7 +1078,7 @@ export async function decidePermission(
               ),
             )
           : kind === "fetch"
-            ? await executeFetch(ctx, row, executor)
+            ? await executeFetch(ctx, row, publicUrl, executor)
             : await executeRegister(ctx, row, publicUrl, executor, secretValue)
   } catch (error) {
     if (!isPcpError(error)) {
@@ -1075,6 +1142,7 @@ async function executeCall(
     tokenId: row.tokenId,
     fields: readStoredFields(row.fields),
     decode: readStoredFields(row.decode),
+    keep: readStoredFields(row.keep),
     executor,
   })
 }
@@ -1083,6 +1151,7 @@ async function executeCall(
 async function executeFetch(
   ctx: VaultContext,
   row: Row,
+  publicUrl: string,
   executor: PermissionExecutor,
 ): Promise<CallToolResult> {
   const token = await db().apiToken.findUnique({
@@ -1097,12 +1166,10 @@ async function executeFetch(
     )
   }
 
-  return runFetch(
-    ctx,
-    row.tokenId,
-    readArgs(ctx, row) as FetchArgs,
-    executor.fetchWeb ?? fetchWeb,
-  )
+  return runFetch(ctx, row.tokenId, readArgs(ctx, row) as FetchArgs, {
+    publicUrl,
+    fetcher: executor.fetchWeb ?? fetchWeb,
+  })
 }
 
 /**

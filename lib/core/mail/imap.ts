@@ -131,6 +131,11 @@ export type OutgoingMail = {
   messageId: string
   inReplyTo?: string
   references?: string[]
+  attachments?: Array<{
+    filename: string
+    contentType: string
+    content: Buffer
+  }>
 }
 
 export interface SmtpTransportLike {
@@ -836,11 +841,6 @@ export function openImapBackend(
 
         const meta = { name: part.name, type: part.type, size: part.size ?? 0 }
 
-        // Only text is passed on, so nothing else is downloaded.
-        if (!isTextType(part.type)) {
-          return { ...meta, text: null }
-        }
-
         if (meta.size > maxBytes) {
           throw new MailRequestError(
             `That attachment is larger than ${Math.round(maxBytes / (1024 * 1024))} MB, more than PCP reads.`,
@@ -853,8 +853,14 @@ export function openImapBackend(
         })
         const read = await readStream(downloaded.content, maxBytes)
 
-        // imapflow has decoded the transfer encoding and the charset.
-        return { ...meta, text: read.bytes.toString("utf8") }
+        // imapflow has undone the transfer encoding, and turned a text
+        // part's charset into UTF-8.
+        return {
+          ...meta,
+          size: read.bytes.length,
+          bytes: read.bytes,
+          charset: isTextType(part.type) ? "utf-8" : null,
+        }
       })
     },
 
@@ -914,6 +920,15 @@ export function openImapBackend(
         text: input.text,
         messageId,
         ...(inReplyTo ? { inReplyTo, references } : {}),
+        ...(input.attachments?.length
+          ? {
+              attachments: input.attachments.map((attachment) => ({
+                filename: attachment.name,
+                contentType: attachment.type,
+                content: attachment.bytes,
+              })),
+            }
+          : {}),
       }
       const transport = await deps.smtp(smtp, login)
       let sent: Awaited<ReturnType<SmtpTransportLike["sendMail"]>>

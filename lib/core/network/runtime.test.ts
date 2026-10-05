@@ -7,6 +7,7 @@ import { clearDdnsConfig, saveDdnsConfig } from "./ddns"
 import {
   edgePorts,
   networkIdle,
+  networkNotices,
   networkOverview,
   reconcileNetwork,
   setNetworkIssuer,
@@ -14,8 +15,8 @@ import {
 import { clearTlsConfig, saveTlsConfig } from "./tls"
 
 // The background side as the Server Actions drive it: nothing runs while
-// both features are off, turning HTTPS on opens port 80 and reports what
-// Let's Encrypt said, turning it off closes it again.
+// both features are off, turning HTTPS on opens port 80, and a first try
+// Let's Encrypt refuses turns it off again, saying why.
 
 const saved = { ...process.env }
 let cleanup: () => Promise<void>
@@ -61,7 +62,15 @@ describe("the network runtime", () => {
     expect(await networkOverview()).toMatchObject({ ddns: null, https: null })
   })
 
-  it("opens port 80 for HTTPS, reports the failure, and closes it again", async () => {
+  it("opens port 80 for HTTPS, and turns it off again when the first try fails", async () => {
+    let refuse = () => {}
+    const asked = new Promise<void>((resolve) => {
+      setNetworkIssuer(async () => {
+        resolve()
+        await new Promise<void>((release) => (refuse = release))
+        throw new Error("connect ECONNREFUSED")
+      })
+    })
     await saveTlsConfig(
       {
         domain: "pcp.example.com",
@@ -72,21 +81,37 @@ describe("the network runtime", () => {
       null,
     )
     await reconcileNetwork({ tlsNow: true })
-    await networkIdle()
+    await asked
 
     const port = edgePorts()?.http
     expect(port).toBeGreaterThan(0)
     expect(await get(port!, "/.well-known/acme-challenge/none")).toBe(404)
+    expect((await networkOverview()).https?.status.state).toBe("issuing")
 
-    const { https } = await networkOverview()
-    expect(https?.domain).toBe("pcp.example.com")
-    expect(https?.status.state).toBe("failed")
-    expect(https?.status.lastError).toMatch(/Let's Encrypt did not issue/)
-    expect(https?.edge?.http.listening).toBe(true)
+    refuse()
+    await networkIdle()
 
-    await clearTlsConfig()
-    await reconcileNetwork()
     expect(edgePorts()).toBeNull()
+    const overview = await networkOverview()
+    expect(overview.https).toBeNull()
+    expect(overview.httpsTurnedOff?.domain).toBe("pcp.example.com")
+    expect(overview.httpsTurnedOff?.error).toMatch(
+      /Let's Encrypt did not issue/,
+    )
+    // Turned off, it is not news for the bell: the HTTPS card says why.
+    expect(await networkNotices()).toEqual([])
+
+    // Turning it on again starts afresh.
+    await saveTlsConfig(
+      {
+        domain: "pcp.example.com",
+        useDdnsName: false,
+        email: "",
+        agreed: true,
+      },
+      null,
+    )
+    expect((await networkOverview()).httpsTurnedOff).toBeNull()
   })
 
   it("sends the first dynamic DNS update when the owner saves", async () => {

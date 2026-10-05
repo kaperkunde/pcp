@@ -109,11 +109,21 @@ function main() {
       env.APPLE_ID && env.APPLE_APP_SPECIFIC_PASSWORD && env.APPLE_TEAM_ID,
     )
 
+  // Whether the app may replace itself (main.mjs, updates.mjs). macOS lets an
+  // update replace an app only when both carry the same real signature, so an
+  // ad-hoc signed Mac build sends the owner to the download page instead.
+  const updater = process.platform === "darwin" && !signing ? "manual" : "auto"
+
   const args = [
     require.resolve("electron-builder/cli.js"),
     platformFlag(),
     `--${options.arch}`,
     `--config.extraMetadata.version=${version}`,
+    `--config.extraMetadata.pcpUpdater=${updater}`,
+    // One update file per architecture: latest-arm64-mac.yml,
+    // latest-x64-mac.yml, latest-x64.yml (Windows). main.mjs asks for the
+    // same channel.
+    `--config.publish.channel=latest-${options.arch}`,
     `--config.mac.notarize=${notarize}`,
     "--publish",
     "never",
@@ -131,7 +141,7 @@ function main() {
       ? "signed ad hoc"
       : "unsigned"
   console.log(
-    `Packaging PCP ${version} for ${process.platform}-${options.arch}, ${how}.`,
+    `Packaging PCP ${version} for ${process.platform}-${options.arch}, ${how}; updates ${updater === "auto" ? "install from the app" : "are downloaded by hand"}.`,
   )
   execFileSync(process.execPath, args, {
     cwd: desktopDir,

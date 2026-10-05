@@ -42,6 +42,18 @@ export function ServerStatusBadge({
     }
   }
 
+  // The browser is checked by finding Chromium on this machine.
+  if (kind === "browser") {
+    switch (status) {
+      case "ok":
+        return <Badge>Ready</Badge>
+      case "error":
+        return <Badge variant="destructive">Chromium missing</Badge>
+      default:
+        return <Badge variant="secondary">Not checked yet</Badge>
+    }
+  }
+
   // A mail account is checked by signing in: its password can be refused,
   // or, with OAuth, its sign-in can need renewing in PCP.
   if (kind === "jmap" || kind === "imap") {

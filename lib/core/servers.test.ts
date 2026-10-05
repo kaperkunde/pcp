@@ -7,7 +7,9 @@ import { createSecret, listSecrets } from "./secrets"
 import {
   asServerKind,
   createServer,
+  isBrowserKind,
   isMailKind,
+  kindNoun,
   normalizeBasicAuth,
   normalizeOAuthClient,
   oauthTokensObsolete,
@@ -26,6 +28,14 @@ describe("kinds", () => {
     expect(isMailKind("imap")).toBe(true)
     expect(isMailKind("mcp")).toBe(false)
     expect(isMailKind("openapi")).toBe(false)
+  })
+
+  it("tells the browser from everything PCP reaches at an address", () => {
+    expect(isBrowserKind("browser")).toBe(true)
+    expect(isBrowserKind("mcp")).toBe(false)
+    expect(isMailKind("browser")).toBe(false)
+    expect(asServerKind("browser")).toBe("browser")
+    expect(kindNoun("browser")).toBe("the browser")
   })
 
   it("reads an unknown kind as an MCP server", () => {

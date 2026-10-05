@@ -45,7 +45,8 @@ import {
   renderAuthValue,
   setServerStatus,
 } from "./servers"
-import type { ResultKeeper } from "./tool-results"
+import { resolveHandles } from "./result-handles"
+import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
 import { PCP_VERSION } from "./version"
 
 /**
@@ -1113,14 +1114,30 @@ export async function callServerTool(
   {
     publicUrl,
     keep,
+    keepBytes,
+    open,
   }: {
     publicUrl: string
     /** Keeps a long text whole for read_result (mail bodies, attachments). */
     keep?: ResultKeeper
+    /** Keeps a file's bytes for the token (a mail attachment read). */
+    keepBytes?: BytesKeeper
+    /**
+     * Opens a result the token kept, for the handles in the arguments
+     * ({"$result": id}): they are replaced by what they stand for before
+     * anything is sent, and an id the token has no result for is refused.
+     */
+    open?: ResultOpener
   },
 ): Promise<CallToolResult> {
   if (server.kind === "openapi") {
-    return callEndpoint(ctx, server, toolName, args, { publicUrl })
+    return callEndpoint(
+      ctx,
+      server,
+      toolName,
+      open ? await resolveHandles(args, open) : args,
+      { publicUrl },
+    )
   }
 
   if (isMailKind(server.kind)) {
@@ -1144,16 +1161,23 @@ export async function callServerTool(
       )
     }
 
-    return callMailTool(server, toolName, args, { credential: signIn, keep })
+    return callMailTool(server, toolName, args, {
+      credential: signIn,
+      keep,
+      keepBytes,
+      open,
+    })
   }
 
+  // Before a connection is opened: an unknown id never reaches the server.
+  const resolved = open ? await resolveHandles(args, open) : args
   let connection: UpstreamConnection | null = null
 
   try {
     connection = await openUpstream(ctx, server, { publicUrl })
 
     return await connection.client.callTool(
-      { name: toolName, arguments: args },
+      { name: toolName, arguments: resolved },
       { timeout: CALL_TIMEOUT_MS },
     )
   } catch (error) {
