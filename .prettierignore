@@ -12,3 +12,4 @@ desktop/server
 desktop/.cache
 desktop/dist
 desktop/pnpm-lock.yaml
+desktop/native-staged

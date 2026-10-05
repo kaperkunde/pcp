@@ -9,3 +9,12 @@
 
 # Written by electron-builder.
 /dist
+
+# Written by scripts/keychain.mjs: the Touch ID keychain module's build, and
+# the copy electron-builder packs.
+/native/keychain/build
+/native-staged
+
+# Written by scripts/dist.mjs from MAC_PROVISIONING_PROFILE.
+/build/embedded.provisionprofile
+/build/entitlements.keychain.plist

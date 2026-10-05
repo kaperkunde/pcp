@@ -72,6 +72,8 @@ const eslintConfig = [
       "desktop/server/**",
       "desktop/.cache/**",
       "desktop/dist/**",
+      "desktop/native/keychain/build/**",
+      "desktop/native-staged/**",
     ],
   },
 ]
