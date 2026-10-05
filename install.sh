@@ -9,15 +9,20 @@
 # the pcp-data volume: as a container Docker restarts, or as a Quadlet
 # systemd unit under Podman (a plain `podman run` on Podman older than 4.4).
 # Running it again updates PCP and keeps the settings below; `uninstall`
-# removes the container and the unit and keeps the volume.
+# removes the container and the unit and keeps the volume. With
+# PCP_AUTO_UPDATE=1 PCP is updated once a day by itself: under Podman with
+# Quadlet by Podman's own podman-auto-update.timer, otherwise by a timer
+# that runs a copy of this installer with `update`, which fetches the image
+# and starts PCP again only when there is a new one.
 #
-# Settings, by environment variable. The first four are remembered in
+# Settings, by environment variable. The first five are remembered in
 # ~/.config/pcp/install.conf, so a later run without them keeps them:
 #
 #   PCP_PORT=3000                     the port PCP answers on
 #   PCP_HTTPS=1                       also publish 80 and 443 for PCP's own HTTPS
 #   PCP_RUNTIME=docker|podman         skip the discovery
 #   PCP_DATA_VOLUME=pcp-data          the volume that holds the vault
+#   PCP_AUTO_UPDATE=1                 update PCP by itself, once a day
 #   PCP_VERSION=latest                the image tag
 #   PCP_IMAGE=ghcr.io/kaperkunde/pcp  the image
 #
@@ -42,9 +47,10 @@ die() {
 }
 
 usage() {
-  warn "Usage: install.sh [uninstall]" "" \
+  warn "Usage: install.sh [uninstall|update]" "" \
     "Settings go in the environment: PCP_PORT, PCP_HTTPS, PCP_RUNTIME," \
-    "PCP_DATA_VOLUME, PCP_VERSION, PCP_IMAGE. The top of the script explains them."
+    "PCP_DATA_VOLUME, PCP_AUTO_UPDATE, PCP_VERSION, PCP_IMAGE. The top of the" \
+    "script explains them."
   exit 2
 }
 
@@ -67,6 +73,7 @@ load_conf() {
       PCP_HTTPS) conf_https=$value ;;
       PCP_RUNTIME) conf_runtime=$value ;;
       PCP_DATA_VOLUME) conf_volume=$value ;;
+      PCP_AUTO_UPDATE) conf_auto=$value ;;
     esac
   done <"$CONF"
 }
@@ -77,11 +84,13 @@ resolve_settings() {
   conf_https=
   conf_runtime=
   conf_volume=
+  conf_auto=
   load_conf
   PCP_PORT=${PCP_PORT:-${conf_port:-3000}}
   PCP_HTTPS=${PCP_HTTPS:-${conf_https:-0}}
   PCP_RUNTIME=${PCP_RUNTIME:-${conf_runtime:-}}
   PCP_DATA_VOLUME=${PCP_DATA_VOLUME:-${conf_volume:-pcp-data}}
+  PCP_AUTO_UPDATE=${PCP_AUTO_UPDATE:-${conf_auto:-0}}
   PCP_VERSION=${PCP_VERSION:-latest}
   PCP_VERSION=${PCP_VERSION#v}
   PCP_IMAGE=${PCP_IMAGE:-$DEFAULT_IMAGE}
@@ -93,6 +102,10 @@ resolve_settings() {
   case "$PCP_HTTPS" in
     0 | 1) ;;
     *) usage_error "PCP_HTTPS must be 0 or 1, not '$PCP_HTTPS'." ;;
+  esac
+  case "$PCP_AUTO_UPDATE" in
+    0 | 1) ;;
+    *) usage_error "PCP_AUTO_UPDATE must be 0 or 1, not '$PCP_AUTO_UPDATE'." ;;
   esac
   case "$PCP_RUNTIME" in
     '' | docker | podman) ;;
@@ -110,8 +123,8 @@ usage_error() {
 
 save_conf() {
   mkdir -p "$(dirname "$CONF")"
-  printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\n' \
-    "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" >"$CONF"
+  printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\nPCP_AUTO_UPDATE=%s\n' \
+    "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" "$PCP_AUTO_UPDATE" >"$CONF"
 }
 
 # --- Which runtime ----------------------------------------------------------
@@ -229,6 +242,12 @@ set_paths() {
   fi
   UNIT="$UNIT_DIR/$CONTAINER.container"
   LOGS="$RUNTIME logs -f $CONTAINER"
+  if [ "$ROOT" = 1 ]; then
+    TIMER_DIR=/etc/systemd/system
+  else
+    TIMER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  fi
+  UPDATER="${XDG_DATA_HOME:-$HOME/.local/share}/pcp/install.sh"
 }
 
 # --- Checks before anything changes -----------------------------------------
@@ -288,7 +307,12 @@ install_container() {
   if [ "$PCP_HTTPS" = 1 ]; then
     set -- "$@" -p 80:8080 -p 443:8443
   fi
+  # Tells PCP's Settings page that it is updated by itself.
+  if [ "$PCP_AUTO_UPDATE" = 1 ]; then
+    set -- "$@" -e PCP_AUTO_UPDATE=1
+  fi
   "$RUNTIME" run "$@" -v "$PCP_DATA_VOLUME:/data" "$IMAGE" >/dev/null || start_failed "$LOGS"
+  MODE=container
 }
 
 write_unit() {
@@ -303,6 +327,9 @@ write_unit() {
       printf 'PublishPort=80:8080\nPublishPort=443:8443\n'
     fi
     printf 'Volume=%s:/data\n' "$PCP_DATA_VOLUME"
+    if [ "$PCP_AUTO_UPDATE" = 1 ]; then
+      printf 'Environment=PCP_AUTO_UPDATE=1\n'
+    fi
     printf 'Label=io.containers.autoupdate=registry\n\n'
     printf '[Service]\nRestart=always\n\n'
     printf '[Install]\nWantedBy=%s\n' "$WANTED_BY"
@@ -318,6 +345,7 @@ install_quadlet() {
   unit_ctl daemon-reload
   unit_ctl restart "$CONTAINER.service" || start_failed "$JOURNAL"
   LOGS=$JOURNAL
+  MODE=quadlet
   if [ "$ROOT" = 0 ]; then
     loginctl enable-linger >/dev/null 2>&1 ||
       warn "Note: PCP stops when you log out until you run: loginctl enable-linger"
@@ -334,6 +362,109 @@ install_podman() {
   else
     install_quadlet
   fi
+}
+
+# --- Updating by itself -----------------------------------------------------
+
+fetch_to() {
+  if has curl; then
+    curl -fsSL "$1" -o "$2"
+  else
+    wget -q -O "$2" "$1"
+  fi
+}
+
+# A copy of this installer for the timer to run: the file this run came
+# from, or, through a pipe, the address it is published at.
+save_updater() {
+  mkdir -p "$(dirname "$UPDATER")"
+  source_file=
+  case "$0" in
+    */* | *.sh)
+      if [ -f "$0" ]; then
+        source_file=$0
+      fi
+      ;;
+  esac
+  if [ -n "$source_file" ]; then
+    cp "$source_file" "$UPDATER.new"
+  else
+    fetch_to "$SCRIPT_URL" "$UPDATER.new"
+  fi && mv "$UPDATER.new" "$UPDATER"
+}
+
+write_update_timer() {
+  mkdir -p "$TIMER_DIR"
+  {
+    printf '# Updates PCP when there is a new release. Written by install.sh;\n'
+    printf '# running it with PCP_AUTO_UPDATE=0 removes it.\n'
+    printf '[Unit]\nDescription=Update PCP\n\n'
+    printf '[Service]\nType=oneshot\nExecStart=/bin/sh "%s" update\n' "$UPDATER"
+  } >"$TIMER_DIR/pcp-update.service"
+  {
+    printf '# Starts pcp-update.service once a day. Written by install.sh.\n'
+    printf '[Unit]\nDescription=Update PCP once a day\n\n'
+    printf '[Timer]\nOnCalendar=daily\nRandomizedDelaySec=1h\nPersistent=true\n\n'
+    printf '[Install]\nWantedBy=timers.target\n'
+  } >"$TIMER_DIR/pcp-update.timer"
+}
+
+# Removes the timer of PCP's own, if this installer set one up.
+disable_auto_update() {
+  [ -f "$TIMER_DIR/pcp-update.timer" ] || return 0
+  unit_ctl disable --now pcp-update.timer >/dev/null 2>&1 || true
+  rm -f "$TIMER_DIR/pcp-update.timer" "$TIMER_DIR/pcp-update.service" "$UPDATER"
+  unit_ctl daemon-reload >/dev/null 2>&1 || true
+}
+
+# PCP_AUTO_UPDATE=1. Under Quadlet the unit's autoupdate label and Podman's
+# timer do it; otherwise a daily timer runs `install.sh update`, and without
+# a systemd session the owner is given the cron line.
+enable_auto_update() {
+  if [ "$MODE" = quadlet ]; then
+    disable_auto_update
+    if unit_ctl enable --now podman-auto-update.timer >/dev/null 2>&1; then
+      AUTO=timer
+    else
+      warn "" "Could not turn on podman-auto-update.timer; run this installer again to update PCP."
+    fi
+    return 0
+  fi
+  if ! save_updater; then
+    warn "" "Could not keep a copy of this installer for the daily update; run it again to update PCP."
+    return 0
+  fi
+  if systemd_ok; then
+    write_update_timer
+    unit_ctl daemon-reload
+    unit_ctl enable --now pcp-update.timer
+    if [ "$ROOT" = 0 ]; then
+      loginctl enable-linger >/dev/null 2>&1 || true
+    fi
+    AUTO=timer
+  else
+    AUTO=cron
+    warn "" "There is no systemd session for this user, so the daily update needs a line in your crontab (crontab -e):" "" \
+      "  0 4 * * * /bin/sh \"$UPDATER\" update"
+  fi
+}
+
+image_id() {
+  "$RUNTIME" image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true
+}
+
+# What the daily timer runs: fetch the image, and start PCP again only when
+# there is a new one (or PCP is not running).
+update() {
+  UPDATING=1
+  before=$(image_id)
+  "$RUNTIME" pull -q "$IMAGE" >/dev/null || die "Could not pull $IMAGE. Check that this computer reaches ghcr.io."
+  after=$(image_id)
+  if [ -n "$after" ] && [ "$before" = "$after" ] && container_running; then
+    say "PCP is up to date: $IMAGE has not changed."
+    return 0
+  fi
+  install
 }
 
 # --- After starting ---------------------------------------------------------
@@ -384,10 +515,15 @@ summary() {
   if [ -n "$lan" ]; then
     say "  From another device:  http://$lan:$PCP_PORT"
   fi
+  case "$AUTO" in
+    timer) updates="  Update PCP   by itself, once a day (PCP_AUTO_UPDATE=0 turns it off)" ;;
+    cron) updates="  Update PCP   with the crontab line above, or run this installer again" ;;
+    *) updates="  Update PCP   run this installer again (PCP_AUTO_UPDATE=1 does it daily)" ;;
+  esac
   say "" \
     "Open it now and set up your vault: the first person to open it becomes" \
     "its owner." "" \
-    "  Update PCP   run this installer again" \
+    "$updates" \
     "  Logs         $LOGS" \
     "  Your data    the $PCP_DATA_VOLUME volume; nothing else holds state" \
     "  Remove PCP   curl -fsSL $SCRIPT_URL | sh -s -- uninstall"
@@ -409,6 +545,15 @@ install() {
   fi
   save_conf
   wait_for_health
+  if [ "$UPDATING" = 1 ]; then
+    say "PCP is updated: $IMAGE."
+    return 0
+  fi
+  if [ "$PCP_AUTO_UPDATE" = 1 ]; then
+    enable_auto_update
+  else
+    disable_auto_update
+  fi
   summary
 }
 
@@ -419,6 +564,7 @@ uninstall() {
     unit_ctl daemon-reload >/dev/null 2>&1 || true
   fi
   "$RUNTIME" rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  disable_auto_update
   rm -f "$CONF"
   say "PCP is removed. The $PCP_DATA_VOLUME volume, with your vault, is kept. To delete it too:" "" \
     "  $RUNTIME volume rm $PCP_DATA_VOLUME"
@@ -426,7 +572,7 @@ uninstall() {
 
 main() {
   case "${1:-}" in
-    '' | uninstall) ;;
+    '' | uninstall | update) ;;
     *) usage ;;
   esac
   require_linux
@@ -439,11 +585,14 @@ main() {
   resolve_settings
   pick_runtime
   set_paths
-  if [ "${1:-}" = uninstall ]; then
-    uninstall
-  else
-    install
-  fi
+  MODE=
+  AUTO=
+  UPDATING=0
+  case "${1:-}" in
+    uninstall) uninstall ;;
+    update) update ;;
+    *) install ;;
+  esac
 }
 
 main "$@"

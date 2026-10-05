@@ -26,6 +26,14 @@ import type { InstallKind } from "@/lib/server/install-kind"
 
 const INSTALL_LINE =
   "curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh"
+const INSTALL_AUTO_LINE = INSTALL_LINE.replace(
+  /\| sh$/,
+  "| PCP_AUTO_UPDATE=1 sh",
+)
+const INSTALL_MANUAL_LINE = INSTALL_LINE.replace(
+  /\| sh$/,
+  "| PCP_AUTO_UPDATE=0 sh",
+)
 const COMPOSE_LINE = "docker compose pull && docker compose up -d"
 const SOURCE_LINE = "git pull && pnpm install && pnpm db:generate && pnpm build"
 const DOWNLOADS = [
@@ -65,11 +73,14 @@ export function UpdatesCard({
   overview,
   host,
   desktopInstall,
+  autoUpdated = false,
 }: {
   overview: UpdatesOverview
   host: InstallKind
   /** In the desktop app: whether it can install an update itself. */
   desktopInstall: "auto" | "manual" | null
+  /** The Linux installer set this container up to update itself daily. */
+  autoUpdated?: boolean
 }) {
   return (
     <Card id="updates" className="scroll-mt-6">
@@ -87,6 +98,7 @@ export function UpdatesCard({
         <HowToUpdate
           host={host}
           desktopInstall={desktopInstall}
+          autoUpdated={autoUpdated}
           overview={overview}
         />
       </CardContent>
@@ -332,16 +344,32 @@ function DesktopUpdate({
 function HowToUpdate({
   host,
   desktopInstall,
+  autoUpdated,
   overview,
 }: {
   host: InstallKind
   desktopInstall: "auto" | "manual" | null
+  autoUpdated: boolean
   overview: UpdatesOverview
 }) {
   return (
     <div className="flex flex-col gap-3 border-t border-border pt-4">
       <h3 className="font-medium">How to update this PCP</h3>
-      {host === "container" ? (
+      {host === "container" && autoUpdated ? (
+        <>
+          <p>
+            This PCP updates itself: the installer set up a daily update that
+            fetches a new release and starts PCP again from it. There is nothing
+            to do.
+          </p>
+          <p className="text-muted-foreground">
+            To update at once, run the install line again:
+          </p>
+          <CopyableValue value={INSTALL_LINE} />
+          <p className="text-muted-foreground">To turn the daily update off:</p>
+          <CopyableValue value={INSTALL_MANUAL_LINE} />
+        </>
+      ) : host === "container" ? (
         <>
           <p className="text-muted-foreground">
             This PCP runs in a container. Updating means pulling the new image
@@ -350,6 +378,8 @@ function HowToUpdate({
           </p>
           <p>If you installed it with the install line, run it again:</p>
           <CopyableValue value={INSTALL_LINE} />
+          <p>Or have the installer do it once a day from now on:</p>
+          <CopyableValue value={INSTALL_AUTO_LINE} />
           <p>
             From a checkout with docker compose (add the same <code>-f</code>{" "}
             files you started it with):
@@ -357,9 +387,7 @@ function HowToUpdate({
           <CopyableValue value={COMPOSE_LINE} />
           <p className="text-muted-foreground">
             If a deploy tool runs it (Coolify, Portainer, a NAS app), redeploy
-            it there. PCP does not update itself in a container. Under Podman,{" "}
-            <code>systemctl --user enable --now podman-auto-update.timer</code>{" "}
-            fetches new releases once a day.
+            it there. PCP itself never pulls an image or restarts its container.
           </p>
         </>
       ) : host === "desktop" ? (

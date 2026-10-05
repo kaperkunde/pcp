@@ -25,7 +25,7 @@ const IMAGE = "ghcr.io/kaperkunde/pcp:latest"
 const RUN = `run -d --name pcp --restart unless-stopped -p 3000:3000 -v pcp-data:/data ${IMAGE}`
 
 /** The real programs the script needs besides the ones a host fakes. */
-const TOOLS = ["awk", "cat", "dirname", "mkdir", "rm", "sleep"]
+const TOOLS = ["awk", "cat", "cp", "dirname", "mkdir", "mv", "rm", "sleep"]
 
 const UNIT = `# PCP. Written by install.sh; running the installer again rewrites it.
 # Logs: journalctl --user -u pcp -f
@@ -65,6 +65,8 @@ type Host = {
   portStart?: number
   /** Whether a compose checkout's container is running. */
   compose?: boolean
+  /** What `image inspect` says the image's id is; nothing when absent. */
+  image?: string
 }
 
 const roots: string[] = []
@@ -96,6 +98,7 @@ function host({
   healthy = true,
   portStart = 1024,
   compose = false,
+  image,
 }: Host = {}) {
   const root = mkdtempSync(join(tmpdir(), "pcp-install-"))
   roots.push(root)
@@ -126,6 +129,7 @@ function host({
     chmodSync(file, 0o755)
   }
   const ps = compose ? "echo 0123456789ab" : ""
+  const imageId = image ? `echo "${image}"` : ":"
 
   if (docker !== "absent") {
     const version =
@@ -145,6 +149,7 @@ function host({
   --version) echo "${version}" ;;
   info) ${info} ;;
   inspect) echo "${state}" ;;
+  image) ${imageId} ;;
   ps) ${ps} ;;
 esac`,
     )
@@ -155,6 +160,7 @@ esac`,
       `case "$1" in
   --version) echo "podman version ${podman}" ;;
   inspect) echo "${state}" ;;
+  image) ${imageId} ;;
   ps) ${ps} ;;
 esac`,
     )
@@ -175,6 +181,9 @@ esac`,
   return {
     unit: join(home, ".config", "containers", "systemd", "pcp.container"),
     conf: join(home, ".config", "pcp", "install.conf"),
+    timer: join(home, ".config", "systemd", "user", "pcp-update.timer"),
+    service: join(home, ".config", "systemd", "user", "pcp-update.service"),
+    updater: join(home, ".local", "share", "pcp", "install.sh"),
     run(args: string[] = [], env: Record<string, string> = {}) {
       writeFileSync(log, "")
       const result = spawnSync("/bin/sh", [INSTALL_SH, ...args], {
@@ -314,7 +323,7 @@ describe("install.sh with Docker", () => {
     const machine = host({ docker: "works" })
     expect(machine.run([], { PCP_PORT: "8080", PCP_HTTPS: "1" }).status).toBe(0)
     expect(readFileSync(machine.conf, "utf8")).toBe(
-      "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_RUNTIME=docker\nPCP_DATA_VOLUME=pcp-data\n",
+      "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_RUNTIME=docker\nPCP_DATA_VOLUME=pcp-data\nPCP_AUTO_UPDATE=0\n",
     )
 
     const again = machine.run()
@@ -424,5 +433,123 @@ describe("install.sh with Podman", () => {
     expect(result.calls).toContain("podman rm -f pcp")
     expect(existsSync(machine.unit)).toBe(false)
     expect(result.stdout).toContain("podman volume rm pcp-data")
+  })
+})
+
+describe("install.sh updating PCP by itself", () => {
+  it("sets up a daily timer under Docker that runs a copy of the installer", () => {
+    const machine = host({ docker: "works" })
+    const result = machine.run([], { PCP_AUTO_UPDATE: "1" })
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_AUTO_UPDATE=1 -v pcp-data:/data ${IMAGE}`,
+    )
+    expect(readFileSync(machine.updater, "utf8")).toBe(
+      readFileSync(INSTALL_SH, "utf8"),
+    )
+    expect(readFileSync(machine.service, "utf8")).toContain(
+      `ExecStart=/bin/sh "${machine.updater}" update`,
+    )
+    expect(readFileSync(machine.timer, "utf8")).toContain("OnCalendar=daily")
+    expect(result.calls).toContain("systemctl --user daemon-reload")
+    expect(result.calls).toContain(
+      "systemctl --user enable --now pcp-update.timer",
+    )
+    expect(result.calls).toContain("loginctl enable-linger")
+    expect(readFileSync(machine.conf, "utf8")).toContain("PCP_AUTO_UPDATE=1\n")
+    expect(result.stdout).toContain("by itself, once a day")
+  })
+
+  it("keeps it on the next run, and takes it away with PCP_AUTO_UPDATE=0", () => {
+    const machine = host({ docker: "works" })
+    expect(machine.run([], { PCP_AUTO_UPDATE: "1" }).status).toBe(0)
+
+    const again = machine.run()
+    expect(again.status).toBe(0)
+    expect(again.calls).toContain(
+      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_AUTO_UPDATE=1 -v pcp-data:/data ${IMAGE}`,
+    )
+    expect(existsSync(machine.timer)).toBe(true)
+
+    const off = machine.run([], { PCP_AUTO_UPDATE: "0" })
+    expect(off.status).toBe(0)
+    expect(off.calls).toContain(`docker ${RUN}`)
+    expect(off.calls).toContain(
+      "systemctl --user disable --now pcp-update.timer",
+    )
+    expect(existsSync(machine.timer)).toBe(false)
+    expect(existsSync(machine.service)).toBe(false)
+    expect(existsSync(machine.updater)).toBe(false)
+    expect(off.stdout).toContain("PCP_AUTO_UPDATE=1 does it daily")
+  })
+
+  it("leaves it to Podman's own timer under Quadlet", () => {
+    const machine = host({ podman: "5.2.2" })
+    const result = machine.run([], { PCP_AUTO_UPDATE: "1" })
+    expect(result.status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toContain(
+      "Environment=PCP_AUTO_UPDATE=1\nLabel=io.containers.autoupdate=registry\n",
+    )
+    expect(result.calls).toContain(
+      "systemctl --user enable --now podman-auto-update.timer",
+    )
+    expect(existsSync(machine.timer)).toBe(false)
+    expect(result.stdout).toContain("by itself, once a day")
+  })
+
+  it("gives the crontab line when there is no systemd session", () => {
+    const machine = host({ podman: "5.2.2", session: false })
+    const result = machine.run([], { PCP_AUTO_UPDATE: "1" })
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain("crontab -e")
+    expect(result.stderr).toContain(`/bin/sh "${machine.updater}" update`)
+    expect(existsSync(machine.updater)).toBe(true)
+    expect(existsSync(machine.timer)).toBe(false)
+    expect(result.stdout).toContain("with the crontab line above")
+  })
+
+  it("refuses a value it does not understand", () => {
+    const result = host({ docker: "works" }).run([], { PCP_AUTO_UPDATE: "yes" })
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain("PCP_AUTO_UPDATE must be 0 or 1")
+  })
+
+  it("removes the timer and the copy on uninstall", () => {
+    const machine = host({ docker: "works" })
+    expect(machine.run([], { PCP_AUTO_UPDATE: "1" }).status).toBe(0)
+    const result = machine.run(["uninstall"])
+    expect(result.status).toBe(0)
+    expect(existsSync(machine.timer)).toBe(false)
+    expect(existsSync(machine.updater)).toBe(false)
+  })
+})
+
+describe("install.sh update", () => {
+  it("leaves PCP running when the image did not change", () => {
+    const machine = host({ docker: "works", image: "sha256:abc" })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(`docker pull -q ${IMAGE}`)
+    expect(result.calls).not.toContain("docker rm -f pcp")
+    expect(result.calls.some((call) => call.startsWith("docker run"))).toBe(
+      false,
+    )
+    expect(result.stdout).toContain("PCP is up to date")
+  })
+
+  it("starts PCP again from a new image, with the remembered settings", () => {
+    const machine = host({ docker: "works" })
+    expect(machine.run([], { PCP_PORT: "8080" }).status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(`docker pull -q ${IMAGE}`)
+    expect(result.calls).toContain(
+      `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -v pcp-data:/data ${IMAGE}`,
+    )
+    expect(result.stdout).toContain("PCP is updated")
+    expect(result.stdout).not.toContain("Open it now")
   })
 })

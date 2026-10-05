@@ -846,6 +846,14 @@ update replace only an app with the same real signature, so an ad-hoc signed
 build tells the server (`PCP_DESKTOP_UPDATER=manual`) and the page links to
 the download instead. `desktop/README.md` has the details.
 
+**The Linux installer can update it once a day** (`PCP_AUTO_UPDATE=1`,
+remembered like its other settings). Under Podman with Quadlet that is
+Podman's own `podman-auto-update.timer`, which follows the unit's autoupdate
+label; otherwise a systemd timer runs a copy of the installer with `update`,
+which pulls the image and starts PCP again only when the image changed. The
+installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
+there is nothing to do. PCP itself still pulls and restarts nothing.
+
 ## Connecting OAuth servers
 
 An OAuth server needs a client ID for PCP before anyone can sign in, and
