@@ -638,6 +638,63 @@ The sites a token reached are on its page and in `web_fetch_rule`, in the
 clear like server addresses, and never in the request log: the gateway logs
 that `web_fetch` was called and not where to.
 
+## Running code
+
+A token made with "run code" (`api_token.run_code`, off unless the owner
+turns it on) gets `run_code(code)`: a JavaScript program, the body of an
+async function, that calls the token's tools and works on their answers, so
+a large answer is filtered or moved without passing through the assistant.
+It is the pattern of Anthropic's programmatic tool calling, which does not
+reach tools behind an MCP connector, hosted by PCP. `lib/core/code/` has
+three parts:
+
+- **The executor** (`quickjs.ts`) runs the program in QuickJS compiled to
+  WebAssembly (`quickjs-emscripten`), one fresh instance per run. The
+  engine has the language and nothing of Node's: no `require`, `process`,
+  `fetch`, timers or file system. Two host functions are put on its global
+  object, and a prelude takes them off at once and wraps them as `pcp`
+  (`call`, `read`, `keep`) and `console`; only strings cross, both ways, so
+  the host never holds one of the program's objects. Memory is a
+  `WebAssembly.Memory` made with a maximum (128 MB), which the WebAssembly
+  engine enforces; QuickJS's own memory limit counts nothing in these
+  builds, which lack `malloc_usable_size`, so it is not used. An interrupt
+  handler stops the program past 15 seconds of its own computing (time
+  spent waiting on a call does not count), when the run is aborted, and when
+  the bridge says stop; none of these can be caught by the program, and
+  after a stop nothing of it runs again. A reply too large for the memory
+  left is an error the program sees; an allocation that fails anyway traps
+  the instance, which is then dropped untouched.
+- **The bridge** (`run.ts`) is everything the program can ask for, as an
+  operation name and a JSON payload it checks as untrusted: `call` (a
+  server, a tool, its arguments, and call_tool's `fields`, `decode` and
+  `keep`), `read` (one of the token's own kept results, as text) and `keep`
+  (a text kept as a result of the token's, returning its handle). A handle
+  PCP wrote into an answer is made bare (`{"$result"}`) before a call, so a
+  program passes on what it was handed as it is. Limits are in
+  `code/limits.ts`: 3 minutes in all, 100 calls with 5 under way at once,
+  50 reads and 50 keeps, 4 million characters of JSON per answer, and 4
+  runs at once per process; the gateway allows a token 60 runs in ten
+  minutes.
+- **The caller** is the gateway's: `resolveCall` looks the tool up among
+  the token's own and refuses a blocked one or a handle the token has no
+  result for, as for `call_tool`. An "ask" tool leaves the same permission
+  request a `call_tool` would and stops the run, which answers with what ran
+  before it and the owner's link last; the owner's Allow once runs that one
+  call for `check_permission`, and Always allow lets the next run make it.
+  An allowed tool runs through `runCodeCall` (`permissions.ts`), the same
+  upstream path as `runCall`, with the answer turned into a value by
+  `answerValue` (`answers.ts`): the JSON whole rather than a preview, its
+  longest texts kept as handles when it is over the limit, and files (base64
+  that decodes to one, image, audio and file blocks) kept as handles on
+  sight, so their bytes never enter the program. An OAuth server to connect
+  or a browser site to allow stops the run the same way, with its link.
+
+Each call is in the request log under `run_code`, by server and tool; the
+program, what it printed and its errors are not logged or kept. What it
+printed (up to a million characters) and what it returned come back in the
+answer, and a long part is kept as a result of the token's (the returned
+value as JSON, shown by its handle) rather than cut.
+
 ## Browser
 
 The browser is a server of kind `browser`, one per vault, added by the
@@ -1087,8 +1144,8 @@ An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
 for a token with the right to manage endpoints, `memory` for a token that
-keeps memories, and `web_fetch` for a token that fetches web pages, all
-above):
+keeps memories, `web_fetch` for a token that fetches web pages, and
+`run_code` for a token that runs code, all above):
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with

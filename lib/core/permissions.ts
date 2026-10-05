@@ -6,7 +6,12 @@ import type {
   PermissionRequest,
 } from "@/lib/generated/prisma/client"
 
-import { readFields, shapeAnswerKeeping, type AnswerShape } from "./answers"
+import {
+  answerValue,
+  readFields,
+  shapeAnswerKeeping,
+  type AnswerShape,
+} from "./answers"
 import {
   accessReview,
   checkAccessLevels,
@@ -313,18 +318,111 @@ export async function runCall(
       context,
     )
   } catch (error) {
-    // The browser needs the owner first: a site to allow, or a tab handed
-    // over. Asked like any other request.
-    if (isOwnerNeeded(error)) {
-      return withPermission({ ctx, tokenId, publicUrl }, error.ask)
+    const owner = await ownerFirst(error, { ctx, tokenId, publicUrl, server })
+
+    if (owner) {
+      return owner
     }
 
-    if (
-      isPcpError(error) &&
-      error.code === "unauthorized" &&
-      server.authType === "oauth"
-    ) {
-      return connectResult(server, publicUrl)
+    throw error
+  }
+}
+
+/**
+ * What the owner has to do before a call that failed this way can run, as
+ * the result that hands them the link; null for any other failure.
+ */
+async function ownerFirst(
+  error: unknown,
+  { ctx, tokenId, publicUrl, server }: PermissionScope & { server: McpServer },
+): Promise<CallToolResult | null> {
+  // The browser needs the owner first: a site to allow, or a tab handed
+  // over. Asked like any other request.
+  if (isOwnerNeeded(error)) {
+    return withPermission({ ctx, tokenId, publicUrl }, error.ask)
+  }
+
+  if (
+    isPcpError(error) &&
+    error.code === "unauthorized" &&
+    server.authType === "oauth"
+  ) {
+    return connectResult(server, publicUrl)
+  }
+
+  return null
+}
+
+/** What one call of a program run by run_code came to. */
+export type CodeCallOutcome =
+  | { ok: true; value: unknown }
+  | { ok: false; error: string }
+  /** The owner has to act first: the result with their link. */
+  | { owner: CallToolResult }
+
+/**
+ * One call a program makes (lib/core/code/run.ts), through the same
+ * upstream path as runCall, with the answer handed to the program as a
+ * value (answers.ts answerValue) rather than shaped for an assistant to
+ * read. An OAuth server to connect, or a browser site to allow, comes back
+ * as `owner`: the run stops there and the assistant hands over the link.
+ * What PCP refused, and what the tool answered as an error, are errors the
+ * program sees.
+ */
+export async function runCodeCall(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  {
+    publicUrl,
+    tokenId,
+    fields,
+    decode,
+    keep,
+    max,
+    executor = defaultExecutor,
+  }: {
+    publicUrl: string
+    tokenId: string
+    /** The most characters of JSON the program is handed. */
+    max: number
+    executor?: PermissionExecutor
+  } & AnswerShape,
+): Promise<CodeCallOutcome> {
+  if (needsConnecting(server)) {
+    return { owner: connectResult(server, publicUrl) }
+  }
+
+  try {
+    const keepers = resultKeepers(ctx, tokenId)
+    const context = { serverId: server.id, toolName }
+    const answer = await executor.callTool(ctx, server, toolName, args, {
+      publicUrl,
+      tokenId,
+      keep: keepers.text,
+      keepBytes: keepers.bytes,
+      open: resultOpener(ctx, tokenId),
+    })
+
+    return await answerValue(
+      answer,
+      { fields, decode, keep },
+      {
+        text: (input) => keepers.text({ ...input, ...context }),
+        bytes: (input) => keepers.bytes({ ...input, ...context }),
+      },
+      { max },
+    )
+  } catch (error) {
+    const owner = await ownerFirst(error, { ctx, tokenId, publicUrl, server })
+
+    if (owner) {
+      return { owner }
+    }
+
+    if (isPcpError(error)) {
+      return { ok: false, error: error.message }
     }
 
     throw error

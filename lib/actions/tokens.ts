@@ -61,6 +61,7 @@ export async function createTokenAction(
       manageEndpoints: field(formData, "manageEndpoints") === "on",
       keepMemories: field(formData, "keepMemories") === "on",
       webFetch: field(formData, "webFetch") === "on",
+      runCode: field(formData, "runCode") === "on",
       expiresAt:
         days > 0 ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null,
     })
@@ -115,6 +116,7 @@ export async function updateTokenAction(
       manageEndpoints: field(formData, "manageEndpoints") === "on",
       keepMemories: field(formData, "keepMemories") === "on",
       webFetch: field(formData, "webFetch") === "on",
+      runCode: field(formData, "runCode") === "on",
       expiresAt:
         expiresIn === "keep"
           ? undefined

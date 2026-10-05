@@ -162,6 +162,15 @@ Not defended against:
   first or Blocked, and read the address and the body before you allow a
   request. PCP's own address is the one the site sees, so a site that trusts
   PCP's network more than the assistant's trusts this too.
+- **Programs an assistant runs.** A token you let run code can call every
+  tool it may call, many times over, from one program, and a prompt
+  injected into the assistant can write that program. Each call still
+  follows the token's levels (a tool that asks you stops the program), so
+  keep tools that send, delete or pay at Ask you first. The program runs in
+  QuickJS compiled to WebAssembly, with no network, files or secrets, a
+  memory the WebAssembly engine caps, and limits on time and calls; a flaw
+  in QuickJS or in the WebAssembly engine of Node would be what let it out,
+  so keep PCP updated.
 - **Site names on disk.** The sites a token reached, with when, are stored
   unencrypted, like server addresses, so the token's page can list them. A
   copy of the disk shows them.

@@ -962,8 +962,13 @@ class Handles {
     }
   }
 
-  /** An image, audio or embedded file block, kept as bytes. */
-  async block(block: Block, max: number): Promise<Block[]> {
+  /**
+   * An image, audio or embedded file block kept as bytes: its handle, and
+   * what it is. Null for any other block, or one that could not be kept.
+   */
+  async keptFile(
+    block: Block,
+  ): Promise<{ handle: ResultHandle; what: string; chars: number } | null> {
     const file =
       block.type === "image" || block.type === "audio"
         ? {
@@ -983,7 +988,7 @@ class Handles {
           : null
 
     if (!file || !this.room()) {
-      return [block]
+      return null
     }
 
     const bytes = Buffer.from(file.data, "base64")
@@ -996,24 +1001,31 @@ class Handles {
       }),
     )
 
-    if (!handle) {
+    return handle ? { handle, what: file.what, chars: file.data.length } : null
+  }
+
+  /** An image, audio or embedded file block, kept as bytes. */
+  async block(block: Block, max: number): Promise<Block[]> {
+    const kept = await this.keptFile(block)
+
+    if (!kept) {
       return [block]
     }
 
-    const json = JSON.stringify(handle)
+    const json = JSON.stringify(kept.handle)
 
-    return file.data.length > max
+    return kept.chars > max
       ? [
           {
             type: "text",
-            text: `PCP kept this ${file.what} as a result, too large to pass on here: ${json}`,
+            text: `PCP kept this ${kept.what} as a result, too large to pass on here: ${json}`,
           },
         ]
       : [
           block,
           {
             type: "text",
-            text: `PCP kept this ${file.what} as a result too, to hand to another tool: ${json}`,
+            text: `PCP kept this ${kept.what} as a result too, to hand to another tool: ${json}`,
           },
         ]
   }
@@ -1147,4 +1159,88 @@ export async function shapeAnswerKeeping(
         : shown,
     whole: () => renderAnswer(prepared, wholeMax),
   }
+}
+
+/** What a program is told when a tool's answer is an error. */
+const MAX_CODE_ERROR_CHARS = 4_000
+
+/**
+ * A tool's answer as a program run by run_code gets it (lib/core/code/):
+ * the value itself rather than text to read, so the program can filter it.
+ * `fields` and `decode` shape it as for call_tool, and `keep` makes handles
+ * of the parts it names; files (base64 that decodes to one, and image,
+ * audio and file blocks) become handles on sight, so their bytes never
+ * enter the program. Nothing is cut to a preview: an answer up to `max`
+ * characters of JSON is handed over whole, its longest texts kept as
+ * handles first when it is longer, and one still too long is an error.
+ *
+ * The value is the answer's JSON when it has some (its structuredContent
+ * when only that is JSON), its text when it is only text, and a list of
+ * its parts otherwise. A tool's error is an error, with its text.
+ */
+export async function answerValue(
+  result: CallToolResult,
+  shape: AnswerShape,
+  keepers: AnswerKeepers,
+  { max }: { max: number },
+): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
+  if (result.isError) {
+    const text = (result.content ?? [])
+      .flatMap((block) => (block.type === "text" ? [block.text] : []))
+      .join("\n")
+      .trim()
+
+    return {
+      ok: false,
+      error: clip(text || "The tool reported an error.", MAX_CODE_ERROR_CHARS),
+    }
+  }
+
+  const prepared = prepareAnswer(result, shape)
+  const handles = new Handles(
+    keepers,
+    (shape.keep ?? []).map((path) => ({ path, parts: path.split(".") })),
+  )
+  const asValue = async (json: unknown) => {
+    const value = await handles.transform(json)
+    await handles.shrink(value, max)
+    return value
+  }
+  const sawJson = prepared.parts.some((part) => part.kind === "json")
+  const values: unknown[] = []
+
+  if (!sawJson && result.structuredContent !== undefined) {
+    values.push(
+      await asValue(applyShape(result.structuredContent, shape).value),
+    )
+  } else {
+    for (const part of prepared.parts) {
+      if (part.kind === "json") {
+        values.push(await asValue(part.value))
+      } else if (part.block.type === "text") {
+        values.push(part.block.text)
+      } else {
+        values.push((await handles.keptFile(part.block))?.handle ?? part.block)
+      }
+    }
+  }
+
+  const value =
+    values.length === 0
+      ? null
+      : values.length === 1
+        ? values[0]
+        : values.every((item) => typeof item === "string")
+          ? values.join("\n\n")
+          : values
+  const length = (JSON.stringify(value) ?? "").length
+
+  if (length > max) {
+    return {
+      ok: false,
+      error: `The answer is ${length.toLocaleString("en")} characters of JSON, more than a program is handed (${max.toLocaleString("en")}). Ask for less: fields to keep only some parts, or fewer items if the tool takes a page size or a limit.`,
+    }
+  }
+
+  return { ok: true, value }
 }

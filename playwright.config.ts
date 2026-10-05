@@ -198,6 +198,16 @@ export default defineConfig({
       use: signedIn("web-fetch"),
     },
     {
+      // A token that runs code: the tool and its instructions, a program
+      // calling tools with the server's secret, a picture moved by its
+      // handle, a blocked tool caught, and an "ask" tool stopping the
+      // program until the owner allows it.
+      name: "run-code",
+      testMatch: /run-code\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("run-code"),
+    },
+    {
       // The browser: added by the owner, its tools and instructions, a new
       // site asking first, refs to act on a page, a link to another site
       // stopped, the live view with a click on it, hand_over on the

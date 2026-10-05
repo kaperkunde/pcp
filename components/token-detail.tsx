@@ -21,6 +21,7 @@ import { PermissionDecision } from "@/components/permission-decision"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { WebFetchCard } from "@/components/web-fetch-card"
+import { RunCodeField } from "@/components/run-code-field"
 import { WebFetchField } from "@/components/web-fetch-field"
 import { Badge } from "@/components/ui/badge"
 import { Button, ButtonLink } from "@/components/ui/button"
@@ -628,6 +629,7 @@ function SettingsCard({
               defaultChecked={token.keepMemories}
             />
             <WebFetchField id="token-fetch" defaultChecked={token.webFetch} />
+            <RunCodeField id="token-code" defaultChecked={token.runCode} />
             <FormError error={state.status === "error" ? state.error : null} />
             <FormNote message={state.status === "ok" ? state.message : null} />
             {locked ? null : (

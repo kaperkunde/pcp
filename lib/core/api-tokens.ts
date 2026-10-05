@@ -27,6 +27,8 @@ export type ApiTokenSummary = {
   keepMemories: boolean
   /** May fetch web pages (the gateway's web_fetch tool). */
   webFetch: boolean
+  /** May run programs that call its tools (the gateway's run_code tool). */
+  runCode: boolean
   servers: Array<{ id: string; name: string }>
   expiresAt: Date | null
   revokedAt: Date | null
@@ -46,6 +48,8 @@ export type TokenInput = {
   keepMemories?: boolean
   /** Left alone on an update when undefined. */
   webFetch?: boolean
+  /** Left alone on an update when undefined. */
+  runCode?: boolean
   expiresAt?: Date | null
 }
 
@@ -61,6 +65,8 @@ export type ResolvedToken = {
   keepMemories: boolean
   /** May fetch web pages, as its site and method levels say (web_fetch). */
   webFetch: boolean
+  /** May run programs whose calls follow its tool levels (run_code). */
+  runCode: boolean
 }
 
 function summaryInclude(now: Date) {
@@ -84,6 +90,7 @@ type SummaryRow = {
   manageEndpoints: boolean
   keepMemories: boolean
   webFetch: boolean
+  runCode: boolean
   expiresAt: Date | null
   revokedAt: Date | null
   createdAt: Date
@@ -101,6 +108,7 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     manageEndpoints: row.manageEndpoints,
     keepMemories: row.keepMemories,
     webFetch: row.webFetch,
+    runCode: row.runCode,
     servers: row.servers.map((link) => link.server),
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
@@ -229,6 +237,7 @@ export async function createApiToken(
       manageEndpoints: input.manageEndpoints ?? false,
       keepMemories: input.keepMemories ?? false,
       webFetch: input.webFetch ?? false,
+      runCode: input.runCode ?? false,
       expiresAt: input.expiresAt ?? null,
       servers: { create: serverIds.map((serverId) => ({ serverId })) },
     },
@@ -264,6 +273,7 @@ export async function updateApiToken(
           ? { keepMemories: input.keepMemories }
           : {}),
         ...(input.webFetch !== undefined ? { webFetch: input.webFetch } : {}),
+        ...(input.runCode !== undefined ? { runCode: input.runCode } : {}),
         ...(input.expiresAt !== undefined
           ? { expiresAt: input.expiresAt }
           : {}),
@@ -334,6 +344,7 @@ export async function resolveApiToken(
     manageEndpoints: record.manageEndpoints,
     keepMemories: record.keepMemories,
     webFetch: record.webFetch,
+    runCode: record.runCode,
   }
 }
 
