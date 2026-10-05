@@ -9,8 +9,9 @@ import { confirmWithPassword, createToken } from "../lib/ui"
 // web_fetch tool and is told how; the first request to a site asks the
 // owner and puts the site on the token's page; the owner decides per method
 // and per site, for one token or for all of them. The fake upstream is on
-// 127.0.0.1, which web_fetch refuses, so every request here stops at PCP's
-// address check, and the page never sees one.
+// 127.0.0.1, which web_fetch refuses until the owner allows private
+// addresses for the token, so every request stops at PCP's address check,
+// and the page sees none, until the last test allows them.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -123,7 +124,7 @@ test("the first request to a site asks the owner and lists the site", async ({
 
   // Allowed, it still reaches public addresses only.
   await expect(page.getByTestId("permission-outcome")).toContainText(
-    "only reaches public ones",
+    "which the owner has not allowed",
   )
   expect(upstream.pageHits).toEqual([])
 })
@@ -151,7 +152,7 @@ test("a blocked method refuses at once, and a site's own level decides every met
     body: '{"pet":"Rex"}',
   })
   expect(toolText(ran)).not.toContain("Not done yet")
-  expect(toolText(ran)).toContain("only reaches public ones")
+  expect(toolText(ran)).toContain("which the owner has not allowed")
   expect(upstream.pageHits).toEqual([])
 })
 
@@ -175,7 +176,7 @@ test("All tokens on a site's line reaches another token, until a line of its own
   const direct = await callTool(baseURL!, second.token, "web_fetch", {
     url: upstream.pageUrl,
   })
-  expect(toolText(direct)).toContain("only reaches public ones")
+  expect(toolText(direct)).toContain("which the owner has not allowed")
 
   // Its own line wins: blocked for this token, still allowed for the first.
   await choose(page, `Web fetch ${site}`, "blocked")
@@ -225,4 +226,36 @@ test("the owner adds a site before any assistant asks, and removes it", async ({
 
   await page.getByRole("button", { name: `Remove ${host}` }).click()
   await expect(row).toHaveCount(0)
+})
+
+test("allowing private addresses reaches the fake upstream's page, never PCP's own", async ({
+  page,
+  baseURL,
+}) => {
+  await page.goto(`/tokens/${tokenId}`)
+  await expect(
+    page.getByLabel("Web fetch private addresses", { exact: true }),
+  ).toHaveValue("blocked")
+  await choose(page, "Web fetch private addresses", "allowed")
+
+  const read = await callTool(baseURL!, token, "web_fetch", {
+    url: upstream.pageUrl,
+  })
+  expect(read.body.result?.isError).toBeUndefined()
+  expect(toolText(read)).toContain("# Only for the owner's network")
+  expect(upstream.pageHits).toEqual(["GET"])
+
+  // PCP itself stays out of reach, allowed or not.
+  const own = await callTool(baseURL!, token, "web_fetch", {
+    url: `${baseURL}/api/health`,
+  })
+  expect(own.body.result?.isError).toBe(true)
+  expect(toolText(own)).toContain("PCP's own address")
+
+  await choose(page, "Web fetch private addresses", "blocked")
+  const refused = await callTool(baseURL!, token, "web_fetch", {
+    url: upstream.pageUrl,
+  })
+  expect(toolText(refused)).toContain("which the owner has not allowed")
+  expect(upstream.pageHits).toEqual(["GET"])
 })

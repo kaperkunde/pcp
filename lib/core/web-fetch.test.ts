@@ -23,7 +23,9 @@ import {
   listFetchRules,
   recordFetch,
   removeFetchSite,
+  privateAllowedFor,
   setFetchMethod,
+  setFetchPrivate,
   setFetchRuleShared,
   setFetchSite,
 } from "./web-fetch"
@@ -316,6 +318,122 @@ describe("levels for all tokens", () => {
     expect(await sites(ctx, other.tokenId)).toEqual({
       "example.com": { level: "allowed", own: "allowed", shared: null },
     })
+  })
+})
+
+describe("private addresses", () => {
+  it("are blocked until the owner allows them for the token or for all tokens", async () => {
+    const { ctx, scope, tokenId, other } = await setup()
+    const view = async (id: string) =>
+      (await listFetchRules(ctx, id)).privateAddresses
+
+    expect(await view(tokenId)).toEqual({
+      access: "blocked",
+      own: null,
+      shared: null,
+    })
+    expect(
+      (await decideFetch(scope, get("https://a.example/"))).privateAllowed,
+    ).toBe(false)
+
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    expect(await view(tokenId)).toMatchObject({
+      access: "allowed",
+      own: "allowed",
+    })
+    expect(await privateAllowedFor(ctx.vaultId, tokenId)).toBe(true)
+    expect(await privateAllowedFor(ctx.vaultId, other.tokenId)).toBe(false)
+
+    // Blocked again needs no line of its own.
+    await setFetchPrivate(ctx, tokenId, "blocked")
+    expect(await view(tokenId)).toEqual({
+      access: "blocked",
+      own: null,
+      shared: null,
+    })
+
+    // For all tokens: every token follows it until its own line says otherwise.
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    await setFetchRuleShared(ctx, tokenId, "private", "private", true)
+    expect(await view(tokenId)).toEqual({
+      access: "allowed",
+      own: null,
+      shared: "allowed",
+    })
+    expect(await privateAllowedFor(ctx.vaultId, other.tokenId)).toBe(true)
+
+    await setFetchPrivate(ctx, other.tokenId, "blocked")
+    expect(await view(other.tokenId)).toMatchObject({
+      access: "blocked",
+      own: "blocked",
+      shared: "allowed",
+    })
+    expect(await privateAllowedFor(ctx.vaultId, other.tokenId)).toBe(false)
+
+    // Unticked, the token keeps what it had and the others lose it.
+    await setFetchRuleShared(ctx, tokenId, "private", "private", false)
+    expect(await view(tokenId)).toMatchObject({
+      access: "allowed",
+      own: "allowed",
+      shared: null,
+    })
+    expect(await privateAllowedFor(ctx.vaultId, other.tokenId)).toBe(false)
+  })
+
+  it("refuses a level that is not allowed or blocked", async () => {
+    const { ctx, tokenId } = await setup()
+    await expect(setFetchPrivate(ctx, tokenId, "ask")).rejects.toThrow(
+      /Allowed or Blocked/,
+    )
+  })
+
+  it("are named on the permission page when they are allowed", async () => {
+    const { ctx, scope, tokenId } = await setup()
+    await decideFetch(scope, get("https://example.com/"))
+    await withPermission(scope, {
+      kind: "fetch",
+      input: get("https://example.com/"),
+    })
+    const id = (await db().permissionRequest.findFirstOrThrow()).id
+
+    const before = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(before?.lines.join("\n")).toContain("public addresses only")
+
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    const after = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(after?.lines.join("\n")).toContain("your own network too")
+  })
+
+  it("follow the token's line when the owner's answer runs the request", async () => {
+    const { ctx, scope, tokenId } = await setup()
+    const seen: Array<{ allowPrivate?: boolean; publicUrl?: string }> = []
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      fetchWeb: async (_args, options) => {
+        seen.push({
+          allowPrivate: options?.allowPrivate,
+          publicUrl: options?.publicUrl,
+        })
+        return { content: [{ type: "text", text: "ok" }] }
+      },
+    }
+    await decideFetch(scope, get("http://printer.lan/"))
+    await withPermission(scope, {
+      kind: "fetch",
+      input: get("http://printer.lan/"),
+    })
+    const id = (await db().permissionRequest.findFirstOrThrow()).id
+
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    expect(seen).toEqual([{ allowPrivate: true, publicUrl: PUBLIC_URL }])
   })
 })
 

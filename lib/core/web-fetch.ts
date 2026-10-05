@@ -25,6 +25,7 @@ import {
   methodGroup,
   normalizeSite,
   resolveFetchAccess,
+  resolvePrivateAccess,
   siteKey,
   toSiteLevel,
   type FetchDecision,
@@ -40,13 +41,19 @@ import {
  * A site an assistant reaches for the first time gets a line of its own on
  * the token's page, following the method levels, so the owner sees every
  * site it tried and can decide each one. A line can be the token's own or
- * for all tokens; the token's own wins.
+ * for all tokens; the token's own wins. Private addresses are one more
+ * line ("private"), which only the owner sets: blocked without one.
  */
 
 /** The scope of a rule for all tokens; any other scope is a token's id. */
 export const ALL_TOKENS = "all"
 
-export type FetchRuleKind = "method" | "site"
+export type FetchRuleKind = "method" | "site" | "private"
+
+/** The key of the one "private" line a scope can have. */
+export const PRIVATE_KEY = "private"
+
+export type FetchPrivateLevel = "allowed" | "blocked"
 
 export type FetchAddedBy = "assistant" | "owner"
 
@@ -69,9 +76,17 @@ export type FetchSiteView = {
   lastFetchedAt: Date | null
 }
 
+export type FetchPrivateView = {
+  /** What applies to the token: its own line, else all tokens', else blocked. */
+  access: FetchPrivateLevel
+  own: FetchPrivateLevel | null
+  shared: FetchPrivateLevel | null
+}
+
 export type TokenFetchRules = {
   methods: FetchMethodView[]
   sites: FetchSiteView[]
+  privateAddresses: FetchPrivateView
 }
 
 function asAccess(value: string | null): ToolAccess | null {
@@ -104,6 +119,12 @@ function toRuleSet(rows: WebFetchRule[]): FetchRuleSet {
       }
     } else if (row.kind === "site") {
       ;(shared ? rules.sharedSites : rules.ownSites).set(row.key, access)
+    } else if (row.kind === "private" && row.key === PRIVATE_KEY && access) {
+      if (shared) {
+        rules.sharedPrivate = access
+      } else {
+        rules.ownPrivate = access
+      }
     }
   }
 
@@ -148,9 +169,29 @@ function isUniqueViolation(error: unknown): boolean {
 export async function decideFetch(
   scope: { ctx: VaultContext; tokenId: string },
   args: FetchArgs,
-): Promise<FetchDecision & { host: string; group: FetchMethodGroup }> {
-  const host = fetchHostOf(args)
-  const group = methodGroup(args.method)
+): Promise<SiteDecision> {
+  return decideSite(scope, fetchHostOf(args), methodGroup(args.method))
+}
+
+/** A request's level, with what it was decided from. */
+export type SiteDecision = FetchDecision & {
+  host: string
+  group: FetchMethodGroup
+  rules: FetchRuleSet
+  /** The owner allowed this token to reach private addresses. */
+  privateAllowed: boolean
+}
+
+/**
+ * The same decision for one site and method, wherever the request comes
+ * from (web_fetch, or the browser opening a page), with the token's rules
+ * as they were read.
+ */
+export async function decideSite(
+  scope: { ctx: VaultContext; tokenId: string },
+  host: string,
+  group: FetchMethodGroup,
+): Promise<SiteDecision> {
   const rules = await loadFetchRules(scope.ctx.vaultId, scope.tokenId)
 
   if (!knowsSite(rules, host)) {
@@ -179,7 +220,21 @@ export async function decideFetch(
     rules.ownSites.set(host, null)
   }
 
-  return { ...resolveFetchAccess(rules, host, group), host, group }
+  return {
+    ...resolveFetchAccess(rules, host, group),
+    host,
+    group,
+    rules,
+    privateAllowed: resolvePrivateAccess(rules),
+  }
+}
+
+/** Whether the owner allowed this token to reach private addresses. */
+export async function privateAllowedFor(
+  vaultId: string,
+  tokenId: string,
+): Promise<boolean> {
+  return resolvePrivateAccess(await loadFetchRules(vaultId, tokenId))
 }
 
 /** Notes when a site was last fetched, on the line that decided it. */
@@ -236,17 +291,30 @@ export async function writeSiteAccess(
   })
 }
 
-/** Runs an allowed request and notes that the site was fetched. */
+/**
+ * Runs an allowed request and notes that the site was fetched. Whether it
+ * may reach private addresses is read as it runs, so an answer the owner
+ * gives later follows the token's line as it is then.
+ */
 export async function runFetch(
   ctx: VaultContext,
   tokenId: string,
   args: FetchArgs,
-  fetcher: (
-    args: FetchArgs,
-    options?: FetchOptions,
-  ) => Promise<CallToolResult> = fetchWeb,
+  {
+    publicUrl,
+    fetcher = fetchWeb,
+  }: {
+    publicUrl: string
+    fetcher?: (
+      args: FetchArgs,
+      options?: FetchOptions,
+    ) => Promise<CallToolResult>
+  },
 ): Promise<CallToolResult> {
-  const result = await fetcher(args)
+  const result = await fetcher(args, {
+    allowPrivate: await privateAllowedFor(ctx.vaultId, tokenId),
+    publicUrl,
+  })
   await recordFetch(ctx.vaultId, tokenId, fetchHostOf(args))
   return result
 }
@@ -255,7 +323,10 @@ const CHANGING_METHODS_WARNING =
   "can change or delete things at this address, and sends it the body shown. Only allow it if you expect the assistant to do that there."
 
 /** What the owner is shown before a web request runs. */
-export function describeFetchAsk(args: FetchArgs): {
+export function describeFetchAsk(
+  args: FetchArgs,
+  { privateAllowed = false }: { privateAllowed?: boolean } = {},
+): {
   title: string
   lines: string[]
   warning: string | null
@@ -281,7 +352,9 @@ export function describeFetchAsk(args: FetchArgs): {
       ...(body
         ? [`Body (${body.length.toLocaleString("en")} characters):\n${clipped}`]
         : []),
-      "From PCP's own address, public addresses only, with none of your secrets",
+      privateAllowed
+        ? "From PCP's own address, with none of your secrets; your own network too, since you allowed private addresses for this token"
+        : "From PCP's own address, public addresses only, with none of your secrets",
     ],
     warning: reading
       ? null
@@ -330,7 +403,22 @@ function viewRules(rows: WebFetchRule[], tokenId: string): TokenFetchRules {
       (a.lastFetchedAt ?? a.createdAt).getTime(),
   )
 
-  return { methods, sites }
+  const privateOf = (row: WebFetchRule | null): FetchPrivateLevel | null => {
+    const access = asAccess(row?.access ?? null)
+    return access === "allowed" || access === "blocked" ? access : null
+  }
+  const ownPrivate = privateOf(find(own, "private", PRIVATE_KEY))
+  const sharedPrivate = privateOf(find(shared, "private", PRIVATE_KEY))
+
+  return {
+    methods,
+    sites,
+    privateAddresses: {
+      access: ownPrivate ?? sharedPrivate ?? "blocked",
+      own: ownPrivate,
+      shared: sharedPrivate,
+    },
+  }
 }
 
 /** A token's method levels and every site it has a line for. */
@@ -356,6 +444,14 @@ function parseLevel(value: string): ToolAccess {
   }
 
   throw invalid("Choose Allowed, Ask you first or Blocked.")
+}
+
+function parsePrivateLevel(value: string): FetchPrivateLevel {
+  if (value === "allowed" || value === "blocked") {
+    return value
+  }
+
+  throw invalid("Choose Allowed or Blocked.")
 }
 
 export function parseSiteLevel(value: string): FetchSiteLevel {
@@ -424,6 +520,53 @@ export async function setFetchMethod(
   })
 }
 
+/**
+ * Whether this token may reach private addresses: the owner's alone to set.
+ * Blocked needs a line only to override all tokens' "allowed".
+ */
+export async function setFetchPrivate(
+  ctx: VaultContext,
+  tokenId: string,
+  access: string,
+): Promise<void> {
+  await requireLiveToken(ctx, tokenId)
+  const level = parsePrivateLevel(access)
+  const shared = await findRule(ctx.vaultId, ALL_TOKENS, "private", PRIVATE_KEY)
+
+  if (level === "blocked" && asAccess(shared?.access ?? null) !== "allowed") {
+    await db().webFetchRule.deleteMany({
+      where: {
+        vaultId: ctx.vaultId,
+        scope: tokenId,
+        kind: "private",
+        key: PRIVATE_KEY,
+      },
+    })
+    return
+  }
+
+  const existing = await findRule(ctx.vaultId, tokenId, "private", PRIVATE_KEY)
+
+  if (!existing) {
+    await roomForOneMore(ctx.vaultId)
+  }
+
+  await db().webFetchRule.upsert({
+    where: where(ctx.vaultId, tokenId, "private", PRIVATE_KEY),
+    create: {
+      id: newId(),
+      vaultId: ctx.vaultId,
+      tokenId,
+      scope: tokenId,
+      kind: "private",
+      key: PRIVATE_KEY,
+      access: level,
+      addedBy: "owner",
+    },
+    update: { access: level },
+  })
+}
+
 /** The token's own level for a site; it gets a line of its own if it had none. */
 export async function setFetchSite(
   ctx: VaultContext,
@@ -477,11 +620,16 @@ export async function setFetchRuleShared(
 ): Promise<void> {
   await requireLiveToken(ctx, tokenId)
 
-  if (kind !== "method" && kind !== "site") {
+  if (kind !== "method" && kind !== "site" && kind !== "private") {
     throw invalid("That is neither a method nor a site.")
   }
 
-  const key = kind === "method" ? parseGroup(rawKey) : normalizeSite(rawKey)
+  const key =
+    kind === "method"
+      ? parseGroup(rawKey)
+      : kind === "private"
+        ? PRIVATE_KEY
+        : normalizeSite(rawKey)
   const mine = await findRule(ctx.vaultId, tokenId, kind, key)
   const all = await findRule(ctx.vaultId, ALL_TOKENS, kind, key)
   const governing = mine ?? all
@@ -490,11 +638,14 @@ export async function setFetchRuleShared(
     throw notFound("That site")
   }
 
-  // A method without a line asks; a site's null follows the methods.
+  // A method without a line asks, private addresses without one are
+  // blocked; a site's null follows the methods.
   const access =
     kind === "method"
       ? (asAccess(governing?.access ?? null) ?? "ask")
-      : asAccess(governing!.access)
+      : kind === "private"
+        ? (asAccess(governing?.access ?? null) ?? "blocked")
+        : asAccess(governing!.access)
   const vaultId = ctx.vaultId
   const own = { vaultId, scope: tokenId, kind, key }
   const forAll = { vaultId, scope: ALL_TOKENS, kind, key }
@@ -515,8 +666,12 @@ export async function setFetchRuleShared(
     return
   }
 
-  // A method at ask needs no line of its own once all tokens have none.
-  if (kind === "method" && access === "ask") {
+  // A method at ask, or private addresses blocked, need no line of their own
+  // once all tokens have none.
+  if (
+    (kind === "method" && access === "ask") ||
+    (kind === "private" && access === "blocked")
+  ) {
     await db().$transaction([
       db().webFetchRule.deleteMany({ where: forAll }),
       db().webFetchRule.deleteMany({ where: own }),

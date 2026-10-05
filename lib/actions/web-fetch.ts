@@ -6,6 +6,7 @@ import {
   addFetchSite,
   removeFetchSite,
   setFetchMethod,
+  setFetchPrivate,
   setFetchRuleShared,
   setFetchSite,
   type FetchRuleKind,
@@ -15,7 +16,8 @@ import { requireContext } from "@/lib/server/session"
 
 /**
  * What the owner decides about web_fetch on a token's page: a level per
- * method, a level per site, and whether a line is for all tokens.
+ * method, a level per site, whether private addresses are reached, and
+ * whether a line is for all tokens.
  */
 
 export type AddFetchSiteResult = ActionState<{ message: string }>
@@ -38,6 +40,22 @@ export async function setFetchMethodAction(
 
   const result = await guarded(async () => {
     await setFetchMethod(ctx, tokenId, group, access)
+    return {}
+  })
+
+  revalidateTokens()
+
+  return result
+}
+
+export async function setFetchPrivateAction(
+  tokenId: string,
+  access: string,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await setFetchPrivate(ctx, tokenId, access)
     return {}
   })
 

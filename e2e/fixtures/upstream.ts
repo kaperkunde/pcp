@@ -51,8 +51,9 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   as an API that echoes a credential back would, and records every
  *   request's headers in `keyedRequests`.
  * - `/page` — an HTML page for web_fetch, recording each request in
- *   `pageHits`. The server is on 127.0.0.1, which web_fetch refuses, so the
- *   tests show that `pageHits` stays empty.
+ *   `pageHits`. The server is on 127.0.0.1, which web_fetch refuses until
+ *   the owner allows private addresses for the token, so `pageHits` stays
+ *   empty until then.
  *
  * - `/ddns/update` — a dynamic DNS service's update URL. It records every
  *   update in `ddns.updates` and answers with `ddns.status`.
@@ -138,7 +139,7 @@ export type Upstream = {
   }
   /** The HTML page for web_fetch. */
   pageUrl: string
-  /** Every request to /page, by method; web_fetch should make none. */
+  /** Every request to /page, by method; none until private addresses are allowed. */
   pageHits: string[]
   close: () => Promise<void>
 }

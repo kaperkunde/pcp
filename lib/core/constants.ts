@@ -114,6 +114,20 @@ export const FETCH_SITE_LABELS: Record<FetchSiteLevel, string> = {
   ...TOOL_ACCESS_LABELS,
 }
 
+/**
+ * Whether web_fetch and the browser may reach private addresses (the
+ * owner's own network): blocked unless the owner allows it; never asked.
+ */
+export const FETCH_PRIVATE_LEVELS = ["blocked", "allowed"] as const
+
+export const FETCH_PRIVATE_LABELS: Record<
+  (typeof FETCH_PRIVATE_LEVELS)[number],
+  string
+> = {
+  blocked: "Blocked",
+  allowed: "Allowed",
+}
+
 /** The longest memory, in characters. */
 export const MAX_MEMORY_CHARS = 10_000
 

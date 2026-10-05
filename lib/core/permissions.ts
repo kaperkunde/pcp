@@ -88,6 +88,7 @@ import {
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
   describeFetchAsk,
+  privateAllowedFor,
   fetchHostOf,
   runFetch,
   writeSiteAccess,
@@ -452,7 +453,9 @@ async function summarizeRow(
   }
 
   if (row.kind === "fetch") {
-    const asked = describeFetchAsk(args as FetchArgs)
+    const asked = describeFetchAsk(args as FetchArgs, {
+      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+    })
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -991,7 +994,7 @@ export async function decidePermission(
               ),
             )
           : kind === "fetch"
-            ? await executeFetch(ctx, row, executor)
+            ? await executeFetch(ctx, row, publicUrl, executor)
             : await executeRegister(ctx, row, publicUrl, executor, secretValue)
   } catch (error) {
     if (!isPcpError(error)) {
@@ -1063,6 +1066,7 @@ async function executeCall(
 async function executeFetch(
   ctx: VaultContext,
   row: Row,
+  publicUrl: string,
   executor: PermissionExecutor,
 ): Promise<CallToolResult> {
   const token = await db().apiToken.findUnique({
@@ -1077,12 +1081,10 @@ async function executeFetch(
     )
   }
 
-  return runFetch(
-    ctx,
-    row.tokenId,
-    readArgs(ctx, row) as FetchArgs,
-    executor.fetchWeb ?? fetchWeb,
-  )
+  return runFetch(ctx, row.tokenId, readArgs(ctx, row) as FetchArgs, {
+    publicUrl,
+    fetcher: executor.fetchWeb ?? fetchWeb,
+  })
 }
 
 /**

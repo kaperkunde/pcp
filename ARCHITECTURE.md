@@ -529,10 +529,28 @@ from Accept and Content-Type, which are the assistant's own here). A body
 only on methods that have one, up to 1 MB. It is checked before the owner is
 asked, so what they allow is what runs.
 
-**Sending it** (`fetch/fetch.ts`). Public addresses only, always, through the
-checked transport of API endpoints (`openapi/transport.ts`): the name is
-resolved by PCP and every address checked as the socket connects. No secret
-is read; no cookie is kept. Redirects are followed by hand, at most five and
+**Private addresses.** One more line per scope, kind `private` (key
+`private`, `allowed` or `blocked`), says whether requests may reach
+loopback, private and link-local addresses: the owner's own network.
+Without a line they are blocked; the token's own line beats all tokens',
+as for sites. Only the owner sets it, on the token's page, and an
+assistant cannot ask for it: the address is known only once PCP looks the
+name up, after the owner would have been asked about the site. The browser
+follows the same line (see Browser). PCP's own address is refused whatever
+the line says: its public URL's site before the owner is asked, and any of
+PCP's ports (`PORT`, `PCP_HTTP_PORT`, `PCP_HTTPS_PORT`) on a loopback,
+unspecified or interface address as the socket connects
+(`openapi/address.ts` `isOwnAddress`). A request there would hand an
+assistant PCP's own pages.
+
+**Sending it** (`fetch/fetch.ts`). Public addresses only unless the
+token's private line allows more, through the checked transport of API
+endpoints (`openapi/transport.ts`): the name is resolved by PCP and every
+address checked as the socket connects, so a name that answers with a
+public address to a check and a private one to the connection gets
+nowhere. Whether private addresses are allowed is read when the request
+runs, so a request the owner allows later follows the line as it is then.
+No secret is read; no cookie is kept. Redirects are followed by hand, at most five and
 only within the site: one to another site ends the call with where it
 points, so that site gets its own decision when the assistant fetches it. A
 303 (and a 301 or 302 after a POST) becomes a GET without the body, as in a

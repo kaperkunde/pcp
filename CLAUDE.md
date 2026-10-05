@@ -112,7 +112,9 @@ so in the summary; the bump itself waits for the request.
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
 - Web fetch (`lib/core/fetch/`, `lib/core/web-fetch.ts`) reaches public
-  addresses only, always, never reads a secret, never sends a header PCP owns
+  addresses, and private ones only where the owner allowed them for the
+  token (a `private` line in `web_fetch_rule`, never an assistant's to set
+  or ask for), never PCP's own address (`isOwnAddress`), never reads a secret, never sends a header PCP owns
   or one that carries a credential, and never follows a redirect to another
   site: that site gets its own decision. A site the token has no line for
   gets one of its own on first sight, so the owner sees every site it tried.
