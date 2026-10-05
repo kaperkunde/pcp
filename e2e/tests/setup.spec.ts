@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test"
 
+import pkg from "../../package.json"
 import { OWNER_NAME, OWNER_PASSWORD, unlock } from "../lib/auth"
 import { saveState, type SetupState } from "../lib/state"
 
@@ -18,6 +19,15 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
     await expect(
       page.getByRole("heading", { name: "Welcome to PCP" }),
     ).toBeVisible()
+
+    // The other way to start: with another PCP's export. Looked at, not
+    // taken (the backup project restores a running PCP's own).
+    await page.getByRole("link", { name: "Restore an export instead" }).click()
+    await expect(
+      page.getByRole("heading", { name: "Restore an export", level: 1 }),
+    ).toBeVisible()
+    await expect(page.getByLabel("Export file")).toBeVisible()
+    await page.goto("/setup")
 
     await page.getByLabel("Your name").fill(OWNER_NAME)
     await page.getByLabel("Password", { exact: true }).fill(OWNER_PASSWORD)
@@ -42,6 +52,11 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
     await page.getByRole("link", { name: "Skip for now — open PCP" }).click()
     await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
   }
+
+  // The header says which release this is, as package.json has it.
+  await expect(
+    page.getByRole("link", { name: `PCP v${pkg.version}` }),
+  ).toBeVisible()
 
   // Setup is one-shot: the signed-in owner is told so, and (below, once
   // locked) a stranger is sent to sign in.

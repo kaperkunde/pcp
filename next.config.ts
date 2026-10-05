@@ -8,19 +8,25 @@ const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: path.join(__dirname),
   poweredByHeader: false,
-  // Native module: must be required at runtime, not bundled. acme-client
-  // (HTTPS, lib/core/network/tls.ts) brings axios and node-forge, which are
-  // happier required than bundled.
+  // Required at runtime, not bundled: better-sqlite3 is a native module;
+  // acme-client (HTTPS, lib/core/network/tls.ts) brings axios and
+  // node-forge, which are happier required than bundled; the mail libraries
+  // (lib/core/mail/imap.ts) load parts of themselves dynamically and only
+  // ever run on the server.
   serverExternalPackages: [
     "better-sqlite3",
     "@prisma/adapter-better-sqlite3",
     "acme-client",
+    "imapflow",
+    "nodemailer",
   ],
   experimental: {
-    // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) travels in a
+    // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) and an export
+    // file to restore (up to MAX_EXPORT_FILE_BYTES, 64 MB) travel in a
     // Server Action's body; Next's default limit is 1 MB. This applies to
-    // every action, and is checked again per file in lib/actions/endpoints.
-    serverActions: { bodySizeLimit: "6mb" },
+    // every action, and each checks its own file's size again before
+    // reading it (lib/actions/endpoints.ts, lib/actions/backup.ts).
+    serverActions: { bodySizeLimit: "70mb" },
   },
   async headers() {
     return [

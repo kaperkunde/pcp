@@ -76,6 +76,12 @@ import {
   type ServerInput,
 } from "./servers"
 import { writeToolAccess } from "./tool-access"
+import {
+  keepWholeAnswer,
+  MAX_KEPT_RESULT_CHARS,
+  resultKeeper,
+  resultNotices,
+} from "./tool-results"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
   describeFetchAsk,
@@ -226,8 +232,11 @@ export function permissionUrl(publicUrl: string, id: string): string {
 /**
  * One call to an upstream tool, its answer shaped for the assistant
  * (answers.ts): only `fields` when given, base64 text at `decode` decoded,
- * and never more than it should read. An OAuth server that is not connected (or whose sign-in expired)
- * answers with the link to connect it instead of an error.
+ * and never more than it should read. When shaping had to leave something
+ * out, the whole answer is kept for the token that asked and the assistant
+ * is told how to read it (lib/core/tool-results.ts). An OAuth server that is
+ * not connected (or whose sign-in expired) answers with the link to connect
+ * it instead of an error.
  */
 export async function runCall(
   ctx: VaultContext,
@@ -236,11 +245,14 @@ export async function runCall(
   args: Record<string, unknown>,
   {
     publicUrl,
+    tokenId,
     fields,
     decode,
     executor = defaultExecutor,
   }: {
     publicUrl: string
+    /** The token the call is made for: the one that may read a kept answer. */
+    tokenId: string
     executor?: PermissionExecutor
   } & AnswerShape,
 ): Promise<CallToolResult> {
@@ -249,9 +261,21 @@ export async function runCall(
   }
 
   try {
-    return shapeAnswer(
-      await executor.callTool(ctx, server, toolName, args, { publicUrl }),
-      { fields, decode },
+    const keep = resultKeeper(ctx, tokenId)
+    const answer = await executor.callTool(ctx, server, toolName, args, {
+      publicUrl,
+      keep,
+    })
+
+    return await keepWholeAnswer(
+      {
+        raw: answer,
+        shown: shapeAnswer(answer, { fields, decode }),
+        whole: () =>
+          shapeAnswer(answer, { fields, decode, max: MAX_KEPT_RESULT_CHARS }),
+      },
+      keep,
+      { serverId: server.id, toolName },
     )
   } catch (error) {
     if (
@@ -931,9 +955,10 @@ export async function decidePermission(
   // now needs connecting was added, which is what the owner agreed to.
   const failed =
     result.isError === true || (kind === "call" && isConnectResult(result))
-  const stored = storedResultText(
-    result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])),
+  const texts = result.content.flatMap((part) =>
+    part.type === "text" ? [part.text] : [],
   )
+  const stored = storedResultText(texts, undefined, resultNotices(texts))
 
   await db().permissionRequest.update({
     where: { id: row.id },
@@ -971,6 +996,7 @@ async function executeCall(
 
   return runCall(ctx, row.server, row.toolName, readArgs(ctx, row), {
     publicUrl,
+    tokenId: row.tokenId,
     fields: readStoredFields(row.fields),
     decode: readStoredFields(row.decode),
     executor,
@@ -1074,6 +1100,23 @@ function secretFields(asked: RegisterArgs, secretId: string | null) {
     : { authSecretId: secretId }
 }
 
+/**
+ * How an API endpoint an assistant proposed signs in. register_server offers
+ * none, a header or OAuth; a user name and password (a mail account's) is
+ * the owner's to set up, never a proposal's.
+ */
+function endpointAuthType(
+  authType: RegisterArgs["authType"],
+): "none" | "header" | "oauth" {
+  if (authType === "basic") {
+    throw invalid(
+      "An API proposed through register_server cannot sign in with a user name and password.",
+    )
+  }
+
+  return authType
+}
+
 async function executeRegister(
   ctx: VaultContext,
   row: Row,
@@ -1091,7 +1134,7 @@ async function executeRegister(
           name: asked.name,
           description: asked.description,
           url: asked.url,
-          authType: asked.authType,
+          authType: endpointAuthType(asked.authType),
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
           authExtraHeaders: asked.authExtraHeaders,

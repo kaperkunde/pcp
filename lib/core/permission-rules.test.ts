@@ -72,6 +72,15 @@ describe("storedResultText", () => {
       "xxxxxxxxxx\n… (truncated)",
     )
   })
+
+  it("keeps the notes the cut would lose", () => {
+    expect(
+      storedResultText(["x".repeat(30), "NOTE"], 10, ["NOTE", "GONE?"]),
+    ).toBe("xxxxxxxxxx\n… (truncated)\nNOTE\nGONE?")
+    expect(storedResultText(["NOTE", "x".repeat(30)], 10, ["NOTE"])).toBe(
+      "NOTE\nxxxxx\n… (truncated)",
+    )
+  })
 })
 
 describe("isOpen", () => {

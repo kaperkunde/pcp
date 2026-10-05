@@ -12,11 +12,13 @@ app/                 Routes and pages (Next.js App Router)
   mcp/route.ts       The gateway endpoint
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
+  api/export/…       The export download (a file needs Content-Disposition)
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
+  mail/              Mail accounts: JMAP and IMAP/SMTP behind one set of mail tools
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
@@ -40,6 +42,7 @@ associated data (a ciphertext cannot be moved to another row):
   owner gives PCP is one of their own `text` secrets,
 - the PKCE verifier of an authorization in flight (`oauth_state`).
 - a memory's path and text (`memory.ciphertext`, as one JSON value).
+- a tool answer kept for `read_result` (`tool_result.ciphertext`).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -367,6 +370,62 @@ address it names, as a schema: what it learns back is whether that was an
 OpenAPI document and, if so, what the owner would be asked, which matters
 only for a service that trusts PCP's own address more than the assistant's.
 
+## Mail accounts
+
+A mail account is a server row of kind `jmap` or `imap` with a fixed set of
+tools (`lib/core/mail/tools.ts`), the same names and answers for both, so an
+assistant learns one set: `list_mailboxes`, `search_emails`, `get_email`,
+`get_attachment`, `move_email`, `mark_email`, `delete_email`, `send_email`,
+and on JMAP `get_thread` and `list_identities`. Which ones an account has
+depends on read-only (the tools that change mail are left out, and refused if
+called anyway), and on whether it can send (JMAP: the session offers
+submission; IMAP: the owner gave an SMTP server). `mcp_tool.operation` is
+null; a call is dispatched by name. Only the owner adds or changes an
+account; `register_server` and the endpoint tools do not touch them.
+
+`upstream.ts` builds the credential and hands it to `mail/accounts.ts` as a
+`MailCredential`: the `Authorization` header for JMAP, the login for IMAP and
+SMTP, and the values to remove from every answer. Nothing under `mail/` reads
+a secret. Authentication is `basic` (a user name, in `auth_username`, and a
+secret: Basic for JMAP, LOGIN for IMAP and SMTP), `header` (a bearer token,
+JMAP only) or `oauth` (JMAP only).
+
+**JMAP** (`mail/jmap.ts`): `url` is the session URL the owner typed. Reading
+the account GETs it with the credential, and the API and download addresses
+it names are accepted only on that URL's origin, so the credential goes
+nowhere the owner did not type; they are kept (`mail_api_url`,
+`mail_download_url`, `mail_account_id`, `mail_submission`) and forgotten when
+the address or sign-in changes. Redirects are never followed: PCP names
+where the server pointed, for the owner to enter instead. A call is one or
+two POSTs of method calls. Sending creates the email in Drafts and submits
+it in the same request, moving it to Sent when it went.
+
+**IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
+`imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
+SMTP. A connection that is not encrypted after it is made is dropped, and
+STARTTLS is required, never optional. Each call connects, signs in, works
+and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
+from before a mailbox was rebuilt is refused rather than naming another
+email. Sending goes over SMTP and a copy (Bcc kept) is appended to Sent.
+
+**What an assistant gets back** is JSON PCP writes: addresses, dates, flags,
+the text of a body (the HTML one made plain when there is no text one) and
+the list of attachments; `get_attachment` reads text attachments and
+refuses the rest without downloading them. A body or attachment longer than
+20,000 characters is kept for `read_result` (below). Delete moves to the
+Trash and nothing deletes for good. Failures: refused credentials mark the
+account `auth_required` (with OAuth, "needs connecting"), an unreachable
+server `error`; a request the server refuses (no such email or mailbox) is
+an error answer and leaves the account as it is.
+
+**OAuth** uses the same Connect flow as an MCP server (below), discovering
+from the session URL. PCP makes a mail account's calls itself rather than
+through the MCP SDK's transport, so its bearer token comes from `credential()`
+in `upstream.ts`, as an OAuth API endpoint's does (`endpointToken`): renewed a
+minute before it runs out, and once more when the server refuses it. When that
+fails the account needs connecting, and the gateway answers with the link to
+connect it.
+
 ## Memories
 
 A token made with "keep memories" (`api_token.keep_memories`, off unless the
@@ -522,6 +581,69 @@ server's stdout in the system's log folder (`~/Library/Logs/PCP` on macOS,
 `logs/` under the app folder elsewhere). Everything PCP remembers is in the
 database; the wrapper holds only what has to be known before the server is
 up.
+
+## Export and restore
+
+Settings offers an export of everything PCP holds, as one file, and a restore
+from such a file in place of everything here; a PCP not set up yet offers the
+restore on its setup page. The code is `lib/core/backup.ts` (making, opening
+and writing a file) and `lib/core/backup-format.ts` (what is in one).
+
+**The file never holds a plaintext secret.** It is the vault's rows as they
+are in the database: `secret.ciphertext` stays ciphertext under the DEK, bound
+to its row id, and the DEK itself travels only wrapped, in the `key_grant`
+rows of kind `password`, `recovery` and `api_token`. So the password, the
+recovery key and every API token work wherever the file is restored, which is
+what lets a PCP move to another machine without every assistant being set up
+again, and reading a secret out of the file takes what reading it off the
+disk takes: one of those credentials. Session grants are not in it (a
+session is one browser's), nor are OAuth authorizations in flight, the
+request log or the `tls/` directory.
+
+Around the rows: gzip, then AES-256-GCM under a key derived from an **export
+password** the owner chooses, with scrypt at the parameters of the password
+grant. The envelope is JSON — the format's name and version, the scrypt
+parameters, the ciphertext as base64 — with the format name and version as
+associated data, so a relabelled envelope does not decrypt. The parameters a
+file asks for are bounded before the key is derived: a file is untrusted
+input, and scrypt's memory comes from them.
+
+**What is checked before anything is written.** The envelope's version
+(a newer format is refused with "update PCP"), the password (a wrong one and
+a damaged file look alike to GCM, and are reported as one), the unpacked size
+(a cap, against a file that unpacks to more than it should), then every row
+against a strict schema naming every column of its table — a column this PCP
+does not know means a newer PCP wrote the file — and the name of the last
+migration applied where it was written, which this PCP must have. Then the
+rows must hold together: one vault, a password grant, every foreign key
+pointing at a row in the file, every row the vault's own. `backup-format.ts`
+ends with a compile-time guard that fails `pnpm typecheck` when a migration
+adds a column the format does not carry yet.
+
+**A restore replaces.** One transaction wipes the vault it is aimed at, table
+by table (not trusting cascades alone), and writes the file's rows in its
+place, parents before children, in chunks that keep under SQLite's variable
+limit; row ids and timestamps are the file's. On a PCP not set up yet the
+transaction first checks that there is no vault, as `setupVault` does. The
+host's network settings (`ddns.config`, `tls.config`, in plain text as they
+are in the database) are in the file and restored only when the owner ticks
+the box, with this machine's status rows dropped so nothing stale shows; a
+restore that brings them has `reconcileNetwork` act on them at once, and
+every restore has `rebuildOutdatedEndpoints` rebuild the tools of endpoints
+a different PCP version built, as boot does. The owner's own session goes
+with the vault; the action signs them in again when the password they typed
+opens the restored vault (their own export), and otherwise sends them to sign
+in with the exported PCP's password.
+
+**Who may.** The export asks for the owner's password again, as making a
+token does: a copied session cookie may use the vault but not walk off with
+it. The restore, when signed in, asks for it too, so a copied cookie cannot
+replace the owner's vault with one it holds the password to; on the setup
+page there is no password yet, and whoever reaches that page could set up
+instead. Both are rate-limited like password attempts. The download is a
+route handler (an action cannot send a file), so it checks the request's
+origin itself (`lib/server/same-origin.ts`), which Server Actions get built
+in.
 
 ## Reaching PCP: dynamic DNS and HTTPS
 
@@ -681,11 +803,30 @@ above):
   (`permission_request.fields`, `permission_request.decode`).
 - `check_permission(id)`, `check_server(server)`, `register_server(...)`
   and `propose_tool_access(changes)` belong to the permission flow below.
+- `read_result(id, offset?, length?, find?)` reads a slice of an answer
+  PCP shortened and kept whole (below).
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the
 gateway finds a server with no tools. It is a cache of the upstream's
 `tools/list`; the owner's description overrides survive a refresh.
+
+### Long answers
+
+`runCall` (`lib/core/permissions.ts`) shapes an upstream's answer for the
+assistant with `shapeAnswer` (above). When that left something out (a JSON
+preview, a text cut at 60,000 characters), the answer shaped the same way but
+not cut is handed to `lib/core/tool-results.ts`: up to 4 million characters
+are kept in `tool_result`, encrypted under the vault's data key with
+`tool_result:<id>` as associated data, for a day, and a notice after the
+shortened answer gives the result's id and length. `read_result` decrypts it
+and returns one slice, for the token whose call produced it only; another
+token's, another vault's or an expired id reads as not found. A token keeps
+at most 100 results and 50 million characters, its oldest going first, and
+expired ones are pruned at boot. A permission request's stored outcome keeps
+the notice when its text is shortened, so `check_permission` names the result
+too. Mail bodies and text attachments use the same store from inside the mail
+tools. Kept results are not part of an export, and nothing kept is logged.
 
 ## Tool access and the owner's permission
 

@@ -15,10 +15,12 @@ export async function register() {
     const { pruneExpiredSessions } = await import("@/lib/core/sessions")
     const { pruneOAuthStates } = await import("@/lib/core/oauth")
     const { prunePermissionRequests } = await import("@/lib/core/permissions")
+    const { pruneToolResults } = await import("@/lib/core/tool-results")
     await Promise.all([
       pruneExpiredSessions(),
       pruneOAuthStates(),
       prunePermissionRequests(),
+      pruneToolResults(),
     ]).catch((error) => console.error("[db] cleanup failed", error))
 
     // Not waited for: until it is done, endpoints answer with the tools

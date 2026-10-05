@@ -21,7 +21,7 @@ export type CatalogueTool = {
   description?: string | null
   inputSchema: unknown
   annotations?: unknown
-  /** openapi: the call plan, as JSON. */
+  /** openapi: the call plan, as JSON. Null for MCP and mail tools. */
   operation?: string | null
   /** openapi: what a successful call answers, in outline. */
   output?: string | null
@@ -33,7 +33,8 @@ const DELETE_CHUNK = 500
  * Whether reading a server's tools again can find anything new: an MCP
  * server's tools change whenever its makers ship, and so can a schema
  * fetched from an address. An uploaded schema changes only when the owner
- * uploads another.
+ * uploads another. A mail account is read again too: whether it may send
+ * can change, and reading it checks that it still signs in.
  */
 export function canRereadTools(server: {
   kind: string

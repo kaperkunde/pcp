@@ -34,6 +34,7 @@ import {
   authHeaderNames,
   extraAuthHeadersWrite,
   getServer,
+  kindNoun,
   normalizeHeaderAuth,
   normalizeOAuthClient,
   secretColumns,
@@ -733,7 +734,10 @@ export async function updateEndpoint(
   const existing = await getServer(ctx, id)
 
   if (existing.kind !== "openapi") {
-    throw new PcpError("state", "This is an MCP server, not an API endpoint.")
+    throw new PcpError(
+      "state",
+      `This is ${kindNoun(existing.kind)}, not an API endpoint.`,
+    )
   }
 
   const data = await normalizeEndpoint(ctx, input)
@@ -862,7 +866,10 @@ export async function changeEndpoint(
   const existing = await getServer(ctx, id)
 
   if (existing.kind !== "openapi") {
-    throw new PcpError("state", "This is an MCP server, not an API endpoint.")
+    throw new PcpError(
+      "state",
+      `This is ${kindNoun(existing.kind)}, not an API endpoint.`,
+    )
   }
 
   if (changes.specText !== undefined && existing.specSource !== "upload") {

@@ -90,6 +90,19 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   request's page (`applyAccessRequest`), with what they chose there. No
   decision and nothing the assistant sends writes them, and blocked tools
   stay out of what it can name.
+- Mail accounts (`lib/core/mail/`) never read a secret: `upstream.ts` hands
+  in a `MailCredential` (the header, the login, or an OAuth bearer from
+  `credential()`, renewed through `endpointToken` like an API endpoint's). Mail travels encrypted only (TLS, or STARTTLS that
+  is required, never optional); a JMAP session's API and download addresses
+  are taken only on the session URL's origin, and redirects are not
+  followed. Nothing deletes mail for good: delete moves to the Trash. Only
+  the owner adds or changes an account. A new mail tool goes in
+  `mail/tools.ts`, for both protocols where they allow, with its arguments
+  checked before anything connects, and is left out of a read-only account
+  and refused there if called anyway.
+- Long tool answers are kept only through `lib/core/tool-results.ts`:
+  encrypted with `tool_result:<id>`, readable by the token whose call
+  produced them, gone after a day, never logged and never exported.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
@@ -106,7 +119,10 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
-  (redirects and PCP's client metadata document) and the health check.
+  (redirects and PCP's client metadata document), the health check and the
+  export download (`app/api/export/route.ts`: a file needs
+  `Content-Disposition`, which an action cannot send; it checks the request's
+  origin itself, `lib/server/same-origin.ts`).
 - The owner is asked by link only: a result hands the assistant a link to
   PCP's page, to end its reply with (`linkLastText`: nothing after it, or
   Claude's apps fold it out of sight), and a check to call once the owner
@@ -115,7 +131,14 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
   ARCHITECTURE.md). Anything new that needs the owner works the same way.
 - The single-user assumption lives in two places: `ownerVault()` and the
-  setup page. Do not add a third.
+  setup page (its restore step included). Do not add a third.
+- An export (`lib/core/backup.ts`) is the vault's rows as they are, under the
+  export password: nothing is decrypted to make it, and it never carries a
+  session grant. A restore replaces the vault whole, in one transaction,
+  after the owner has seen what the file holds and typed their password. A
+  migration that adds a column fails `pnpm typecheck` in
+  `lib/core/backup-format.ts` until the format carries it, with the column's
+  default so older files still restore.
 - Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS) belong to
   the machine, are read with no credential, and are stored unencrypted. Never
   copy anything from the vault into one. `lib/core/network/` starts nothing
@@ -163,7 +186,8 @@ column with `ALTER TABLE … DROP COLUMN` instead.
 
 The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
-OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a note an
+OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
+signs in to is a "mail account"; a note an
 assistant keeps between conversations is a "memory", "shared" when every
 assistant reads it; what web_fetch reaches is a "site" (a host), and a level
 every token follows is "for all tokens" ("All tokens" in the UI). No operator

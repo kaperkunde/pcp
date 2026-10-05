@@ -2,7 +2,11 @@
 
 ## Setup
 
-Node 22 (`nvm use` reads `.nvmrc`) and pnpm 10.
+Node 24 (`nvm use` reads `.nvmrc`) and pnpm 10. The desktop app runs the
+server on the Node inside Electron (24 in Electron 42), so `.nvmrc`, the
+Docker image and `engines` follow Electron's Node major: what CI tests is
+what both ship. `.npmrc` has `engine-strict`, so an older Node stops the
+install rather than half-working.
 
 ```bash
 pnpm install
@@ -23,6 +27,7 @@ pnpm typecheck       # tsc --noEmit
 pnpm build           # next build
 pnpm test            # unit tests (vitest)
 pnpm test:e2e        # Playwright against a fresh e2e database
+shellcheck --shell=sh install.sh   # the install script, which the tests run
 ```
 
 Husky runs lint-staged (eslint --fix + prettier on the staged files) on every
@@ -30,9 +35,9 @@ commit, then `pnpm typecheck` and `pnpm format:check` over the whole tree.
 Fix what the hook reports; `pnpm format` settles the formatting ones.
 
 GitHub Actions runs the checks on pull requests only
-(`.github/workflows/ci.yml`): lint, format, typecheck and build in one job,
-unit tests in another, the Playwright suite in a third, side by side. The one
-thing a push runs is the release workflow, on `main` (below).
+(`.github/workflows/ci.yml`): lint, format, shellcheck, typecheck and build in
+one job, unit tests in another, the Playwright suite in a third, side by side.
+The one thing a push runs is the release workflow, on `main` (below).
 
 `pnpm lint`, `pnpm format:check` and `pnpm test` cover `desktop/` too (its
 scripts and the settings module's test); the app itself is built by hand or
@@ -56,6 +61,14 @@ attached to the draft under stable names (`PCP-mac-arm64.dmg`,
 `releases/latest/download/…` links keep working), and the release is
 published. An app build that fails does not hold the release back: the
 publish job warns, and re-running the failed job attaches the app.
+
+The same run builds the container image from the tag, for amd64 and arm64,
+and pushes it to `ghcr.io/kaperkunde/pcp` as `<version>` and `latest`, which
+`install.sh` and `docker-compose.yaml` pull. It is held to the same rule: a
+failed build warns and `latest` stays at the previous release until the job
+is re-run. The package's visibility is set on GitHub, not here: a package
+takes the repository's visibility when it is first pushed, and anonymous
+pulls need it public.
 
 MAJOR and MINOR are raised by hand, in a commit on `develop`:
 
@@ -142,6 +155,8 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/openapi/`                  | OpenAPI → tools and call plans; building and sending requests |
 | `lib/core/answers.ts`                | Shaping an answer for the assistant: fields, decode, preview  |
 | `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
+| `lib/core/mail/`                     | Mail accounts: JMAP and IMAP/SMTP behind one set of tools     |
+| `lib/core/tool-results.ts`           | Long answers kept, encrypted, for `read_result`               |
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
 | `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits  |
@@ -153,6 +168,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in           |
 | `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server   |
 | `lib/core/migrate.ts`                | Boot-time migrations                                          |
+| `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts     |
 | `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
 | `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
 | `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |
@@ -160,13 +176,14 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `app/mcp/route.ts`                   | The gateway endpoint                                          |
 | `app/api/oauth/`                     | OAuth callback; PCP's client metadata document                |
 | `app/api/servers/[id]/oauth/`        | OAuth start; the per-server callback older clients use        |
-| `e2e/fixtures/upstream.ts`           | The fake MCP + OAuth server the e2e suite talks to            |
+| `e2e/fixtures/upstream.ts`           | The fake MCP, OAuth, REST and JMAP servers the e2e suite uses |
 | `app/manifest.ts`, `public/icons/`   | The manifest and icon set; `assets/icon.png` is the master    |
 | `lib/core/local-address.ts`          | Whether PCP's own address is one only a home network reaches  |
 | `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                  |
 | `desktop/main.mjs`                   | The desktop app: starts the server, opens the window          |
 | `desktop/scripts/stage.mjs`          | Stages the server for the app, as the Dockerfile lays it out  |
-| `.github/workflows/release.yml`      | Tags, builds the desktop apps, publishes the release          |
+| `.github/workflows/release.yml`      | Tags, builds the apps and the image, publishes the release    |
+| `install.sh`                         | The one-line Linux install: Docker or Podman, published image |
 
 ## Licence
 

@@ -46,6 +46,8 @@ export type ServerDetailProps = {
     name: string
     slug: string
     url: string
+    /** imap: where mail is sent; null when the account cannot send. */
+    smtpUrl?: string | null
     enabled: boolean
     readOnly: boolean
     publicOnly: boolean
@@ -81,6 +83,7 @@ export function ServerDetail({
   redirectUrl,
 }: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
+  const mail = server.kind === "jmap" || server.kind === "imap"
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
   // Kept here rather than in the form: saving moves the server on from
@@ -108,8 +111,9 @@ export function ServerDetail({
                 connected={server.connected}
                 enabled={server.enabled}
                 kind={server.kind}
+                oauth={server.authType === "oauth"}
               />
-              {endpoint && server.readOnly ? (
+              {(endpoint || mail) && server.readOnly ? (
                 <Badge variant="outline">Read-only</Badge>
               ) : null}
               {endpoint && server.publicOnly ? (
@@ -157,7 +161,9 @@ export function ServerDetail({
                       : "Checking…"
                     : endpoint
                       ? "Re-read schema"
-                      : "Refresh tools"}
+                      : mail
+                        ? "Check account"
+                        : "Refresh tools"}
                 </Button>
               ) : null}
               <Button
@@ -173,8 +179,15 @@ export function ServerDetail({
             </div>
           </div>
           <CardDescription>
-            {endpoint ? "Requests go to " : null}
+            {endpoint ? "Requests go to " : mail ? "Signs in at " : null}
             <code className="text-xs">{server.url}</code>
+            {mail && server.smtpUrl ? (
+              <>
+                {" "}
+                · sends through{" "}
+                <code className="text-xs">{server.smtpUrl}</code>
+              </>
+            ) : null}
             {endpoint ? (
               <>
                 {" "}
@@ -240,7 +253,12 @@ export function ServerDetail({
         </CardContent>
       </Card>
 
-      <ToolsCard serverId={server.id} tools={tools} endpoint={endpoint} />
+      <ToolsCard
+        serverId={server.id}
+        tools={tools}
+        endpoint={endpoint}
+        mail={mail}
+      />
 
       <Card>
         <CardHeader>
@@ -248,7 +266,9 @@ export function ServerDetail({
           <CardDescription>
             {endpoint
               ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."
-              : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
+              : mail
+                ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your mail stays on the server, and secrets you added stay."
+                : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
           </CardDescription>
         </CardHeader>
         <CardContent className="items-start">
@@ -278,10 +298,12 @@ function ToolsCard({
   serverId,
   tools,
   endpoint,
+  mail,
 }: {
   serverId: string
   tools: ServerDetailProps["tools"]
   endpoint: boolean
+  mail: boolean
 }) {
   const [open, setOpen] = useState(false)
   const listId = useId()
@@ -314,7 +336,9 @@ function ToolsCard({
         <CardDescription>
           {endpoint
             ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
-            : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
+            : mail
+              ? "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
+              : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
         </CardDescription>
       </CardHeader>
       {tools.length === 0 ? (
@@ -322,7 +346,9 @@ function ToolsCard({
           <p className="text-muted-foreground">
             {endpoint
               ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
-              : "No tools known yet. Connect the server, or refresh its tools."}
+              : mail
+                ? "No tools yet: PCP offers them once it has signed in. Check the settings below, then check the account again, or connect it."
+                : "No tools known yet. Connect the server, or refresh its tools."}
           </p>
         </CardContent>
       ) : open ? (

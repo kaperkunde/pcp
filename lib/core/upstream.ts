@@ -20,7 +20,9 @@ import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
-import { PcpError } from "./errors"
+import { isPcpError, PcpError } from "./errors"
+import { callMailTool, syncMailTools } from "./mail/accounts"
+import type { MailCredential } from "./mail/types"
 import { send } from "./openapi/transport"
 import {
   applyAuthorizeParams,
@@ -36,14 +38,22 @@ import {
   revealSecret,
   writeManagedSecret,
 } from "./secrets"
-import { extraAuthHeaders, renderAuthValue, setServerStatus } from "./servers"
+import {
+  extraAuthHeaders,
+  isMailKind,
+  renderAuthValue,
+  setServerStatus,
+} from "./servers"
+import type { ResultKeeper } from "./tool-results"
 import { PCP_VERSION } from "./version"
 
 /**
  * Talking to the servers in the registry: opening a connection with the
  * right credentials, reading their tool lists and calling their tools. API
  * endpoints (kind "openapi") branch off to lib/core/endpoints.ts, which
- * makes plain HTTP calls with the header this module builds.
+ * makes plain HTTP calls with the header this module builds; mail accounts
+ * (kinds "jmap" and "imap") to lib/core/mail/accounts.ts, with the header
+ * or login this module builds, or an OAuth token it renews.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -635,10 +645,19 @@ async function authHeaders(
 }
 
 /**
- * The headers a server's secrets go in (the first on the server row, any
- * further ones after it), and the values that would give a secret away if
- * an answer repeated them (each secret itself, and each header as sent).
+ * What PCP sends to authenticate to a server: the headers its secrets go in
+ * (the first on the server row, any further ones after it), and the values
+ * that would give a secret away if an answer repeated them (each secret
+ * itself, and each header as sent). A login (basic authentication) also
+ * carries the user name and password, for a protocol that signs in with
+ * them rather than with a header (IMAP, SMTP).
  */
+export type Credential = {
+  headers: Record<string, string>
+  redact: string[]
+  login: { username: string; password: string } | null
+}
+
 async function credential(
   ctx: VaultContext,
   server: McpServer,
@@ -646,13 +665,21 @@ async function credential(
     publicUrl,
     renew = false,
   }: {
-    /** Needed for an OAuth endpoint, whose token may be renewed on the way. */
+    /** Needed for an OAuth token PCP sends itself, which may be renewed. */
     publicUrl?: string
     renew?: boolean
   } = {},
-): Promise<{ headers: Record<string, string>; redact: string[] }> {
-  // An MCP server's OAuth token is the SDK transport's to send.
-  if (server.authType === "oauth" && server.kind === "openapi") {
+): Promise<Credential> {
+  if (server.authType === "basic") {
+    return basicCredential(ctx, server)
+  }
+
+  // An MCP server's OAuth token is the SDK transport's to send; an API
+  // endpoint's and a mail account's, PCP's own.
+  if (
+    server.authType === "oauth" &&
+    (server.kind === "openapi" || isMailKind(server.kind))
+  ) {
     const token = await endpointToken(ctx, server, {
       publicUrl: publicUrl ?? "",
       renew,
@@ -662,11 +689,12 @@ async function credential(
     return {
       headers: { Authorization: value },
       redact: [token.access, value, ...(token.refresh ? [token.refresh] : [])],
+      login: null,
     }
   }
 
   if (server.authType !== "header") {
-    return { headers: {}, redact: [] }
+    return { headers: {}, redact: [], login: null }
   }
 
   if (!server.authSecretId || !server.authHeaderName) {
@@ -710,7 +738,80 @@ async function credential(
     redact.push(secret, value)
   }
 
-  return { headers, redact }
+  return { headers, redact, login: null }
+}
+
+async function basicCredential(
+  ctx: VaultContext,
+  server: McpServer,
+): Promise<Credential> {
+  if (!server.authSecretId || !server.authUsername) {
+    throw new PcpError(
+      "state",
+      `${server.name} has no user name and secret configured.`,
+    )
+  }
+
+  const password = await readSecretValue(ctx, server.authSecretId)
+
+  // A line break would end an IMAP login line early, and a header cannot
+  // carry one: say so without the value.
+  if (/[\u0000\r\n]/.test(password)) {
+    throw new PcpError(
+      "state",
+      `${server.name}'s secret has a line break or another character PCP cannot send. Check the secret's value.`,
+    )
+  }
+
+  const token = Buffer.from(`${server.authUsername}:${password}`).toString(
+    "base64",
+  )
+
+  return {
+    headers: { Authorization: `Basic ${token}` },
+    redact: [password, token, `Basic ${token}`],
+    login: { username: server.authUsername, password },
+  }
+}
+
+/**
+ * What a mail account signs in with: its login, its bearer token, or the
+ * OAuth token PCP holds for it, renewed by onUnauthorized when the server
+ * refuses it (null then means the owner has to connect it again).
+ */
+async function mailCredential(
+  ctx: VaultContext,
+  server: McpServer,
+  { publicUrl }: { publicUrl: string },
+): Promise<MailCredential> {
+  const { headers, redact, login } = await credential(ctx, server, {
+    publicUrl,
+  })
+
+  if (server.authType !== "oauth") {
+    return { headers, redact, login }
+  }
+
+  return {
+    headers,
+    redact,
+    login: null,
+    onUnauthorized: async () => {
+      try {
+        const renewed = await credential(ctx, server, {
+          publicUrl,
+          renew: true,
+        })
+        return { headers: renewed.headers, redact: renewed.redact }
+      } catch (error) {
+        if (error instanceof UnauthorizedError) {
+          return null
+        }
+
+        throw error
+      }
+    },
+  }
 }
 
 export type UpstreamConnection = {
@@ -820,6 +921,20 @@ export async function syncServerTools(
     return syncEndpointTools(server, { byOwner })
   }
 
+  if (isMailKind(server.kind)) {
+    let signIn: MailCredential
+
+    try {
+      signIn = await mailCredential(ctx, server, { publicUrl })
+    } catch (error) {
+      const result = describeFailure(server, error, null)
+      await setServerStatus(server.id, result.status, result.message)
+      return { ...result, toolCount: 0 }
+    }
+
+    return syncMailTools(server, signIn)
+  }
+
   let connection: UpstreamConnection | null = null
 
   try {
@@ -902,10 +1017,41 @@ export async function callServerTool(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl }: { publicUrl: string },
+  {
+    publicUrl,
+    keep,
+  }: {
+    publicUrl: string
+    /** Keeps a long text whole for read_result (mail bodies, attachments). */
+    keep?: ResultKeeper
+  },
 ): Promise<CallToolResult> {
   if (server.kind === "openapi") {
     return callEndpoint(ctx, server, toolName, args, { publicUrl })
+  }
+
+  if (isMailKind(server.kind)) {
+    let signIn: MailCredential
+
+    try {
+      signIn = await mailCredential(ctx, server, { publicUrl })
+    } catch (error) {
+      if (isPcpError(error)) {
+        throw error
+      }
+
+      const failure = describeFailure(server, error, null)
+      await setServerStatus(server.id, failure.status, failure.message)
+      throw new PcpError(
+        failure.status === "auth_required" ||
+          failure.status === "client_required"
+          ? "unauthorized"
+          : "upstream",
+        failure.message,
+      )
+    }
+
+    return callMailTool(server, toolName, args, { credential: signIn, keep })
   }
 
   let connection: UpstreamConnection | null = null

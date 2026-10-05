@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation"
 
 import { invalid } from "@/lib/core/errors"
-import { createSession, destroySession } from "@/lib/core/sessions"
+import { destroySession } from "@/lib/core/sessions"
 import {
   isSetUp,
   resetPasswordWithRecoveryKey,
@@ -18,21 +18,13 @@ import {
 import {
   clearSessionCookie,
   currentSession,
-  writeSessionCookie,
+  signIn,
 } from "@/lib/server/session"
-import { headers } from "next/headers"
 
 /**
  * Setup, sign-in, sign-out and recovery. Each success writes the session
  * cookie here, in the action, which is the one place Next allows it.
  */
-
-async function signIn(ctx: { vaultId: string; dek: Buffer }) {
-  const { cookieValue, expiresAt } = await createSession(ctx, {
-    userAgent: (await headers()).get("user-agent"),
-  })
-  await writeSessionCookie(cookieValue, expiresAt)
-}
 
 export type SetupResult = ActionState<{ recoveryKey: string }>
 

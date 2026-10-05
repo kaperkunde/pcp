@@ -22,9 +22,12 @@ const GLOBAL = { max: 60, windowMs: WINDOW_MS }
 export const TOO_MANY_ATTEMPTS =
   "Too many attempts. Wait a few minutes and try again."
 
-/** A password or recovery key typed on a signed-out page, per address. */
+/**
+ * A password, recovery key or export password typed on a signed-out page,
+ * per address.
+ */
 export async function withinSignInLimits(
-  kind: "password" | "recovery-key",
+  kind: "password" | "recovery-key" | "export",
 ): Promise<boolean> {
   return (
     checkRateLimit(`${kind}:${await clientIp()}`, PER_SOURCE) &&
@@ -41,6 +44,18 @@ export function withinSessionLimits(sessionId: string): boolean {
   return (
     checkRateLimit(`password:session:${sessionId}`, PER_SOURCE) &&
     checkRateLimit("password:*", GLOBAL)
+  )
+}
+
+/**
+ * An export password typed inside a session, to open an export file. As
+ * slow a guess as the owner's password, and counted apart from it, so
+ * checking a file does not use up the owner's own tries.
+ */
+export function withinExportLimits(sessionId: string): boolean {
+  return (
+    checkRateLimit(`export:session:${sessionId}`, PER_SOURCE) &&
+    checkRateLimit("export:*", GLOBAL)
   )
 }
 

@@ -26,6 +26,17 @@ export const SPEC_FILE_ACCEPT =
   ".json,.yaml,.yml,application/json,application/yaml,text/yaml"
 
 /**
+ * An export of everything PCP holds (lib/core/backup.ts): the file's
+ * extension, and the most PCP reads of one. The file is a JSON envelope
+ * around compressed, encrypted rows; the second limit is what those rows
+ * may unpack to, well under what V8 lets one string hold.
+ */
+export const EXPORT_FILE_SUFFIX = ".pcpexport"
+export const EXPORT_FILE_ACCEPT = EXPORT_FILE_SUFFIX
+export const MAX_EXPORT_FILE_BYTES = 64 * 1024 * 1024
+export const MAX_EXPORT_PAYLOAD_BYTES = 256 * 1024 * 1024
+
+/**
  * What one API token may do with one tool. `ask` is the default: the owner
  * is asked the first time, and decides then for the calls after it.
  */

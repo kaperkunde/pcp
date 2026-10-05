@@ -4,9 +4,9 @@ import { LocalDate } from "@/components/local-date"
 import { ServerStatusBadge } from "@/components/server-status-badge"
 import { Badge } from "@/components/ui/badge"
 import { Card } from "@/components/ui/card"
-import type { ServerSummary } from "@/lib/core/servers"
+import { isMailKind, type ServerSummary } from "@/lib/core/servers"
 
-/** The cards on the Servers page: MCP servers and API endpoints alike. */
+/** The cards on the Servers page: servers, endpoints and mail accounts. */
 export function ServerList({
   servers,
   empty,
@@ -26,6 +26,7 @@ export function ServerList({
     <ul className="flex flex-col gap-3">
       {servers.map((server) => {
         const endpoint = server.kind === "openapi"
+        const mail = isMailKind(server.kind)
         const noun = endpoint ? "operation" : "tool"
 
         return (
@@ -42,7 +43,7 @@ export function ServerList({
                   </code>
                 </div>
                 <div className="flex items-center gap-2">
-                  {endpoint && server.readOnly ? (
+                  {(endpoint || mail) && server.readOnly ? (
                     <Badge variant="outline">Read-only</Badge>
                   ) : null}
                   <ServerStatusBadge
@@ -50,6 +51,7 @@ export function ServerList({
                     connected={server.connected}
                     enabled={server.enabled}
                     kind={server.kind}
+                    oauth={server.authType === "oauth"}
                   />
                 </div>
               </div>

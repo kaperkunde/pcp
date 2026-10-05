@@ -396,6 +396,35 @@ describe("the owner's answer", () => {
     expect(calls).toHaveLength(1)
   })
 
+  it("keeps a long answer for the token, and says so in the outcome", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const long = `${"word ".repeat(30_000)}THE END`
+    const executor: PermissionExecutor = {
+      callTool: async () => ({ content: [{ type: "text", text: long }] }),
+      syncTools: async () => ({ status: "ok", message: "", toolCount: 3 }),
+    }
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    const id = await onlyRequestId()
+
+    const ran = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(textOf(ran)).not.toContain("THE END")
+    expect(textOf(ran)).toContain("PCP kept the whole answer")
+
+    const kept = await db().toolResult.findFirstOrThrow()
+    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect(kept.length).toBe(long.length)
+
+    // The stored outcome is shorter still, and still names the result.
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.outcome).toContain(`as result ${kept.id}`)
+  })
+
   it("runs once however many answers race for it", async () => {
     const { ctx, scope, server } = await setup()
     const { calls, executor } = stub()

@@ -84,6 +84,13 @@ export function toolText(response: McpResponse): string {
   return response.body.result?.content?.[0]?.text ?? ""
 }
 
+/** Every text block of a result: a notice (a kept answer's) is a block of its own. */
+export function allToolText(response: McpResponse): string {
+  return (response.body.result?.content ?? [])
+    .map((block) => block.text ?? "")
+    .join("\n")
+}
+
 export async function callTool(
   baseURL: string,
   token: string,

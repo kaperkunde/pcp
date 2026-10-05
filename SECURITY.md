@@ -44,6 +44,17 @@ a later schema that moves them is reported, never followed. Read-only keeps an
 endpoint to GET operations, and a token scoped to other servers does not see
 it.
 
+**An assistant with an API token and a mail account** can do what the
+account's tools do, as far as you allowed them: list and search its mail,
+read emails and text attachments, and, unless you made the account
+read-only (or, over IMAP, gave it no SMTP server), send as you, move, flag
+and delete into the Trash. Nothing deletes mail for good, and sending cannot
+be undone, so leave `send_email` on Ask you first unless you mean otherwise.
+It never receives the password or token: PCP signs in itself and removes
+both from every answer. It cannot add or change a mail account. Over JMAP,
+PCP sends the credential only to the session URL's origin and never follows
+a redirect; over IMAP and SMTP, only over an encrypted connection.
+
 **An assistant with a token that may manage endpoints** can read an API
 endpoint and rewrite one it registered, and nothing that decides where your
 secrets go. A change that other assistants would see disables the endpoint
@@ -138,6 +149,14 @@ Not defended against:
   directly so PCP can check the address it connects to. A host that must use
   a proxy has to allow private addresses on those endpoints, which turns that
   check off; the proxy's own egress rules are what protect it then.
+- **What is in your mail.** An email is someone else's text: one an
+  assistant reads can carry instructions meant for it (prompt injection),
+  and could ask it to send or forward mail. Keep sending on Ask you first,
+  or make the account read-only, for an assistant that reads mail from
+  strangers.
+- **Mail servers with certificates your system does not trust.** PCP checks
+  the certificate of every JMAP, IMAP and SMTP server and refuses one it
+  cannot verify, a self-signed one included.
 - **A key an API alters before echoing it.** PCP removes the secret as sent;
   an API that hashes or truncates it first is not caught.
 
@@ -162,8 +181,20 @@ Not defended against:
   once turned on under Settings, listens on ports 80 and 443 on every
   interface whatever that menu says, since a router's port forward needs
   exactly that. A tunnel needs neither.
-- Back up the data volume. Losing it loses the vault.
+- Back up the data volume, or export from Settings. Losing both loses the
+  vault.
+- An export file (Settings → Export) holds the vault's rows as they are: the
+  ciphertext, and the data key wrapped under your password, the recovery key
+  and each API token, all encrypted again under the export password you chose
+  (scrypt, as for the password). Reading a secret out of it takes the export
+  password and one of those credentials. With dynamic DNS on, its token or
+  password is in the file in plain text, as it is in the database; the
+  certificate's key is not in it.
 - Keep the recovery key somewhere safe. Losing it and the password loses the
   data; that is the design.
 - The request log (`logs/*.jsonl` in the data directory) records which tools
   were called, never their arguments or results.
+- An answer too long to pass on in one piece (a large API response, a long
+  email) is kept for a day so the assistant can read the rest: encrypted
+  under the vault's key, readable only by the token that asked, and pruned at
+  the next start after it expires.

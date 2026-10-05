@@ -99,9 +99,9 @@ export function OutsideAccessCard({
                 </>
               ) : (
                 <>
-                  In Docker, start PCP with{" "}
-                  <code>docker-compose.https.yaml</code> as well, which opens
-                  them.
+                  In Docker or Podman, publish ports 80 and 443 too: run the
+                  installer again with <code>PCP_HTTPS=1</code>, or start PCP
+                  with <code>docker-compose.https.yaml</code> as well.
                 </>
               )}
             </li>

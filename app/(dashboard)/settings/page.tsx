@@ -1,6 +1,8 @@
 import type { Metadata } from "next"
 
+import { ExportCard, RestoreCard } from "@/components/backup-cards"
 import { CopyableValue } from "@/components/copyable-value"
+import { FormNote } from "@/components/form-status"
 import { DdnsCard, HttpsCard } from "@/components/network-forms"
 import { OutsideAccessCard } from "@/components/outside-access-card"
 import { PageHeader } from "@/components/page-header"
@@ -27,8 +29,13 @@ import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Settings" }
 
-export default async function SettingsPage() {
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}) {
   const ctx = await requireContext()
+  const query = await searchParams
   const [pinned, detected, publicUrl, vault, network] = await Promise.all([
     getSetting(ctx, SETTING_PUBLIC_URL),
     requestOrigin(),
@@ -40,6 +47,9 @@ export default async function SettingsPage() {
   return (
     <>
       <PageHeader title="Settings" />
+      {query.restored === "1" ? (
+        <FormNote message="Restored from the export. You are signed in with the same password as before." />
+      ) : null}
       <Card>
         <CardHeader>
           <CardTitle>Gateway endpoint</CardTitle>
@@ -67,6 +77,8 @@ export default async function SettingsPage() {
       <ChangePasswordForm username={vault.name} />
       <RecoveryKeyCard username={vault.name} />
       <SessionsCard />
+      <ExportCard username={vault.name} />
+      <RestoreCard username={vault.name} mode="settings" />
     </>
   )
 }

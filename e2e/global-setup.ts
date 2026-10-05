@@ -4,11 +4,13 @@
 const ROUTES = [
   "/",
   "/setup",
+  "/setup/restore",
   "/login",
   "/recover",
   "/servers",
   "/servers/new",
   "/servers/endpoints/new",
+  "/servers/mail/new",
   "/secrets",
   "/tokens",
   "/settings",
