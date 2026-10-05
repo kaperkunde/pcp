@@ -2,6 +2,7 @@ import { isSetUp } from "../vault"
 import { runUpdateRound } from "./check"
 import { UPDATE_FIRST_TICK_MS, UPDATE_TICK_MS } from "./limits"
 import {
+  clearFinishedInstall,
   getUpdateConfig,
   getUpdateStatus,
   saveUpdateStatus,
@@ -115,6 +116,9 @@ export async function startUpdates(): Promise<void> {
   }
 
   state.started = true
+  await clearFinishedInstall().catch((error) =>
+    console.error("[updates] could not read the update status", error),
+  )
   await reconcileUpdates().catch((error) =>
     console.error("[updates] could not start", error),
   )

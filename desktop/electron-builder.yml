@@ -24,13 +24,22 @@ extraResources:
 # The wrapper has no native dependencies of its own; the server's are handled
 # when it is staged.
 npmRebuild: false
-publish: null
+# Where the app finds its updates (electron-updater, main.mjs): the latest
+# GitHub Release, under the stable names the workflow uploads. dist.mjs
+# passes --publish never, so nothing is uploaded from here; the update files
+# (latest-<arch>*.yml, one per channel) are written beside the installers and
+# the workflow attaches them.
+publish:
+  provider: generic
+  url: https://github.com/kaperkunde/pcp/releases/latest/download
 
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.png
   target:
     - target: dmg
+    # The updater installs from the zip; the dmg is for a first install.
+    - target: zip
   artifactName: PCP-mac-${arch}.${ext}
   hardenedRuntime: true
   gatekeeperAssess: false

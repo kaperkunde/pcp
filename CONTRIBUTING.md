@@ -58,8 +58,9 @@ the fast-forward is skipped; merge `main` into `develop` before the next
 release. The desktop apps are then built on macOS and Windows runners and
 attached to the draft under stable names (`PCP-mac-arm64.dmg`,
 `PCP-mac-x64.dmg`, `PCP-windows-x64.exe`, so the README's
-`releases/latest/download/…` links keep working), and the release is
-published. An app build that fails does not hold the release back: the
+`releases/latest/download/…` links keep working), with the files the app's
+own updater reads beside them (`latest-<arch>[-mac].yml`, and on macOS the
+zip it installs from), and the release is published. An app build that fails does not hold the release back: the
 publish job warns, and re-running the failed job attaches the app.
 
 The same run builds the container image from the tag, for amd64 and arm64,
@@ -94,7 +95,8 @@ same `next build --output standalone` the Docker image runs, started as a
 child process with its data in the system's application data folder, and a
 window on it. It is its own pnpm project, so Electron is never part of a
 root install. The wrapper imports nothing from the app and the app knows the
-wrapper only as `PCP_DESKTOP=1`; a change to PCP reaches the app through
+wrapper only as `PCP_DESKTOP=1` (and `PCP_DESKTOP_UPDATER`, whether it can
+install an update itself); a change to PCP reaches the app through
 `pnpm build`, and a change to how the server is laid out (what the Dockerfile
 copies) is mirrored in `desktop/scripts/stage.mjs`.
 

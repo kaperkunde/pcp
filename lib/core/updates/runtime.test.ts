@@ -12,6 +12,10 @@ import {
 } from "./runtime"
 import {
   availableUpdate,
+  clearFinishedInstall,
+  INSTALL_REQUEST_FRESH_MS,
+  pendingInstallRequest,
+  requestInstall,
   getUpdateConfig,
   getUpdateStatus,
   saveUpdateConfig,
@@ -147,5 +151,51 @@ describe("the update runtime", () => {
     await setupVault({ name: "Ada", password: "correct horse battery" })
     await updateTick()
     expect(asked).toBe(1)
+  })
+})
+
+describe("an install request for the desktop app", () => {
+  const NOW = new Date("2026-10-05T12:00:00Z")
+  const later = (ms: number) => new Date(NOW.getTime() + ms)
+
+  it("needs a newer release to install", async () => {
+    await expect(requestInstall(NOW)).rejects.toThrow(/no newer version/)
+
+    setUpdateFetch(answer("v0.0.1"))
+    await checkNow()
+    await expect(requestInstall(NOW)).rejects.toThrow(/no newer version/)
+  })
+
+  it("is offered to the app while it is fresh, then let go", async () => {
+    setUpdateFetch(answer("v999.0.0"))
+    await checkNow()
+
+    const request = await requestInstall(NOW)
+
+    expect(request.version).toBe("999.0.0")
+    expect(await pendingInstallRequest(later(60_000))).toEqual(request)
+    expect(
+      await pendingInstallRequest(later(INSTALL_REQUEST_FRESH_MS + 1)),
+    ).toBeNull()
+  })
+
+  it("is cleared at boot once it is too old or this version answers it", async () => {
+    setUpdateFetch(answer("v999.0.0"))
+    await checkNow()
+    await requestInstall(NOW)
+
+    await clearFinishedInstall(later(60_000))
+    expect((await getUpdateStatus()).installRequest).toBeTruthy()
+
+    await clearFinishedInstall(later(INSTALL_REQUEST_FRESH_MS + 1))
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
+    // What the check found stays.
+    expect((await getUpdateStatus()).latest?.version).toBe("999.0.0")
+
+    await saveUpdateStatus({
+      installRequest: { id: "old", at: NOW.toISOString(), version: "0.0.1" },
+    })
+    await clearFinishedInstall(later(60_000))
+    expect((await getUpdateStatus()).installRequest).toBeUndefined()
   })
 })

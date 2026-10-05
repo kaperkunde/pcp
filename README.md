@@ -82,8 +82,10 @@ from other devices** in its menu. It keeps running when you close its window
 (quit from the menu, or the tray icon on Windows) and can start when you sign
 in. Its data is in `~/Library/Application Support/PCP` on a Mac and
 `%APPDATA%\PCP` on Windows; back that folder up like a Docker volume. When a
-new version is out, PCP says so in its header; download it from the same
-links and open it, and your vault stays where it is.
+new version is out, PCP says so in its header, and **Settings → Updates →
+Install and restart** downloads it and restarts the app. A Mac app that is not
+signed with a developer certificate cannot replace itself, so there the page
+links to the download instead; open it, and your vault stays where it is.
 
 **From outside your home.** An assistant that runs elsewhere (Claude on the
 web, a phone) needs an address that reaches your computer from the internet,
