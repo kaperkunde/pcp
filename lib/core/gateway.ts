@@ -950,6 +950,17 @@ export function buildGatewayServer(
 
         const until = slice.expiresAt.toISOString()
 
+        if (slice.binary) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `[result ${slice.id}: ${slice.name ?? "binary data"}, ${slice.mediaType}, ${slice.total} bytes, readable until ${until}] PCP does not show binary data. To hand it to another tool, pass {"$result": "${slice.id}"} where that tool wants a string (it becomes base64), or as an attachment where the tool takes them.`,
+              },
+            ],
+          }
+        }
+
         if (args.find !== undefined && slice.foundAt === null) {
           return {
             content: [

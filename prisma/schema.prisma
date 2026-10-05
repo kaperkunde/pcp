@@ -549,11 +549,18 @@ model ToolResult {
   serverId   String?    @map("server_id")
   server     McpServer? @relation(fields: [serverId], references: [id], onDelete: SetNull)
   toolName   String     @map("tool_name")
-  /// text/plain | application/json: how the text reads.
+  /// text | bytes: what was kept. A text answer, or a file's bytes (an
+  /// attachment, a binary field of an answer).
+  kind       String     @default("text")
+  /// A file's name, when it had one.
+  name       String?
+  /// Any media type, parameters allowed (text/plain, application/json,
+  /// text/csv; charset=utf-8, image/png).
   mediaType  String     @map("media_type")
-  /// The whole text's length in UTF-16 code units, which offsets count.
+  /// The whole text's length in UTF-16 code units, which offsets count; for
+  /// bytes, their number.
   length     Int
-  /// The text, AES-256-GCM under the vault's data key with
+  /// The text or the bytes, AES-256-GCM under the vault's data key with
   /// "tool_result:<id>" as associated data.
   ciphertext Bytes
   createdAt  DateTime   @default(now()) @map("created_at")
