@@ -129,6 +129,21 @@ so in the summary; the bump itself waits for the request.
   site: that site gets its own decision. A site the token has no line for
   gets one of its own on first sight, so the owner sees every site it tried.
   Its limits go in `fetch/limits.ts`. Sites stay out of the request log.
+- The browser (`lib/core/browser/`) runs Chromium for the vault and keeps
+  nothing on disk: its sign-ins are the vault's `browser_profile`,
+  encrypted, saved only while a request holds the key. Every connection goes
+  through its proxy (`proxy.ts`), which checks the address it dials as web
+  fetch does, and every page a tab's main frame opens passes the gate in
+  `runtime.ts`: the driving token's web fetch site lines, a site the owner
+  allowed for that tab, or the owner's own control; PCP's own site never. No
+  tool runs JavaScript, reads or sets cookies or storage, or downloads. A
+  refusal that names a site is a tool error, never a thrown `PcpError` (the
+  request log keeps those). The owner's input enters through the DevTools
+  protocol with each event's own time (`input.ts`), never as page script. A
+  tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
+  a permission request (`browse`, `browser_handover`). Its limits go in
+  `browser/limits.ts`; the Dockerfile's Chromium is the version
+  `playwright-core` drives (`scripts/docker.test.ts`).
 - A level can be a token's own or for all tokens (tools in
   `vault_tool_access`, web fetch in `web_fetch_rule` with scope `all`), and
   the token's own always wins. An owner's answer to a request writes the

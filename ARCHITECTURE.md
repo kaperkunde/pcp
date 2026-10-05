@@ -623,6 +623,114 @@ The sites a token reached are on its page and in `web_fetch_rule`, in the
 clear like server addresses, and never in the request log: the gateway logs
 that `web_fetch` was called and not where to.
 
+## Browser
+
+The browser is a server of kind `browser`, one per vault, added by the
+owner on the Browser page (`url` is the fixed `pcp:browser`). Its tools are
+a fixed catalogue (`lib/core/browser/tools.ts`) written with `storeTools`
+like a mail account's, and `upstream.ts` hands its calls to
+`lib/core/browser/call.ts` with the calling token. So it is found, levelled,
+proposed for and called like any server, and a long snapshot is kept for
+`read_result` by `runCall` like any long answer.
+
+**What runs** (`runtime.ts`). One headless Chromium per vault, driven by
+`playwright-core`, started on the first page opened (by an assistant or the
+owner) and closed after fifteen minutes with no tool call, no input and
+nobody watching. The registry is on `globalThis`, as the network's is,
+because the gateway, the actions and the route handlers are bundled apart.
+Chromium runs with one in-memory context: nothing is written to disk. It
+starts without `--enable-automation`, with
+`--disable-blink-features=AutomationControlled`, a desktop user agent without
+"Headless", the host's locale and time zone and a 1280 by 800 viewport, and
+with service workers blocked (one could answer a navigation without the
+network, around the gate). Chromium's own sandbox is used where the machine
+gives one and dropped where it cannot (root, or an unprivileged container;
+the Docker image says so with `PCP_BROWSER_SANDBOX=off`). PCP adds no
+stealth beyond that: the strictest sites may still refuse a headless
+Chromium.
+
+**The sign-ins** (`profile.ts`). The context starts from the vault's
+`browser_profile`: Playwright's storage state (cookies, local storage,
+IndexedDB) as JSON, AES-256-GCM under the data key with
+`browser_profile:<vaultId>`, at most 8 MB (past that IndexedDB is left out,
+then local storage, and the page says so). It is saved while a request
+holds the key: after every tool call that can change a site, after the
+owner's input (every two seconds at most), when the owner hands a tab back
+or answers a hand-over, when they stop watching a tab, and when they close
+the browser. The idle close has no key and saves nothing, so what a page
+changed on its own since the last save is lost. Counts (sites, cookies,
+size) are kept in the clear for the page. An export carries the row as
+ciphertext; Forget all sites closes the browser unsaved and deletes it.
+
+**Which pages open** (the gate in `runtime.ts`). A tab's main frame loads
+nothing the gate has not passed: the DevTools protocol pauses each document
+request (redirects included) before it is sent. It passes when the owner
+drives the tab, when the owner allowed the site for this tab, or when the
+web fetch lines of the token that drives the tab give GET to that site
+`allowed`; never PCP's own site. Otherwise it is answered with 204, which
+leaves the tab on the page it was on, and the next answer says which site
+was stopped and puts it on the token's page (a line of its own on first
+sight, as web fetch does). Frames inside a page and subresources are not
+gated per site. `navigate` and `tabs` decide before anything opens, with
+`decideSite` (web-fetch.ts): blocked is refused; ask throws `OwnerNeeded`,
+which `runCall` turns into a `browse` request offering Allow once (the site
+for that tab while it is open), Always allow this site and Block this site
+(the token's site line, as for web fetch) and Not now. A popup becomes a tab
+of the tab that opened it. A token whose `navigate` tool is at ask is asked
+about the tool and then about the site; the browser's server page is where
+its tools are allowed for a token trusted with it.
+
+**Which addresses it reaches** (`proxy.ts`). Every connection goes through
+a forward proxy on 127.0.0.1 (`--proxy-server`, with loopback not
+bypassed; QUIC off and WebRTC kept to the proxy, since UDP would go around
+it). PCP resolves each name, checks every address, and dials the one it
+checked, for pages, redirects, scripts and images alike, as web fetch's
+transport does. Public addresses pass; private ones pass while an open tab
+is driven by a token whose `private` line allows them (the proxy cannot tell
+which tab a connection is for, so this is per browser; tabs the owner opens
+follow the line for all tokens); PCP's own address never. Refusals are
+remembered for half a minute so an answer can say why a page did not open.
+Hosts are never logged.
+
+**What an assistant gets.** A snapshot (Playwright's accessibility tree
+with refs), the page as Markdown (`htmlToMarkdown`, read from the live
+page), a screenshot of the viewport, and the tab's address, title and the
+link to it in PCP. It acts by ref (click, type, select), by key or by
+scroll. It never gets a cookie or storage, never runs JavaScript, never
+downloads a file. A refusal that names a site or an address is a tool
+error, not a thrown `PcpError`, whose text the request log would keep.
+
+**The owner's control.** A tab is driven by the assistants or by the owner.
+Take over on the tab's page makes it the owner's, and every browser tool
+refuses it until Hand back; a tab the owner opens starts as theirs.
+`hand_over` makes the tab the owner's and throws `OwnerNeeded` for a
+`browser_handover` request, which shows the assistant's message and the tab
+live; Done (or Not now) gives it back, saves the profile, and is what
+`check_permission` reports. A hand-over nobody answers goes back when its
+request expires.
+
+**The live view** (`app/api/browser/tabs/[id]/`, `screencast.ts`,
+`input.ts`, `components/browser-tab-view.tsx`). The tab's page draws
+Chromium's screencast (a JPEG each time the page repaints, shared by
+everyone watching) on a canvas, streamed as server-sent events by a route
+handler. While the owner has the tab, their pointer (with the samples the
+browser coalesced), wheel, keys and pastes go back in batches every 40 ms
+to a second route, each event with the time it happened. They are replayed
+through the DevTools protocol (`Input.dispatchMouseEvent` and
+`dispatchKeyEvent`, which Chromium treats as a device's input: trusted
+events), each at its own time plus a fixed delay and stamped with it, so a
+CAPTCHA reading the movement sees its real cadence; a batch that arrives
+late starts a new clock. Coordinates are mapped with the frame's own
+metadata. Both routes check PCP's origin and the owner's session, as the
+export download does. A WebSocket would answer a little sooner, but needs a
+server of its own around Next; the input's format is the same whatever
+carries it.
+
+**Chromium on the machine** (`executable.ts`). `PCP_BROWSER_EXECUTABLE`,
+then the host setting `browser.executable`, then Playwright's own variable
+and install location. The Docker image installs Playwright's Chromium, the
+version `playwright-core` drives; the desktop app stages none.
+
 ## Data on disk
 
 `PCP_DATA_DIR` (default `./data`; `/data` in Docker; in the desktop app

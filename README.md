@@ -43,6 +43,11 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **Web pages, on your terms.** A token can be given a `web_fetch` tool that
   reads public web pages as Markdown. You decide per method and per site, and
   every site an assistant tried is listed for you to allow or block.
+- **A browser that keeps your sign-ins.** Add PCP's browser and an assistant
+  can open pages, read them, click, type and fill in forms in a headless
+  Chromium on the machine PCP runs on, signed in where you signed it in. You
+  decide which sites each token opens, watch any tab live in PCP, and take it
+  over for a sign-in or a CAPTCHA; an assistant can hand you a tab and wait.
 - **Mail without an MCP server.** Add a mail account over JMAP (Stalwart,
   Fastmail, Cyrus) or IMAP with SMTP, or let an assistant propose one for you
   to agree to, and an assistant can search, read, file and send its mail, with
@@ -363,10 +368,34 @@ A request that asks you offers **Allow once**, **Always allow this site**,
 reported to the assistant rather than followed, so you decide the second one
 too. Every line, method or site, has an **All tokens** box like the tools do.
 
-`web_fetch` reaches public addresses only, never your own network, and sends
-none of your secrets or cookies; it never sends an Authorization or Cookie
-header at all. The sites a token reached are on its page, not in the request
-log.
+`web_fetch` reaches public addresses only, unless you set **Private
+addresses** to **Allowed** on the token's page (a device at home, a service
+on your network; an assistant cannot ask for it), and never PCP's own
+address. It sends none of your secrets or cookies; it never sends an
+Authorization or Cookie header at all. The sites a token reached are on its
+page, not in the request log.
+
+**The browser.** On the **Browser** page, **Add the browser**: it becomes a
+server like any other, with tools to open a page (`navigate`, `tabs`), read
+it (`snapshot`, which names each element with a ref; `read_page`; `find`;
+`screenshot`), act on it (`click`, `type`, `select_option`, `press_key`,
+`scroll`, `wait_for`, `handle_dialog`) and `hand_over` a tab to you. It is
+Chromium without a window on PCP's machine (the Docker image includes it),
+started with the first page and closed after fifteen idle minutes. Which
+sites a token opens follows the same lines as web fetch, on the token's page
+(as **Browser sites** for a token without web fetch): a site it has not opened before asks you, and
+**Allow once** lets that tab open the site's pages while it is open. Private
+addresses and PCP's own address work as for web fetch.
+
+The browser keeps its cookies, local storage and IndexedDB, encrypted in your
+vault, so a sign-in lasts between conversations; an assistant acts as you
+where you signed in, but no tool hands back a cookie or runs a script.
+**Forget all sites** signs it out of everything. Every answer names the tab
+and a link to it in PCP, where you watch it live and **Take over**: your
+mouse and keyboard go to the page, with the timing you made them, and the
+assistant's tools leave the tab alone until you **Hand back**. `hand_over`
+asks you the same way any request does, with the tab live on the request's
+page, and **Done** gives it back.
 
 ## How it is secured
 

@@ -18,7 +18,8 @@ What you end up with:
 - **A computer that stays on.** A Raspberry Pi 4 or 5 (64-bit OS), an old
   laptop or mini PC running Linux, a NAS that runs Docker, or a small cloud
   server (a few euros or dollars a month). PCP is light: 1 GB of memory is
-  plenty.
+  plenty. If you add the browser, it runs Chromium while it is in use: give
+  it another 1 GB.
 - **Docker or Podman.** Fedora Atomic systems such as Bazzite come with
   Podman. On other Linux systems, this installs Docker:
 
