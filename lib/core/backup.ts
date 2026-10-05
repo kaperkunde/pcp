@@ -147,6 +147,9 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           tools: (await tx.mcpTool.findMany(byServer)).map(rowJson),
           openApiSpecs: (await tx.openApiSpec.findMany(byServer)).map(rowJson),
           settings: settings.map(rowJson),
+          browserProfiles: (await tx.browserProfile.findMany(byVault)).map(
+            rowJson,
+          ),
         },
         host: host.filter(isExportedHostRow).map(rowJson),
       }
@@ -374,6 +377,12 @@ export async function restoreExport(
         await inChunks(tables.settings, (data) =>
           tx.setting.createMany({ data }),
         )
+        // One row of up to MAX_PROFILE_BYTES of ciphertext.
+        await inChunks(
+          tables.browserProfiles,
+          (data) => tx.browserProfile.createMany({ data }),
+          1,
+        )
       },
       { timeout: 60_000 },
     )
@@ -399,6 +408,7 @@ async function wipeVault(
   const byToken = { where: { token: { vaultId } } }
 
   await tx.setting.deleteMany(byVault)
+  await tx.browserProfile.deleteMany(byVault)
   // Answers kept for read_result are not exported: a day's cache, bound to
   // the tokens this restore replaces.
   await tx.toolResult.deleteMany(byVault)

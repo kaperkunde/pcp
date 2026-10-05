@@ -11,7 +11,14 @@ import {
 } from "./backup"
 import { EXPORT_AAD, type ExportPayloadJson } from "./backup-format"
 import { storeTools } from "./catalogue"
-import { decrypt, deriveKek, type ScryptParams } from "./crypto"
+import {
+  asBytes,
+  decrypt,
+  decryptString,
+  deriveKek,
+  encryptString,
+  type ScryptParams,
+} from "./crypto"
 import { db } from "./db"
 import { getHostJson, setHostJson } from "./host-settings"
 import { createMailAccount } from "./mail/accounts"
@@ -285,6 +292,72 @@ describe("restoring", { timeout: 60_000 }, () => {
     await expect(
       readResult(ctx, { tokenId, id: kept.id }),
     ).rejects.toMatchObject({ code: "not_found" })
+  })
+
+  it("carries the browser's sign-ins as they are, and restores a file from before the browser", async () => {
+    const { ctx } = await populate()
+    const state = JSON.stringify({
+      cookies: [{ name: "sid", value: "very-secret-cookie" }],
+      origins: [],
+    })
+    await db().browserProfile.create({
+      data: {
+        vaultId: ctx.vaultId,
+        ciphertext: asBytes(
+          encryptString(ctx.dek, state, `browser_profile:${ctx.vaultId}`),
+        ),
+        sites: 3,
+        cookies: 1,
+        size: state.length,
+        savedAt: new Date("2026-10-05T12:00:00Z"),
+      },
+    })
+    const before = await db().browserProfile.findUniqueOrThrow({
+      where: { vaultId: ctx.vaultId },
+    })
+
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const payload = await openRaw(file, EXPORT_PASSWORD)
+    expect(payload.tables.browserProfiles).toHaveLength(1)
+    expect(JSON.stringify(payload)).not.toContain("very-secret-cookie")
+    const { payload: read, preview } = await readExport(file, EXPORT_PASSWORD)
+    expect(preview.counts.browserSites).toBe(3)
+
+    await db().browserProfile.delete({ where: { vaultId: ctx.vaultId } })
+    await restoreExport(
+      read,
+      { into: "vault", vaultId: ctx.vaultId },
+      { restoreHostSettings: false },
+    )
+    const after = await db().browserProfile.findUniqueOrThrow({
+      where: { vaultId: ctx.vaultId },
+    })
+    expect(after).toEqual(before)
+    expect(
+      decryptString(
+        ctx.dek,
+        Buffer.from(after.ciphertext),
+        `browser_profile:${ctx.vaultId}`,
+      ),
+    ).toBe(state)
+
+    // A file from before the browser has no such table, and restores
+    // without sign-ins.
+    const older = structuredClone(payload) as {
+      tables: Record<string, unknown>
+    }
+    delete older.tables.browserProfiles
+    const { payload: oldRead, preview: oldPreview } = await readExport(
+      await encodeExport(older as ExportPayloadJson, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    expect(oldPreview.counts.browserSites).toBe(0)
+    await restoreExport(
+      oldRead,
+      { into: "vault", vaultId: ctx.vaultId },
+      { restoreHostSettings: false },
+    )
+    expect(await db().browserProfile.count()).toBe(0)
   })
 
   it("restores a file from before mail accounts, with their columns empty", async () => {
