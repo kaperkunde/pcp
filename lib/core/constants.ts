@@ -168,7 +168,7 @@ export const DDNS_PROVIDER_LABELS: Record<
 > = {
   duckdns: {
     label: "DuckDNS",
-    hint: "Free. Sign in at duckdns.org, pick a name, and copy your token.",
+    hint: "Free, and the easiest: a name and a token.",
   },
   dyndns2: {
     label: "No-IP, Dynu and others",
@@ -182,6 +182,33 @@ export const DDNS_PROVIDER_LABELS: Record<
     label: "Another service (an update URL)",
     hint: "Any service that updates when PCP opens a URL.",
   },
+}
+
+/** Where the owner signs in to DuckDNS, adds a name and finds the token. */
+export const DUCKDNS_URL = "https://www.duckdns.org/"
+
+const DUCKDNS_TOKEN =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+const DUCKDNS_NAME =
+  /(?:[?&]domains=([a-z0-9-]+)|\b(?!www\.)([a-z0-9-]+)\.duckdns\.org)/i
+
+/**
+ * The token, and the name if it is there, in whatever the owner pasted from
+ * duckdns.org: the token alone, or a whole update line from its install
+ * page (…/update?domains=name&token=…). DuckDNS has no way to hand a token
+ * over but the screen, and copying exactly the token from it is fiddly,
+ * on a phone above all. Shared by the form and lib/core/network/ddns.ts.
+ */
+export function readDuckDnsPaste(text: string): {
+  token: string | null
+  subdomain: string | null
+} {
+  const name = DUCKDNS_NAME.exec(text)
+
+  return {
+    token: DUCKDNS_TOKEN.exec(text)?.[0].toLowerCase() ?? null,
+    subdomain: (name?.[1] ?? name?.[2])?.toLowerCase() ?? null,
+  }
 }
 
 /** dyndns2 services PCP knows the update address of. */

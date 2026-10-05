@@ -6,7 +6,8 @@ import { E2E_EDGE_HTTP_PORT } from "../lib/network"
 // Dynamic DNS and HTTPS from Settings. The dynamic DNS service is the fake
 // upstream's update URL; Let's Encrypt is an address where nothing answers
 // (PCP_ACME_DIRECTORY in playwright.config.ts), so asking for a certificate
-// fails the way it does when port 80 is not reachable, and the page says so.
+// fails the way it does when port 80 is not reachable: PCP turns HTTPS off
+// again and the page says why.
 test.describe.configure({ mode: "serial" })
 
 const NAME = `pcp-${Date.now().toString(36)}.e2e.example`
@@ -83,7 +84,7 @@ test("stops when the service refuses the login, until the settings are saved", a
   expect(upstream.ddns.updates).toHaveLength(3)
 })
 
-test("turns HTTPS on for the dynamic DNS name and says why there is no certificate", async ({
+test("turns HTTPS on for the dynamic DNS name, and off again when Let's Encrypt refuses the first try", async ({
   page,
   request,
 }) => {
@@ -100,39 +101,27 @@ test("turns HTTPS on for the dynamic DNS name and says why there is no certifica
     `Asking Let's Encrypt for a certificate for ${NAME}`,
   )
 
-  // Port 80 is open: it answers Let's Encrypt and, until there is a
-  // certificate, forwards to PCP.
-  const edge = `http://127.0.0.1:${E2E_EDGE_HTTP_PORT}`
-  await expect
-    .poll(async () => (await request.get(`${edge}/api/health`)).status())
-    .toBe(200)
-  expect(
-    (await request.get(`${edge}/.well-known/acme-challenge/none`)).status(),
-  ).toBe(404)
-
-  const status = page.getByTestId("https-status")
-  await expect(status.getByText("No certificate")).toBeVisible({
+  // A first try that fails is not tried again: HTTPS is off, and the card
+  // says why until it is turned on again.
+  await page.reload()
+  const turnedOff = page.getByTestId("https-turned-off")
+  await expect(turnedOff.getByText("Turned off")).toBeVisible({
     timeout: 30_000,
   })
-  await expect(status.getByRole("alert").first()).toContainText(
+  await expect(turnedOff.getByRole("alert")).toContainText(
     `Let's Encrypt did not issue a certificate for ${NAME}`,
   )
-  await expect(
-    status.getByRole("button", { name: "Try again now" }),
-  ).toBeVisible()
-})
-
-test("turns HTTPS and dynamic DNS off again", async ({ page, request }) => {
-  await page.goto("/settings")
-  page.once("dialog", (dialog) => dialog.accept())
-  await page.getByRole("button", { name: "Turn HTTPS off" }).click()
+  await expect(page.getByTestId("https-status")).toHaveCount(0)
   await expect(
     page.getByRole("button", { name: "Turn on HTTPS" }),
   ).toBeVisible()
   await expect(
     request.get(`http://127.0.0.1:${E2E_EDGE_HTTP_PORT}/api/health`),
   ).rejects.toThrow()
+})
 
+test("turns dynamic DNS off again", async ({ page }) => {
+  await page.goto("/settings")
   page.once("dialog", (dialog) => dialog.accept())
   await page.getByRole("button", { name: "Turn dynamic DNS off" }).click()
   await expect(

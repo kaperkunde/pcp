@@ -13,7 +13,7 @@ import {
   MAX_MAILBOXES,
   MAX_THREAD_EMAILS,
 } from "./limits"
-import { bareType, charsetOf, decodeText, isTextType } from "../media-types"
+import { bareType, charsetOf } from "../media-types"
 import {
   MAILBOX_ROLES,
   MailAuthError,
@@ -913,12 +913,9 @@ export function openJmapBackend(
       const size = typeof part.size === "number" ? part.size : 0
       const meta = { name, type, size }
 
-      // Only text is passed on, so nothing else is downloaded.
-      if (!isTextType(type)) {
-        return { ...meta, text: null }
-      }
+      const downloaded = await download(part, meta, maxBytes)
 
-      return { ...meta, ...(await download(part, meta, maxBytes)) }
+      return { ...meta, size: downloaded.bytes.length, ...downloaded }
     },
 
     async close() {
@@ -926,12 +923,12 @@ export function openJmapBackend(
     },
   }
 
-  /** The attachment's bytes as text, when it is small enough and allowed. */
+  /** The attachment's bytes, when it is small enough. */
   async function download(
     part: Json,
     meta: { name: string | null; type: string; size: number },
     maxBytes: number,
-  ): Promise<{ text: string }> {
+  ): Promise<{ bytes: Buffer; charset: string | null }> {
     if (!config.downloadUrl) {
       throw new MailRequestError("The JMAP server offers no downloads.")
     }
@@ -979,7 +976,7 @@ export function openJmapBackend(
       (typeof part.charset === "string" ? part.charset : null) ??
       charsetOf(meta.type)
 
-    return { text: decodeText(bytes, charset) }
+    return { bytes, charset }
   }
 }
 

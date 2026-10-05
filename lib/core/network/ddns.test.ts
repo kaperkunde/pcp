@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { readDuckDnsPaste } from "../constants"
 import { scratchDatabase } from "../test-db"
 import {
   customRequest,
@@ -59,9 +60,11 @@ const text =
     new Response(body, { status })
 const ipService = { [PUBLIC_IP_SERVICES[0]]: text("203.0.113.7\n") }
 
+const TOKEN = "a7c4d0ad-114e-40ef-ba1d-d217904a50f2"
+
 const duck: DdnsConfig = {
   provider: "duckdns",
-  subdomain: "pcp-me",
+  subdomain: "my-house",
   token: "duck-token",
 }
 
@@ -73,10 +76,53 @@ describe("reading the form", () => {
   it("takes a DuckDNS name with or without the suffix", () => {
     expect(
       parseDdnsInput(
-        { provider: "duckdns", subdomain: "PCP-Me.duckdns.org", token: "t" },
+        {
+          provider: "duckdns",
+          subdomain: "My-House.duckdns.org",
+          token: TOKEN,
+        },
         null,
       ),
-    ).toEqual({ provider: "duckdns", subdomain: "pcp-me", token: "t" })
+    ).toEqual({ provider: "duckdns", subdomain: "my-house", token: TOKEN })
+  })
+
+  it("finds the DuckDNS token, and the name, in whatever was pasted", () => {
+    // The update line from duckdns.org's install page.
+    const line = `echo url="https://www.duckdns.org/update?domains=my-house&token=${TOKEN.toUpperCase()}&ip=" | curl -k -o ~/duckdns/duck.log -K -`
+
+    expect(
+      parseDdnsInput({ provider: "duckdns", subdomain: "", token: line }, null),
+    ).toEqual({ provider: "duckdns", subdomain: "my-house", token: TOKEN })
+    // A name typed in wins over the one in the line.
+    expect(
+      parseDdnsInput(
+        { provider: "duckdns", subdomain: "lantern", token: line },
+        null,
+      ),
+    ).toEqual({ provider: "duckdns", subdomain: "lantern", token: TOKEN })
+    expect(
+      parseDdnsInput(
+        {
+          provider: "duckdns",
+          subdomain: "lantern",
+          token: ` token: ${TOKEN}\n`,
+        },
+        null,
+      ),
+    ).toEqual({ provider: "duckdns", subdomain: "lantern", token: TOKEN })
+    expect(readDuckDnsPaste("https://lantern.duckdns.org")).toEqual({
+      token: null,
+      subdomain: "lantern",
+    })
+  })
+
+  it("says so when what was pasted holds no DuckDNS token", () => {
+    expect(() =>
+      parseDdnsInput(
+        { provider: "duckdns", subdomain: "lantern", token: "my password" },
+        null,
+      ),
+    ).toThrow(/not a DuckDNS token/)
   })
 
   it("refuses a provider it does not know and a bad name", () => {
@@ -85,7 +131,7 @@ describe("reading the form", () => {
     )
     expect(() =>
       parseDdnsInput(
-        { provider: "duckdns", subdomain: "a b", token: "t" },
+        { provider: "duckdns", subdomain: "a b", token: TOKEN },
         null,
       ),
     ).toThrow(/DuckDNS name/)
@@ -168,7 +214,7 @@ describe("reading the form", () => {
   })
 
   it("names the host HTTPS can use", () => {
-    expect(ddnsHostname(duck)).toBe("pcp-me.duckdns.org")
+    expect(ddnsHostname(duck)).toBe("my-house.duckdns.org")
     expect(
       ddnsHostname({ provider: "custom", url: "https://x", hostname: "" }),
     ).toBe(null)
@@ -234,7 +280,7 @@ describe("what each service is sent", () => {
     })
 
     const url = new URL(calls[0].url)
-    expect(url.searchParams.get("domains")).toBe("pcp-me")
+    expect(url.searchParams.get("domains")).toBe("my-house")
     expect(url.searchParams.get("token")).toBe("duck-token")
     expect(url.searchParams.get("ip")).toBe("203.0.113.7")
     expect(header(calls[0], "user-agent")).toMatch(/^PCP\//)
@@ -548,21 +594,21 @@ describe("stored settings", () => {
   it("a save starts the status over and lifts a stop", async () => {
     await saveDdnsConfig({
       provider: "duckdns",
-      subdomain: "pcp-me",
-      token: "t",
+      subdomain: "my-house",
+      token: TOKEN,
     })
     await saveDdnsStatus({ stopped: "refused", lastIp: "203.0.113.7" })
 
     await saveDdnsConfig({
       provider: "duckdns",
-      subdomain: "pcp-me",
+      subdomain: "my-house",
       token: "",
     })
 
     expect(await getDdnsConfig()).toEqual({
       provider: "duckdns",
-      subdomain: "pcp-me",
-      token: "t",
+      subdomain: "my-house",
+      token: TOKEN,
     })
     expect(await getDdnsStatus()).toEqual({})
   })

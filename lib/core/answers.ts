@@ -1,7 +1,9 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import { invalid } from "./errors"
+import { invalid, isPcpError } from "./errors"
+import { isTextBytes, sniffMediaType } from "./media-types"
 import { canonicalJson } from "./permission-rules"
+import { handleOf, type KeptResult, type ResultHandle } from "./tool-results"
 
 /**
  * What an assistant reads of a tool's answer. An API can answer with far
@@ -25,6 +27,21 @@ import { canonicalJson } from "./permission-rules"
  *   a client that shows both would count it twice.
  *
  * Text that is not JSON is cut at MAX_ANSWER_CHARS, as before.
+ *
+ * With a keeper (shapeAnswerKeeping, which every upstream call goes
+ * through), large values become results kept for the token and are shown as
+ * handles, {"$result": id, ...}, that any later call can name in their place
+ * (lib/core/result-handles.ts):
+ *
+ * - `keep` names the parts to keep that way, whatever their size;
+ * - base64 that decodes to a file (an image, a PDF, a zip) is kept as the
+ *   file's bytes on sight: it is no use to read and costs thousands of
+ *   characters;
+ * - an answer still too long has its longest texts kept, longest first,
+ *   until it fits, before anything is cut to a preview.
+ *
+ * An image, audio or embedded file block is kept as bytes too; one too large
+ * to pass on is replaced by its handle.
  */
 
 /** The most of one answer's text an assistant is given. */
@@ -43,6 +60,8 @@ export type AnswerShape = {
   fields?: string[]
   /** Where base64 text is decoded. */
   decode?: string[]
+  /** The parts kept as results and shown as handles. */
+  keep?: string[]
 }
 
 const CUT = "\n… (truncated by PCP)"
@@ -412,12 +431,11 @@ function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}${CUT}` : text
 }
 
-/** One JSON value as the texts an assistant reads: notes, then the JSON. */
-function shapeJson(
+/** A JSON value's fields and decoding applied, with notes on what was done. */
+function applyShape(
   value: unknown,
   { fields, decode }: AnswerShape,
-  max: number,
-): string[] {
+): { value: unknown; notes: string[] } {
   const notes: string[] = []
   let shaped = value
 
@@ -440,13 +458,173 @@ function shapeJson(
     notes.push(...decoded.notes)
   }
 
-  const text = JSON.stringify(shaped) ?? "null"
+  return { value: shaped, notes }
+}
+
+/** One JSON value as the texts an assistant reads: notes, then the JSON. */
+function renderJson(
+  value: unknown,
+  notes: string[],
+  max: number,
+  fields: string[] | undefined,
+): string[] {
+  const text = JSON.stringify(value) ?? "null"
 
   if (text.length <= max) {
     return [...notes, text]
   }
 
-  return [...notes, ...oversized(shaped, text.length, max, fields)]
+  return [...notes, ...oversized(value, text.length, max, fields)]
+}
+
+type Block = CallToolResult["content"][number]
+
+type Part =
+  | { kind: "block"; block: Block }
+  | { kind: "json"; value: unknown; notes: string[] }
+
+/**
+ * An answer parsed and shaped, before it is cut to a length: rendered once
+ * for the assistant and, when that left something out, once more whole.
+ */
+type Prepared = {
+  error: CallToolResult | null
+  parts: Part[]
+  fields: string[] | undefined
+  structured: unknown
+  /** The JSON came from structuredContent, shaped as asked. */
+  fromStructured: boolean
+  /** Why fields or decode did nothing. */
+  notApplied: string | null
+  /** structuredContent may be passed on beside the text. */
+  keepStructured: boolean
+}
+
+function prepareAnswer(
+  result: CallToolResult,
+  { fields, decode, keep }: AnswerShape,
+): Prepared {
+  const blocks = result.content ?? []
+  const structured = result.structuredContent
+
+  if (result.isError) {
+    return {
+      error: result,
+      parts: [],
+      fields,
+      structured,
+      fromStructured: false,
+      notApplied: null,
+      keepStructured: false,
+    }
+  }
+
+  const shaping = fields !== undefined || decode !== undefined
+  let sawJson = false
+  let repeatsStructured = false
+  const parts: Part[] = []
+
+  for (const block of blocks) {
+    const parsed = block.type === "text" ? parseJson(block.text) : null
+
+    if (!parsed) {
+      parts.push({ kind: "block", block })
+      continue
+    }
+
+    sawJson = true
+    // An API's answer that is not an object is passed as { value } there.
+    repeatsStructured ||=
+      structured !== undefined &&
+      [parsed.value, { value: parsed.value }].some(
+        (candidate) => canonicalJson(candidate) === canonicalJson(structured),
+      )
+    parts.push({
+      kind: "json",
+      ...applyShape(parsed.value, { fields, decode }),
+    })
+  }
+
+  // Asked for fields, decoding or keeping with the JSON only in
+  // structuredContent: shape that.
+  const fromStructured =
+    (shaping || keep !== undefined) && !sawJson && structured !== undefined
+
+  if (fromStructured) {
+    parts.push({ kind: "json", ...applyShape(structured, { fields, decode }) })
+  }
+
+  const asked = [fields && "fields", decode && "decode", keep && "keep"].filter(
+    Boolean,
+  )
+
+  return {
+    error: null,
+    parts,
+    fields,
+    structured,
+    fromStructured,
+    notApplied:
+      asked.length > 0 && !sawJson && !fromStructured
+        ? `${asked.join(" and ")} ${asked.length > 1 ? "were" : "was"} not applied: the answer is not JSON.`
+        : null,
+    // Shaped text no longer matches structuredContent, and a copy of the
+    // text is no use: either way the text is the answer.
+    keepStructured:
+      structured !== undefined && !(sawJson && (shaping || repeatsStructured)),
+  }
+}
+
+function renderAnswer(prepared: Prepared, max: number): CallToolResult {
+  if (prepared.error) {
+    return {
+      ...prepared.error,
+      content: (prepared.error.content ?? []).map((block) =>
+        block.type === "text"
+          ? { ...block, text: clip(block.text, max) }
+          : block,
+      ),
+    }
+  }
+
+  const content: CallToolResult["content"] = []
+
+  if (prepared.notApplied) {
+    content.push({ type: "text", text: prepared.notApplied })
+  }
+
+  for (const part of prepared.parts) {
+    if (part.kind === "block") {
+      content.push(
+        part.block.type === "text"
+          ? { ...part.block, text: clip(part.block.text, max) }
+          : part.block,
+      )
+      continue
+    }
+
+    for (const text of renderJson(
+      part.value,
+      part.notes,
+      max,
+      prepared.fields,
+    )) {
+      content.push({ type: "text", text })
+    }
+  }
+
+  if (prepared.fromStructured) {
+    return { content }
+  }
+
+  const keepStructured =
+    prepared.keepStructured &&
+    (JSON.stringify(prepared.structured)?.length ?? 0) <= max
+
+  return {
+    content,
+    ...(keepStructured ? { structuredContent: prepared.structured } : {}),
+  }
 }
 
 /**
@@ -459,80 +637,459 @@ export function shapeAnswer(
     fields,
     decode,
     max = MAX_ANSWER_CHARS,
-  }: AnswerShape & { max?: number } = {},
+  }: Omit<AnswerShape, "keep"> & { max?: number } = {},
 ): CallToolResult {
-  const shape = { fields, decode }
-  const shaping = fields !== undefined || decode !== undefined
-  const blocks = result.content ?? []
+  return renderAnswer(prepareAnswer(result, { fields, decode }), max)
+}
 
-  if (result.isError) {
-    return {
-      ...result,
-      content: blocks.map((block) =>
-        block.type === "text"
-          ? { ...block, text: clip(block.text, max) }
-          : block,
-      ),
+/** Strings at least this long that decode to a file are kept on sight. */
+export const MIN_AUTO_BYTES_CHARS = 1_024
+/** Texts at least this long are kept when an answer is still too long. */
+export const MIN_AUTO_TEXT_CHARS = 2_000
+export const MAX_AUTO_TEXT_HANDLES = 20
+/** All the handles one answer may make, whatever made them. */
+export const MAX_HANDLES_PER_ANSWER = 50
+export const HANDLE_PREVIEW_CHARS = 200
+/** Paths a handle note names before "and N more". */
+const MAX_NOTED_HANDLES = 10
+
+/** Keeps a value of an answer for the token the call was made for. */
+export type AnswerKeepers = {
+  text(input: {
+    text: string
+    mediaType: string
+    name?: string | null
+  }): Promise<KeptResult>
+  bytes(input: {
+    bytes: Buffer
+    mediaType: string
+    name: string | null
+  }): Promise<KeptResult>
+}
+
+const HEX = /^[0-9a-fA-F]+$/
+
+/**
+ * The file a string is the base64 of, or null. Only bytes that are not text
+ * count. A file type known by its first bytes is taken from anything; any
+ * other bytes only from standard base64 that looks it (padded to whole
+ * groups, both cases and digits, + or /, not hex), so an id or a digest
+ * that merely uses the alphabet stays text.
+ */
+function fileOf(
+  value: string,
+  minChars: number,
+): { bytes: Buffer; type: string | null } | null {
+  if (value.length < minChars) {
+    return null
+  }
+
+  const compact = value.replace(/[\r\n]/g, "")
+
+  if (!BASE64.test(compact) || compact.replace(/=+$/, "").length % 4 === 1) {
+    return null
+  }
+
+  const bytes = Buffer.from(compact, "base64")
+
+  if (bytes.length === 0 || isTextBytes(bytes)) {
+    return null
+  }
+
+  const sniffed = sniffMediaType(bytes)
+
+  if (sniffed) {
+    return { bytes, type: sniffed }
+  }
+
+  const looksLikeBase64 =
+    compact.length % 4 === 0 &&
+    /[A-Z]/.test(compact) &&
+    /[a-z]/.test(compact) &&
+    /[0-9]/.test(compact) &&
+    /[+/]/.test(compact) &&
+    !HEX.test(compact)
+
+  return looksLikeBase64 ? { bytes, type: null } : null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function siblingString(
+  siblings: Record<string, unknown> | null,
+  keys: string[],
+): string | null {
+  for (const key of keys) {
+    const value = siblings?.[key]
+
+    if (typeof value === "string" && value.trim() !== "") {
+      return value
     }
   }
 
-  const structured = result.structuredContent
-  let sawJson = false
-  let repeatsStructured = false
-  const content: CallToolResult["content"] = []
+  return null
+}
 
-  for (const block of blocks) {
-    const parsed = block.type === "text" ? parseJson(block.text) : null
+const NAME_KEYS = ["filename", "fileName", "name", "title"]
+const TYPE_KEYS = ["mimeType", "contentType", "mediaType", "type"]
 
-    if (block.type !== "text" || !parsed) {
-      content.push(
-        block.type === "text"
-          ? { ...block, text: clip(block.text, max) }
-          : block,
+function sizeOf(handle: ResultHandle): string {
+  return handle.size !== undefined
+    ? `${handle.size.toLocaleString("en")} bytes`
+    : `${(handle.length ?? 0).toLocaleString("en")} characters`
+}
+
+/** Makes the handles of one answer, and says what it made. */
+class Handles {
+  made: Array<{ path: string; handle: ResultHandle }> = []
+  capped = false
+
+  constructor(
+    private readonly keepers: AnswerKeepers,
+    private readonly keep: Array<{ path: string; parts: string[] }>,
+  ) {}
+
+  private room(): boolean {
+    if (this.made.length >= MAX_HANDLES_PER_ANSWER) {
+      this.capped = true
+      return false
+    }
+
+    return true
+  }
+
+  /** A kept value's handle, or null when it could not be kept. */
+  private async kept(
+    path: string,
+    make: () => Promise<KeptResult>,
+    preview?: string,
+  ): Promise<ResultHandle | null> {
+    try {
+      const handle = handleOf(await make(), preview)
+      this.made.push({ path, handle })
+      return handle
+    } catch (error) {
+      // Too large to keep: it stays as it was.
+      if (isPcpError(error)) {
+        return null
+      }
+
+      throw error
+    }
+  }
+
+  private keepText(path: string, text: string, mediaType: string) {
+    return this.kept(
+      path,
+      () => this.keepers.text({ text, mediaType }),
+      text.slice(0, HANDLE_PREVIEW_CHARS),
+    )
+  }
+
+  private keepFile(
+    path: string,
+    file: { bytes: Buffer; type: string | null },
+    siblings: Record<string, unknown> | null,
+  ) {
+    const declared = siblingString(siblings, TYPE_KEYS)
+
+    return this.kept(path, () =>
+      this.keepers.bytes({
+        bytes: file.bytes,
+        mediaType:
+          file.type ??
+          (declared?.includes("/") ? declared : "application/octet-stream"),
+        name: siblingString(siblings, NAME_KEYS),
+      }),
+    )
+  }
+
+  /** Rules a (keep) and b (files on sight), over one JSON value. */
+  async transform(
+    value: unknown,
+    keys: string[] = [],
+    path = "",
+    siblings: Record<string, unknown> | null = null,
+  ): Promise<unknown> {
+    if (keys.length >= MAX_DECODE_DEPTH) {
+      return value
+    }
+
+    const asked = this.keep.some(({ parts }) => endsWith(keys, parts))
+
+    if (asked && value !== null && typeof value === "object") {
+      if (!this.room()) {
+        return value
+      }
+
+      return (
+        (await this.keepText(
+          path,
+          JSON.stringify(value),
+          "application/json",
+        )) ?? value
       )
-      continue
     }
 
-    sawJson = true
-    // An API's answer that is not an object is passed as { value } there.
-    repeatsStructured ||=
-      structured !== undefined &&
-      [parsed.value, { value: parsed.value }].some(
-        (candidate) => canonicalJson(candidate) === canonicalJson(structured),
+    if (typeof value === "string") {
+      if (value === "" || !(asked || value.length >= MIN_AUTO_BYTES_CHARS)) {
+        return value
+      }
+
+      const file = fileOf(value, asked ? 64 : MIN_AUTO_BYTES_CHARS)
+
+      if (!file && !asked) {
+        return value
+      }
+
+      if (!this.room()) {
+        return value
+      }
+
+      return (
+        (file
+          ? await this.keepFile(path, file, siblings)
+          : await this.keepText(path, value, "text/plain")) ?? value
+      )
+    }
+
+    if (Array.isArray(value)) {
+      const out: unknown[] = []
+
+      for (const [index, item] of value.entries()) {
+        out.push(await this.transform(item, keys, `${path}[${index}]`, null))
+      }
+
+      return out
+    }
+
+    if (isRecord(value)) {
+      const out: Record<string, unknown> = {}
+
+      for (const [key, item] of Object.entries(value)) {
+        out[key] = await this.transform(
+          item,
+          [...keys, key],
+          path ? `${path}.${key}` : key,
+          value,
+        )
+      }
+
+      return out
+    }
+
+    return value
+  }
+
+  /** Rule c: the longest texts kept until the value fits in max. */
+  async shrink(value: unknown, max: number): Promise<void> {
+    let total = (JSON.stringify(value) ?? "").length
+
+    if (total <= max) {
+      return
+    }
+
+    const candidates: Array<{
+      holder: Record<string, unknown> | unknown[]
+      key: string | number
+      path: string
+      text: string
+    }> = []
+
+    const walk = (node: unknown, path: string, depth: number) => {
+      if (depth >= MAX_DECODE_DEPTH) {
+        return
+      }
+
+      const entries: Array<[string | number, unknown, string]> = Array.isArray(
+        node,
+      )
+        ? node.map((item, index) => [index, item, `${path}[${index}]`])
+        : isRecord(node) && !("$result" in node)
+          ? Object.entries(node).map(([key, item]) => [
+              key,
+              item,
+              path ? `${path}.${key}` : key,
+            ])
+          : []
+
+      for (const [key, item, itemPath] of entries) {
+        if (typeof item === "string" && item.length >= MIN_AUTO_TEXT_CHARS) {
+          candidates.push({
+            holder: node as Record<string, unknown>,
+            key,
+            path: itemPath,
+            text: item,
+          })
+        } else {
+          walk(item, itemPath, depth + 1)
+        }
+      }
+    }
+
+    walk(value, "", 0)
+    candidates.sort((a, b) => b.text.length - a.text.length)
+
+    let made = 0
+
+    for (const candidate of candidates) {
+      if (total <= max || made >= MAX_AUTO_TEXT_HANDLES || !this.room()) {
+        break
+      }
+
+      const handle = await this.keepText(
+        candidate.path,
+        candidate.text,
+        "text/plain",
       )
 
-    for (const text of shapeJson(parsed.value, shape, max)) {
-      content.push({ type: "text", text })
+      if (handle) {
+        ;(candidate.holder as Record<string | number, unknown>)[candidate.key] =
+          handle
+        total -=
+          JSON.stringify(candidate.text).length - JSON.stringify(handle).length
+        made += 1
+      }
     }
   }
 
-  // Asked for fields or decoding with the JSON only in structuredContent:
-  // shape that.
-  if (shaping && !sawJson && structured !== undefined) {
-    for (const text of shapeJson(structured, shape, max)) {
-      content.push({ type: "text", text })
+  /** An image, audio or embedded file block, kept as bytes. */
+  async block(block: Block, max: number): Promise<Block[]> {
+    const file =
+      block.type === "image" || block.type === "audio"
+        ? {
+            data: block.data,
+            type: block.mimeType,
+            name: null,
+            what: block.type,
+          }
+        : block.type === "resource" && "blob" in block.resource
+          ? {
+              data: block.resource.blob,
+              type: block.resource.mimeType ?? null,
+              name:
+                block.resource.uri.split(/[/?#]/).filter(Boolean).pop() ?? null,
+              what: "file",
+            }
+          : null
+
+    if (!file || !this.room()) {
+      return [block]
     }
 
-    return { content }
+    const bytes = Buffer.from(file.data, "base64")
+    const handle = await this.kept(block.type, () =>
+      this.keepers.bytes({
+        bytes,
+        mediaType:
+          file.type ?? sniffMediaType(bytes) ?? "application/octet-stream",
+        name: file.name,
+      }),
+    )
+
+    if (!handle) {
+      return [block]
+    }
+
+    const json = JSON.stringify(handle)
+
+    return file.data.length > max
+      ? [
+          {
+            type: "text",
+            text: `PCP kept this ${file.what} as a result, too large to pass on here: ${json}`,
+          },
+        ]
+      : [
+          block,
+          {
+            type: "text",
+            text: `PCP kept this ${file.what} as a result too, to hand to another tool: ${json}`,
+          },
+        ]
   }
 
-  if (shaping && !sawJson) {
-    const asked = [fields && "fields", decode && "decode"].filter(Boolean)
-    content.unshift({
-      type: "text",
-      text: `${asked.join(" and ")} ${asked.length > 1 ? "were" : "was"} not applied: the answer is not JSON.`,
-    })
-  }
+  /** The note for the handles made since `from`, or null for none. */
+  note(from: number): string | null {
+    const made = this.made.slice(from)
 
-  // Shaped text no longer matches structuredContent, and a copy of the
-  // text is no use: either way the text is the answer.
-  const keepStructured =
-    structured !== undefined &&
-    !(sawJson && (shaping || repeatsStructured)) &&
-    (JSON.stringify(structured)?.length ?? 0) <= max
+    if (made.length === 0) {
+      return null
+    }
+
+    const named = made
+      .slice(0, MAX_NOTED_HANDLES)
+      .map(
+        ({ path, handle }) =>
+          `${path || "(the answer)"} → ${handle.$result} (${handle.type}, ${sizeOf(handle)})`,
+      )
+      .join("; ")
+    const more =
+      made.length > MAX_NOTED_HANDLES
+        ? `; and ${made.length - MAX_NOTED_HANDLES} more`
+        : ""
+    const capped = this.capped
+      ? ` PCP keeps at most ${MAX_HANDLES_PER_ANSWER} per answer: ask for fewer fields for the rest.`
+      : ""
+
+    return `PCP kept ${made.length} value${made.length === 1 ? "" : "s"} of this answer as results, each shown as {"$result": …}: ${named}${more}. Pass a handle as it is in any tool's arguments, where it stands for the value (a file as base64, or as text with "as": "text"); read_result reads a text one.${capped}`
+  }
+}
+
+/**
+ * A tool's result as the assistant gets it, with large values kept as
+ * results for the token and shown as handles (see above). `shown` is cut to
+ * `max`; `whole()` renders the same shaped answer, with the same handles, up
+ * to `wholeMax`, for keepWholeAnswer to keep when `shown` left anything out.
+ */
+export async function shapeAnswerKeeping(
+  result: CallToolResult,
+  { fields, decode, keep }: AnswerShape,
+  keepers: AnswerKeepers,
+  { max = MAX_ANSWER_CHARS, wholeMax }: { max?: number; wholeMax: number },
+): Promise<{ shown: CallToolResult; whole: () => CallToolResult }> {
+  const prepared = prepareAnswer(result, { fields, decode, keep })
+
+  if (!prepared.error) {
+    const handles = new Handles(
+      keepers,
+      (keep ?? []).map((path) => ({ path, parts: path.split(".") })),
+    )
+    const parts: Part[] = []
+
+    for (const part of prepared.parts) {
+      if (part.kind === "block") {
+        for (const block of await handles.block(part.block, max)) {
+          parts.push({ kind: "block", block })
+        }
+
+        continue
+      }
+
+      const from = handles.made.length
+      const value = await handles.transform(part.value)
+      const notesLength = part.notes.reduce((sum, note) => sum + note.length, 0)
+      await handles.shrink(value, max - notesLength)
+      const note = handles.note(from)
+
+      parts.push({
+        kind: "json",
+        value,
+        notes: note ? [...part.notes, note] : part.notes,
+      })
+    }
+
+    prepared.parts = parts
+
+    if (handles.made.length > 0) {
+      prepared.keepStructured = false
+    }
+  }
 
   return {
-    content,
-    ...(keepStructured ? { structuredContent: structured } : {}),
+    shown: renderAnswer(prepared, max),
+    whole: () => renderAnswer(prepared, wholeMax),
   }
 }

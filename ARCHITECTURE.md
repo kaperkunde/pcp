@@ -20,6 +20,7 @@ lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
   mail/              Mail accounts: JMAP and IMAP/SMTP behind one set of mail tools
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
+  updates/           The daily check for a newer release, and what it found
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
 desktop/             The Mac and Windows app: Electron around the production build, nothing of PCP in it
@@ -696,10 +697,12 @@ by table (not trusting cascades alone), and writes the file's rows in its
 place, parents before children, in chunks that keep under SQLite's variable
 limit; row ids and timestamps are the file's. On a PCP not set up yet the
 transaction first checks that there is no vault, as `setupVault` does. The
-host's network settings (`ddns.config`, `tls.config`, in plain text as they
-are in the database) are in the file and restored only when the owner ticks
-the box, with this machine's status rows dropped so nothing stale shows; a
-restore that brings them has `reconcileNetwork` act on them at once, and
+host's settings (`ddns.config`, `tls.config` and `update.config`, in plain
+text as they are in the database) are in the file and restored only when the
+owner ticks the box, with this machine's network status rows dropped so
+nothing stale shows (the update status stays: what GitHub said holds here
+too); a restore that brings them has `reconcileNetwork` and
+`reconcileUpdates` act on them at once, and
 every restore has `rebuildOutdatedEndpoints` rebuild the tools of endpoints
 a different PCP version built, as boot does. The owner's own session goes
 with the vault; the action signs them in again when the password they typed
@@ -782,6 +785,55 @@ HTTP for the local network. In the desktop app the two ports stay 80 and 443
 (macOS and Windows let an ordinary program use them), and they listen on
 every interface even while the app keeps port 3000 to this computer: a
 router's forward needs exactly that.
+
+## Updates
+
+PCP tells the owner when a newer release is out and how to update the PCP
+they are looking at. It never updates itself in a container or a checkout.
+The code is `lib/core/updates/`.
+
+**What it asks, and of whom.** Once a day PCP asks GitHub for the
+repository's latest release (`api.github.com/repos/kaperkunde/pcp/releases/latest`,
+which leaves out drafts and pre-releases). The request carries an `accept`
+header and a user agent naming PCP's version, nothing else: no credential, no
+cookie, nothing of the vault. So GitHub learns this PCP's address and version.
+The owner is told so where the check is turned off (Settings → Updates, and
+the step after setup). The address is PCP's own, not one an assistant chose,
+so it goes through plain `fetch` like dynamic DNS does (which works behind an
+outbound proxy), with `redirect: "manual"`: at most two redirects, to the same
+origin (a renamed repository answers with one). `PCP_RELEASES_URL` replaces
+the address, for tests and mirrors.
+
+**The answer is untrusted input.** It is read within limits
+(`updates/limits.ts`: ten seconds, 256 KB) through a schema that keeps the tag,
+the date, the notes and the names of the attached files. The tag must be
+`vMAJOR.MINOR.PATCH`. The notes are cut to 4,000 characters, stripped of
+characters that do not show, and shown as text, never as HTML or Markdown.
+The release page the owner is sent to is built from PCP's repository address
+and the version; the answer's own links are never used.
+
+**When.** The check is on unless the owner turns it off (`update.config`, a
+host setting, stored like the network ones and carried by an export). While
+it is on, one timer per process (`updates/runtime.ts`, on `globalThis` as the
+network runtime is) wakes every hour; a round runs only when PCP is set up
+and a day has passed since the last good check, so a restart asks nothing
+again, and nothing is asked before an owner exists to have been told. A
+failure backs off an hour, four hours, then a day. With the check off there
+is no timer and no request; **Check now** still asks, because the owner
+pressed it (at most five times a minute). What a round finds is
+`update.status`, a host setting that never leaves the machine. It is not in
+the request log.
+
+**What the owner sees.** Every page's header has a "v… available" link next to
+the version while the last check found a later release; the layout reads it
+from `update.status` on each page and nothing polls. Settings → Updates says
+which version runs, what the last check found, with the release notes, and
+how to update this PCP for the way it was installed
+(`lib/server/install-kind.ts`): the container image sets `PCP_CONTAINER`
+(run the install line again, pull with compose, or redeploy from the tool that
+runs it), the desktop app sets `PCP_DESKTOP` (download the new version), and
+anything else is a checkout (`git pull` and a build). A develop build ahead
+of the last release counts as up to date.
 
 ## Connecting OAuth servers
 

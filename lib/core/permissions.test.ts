@@ -192,6 +192,50 @@ describe("asking the owner", () => {
     expect(textOf(result)).toBe('{"data":[{"id":1}]}')
   })
 
+  it("keeps what the assistant asked to once the owner allows the call", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              report: `${"x".repeat(300)} THE END`,
+              n: 1,
+            }),
+          },
+        ],
+      }),
+    }
+    const asked = {
+      ...call(server, "add_numbers", { a: 1 }),
+      keep: ["report"],
+    }
+
+    await withPermission(scope, asked)
+    // Keeping something else is another request.
+    await withPermission(scope, { ...asked, keep: ["n"] })
+    expect(await db().permissionRequest.count()).toBe(2)
+
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { keep: JSON.stringify(["report"]) },
+    })
+    const result = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    const kept = await db().toolResult.findFirstOrThrow()
+
+    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect(textOf(result)).toContain(`report → ${kept.id} (text/plain`)
+    expect(textOf(result)).toContain(`"report":{"$result":"${kept.id}"`)
+    expect(textOf(result)).not.toContain("THE END")
+  })
+
   it("decodes what the assistant asked to once the owner allows the call", async () => {
     const { ctx, scope, server } = await setup()
     const executor: PermissionExecutor = {

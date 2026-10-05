@@ -13,7 +13,7 @@ export type FakeAttachment = {
   blobId: string
   name: string
   type: string
-  content: string
+  content: string | Buffer
 }
 
 export type FakeEmail = {
@@ -64,7 +64,7 @@ export type FakeJmap = {
     url: string
     headers: Record<string, string | string[] | undefined>
     body: string
-  }) => { status: number; type: string; body: string } | null
+  }) => { status: number; type: string; body: string | Buffer } | null
 }
 
 export const FAKE_MAILBOXES = [
@@ -103,7 +103,9 @@ export function fakeEmails(): FakeEmail[] {
           blobId: "blob-png",
           name: "drawing.png",
           type: "image/png",
-          content: "\u0089PNG",
+          content: Buffer.from([
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13,
+          ]),
         },
       ],
     },

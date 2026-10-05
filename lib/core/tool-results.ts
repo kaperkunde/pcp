@@ -331,6 +331,11 @@ export async function openResult(
   input: { tokenId: string; id: string },
   now = new Date(),
 ): Promise<OpenedResult | null> {
+  // An id left out would match every row to Prisma: none is none.
+  if (typeof input.id !== "string" || input.id === "") {
+    return null
+  }
+
   const row = await db().toolResult.findFirst({
     where: {
       id: input.id,
@@ -559,7 +564,10 @@ export function resultNotice(kept: KeptResult): string {
 /** The notices in a result's text, so a shortened copy can keep them. */
 export function resultNotices(texts: string[]): string[] {
   return texts.flatMap(
-    (text) => text.match(/… \(PCP kept the whole answer: [^\n]*\)/g) ?? [],
+    (text) =>
+      text.match(
+        /… \(PCP kept the whole answer: [^\n]*\)|PCP kept \d+ values? of this answer as results[^\n]*/g,
+      ) ?? [],
   )
 }
 

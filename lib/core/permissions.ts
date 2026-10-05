@@ -6,7 +6,7 @@ import type {
   PermissionRequest,
 } from "@/lib/generated/prisma/client"
 
-import { readFields, shapeAnswer, type AnswerShape } from "./answers"
+import { readFields, shapeAnswerKeeping, type AnswerShape } from "./answers"
 import {
   accessReview,
   checkAccessLevels,
@@ -236,7 +236,8 @@ export function permissionUrl(publicUrl: string, id: string): string {
 /**
  * One call to an upstream tool, its answer shaped for the assistant
  * (answers.ts): only `fields` when given, base64 text at `decode` decoded,
- * and never more than it should read. When shaping had to leave something
+ * the parts at `keep`, files and texts too long to read kept as results and
+ * shown as handles, and never more than it should read. When shaping had to leave something
  * out, the whole answer is kept for the token that asked and the assistant
  * is told how to read it (lib/core/tool-results.ts). An OAuth server that is
  * not connected (or whose sign-in expired) answers with the link to connect
@@ -252,6 +253,7 @@ export async function runCall(
     tokenId,
     fields,
     decode,
+    keep,
     executor = defaultExecutor,
   }: {
     publicUrl: string
@@ -266,22 +268,27 @@ export async function runCall(
 
   try {
     const keepers = resultKeepers(ctx, tokenId)
-    const keep = keepers.text
+    const context = { serverId: server.id, toolName }
     const answer = await executor.callTool(ctx, server, toolName, args, {
       publicUrl,
-      keep,
+      keep: keepers.text,
+      keepBytes: keepers.bytes,
       open: resultOpener(ctx, tokenId),
     })
+    const { shown, whole } = await shapeAnswerKeeping(
+      answer,
+      { fields, decode, keep },
+      {
+        text: (input) => keepers.text({ ...input, ...context }),
+        bytes: (input) => keepers.bytes({ ...input, ...context }),
+      },
+      { wholeMax: MAX_KEPT_RESULT_CHARS },
+    )
 
     return await keepWholeAnswer(
-      {
-        raw: answer,
-        shown: shapeAnswer(answer, { fields, decode }),
-        whole: () =>
-          shapeAnswer(answer, { fields, decode, max: MAX_KEPT_RESULT_CHARS }),
-      },
-      keep,
-      { serverId: server.id, toolName },
+      { raw: answer, shown, whole },
+      keepers.text,
+      context,
     )
   } catch (error) {
     if (
@@ -302,10 +309,10 @@ function describeAsk(ask: PermissionAsk): {
 } {
   switch (ask.kind) {
     case "call":
-      // The same call asking for other fields, or to decode other
+      // The same call asking for other fields, or to decode or keep other
       // paths, is another request.
       return {
-        target: `${ask.server.id}/${ask.tool.name}${ask.fields ? `\n${canonicalJson(ask.fields)}` : ""}${ask.decode ? `\ndecode ${canonicalJson(ask.decode)}` : ""}`,
+        target: `${ask.server.id}/${ask.tool.name}${ask.fields ? `\n${canonicalJson(ask.fields)}` : ""}${ask.decode ? `\ndecode ${canonicalJson(ask.decode)}` : ""}${ask.keep ? `\nkeep ${canonicalJson(ask.keep)}` : ""}`,
         args: ask.args,
       }
     case "register":
@@ -818,6 +825,7 @@ export async function withPermission(
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
         decode:
           ask.kind === "call" && ask.decode ? JSON.stringify(ask.decode) : null,
+        keep: ask.kind === "call" && ask.keep ? JSON.stringify(ask.keep) : null,
         argsCiphertext: asBytes(
           encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
         ),
@@ -1058,6 +1066,7 @@ async function executeCall(
     tokenId: row.tokenId,
     fields: readStoredFields(row.fields),
     decode: readStoredFields(row.decode),
+    keep: readStoredFields(row.keep),
     executor,
   })
 }

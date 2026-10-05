@@ -744,6 +744,14 @@ export function buildGatewayServer(
           .describe(
             'Decode base64 (or base64url) text in a JSON answer back into the text it encodes, at these paths. A path matches wherever the answer\'s keys end with it, so ["body.data"] decodes the body of every part of a Gmail message, however deeply the parts nest. What is not text (an attachment) is left encoded. describe_tool\'s "returns" marks such text "string (base64)"; leave it out of fields when you do not need it, since encoded text is long.',
           ),
+        keep: z
+          .array(z.string().min(1).max(200))
+          .min(1)
+          .max(MAX_FIELDS)
+          .optional()
+          .describe(
+            'Keep these parts of a JSON answer as results instead of reading them, as paths like decode\'s: ["attachments.data", "body"]. Each comes back as a handle, {"$result": "<id>", "type", "size" or "length", …}, that you pass as it is in any later call\'s arguments where the value belongs, so a file or a long text moves between tools without passing through you. Files sent as base64 are kept this way without asking.',
+          ),
       }),
       annotations: { openWorldHint: true },
     },
@@ -757,9 +765,11 @@ export function buildGatewayServer(
         arguments?: Record<string, unknown>
         fields?: string[]
         decode?: string[]
+        keep?: string[]
       }) => {
         const fields = readFields(args.fields)
         const decode = readFields(args.decode, "decode")
+        const keep = readFields(args.keep, "keep")
         const found = await lookup(args.server, args.tool, {
           includeBlocked: true,
         })
@@ -797,6 +807,7 @@ export function buildGatewayServer(
             args: args.arguments ?? {},
             fields,
             decode,
+            keep,
           })
         }
 
@@ -805,6 +816,7 @@ export function buildGatewayServer(
           tokenId: scope.tokenId,
           fields,
           decode,
+          keep,
         })
       },
     ),

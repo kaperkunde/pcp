@@ -44,5 +44,10 @@ export async function register() {
     // so nothing listens or runs here for anyone with a proxy of their own.
     const { startNetwork } = await import("@/lib/core/network/runtime")
     await startNetwork()
+
+    // The daily check for a newer release, unless the owner turned it off:
+    // then there is no timer and no request (lib/core/updates/runtime.ts).
+    const { startUpdates } = await import("@/lib/core/updates/runtime")
+    await startUpdates()
   }
 }

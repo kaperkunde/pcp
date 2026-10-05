@@ -468,7 +468,7 @@ describe("reading", () => {
     ).rejects.toThrow(/not there any more/)
   })
 
-  it("reads text attachments and never downloads the rest", async () => {
+  it("downloads attachments of any kind, as their bytes", async () => {
     const { mail, imap } = setup()
     const id = encodeImapId(1, 7n, "INBOX")
 
@@ -476,16 +476,18 @@ describe("reading", () => {
       name: "parts.csv",
       type: "text/csv",
       size: 18,
-      text: "part,count\ncog,42\n",
+      bytes: Buffer.from("part,count\ncog,42\n"),
+      charset: "utf-8",
     })
     expect(
       await mail.getAttachment(id, "3", { maxBytes: 100_000 }),
     ).toMatchObject({
       name: "plan.pdf",
-      text: null,
+      charset: null,
     })
     expect(imap.calls.filter((call) => call.startsWith("download"))).toEqual([
       "download 1 2",
+      "download 1 3",
     ])
     await expect(
       mail.getAttachment(id, "1.1", { maxBytes: 1000 }),

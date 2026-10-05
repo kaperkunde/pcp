@@ -300,6 +300,20 @@ function keepFile(
   )
 }
 
+describe("resultNotices", () => {
+  it("finds the kept-answer notice and the handle note, for a shortened copy", () => {
+    const notice =
+      "… (PCP kept the whole answer: 10 characters as result r1, readable until x. What is above is shortened.)"
+    const note =
+      'PCP kept 2 values of this answer as results, each shown as {"$result": …}: a → r2 (text/plain, 9 characters).'
+
+    expect(resultNotices([`text\n${notice}`, `${note}\n{"a":1}`])).toEqual([
+      notice,
+      note,
+    ])
+  })
+})
+
 describe("keeping a file", () => {
   it("keeps the bytes, their size, name and type, encrypted", async () => {
     const kept = await keepFile(PNG, "image/png", "dot.png")
@@ -401,6 +415,11 @@ describe("opening a result", () => {
       ),
     ).toBeNull()
     expect(await openResult(ctx, { tokenId, id: "nope" })).toBeNull()
+    // Not an id at all must not match the token's only result.
+    expect(
+      await openResult(ctx, { tokenId, id: undefined as unknown as string }),
+    ).toBeNull()
+    expect(await openResult(ctx, { tokenId, id: "" })).toBeNull()
   })
 })
 

@@ -45,7 +45,7 @@ import {
   setServerStatus,
 } from "./servers"
 import { resolveHandles } from "./result-handles"
-import type { ResultKeeper, ResultOpener } from "./tool-results"
+import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
 import { PCP_VERSION } from "./version"
 
 /**
@@ -1021,11 +1021,14 @@ export async function callServerTool(
   {
     publicUrl,
     keep,
+    keepBytes,
     open,
   }: {
     publicUrl: string
     /** Keeps a long text whole for read_result (mail bodies, attachments). */
     keep?: ResultKeeper
+    /** Keeps a file's bytes for the token (a mail attachment read). */
+    keepBytes?: BytesKeeper
     /**
      * Opens a result the token kept, for the handles in the arguments
      * ({"$result": id}): they are replaced by what they stand for before
@@ -1068,6 +1071,7 @@ export async function callServerTool(
     return callMailTool(server, toolName, args, {
       credential: signIn,
       keep,
+      keepBytes,
       open,
     })
   }

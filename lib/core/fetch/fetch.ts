@@ -63,9 +63,12 @@ export type FetchOptions = Pick<SendOptions, "addressCheck"> & {
 export function addressCheckFor(
   allowPrivate: boolean,
 ): (address: string, port: number) => boolean {
+  // PCP's own address can be a public one (a server's interface): it is
+  // refused either way.
   return allowPrivate
     ? (address, port) => !isOwnAddress(address, port)
-    : (address) => isPublicAddress(address)
+    : (address, port) =>
+        isPublicAddress(address) && !isOwnAddress(address, port)
 }
 
 /** Whether an address is PCP's own public one (its site). */

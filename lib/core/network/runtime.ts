@@ -20,7 +20,9 @@ import {
   saveTlsStatus,
   TLS_CHECK_INTERVAL_MS,
   tlsDomain,
+  tlsNotice,
   type TlsStatus,
+  turnOffTlsAfterFailure,
 } from "./tls"
 
 /**
@@ -210,7 +212,7 @@ function tlsRound(force: boolean): Promise<void> {
     const unchanged = async () =>
       JSON.stringify(await getTlsConfig()) === JSON.stringify(config)
 
-    const { status, certificate } = await runTlsRound({
+    const { status, certificate, turnOff } = await runTlsRound({
       domain,
       config,
       status: await getTlsStatus(),
@@ -225,6 +227,13 @@ function tlsRound(force: boolean): Promise<void> {
     })
 
     if (!(await unchanged())) {
+      return
+    }
+
+    if (turnOff) {
+      await turnOffTlsAfterFailure(status)
+      // Closes ports 80 and 443 and stops the timer.
+      await reconcileNetwork()
       return
     }
 
@@ -247,6 +256,8 @@ export type NetworkOverview = {
     status: TlsStatus
     edge: EdgeStatus | null
   } | null
+  /** Why PCP turned HTTPS off after its first try, until it is on again. */
+  httpsTurnedOff: { domain: string | null; error: string; at: string } | null
   ddnsName: string | null
   ports: { http: number; https: number }
 }
@@ -272,7 +283,25 @@ export async function networkOverview(): Promise<NetworkOverview> {
           edge: edge ? structuredClone(edge.status) : null,
         }
       : null,
+    httpsTurnedOff:
+      !tls && tlsStatus.turnedOffAt && tlsStatus.lastError
+        ? {
+            domain: tlsStatus.domain ?? null,
+            error: tlsStatus.lastError,
+            at: tlsStatus.turnedOffAt,
+          }
+        : null,
     ddnsName: ddnsHostname(ddns),
     ports: { http: httpPort(), https: httpsPort() },
   }
+}
+
+/** Something about the network the owner should hear of on any page. */
+export type NetworkNotice = { id: string; title: string; href: string }
+
+export async function networkNotices(): Promise<NetworkNotice[]> {
+  const [tls, status] = await Promise.all([getTlsConfig(), getTlsStatus()])
+  const title = tlsNotice(tls, status)
+
+  return title ? [{ id: "https", title, href: "/settings#https" }] : []
 }
