@@ -7,8 +7,10 @@ import { addSecret, allowAllTools, createToken } from "../lib/ui"
 // A mail account, added in PCP and used by an assistant through /mcp: a
 // JMAP server signed in with a user name and app password, the same behind
 // OAuth through the Connect flow, a read-only account, a refused password
-// and an IMAP server that is not there. The fake upstream's JMAP server
-// records every request, which is how the tests see what PCP sent.
+// and an IMAP server that is not there; and accounts an assistant proposes
+// through register_server, which the owner agrees to on PCP's page. The fake
+// upstream's JMAP server records every request, which is how the tests see
+// what PCP sent.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -343,6 +345,176 @@ test("a JMAP account signs in with OAuth through Connect, and renews its token",
     tool: "list_mailboxes",
   })
   expect(toolText(disconnected)).toContain("needs connecting")
+})
+
+function permissionIn(text: string): { path: string; id: string } {
+  const id = text.match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(id, text).toBeTruthy()
+  return { path: `/permissions/${id}`, id: id! }
+}
+
+test("an assistant proposes a JMAP account; the owner types the app password in PCP", async ({
+  page,
+  baseURL,
+}) => {
+  const proposed = `Proposed mail ${RUN}`
+  const slug = `proposed-mail-${RUN}`
+  const secretName = `Proposed mail password ${RUN}`
+
+  // The server's address alone: PCP completes it, and shows the owner where.
+  const first = await callTool(baseURL!, token, "register_server", {
+    kind: "jmap",
+    name: proposed,
+    url: upstream.origin,
+    auth_type: "basic",
+    username: "ada@example.com",
+    secret: secretName,
+  })
+  expect(first.body.result?.isError ?? false, toolText(first)).toBe(false)
+  expect(toolText(first)).toContain("Not done yet")
+  expect(toolText(first)).toContain(
+    "They type the password for ada@example.com in there",
+  )
+  await page.goto(permissionIn(toolText(first)).path)
+  await expect(
+    page.getByText(`Add the mail account ${proposed}?`),
+  ).toBeVisible()
+  await expect(page.getByText("Protocol: JMAP", { exact: true })).toBeVisible()
+  await expect(
+    page.getByText(`Session URL: ${upstream.origin}/.well-known/jmap`),
+  ).toBeVisible()
+  await expect(page.getByText("User name: ada@example.com")).toBeVisible()
+  // The fake server is on loopback, which PCP does not look at for an
+  // assistant: the owner is told, and decides.
+  await expect(
+    page.getByText(/is, or resolves to, a private or local address/),
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Not now" }).click()
+  await expect(page.getByTestId("permission-outcome")).toBeVisible()
+  expect(upstream.jmap.requests.length).toBeGreaterThan(0)
+  const seen = upstream.jmap.requests.length
+
+  // The session URL itself, with the password typed in on the page.
+  const asked = await callTool(baseURL!, token, "register_server", {
+    kind: "jmap",
+    name: proposed,
+    url: upstream.jmapSessionUrl,
+    auth_type: "basic",
+    username: "ada@example.com",
+    secret: secretName,
+    description: "Proposed by an assistant.",
+  })
+  const { path, id } = permissionIn(toolText(asked))
+  // Nothing was sent to the server for a proposal, however it was made.
+  expect(upstream.jmap.requests).toHaveLength(seen)
+
+  await page.goto(path)
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(
+    page.getByText("Enter the password for ada@example.com first."),
+  ).toBeVisible()
+  await page
+    .getByLabel("Password for ada@example.com")
+    .fill(upstream.expectedToken)
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `Added ${proposed} as "${slug}" with 10 tools`,
+  )
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `saved in PCP as "${secretName}"`,
+  )
+
+  // The assistant learns the outcome, never the password.
+  const outcome = await callTool(baseURL!, token, "check_permission", { id })
+  expect(toolText(outcome)).toContain("10 tools")
+  expect(toolText(outcome)).not.toContain(upstream.expectedToken)
+  expect(upstream.jmap.requests.at(-1)!.authorization).toBe(basic())
+
+  // Its tools ask first, like any server's; allowed, they work.
+  await allowAllTools(page, TOKEN_NAME, slug)
+  const boxes = json(
+    await callTool(baseURL!, token, "call_tool", {
+      server: slug,
+      tool: "list_mailboxes",
+    }),
+  )
+  expect(JSON.stringify(boxes)).toContain("Inbox")
+
+  // The password is a secret of the owner's, used by the account.
+  await page.goto("/secrets")
+  await expect(
+    page
+      .getByRole("listitem")
+      .filter({ hasText: secretName })
+      .getByText(proposed),
+  ).toBeVisible()
+})
+
+test("an assistant proposes a JMAP account with OAuth; PCP registers itself when the owner connects it", async ({
+  page,
+  baseURL,
+}) => {
+  const proposed = `Proposed OAuth mail ${RUN}`
+  const slug = `proposed-oauth-mail-${RUN}`
+
+  const asked = await callTool(baseURL!, token, "register_server", {
+    kind: "jmap",
+    name: proposed,
+    url: upstream.oauthJmapSessionUrl,
+    auth_type: "oauth",
+  })
+  expect(asked.body.result?.isError ?? false, toolText(asked)).toBe(false)
+  const { path, id } = permissionIn(toolText(asked))
+
+  await page.goto(path)
+  await expect(
+    page.getByText(`Add the mail account ${proposed}?`),
+  ).toBeVisible()
+  await expect(
+    page.getByText(/^Authentication: OAuth; you sign in when you connect it/),
+  ).toBeVisible()
+  // No client to bring: PCP says how it finds one.
+  await expect(
+    page.getByText(/^Sign-in: PCP finds where the mail server signs you in/),
+  ).toBeVisible()
+  await expect(page.getByText(/Redirect URI your client needs/)).toHaveCount(0)
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `Added ${proposed}`,
+  )
+
+  // Added, and the assistant is told how to get it connected.
+  const added = await callTool(baseURL!, token, "check_permission", { id })
+  expect(toolText(added)).toContain("needs connecting")
+  expect(added.body.result?.structuredContent?.kind).toBe("connect")
+  const connect = added.body.result!.structuredContent!.connect!
+  expect(connect.slug).toBe(slug)
+  // Nothing was sent to the mail server before the owner signed in.
+  const before = upstream.oauthJmap.requests.length
+
+  const registered = upstream.registrations.length
+  const connected = callTool(baseURL!, token, "check_server", {
+    server: connect.slug,
+  })
+  await page.goto(connect.startUrl)
+  await expect(page).toHaveURL(
+    new RegExp(`/servers/${connect.serverId}\\?connected=1$`),
+  )
+  expect(
+    (await connected).body.result?.structuredContent?.server,
+  ).toMatchObject({ connected: true, toolCount: 10 })
+  expect(upstream.registrations).toHaveLength(registered + 1)
+  expect(upstream.oauthJmap.requests.length).toBeGreaterThan(before)
+  expect(upstream.oauthJmap.requests.at(-1)!.authorization).toMatch(
+    /^Bearer access-/,
+  )
+
+  await allowAllTools(page, TOKEN_NAME, slug)
+  const boxes = await callTool(baseURL!, token, "call_tool", {
+    server: slug,
+    tool: "list_mailboxes",
+  })
+  expect(boxes.body.result?.isError ?? false, toolText(boxes)).toBe(false)
 })
 
 test("the account is shown in token scopes as mail", async ({ page }) => {

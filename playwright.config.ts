@@ -105,7 +105,8 @@ export default defineConfig({
     {
       // An API that signs in with OAuth: proposed by an assistant with the
       // owner's client ID, the client secret typed in on the approval page,
-      // connected, and called with the token.
+      // connected, and called with the token; and at a provider that lets
+      // apps register themselves, with no client at all.
       name: "endpoint-oauth",
       testMatch: /endpoint-oauth\.spec\.ts/,
       dependencies: ["setup"],
@@ -130,7 +131,8 @@ export default defineConfig({
     {
       // A mail account: JMAP with an app password and with OAuth, read-only,
       // a refused password, an unreachable IMAP server; its tools called
-      // through the gateway.
+      // through the gateway; and accounts an assistant proposes, which the
+      // owner agrees to on PCP's page.
       name: "mail",
       testMatch: /mail\.spec\.ts/,
       dependencies: ["setup"],
@@ -161,6 +163,15 @@ export default defineConfig({
       testMatch: /network\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("network"),
+    },
+    {
+      // An API that wants HTTP Basic authentication: a user name and a
+      // password typed into the form, or proposed by an assistant and typed
+      // in on the approval page; the login sent, and kept from the assistant.
+      name: "endpoint-basic",
+      testMatch: /endpoint-basic\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("endpoint-basic"),
     },
     {
       // An API whose credential is a key and a secret key in two headers:

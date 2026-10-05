@@ -40,6 +40,17 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   takes only a token that server issued. Requests are recorded in
  *   `closedApiRequests`.
  *
+ * - `/open-api/openapi.json` and `/open-api/*` — a REST API that signs in
+ *   with OAuth at the open authorization server above, the one that lets
+ *   apps register themselves: its document declares an oauth2 flow at
+ *   `${origin}/authorize` and `${origin}/token`, so PCP can register itself
+ *   when the owner connects it. `/open-api/whoami` takes only a token that
+ *   server issued; requests are recorded in `openApiRequests`, and every
+ *   client the server registered in `registrations`.
+ * - `/basic-api/openapi.json` and `/basic-api/*` — a REST API that wants
+ *   HTTP Basic authentication (`basicUser`). `/basic-api/whoami` answers
+ *   with the Authorization header it got, as an API that echoes a
+ *   credential would; requests are recorded in `basicApiRequests`.
  * - `/openapi.json` and `/api/*` — a small REST API (a pet store) with its
  *   OpenAPI document, for PCP's API endpoints. `/api/*` wants the same
  *   bearer token as `/mcp` and records every request in `requests`, which is
@@ -102,6 +113,22 @@ export type Upstream = {
   closedApiUrl: string
   /** Every request to /closed-api/* past the document, with its token. */
   closedApiRequests: Array<{ path: string; authorization: string | null }>
+  /** The OpenAPI document of the API behind the open authorization server. */
+  openApiSpecUrl: string
+  /** Where its requests go. */
+  openApiUrl: string
+  /** Every request to /open-api/* past the document, with its token. */
+  openApiRequests: Array<{ path: string; authorization: string | null }>
+  /** Every client the open authorization server registered, in order. */
+  registrations: Registered[]
+  /** The OpenAPI document of the API that wants HTTP Basic. */
+  basicApiSpecUrl: string
+  /** Where its requests go. */
+  basicApiUrl: string
+  /** The user name and password /basic-api/* wants. */
+  basicUser: { username: string; password: string }
+  /** Every request to /basic-api/* past the document, with its header. */
+  basicApiRequests: Array<{ path: string; authorization: string | null }>
   /** The OpenAPI document of the pet store. */
   openapiUrl: string
   /** The key and secret key /keyed/* wants, in their two headers. */
@@ -172,6 +199,66 @@ function closedApiSpec(origin: string) {
           operationId: "whoami",
           summary: "Who signed in",
           security: [{ closed: ["whoami.read"] }],
+        },
+      },
+    },
+  }
+}
+
+/** The document of the API behind the open authorization server. */
+function openApiSpec(origin: string) {
+  return {
+    openapi: "3.0.3",
+    info: {
+      title: "Open whoami",
+      description: "Says who signed in, behind OAuth that lets apps register.",
+    },
+    servers: [{ url: `${origin}/open-api` }],
+    components: {
+      securitySchemes: {
+        open: {
+          type: "oauth2",
+          flows: {
+            authorizationCode: {
+              authorizationUrl: `${origin}/authorize`,
+              tokenUrl: `${origin}/token`,
+              scopes: { postcards: "Read who you are" },
+            },
+          },
+        },
+      },
+    },
+    paths: {
+      "/whoami": {
+        get: {
+          operationId: "whoami",
+          summary: "Who signed in",
+          security: [{ open: ["postcards"] }],
+        },
+      },
+    },
+  }
+}
+
+/** The document of the API that wants a user name and a password. */
+function basicApiSpec(origin: string) {
+  return {
+    openapi: "3.0.3",
+    info: {
+      title: "Basic whoami",
+      description: "Says who signed in, with a user name and password.",
+    },
+    servers: [{ url: `${origin}/basic-api` }],
+    security: [{ basic: [] }],
+    components: {
+      securitySchemes: { basic: { type: "http", scheme: "basic" } },
+    },
+    paths: {
+      "/whoami": {
+        get: {
+          operationId: "whoami",
+          summary: "Who signed in",
+          responses: { "200": { description: "Who you are" } },
         },
       },
     },
@@ -519,6 +606,13 @@ export async function startUpstream({
   const closedSignIns: Upstream["closedSignIns"] = []
   const ddns: Upstream["ddns"] = { updateUrl: "", updates: [], status: 200 }
   const closedApiRequests: Upstream["closedApiRequests"] = []
+  const openApiRequests: Upstream["openApiRequests"] = []
+  const registrations: Upstream["registrations"] = []
+  const basicUser = {
+    username: "ada",
+    password: `basic-secret-${randomBytes(6).toString("hex")}`,
+  }
+  const basicApiRequests: Upstream["basicApiRequests"] = []
   const tokenLifetime = { seconds: 3600 }
   const tokenRequests: Upstream["tokenRequests"] = []
   const jmap = createFakeJmap({
@@ -714,6 +808,48 @@ export async function startUpstream({
         }
       }
 
+      if (url.pathname === "/open-api/openapi.json") {
+        return json(res, 200, openApiSpec(origin))
+      }
+
+      if (url.pathname.startsWith("/open-api/")) {
+        openApiRequests.push({ path: url.pathname, authorization })
+        const token = authorization?.startsWith("Bearer ")
+          ? authorization.slice(7)
+          : ""
+
+        if (!issuedTokens.has(token)) {
+          res.setHeader("www-authenticate", 'Bearer error="invalid_token"')
+          return json(res, 401, { error: "invalid_token" })
+        }
+
+        if (url.pathname === "/open-api/whoami") {
+          return json(res, 200, { you: "the owner", scope: "postcards" })
+        }
+      }
+
+      if (url.pathname === "/basic-api/openapi.json") {
+        return json(res, 200, basicApiSpec(origin))
+      }
+
+      if (url.pathname.startsWith("/basic-api/")) {
+        basicApiRequests.push({ path: url.pathname, authorization })
+        const wanted = `Basic ${Buffer.from(`${basicUser.username}:${basicUser.password}`).toString("base64")}`
+
+        if (authorization !== wanted) {
+          res.setHeader("www-authenticate", 'Basic realm="basic-api"')
+          return json(res, 401, { error: "unauthorized" })
+        }
+
+        if (url.pathname === "/basic-api/whoami") {
+          // An API that repeats the credential it was sent.
+          return json(res, 200, {
+            you: basicUser.username,
+            echo: authorization,
+          })
+        }
+      }
+
       if (url.pathname === "/openapi.json") {
         return json(res, 200, petstoreSpec(origin))
       }
@@ -867,10 +1003,12 @@ export async function startUpstream({
       if (url.pathname === "/register" && req.method === "POST") {
         const metadata = JSON.parse(body) as { redirect_uris?: string[] }
         const client_id = `client-${randomBytes(4).toString("hex")}`
-        clients.set(client_id, {
+        const registered = {
           client_id,
           redirect_uris: metadata.redirect_uris ?? [],
-        })
+        }
+        clients.set(client_id, registered)
+        registrations.push(registered)
         return json(res, 201, {
           client_id,
           redirect_uris: metadata.redirect_uris ?? [],
@@ -963,6 +1101,14 @@ export async function startUpstream({
     closedApiSpecUrl: `${origin}/closed-api/openapi.json`,
     closedApiUrl: `${origin}/closed-api`,
     closedApiRequests,
+    openApiSpecUrl: `${origin}/open-api/openapi.json`,
+    openApiUrl: `${origin}/open-api`,
+    openApiRequests,
+    registrations,
+    basicApiSpecUrl: `${origin}/basic-api/openapi.json`,
+    basicApiUrl: `${origin}/basic-api`,
+    basicUser,
+    basicApiRequests,
     openapiUrl: `${origin}/openapi.json`,
     keyedKeys,
     keyedRequests,
