@@ -15,7 +15,10 @@ things it defends against, and the things it does not:
 ciphertext and SHA-256 hashes. The vault's data key is stored only wrapped
 under keys derived from your password (scrypt, 64 MiB), the recovery key, a
 session cookie or an API token — none of which are on the disk. See
-[ARCHITECTURE.md](ARCHITECTURE.md#encryption).
+[ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
+session cookie and the Touch ID key do sit in the app's folder, but
+encrypted under a key in your login keychain, which a copy of the disk does
+not open.
 
 **Someone with a running server but no credential** cannot read the vault
 either: the key exists in memory only for the duration of a request that
@@ -99,6 +102,16 @@ once the session ends. **Sign out everywhere** (Settings) ends every session
 and can revoke every API token with it; recovery can do the same. Rotate any
 secret they could have seen.
 
+**Touch ID in the Mac app** unlocks PCP, and confirms a new API token, an
+export or a restore, with your fingerprint. It is a key of its own that PCP
+makes once you have typed your password, not your password: the app keeps it
+encrypted under a key in your login keychain and hands it to PCP's page only
+after Touch ID, and only to PCP's own pages. It cannot change your password,
+make a recovery key or set Touch ID up again; those take the password, so
+someone with your finger and not your password cannot lock you out.
+Recovering with the recovery key, signing out everywhere and a restore turn
+it off.
+
 **Password guessing** is rate-limited: 10 attempts per 15 minutes per address
 on the sign-in page and per session inside PCP, 60 in all. scrypt makes each
 guess expensive.
@@ -110,6 +123,13 @@ Not defended against:
   patched and the image current.
 - **A compromised browser or client.** A session cookie or an API token is
   a credential; treat it like one.
+- **Software already running as you on the Mac**, against Touch ID. The
+  fingerprint is the app's own check, not a keychain item macOS binds to it
+  (that takes a Developer ID signature with a provisioning profile). The
+  keychain gives the key's encryption key to PCP's own code and asks you
+  before any other program, and PCP's build stops other programs from
+  running code as it; a program that gets past that can use the key without
+  your finger, as it could your signed-in session.
 - **The setup race.** Before the first setup, whoever reaches the site
   first becomes its owner. Set PCP up right after starting it, and do not
   expose an unconfigured instance to the internet.
@@ -184,6 +204,10 @@ Not defended against:
   once turned on under Settings, listens on ports 80 and 443 on every
   interface whatever that menu says, since a router's port forward needs
   exactly that. A tunnel needs neither.
+- macOS ties the Mac app's keychain item to the exact build when the app
+  has no Developer ID signature, so after an update it asks once for your
+  Mac's password before PCP may use it. Choose **Always Allow**; denying it
+  signs the app out and turns its Touch ID off.
 - Back up the data volume, or export from Settings. Losing both loses the
   vault.
 - An export file (Settings → Export) holds the vault's rows as they are: the

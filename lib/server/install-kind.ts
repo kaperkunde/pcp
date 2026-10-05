@@ -17,3 +17,11 @@ export function installKind(): InstallKind {
 
   return process.env.PCP_CONTAINER === "1" ? "container" : "source"
 }
+
+/**
+ * Whether the Linux installer set this container up to update itself once a
+ * day (`PCP_AUTO_UPDATE=1`, which install.sh also passes into the container).
+ */
+export function autoUpdated(): boolean {
+  return process.env.PCP_AUTO_UPDATE === "1"
+}

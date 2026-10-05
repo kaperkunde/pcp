@@ -3,7 +3,7 @@ import { asBytes } from "@/lib/core/crypto"
 import { isPcpError } from "@/lib/core/errors"
 import { validatePassword } from "@/lib/core/vault"
 import { UNEXPECTED_ERROR } from "@/lib/server/action-state"
-import { confirmPassword } from "@/lib/server/password-attempts"
+import { confirmOwner } from "@/lib/server/password-attempts"
 import { isSameOrigin } from "@/lib/server/same-origin"
 import { currentSession } from "@/lib/server/session"
 
@@ -22,7 +22,8 @@ const MAX_FORM_BYTES = 64 * 1024
  * fetch() would follow and take for a file.
  *
  * An export is a lasting copy of the vault, so like making a token it asks
- * for the owner's password again (lib/server/password-attempts.ts).
+ * for the owner's password again, or Touch ID in the Mac app
+ * (lib/server/password-attempts.ts).
  */
 export async function POST(request: Request): Promise<Response> {
   if (!isSameOrigin(request)) {
@@ -66,7 +67,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
-    await confirmPassword(session, text(form, "password"))
+    await confirmOwner(session, form)
     const file = await exportVault(session.ctx, exportPassword)
 
     // A plain Uint8Array: Response does not take Node's Buffer as a body.

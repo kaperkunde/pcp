@@ -207,6 +207,15 @@ export default defineConfig({
       use: signedIn("updates"),
     },
     {
+      // Touch ID with a stand-in for the Mac app. Signs every browser out,
+      // so it comes after the projects that start signed in, and signs in
+      // on its own.
+      name: "touch-id",
+      testMatch: /touch-id\.spec\.ts/,
+      dependencies: ["setup"],
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
       // Signs every browser out, so it comes last and signs in on its own.
       name: "recovery",
       testMatch: /recovery\.spec\.ts/,

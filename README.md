@@ -116,7 +116,8 @@ The installer finds Docker or Podman on the computer (Bazzite and other
 Fedora Atomic systems come with Podman), pulls the published image
 (`ghcr.io/kaperkunde/pcp`) and keeps PCP running on port 3000 across reboots:
 as a container Docker restarts, or as a systemd unit under Podman. Run the
-same line again to update PCP. The top of [`install.sh`](install.sh) lists
+same line again to update PCP, or once with `PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`)
+to have it update PCP by itself once a day. The top of [`install.sh`](install.sh) lists
 its settings (`PCP_PORT`, `PCP_HTTPS` and a few more), and
 `… | sh -s -- uninstall` removes it and keeps your data.
 

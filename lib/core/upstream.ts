@@ -20,6 +20,8 @@ import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { callBrowserTool } from "./browser/call"
+import { syncBrowserTools } from "./browser/server"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { isPcpError, PcpError } from "./errors"
 import { callMailTool, syncMailTools } from "./mail/accounts"
@@ -1015,6 +1017,10 @@ export async function syncServerTools(
     return syncEndpointTools(server, { byOwner })
   }
 
+  if (server.kind === "browser") {
+    return syncBrowserTools(server)
+  }
+
   if (isMailKind(server.kind)) {
     let signIn: MailCredential
 
@@ -1113,11 +1119,14 @@ export async function callServerTool(
   args: Record<string, unknown>,
   {
     publicUrl,
+    tokenId,
     keep,
     keepBytes,
     open,
   }: {
     publicUrl: string
+    /** The token the call is made for: the browser drives tabs as it. */
+    tokenId?: string
     /** Keeps a long text whole for read_result (mail bodies, attachments). */
     keep?: ResultKeeper
     /** Keeps a file's bytes for the token (a mail attachment read). */
@@ -1130,6 +1139,20 @@ export async function callServerTool(
     open?: ResultOpener
   },
 ): Promise<CallToolResult> {
+  if (server.kind === "browser") {
+    if (!tokenId) {
+      throw new PcpError("state", "The browser is used through a token.")
+    }
+
+    return callBrowserTool(
+      ctx,
+      server,
+      toolName,
+      open ? await resolveHandles(args, open) : args,
+      { tokenId, publicUrl },
+    )
+  }
+
   if (server.kind === "openapi") {
     return callEndpoint(
       ctx,

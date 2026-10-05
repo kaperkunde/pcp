@@ -20,6 +20,7 @@ import {
   type ScryptParams,
 } from "./crypto"
 import { db } from "./db"
+import { createDeviceKey, unlockWithDeviceKey } from "./device-keys"
 import { getHostJson, setHostJson } from "./host-settings"
 import { createMailAccount } from "./mail/accounts"
 import { createMemory, listMemories } from "./memories"
@@ -117,9 +118,10 @@ async function openRaw(file: Buffer, password: string) {
 }
 
 describe("the export file", { timeout: 60_000 }, () => {
-  it("holds the rows as they are, under the export password, without sessions", async () => {
+  it("holds the rows as they are, under the export password, without sessions or Touch ID", async () => {
     const { ctx, token } = await populate()
     await createSession(ctx)
+    await createDeviceKey(ctx)
 
     const file = await exportVault(ctx, EXPORT_PASSWORD)
     const text = file.toString("utf8")
@@ -186,6 +188,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     await deleteSecret(ctx, spareId)
     const marker = await createSecret(ctx, { name: "marker", value: "later" })
     const session = await createSession(ctx)
+    const deviceKey = await createDeviceKey(ctx)
     await setHostJson(DDNS_CONFIG_KEY, {
       provider: "duckdns",
       subdomain: "changed",
@@ -209,6 +212,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     )
     expect((await resolveApiToken(token))?.tokenName).toBe("Claude")
     expect(await resolveSession(session.cookieValue)).toBeNull()
+    expect(await unlockWithDeviceKey(deviceKey)).toBeNull()
     expect(await getSetting(unlocked!, SETTING_PUBLIC_URL)).toBe(
       "https://pcp.example",
     )
@@ -640,6 +644,15 @@ describe("refusing a file", { timeout: 60_000 }, () => {
         EXPORT_PASSWORD,
       ),
     ).rejects.toThrow(/not consistent/)
+
+    const deviceGrant = structuredClone(payload)
+    deviceGrant.tables.keyGrants[0]!.kind = "device"
+    await expect(
+      readExport(
+        await encodeExport(deviceGrant, EXPORT_PASSWORD),
+        EXPORT_PASSWORD,
+      ),
+    ).rejects.toThrow(/kind "device" does not belong/)
 
     const otherVault = structuredClone(payload)
     otherVault.tables.secrets[0]!.vaultId = "someone-else"

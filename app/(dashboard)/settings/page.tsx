@@ -13,6 +13,7 @@ import {
   RecoveryKeyCard,
   SessionsCard,
 } from "@/components/settings-forms"
+import { TouchIdCard } from "@/components/touch-id-card"
 import {
   Card,
   CardContent,
@@ -20,13 +21,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { deviceKeyInfo } from "@/lib/core/device-keys"
 import { isLocalAddress } from "@/lib/core/local-address"
 import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { updatesOverview } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
 import { desktopUpdater, isDesktopApp } from "@/lib/server/desktop"
-import { installKind } from "@/lib/server/install-kind"
+import { autoUpdated, installKind } from "@/lib/server/install-kind"
 import { publicUrlFor, requestOrigin } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -39,7 +41,7 @@ export default async function SettingsPage({
 }) {
   const ctx = await requireContext()
   const query = await searchParams
-  const [pinned, detected, publicUrl, vault, network, updates] =
+  const [pinned, detected, publicUrl, vault, network, updates, touchId] =
     await Promise.all([
       getSetting(ctx, SETTING_PUBLIC_URL),
       requestOrigin(),
@@ -47,6 +49,7 @@ export default async function SettingsPage({
       getVault(ctx.vaultId),
       networkOverview(),
       updatesOverview(),
+      deviceKeyInfo(ctx.vaultId),
     ])
 
   return (
@@ -84,9 +87,11 @@ export default async function SettingsPage({
         overview={updates}
         host={installKind()}
         desktopInstall={isDesktopApp() ? desktopUpdater() : null}
+        autoUpdated={autoUpdated()}
       />
       <ChangePasswordForm username={vault.name} />
       <RecoveryKeyCard username={vault.name} />
+      <TouchIdCard username={vault.name} info={touchId} />
       <SessionsCard />
       <ExportCard username={vault.name} />
       <RestoreCard username={vault.name} mode="settings" />

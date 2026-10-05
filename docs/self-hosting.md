@@ -185,6 +185,19 @@ git pull
 docker compose -f docker-compose.yaml -f docker-compose.https.yaml up -d --build
 ```
 
+To have it done for you, run the install line once with `PCP_AUTO_UPDATE=1`;
+it remembers that, and PCP is then updated once a day, starting again only
+when there is a new release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | PCP_AUTO_UPDATE=1 sh
+```
+
+Under Podman that turns on Podman's own `podman-auto-update.timer`; under
+Docker it adds a daily `pcp-update.timer` to your user's systemd (or, without
+a systemd session, prints the line for your crontab). `PCP_AUTO_UPDATE=0`
+takes PCP's own timer away again.
+
 **Backing up.** Settings → Export writes everything PCP holds to one file,
 locked with an export password you choose; Settings → Restore (or "Restore an
 export instead" on a fresh PCP's setup page) puts it back, on this machine or
@@ -209,9 +222,7 @@ the certificate's key are not.
 
 **Restarting.** PCP starts again by itself after a reboot. `docker logs -f
 pcp` shows what it is doing (`docker compose logs -f` from a checkout,
-`journalctl --user -u pcp -f` under Podman). Under Podman,
-`systemctl --user enable --now podman-auto-update.timer` also fetches new
-releases by itself, once a day.
+`journalctl --user -u pcp -f` under Podman).
 
 ## When something does not work
 

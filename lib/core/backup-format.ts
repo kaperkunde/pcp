@@ -431,7 +431,8 @@ const GRANT_KINDS = new Set(["password", "recovery", "api_token"])
  * any of them is written: a file put together by hand, or cut short, is
  * refused with a reason rather than a rolled-back foreign key error. Also
  * where the kinds the schema leaves as text are pinned down: a key grant is
- * one the owner may carry (never a session's).
+ * one the owner may carry (never a session's or the Touch ID key, which stay
+ * with the PCP that made them).
  */
 export function checkReferences(payload: ExportPayload): void {
   const { vault, tables } = payload

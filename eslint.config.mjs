@@ -48,6 +48,14 @@ const eslintConfig = [
     },
   },
   {
+    // A sandboxed preload is CommonJS: require is the only way it gets
+    // Electron's renderer modules.
+    files: ["desktop/preload.cjs"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
     ignores: [
       "node_modules/**",
       ".next/**",

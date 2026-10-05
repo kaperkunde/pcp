@@ -15,7 +15,8 @@ window on it, and keeps the data in the system's application data folder:
 volume holds; back it up like one. Nothing of PCP is changed or duplicated
 for the app: a change to the web app reaches the desktop app through
 `pnpm build`, and `main.mjs` only knows the server's port, data directory and
-health check.
+health check, and on a Mac keeps the Touch ID key (below) without reading
+it.
 
 ## What the wrapper adds
 
@@ -39,6 +40,27 @@ health check.
   `PORT` in the environment is used when the file does not set one.
 - **Failures are said.** If the port is taken or the server exits, a dialog
   says so and points at the log.
+- **Touch ID** (macOS, with Touch ID set up). Turned on in PCP's Settings,
+  or with the box under the password on the sign-in page, which takes the
+  password once. PCP then makes a key of its own for the app (not the
+  password; `lib/core/device-keys.ts`), and the app keeps it in
+  `…/PCP/touch-id.bin`, encrypted with `safeStorage` under a key macOS keeps
+  in the login keychain for this app. From then on the sign-in page asks for
+  Touch ID as it opens, and so does the password step of a new API token,
+  an export and a restore; the password stays there for when Touch ID is
+  not given. A new password and a new recovery key still take the password.
+  PCP's pages reach it through the window's preload (`preload.cjs`,
+  `window.pcpDesktop`), on PCP's own address only; `touch-id.mjs` checks
+  that again, shows the system prompt and answers. ARCHITECTURE.md ("Touch
+  ID in the Mac app") has the rest.
+- **Fuses.** `electron-builder.yml` flips Electron's fuses in the packaged
+  app: it cannot be run as plain Node, with `NODE_OPTIONS` or under the
+  inspector, which is what keeps another program from using its keychain
+  item; and the window's cookies, PCP's sign-in among them, are encrypted
+  under that keychain key instead of sitting in plain text next to the
+  vault. Cookie encryption is one way, so the fuse stays on. A sign-in from
+  before it is encrypted the next time PCP writes it: lock and unlock once
+  to do that at once.
 - **Updates from Settings.** See "Updating" below.
 
 ## Building it
@@ -131,6 +153,12 @@ To sign, add repository secrets and the workflow picks them up:
 | `CSC_LINK`, `CSC_KEY_PASSWORD`                             | The macOS Developer ID Application certificate, as a base64 `.p12` and its password |
 | `WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`                     | The Windows code signing certificate, as a base64 `.pfx` and its password           |
 | `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` | Notarization on macOS; `scripts/dist.mjs` turns it on when all three are set        |
+
+A Developer ID signature also lets an update keep using the keychain item
+that holds the Touch ID key and the cookies' key. An ad-hoc signed build is
+a stranger to it after every update: macOS asks once for the Mac's password
+(**Always Allow**), and if that is denied the app is signed out and forgets
+its Touch ID key.
 
 Each platform signs only with its own certificate: `scripts/dist.mjs` keeps
 `CSC_LINK` away from the Windows build, where electron-builder would otherwise
