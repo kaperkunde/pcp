@@ -559,7 +559,10 @@ export function resultNotice(kept: KeptResult): string {
 /** The notices in a result's text, so a shortened copy can keep them. */
 export function resultNotices(texts: string[]): string[] {
   return texts.flatMap(
-    (text) => text.match(/… \(PCP kept the whole answer: [^\n]*\)/g) ?? [],
+    (text) =>
+      text.match(
+        /… \(PCP kept the whole answer: [^\n]*\)|PCP kept \d+ values? of this answer as results[^\n]*/g,
+      ) ?? [],
   )
 }
 

@@ -181,6 +181,8 @@ const PermissionRequestRow = z.strictObject({
   argsHash: str,
   fields: str.nullable(),
   decode: str.nullable(),
+  // Added in 0.2: absent from older files.
+  keep: str.nullable().default(null),
   status: str,
   via: str.nullable(),
   resultCiphertext: bytesOrNull,
