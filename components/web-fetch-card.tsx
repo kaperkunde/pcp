@@ -56,23 +56,37 @@ export function WebFetchCard({
   tokenId,
   rules,
   locked,
+  webFetch = true,
+  browser = false,
 }: {
   tokenId: string
   rules: TokenFetchRules
   locked: boolean
+  /** The token fetches web pages (web_fetch). */
+  webFetch?: boolean
+  /** The token reaches the browser, which follows these sites too. */
+  browser?: boolean
 }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Web fetch</CardTitle>
+        <CardTitle>
+          {webFetch
+            ? browser
+              ? "Web fetch and the browser"
+              : "Web fetch"
+            : "Browser sites"}
+        </CardTitle>
         <CardDescription>
-          An assistant with this token can fetch web pages through PCP, with
-          none of your secrets, and from your own network only if you allow it
-          below. A site&apos;s own setting decides every request to it; a site
-          that uses the method settings gets the level of the request&apos;s
-          method. Each site an assistant reaches for shows up here the first
-          time. The browser, when this token can use it, follows the same sites
-          and the GET setting.
+          {webFetch
+            ? "An assistant with this token can fetch web pages through PCP, with none of your secrets, and from your own network only if you allow it below. "
+            : "An assistant with this token can open pages in PCP's browser, from your own network only if you allow it below. "}
+          A site&apos;s own setting decides every request to it; a site that
+          uses the method settings gets the level of the request&apos;s method.
+          Each site an assistant reaches for shows up here the first time.
+          {browser
+            ? " The browser opens a page where a GET request may go, and asks you first where one would ask."
+            : null}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">

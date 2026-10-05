@@ -82,6 +82,7 @@ export function TokenDetail({
   waiting,
   endpointUrl,
   fetchRules,
+  browser = false,
 }: {
   token: ApiTokenSummary
   servers: Array<{ id: string; name: string; kind?: ServerKind }>
@@ -89,8 +90,10 @@ export function TokenDetail({
   otherTokens: Array<{ id: string; name: string }>
   waiting: WaitingRequest[]
   endpointUrl: string
-  /** Only for a token that may fetch web pages. */
+  /** Only for a token that may fetch web pages, or reaches the browser. */
   fetchRules: TokenFetchRules | null
+  /** The token reaches the browser, which follows the same sites. */
+  browser?: boolean
 }) {
   const locked = token.revokedAt !== null
   // Only right after the token list made it (new-token-handoff.ts).
@@ -112,8 +115,14 @@ export function TokenDetail({
         <CopyCard tokenId={token.id} otherTokens={otherTokens} />
       ) : null}
       <ToolsCard tokenId={token.id} access={access} locked={locked} />
-      {token.webFetch && fetchRules ? (
-        <WebFetchCard tokenId={token.id} rules={fetchRules} locked={locked} />
+      {(token.webFetch || browser) && fetchRules ? (
+        <WebFetchCard
+          tokenId={token.id}
+          rules={fetchRules}
+          locked={locked}
+          webFetch={token.webFetch}
+          browser={browser}
+        />
       ) : null}
       <SettingsCard token={token} servers={servers} locked={locked} />
     </div>

@@ -14,6 +14,10 @@ const ROUTES = [
   "/secrets",
   "/tokens",
   "/settings",
+  "/browser",
+  // Refused without a session, but compiled.
+  "/api/browser/tabs/warm/stream",
+  "/api/browser/tabs/warm/input",
   "/api/health",
   "/mcp",
 ]

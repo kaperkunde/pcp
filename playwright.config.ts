@@ -198,6 +198,17 @@ export default defineConfig({
       use: signedIn("web-fetch"),
     },
     {
+      // The browser: added by the owner, its tools and instructions, a new
+      // site asking first, refs to act on a page, a link to another site
+      // stopped, the live view with a click on it, hand_over on the
+      // request's page, and the sign-ins kept across a restart and
+      // forgotten.
+      name: "browser",
+      testMatch: /browser\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("browser"),
+    },
+    {
       // The update check: Check now against the fake upstream's release, the
       // header's notice and the Settings card, the daily check off and on
       // (Settings and the setup step), and how this PCP is updated.

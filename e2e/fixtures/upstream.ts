@@ -65,6 +65,10 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   `pageHits`. The server is on 127.0.0.1, which web_fetch refuses until
  *   the owner allows private addresses for the token, so `pageHits` stays
  *   empty until then.
+ * - `/browser/form`, `/browser/button`, `/browser/cookie` — pages for the
+ *   browser: a form that greets by name and sets a cookie, a button that
+ *   fills the page (for a click on the live view), and one that shows the
+ *   cookie it was sent.
  *
  * - `/ddns/update` — a dynamic DNS service's update URL. It records every
  *   update in `ddns.updates` and answers with `ddns.status`.
@@ -181,6 +185,8 @@ export type Upstream = {
   }
   /** The HTML page for web_fetch. */
   pageUrl: string
+  /** Where the browser's pages are: `${browserUrl}/form` and the rest. */
+  browserUrl: string
   /** Every request to /page, by method; none until private addresses are allowed. */
   pageHits: string[]
   close: () => Promise<void>
@@ -915,6 +921,32 @@ export async function startUpstream({
         return json(res, 404, { error: "not_found" })
       }
 
+      if (url.pathname === "/browser/form") {
+        res.setHeader("content-type", "text/html; charset=utf-8")
+        return res.end(
+          `<!doctype html><title>Browser form</title>
+<h1 id="greeting">Who are you?</h1>
+<label>Name <input id="name"></label>
+<button onclick="document.getElementById('greeting').textContent = 'Hello, ' + document.getElementById('name').value; document.cookie = 'seen=yes; max-age=3600; path=/'">Say hello</button>
+<a href="http://localhost:${(server.address() as AddressInfo).port}/page">Elsewhere</a>`,
+        )
+      }
+
+      if (url.pathname === "/browser/button") {
+        res.setHeader("content-type", "text/html; charset=utf-8")
+        return res.end(
+          `<!doctype html><title>Big button</title><style>html,body{margin:0;height:100%}button{width:100vw;height:100vh;font-size:48px}</style>
+<button onclick="this.textContent = 'Clicked by a person: ' + event.isTrusted">Press me</button>`,
+        )
+      }
+
+      if (url.pathname === "/browser/cookie") {
+        res.setHeader("content-type", "text/html; charset=utf-8")
+        return res.end(
+          `<!doctype html><title>Cookie</title><h1>Cookie: ${(req.headers.cookie ?? "none").replace(/[<>&]/g, "")}</h1>`,
+        )
+      }
+
       if (url.pathname === "/page") {
         pageHits.push(req.method ?? "")
         res.setHeader("content-type", "text/html; charset=utf-8")
@@ -1148,6 +1180,7 @@ export async function startUpstream({
     keyedKeys,
     keyedRequests,
     pageUrl: `${origin}/page`,
+    browserUrl: `${origin}/browser`,
     pageHits,
     jmapSessionUrl: `${origin}/jmap/session`,
     oauthJmapSessionUrl: `${origin}/oauth/jmap/session`,

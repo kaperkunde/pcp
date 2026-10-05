@@ -70,6 +70,11 @@ export function BrowserTabView({
   const seq = useRef(0)
   const lastDown = useRef({ t: -1e9, x: 0, y: 0, count: 0 })
   const metaRef = useRef<FrameMetadata | null>(null)
+  // Right after you take a tab over or hand it back, the stream may still
+  // send its state from before: what you chose holds for a moment.
+  const pinned = useRef<{ control: TabView["control"]; until: number } | null>(
+    null,
+  )
   const holding = view.control === "owner"
 
   // The pictures: one EventSource, drawn newest-first, reconnecting after
@@ -119,7 +124,12 @@ export function BrowserTabView({
       })
       source.addEventListener("tab", (event) => {
         const next = JSON.parse((event as MessageEvent).data) as TabView
-        setView(next)
+        const pin = pinned.current
+        setView(
+          pin && Date.now() < pin.until
+            ? { ...next, control: pin.control }
+            : next,
+        )
       })
       source.addEventListener("frame", (event) => {
         latest = JSON.parse((event as MessageEvent).data)
@@ -236,10 +246,26 @@ export function BrowserTabView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [holding])
 
-  function act(run: () => Promise<ActionState>) {
+  function act(run: () => Promise<ActionState>, control?: TabView["control"]) {
+    if (control) {
+      pinned.current = { control, until: Date.now() + 3_000 }
+      setView((current) => ({ ...current, control }))
+    }
+
     startTransition(async () => {
       const result = await run()
       setError(result.status === "error" ? result.error : null)
+
+      if (result.status === "error" && control) {
+        pinned.current = null
+        setView((current) => ({
+          ...current,
+          control: control === "owner" ? "assistant" : "owner",
+        }))
+      } else if (control) {
+        pinned.current = { control, until: Date.now() + 3_000 }
+      }
+
       router.refresh()
     })
   }
@@ -330,7 +356,7 @@ export function BrowserTabView({
                 type="button"
                 size="sm"
                 disabled={pending}
-                onClick={() => act(() => handBackTabAction(tabId))}
+                onClick={() => act(() => handBackTabAction(tabId), "assistant")}
               >
                 Hand back
               </Button>
@@ -340,10 +366,7 @@ export function BrowserTabView({
               type="button"
               size="sm"
               disabled={pending || status === "closed"}
-              onClick={() => {
-                setView((current) => ({ ...current, control: "owner" }))
-                act(() => takeOverTabAction(tabId))
-              }}
+              onClick={() => act(() => takeOverTabAction(tabId), "owner")}
             >
               Take over
             </Button>
