@@ -28,7 +28,7 @@ import {
  * "imap", lib/core/mail/). Talking to them is lib/core/upstream.ts.
  */
 
-/** basic: a user name and a secret (a mail account's login). */
+/** basic: a user name and a secret (an API's or a mail account's login). */
 export type AuthType = "none" | "header" | "oauth" | "basic"
 
 export type ServerKind = "mcp" | "openapi" | "jmap" | "imap"
@@ -351,14 +351,11 @@ export async function normalizeHeaderAuth(
 }
 
 /**
- * Basic authentication: a user name and the secret that goes with it, sent
- * together (a JMAP server's Basic authentication, an IMAP or SMTP login).
+ * A user name for basic authentication: what a login is made with, so it
+ * cannot hold what would change what is sent.
  */
-export async function normalizeBasicAuth(
-  ctx: VaultContext,
-  input: { authUsername?: string | null; authSecretId?: string | null },
-): Promise<{ authUsername: string; authSecretId: string }> {
-  const authUsername = input.authUsername?.trim() ?? ""
+export function validateUsername(raw: string | null | undefined): string {
+  const authUsername = raw?.trim() ?? ""
 
   if (!authUsername) {
     throw invalid("Enter the user name to sign in with.")
@@ -376,13 +373,67 @@ export async function normalizeBasicAuth(
     )
   }
 
+  return authUsername
+}
+
+export type BasicAuth = {
+  authUsername: string
+  /** Null while newSecret is still to be saved. */
+  authSecretId: string | null
+  newSecret: NewSecret | null
+}
+
+/**
+ * Basic authentication: a user name and the secret that goes with it, sent
+ * together (an API's Basic authentication, a JMAP server's, an IMAP or SMTP
+ * login). A password typed into the form is checked here and saved with the
+ * row that sends it, as a header secret is.
+ */
+export async function normalizeBasicAuth(
+  ctx: VaultContext,
+  input: Pick<
+    ServerInput,
+    "authSecretId" | "authSecretName" | "authSecretValue"
+  > & { authUsername?: string | null },
+  sender: { name: string },
+): Promise<BasicAuth> {
+  const authUsername = validateUsername(input.authUsername)
+
   if (!input.authSecretId) {
     throw invalid("Choose the secret that holds the password.")
   }
 
-  await requireTextSecret(ctx, input.authSecretId)
+  let newSecret: NewSecret | null = null
 
-  return { authUsername, authSecretId: input.authSecretId }
+  if (input.authSecretId === NEW_SECRET) {
+    const value = input.authSecretValue ?? ""
+    const name = input.authSecretName?.trim() || null
+
+    if (name) {
+      await checkNewSecret(ctx, { name, value })
+    } else {
+      const problem = validateSecretValue(value)
+
+      if (problem) {
+        throw invalid(problem)
+      }
+    }
+
+    newSecret = {
+      name,
+      base: `${sender.name} password`,
+      value,
+      description: `The password for ${authUsername} at ${sender.name}.`,
+    }
+  } else {
+    await requireTextSecret(ctx, input.authSecretId)
+  }
+
+  return {
+    authUsername,
+    authSecretId: newSecret ? null : input.authSecretId,
+    newSecret,
+  }
 }
 
 export type OAuthClientInput = Pick<
@@ -415,6 +466,11 @@ export async function extraAuthHeaders(
 export async function authHeaderNames(
   server: Pick<McpServer, "id" | "authType" | "authHeaderName">,
 ): Promise<string[]> {
+  // Basic authentication is the Authorization header, whatever the row says.
+  if (server.authType === "basic") {
+    return ["Authorization"]
+  }
+
   if (!server.authHeaderName) {
     return []
   }

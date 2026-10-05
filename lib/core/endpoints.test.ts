@@ -252,8 +252,8 @@ describe("createEndpoint", () => {
       createEndpoint(ctx, input({ authType: "header", authSecretId: "nope" })),
     ).rejects.toThrow(/does not exist/)
     await expect(
-      createEndpoint(ctx, input({ authType: "basic" as never })),
-    ).rejects.toThrow(/an OAuth token, or no credential/)
+      createEndpoint(ctx, input({ authType: "digest" as never })),
+    ).rejects.toThrow(/a user name and password, an OAuth token, or no/)
     // This schema's only scheme is an API key: there is no sign-in to use.
     await expect(
       createEndpoint(
@@ -944,6 +944,167 @@ describe("a credential in several headers", () => {
       ),
     ).rejects.toThrow(/at most 5/)
     expect(await db().mcpServer.count()).toBe(0)
+  })
+})
+
+describe("a user name and password (Basic authentication)", () => {
+  const PASSWORD = "app-password-4711"
+  const TOKEN = Buffer.from(`ada:${PASSWORD}`).toString("base64")
+
+  // An API that asks for HTTP Basic, and also declares an API key the
+  // endpoint does not send.
+  function basicSchema(extra: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      openapi: "3.0.3",
+      info: { title: "Pets" },
+      servers: [{ url: `${api.origin}/api` }],
+      security: [{ basic: [] }],
+      components: {
+        securitySchemes: { basic: { type: "http", scheme: "basic" } },
+      },
+      paths: {
+        "/whoami": {
+          get: {
+            operationId: "whoami",
+            parameters: [
+              {
+                name: "Authorization",
+                in: "header",
+                schema: { type: "string" },
+              },
+            ],
+          },
+        },
+      },
+      ...extra,
+    })
+  }
+
+  async function basic(overrides: Partial<EndpointInput> = {}) {
+    const { id } = await createSecret(ctx, {
+      name: "Pets password",
+      value: PASSWORD,
+    })
+
+    return input({
+      authType: "basic",
+      authUsername: "ada",
+      authSecretId: id,
+      specText: basicSchema(),
+      baseUrl: `${api.origin}/api`,
+      ...overrides,
+    })
+  }
+
+  it("sends the login as Basic, never offers Authorization as an argument, and keeps the password out of the answer", async () => {
+    const { id, sync } = await createEndpoint(ctx, await basic())
+    // The schema asks for Basic and the endpoint sends it: nothing to say.
+    expect(sync.message).toBe("")
+
+    const server = await getServer(ctx, id)
+    expect(server).toMatchObject({
+      authType: "basic",
+      authUsername: "ada",
+      authHeaderName: "Authorization",
+      authValueTemplate: null,
+    })
+    expect(JSON.stringify(server.tools[0]!.inputSchema)).not.toMatch(
+      /authorization/i,
+    )
+
+    const echo = await startTestApi((req, res) =>
+      json(res, 200, { youSent: req.headers.authorization }),
+    )
+    await db().mcpServer.update({
+      where: { id },
+      data: { url: `${echo.origin}/api` },
+    })
+
+    try {
+      const result = await callServerTool(
+        ctx,
+        await getServer(ctx, id),
+        "whoami",
+        {},
+        PUBLIC,
+      )
+      expect(echo.requests[0]!.headers.authorization).toBe(`Basic ${TOKEN}`)
+      expect(JSON.stringify(result)).not.toContain(TOKEN)
+      expect(JSON.stringify(result)).not.toContain(PASSWORD)
+      expect(JSON.stringify(result)).toContain("[redacted]")
+    } finally {
+      await echo.close()
+    }
+  })
+
+  it("is the owner's to have: the address must be typed, and a login needs both parts", async () => {
+    const withBase = await basic()
+
+    await expect(
+      createEndpoint(ctx, { ...withBase, authUsername: "" }),
+    ).rejects.toThrow(/user name/)
+    await expect(
+      createEndpoint(ctx, { ...withBase, authSecretId: null }),
+    ).rejects.toThrow(/secret/)
+    // The schema's own server is someone else's word for where to send it.
+    await expect(
+      createEndpoint(ctx, { ...withBase, baseUrl: "" }),
+    ).rejects.toThrow(/base URL/i)
+    expect(await db().mcpServer.count()).toBe(0)
+  })
+
+  it("saves a password typed into the form with it, and none when it is refused", async () => {
+    const typed = input({
+      authType: "basic",
+      authUsername: "ada",
+      authSecretId: NEW_SECRET,
+      authSecretValue: PASSWORD,
+      specText: basicSchema(),
+      baseUrl: `${api.origin}/api`,
+    })
+
+    await expect(
+      createEndpoint(ctx, { ...typed, specText: "{ nope" }),
+    ).rejects.toThrow()
+    expect(await listSecrets(ctx)).toEqual([])
+
+    const { id } = await createEndpoint(ctx, typed)
+    const [secret] = await listSecrets(ctx)
+    expect(secret).toMatchObject({
+      name: "Petstore password",
+      description: "The password for ada at Petstore.",
+      usedBy: [{ id, name: "Petstore" }],
+    })
+    expect(await revealSecret(ctx, secret!.id)).toBe(PASSWORD)
+  })
+
+  it("forgets the user name when the endpoint stops using it", async () => {
+    const { id } = await createEndpoint(ctx, await basic())
+
+    await updateEndpoint(ctx, id, input({ baseUrl: `${api.origin}/api` }))
+
+    expect(await getServer(ctx, id)).toMatchObject({
+      authType: "none",
+      authUsername: null,
+      authHeaderName: null,
+    })
+  })
+
+  it("still says when the schema wants a key as well", async () => {
+    const doc = JSON.parse(basicSchema()) as Record<string, unknown>
+    doc.components = {
+      securitySchemes: {
+        basic: { type: "http", scheme: "basic" },
+        key: { type: "apiKey", in: "header", name: "X-API-Key" },
+      },
+    }
+    doc.security = [{ basic: [], key: [] }]
+
+    const { sync } = await createEndpoint(
+      ctx,
+      await basic({ specText: JSON.stringify(doc) }),
+    )
+    expect(sync.message).toContain("X-API-Key")
   })
 })
 

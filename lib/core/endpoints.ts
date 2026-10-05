@@ -35,6 +35,7 @@ import {
   extraAuthHeadersWrite,
   getServer,
   kindNoun,
+  normalizeBasicAuth,
   normalizeHeaderAuth,
   normalizeOAuthClient,
   secretColumns,
@@ -87,7 +88,7 @@ export type EndpointInput = {
   publicOnly?: boolean
   /** Off until the owner enables it. Default on. */
   enabled?: boolean
-  authType: "none" | "header" | "oauth"
+  authType: "none" | "header" | "basic" | "oauth"
   authHeaderName?: string | null
   authValueTemplate?: string | null
   /** A secret's id, or NEW_SECRET for one typed into the form. */
@@ -95,6 +96,8 @@ export type EndpointInput = {
   /** With NEW_SECRET: what to call it, and its value. */
   authSecretName?: string | null
   authSecretValue?: string | null
+  /** basic: the user name the secret (the password) goes with. */
+  authUsername?: string | null
   /** Further headers, each with a stored secret, sent with the first. */
   authExtraHeaders?: ExtraAuthHeaderInput[] | null
   /**
@@ -110,20 +113,20 @@ export type EndpointInput = {
   oauthAuthorizeParams?: string | null
 }
 
-/** The header an OAuth endpoint's token goes in. */
+/** The header an OAuth endpoint's token, or a login, goes in. */
 const BEARER_HEADER = "Authorization"
 
-/** Whether an endpoint sends the owner something: a secret, or a token. */
+/** Whether an endpoint sends the owner something: a secret, a login or a token. */
 function sendsCredential(authType: string): boolean {
-  return authType === "header" || authType === "oauth"
+  return authType === "header" || authType === "basic" || authType === "oauth"
 }
 
 async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
   const { name, description } = normalizeNameAndDescription(input)
 
-  if (!["none", "header", "oauth"].includes(input.authType)) {
+  if (!["none", "header", "basic", "oauth"].includes(input.authType)) {
     throw invalid(
-      "An API endpoint sends a secret in a header, an OAuth token, or no credential at all.",
+      "An API endpoint sends a secret in a header, a user name and password, an OAuth token, or no credential at all.",
     )
   }
 
@@ -137,28 +140,41 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
     input.authType === "header"
       ? {
           authType: "header",
+          authUsername: null,
           ...(await normalizeHeaderAuth(ctx, input, { name })),
           ...noClient,
         }
-      : input.authType === "oauth"
+      : input.authType === "basic"
         ? {
-            authType: "oauth",
-            authSecretId: null,
-            // Blocks the header from being an operation's argument.
+            authType: "basic",
+            // The login is the Authorization header: no operation may set it.
             authHeaderName: BEARER_HEADER,
             authValueTemplate: null,
             authExtraHeaders: [] as ExtraAuthHeader[],
-            ...(await normalizeOAuthClient(ctx, input, { name })),
-          }
-        : {
-            authType: "none",
-            authSecretId: null,
-            authHeaderName: null,
-            authValueTemplate: null,
-            authExtraHeaders: [] as ExtraAuthHeader[],
-            newSecret: null,
+            ...(await normalizeBasicAuth(ctx, input, { name })),
             ...noClient,
           }
+        : input.authType === "oauth"
+          ? {
+              authType: "oauth",
+              authSecretId: null,
+              authUsername: null,
+              // Blocks the header from being an operation's argument.
+              authHeaderName: BEARER_HEADER,
+              authValueTemplate: null,
+              authExtraHeaders: [] as ExtraAuthHeader[],
+              ...(await normalizeOAuthClient(ctx, input, { name })),
+            }
+          : {
+              authType: "none",
+              authSecretId: null,
+              authUsername: null,
+              authHeaderName: null,
+              authValueTemplate: null,
+              authExtraHeaders: [] as ExtraAuthHeader[],
+              newSecret: null,
+              ...noClient,
+            }
 
   const specSource = input.specSource === "upload" ? "upload" : "url"
 
@@ -323,7 +339,7 @@ function statusNotes(
     notes.push(
       `The schema says requests need ${generated.security}; this endpoint sends none.`,
     )
-  } else if (server.authType === "header") {
+  } else if (server.authType === "header" || server.authType === "basic") {
     const lower = new Set(sent.map((name) => name.toLowerCase()))
     const missing = generated.securityHeaders.filter(
       (name) => !lower.has(name.toLowerCase()),
@@ -657,6 +673,7 @@ export async function createEndpoint(
         specUrlFromAssistant:
           data.specSource === "url" && input.specUrlFromAssistant === true,
         authType: data.authType,
+        authUsername: data.authUsername,
         authHeaderName: data.authHeaderName,
         authValueTemplate: data.authValueTemplate,
         ...secretColumns(data, secretId),
@@ -805,6 +822,7 @@ export async function updateEndpoint(
         publicOnly: data.publicOnly,
         specUrlFromAssistant,
         authType: data.authType,
+        authUsername: data.authUsername,
         authHeaderName: data.authHeaderName,
         authValueTemplate: data.authValueTemplate,
         ...secretColumns(data, secretId),

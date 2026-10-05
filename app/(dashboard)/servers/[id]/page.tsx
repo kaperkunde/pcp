@@ -173,9 +173,12 @@ export default async function ServerPage({
             readOnly: server.readOnly,
             publicOnly: server.publicOnly,
             authType:
-              server.authType === "header" || server.authType === "oauth"
+              server.authType === "header" ||
+              server.authType === "basic" ||
+              server.authType === "oauth"
                 ? server.authType
                 : "none",
+            authUsername: server.authUsername ?? "",
             authHeaderName: server.authHeaderName ?? "Authorization",
             authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
             authSecretId: server.authSecretId ?? "",

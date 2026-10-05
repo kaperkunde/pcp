@@ -49,7 +49,9 @@ async function inputFrom(formData: FormData): Promise<EndpointInput> {
     field(formData, "specSource") === "upload" ? "upload" : "url"
   const chosen = field(formData, "authType")
   const authType =
-    chosen === "header" || chosen === "oauth" ? chosen : ("none" as const)
+    chosen === "header" || chosen === "basic" || chosen === "oauth"
+      ? chosen
+      : ("none" as const)
   let specText: string | null = null
 
   if (specSource === "upload") {
@@ -81,6 +83,7 @@ async function inputFrom(formData: FormData): Promise<EndpointInput> {
     authHeaderName: field(formData, "authHeaderName"),
     authValueTemplate: field(formData, "authValueTemplate"),
     authSecretId: field(formData, "authSecretId") || null,
+    authUsername: field(formData, "authUsername") || null,
     authExtraHeaders: extraHeadersFrom(formData),
     authSecretName: field(formData, "authSecretName") || null,
     authSecretValue: field(formData, "authSecretValue") || null,

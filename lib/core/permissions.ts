@@ -128,6 +128,8 @@ export type PermissionScope = {
  */
 export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   secretName?: string | null
+  /** basic: the user name the secret (the password) goes with. */
+  authUsername?: string | null
   /** Further headers, each with its stored secret's name for the owner. */
   authExtraHeaders?: Array<ExtraAuthHeader & { secretName: string }>
   newSecretName?: string | null
@@ -1100,23 +1102,6 @@ function secretFields(asked: RegisterArgs, secretId: string | null) {
     : { authSecretId: secretId }
 }
 
-/**
- * How an API endpoint an assistant proposed signs in. register_server offers
- * none, a header or OAuth; a user name and password (a mail account's) is
- * the owner's to set up, never a proposal's.
- */
-function endpointAuthType(
-  authType: RegisterArgs["authType"],
-): "none" | "header" | "oauth" {
-  if (authType === "basic") {
-    throw invalid(
-      "An API proposed through register_server cannot sign in with a user name and password.",
-    )
-  }
-
-  return authType
-}
-
 async function executeRegister(
   ctx: VaultContext,
   row: Row,
@@ -1134,7 +1119,8 @@ async function executeRegister(
           name: asked.name,
           description: asked.description,
           url: asked.url,
-          authType: endpointAuthType(asked.authType),
+          authType: asked.authType,
+          authUsername: asked.authUsername,
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
           authExtraHeaders: asked.authExtraHeaders,

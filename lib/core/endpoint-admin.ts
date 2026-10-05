@@ -121,7 +121,7 @@ export type EndpointDetails = {
    * secrets or what they hold.
    */
   authentication: {
-    type: "none" | "header" | "oauth"
+    type: "none" | "header" | "basic" | "oauth"
     header: string | null
     headers: string[]
   }
@@ -339,13 +339,14 @@ async function detailsOf(
       characters: spec?.text.length ?? null,
       edits: spec?.patches.length ?? 0,
     },
-    // The headers' names, never which secrets or what they hold.
+    // The headers' names, never which secrets or what they hold, nor the
+    // user name a password goes with.
     authentication:
       server.authType === "header"
         ? { type: "header", header: server.authHeaderName, headers }
-        : server.authType === "oauth"
+        : server.authType === "basic" || server.authType === "oauth"
           ? {
-              type: "oauth",
+              type: server.authType,
               header: "Authorization",
               headers: ["Authorization"],
             }
@@ -688,10 +689,12 @@ export async function createApprovedEndpoint(
     name: string
     description?: string
     url: string
-    authType: "none" | "header" | "oauth"
+    authType: "none" | "header" | "basic" | "oauth"
     authHeaderName?: string | null
     authValueTemplate?: string | null
     authSecretId?: string | null
+    /** basic: the user name the secret (the password) goes with. */
+    authUsername?: string | null
     authExtraHeaders?: ExtraAuthHeaderInput[] | null
     /** oauth: the owner's client, and the scope they were shown. */
     oauthClientId?: string | null
@@ -726,6 +729,7 @@ export async function createApprovedEndpoint(
     authHeaderName: asked.authHeaderName,
     authValueTemplate: asked.authValueTemplate,
     authSecretId: asked.authSecretId,
+    authUsername: asked.authUsername,
     authExtraHeaders: asked.authExtraHeaders,
     oauthClientId: asked.oauthClientId,
     oauthClientSecretId: asked.oauthClientSecretId,

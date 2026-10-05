@@ -125,9 +125,13 @@ async function normalizeMailAccount(
   }
 
   switch (input.authType) {
-    case "basic":
-      Object.assign(auth, await normalizeBasicAuth(ctx, input))
+    case "basic": {
+      const basic = await normalizeBasicAuth(ctx, input, { name })
+      auth.authUsername = basic.authUsername
+      auth.authSecretId = basic.authSecretId
+      newSecret = basic.newSecret
       break
+    }
     case "header": {
       // A bearer token, the way JMAP servers take one.
       const header = await normalizeHeaderAuth(
