@@ -168,3 +168,149 @@ describe("a handle in an endpoint call's arguments", () => {
     })
   })
 })
+
+describe("an upload to an endpoint", () => {
+  function uploadSchema(origin: string) {
+    return JSON.stringify({
+      openapi: "3.0.3",
+      info: { title: "Files" },
+      servers: [{ url: `${origin}/api` }],
+      paths: {
+        "/documents": {
+          put: {
+            operationId: "putDocument",
+            requestBody: {
+              required: true,
+              content: {
+                "application/pdf": {
+                  schema: { type: "string", format: "binary" },
+                },
+              },
+            },
+          },
+        },
+        "/photos": {
+          post: {
+            operationId: "addPhoto",
+            requestBody: {
+              required: true,
+              content: {
+                "multipart/form-data": {
+                  schema: {
+                    type: "object",
+                    properties: {
+                      caption: { type: "string" },
+                      photo: { type: "string", format: "binary" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+  }
+
+  async function files() {
+    const { id } = await createEndpoint(ctx, {
+      name: "Files",
+      specSource: "upload",
+      specText: uploadSchema(api.origin),
+      readOnly: false,
+      authType: "none",
+    })
+
+    return getServer(ctx, id)
+  }
+
+  async function keptFile(bytes: Buffer, mediaType: string, name: string) {
+    return (
+      await keepBytes(ctx, {
+        tokenId,
+        serverId: null,
+        toolName: "get_attachment",
+        bytes,
+        mediaType,
+        name,
+      })
+    ).id
+  }
+
+  it("sends a kept file as the body, as its bytes", async () => {
+    const server = await files()
+    const pdf = Buffer.from("%PDF-1.7 \u0000\u00ff binary")
+    const id = await keptFile(pdf, "application/pdf", "plan.pdf")
+
+    const answer = await runCall(
+      ctx,
+      server,
+      "putDocument",
+      { body: { $result: id } },
+      { ...PUBLIC, tokenId },
+    )
+
+    expect(answer.isError).toBeUndefined()
+    expect(api.requests[0]).toMatchObject({
+      method: "PUT",
+      url: "/api/documents",
+    })
+    expect(api.requests[0]!.headers["content-type"]).toBe("application/pdf")
+    expect(api.requests[0]!.bytes.equals(pdf)).toBe(true)
+  })
+
+  it("sends a kept file in multipart form data, under its name, beside a text a handle stands for", async () => {
+    const server = await files()
+    const id = await keptFile(PNG, "image/png", "rex.png")
+    const caption = await keptText("Rex in the garden")
+
+    await runCall(
+      ctx,
+      server,
+      "addPhoto",
+      { body: { caption: { $result: caption }, photo: { $result: id } } },
+      { ...PUBLIC, tokenId },
+    )
+
+    const request = api.requests[0]!
+    const body = request.bytes
+
+    expect(request.headers["content-type"]).toMatch(
+      /^multipart\/form-data; boundary=/,
+    )
+    expect(request.body).toContain(
+      'name="caption"\r\n\r\nRex in the garden\r\n',
+    )
+    expect(request.body).toContain(
+      'name="photo"; filename="rex.png"\r\nContent-Type: image/png\r\n\r\n',
+    )
+    expect(body.includes(PNG)).toBe(true)
+  })
+
+  it("refuses a file argument that is not a handle, or one the token has not got, sending nothing", async () => {
+    const server = await files()
+
+    await expect(
+      runCall(
+        ctx,
+        server,
+        "putDocument",
+        { body: "%PDF" },
+        {
+          ...PUBLIC,
+          tokenId,
+        },
+      ),
+    ).rejects.toThrow(/is a file: pass a result PCP kept for you/)
+    await expect(
+      runCall(
+        ctx,
+        server,
+        "addPhoto",
+        { body: { photo: { $result: "gone" } } },
+        { ...PUBLIC, tokenId },
+      ),
+    ).rejects.toThrow(/No kept result "gone" for this token/)
+    expect(api.requests).toEqual([])
+  })
+})

@@ -1086,7 +1086,7 @@ async function callEndpoint(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl }: { publicUrl: string },
+  { publicUrl, open }: { publicUrl: string; open?: ResultOpener },
 ): Promise<CallToolResult> {
   try {
     const { headers, redact } = await credential(ctx, server, { publicUrl })
@@ -1094,6 +1094,7 @@ async function callEndpoint(
     return await callEndpointTool(server, toolName, args, {
       authHeaders: headers,
       redact,
+      open,
       ...(server.authType === "oauth"
         ? {
             renew: async () =>
@@ -1153,14 +1154,10 @@ export async function callServerTool(
     )
   }
 
+  // The endpoint resolves its own handles: an upload's file fields take
+  // the kept file's bytes, not its base64.
   if (server.kind === "openapi") {
-    return callEndpoint(
-      ctx,
-      server,
-      toolName,
-      open ? await resolveHandles(args, open) : args,
-      { publicUrl },
-    )
+    return callEndpoint(ctx, server, toolName, args, { publicUrl, open })
   }
 
   if (isMailKind(server.kind)) {

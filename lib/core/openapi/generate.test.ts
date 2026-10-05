@@ -469,14 +469,81 @@ describe("unsupported features", () => {
     })
     expect(optional.tools[0]!.operation.body).toBeNull()
 
+    // multipart that names no file field: nothing PCP can upload.
     const required = one({
       requestBody: {
         required: true,
-        content: { "application/octet-stream": { schema: {} } },
+        content: { "multipart/form-data": { schema: { type: "object" } } },
       },
     })
     expect(required.tools).toEqual([])
     expect(required.skipped[0]!.reason).toBe("it needs a file upload")
+  })
+
+  it("takes a binary body as one kept file", () => {
+    const { tools } = one({
+      requestBody: {
+        required: true,
+        content: {
+          "application/pdf": { schema: { type: "string", format: "binary" } },
+        },
+      },
+    })
+
+    expect(tools[0]!.operation.body).toEqual({
+      arg: "body",
+      contentType: "application/pdf",
+      encoding: "binary",
+      required: true,
+    })
+    expect(
+      (tools[0]!.inputSchema.properties as Record<string, unknown>).body,
+    ).toMatchObject({
+      type: "object",
+      required: ["$result"],
+      additionalProperties: false,
+    })
+  })
+
+  it("takes multipart with file fields, a file or a list, beside its other fields", () => {
+    const { tools } = one({
+      requestBody: {
+        content: {
+          "multipart/form-data": {
+            schema: {
+              type: "object",
+              required: ["photo"],
+              properties: {
+                caption: { type: "string" },
+                photo: { type: "string", format: "binary" },
+                extras: {
+                  type: "array",
+                  items: { type: "string", format: "binary" },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+    const body = (tools[0]!.inputSchema.properties as Record<string, unknown>)
+      .body as {
+      properties: Record<string, { type?: string; required?: string[] }>
+      required: string[]
+    }
+
+    expect(tools[0]!.operation.body).toMatchObject({
+      contentType: "multipart/form-data",
+      encoding: "multipart",
+      files: [
+        { name: "photo", many: false },
+        { name: "extras", many: true },
+      ],
+    })
+    expect(body.required).toEqual(["photo"])
+    expect(body.properties.caption).toEqual({ type: "string" })
+    expect(body.properties.photo!.required).toEqual(["$result"])
+    expect(body.properties.extras!.type).toBe("array")
   })
 
   it("skips an operation with its own server, and one with an external reference", () => {

@@ -207,7 +207,8 @@ itself in a container or a checkout.
 3. **API endpoints.** Add an API by giving PCP its OpenAPI 3 schema, as a URL
    or an uploaded JSON or YAML file. PCP turns each operation into a tool,
    with the arguments the schema describes, and tells you what it left out
-   (file uploads, cookies). Choose a secret to send in a header (more than
+   (cookies, for one). An operation that takes a file upload takes a file
+   PCP kept for the assistant, such as an email attachment, by its handle. Choose a secret to send in a header (more than
    one, each in its own header, for an API that wants a key and a secret
    key), a user name and password (HTTP Basic authentication, which PCP
    encodes), or, for an API whose schema declares an OAuth sign-in (Google's,

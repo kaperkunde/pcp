@@ -62,6 +62,10 @@ export const SPEC_MAX_REDIRECTS = 3
 
 export const CALL_TIMEOUT_MS = 60_000
 export const MAX_REQUEST_BODY_BYTES = 1024 * 1024
+/** An upload's body: kept files (10 MiB each at most) and its form fields. */
+export const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024
+/** Files one multipart upload may carry. */
+export const MAX_UPLOAD_FILES = 20
 export const MAX_RESPONSE_BYTES = 1024 * 1024
 /** structuredContent is only added when it is at most this long as JSON. */
 export const MAX_STRUCTURED_CHARS = 60_000
