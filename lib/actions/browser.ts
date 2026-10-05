@@ -12,6 +12,7 @@ import {
   ownerBack,
   ownerNavigate,
   ownerReload,
+  startChromiumInstall,
   stopBrowser,
   takeOverTab,
   type BrowserOverview,
@@ -28,7 +29,7 @@ import { requireContext } from "@/lib/server/session"
 /**
  * What the owner does with the browser on its pages: add it, open and
  * close tabs, take one over and hand it back, move it along while it is
- * theirs, close the browser, forget its sign-ins.
+ * theirs, close the browser, forget its sign-ins, and install Chromium.
  */
 
 function revalidateBrowser() {
@@ -139,6 +140,12 @@ export async function closeBrowserAction(): Promise<ActionState> {
 export async function forgetSitesAction(): Promise<ActionState> {
   const ctx = await requireContext()
   return onTab(() => forgetSites(ctx))
+}
+
+/** Starts it and returns: the page follows it through the overview. */
+export async function installChromiumAction(): Promise<ActionState> {
+  await requireContext()
+  return onTab(() => startChromiumInstall())
 }
 
 /** The Browser page's live part, polled while it is open. */

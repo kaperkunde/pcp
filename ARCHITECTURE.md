@@ -692,8 +692,12 @@ which `runCall` turns into a `browse` request offering Allow once (the site
 for that tab while it is open), Always allow this site and Block this site
 (the token's site line, as for web fetch) and Not now. A popup becomes a tab
 of the tab that opened it. A token whose `navigate` tool is at ask is asked
-about the tool and then about the site; the browser's server page is where
-its tools are allowed for a token trusted with it.
+once: the call's request shows the address, and when the owner allows the
+call, `runCall` (told so by `executeCall`) opens the site for that tab as
+Allow once would, with no `browse` request after it. Only `navigate` and
+`tabs` ask about a site, and only for the address in their arguments, so
+the site is always one the owner saw. A blocked site stays blocked, and a
+hand-over during such a call is still asked.
 
 **Which addresses it reaches** (`proxy.ts`). Every connection goes through
 a forward proxy on 127.0.0.1 (`--proxy-server`, with loopback not
@@ -741,10 +745,24 @@ export download does. A WebSocket would answer a little sooner, but needs a
 server of its own around Next; the input's format is the same whatever
 carries it.
 
-**Chromium on the machine** (`executable.ts`). `PCP_BROWSER_EXECUTABLE`,
-then the host setting `browser.executable`, then Playwright's own variable
-and install location. The Docker image installs Playwright's Chromium, the
-version `playwright-core` drives; the desktop app stages none.
+**Chromium on the machine** (`executable.ts`, `install.ts`).
+`PCP_BROWSER_EXECUTABLE`, then PCP's own install, then Playwright's own
+variable and install location. The Docker image installs Playwright's
+Chromium, the version `playwright-core` drives; the desktop app stages none.
+Where none is found, the Browser page's **Install Chromium** downloads the
+build `playwright-core` drives from the addresses Playwright pins for it
+(read from `playwright-core/lib/coreBundle`'s registry, never from a
+request), unpacks it with Playwright's own unzip into
+`browsers/chromium-<revision>/` under the data folder, makes it executable
+and writes Playwright's `INSTALLATION_COMPLETE` marker last, under a
+temporary name until it is whole. It runs in PCP's process: Playwright's
+installer downloads in a child process, and the desktop app's `runAsNode`
+fuse is off, so it could not start one. The download is capped in size, in
+time, and in time without a byte (`limits.ts`); one install runs at a time,
+and the page follows its progress. The install is looked for by the
+revision `playwright-core` drives, so after an update to a newer one the
+page offers to install that, which removes the older build. Nothing runs
+until the owner clicks.
 
 ## Data on disk
 
@@ -763,6 +781,10 @@ Linux):
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
+- `browsers/chromium-<revision>/` — only once the owner installs Chromium
+  from the Browser page: Playwright's build of it, as Playwright lays it out
+  (see "Browser"). Machine data, not the vault's: it holds nothing of the
+  owner's, and an export does not carry it.
 
 The desktop app keeps its own files beside that directory, not in it:
 `desktop.json` (the port, whether other devices may connect), on a Mac with

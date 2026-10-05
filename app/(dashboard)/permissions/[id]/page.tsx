@@ -164,6 +164,10 @@ export default async function PermissionPage({
                 <p className="text-muted-foreground">
                   Always allow and Block also decide the calls after this one.
                   You can change that on the token&apos;s page.
+                  {view.serverKind === "browser" &&
+                  (view.tool === "navigate" || view.tool === "tabs")
+                    ? " Allowing it also lets the tab open the site it names, unless you blocked that site for this token, and keep to its pages while the tab is open; other sites are asked about on their own."
+                    : null}
                 </p>
               ) : view.kind === "fetch" ? (
                 <p className="text-muted-foreground">

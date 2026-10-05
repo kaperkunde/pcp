@@ -41,7 +41,7 @@ export async function syncBrowserTools(
 
   if (!(await chromiumExecutable())) {
     const message =
-      "Chromium is not installed on the machine PCP runs on; the Browser page says how to add it."
+      "Chromium is not installed on the machine PCP runs on; install it on the Browser page."
     await setServerStatus(server.id, "error", message, {
       lastSyncedAt: new Date(),
     })
@@ -50,6 +50,21 @@ export async function syncBrowserTools(
 
   await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
   return { status: "ok", message: "", toolCount }
+}
+
+/**
+ * Every vault's browser row checked again: Chromium belongs to the
+ * machine, so installing it readies them all.
+ */
+export async function syncAllBrowserTools(): Promise<void> {
+  const servers = await db().mcpServer.findMany({
+    where: { kind: "browser" },
+    select: { id: true },
+  })
+
+  for (const server of servers) {
+    await syncBrowserTools(server)
+  }
 }
 
 /** Adds the vault's browser; there is only ever one. */

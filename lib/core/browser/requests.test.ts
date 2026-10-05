@@ -12,6 +12,7 @@ import {
   decidePermission,
   getPermissionView,
   runCall,
+  withPermission,
   type PermissionExecutor,
 } from "../permissions"
 import { scratchDatabase } from "../test-db"
@@ -258,6 +259,85 @@ describe("opening a site the owner has not decided", () => {
     expect(answer.isError).toBe(true)
     expect(textOf(answer)).toContain("switched off")
     expect(run.opened).toEqual([])
+  })
+})
+
+describe("a browser call the owner allowed", () => {
+  /** The owner asked about the call itself, as a tool at "ask" is. */
+  async function askedCall(tool: string, args: Record<string, unknown>) {
+    const asked = await withPermission(
+      { ctx, tokenId, publicUrl: PUBLIC_URL },
+      { kind: "call", server, tool: { name: tool }, args },
+    )
+    return idOf(asked)
+  }
+
+  it("opens the site it names without asking about the site again", async () => {
+    const run = executor({
+      kind: "browse",
+      input: {
+        serverId: server.id,
+        tabId: "t1",
+        url: "https://news.example/today",
+        toolName: "navigate",
+      },
+    })
+    const id = await askedCall("navigate", {
+      url: "https://news.example/today",
+      tab: "t1",
+    })
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view).toMatchObject({ kind: "call", serverKind: "browser" })
+
+    const answer = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      run,
+    )
+
+    expect(textOf(answer)).toBe("opened https://news.example/today")
+    expect(run.opened).toEqual([
+      { tabId: "t1", url: "https://news.example/today" },
+    ])
+    expect(await db().permissionRequest.count()).toBe(1)
+    // Allowed for the tab, not for the token: the token's sites are as they were.
+    expect(
+      (await listFetchRules(ctx, tokenId)).sites.find(
+        (site) => site.host === "news.example",
+      )?.level,
+    ).not.toBe("allowed")
+  })
+
+  it("still asks for a hand-over, which is another question", async () => {
+    const run = executor({
+      kind: "browser_handover",
+      input: {
+        serverId: server.id,
+        tabId: "t1",
+        message: "Please sign in.",
+        url: "https://shop.example/login",
+        title: "Sign in",
+      },
+    })
+    const id = await askedCall("hand_over", { message: "Please sign in." })
+
+    const answer = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      run,
+    )
+
+    expect(textOf(answer)).toContain("Not done yet")
+    expect(run.opened).toEqual([])
+    expect(
+      await db().permissionRequest.count({
+        where: { kind: "browser_handover" },
+      }),
+    ).toBe(1)
   })
 })
 

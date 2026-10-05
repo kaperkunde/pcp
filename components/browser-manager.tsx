@@ -23,6 +23,7 @@ import {
   closeTabAction,
   enableBrowserAction,
   forgetSitesAction,
+  installChromiumAction,
   openTabAction,
   updateBrowserAction,
 } from "@/lib/actions/browser"
@@ -31,6 +32,10 @@ import type { ActionState } from "@/lib/server/action-state"
 
 /** How often the page asks for the tabs and the browser's state. */
 const REFRESH_MS = 5_000
+/** The same while Chromium is being installed, for its progress. */
+const INSTALL_REFRESH_MS = 1_000
+
+type ErrorPlace = "page" | "chromium"
 
 /**
  * The Browser page's cards: adding the browser, its tabs (live), opening
@@ -47,7 +52,11 @@ export function BrowserManager({
 }) {
   const [overview, setOverview] = useState(initial)
   const [pending, startTransition] = useTransition()
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<{
+    place: ErrorPlace
+    message: string
+  } | null>(null)
+  const installing = isInstalling(overview.chromium.install)
 
   useEffect(() => setOverview(initial), [initial])
 
@@ -56,21 +65,31 @@ export function BrowserManager({
       if (document.visibilityState !== "visible") return
       void browserOverviewAction().then((next) => next && setOverview(next))
     }
-    const timer = setInterval(refresh, REFRESH_MS)
+    const timer = setInterval(
+      refresh,
+      installing ? INSTALL_REFRESH_MS : REFRESH_MS,
+    )
     return () => clearInterval(timer)
-  }, [])
+  }, [installing])
 
-  function act(run: () => Promise<ActionState>, confirm?: string) {
+  function act(
+    run: () => Promise<ActionState>,
+    { confirm, place = "page" }: { confirm?: string; place?: ErrorPlace } = {},
+  ) {
     if (confirm && !window.confirm(confirm)) return
 
     startTransition(async () => {
       const result = await run()
-      setError(result.status === "error" ? result.error : null)
+      setError(
+        result.status === "error" ? { place, message: result.error } : null,
+      )
       const next = await browserOverviewAction()
       if (next) setOverview(next)
     })
   }
 
+  const errorAt = (place: ErrorPlace) =>
+    error?.place === place ? error.message : null
   const { server, chromium, status, profile, tabs } = overview
 
   return (
@@ -96,7 +115,7 @@ export function BrowserManager({
             >
               Add the browser
             </Button>
-            <FormError error={error} />
+            <FormError error={errorAt("page")} />
           </CardContent>
         </Card>
       ) : null}
@@ -205,10 +224,9 @@ export function BrowserManager({
             size="sm"
             disabled={pending || (!profile && !status.running)}
             onClick={() =>
-              act(
-                forgetSitesAction,
-                "Close the browser and sign it out of every site?",
-              )
+              act(forgetSitesAction, {
+                confirm: "Close the browser and sign it out of every site?",
+              })
             }
           >
             Forget all sites
@@ -228,18 +246,21 @@ export function BrowserManager({
         <CardContent className="flex flex-col items-start gap-3">
           {chromium.path ? (
             <p>
-              Found at <code className="text-xs">{chromium.path}</code>.{" "}
+              Found at <code className="text-xs">{chromium.path}</code>
+              {chromium.fromInstall ? ", installed by PCP" : null}.{" "}
               {status.running
                 ? `Running, with ${status.tabs} ${status.tabs === 1 ? "tab" : "tabs"}${status.sandbox === false ? ", without Chromium's own sandbox (this machine does not provide one)" : ""}.`
                 : "Not running."}
             </p>
           ) : (
-            <p className="text-warning">
-              Chromium is not installed on this machine.{" "}
-              {desktop
-                ? "Installing it from the app comes in a later version; until then, point PCP_BROWSER_EXECUTABLE at an installed Chromium or Chrome."
-                : "PCP's Docker image includes it; elsewhere, run `pnpm exec playwright install chromium`, or point PCP_BROWSER_EXECUTABLE at an installed Chromium or Chrome."}
-            </p>
+            <ChromiumInstall
+              chromium={chromium}
+              desktop={desktop}
+              disabled={pending}
+              onInstall={() =>
+                act(installChromiumAction, { place: "chromium" })
+              }
+            />
           )}
           {status.running ? (
             <Button
@@ -252,7 +273,9 @@ export function BrowserManager({
               Close the browser
             </Button>
           ) : null}
-          <FormError error={server ? error : null} />
+          <FormError
+            error={errorAt("chromium") ?? (server ? errorAt("page") : null)}
+          />
         </CardContent>
       </Card>
 
@@ -280,6 +303,106 @@ export function BrowserManager({
         </Card>
       ) : null}
     </div>
+  )
+}
+
+function isInstalling(install: BrowserOverview["chromium"]["install"]) {
+  return install.stage === "downloading" || install.stage === "unpacking"
+}
+
+function megabytes(bytes: number): string {
+  return `${Math.round(bytes / (1024 * 1024))} MB`
+}
+
+/** No Chromium found: installing it, and how far that has got. */
+function ChromiumInstall({
+  chromium,
+  desktop,
+  disabled,
+  onInstall,
+}: {
+  chromium: BrowserOverview["chromium"]
+  desktop: boolean
+  disabled: boolean
+  onInstall: () => void
+}) {
+  const { install } = chromium
+
+  if (install.stage === "downloading") {
+    const percent =
+      install.total !== null
+        ? Math.floor((install.received / install.total) * 100)
+        : null
+
+    return (
+      <div className="flex w-full max-w-md flex-col gap-2" role="status">
+        <p>
+          Downloading Chromium…{" "}
+          {percent !== null
+            ? `${percent}% (${megabytes(install.received)} of ${megabytes(install.total!)})`
+            : megabytes(install.received)}
+        </p>
+        {percent !== null ? (
+          <div
+            className="h-2 w-full overflow-hidden rounded-full bg-muted"
+            role="progressbar"
+            aria-label="Chromium download"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={percent}
+          >
+            <div
+              className="h-full bg-primary transition-[width]"
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  if (install.stage === "unpacking") {
+    return <p role="status">Unpacking Chromium…</p>
+  }
+
+  return (
+    <>
+      <p className="text-warning">
+        {chromium.outdated
+          ? "The Chromium PCP installed was for an earlier version of PCP; this one drives a newer build."
+          : "Chromium is not on this machine yet."}
+      </p>
+      <p className="text-muted-foreground">
+        Install Chromium downloads the build PCP drives, under 200 MB, from
+        Playwright&apos;s servers into PCP&apos;s data folder
+        {chromium.outdated ? ", and removes the earlier one" : null}.
+        {desktop ? null : (
+          <>
+            {" "}
+            Or point <code className="text-xs">PCP_BROWSER_EXECUTABLE</code> at
+            a Chromium or Chrome already installed.
+          </>
+        )}
+        {chromium.platform === "linux" ? (
+          <>
+            {" "}
+            On Linux, Chromium also needs some system libraries;{" "}
+            <code className="text-xs">
+              npx playwright install-deps chromium
+            </code>{" "}
+            adds them.
+          </>
+        ) : null}
+      </p>
+      {install.stage === "failed" && install.error ? (
+        <p className="text-sm text-destructive" role="alert">
+          The install did not finish: {install.error}
+        </p>
+      ) : null}
+      <Button type="button" size="sm" disabled={disabled} onClick={onInstall}>
+        {install.stage === "failed" ? "Try again" : "Install Chromium"}
+      </Button>
+    </>
   )
 }
 
