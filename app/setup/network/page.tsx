@@ -39,6 +39,7 @@ export default async function SetupNetworkPage() {
       <DdnsCard ddns={network.ddns} />
       <HttpsCard
         https={network.https}
+        turnedOff={network.httpsTurnedOff}
         ddnsName={network.ddnsName}
         ports={network.ports}
         pinnedPublicUrl={pinned}

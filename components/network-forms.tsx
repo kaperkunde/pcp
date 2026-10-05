@@ -7,6 +7,7 @@ import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
+import { ButtonLink } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -30,8 +31,10 @@ import {
   DDNS_PROVIDER_LABELS,
   DDNS_PROVIDERS,
   type DdnsProvider,
+  DUCKDNS_URL,
   DYNDNS2_SERVERS,
   LETS_ENCRYPT_TERMS_URL,
+  readDuckDnsPaste,
 } from "@/lib/core/constants"
 import type { NetworkOverview } from "@/lib/core/network/runtime"
 
@@ -102,36 +105,7 @@ export function DdnsCard({ ddns }: { ddns: NetworkOverview["ddns"] }) {
           </Field>
 
           {provider === "duckdns" ? (
-            <>
-              <Field
-                label="Your DuckDNS name"
-                htmlFor="ddns-subdomain"
-                hint="The part before .duckdns.org."
-              >
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="ddns-subdomain"
-                    name="subdomain"
-                    defaultValue={saved ? ddns?.subdomain : ""}
-                    placeholder="pcp-yourname"
-                    required
-                  />
-                  <span className="text-sm text-muted-foreground">
-                    .duckdns.org
-                  </span>
-                </div>
-              </Field>
-              <Field label="DuckDNS token" htmlFor="ddns-token">
-                <Input
-                  id="ddns-token"
-                  name="token"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={saved ? KEEP : ""}
-                  required={!saved}
-                />
-              </Field>
-            </>
+            <DuckDnsFields ddns={saved ? ddns : null} />
           ) : null}
 
           {provider === "dyndns2" ? (
@@ -258,6 +232,101 @@ export function DdnsCard({ ddns }: { ddns: NetworkOverview["ddns"] }) {
         ) : null}
       </CardContent>
     </Card>
+  )
+}
+
+function DuckDnsFields({ ddns }: { ddns: NetworkOverview["ddns"] | null }) {
+  const [subdomain, setSubdomain] = useState(ddns?.subdomain ?? "")
+  const [token, setToken] = useState("")
+  const [found, setFound] = useState<string | null>(null)
+
+  // Whatever is pasted, keep the token in it, and take the name too when
+  // it is there and none is typed yet.
+  const onToken = (value: string) => {
+    const pasted = readDuckDnsPaste(value)
+
+    if (pasted.token && pasted.token !== value.trim()) {
+      setToken(pasted.token)
+      const name = !subdomain && pasted.subdomain ? pasted.subdomain : null
+      if (name) setSubdomain(name)
+      setFound(
+        name
+          ? `Found the token and the name ${name} in what you pasted.`
+          : "Found the token in what you pasted.",
+      )
+      return
+    }
+
+    setToken(value)
+    setFound(null)
+  }
+
+  return (
+    <>
+      <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm text-muted-foreground [&_strong]:font-medium [&_strong]:text-foreground">
+        <li>
+          Open DuckDNS and sign in, with GitHub, Google or another account you
+          have.{" "}
+          <ButtonLink
+            href={DUCKDNS_URL}
+            target="_blank"
+            rel="noreferrer"
+            variant="outline"
+            size="sm"
+            className="ml-1"
+          >
+            Open duckdns.org
+          </ButtonLink>
+        </li>
+        <li>
+          Type a name under <strong>sub domain</strong> and choose{" "}
+          <strong>add domain</strong>. Pick one that says nothing about PCP: a
+          name that gives away what runs behind it helps people looking for such
+          servers to attack.
+        </li>
+        <li>
+          Copy the <strong>token</strong> shown at the top of the page and paste
+          it below. Copying the whole line from DuckDNS&apos;s{" "}
+          <strong>install</strong> page works too: PCP picks the token and the
+          name out of it.
+        </li>
+      </ol>
+      <Field
+        label="Your DuckDNS name"
+        htmlFor="ddns-subdomain"
+        hint="The part before .duckdns.org."
+      >
+        <div className="flex items-center gap-2">
+          <Input
+            id="ddns-subdomain"
+            name="subdomain"
+            value={subdomain}
+            onChange={(event) => setSubdomain(event.target.value)}
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            required
+          />
+          <span className="text-sm text-muted-foreground">.duckdns.org</span>
+        </div>
+      </Field>
+      <Field
+        label="DuckDNS token"
+        htmlFor="ddns-token"
+        hint={found ?? undefined}
+      >
+        <Input
+          id="ddns-token"
+          name="token"
+          type="password"
+          autoComplete="off"
+          value={token}
+          onChange={(event) => onToken(event.target.value)}
+          placeholder={ddns ? KEEP : ""}
+          required={!ddns}
+        />
+      </Field>
+    </>
   )
 }
 
@@ -399,11 +468,13 @@ function UpdateNowButton() {
 
 export function HttpsCard({
   https,
+  turnedOff,
   ddnsName,
   ports,
   pinnedPublicUrl,
 }: {
   https: NetworkOverview["https"]
+  turnedOff: NetworkOverview["httpsTurnedOff"]
   ddnsName: string | null
   ports: NetworkOverview["ports"]
   pinnedPublicUrl: string | null
@@ -412,12 +483,14 @@ export function HttpsCard({
     saveHttpsAction,
     { status: "idle" },
   )
+  // After a failed first try, the name it was for comes back as it was.
+  const lastDomain = https ? https.typedDomain : (turnedOff?.domain ?? null)
   const [useDdnsName, setUseDdnsName] = useState(
-    !!ddnsName && (!https || https.typedDomain === null),
+    !!ddnsName && (lastDomain === null || lastDomain === ddnsName),
   )
 
   return (
-    <Card>
+    <Card id="https" className="scroll-mt-6">
       <CardHeader>
         <CardTitle>HTTPS</CardTitle>
         <CardDescription>
@@ -444,6 +517,25 @@ export function HttpsCard({
             ports={ports}
             pinnedPublicUrl={pinnedPublicUrl}
           />
+        ) : turnedOff ? (
+          <div
+            className="flex flex-col gap-2 text-sm"
+            data-testid="https-turned-off"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="destructive">Turned off</Badge>
+              {turnedOff.domain ? <strong>{turnedOff.domain}</strong> : null}
+            </div>
+            <p className="text-destructive" role="alert">
+              {turnedOff.error}
+            </p>
+            <p className="text-muted-foreground">
+              PCP turned HTTPS off at <LocalDate value={turnedOff.at} /> rather
+              than keep asking: a first try usually fails for a reason that does
+              not go away by itself. Fix what it says, then turn HTTPS on again
+              below.
+            </p>
+          </div>
         ) : null}
         <form
           action={action}
@@ -469,7 +561,7 @@ export function HttpsCard({
               <Input
                 id="https-domain"
                 name="domain"
-                defaultValue={https?.typedDomain ?? ""}
+                defaultValue={lastDomain ?? ""}
                 placeholder="pcp.example.com"
                 required
               />

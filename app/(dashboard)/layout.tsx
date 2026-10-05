@@ -6,6 +6,7 @@ import { PcpMark } from "@/components/pcp-mark"
 import { PendingRequests } from "@/components/pending-requests"
 import { Button } from "@/components/ui/button"
 import { logoutAction } from "@/lib/actions/auth"
+import { networkNotices } from "@/lib/core/network/runtime"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { getVault } from "@/lib/core/vault"
 import { PCP_VERSION } from "@/lib/core/version"
@@ -20,9 +21,10 @@ export default async function DashboardLayout({
   children: ReactNode
 }) {
   const { ctx } = await requireSession()
-  const [vault, pending] = await Promise.all([
+  const [vault, pending, notices] = await Promise.all([
     getVault(ctx.vaultId),
     publicUrlFor(ctx).then((publicUrl) => listPendingRequests(ctx, publicUrl)),
+    networkNotices(),
   ])
 
   return (
@@ -41,6 +43,7 @@ export default async function DashboardLayout({
                 ...request,
                 createdAt: request.createdAt.toISOString(),
               })),
+              notices,
             }}
           />
           <span>{vault.name}</span>

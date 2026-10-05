@@ -8,7 +8,7 @@ Traefik, nginx, Coolify, …), [skip to the end](#i-already-have-a-proxy).
 What you end up with:
 
 - PCP running on a computer that stays on,
-- a name like `pcp-yourname.duckdns.org` that keeps working when your home
+- a name like `yourname.duckdns.org` that keeps working when your home
   internet address changes (optional),
 - HTTPS with a free certificate from Let's Encrypt, so assistants and sign-ins
   with other services work from anywhere (optional).
@@ -93,13 +93,16 @@ DNS service gives you a name that follows it.
 
 1. Go to [duckdns.org](https://www.duckdns.org) and sign in (with GitHub,
    Google or another account).
-2. Type a name under **sub domain** (for example `pcp-yourname`) and choose
-   **add domain**.
-3. Copy the **token** shown at the top of the page.
+2. Type a name under **sub domain** and choose **add domain**. Pick one that
+   says nothing about PCP (not `pcp-something`): a name that gives away what
+   runs behind it helps people who look for such servers to attack.
+3. Copy the **token** shown at the top of the page. If copying exactly the
+   token is fiddly, copy the whole update line from DuckDNS's **install**
+   page instead: PCP picks the token and the name out of it.
 4. In PCP, under **Dynamic DNS**, keep **DuckDNS** selected, enter
-   `pcp-yourname` and paste the token. Choose **Turn on dynamic DNS**.
+   your name and paste the token. Choose **Turn on dynamic DNS**.
 
-PCP says something like "pcp-yourname.duckdns.org now points at
+PCP says something like "yourname.duckdns.org now points at
 203.0.113.7". From now on it checks your address every five minutes and tells
 DuckDNS when it changes.
 
@@ -144,12 +147,12 @@ In PCP, under **HTTPS**:
 
 Within a minute the card shows **Working** and the date the certificate lasts
 until. PCP renews it on its own, well before it runs out. Choose **Use
-https://pcp-yourname.duckdns.org as PCP's public address** when PCP offers it,
+https://yourname.duckdns.org as PCP's public address** when PCP offers it,
 so sign-ins with other services send you back to the right place.
 
 ### 4d. Check it from outside
 
-Turn Wi-Fi off on your phone and open `https://pcp-yourname.duckdns.org`. You
+Turn Wi-Fi off on your phone and open `https://yourname.duckdns.org`. You
 should see PCP's sign-in page with the padlock in the address bar.
 
 Some routers do not let a computer at home reach the home's own name. If the
@@ -161,7 +164,7 @@ Use `http://<this computer's address>:3000` at home.
 In PCP, create an API token under **API tokens**. Then, for Claude Code:
 
 ```bash
-claude mcp add --transport http pcp https://pcp-yourname.duckdns.org/mcp \
+claude mcp add --transport http pcp https://yourname.duckdns.org/mcp \
   --header "Authorization: Bearer pcp_…"
 ```
 
@@ -221,9 +224,12 @@ Check, in order:
 - Your internet provider does not block port 80. Some do, mostly on
   residential plans. Ask them, or see "Neither works" below.
 
-Then choose **Try again now**. Let's Encrypt allows only a few failed
-attempts per hour, so PCP otherwise waits a while before trying again by
-itself.
+If this happens on the first try, PCP turns HTTPS off again and the card
+says why: these problems do not go away by themselves, and Let's Encrypt is
+a shared service that should not be asked over and over. Fix what it says,
+then turn HTTPS on again. Once PCP has had a certificate, a renewal that fails
+is tried again by itself, waiting longer each time, and the bell at the top of
+every page says so until it works.
 
 **The address PCP shows is not your router's.** Compare the "WAN" or
 "Internet" address on your router's status page with what

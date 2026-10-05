@@ -16,6 +16,7 @@ import {
   type TlsConfig,
   tlsDir,
   tlsDomain,
+  tlsNotice,
   type TlsStatus,
   writeCertificate,
 } from "./tls"
@@ -26,7 +27,7 @@ import {
 const now = new Date("2026-10-01T12:00:00Z")
 const duck: DdnsConfig = {
   provider: "duckdns",
-  subdomain: "pcp-me",
+  subdomain: "my-house",
   token: "t",
 }
 const input = { domain: "", useDdnsName: false, email: "", agreed: true }
@@ -53,7 +54,7 @@ describe("reading the form", () => {
 
     const fromDdns = parseTlsInput({ ...input, useDdnsName: true }, duck, now)
     expect(fromDdns.domain).toBeNull()
-    expect(tlsDomain(fromDdns, duck)).toBe("pcp-me.duckdns.org")
+    expect(tlsDomain(fromDdns, duck)).toBe("my-house.duckdns.org")
     expect(tlsDomain(fromDdns, null)).toBeNull()
 
     expect(() =>
@@ -190,12 +191,34 @@ describe("a round", () => {
     expect(calls).toHaveLength(1)
   })
 
-  it("waits longer after each failure, unless told to try now", async () => {
+  it("turns HTTPS off when the first try fails, rather than ask again", async () => {
     const { issue, calls } = issuer(new Error("Timeout during connect"))
     const first = await round(issue)
 
-    expect(first.status.state).toBe("failed")
+    expect(calls).toHaveLength(1)
+    expect(first.turnOff).toBe(true)
+    expect(first.certificate).toBeNull()
+    expect(first.status).toMatchObject({
+      state: "failed",
+      domain,
+      turnedOffAt: now.toISOString(),
+    })
     expect(first.status.lastError).toMatch(/port 80/)
+    expect(first.status.nextAttemptAt).toBeUndefined()
+  })
+
+  it("once it has had a certificate, waits longer after each failure, unless told to try now", async () => {
+    const { issue, calls } = issuer(new Error("Timeout during connect"))
+    // A certificate it got before, whose file is gone.
+    const before: TlsStatus = {
+      state: "active",
+      domain,
+      notAfter: new Date(now.getTime() - 1).toISOString(),
+    }
+    const first = await round(issue, before)
+
+    expect(first.turnOff).toBeUndefined()
+    expect(first.status.state).toBe("failed")
     expect(Date.parse(first.status.nextAttemptAt!) - now.getTime()).toBe(
       3_600_000,
     )
@@ -224,7 +247,21 @@ describe("a round", () => {
 
     expect(status.state).toBe("active")
     expect(status.lastError).toMatch(/rate limited/)
+    expect(status.nextAttemptAt).toBeDefined()
     expect(certificate?.cert).toBe(cert)
+
+    // Said on every page until it works.
+    expect(tlsNotice(config, status)).toMatch(
+      /could not renew the HTTPS certificate for pcp.example.com/,
+    )
+  })
+
+  it("leaves the bell alone while all is well, off, or on its first try", () => {
+    expect(tlsNotice(config, { state: "active", domain })).toBeNull()
+    expect(tlsNotice(config, { state: "issuing", domain })).toBeNull()
+    expect(
+      tlsNotice(null, { state: "failed", lastError: "x", turnedOffAt: "t" }),
+    ).toBeNull()
   })
 
   it("starts over for a different name, and fails without one", async () => {

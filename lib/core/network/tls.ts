@@ -39,6 +39,13 @@ export type TlsStatus = {
   warning?: string
   failures?: number
   nextAttemptAt?: string
+  /**
+   * Set when the first try for a name failed and PCP turned HTTPS off
+   * rather than ask again: such failures rarely mend themselves (a port not
+   * forwarded, a name pointing elsewhere), and Let's Encrypt is a shared
+   * service. The page says why until the owner turns HTTPS on again.
+   */
+  turnedOffAt?: string
 }
 
 export const TLS_CONFIG_KEY = "tls.config"
@@ -202,8 +209,8 @@ export type Issuer = (request: {
 export const acmeIssuer: Issuer = async ({ domain, email, challenges }) => {
   const acme = await import("acme-client")
   // acme-client retries a failed request five times, waiting up to 25
-  // seconds between tries. A round that fails is tried again in an hour
-  // anyway; one retry (honouring Retry-After) is plenty, and keeps the page
+  // seconds between tries. One retry (honouring Retry-After) is plenty: a
+  // renewal that fails is tried again later anyway, and it keeps the page
   // from saying "getting a certificate" for over a minute.
   const defaults = acme.axios.defaults as unknown as {
     acmeSettings?: { retryMaxAttempts: number }
@@ -283,6 +290,11 @@ function explain(domain: string, error: unknown): string {
  * One round: keep the certificate the saved one, renew or get one when
  * that is due, and wait longer after each failure. Returns the status to
  * keep and the certificate to serve, if there is one.
+ *
+ * Only a name that has had a certificate is tried again. When the first
+ * try fails, `turnOff` says to turn HTTPS off: what went wrong is usually
+ * the router or the name, which no retry fixes, and Let's Encrypt should
+ * not be asked every hour on the off chance.
  */
 export async function runTlsRound({
   domain,
@@ -307,7 +319,11 @@ export async function runTlsRound({
   resolve4?: (name: string) => Promise<string[]>
   /** Told before PCP asks, so the page can say a certificate is on its way. */
   onIssuing?: (status: TlsStatus) => Promise<void>
-}): Promise<{ status: TlsStatus; certificate: Certificate | null }> {
+}): Promise<{
+  status: TlsStatus
+  certificate: Certificate | null
+  turnOff?: boolean
+}> {
   if (!domain) {
     return {
       status: {
@@ -375,6 +391,22 @@ export async function runTlsRound({
       certificate: saved,
     }
   } catch (error) {
+    const lastError = explain(domain, error)
+
+    if (!existing && !previous.notAfter) {
+      return {
+        status: {
+          state: "failed",
+          domain,
+          lastError,
+          warning,
+          turnedOffAt: now.toISOString(),
+        },
+        certificate: null,
+        turnOff: true,
+      }
+    }
+
     const failures = (previous.failures ?? 0) + 1
     const wait = Math.min(RETRY_FIRST_MS * 2 ** (failures - 1), RETRY_MAX_MS)
 
@@ -384,9 +416,10 @@ export async function runTlsRound({
         // fails.
         state: existing ? "active" : "failed",
         domain,
-        notBefore: existing?.notBefore.toISOString(),
-        notAfter: existing?.notAfter.toISOString(),
-        lastError: explain(domain, error),
+        // Also what marks this name as one that has had a certificate.
+        notBefore: existing?.notBefore.toISOString() ?? previous.notBefore,
+        notAfter: existing?.notAfter.toISOString() ?? previous.notAfter,
+        lastError,
         warning,
         failures,
         nextAttemptAt: new Date(now.getTime() + wait).toISOString(),
@@ -421,6 +454,36 @@ export async function saveTlsConfig(
   // A save is a fresh start: no waiting out an earlier failure.
   await setHostJson(TLS_STATUS_KEY, null)
   return config
+}
+
+/**
+ * Turns HTTPS off after its first try failed, keeping the status that says
+ * why for the page.
+ */
+export async function turnOffTlsAfterFailure(status: TlsStatus): Promise<void> {
+  await setHostJson(TLS_CONFIG_KEY, null)
+  await setHostJson(TLS_STATUS_KEY, status)
+}
+
+/**
+ * What the owner should hear about wherever they are in PCP: HTTPS that
+ * worked and now does not renew (or has no name to use). Null when all is
+ * well, while it is off, and while the first certificate is on its way (the
+ * HTTPS card shows that one).
+ */
+export function tlsNotice(
+  config: TlsConfig | null,
+  status: TlsStatus,
+): string | null {
+  if (!config || !status.lastError || status.state === "issuing") {
+    return null
+  }
+
+  const name = status.domain ? ` for ${status.domain}` : ""
+
+  return status.state === "active"
+    ? `PCP could not renew the HTTPS certificate${name}. It keeps trying.`
+    : `HTTPS is not working${name}: PCP has no certificate to serve.`
 }
 
 /** Turns HTTPS off. The certificate files stay, for turning it on again. */
