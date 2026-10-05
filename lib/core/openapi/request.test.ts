@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { PCP_VERSION } from "../version"
 import type { CallPlan, ParamPlan } from "./plan"
 import { buildRequest } from "./request"
 
@@ -275,7 +276,7 @@ describe("headers", () => {
   it("set accept and a user agent", () => {
     const headers = buildRequest(plan(), BASE, {}, {}).headers
     expect(headers.accept).toBe("application/json")
-    expect(headers["user-agent"]).toMatch(/^pcp\//)
+    expect(headers["user-agent"]).toBe(`pcp/${PCP_VERSION}`)
   })
 })
 

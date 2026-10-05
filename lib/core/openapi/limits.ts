@@ -4,6 +4,8 @@
  * in it is allowed to cost more than these.
  */
 
+import { PCP_VERSION } from "../version"
+
 /** Operations in one schema; more is refused rather than cut. */
 export const MAX_OPERATIONS = 2000
 /** One tool's argument schema, as JSON; a larger one skips the operation. */
@@ -67,7 +69,7 @@ export const MAX_STRUCTURED_CHARS = 60_000
 export const MAX_ERROR_EXCERPT = 2000
 export const MAX_HEADER_VALUE = 8192
 
-export const USER_AGENT = "pcp/0.1.0"
+export const USER_AGENT = `pcp/${PCP_VERSION}`
 
 /** Edits (JSON Patch operations) kept on one endpoint. */
 export const MAX_PATCH_OPERATIONS = 1000
