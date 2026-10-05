@@ -3,7 +3,7 @@ export type McpResponse = {
   wwwAuthenticate: string | null
   body: {
     result?: {
-      content?: Array<{ type: string; text?: string }>
+      content?: Array<{ type: string; text?: string; uri?: string }>
       isError?: boolean
       tools?: Array<{
         name: string
@@ -12,7 +12,12 @@ export type McpResponse = {
         annotations?: { readOnlyHint?: boolean }
         _meta?: { ui?: { resourceUri?: string; visibility?: string[] } }
       }>
-      contents?: Array<{ uri: string; mimeType?: string; text?: string }>
+      contents?: Array<{
+        uri: string
+        mimeType?: string
+        text?: string
+        blob?: string
+      }>
       serverInfo?: {
         name: string
         icons?: Array<{ src: string; mimeType?: string; sizes?: string[] }>
@@ -89,6 +94,15 @@ export function allToolText(response: McpResponse): string {
   return (response.body.result?.content ?? [])
     .map((block) => block.text ?? "")
     .join("\n")
+}
+
+/** The last text block of a tool's answer: its JSON, after any notes. */
+export function lastToolText(response: McpResponse): string {
+  return (
+    (response.body.result?.content ?? [])
+      .filter((block) => block.type === "text")
+      .at(-1)?.text ?? ""
+  )
 }
 
 export async function callTool(

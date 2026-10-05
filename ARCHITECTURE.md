@@ -1149,6 +1149,10 @@ still too long, its longest texts, longest first, up to 20. Image, audio and
 embedded file blocks are kept too, and one too large to pass on is replaced
 by its handle. At most 50 per answer; a note at the top names each. A handle
 is `{"$result": id, type, size or length, name?, preview?, readableUntil}`.
+Each answer also carries a `resource_link` per handle (`pcp://results/<id>`),
+the mail tools' own included; the gateway's resource template of that name
+gives the text or the file's bytes to the token that kept it, and lists
+none.
 
 In arguments, an object of only `$result` (and `as`) is replaced before the
 call is sent (`lib/core/result-handles.ts`, called from `upstream.ts` for MCP

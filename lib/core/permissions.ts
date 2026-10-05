@@ -304,7 +304,7 @@ export async function runCall(
         text: (input) => keepers.text({ ...input, ...context }),
         bytes: (input) => keepers.bytes({ ...input, ...context }),
       },
-      { wholeMax: MAX_KEPT_RESULT_CHARS },
+      { wholeMax: MAX_KEPT_RESULT_CHARS, links: true },
     )
 
     return await keepWholeAnswer(

@@ -744,6 +744,8 @@ function sizeOf(handle: ResultHandle): string {
 /** Makes the handles of one answer, and says what it made. */
 class Handles {
   made: Array<{ path: string; handle: ResultHandle }> = []
+  /** Handles already in the answer: a mail tool keeps its own. */
+  seen: Array<{ path: string; handle: ResultHandle }> = []
   capped = false
 
   constructor(
@@ -866,6 +868,11 @@ class Handles {
     }
 
     if (isRecord(value)) {
+      if (isHandleObject(value)) {
+        this.seen.push({ path, handle: value })
+        return value
+      }
+
       const out: Record<string, unknown> = {}
 
       for (const [key, item] of Object.entries(value)) {
@@ -1038,9 +1045,43 @@ class Handles {
   }
 }
 
+/** A handle PCP wrote into an answer itself (a mail tool's). */
+function isHandleObject(value: Record<string, unknown>): value is ResultHandle {
+  return (
+    typeof value.$result === "string" &&
+    typeof value.type === "string" &&
+    typeof value.readableUntil === "string"
+  )
+}
+
+/** Where a client that reads resources finds a kept result. */
+export function resultUri(id: string): string {
+  return `pcp://results/${encodeURIComponent(id)}`
+}
+
+/**
+ * A resource link for each handle, after the answer: a client that reads
+ * resources can fetch the value itself (resources/read), and one that does
+ * not still has the handle in the text.
+ */
+function resourceLinks(
+  handles: Array<{ path: string; handle: ResultHandle }>,
+): Block[] {
+  const unique = new Map(handles.map((entry) => [entry.handle.$result, entry]))
+
+  return [...unique.values()].map(({ path, handle }) => ({
+    type: "resource_link",
+    uri: resultUri(handle.$result),
+    name: handle.name ?? (path || handle.$result),
+    mimeType: handle.type,
+    description: `Kept by PCP until ${handle.readableUntil}; {"$result": "${handle.$result}"} passes it to a tool.`,
+  }))
+}
+
 /**
  * A tool's result as the assistant gets it, with large values kept as
- * results for the token and shown as handles (see above). `shown` is cut to
+ * results for the token and shown as handles (see above). With `links`,
+ * each handle also gets a resource link after the answer. `shown` is cut to
  * `max`; `whole()` renders the same shaped answer, with the same handles, up
  * to `wholeMax`, for keepWholeAnswer to keep when `shown` left anything out.
  */
@@ -1048,9 +1089,14 @@ export async function shapeAnswerKeeping(
   result: CallToolResult,
   { fields, decode, keep }: AnswerShape,
   keepers: AnswerKeepers,
-  { max = MAX_ANSWER_CHARS, wholeMax }: { max?: number; wholeMax: number },
+  {
+    max = MAX_ANSWER_CHARS,
+    wholeMax,
+    links = false,
+  }: { max?: number; wholeMax: number; links?: boolean },
 ): Promise<{ shown: CallToolResult; whole: () => CallToolResult }> {
   const prepared = prepareAnswer(result, { fields, decode, keep })
+  let linked: Block[] = []
 
   if (!prepared.error) {
     const handles = new Handles(
@@ -1086,10 +1132,19 @@ export async function shapeAnswerKeeping(
     if (handles.made.length > 0) {
       prepared.keepStructured = false
     }
+
+    if (links) {
+      linked = resourceLinks([...handles.made, ...handles.seen])
+    }
   }
 
+  const shown = renderAnswer(prepared, max)
+
   return {
-    shown: renderAnswer(prepared, max),
+    shown:
+      linked.length > 0
+        ? { ...shown, content: [...shown.content, ...linked] }
+        : shown,
     whole: () => renderAnswer(prepared, wholeMax),
   }
 }

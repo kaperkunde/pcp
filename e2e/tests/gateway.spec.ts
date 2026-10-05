@@ -5,6 +5,7 @@ import { OWNER_PASSWORD } from "../lib/auth"
 import {
   allToolText,
   callTool,
+  lastToolText,
   initialize,
   mcpRequest,
   toolText,
@@ -315,7 +316,7 @@ test("hands a file back as a handle, and puts it where a later call names it", a
   const base64 = PICTURE_PNG.toString("base64")
   expect(shown).not.toContain(base64.slice(0, 40))
   expect(shown).toContain("PCP kept 2 values of this answer as results")
-  const answer = JSON.parse(shown.split("\n").at(-1)!) as {
+  const answer = JSON.parse(lastToolText(picture)) as {
     name: string
     caption: { $result: string; type: string }
     data: { $result: string; type: string; size: number; name?: string }
@@ -327,6 +328,21 @@ test("hands a file back as a handle, and puts it where a later call names it", a
     name: "dot.png",
   })
   expect(answer.caption.type).toBe("text/plain")
+
+  // A client that reads resources can fetch the file itself, by its link.
+  const link = picture.body.result?.content?.find(
+    (block) =>
+      block.type === "resource_link" &&
+      block.uri?.endsWith(answer.data.$result),
+  )
+  expect(link?.uri).toBe(`pcp://results/${answer.data.$result}`)
+  const resource = await mcpRequest(baseURL!, token, "resources/read", {
+    uri: link!.uri,
+  })
+  expect(resource.body.result?.contents?.[0]).toMatchObject({
+    mimeType: "image/png",
+    blob: base64,
+  })
 
   // read_result describes the file and reads the text.
   const described = await callTool(baseURL!, token, "read_result", {
@@ -366,6 +382,11 @@ test("hands a file back as a handle, and puts it where a later call names it", a
     `No kept result "${answer.data.$result}" for this token`,
   )
   expect(upstream.calls.length).toBe(before)
+  const notTheirs = await mcpRequest(baseURL!, other, "resources/read", {
+    uri: link!.uri,
+  })
+  expect(notTheirs.body.result?.contents).toBeUndefined()
+  expect(notTheirs.body.error?.message).toBeTruthy()
 })
 
 test("a token scoped to other servers cannot see this one", async ({

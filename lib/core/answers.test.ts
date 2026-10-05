@@ -8,6 +8,7 @@ import {
   pickFields,
   readFields,
   shapeAnswer,
+  resultUri,
   shapeAnswerKeeping,
   type AnswerKeepers,
 } from "./answers"
@@ -605,5 +606,60 @@ describe("what keeping leaves as it was", () => {
     expect(texts(shown)[0]).toBe(
       "keep was not applied: the answer is not JSON.",
     )
+  })
+})
+
+describe("resource links", () => {
+  it("links each handle once, those it made and those already in the answer", async () => {
+    const mailHandle = {
+      $result: "mail-1",
+      type: "text/csv; charset=utf-8",
+      size: 18,
+      name: "parts.csv",
+      readableUntil: UNTIL.toISOString(),
+    }
+    const fake = fakeKeepers()
+    const { shown } = await shapeAnswerKeeping(
+      json({
+        attachment: mailHandle,
+        again: mailHandle,
+        filename: "dot.png",
+        data: PNG.toString("base64"),
+      }),
+      {},
+      fake.keepers,
+      { wholeMax: 4_000_000, links: true },
+    )
+    const links = shown.content.filter(
+      (block) => block.type === "resource_link",
+    )
+
+    expect(links).toEqual([
+      expect.objectContaining({
+        uri: resultUri("r0"),
+        name: "dot.png",
+        mimeType: "image/png",
+      }),
+      expect.objectContaining({
+        uri: "pcp://results/mail-1",
+        name: "parts.csv",
+        mimeType: "text/csv; charset=utf-8",
+      }),
+    ])
+    expect(fake.kept).toHaveLength(1)
+  })
+
+  it("adds none unless asked, and none for an answer without handles", async () => {
+    const plain = await keeping(json({ data: PNG.toString("base64") }))
+    const fake = fakeKeepers()
+    const small = await shapeAnswerKeeping(json({ a: 1 }), {}, fake.keepers, {
+      wholeMax: 4_000_000,
+      links: true,
+    })
+
+    expect(plain.shown.content.some((b) => b.type === "resource_link")).toBe(
+      false,
+    )
+    expect(small.shown.content.map((b) => b.type)).toEqual(["text"])
   })
 })

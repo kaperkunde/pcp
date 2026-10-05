@@ -1,5 +1,7 @@
 import {
   McpServer,
+  ResourceNotFoundError,
+  ResourceTemplate,
   type CallToolResult,
   type Icon,
   type ServerContext,
@@ -85,7 +87,13 @@ import { findTextSecretByName, validateSecretName } from "./secrets"
 import { validateServerUrl, validateUsername, type AuthType } from "./servers"
 import { effectiveAccess, loadToolAccess } from "./tool-access"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
-import { describeResults, readResult, RESULT_PAGE_CHARS } from "./tool-results"
+import {
+  describeResults,
+  openResult,
+  readResult,
+  RESULT_PAGE_CHARS,
+} from "./tool-results"
+import { resultUri } from "./answers"
 import { needsConnecting, syncServerTools } from "./upstream"
 import { PCP_VERSION } from "./version"
 import { decideFetch, runFetch } from "./web-fetch"
@@ -938,6 +946,50 @@ export function buildGatewayServer(
         structuredContent: { kind: "done", server: state },
       }
     }),
+  )
+
+  // The values a token's answers handed back as handles, for a client that
+  // reads resources (each answer links them). Only the token's own results
+  // resolve; none are listed, and nothing kept is logged.
+  server.registerResource(
+    "kept-result",
+    new ResourceTemplate("pcp://results/{id}", { list: undefined }),
+    {
+      title: "A result PCP kept",
+      description:
+        "A text or file PCP kept for this token from a tool's answer, for a day.",
+    },
+    async (uri, variables) => {
+      const id = Array.isArray(variables.id) ? variables.id[0] : variables.id
+      const started = Date.now()
+      const opened =
+        typeof id === "string"
+          ? await openResult(scope.ctx, { tokenId: scope.tokenId, id })
+          : null
+
+      void appendRequestLog({
+        vaultId: scope.ctx.vaultId,
+        tokenId: scope.tokenId,
+        tool: "resources/read",
+        ok: opened !== null,
+        ms: Date.now() - started,
+      })
+
+      if (!opened || uri.href !== resultUri(opened.id)) {
+        throw new ResourceNotFoundError(uri.href)
+      }
+
+      const contents =
+        opened.kind === "text"
+          ? { uri: uri.href, mimeType: opened.mediaType, text: opened.text() }
+          : {
+              uri: uri.href,
+              mimeType: opened.mediaType,
+              blob: opened.bytes().toString("base64"),
+            }
+
+      return { contents: [contents] }
+    },
   )
 
   server.registerTool(

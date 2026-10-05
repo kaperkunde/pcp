@@ -4,7 +4,13 @@ import path from "node:path"
 import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
-import { allToolText, callTool, initialize, toolText } from "../lib/mcp"
+import {
+  allToolText,
+  callTool,
+  initialize,
+  lastToolText,
+  toolText,
+} from "../lib/mcp"
 import { OWNER_PASSWORD } from "../lib/auth"
 import {
   addSecret,
@@ -293,7 +299,7 @@ test("a kept value from one call goes into another's body by its handle", async 
   expect(list.body.result?.isError ?? false, toolText(list)).toBe(false)
   const text = allToolText(list)
   expect(text).toContain("PCP kept 1 value of this answer as results")
-  const [fido] = JSON.parse(text.split("\n").at(-1)!) as Array<{
+  const [fido] = JSON.parse(lastToolText(list)) as Array<{
     name: { $result: string; preview: string }
   }>
   expect(fido!.name.preview).toBe("Fido")
