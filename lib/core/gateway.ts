@@ -361,7 +361,7 @@ export function buildInstructions(
     ...memoryLead(memories),
     "PCP is a gateway to the owner's MCP servers, APIs and mail accounts. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it; list_tools names every tool on one server. Refer to tools as server/tool.",
     'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, or a mail account (JMAP, or IMAP with SMTP). A mailbox is always a mail account, never an API written around its mail server. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP\'s page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
-    "An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time.",
+    'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email attachment, and PCP puts the value there, so it never has to pass through you.',
     "Servers:",
     ...lines,
     ...(browser ? [BROWSER_INSTRUCTIONS(browser.slug)] : []),
@@ -754,7 +754,7 @@ export function buildGatewayServer(
           .record(z.string(), z.unknown())
           .optional()
           .describe(
-            "The tool's arguments, matching describe_tool's inputSchema.",
+            'The tool\'s arguments, matching describe_tool\'s inputSchema. {"$result": "<id>"} anywhere a string goes stands for a result PCP kept for you: its text, or a file as base64 ("as": "text" for a text file\'s text).',
           ),
         fields: z
           .array(z.string().min(1).max(200))
@@ -944,13 +944,15 @@ export function buildGatewayServer(
     "read_result",
     {
       title: "Read the rest of a long answer",
-      description: `Reads a slice of an answer PCP kept because it was too long to pass on whole. A long answer ends with a notice naming the result id and how long it is. Results are kept for a day, for this token only.`,
+      description: `Reads a slice of an answer or value PCP kept: a long answer ends with a notice naming its result id, and a handle {"$result": "<id>"} names one. A file that is not text is described, not shown; pass its handle to the tool that should get it. Results are kept for a day, for this token only.`,
       inputSchema: z.object({
         id: z
           .string()
           .min(1)
           .max(64)
-          .describe("The result id from the notice at the end of the answer."),
+          .describe(
+            "The result id: from the notice at the end of an answer, or a handle's $result.",
+          ),
         offset: z
           .number()
           .int()

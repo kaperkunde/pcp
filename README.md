@@ -262,10 +262,10 @@ and these tools:
 | `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                                                                            |
 | `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                          |
 | `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                      |
-| `call_tool`           | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs, and `decode` decodes base64 text in it (an email's body). |
+| `call_tool`           | Runs it, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer (some parts only, base64 decoded, parts as handles).             |
 | `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                         |
 | `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                   |
-| `read_result`         | Reads the whole of an answer too long to pass on in one piece, a slice at a time from any offset or from where a text appears.                                    |
+| `read_result`         | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                              |
 | `register_server`     | Proposes a new MCP server, an API from an OpenAPI 3 schema, or a mail account (JMAP or IMAP), with no auth, a secret by name, a user name and password, or OAuth. |
 | `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                       |
 
@@ -273,6 +273,16 @@ A shortened answer (a JSON preview, a long text cut off, a long email) ends
 with a result id. PCP keeps the whole of it, encrypted, for a day, for the
 token that asked, and `read_result` reads it from any offset or from the
 first place a text appears.
+
+Files and long values move between tools without passing through the
+assistant. A file in an answer (an attachment, an image, base64 that decodes
+to a PDF) and any part named in `keep` come back as a handle,
+`{"$result": "<id>", …}`, with its type and size. Put that handle in any later
+call's arguments and PCP puts the value there: a text as text, a file as
+base64. `get_attachment` reads any attachment that way, and `send_email`
+takes handles as attachments, so an attachment from one mail account can be
+sent from another, or handed to an API. The permission page shows what each
+handle is, never its content.
 
 A tool you have not decided about answers "Not done yet" and asks you: the
 assistant ends its reply with a link to the request in PCP. Answer there,

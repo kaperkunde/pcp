@@ -102,9 +102,10 @@ so in the summary; the bump itself waits for the request.
 - Mail accounts (`lib/core/mail/`) never read a secret: `upstream.ts` hands
   in a `MailCredential` (the header, the login, or an OAuth bearer from
   `credential()`, renewed through `endpointToken` like an API endpoint's). Mail travels encrypted only (TLS, or STARTTLS that
-  is required, never optional); a JMAP session's API and download addresses
-  are taken only on the session URL's origin, and redirects are not
-  followed. Nothing deletes mail for good: delete moves to the Trash. An
+  is required, never optional); a JMAP session's API, download and upload
+  addresses are taken only on the session URL's origin, and redirects are not
+  followed. An attachment sent is a kept result of the token's own, read
+  before anything connects. Nothing deletes mail for good: delete moves to the Trash. An
   assistant adds one only through `register_server` (kind `jmap` or `imap`),
   a permission request like any new server: the owner types the password or
   token in on PCP's page or connects it, the assistant never sees a value, and
@@ -115,9 +116,14 @@ so in the summary; the bump itself waits for the request.
   `mail/tools.ts`, for both protocols where they allow, with its arguments
   checked before anything connects, and is left out of a read-only account
   and refused there if called anyway.
-- Long tool answers are kept only through `lib/core/tool-results.ts`:
-  encrypted with `tool_result:<id>`, readable by the token whose call
-  produced them, gone after a day, never logged and never exported.
+- Long tool answers and files are kept only through
+  `lib/core/tool-results.ts`: text or bytes, encrypted with
+  `tool_result:<id>`, readable by the token whose call produced them, gone
+  after a day, never logged and never exported. A handle (`{"$result": id}`)
+  in a call's arguments is replaced only in `upstream.ts` and
+  `mail/accounts.ts` (`lib/core/result-handles.ts`), with the token's own
+  results, before anything is sent; a waiting request stores the handle,
+  never the content.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.

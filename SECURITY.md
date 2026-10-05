@@ -222,6 +222,9 @@ Not defended against:
 - The request log (`logs/*.jsonl` in the data directory) records which tools
   were called, never their arguments or results.
 - An answer too long to pass on in one piece (a large API response, a long
-  email) is kept for a day so the assistant can read the rest: encrypted
-  under the vault's key, readable only by the token that asked, and pruned at
-  the next start after it expires.
+  email), and a file or value handed back as a handle (an attachment, an
+  image), is kept for a day: encrypted under the vault's key, readable and
+  usable only by the token that asked, and pruned at the next start after it
+  expires. A handle in a later call's arguments is replaced only with that
+  token's own results; the permission page shows what each handle is (name,
+  type, size), never its content, and the request log records neither.

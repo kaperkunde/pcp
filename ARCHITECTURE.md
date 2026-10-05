@@ -43,7 +43,8 @@ associated data (a ciphertext cannot be moved to another row):
   owner gives PCP is one of their own `text` secrets,
 - the PKCE verifier of an authorization in flight (`oauth_state`).
 - a memory's path and text (`memory.ciphertext`, as one JSON value).
-- a tool answer kept for `read_result` (`tool_result.ciphertext`).
+- a tool answer or a file kept for `read_result` and handles
+  (`tool_result.ciphertext`).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -437,14 +438,16 @@ secret: Basic for JMAP, LOGIN for IMAP and SMTP), `header` (a bearer token,
 JMAP only) or `oauth` (JMAP only).
 
 **JMAP** (`mail/jmap.ts`): `url` is the session URL the owner typed. Reading
-the account GETs it with the credential, and the API and download addresses
-it names are accepted only on that URL's origin, so the credential goes
-nowhere the owner did not type; they are kept (`mail_api_url`,
-`mail_download_url`, `mail_account_id`, `mail_submission`) and forgotten when
+the account GETs it with the credential, and the API, download and upload
+addresses it names are accepted only on that URL's origin, so the credential
+goes nowhere the owner did not type; they are kept (`mail_api_url`,
+`mail_download_url`, `mail_upload_url`, `mail_account_id`,
+`mail_submission`) and forgotten when
 the address or sign-in changes. Redirects are never followed: PCP names
 where the server pointed, for the owner to enter instead. A call is one or
-two POSTs of method calls. Sending creates the email in Drafts and submits
-it in the same request, moving it to Sent when it went.
+two POSTs of method calls. Sending uploads each attachment to the upload
+address first, then creates the email in Drafts with the blobs attached and
+submits it in the same request, moving it to Sent when it went.
 
 **IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
@@ -452,13 +455,18 @@ SMTP. A connection that is not encrypted after it is made is dropped, and
 STARTTLS is required, never optional. Each call connects, signs in, works
 and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
-email. Sending goes over SMTP and a copy (Bcc kept) is appended to Sent.
+email. Sending goes over SMTP and a copy (Bcc kept) is appended to Sent,
+attachments in both, written by nodemailer.
 
 **What an assistant gets back** is JSON PCP writes: addresses, dates, flags,
 the text of a body (the HTML one made plain when there is no text one) and
-the list of attachments; `get_attachment` reads text attachments and
-refuses the rest without downloading them. A body or attachment longer than
-20,000 characters is kept for `read_result` (below). Delete moves to the
+the list of attachments. `get_attachment` downloads an attachment of any
+kind, up to 10 MiB, and keeps it for the token as a file (below): the answer
+gives its handle, and a text one's first 20,000 characters too, scrubbed of
+the credential. A body longer than 20,000 characters is kept the same way.
+`send_email` takes kept results as attachments, read before anything
+connects (at most 10, 20 MB together), so an attachment read from one
+account can be sent from another. Delete moves to the
 Trash and nothing deletes for good. Failures: refused credentials mark the
 account `auth_required` (with OAuth, "needs connecting"), an unreachable
 server `error`; a request the server refuses (no such email or mailbox) is
@@ -1086,7 +1094,7 @@ above):
   endpoint's tool, `returns`: an outline of its success answer read from the
   schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text the
   schema marks base64 (`format: byte`) shows as `string (base64)`.
-- `call_tool(server, tool, arguments, fields?, decode?)` opens a connection
+- `call_tool(server, tool, arguments, fields?, decode?, keep?)` opens a connection
   to the upstream with the configured credential (header secret or OAuth
   token, refreshed by the SDK when needed), calls the tool, and passes the
   content back shaped for the assistant (`lib/core/answers.ts`): `fields`
@@ -1095,20 +1103,22 @@ above):
   answer's keys end with one of its paths (`body.data` is every part of a
   Gmail message; what is not text stays encoded), a JSON answer still too
   long becomes a preview that is valid JSON with a note on asking for less,
-  and structured content that repeats the text is dropped. A call that waits
-  for the owner keeps its fields and decode paths on the request
-  (`permission_request.fields`, `permission_request.decode`).
+  and structured content that repeats the text is dropped. Large values
+  become handles (below). A call that waits for the owner keeps its fields,
+  decode and keep paths on the request (`permission_request.fields`,
+  `permission_request.decode`, `permission_request.keep`).
 - `check_permission(id)`, `check_server(server)`, `register_server(...)`
   and `propose_tool_access(changes)` belong to the permission flow below.
 - `read_result(id, offset?, length?, find?)` reads a slice of an answer
-  PCP shortened and kept whole (below).
+  PCP shortened and kept whole, or of a kept value; a file that is not text
+  is described, not shown (below).
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the
 gateway finds a server with no tools. It is a cache of the upstream's
 `tools/list`; the owner's description overrides survive a refresh.
 
-### Long answers
+### Long answers and kept results
 
 `runCall` (`lib/core/permissions.ts`) shapes an upstream's answer for the
 assistant with `shapeAnswer` (above). When that left something out (a JSON
@@ -1122,8 +1132,32 @@ token's, another vault's or an expired id reads as not found. A token keeps
 at most 100 results and 50 million characters, its oldest going first, and
 expired ones are pruned at boot. A permission request's stored outcome keeps
 the notice when its text is shortened, so `check_permission` names the result
-too. Mail bodies and text attachments use the same store from inside the mail
+too. Mail bodies and attachments use the same store from inside the mail
 tools. Kept results are not part of an export, and nothing kept is logged.
+
+A kept result is a text or a file's bytes (`tool_result.kind`, with `name`
+and any media type), encrypted the same way. A file over 10 MiB is refused
+rather than cut. A token keeps at most 300 results and 50 million
+characters and bytes together.
+
+**Handles** move a kept value between tools without the assistant reading it.
+`shapeAnswerKeeping` (`lib/core/answers.ts`) makes them while it shapes an
+answer, once, so the shown answer and the whole kept one carry the same ids:
+the parts `keep` names; base64 that decodes to a file, recognised by its
+first bytes or by looking like standard base64; and, when the answer is
+still too long, its longest texts, longest first, up to 20. Image, audio and
+embedded file blocks are kept too, and one too large to pass on is replaced
+by its handle. At most 50 per answer; a note at the top names each. A handle
+is `{"$result": id, type, size or length, name?, preview?, readableUntil}`.
+
+In arguments, an object of only `$result` (and `as`) is replaced before the
+call is sent (`lib/core/result-handles.ts`, called from `upstream.ts` for MCP
+servers and API endpoints and from `mail/accounts.ts`): a text as its text, a
+file as base64, or the other way with `as`. Only the token's own results
+resolve; an unknown or expired id is refused by name before anything is
+sent, and the gateway checks the ids before it asks the owner. A request
+waiting for the owner stores the handle, never the content, and its page
+shows each one's name, type, size and the tool that kept it.
 
 ## Tool access and the owner's permission
 
