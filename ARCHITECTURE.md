@@ -835,7 +835,8 @@ app keeps and hands over only after Touch ID.
   prompt with a reason of its own (never text from the page), and returns
   the key only after Touch ID. The page sends it in a form field
   (`deviceKey`) to `touchIdLoginAction` or `confirmOwner`, rate-limited like
-  the password, and keeps it nowhere. An OAuth provider's page in the same
+  the password but on a budget of its own (a random key is no password
+  guess, and must not spend the owner's tries), and keeps it nowhere. An OAuth provider's page in the same
   window gets no bridge.
 - **What turns it off**: the Settings card, recovering with the recovery
   key, signing out everywhere, and a restore (the vault is replaced, and the

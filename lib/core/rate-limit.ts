@@ -33,6 +33,18 @@ export function checkRateLimit(
   return true
 }
 
+/**
+ * Gives back one count taken in the current window, for an attempt that
+ * turned out not to be one the limit is for (a right password is not a
+ * guess). Never below zero, and nothing for a window already gone.
+ */
+export function refundRateLimit(key: string): void {
+  const entry = store.get(key)
+  if (entry && Date.now() < entry.expiresAt && entry.count > 0) {
+    entry.count--
+  }
+}
+
 /** Tests: forget every window. */
 export function resetRateLimits(): void {
   store.clear()

@@ -167,30 +167,23 @@ test("forgets a key PCP no longer knows, and the password still works", async ({
 
   await unlock(page)
 
-  // PCP still has a key; this app no longer does: set it up again.
+  // PCP still has a key; this app no longer does: Settings says so, and
+  // turning it off there takes no password.
   await page.goto("/settings")
   const touchId = card(page, "Touch ID")
   await expect(touchId.getByText(/no longer holds its key/)).toBeVisible()
-  await touchId.getByLabel("Your password").fill(OWNER_PASSWORD)
-  await touchId.getByRole("button", { name: "Set up Touch ID again" }).click()
-  await expect(touchId.getByText("On in this app.")).toBeVisible()
+  await touchId.getByRole("button", { name: "Turn off Touch ID" }).click()
+  await expect(
+    touchId.getByRole("button", { name: "Turn on Touch ID" }),
+  ).toBeVisible()
 })
 
 test("turns on at sign-in, and signing out everywhere turns it off", async ({
   page,
 }) => {
-  await unlockWithTouchId(page)
-  await page.goto("/settings")
-  await card(page, "Touch ID")
-    .getByRole("button", { name: "Turn off Touch ID" })
-    .click()
-  await expect(
-    card(page, "Touch ID").getByRole("button", { name: "Turn on Touch ID" }),
-  ).toBeVisible()
-  await expect.poll(() => savedKey(page)).toBeNull()
-
   // Off, but available: the sign-in page offers it with the password.
-  await lock(page)
+  expect(kept).toBeNull()
+  await page.goto("/login")
   await page.getByLabel("Password").fill(OWNER_PASSWORD)
   await page.getByLabel("Unlock with Touch ID from now on").check()
   await page.getByRole("button", { name: "Unlock", exact: true }).click()
@@ -207,10 +200,8 @@ test("turns on at sign-in, and signing out everywhere turns it off", async ({
   await expect(page).toHaveURL(/\/login/)
   await expect(page.getByText(REJECTED)).toBeVisible()
   await expect.poll(() => savedKey(page)).toBeNull()
-
-  await unlock(page)
-  await page.goto("/settings")
+  // And the sign-in page offers to turn it on again.
   await expect(
-    card(page, "Touch ID").getByRole("button", { name: "Turn on Touch ID" }),
+    page.getByLabel("Unlock with Touch ID from now on"),
   ).toBeVisible()
 })

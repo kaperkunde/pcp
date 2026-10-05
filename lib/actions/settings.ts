@@ -15,6 +15,7 @@ import { changePassword, rotateRecoveryKey } from "@/lib/core/vault"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import {
   confirmPassword,
+  forgiveSessionTry,
   TOO_MANY_ATTEMPTS,
   withinSessionLimits,
 } from "@/lib/server/password-attempts"
@@ -69,6 +70,7 @@ export async function changePasswordAction(
 
   return guarded(async () => {
     await changePassword(session.ctx, field(formData, "current"), password)
+    forgiveSessionTry(session.sessionId)
     return { message: "Password changed." }
   })
 }
