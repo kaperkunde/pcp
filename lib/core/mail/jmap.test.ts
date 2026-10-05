@@ -315,7 +315,7 @@ describe("the mail tools' work", () => {
     })
     expect(plain.attachments).toEqual([
       { id: "blob-csv", name: "parts.csv", type: "text/csv", size: 18 },
-      { id: "blob-png", name: "drawing.png", type: "image/png", size: 5 },
+      { id: "blob-png", name: "drawing.png", type: "image/png", size: 12 },
     ])
     expect(plain.messageId).toBe("engine-1@example.com")
 
@@ -410,7 +410,7 @@ describe("the mail tools' work", () => {
     )
   })
 
-  it("reads a text attachment and leaves other kinds alone", async () => {
+  it("downloads an attachment of any kind, as its bytes", async () => {
     const { mail, fake } = await backend()
 
     expect(
@@ -419,19 +419,26 @@ describe("the mail tools' work", () => {
       name: "parts.csv",
       type: "text/csv",
       size: 18,
-      text: "part,count\ncog,42\n",
+      bytes: Buffer.from("part,count\ncog,42\n"),
+      charset: null,
     })
     expect(fake.requests.at(-1)).toMatchObject({
       path: "/jmap/download/acct-1/blob-csv/parts.csv",
       authorization: BASIC,
     })
 
-    const before = fake.requests.length
-    expect(
-      (await mail.getAttachment("e1", "blob-png", { maxBytes: 1000 })).text,
-    ).toBeNull()
-    // Only the lookup: the image itself was never fetched.
-    expect(fake.requests.length).toBe(before + 1)
+    const png = await mail.getAttachment("e1", "blob-png", { maxBytes: 1000 })
+    expect(png).toMatchObject({
+      name: "drawing.png",
+      type: "image/png",
+      size: 12,
+    })
+    expect(png.bytes.subarray(0, 4)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    )
+    expect(fake.requests.at(-1)).toMatchObject({
+      path: "/jmap/download/acct-1/blob-png/drawing.png",
+    })
 
     await expect(
       mail.getAttachment("e1", "blob-csv", { maxBytes: 5 }),

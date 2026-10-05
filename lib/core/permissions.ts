@@ -272,6 +272,7 @@ export async function runCall(
     const answer = await executor.callTool(ctx, server, toolName, args, {
       publicUrl,
       keep: keepers.text,
+      keepBytes: keepers.bytes,
       open: resultOpener(ctx, tokenId),
     })
     const { shown, whole } = await shapeAnswerKeeping(

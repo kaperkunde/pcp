@@ -331,6 +331,11 @@ export async function openResult(
   input: { tokenId: string; id: string },
   now = new Date(),
 ): Promise<OpenedResult | null> {
+  // An id left out would match every row to Prisma: none is none.
+  if (typeof input.id !== "string" || input.id === "") {
+    return null
+  }
+
   const row = await db().toolResult.findFirst({
     where: {
       id: input.id,

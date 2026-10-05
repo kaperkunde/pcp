@@ -415,6 +415,11 @@ describe("opening a result", () => {
       ),
     ).toBeNull()
     expect(await openResult(ctx, { tokenId, id: "nope" })).toBeNull()
+    // Not an id at all must not match the token's only result.
+    expect(
+      await openResult(ctx, { tokenId, id: undefined as unknown as string }),
+    ).toBeNull()
+    expect(await openResult(ctx, { tokenId, id: "" })).toBeNull()
   })
 })
 

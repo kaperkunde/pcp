@@ -12,8 +12,10 @@ import { getServer, listServers, updateServer } from "../servers"
 import { scratchDatabase } from "../test-db"
 import {
   keepResult,
+  openResult,
   readResult,
   resultKeeper,
+  resultKeepers,
   resultOpener,
 } from "../tool-results"
 import { callServerTool, syncServerTools } from "../upstream"
@@ -285,22 +287,68 @@ describe("calling its tools", () => {
         body: {
           text: string
           truncated: boolean
-          result: { id: string; length: number }
+          result: { $result: string; length: number; type: string }
         }
       }
     ).body
 
     expect(body.truncated).toBe(true)
     expect(body.text).toHaveLength(20_000)
+    expect(body.result.type).toBe("text/plain")
     const whole = await readResult(ctx, {
       tokenId,
-      id: body.result.id,
+      id: body.result.$result,
       offset: body.result.length - 14,
     })
     expect(whole.text).toBe("Yours, Charles")
   })
 
-  it("reads a text attachment, and says what it will not read", async () => {
+  it("keeps an attachment of any kind for the token, and shows a text one's start", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const keepers = resultKeepers(ctx, tokenId)
+    const options = { ...PUBLIC, keep: keepers.text, keepBytes: keepers.bytes }
+
+    const csv = await callServerTool(
+      ctx,
+      server,
+      "get_attachment",
+      { id: "e1", attachment: "blob-csv" },
+      options,
+    )
+    expect(csv.structuredContent).toMatchObject({
+      name: "parts.csv",
+      text: "part,count\ncog,42\n",
+      truncated: false,
+      result: { type: "text/csv; charset=utf-8", size: 18, name: "parts.csv" },
+    })
+
+    const png = await callServerTool(
+      ctx,
+      server,
+      "get_attachment",
+      { id: "e1", attachment: "blob-png" },
+      options,
+    )
+    const answer = png.structuredContent as {
+      result: { $result: string; type: string; size: number }
+      text?: string
+    }
+
+    expect(answer.result).toMatchObject({ type: "image/png", size: 12 })
+    expect(answer.text).toBeUndefined()
+
+    const opened = await openResult(ctx, { tokenId, id: answer.result.$result })
+    expect(opened?.bytes().subarray(0, 4)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    )
+  })
+
+  it("refuses a file it cannot keep, and reads a text one without a keeper", async () => {
     const server = await ready()
 
     const csv = await callServerTool(
@@ -311,7 +359,6 @@ describe("calling its tools", () => {
       PUBLIC,
     )
     expect(csv.structuredContent).toMatchObject({
-      name: "parts.csv",
       text: "part,count\ncog,42\n",
     })
 
@@ -323,7 +370,7 @@ describe("calling its tools", () => {
       PUBLIC,
     )
     expect(png.isError).toBe(true)
-    expect(textOf(png)).toMatch(/text attachments only/)
+    expect(textOf(png)).toMatch(/only as a kept result/)
   })
 
   it("sends, and files the email in Sent", async () => {

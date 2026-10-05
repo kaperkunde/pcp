@@ -1,3 +1,5 @@
+import { MAX_KEPT_RESULT_BYTES } from "../tool-results"
+
 /** Bounds on what a mail account is asked for and what PCP passes on. */
 
 export const MAIL_CONNECT_TIMEOUT_MS = 20_000
@@ -23,8 +25,14 @@ export const MAX_SUBJECT_CHARS = 500
 export const MAX_SEND_TEXT_CHARS = 100_000
 export const MAX_SEARCH_TEXT_CHARS = 500
 
-/** An attachment get_attachment reads; larger ones are refused. */
-export const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+/**
+ * An attachment get_attachment reads and keeps for the token; larger ones
+ * are refused. The same as the most a kept file may be, so one that is read
+ * can always be kept.
+ */
+export const MAX_ATTACHMENT_BYTES = MAX_KEPT_RESULT_BYTES
+/** The start of a text attachment get_attachment shows. */
+export const MAX_ATTACHMENT_TEXT_CHARS = 20_000
 
 /** Renew an OAuth token this long before it runs out. */
 export const OAUTH_REFRESH_MARGIN_MS = 60_000

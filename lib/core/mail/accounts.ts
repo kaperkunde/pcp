@@ -29,7 +29,14 @@ import {
 } from "../servers"
 import { deleteManagedSecret } from "../secrets"
 import { resolveHandles } from "../result-handles"
-import type { ResultKeeper, ResultOpener } from "../tool-results"
+import {
+  handleOf,
+  type BytesKeeper,
+  type ResultHandle,
+  type ResultKeeper,
+  type ResultOpener,
+} from "../tool-results"
+import { bareType, decodeText, isTextType } from "../media-types"
 import {
   formatMailServer,
   parseImapAddress,
@@ -48,6 +55,7 @@ import { fetchJmapSession, openJmapBackend } from "./jmap"
 import {
   DEFAULT_SEARCH_LIMIT,
   MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_TEXT_CHARS,
   MAX_BODY_CHARS,
   MAX_FULL_BODY_BYTES,
 } from "./limits"
@@ -418,8 +426,6 @@ async function openBackend(
   return openJmapBackend({ ...session, from: server.mailFrom }, credential)
 }
 
-type Kept = { id: string; length: number; readableUntil: string } | undefined
-
 /** Text an answer carries the start of, with the whole kept when longer. */
 async function firstChars(
   text: string,
@@ -428,7 +434,7 @@ async function firstChars(
     server,
     toolName,
   }: { keep?: ResultKeeper; server: McpServer; toolName: string },
-): Promise<{ text: string; truncated: boolean; result?: Kept }> {
+): Promise<{ text: string; truncated: boolean; result?: ResultHandle }> {
   if (text.length <= MAX_BODY_CHARS) {
     return { text, truncated: false }
   }
@@ -446,15 +452,7 @@ async function firstChars(
     toolName,
   })
 
-  return {
-    text: shown,
-    truncated: true,
-    result: {
-      id: kept.id,
-      length: kept.length,
-      readableUntil: kept.expiresAt.toISOString(),
-    },
-  }
+  return { text: shown, truncated: true, result: handleOf(kept) }
 }
 
 async function runTool(
@@ -464,8 +462,13 @@ async function runTool(
   args: Record<string, unknown>,
   {
     keep,
+    keepBytes,
     scrub,
-  }: { keep?: ResultKeeper; scrub: ReturnType<typeof makeRedactor> },
+  }: {
+    keep?: ResultKeeper
+    keepBytes?: BytesKeeper
+    scrub: ReturnType<typeof makeRedactor>
+  },
 ): Promise<unknown> {
   switch (toolName) {
     case "list_mailboxes":
@@ -497,7 +500,7 @@ async function runTool(
           source: email.body.source,
           ...(body.result
             ? {
-                note: `text holds the first ${MAX_BODY_CHARS} characters; read_result reads the whole body from result.id.`,
+                note: `text holds the first ${MAX_BODY_CHARS} characters. body.result is the whole of it, kept: read_result reads it, and any tool takes {"$result": its id} in its place.`,
               }
             : {}),
           ...(email.body.truncated
@@ -516,23 +519,53 @@ async function runTool(
         { maxBytes: MAX_ATTACHMENT_BYTES },
       )
 
-      if (attachment.text === null) {
-        throw new MailRequestError(
-          `${attachment.name ?? "That attachment"} is ${attachment.type}; PCP passes on text attachments only.`,
-        )
+      const isText = isTextType(attachment.type)
+      // Text is scrubbed of the credential before anything keeps or shows
+      // it, and kept as UTF-8; a file is kept as it came.
+      const text = isText
+        ? scrub.text(decodeText(attachment.bytes, attachment.charset))
+        : null
+      const meta = {
+        name: attachment.name,
+        type: attachment.type,
+        size: attachment.size,
       }
 
-      const content = await firstChars(scrub.text(attachment.text), {
-        keep,
-        server,
+      if (!keepBytes) {
+        if (text === null) {
+          throw new MailRequestError(
+            `${attachment.name ?? "That attachment"} is ${attachment.type}; PCP passes on a file like this only as a kept result, which this call cannot make.`,
+          )
+        }
+
+        return {
+          ...meta,
+          ...(await firstChars(text, { keep, server, toolName })),
+        }
+      }
+
+      const kept = await keepBytes({
+        bytes: text === null ? attachment.bytes : Buffer.from(text, "utf8"),
+        mediaType:
+          text === null
+            ? attachment.type
+            : `${bareType(attachment.type)}; charset=utf-8`,
+        name: attachment.name,
+        serverId: server.id,
         toolName,
       })
 
       return {
-        name: attachment.name,
-        type: attachment.type,
-        size: attachment.size,
-        ...content,
+        ...meta,
+        result: handleOf(kept),
+        ...(text === null
+          ? {
+              note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants it (send_email's attachments, or a field that takes base64).`,
+            }
+          : {
+              text: text.slice(0, MAX_ATTACHMENT_TEXT_CHARS),
+              truncated: text.length > MAX_ATTACHMENT_TEXT_CHARS,
+            }),
       }
     }
 
@@ -593,11 +626,14 @@ export async function callMailTool(
   {
     credential,
     keep,
+    keepBytes,
     open,
     imap = defaultImapDeps,
   }: {
     credential: MailCredential
     keep?: ResultKeeper
+    /** Keeps a file's bytes for the token: an attachment read. */
+    keepBytes?: BytesKeeper
     /** Opens a result the token kept: handles in the arguments. */
     open?: ResultOpener
     imap?: ImapDeps
@@ -644,6 +680,7 @@ export async function callMailTool(
     const scrub = makeRedactor(credential.redact)
     const value = await runTool(backend, server, toolName, args, {
       keep,
+      keepBytes,
       scrub,
     })
 
