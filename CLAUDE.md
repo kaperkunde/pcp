@@ -34,6 +34,11 @@ minor|major` in a commit on `develop`; the patch and the `v*` tags belong to
 the release workflow, never to a hand edit. Anything that states PCP's version
 uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
 
+Never change the version yourself. Build (patch) versions count up on their
+own on every push to `main`, and a MINOR or MAJOR bump is made only when the
+user asks for one in so many words. A change that could justify a bump is said
+so in the summary; the bump itself waits for the request.
+
 ## Boundaries
 
 - `lib/core` is framework-free. No `next/*`, no React, no `lib/actions`,

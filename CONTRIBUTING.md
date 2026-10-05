@@ -70,7 +70,9 @@ is re-run. The package's visibility is set on GitHub, not here: a package
 takes the repository's visibility when it is first pushed, and anonymous
 pulls need it public.
 
-MAJOR and MINOR are raised by hand, in a commit on `develop`:
+MAJOR and MINOR are raised by hand, in a commit on `develop`, when the
+maintainer decides a release warrants one; a contributor does not bump, and
+an automated assistant does so only when asked to in so many words:
 
 ```bash
 pnpm version:bump minor   # 0.1.4 → 0.2.0
