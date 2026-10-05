@@ -173,6 +173,8 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts     |
 | `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
 | `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
+| `lib/core/updates/`                  | The daily check for a newer release; what it found            |
+| `lib/server/install-kind.ts`         | App, container or checkout: how Settings says to update       |
 | `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |
 | `lib/actions/`                       | Server Actions the forms call                                 |
 | `app/mcp/route.ts`                   | The gateway endpoint                                          |

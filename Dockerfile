@@ -48,8 +48,10 @@ FROM base AS runner
 WORKDIR /app
 
 # PCP runs as an unprivileged user, so its own HTTPS listeners use ports
-# above 1024; the compose file maps 80 and 443 onto them.
+# above 1024; the compose file maps 80 and 443 onto them. PCP_CONTAINER lets
+# Settings say how a container is updated (lib/server/install-kind.ts).
 ENV NODE_ENV=production \
+    PCP_CONTAINER=1 \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
     PCP_DATA_DIR=/data \

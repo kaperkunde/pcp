@@ -381,14 +381,10 @@ export function RestoreCard({
                   className="mt-0.5"
                 />
                 <span>
-                  Also restore the dynamic DNS and HTTPS settings.{" "}
+                  Also restore this machine&apos;s settings:{" "}
+                  {hostSettingNames(preview.host)}.{" "}
                   <span className="text-muted-foreground">
-                    {preview.host.ddnsName
-                      ? `${preview.host.ddnsName} will then point at this machine`
-                      : "Dynamic DNS will then update from this machine"}
-                    {preview.host.https
-                      ? ", and HTTPS asks Let's Encrypt for a certificate."
-                      : "."}
+                    {hostSettingEffects(preview.host)}
                   </span>
                 </span>
               </Label>
@@ -490,4 +486,38 @@ export function RestoreInsteadLink() {
       </Link>
     </p>
   )
+}
+
+type HostPreview = NonNullable<ExportPreview["host"]>
+
+/** "dynamic DNS, HTTPS and the update check", for what the file holds. */
+function hostSettingNames(host: HostPreview): string {
+  const names = [
+    host.ddns ? "dynamic DNS" : null,
+    host.https ? "HTTPS" : null,
+    host.updateCheck !== null ? "the update check" : null,
+  ].filter((name): name is string => name !== null)
+
+  return names.length > 1
+    ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`
+    : (names[0] ?? "")
+}
+
+/** What restoring them does here, one sentence each. */
+function hostSettingEffects(host: HostPreview): string {
+  return [
+    host.ddns
+      ? host.ddnsName
+        ? `${host.ddnsName} will then point at this machine.`
+        : "Dynamic DNS will then update from this machine."
+      : null,
+    host.https ? "HTTPS asks Let's Encrypt for a certificate." : null,
+    host.updateCheck === true
+      ? "PCP checks for new releases once a day."
+      : host.updateCheck === false
+        ? "PCP does not check for new releases."
+        : null,
+  ]
+    .filter(Boolean)
+    .join(" ")
 }

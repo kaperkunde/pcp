@@ -24,6 +24,7 @@ import { asBytes } from "./crypto"
 import { invalid } from "./errors"
 import { DDNS_CONFIG_KEY, ddnsHostname, type DdnsConfig } from "./network/ddns"
 import { TLS_CONFIG_KEY } from "./network/tls"
+import { UPDATE_CONFIG_KEY } from "./updates/state"
 
 /**
  * The shape of an export file (lib/core/backup.ts): what is in it, and the
@@ -306,7 +307,11 @@ const BrowserProfileRow = z.strictObject({
 })
 
 /** The host settings that travel: the configuration, never a machine's status. */
-export const EXPORTED_HOST_KEYS = [DDNS_CONFIG_KEY, TLS_CONFIG_KEY] as const
+export const EXPORTED_HOST_KEYS = [
+  DDNS_CONFIG_KEY,
+  TLS_CONFIG_KEY,
+  UPDATE_CONFIG_KEY,
+] as const
 
 export type ExportedHostKey = (typeof EXPORTED_HOST_KEYS)[number]
 
@@ -376,8 +381,14 @@ export type ExportPreview = {
     /** Sites the browser keeps sign-ins for; 0 without any. */
     browserSites: number
   }
-  /** Null when the file carries no network settings. */
-  host: { ddnsName: string | null; https: boolean } | null
+  /** Null when the file carries no settings of the machine. */
+  host: {
+    ddns: boolean
+    ddnsName: string | null
+    https: boolean
+    /** Whether PCP looks for new releases; null when the file does not say. */
+    updateCheck: boolean | null
+  } | null
 }
 
 /**
@@ -552,6 +563,7 @@ export function previewOf(payload: ExportPayload): ExportPreview {
   const { tables, host } = payload
   const ddns = host.find((row) => row.key === DDNS_CONFIG_KEY)
   const tls = host.find((row) => row.key === TLS_CONFIG_KEY)
+  const update = host.find((row) => row.key === UPDATE_CONFIG_KEY)
 
   return {
     exportedAt: payload.exportedAt,
@@ -575,9 +587,23 @@ export function previewOf(payload: ExportPayload): ExportPreview {
       browserSites: tables.browserProfiles[0]?.sites ?? 0,
     },
     host:
-      ddns || tls
-        ? { ddnsName: ddns ? ddnsNameOf(ddns.value) : null, https: !!tls }
+      ddns || tls || update
+        ? {
+            ddns: !!ddns,
+            ddnsName: ddns ? ddnsNameOf(ddns.value) : null,
+            https: !!tls,
+            updateCheck: update ? updateCheckOf(update.value) : null,
+          }
         : null,
+  }
+}
+
+function updateCheckOf(value: string): boolean | null {
+  try {
+    const check = (JSON.parse(value) as { check?: unknown }).check
+    return typeof check === "boolean" ? check : null
+  } catch {
+    return null
   }
 }
 

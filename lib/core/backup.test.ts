@@ -24,6 +24,7 @@ import { getHostJson, setHostJson } from "./host-settings"
 import { createMailAccount } from "./mail/accounts"
 import { createMemory, listMemories } from "./memories"
 import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
+import { UPDATE_CONFIG_KEY, UPDATE_STATUS_KEY } from "./updates/state"
 import { createSecret, deleteSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { createSession, resolveSession } from "./sessions"
@@ -88,6 +89,10 @@ async function populate() {
     token: "duck-token",
   })
   await setHostJson(DDNS_STATUS_KEY, { lastIp: "203.0.113.5" })
+  await setHostJson(UPDATE_CONFIG_KEY, { check: false })
+  await setHostJson(UPDATE_STATUS_KEY, {
+    lastCheckedAt: "2026-01-01T00:00:00.000Z",
+  })
 
   return {
     ctx,
@@ -132,7 +137,11 @@ describe("the export file", { timeout: 60_000 }, () => {
     expect(payload.tables.secrets).toHaveLength(2)
     expect(payload.tables.tools).toHaveLength(2)
     expect(payload.tables.memories).toHaveLength(1)
-    expect(payload.host.map((row) => row.key)).toEqual([DDNS_CONFIG_KEY])
+    expect(payload.host.map((row) => row.key).sort()).toEqual(
+      [DDNS_CONFIG_KEY, UPDATE_CONFIG_KEY].sort(),
+    )
+    // A machine's status never travels.
+    expect(JSON.stringify(payload)).not.toContain("2026-01-01T00:00:00.000Z")
     // Ciphertext, not values: the secret is as unreadable here as on disk.
     expect(JSON.stringify(payload)).not.toContain("s3cret")
     expect(JSON.stringify(payload)).not.toContain("Remember this.")
@@ -147,7 +156,12 @@ describe("the export file", { timeout: 60_000 }, () => {
       tokens: 1,
       memories: 1,
     })
-    expect(preview.host).toEqual({ ddnsName: "ada.duckdns.org", https: false })
+    expect(preview.host).toEqual({
+      ddns: true,
+      ddnsName: "ada.duckdns.org",
+      https: false,
+      updateCheck: false,
+    })
   })
 
   it("asks at least as much of the export password as of the owner's", async () => {
@@ -177,6 +191,7 @@ describe("restoring", { timeout: 60_000 }, () => {
       subdomain: "changed",
       token: "other",
     })
+    await setHostJson(UPDATE_CONFIG_KEY, { check: true })
 
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
@@ -208,6 +223,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await getHostJson(DDNS_CONFIG_KEY)).toMatchObject({
       subdomain: "changed",
     })
+    expect(await getHostJson(UPDATE_CONFIG_KEY)).toEqual({ check: true })
 
     // The recovery key from before the export still opens it.
     const recovered = await resetPasswordWithRecoveryKey(
@@ -408,6 +424,10 @@ describe("restoring", { timeout: 60_000 }, () => {
     const file = await exportVault(ctx, EXPORT_PASSWORD)
     await setHostJson(DDNS_CONFIG_KEY, null)
     await setHostJson(DDNS_STATUS_KEY, { lastIp: "198.51.100.9" })
+    await setHostJson(UPDATE_CONFIG_KEY, { check: true })
+    await setHostJson(UPDATE_STATUS_KEY, {
+      lastCheckedAt: "2026-02-02T00:00:00.000Z",
+    })
 
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
@@ -420,6 +440,11 @@ describe("restoring", { timeout: 60_000 }, () => {
       subdomain: "ada",
     })
     expect(await getHostJson(DDNS_STATUS_KEY)).toBeNull()
+    // The owner's choice comes back; what GitHub said here stays.
+    expect(await getHostJson(UPDATE_CONFIG_KEY)).toEqual({ check: false })
+    expect(await getHostJson(UPDATE_STATUS_KEY)).toEqual({
+      lastCheckedAt: "2026-02-02T00:00:00.000Z",
+    })
   })
 
   it("restores into a PCP not set up yet, which then opens with the exported credentials", async () => {

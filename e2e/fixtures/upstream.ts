@@ -62,6 +62,10 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   password (Basic). `/oauth/jmap/*` is the same behind the OAuth
  *   authorization server above; `tokenLifetime.seconds` sets how long the
  *   tokens it hands out last, and `tokenRequests` records each grant.
+ * - `/releases/latest` — GitHub's latest release, as PCP's update check asks
+ *   for it (PCP_RELEASES_URL in playwright.config.ts, on the fixed port
+ *   `startUpstream({ port })` takes). It answers `releases.latest` and
+ *   records what each request carried in `releases.requests`.
  *
  * Everything is in memory. Start one per test file.
  */
@@ -136,6 +140,17 @@ export type Upstream = {
       authorization: string | null
     }>
     status: number
+  }
+  /** GitHub's latest release for the update check: what it answers, and what it was sent. */
+  releases: {
+    /** The release JSON; null answers 404, as GitHub does before a first release. */
+    latest: Record<string, unknown> | null
+    requests: Array<{
+      userAgent: string | null
+      accept: string | null
+      authorization: string | null
+      cookie: string | null
+    }>
   }
   /** The HTML page for web_fetch. */
   pageUrl: string
@@ -495,7 +510,8 @@ export function keyedSpec(origin: string) {
 
 export async function startUpstream({
   expectedToken = `upstream-secret-${randomBytes(6).toString("hex")}`,
-}: { expectedToken?: string } = {}): Promise<Upstream> {
+  port: listenPort = 0,
+}: { expectedToken?: string; port?: number } = {}): Promise<Upstream> {
   const calls: Upstream["calls"] = []
   const lateTools = new Set<string>()
   const requests: Upstream["requests"] = []
@@ -519,6 +535,7 @@ export async function startUpstream({
   }
   const closedSignIns: Upstream["closedSignIns"] = []
   const ddns: Upstream["ddns"] = { updateUrl: "", updates: [], status: 200 }
+  const releases: Upstream["releases"] = { latest: null, requests: [] }
   const closedApiRequests: Upstream["closedApiRequests"] = []
   const tokenLifetime = { seconds: 3600 }
   const tokenRequests: Upstream["tokenRequests"] = []
@@ -684,6 +701,18 @@ export async function startUpstream({
           expires_in: 3600,
           ...(refresh ? { refresh_token: refresh } : {}),
         })
+      }
+
+      if (url.pathname === "/releases/latest") {
+        releases.requests.push({
+          userAgent: req.headers["user-agent"] ?? null,
+          accept: req.headers.accept ?? null,
+          authorization,
+          cookie: req.headers.cookie ?? null,
+        })
+        return releases.latest
+          ? json(res, 200, releases.latest)
+          : json(res, 404, { message: "Not Found" })
       }
 
       if (url.pathname === "/ddns/update") {
@@ -949,7 +978,9 @@ export async function startUpstream({
     }
   })
 
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  await new Promise<void>((resolve) =>
+    server.listen(listenPort, "127.0.0.1", resolve),
+  )
   const { port } = server.address() as AddressInfo
   origin = `http://127.0.0.1:${port}`
   ddns.updateUrl = `${origin}/ddns/update`
@@ -981,6 +1012,7 @@ export async function startUpstream({
     calls,
     requests,
     ddns,
+    releases,
     close: () =>
       new Promise((resolve, reject) => {
         for (const handler of Object.values(handlers)) void handler.close()

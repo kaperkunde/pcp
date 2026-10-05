@@ -150,6 +150,13 @@ so in the summary; the bump itself waits for the request.
   the machine, are read with no credential, and are stored unencrypted. Never
   copy anything from the vault into one. `lib/core/network/` starts nothing
   (timer, listener, request) while both features are off.
+- The update check (`lib/core/updates/`) asks GitHub's latest-release address
+  and nothing else, sends nothing but PCP's version in its user agent, reads
+  the answer as untrusted input (never rendered as HTML, never a link taken
+  from it), and runs no timer and no request while the owner has it off; it
+  asks nothing before setup. It tells the owner how to update for the way PCP
+  was installed; in a container or a checkout PCP never pulls, builds or
+  restarts itself.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` (`lib/server/desktop.ts`), for copy that says how the

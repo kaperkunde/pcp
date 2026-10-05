@@ -2,9 +2,11 @@ import type { Metadata } from "next"
 
 import { AuthShell } from "@/components/auth-shell"
 import { DdnsCard, HttpsCard } from "@/components/network-forms"
+import { UpdateCheckCard } from "@/components/updates-card"
 import { ButtonLink } from "@/components/ui/button"
 import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
+import { getUpdateConfig } from "@/lib/core/updates/state"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Reach PCP from anywhere" }
@@ -16,9 +18,10 @@ export const dynamic = "force-dynamic"
  */
 export default async function SetupNetworkPage() {
   const ctx = await requireContext()
-  const [network, pinned] = await Promise.all([
+  const [network, pinned, updates] = await Promise.all([
     networkOverview(),
     getSetting(ctx, SETTING_PUBLIC_URL),
+    getUpdateConfig(),
   ])
 
   return (
@@ -44,6 +47,7 @@ export default async function SetupNetworkPage() {
         ports={network.ports}
         pinnedPublicUrl={pinned}
       />
+      <UpdateCheckCard check={updates.check} />
       <ButtonLink href="/servers" size="lg">
         Done — open PCP
       </ButtonLink>

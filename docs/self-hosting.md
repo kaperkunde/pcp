@@ -173,9 +173,12 @@ permissions.
 
 ## 6. Keeping it running
 
-**Updating.** Run the install line again: it fetches the new release and
-restarts PCP with the settings it remembered. From a checkout, in the `pcp`
-folder:
+**Updating.** PCP tells you when a new release is out: a note in its header,
+and **Settings → Updates** with the release notes and the command for your
+install. (It asks GitHub once a day, which sees your address and PCP's
+version; you can turn that off there.) Run the install line again: it
+fetches the new release and restarts PCP with the settings it remembered.
+From a checkout, in the `pcp` folder:
 
 ```bash
 git pull

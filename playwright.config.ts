@@ -2,7 +2,11 @@ import path from "node:path"
 
 import { defineConfig, devices } from "@playwright/test"
 
-import { E2E_EDGE_HTTP_PORT, E2E_EDGE_HTTPS_PORT } from "./e2e/lib/network"
+import {
+  E2E_EDGE_HTTP_PORT,
+  E2E_EDGE_HTTPS_PORT,
+  E2E_RELEASES_URL,
+} from "./e2e/lib/network"
 
 const baseURL = process.env.PCP_URL ?? "http://localhost:3000"
 
@@ -70,6 +74,9 @@ export default defineConfig({
       PCP_HTTPS_PORT: String(E2E_EDGE_HTTPS_PORT),
       PCP_ACME_DIRECTORY: "http://127.0.0.1:9/directory",
       PCP_PUBLIC_IP_URL: "http://127.0.0.1:9/ip",
+      // The update check asks the fake upstream (the updates project starts
+      // it on this port), never GitHub.
+      PCP_RELEASES_URL: E2E_RELEASES_URL,
     },
   },
   projects: [
@@ -178,6 +185,15 @@ export default defineConfig({
       testMatch: /web-fetch\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("web-fetch"),
+    },
+    {
+      // The update check: Check now against the fake upstream's release, the
+      // header's notice and the Settings card, the daily check off and on
+      // (Settings and the setup step), and how this PCP is updated.
+      name: "updates",
+      testMatch: /updates\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("updates"),
     },
     {
       // Signs every browser out, so it comes last and signs in on its own.

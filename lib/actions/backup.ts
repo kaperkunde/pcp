@@ -9,6 +9,7 @@ import { MAX_EXPORT_FILE_BYTES } from "@/lib/core/constants"
 import { rebuildOutdatedEndpoints } from "@/lib/core/endpoints"
 import { invalid, PcpError } from "@/lib/core/errors"
 import { reconcileNetwork } from "@/lib/core/network/runtime"
+import { reconcileUpdates } from "@/lib/core/updates/runtime"
 import { isSetUp, unlockOwnerVault } from "@/lib/core/vault"
 import {
   type ActionState,
@@ -63,6 +64,7 @@ async function afterRestore(restoreHostSettings: boolean): Promise<void> {
 
   if (restoreHostSettings) {
     await reconcileNetwork({ ddnsNow: true, tlsNow: true })
+    await reconcileUpdates()
   }
 
   revalidatePath("/", "layout")
