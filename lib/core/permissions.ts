@@ -32,6 +32,7 @@ import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
 import { newId } from "./ids"
+import { createMailAccount } from "./mail/accounts"
 import {
   decideMemoryAsk,
   describeMemoryAsk,
@@ -61,6 +62,7 @@ import {
   summaryText,
   type PermissionStatus,
 } from "./permission-rules"
+import type { MailRegistration } from "./register-rules"
 import { summarize } from "./search"
 import {
   createSecretNamedAfter,
@@ -140,6 +142,8 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
    */
   newSecretOptional?: boolean
   endpoint?: EndpointRegistration
+  /** A mail account (JMAP or IMAP) rather than an MCP server or an API. */
+  mail?: MailRegistration
 }
 
 export type PermissionAsk =
@@ -203,6 +207,8 @@ export type PermissionView = {
     optional: boolean
     /** Set when it is an OAuth client's secret: the client's ID. */
     clientId: string | null
+    /** Set when it is the password for this user name (basic authentication). */
+    login: string | null
   } | null
 }
 
@@ -416,7 +422,15 @@ function registerOAuthLines(input: RegisterArgs, publicUrl: string): string[] {
       : []),
     ...(input.oauthClientId
       ? [`Redirect URI your client needs: ${oauthRedirectUrl(publicUrl)}`]
-      : []),
+      : input.mail
+        ? [
+            "Sign-in: PCP finds where the mail server signs you in when you connect it, and registers itself there if the server allows it; otherwise its page asks you for an OAuth client",
+          ]
+        : input.endpoint
+          ? [
+              "Client: none given. When you connect it, PCP registers itself with the provider if the provider allows that; otherwise its page asks you for an OAuth client",
+            ]
+          : []),
   ]
 }
 
@@ -486,20 +500,72 @@ async function summarizeRow(
     ]
       .map((name) => `"${name}"`)
       .join(" and ")
+    const login = input.authUsername ?? "?"
+    const mailAuth = Boolean(input.mail)
     const auth =
-      input.authType === "header" && input.newSecretName
-        ? `Authentication: sends a new secret, saved as "${input.newSecretName}", in the ${input.authHeaderName || "Authorization"} header${andExtras}; you enter its value here when you agree`
-        : input.authType === "header"
-          ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header${andExtras}`
-          : input.authType === "oauth"
-            ? oauthLines[0]!
-            : "Authentication: none"
+      input.authType === "basic" && input.newSecretName
+        ? mailAuth
+          ? `Authentication: user name and password; the password is saved as a new secret "${input.newSecretName}", and you enter it here when you agree`
+          : `Authentication: sends a new secret, saved as "${input.newSecretName}", as the password for ${login} (HTTP Basic); you enter its value here when you agree`
+        : input.authType === "basic"
+          ? mailAuth
+            ? `Authentication: user name and your secret "${input.secretName ?? "?"}" as the password`
+            : `Authentication: sends your secret "${input.secretName ?? "?"}" as the password for ${login} (HTTP Basic)`
+          : input.authType === "header" && mailAuth
+            ? input.newSecretName
+              ? `Authentication: a bearer token, saved as a new secret "${input.newSecretName}"; you enter it here when you agree`
+              : `Authentication: your secret "${input.secretName ?? "?"}" as a bearer token`
+            : input.authType === "header" && input.newSecretName
+              ? `Authentication: sends a new secret, saved as "${input.newSecretName}", in the ${input.authHeaderName || "Authorization"} header${andExtras}; you enter its value here when you agree`
+              : input.authType === "header"
+                ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header${andExtras}`
+                : input.authType === "oauth"
+                  ? oauthLines[0]!
+                  : "Authentication: none"
+    const where = mailAuth ? "this mail server" : "this address"
     const warning =
-      input.authType === "header"
-        ? `PCP will send the ${extras.length > 0 ? "secrets" : "secret"} ${secrets} to this address with every call. Only add it if you trust the address.`
-        : input.authType === "oauth" && input.endpoint
-          ? "PCP will send your OAuth token for this account to this address with every call. Only add it if you trust the address and the sign-in addresses."
-          : null
+      input.authType === "basic"
+        ? `PCP will send the user name ${login} and the secret "${input.secretName ?? "?"}" to ${where} with every call. Only add it if you trust the address.`
+        : input.authType === "header"
+          ? `PCP will send the ${extras.length > 0 ? "secrets" : "secret"} ${secrets} to ${where} with every call. Only add it if you trust the address.`
+          : input.authType === "oauth" && (input.endpoint || input.mail)
+            ? `PCP will send your OAuth token for this account to ${where} with every call. Only add it if you trust the address${input.endpoint ? " and the sign-in addresses" : ""}.`
+            : null
+
+    if (input.mail) {
+      const { protocol, smtpUrl, readOnly, mailFrom, checked, privateAddress } =
+        input.mail
+      const jmap = protocol === "jmap"
+
+      return {
+        title: `Add the mail account ${input.name}?`,
+        lines: [
+          jmap
+            ? "Protocol: JMAP"
+            : smtpUrl
+              ? "Protocol: IMAP, sending through SMTP"
+              : "Protocol: IMAP (it cannot send: no SMTP server was named)",
+          jmap ? `Session URL: ${input.url}` : `IMAP server: ${input.url}`,
+          ...(smtpUrl ? [`SMTP server: ${smtpUrl}`] : []),
+          ...(checked ? [`Checked: ${checked}`] : []),
+          ...(privateAddress
+            ? [
+                `${privateAddress} If you agree, PCP signs in there from your own network.`,
+              ]
+            : []),
+          ...(input.authType === "basic" ? [`User name: ${login}`] : []),
+          auth,
+          ...oauthLines.slice(1),
+          readOnly
+            ? "Read-only: only the tools that read mail"
+            : "Can change things: its tools may send as you where the server allows it, move and flag mail, and delete into the Trash (never for good)",
+          ...(mailFrom ? [`From address: ${mailFrom}`] : []),
+          ...(input.description ? [`Description: ${input.description}`] : []),
+          asker,
+        ],
+        warning,
+      }
+    }
 
     if (input.endpoint) {
       const { preview, readOnly, specUrl, patches } = input.endpoint
@@ -623,7 +689,12 @@ async function toView(
 function newSecretOf(
   ctx: VaultContext,
   row: PermissionRequest,
-): { name: string; optional: boolean; clientId: string | null } | null {
+): {
+  name: string
+  optional: boolean
+  clientId: string | null
+  login: string | null
+} | null {
   if (row.kind !== "register") {
     return null
   }
@@ -636,6 +707,7 @@ function newSecretOf(
         optional: args.newSecretOptional === true,
         clientId:
           args.authType === "oauth" ? (args.oauthClientId ?? null) : null,
+        login: args.authType === "basic" ? (args.authUsername ?? null) : null,
       }
     : null
 }
@@ -709,7 +781,9 @@ function pendingText(view: PermissionView, detail?: string): string {
   const typed = view.secretToEnter
     ? view.secretToEnter.clientId
       ? ` They type the client secret of their OAuth client in there, if it has one; do not ask them for it here.`
-      : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
+      : view.secretToEnter.login
+        ? ` They type the password for ${view.secretToEnter.login} in there, and it is saved as the secret "${view.secretToEnter.name}"; do not ask them for it here.`
+        : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
     : ""
 
   return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
@@ -1084,7 +1158,11 @@ async function secretForRegister(
     description:
       asked.authType === "oauth"
         ? `Client secret for the OAuth client ${asked.oauthClientId ?? "?"}.`
-        : `Sent to ${asked.name} in the ${asked.authHeaderName || "Authorization"} header.`,
+        : asked.authType === "basic"
+          ? `The password for ${asked.authUsername ?? "?"} at ${asked.name}.`
+          : asked.mail
+            ? `Sent to ${asked.name} as a bearer token.`
+            : `Sent to ${asked.name} in the ${asked.authHeaderName || "Authorization"} header.`,
   })
 
   return { id: saved.id, saved }
@@ -1127,16 +1205,29 @@ async function executeRegister(
           ...secretFields(asked, secret.id),
           endpoint: asked.endpoint,
         })
-      : await createServer(ctx, {
-          name: asked.name,
-          url: asked.url,
-          description: asked.description,
-          authType: asked.authType,
-          authHeaderName: asked.authHeaderName,
-          authValueTemplate: asked.authValueTemplate,
-          authExtraHeaders: asked.authExtraHeaders,
-          ...secretFields(asked, secret.id),
-        })
+      : asked.mail
+        ? await createMailAccount(ctx, {
+            protocol: asked.mail.protocol,
+            name: asked.name,
+            description: asked.description,
+            url: asked.url,
+            smtpUrl: asked.mail.smtpUrl,
+            readOnly: asked.mail.readOnly,
+            mailFrom: asked.mail.mailFrom,
+            authType: asked.authType as "basic" | "header" | "oauth",
+            authUsername: asked.authUsername ?? null,
+            ...secretFields(asked, secret.id),
+          })
+        : await createServer(ctx, {
+            name: asked.name,
+            url: asked.url,
+            description: asked.description,
+            authType: asked.authType,
+            authHeaderName: asked.authHeaderName,
+            authValueTemplate: asked.authValueTemplate,
+            authExtraHeaders: asked.authExtraHeaders,
+            ...secretFields(asked, secret.id),
+          })
   } catch (error) {
     // The secret was typed in for this server alone.
     if (secret.saved) {

@@ -60,6 +60,20 @@ import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog } from "./request-log"
 import { canRereadTools, type SyncResult } from "./catalogue"
 import {
+  completeSessionUrl,
+  formatMailServer,
+  parseImapAddress,
+  parseRecipient,
+  parseSmtpAddress,
+} from "./mail/addresses"
+import { probeJmapSession, type JmapProbe } from "./mail/probe"
+import {
+  checkRegisterShape,
+  isMailRegistrationKind,
+  resolveKind,
+  type RegisterKind,
+} from "./register-rules"
+import {
   LIST_PAGE_SIZE,
   listTools,
   searchTools,
@@ -67,7 +81,7 @@ import {
   type ToolCandidate,
 } from "./search"
 import { findTextSecretByName, validateSecretName } from "./secrets"
-import { validateServerUrl, type AuthType } from "./servers"
+import { validateServerUrl, validateUsername, type AuthType } from "./servers"
 import { effectiveAccess, loadToolAccess } from "./tool-access"
 import { readResult, RESULT_PAGE_CHARS } from "./tool-results"
 import { needsConnecting, syncServerTools } from "./upstream"
@@ -318,7 +332,7 @@ export function buildInstructions(
   if (servers.length === 0) {
     return [
       ...memoryLead(memories),
-      "PCP is a gateway to the owner's MCP servers, APIs and mail accounts, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, or an API from OpenAPI text).",
+      "PCP is a gateway to the owner's MCP servers, APIs and mail accounts, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, an API from its OpenAPI document, or a mail account over JMAP or IMAP).",
       ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
       ...memoryInstructions(memories),
       ...(webFetch ? [FETCH_INSTRUCTIONS] : []),
@@ -334,7 +348,7 @@ export function buildInstructions(
   return [
     ...memoryLead(memories),
     "PCP is a gateway to the owner's MCP servers, APIs and mail accounts. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it; list_tools names every tool on one server. Refer to tools as server/tool.",
-    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server adds a server, or an API from OpenAPI text, once the owner agrees. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
+    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, or a mail account (JMAP, or IMAP with SMTP). A mailbox is always a mail account, never an API written around its mail server. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP\'s page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
     "An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time.",
     "Servers:",
     ...lines,
@@ -432,9 +446,12 @@ export function buildGatewayServer(
   servers: GatewayServer[],
   {
     memories = null,
+    probeJmap = probeJmapSession,
   }: {
     /** What to say about memories; read only for a token that keeps them. */
     memories?: InstructionMemories | null
+    /** How a proposed JMAP address is looked at; replaced in tests. */
+    probeJmap?: typeof probeJmapSession
   } = {},
 ): McpServer {
   const server = new McpServer(
@@ -993,43 +1010,58 @@ export function buildGatewayServer(
   server.registerTool(
     "register_server",
     {
-      title: "Add a server or an API",
-      description:
-        "Propose something new for PCP to reach; the owner must agree before it is added. Either an MCP server, by its address (url), or an API, by its OpenAPI 3 document: as text (openapi_schema), or the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. PCP turns each operation into a tool and makes the HTTP calls itself; a header parameter an operation declares becomes one of its arguments, except the headers that carry secrets and the ones PCP sets itself (Authorization, Content-Type, Accept and the like), which are left out. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation. Authentication is none; a header carrying one of the owner's secrets, named by its NAME: one stored in PCP, or a name for a new one, whose value the owner types in on PCP's page when they agree (that request can only be answered there), and, for a credential in several parts (a key and a secret key, as an OpenAPI security requirement naming several apiKey schemes asks), further headers each with a secret the owner stored, in extra_headers; or OAuth, where the owner signs in once they agree. OAuth works for an MCP server, and for an API whose OpenAPI document declares an oauth2 security scheme with an authorizationCode flow (authorizationUrl and tokenUrl; add one with spec_patches when the document lacks it): PCP renews the token itself. Not supported: OpenID Connect discovery without such a flow, the implicit, password and client-credentials flows, and keys sent in the query string. Most large providers (Google, Microsoft, Spotify) let no app register itself: pass client_id, the ID of a client the owner created in the provider's developer settings with PCP's redirect URI, and the owner enters its client secret on PCP's page. Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.",
+      title: "Add a server, an API or a mail account",
+      description: [
+        "Propose something new for PCP to reach; the owner must agree on PCP's page before it is added, and nothing exists until they do.",
+        "Choose what it is with kind. mcp: an MCP server, by its address in url. api: a REST API, by its OpenAPI 3 document, as text (openapi_schema) or by the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. jmap: a mailbox on a JMAP server (Stalwart, Fastmail, Cyrus), by the server's address in url. imap: a mailbox over IMAP, by its server in url, with smtp_url to send through. Left out, kind is api when you pass openapi_schema or openapi_url, and mcp otherwise.",
+        "A mailbox is always a mail account (jmap or imap), never an API you write around its mail server: PCP signs in to a mail account itself, over an encrypted connection, and gives every account the same tools (list mailboxes, search, read emails and text attachments, move, flag, delete into the Trash, send; conversations and identities on JMAP).",
+        "For an API, PCP turns each operation into a tool and makes the HTTP calls itself; a header parameter an operation declares becomes one of its arguments, except the headers that carry secrets and the ones PCP sets itself (Authorization, Content-Type, Accept and the like), which are left out. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation.",
+        "Authentication, in auth_type: none (an open API or MCP server; not for a mail account). header: a secret in a header, such as an API key or token. basic: a user name (username) and a password, which PCP sends as HTTP Basic authentication (an API that takes it, a JMAP app password, an IMAP login; not for an MCP server). oauth: the owner signs in once they agree (an MCP server, a JMAP account, or an API whose OpenAPI document declares an oauth2 security scheme with an authorizationCode flow: authorizationUrl and tokenUrl, added with spec_patches when the document lacks it); PCP renews the token itself.",
+        "A secret is named in secret, by its NAME: one the owner stored in PCP, or a name for a new one, whose value the owner types in on PCP's page when they agree (that request can only be answered there). A credential in several header parts (a key and a secret key, as an OpenAPI security requirement naming several apiKey schemes asks) goes in extra_headers, each part a secret the owner stored. Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.",
+        "For oauth, PCP finds out itself, when the owner connects, whether the provider lets it register as a client, and registers when it does. Pass client_id only for a provider that lets no app register itself (Google, Microsoft, Spotify and most large providers): the ID of a client the owner created in the provider's developer settings with PCP's redirect URI, and the owner enters its client secret on PCP's page. Not supported: OpenID Connect discovery without an authorizationCode flow, the implicit, password and client-credentials flows, and keys sent in the query string.",
+      ].join("\n\n"),
       inputSchema: z.object({
         name: z
           .string()
           .min(1)
           .max(80)
-          .describe('What to call it, e.g. "Linear" or "Pet store API".'),
+          .describe(
+            'What to call it, e.g. "Linear", "Pet store API" or "Personal mail".',
+          ),
+        kind: z
+          .enum(["mcp", "api", "jmap", "imap"])
+          .optional()
+          .describe(
+            "What it is: mcp (an MCP server), api (a REST API from an OpenAPI document), jmap (a mailbox on a JMAP server) or imap (a mailbox over IMAP, with SMTP to send). Left out: api when openapi_schema or openapi_url is passed, mcp otherwise. A mailbox is always jmap or imap, never an api.",
+          ),
         url: z
           .string()
           .optional()
           .describe(
-            "An MCP server: its MCP endpoint, like https://mcp.example.com/mcp. An API: the base URL requests go to, like https://api.example.com/v1; leave it out to use the server the schema names, unless a secret is sent, then it is required.",
+            "mcp: the MCP endpoint, like https://mcp.example.com/mcp. api: the base URL requests go to, like https://api.example.com/v1; leave it out to use the server the schema names, unless a secret or a password is sent, then it is required. jmap: the mail server, like https://mail.example.com (PCP finds the session at /.well-known/jmap), or the full session URL; PCP checks now that something answers there. imap: the IMAP server, like mail.example.com, imaps://mail.example.com:993, or imap://mail.example.com:143 for STARTTLS.",
           ),
         openapi_schema: z
           .string()
           .max(MAX_SPEC_BYTES)
           .optional()
           .describe(
-            `Registers an API instead of an MCP server: the whole OpenAPI 3.x document as JSON or YAML text. Only references inside the document (#/components/…) are followed; PCP never fetches an address named in it. Up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
+            `For kind api: the whole OpenAPI 3.x document as JSON or YAML text. Only references inside the document (#/components/…) are followed; PCP never fetches an address named in it. Up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
           ),
         openapi_url: z
           .string()
           .max(2048)
           .optional()
           .describe(
-            `Registers an API from the address of its OpenAPI 3.x document instead of its text, such as a raw file in the API's repository. PCP downloads it now, from a public address only, and the owner approves that copy; a later change to the document is not taken without them. Up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
+            `For kind api: the address of its OpenAPI 3.x document instead of its text, such as a raw file in the API's repository. PCP downloads it now, from a public address only, and the owner approves that copy; a later change to the document is not taken without them. Up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.`,
           ),
         spec_patches: PATCH_SCHEMA.optional().describe(
-          "With openapi_schema or openapi_url: edits applied to the document before tools are made from it, and kept, so they still apply when it is read again. A JSON Patch (RFC 6902).",
+          "For kind api: edits applied to the document before tools are made from it, and kept, so they still apply when it is read again. A JSON Patch (RFC 6902).",
         ),
         read_only: z
           .boolean()
           .optional()
           .describe(
-            "With openapi_schema or openapi_url: offer only the GET operations as tools.",
+            "For kind api: offer only the GET operations as tools. For jmap and imap: offer only the tools that read mail (no sending, moving, flagging or deleting).",
           ),
         description: z
           .string()
@@ -1037,35 +1069,56 @@ export function buildGatewayServer(
           .optional()
           .describe("One sentence on what it is for; assistants see it."),
         auth_type: z
-          .enum(["none", "oauth", "header"])
+          .enum(["none", "header", "basic", "oauth"])
           .optional()
           .describe(
-            "none (the default); header (sends a secret the owner stored in PCP); or oauth (the owner signs in after agreeing: an MCP server, or an API whose document has an oauth2 authorizationCode flow).",
+            "none (the default; not for a mail account); header (sends a secret the owner stored in PCP: an API key or token, or a mail account's bearer token); basic (a user name in username and a password named in secret, sent as HTTP Basic authentication: an API, a JMAP app password, an IMAP login; not for an MCP server); or oauth (the owner signs in after agreeing: an MCP server, a JMAP account, or an API whose document has an oauth2 authorizationCode flow).",
           ),
         secret: z
           .string()
           .optional()
           .describe(
-            "For header: the name of a secret the owner stored in PCP, or a name for a new one (say \"Linear API key\"), which the owner fills in on PCP's page when they agree. For oauth with client_id: the name of the secret holding that client's secret, or leave it out and the owner enters it on PCP's page. Its name, never its value.",
+            'For header and basic: the name of a secret the owner stored in PCP (the key, token or password), or a name for a new one (say "Linear API key" or "Personal mail app password"), which the owner fills in on PCP\'s page when they agree. For oauth with client_id: the name of the secret holding that client\'s secret, or leave it out and the owner enters it on PCP\'s page. Its name, never its value.',
+          ),
+        username: z
+          .string()
+          .max(320)
+          .optional()
+          .describe(
+            "For basic: the user name the password goes with. For a mail account that is usually the mailbox address (ada@example.com). Not a secret.",
+          ),
+        smtp_url: z
+          .string()
+          .max(500)
+          .optional()
+          .describe(
+            "For imap: the SMTP server the account sends through, with the same user name and password, like smtps://mail.example.com:465, or smtp://mail.example.com:587 for STARTTLS. Left out, the account cannot send.",
+          ),
+        mail_from: z
+          .string()
+          .max(320)
+          .optional()
+          .describe(
+            "For jmap and imap: the address to send from, when the user name is not an email address.",
           ),
         client_id: z
           .string()
           .max(500)
           .optional()
           .describe(
-            "For oauth: the client ID of an OAuth client the owner created with the provider (for Google, in Google Cloud's APIs & Services, Credentials). Needed when the provider lets no app register itself. Its redirect URI must be PCP's, which the owner is shown when they agree. Not a secret.",
+            "For oauth: the client ID of an OAuth client the owner created with the provider (for Google, in Google Cloud's APIs & Services, Credentials). Only for a provider that lets no app register itself: PCP finds out on its own whether it can register as a client when the owner connects, and asks them for a client only when it cannot. Its redirect URI must be PCP's, which the owner is shown when they agree. Not a secret.",
           ),
         header_name: z
           .string()
           .optional()
           .describe(
-            `For header: the header to send (default ${DEFAULT_HEADER_NAME}).`,
+            `For header on an MCP server or an API: the header to send (default ${DEFAULT_HEADER_NAME}).`,
           ),
         value_template: z
           .string()
           .optional()
           .describe(
-            `For header: the header's value with ${SECRET_PLACEHOLDER} where the secret goes (default "${DEFAULT_VALUE_TEMPLATE}"; "${SECRET_PLACEHOLDER}" alone for a header that takes the bare key, like X-API-Key).`,
+            `For header on an MCP server or an API: the header's value with ${SECRET_PLACEHOLDER} where the secret goes (default "${DEFAULT_VALUE_TEMPLATE}"; "${SECRET_PLACEHOLDER}" alone for a header that takes the bare key, like X-API-Key).`,
           ),
         extra_headers: z
           .array(
@@ -1092,13 +1145,14 @@ export function buildGatewayServer(
           .max(4000)
           .optional()
           .describe(
-            "For oauth: the scope to ask for, space-separated. For an API, leave it out to ask for the scopes its offered operations need, as the document says.",
+            "For oauth: the scope to ask for, space-separated. For an API, leave it out to ask for the scopes its offered operations need, as the document says. For a JMAP account, name what the server lists for mail (Stalwart: urn:ietf:params:oauth:scope:mail); PCP adds offline_access itself where the server offers it, so the connection can be renewed.",
           ),
       }),
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     logged("register_server", () => ({}))(
       async (args: {
+        kind?: RegisterKind
         name: string
         url?: string
         openapi_schema?: string
@@ -1108,6 +1162,9 @@ export function buildGatewayServer(
         description?: string
         auth_type?: AuthType
         secret?: string
+        username?: string
+        smtp_url?: string
+        mail_from?: string
         header_name?: string
         value_template?: string
         extra_headers?: Array<{
@@ -1118,40 +1175,18 @@ export function buildGatewayServer(
         oauth_scope?: string
         client_id?: string
       }) => {
+        const kind = resolveKind(args)
+        const refused = checkRegisterShape(kind, args)
+
+        if (refused) {
+          return failure(refused)
+        }
+
         const authType: AuthType = args.auth_type ?? "none"
-        const isApi =
-          args.openapi_schema !== undefined || args.openapi_url !== undefined
-
-        if (authType !== "oauth" && (args.client_id || args.oauth_scope)) {
-          return failure("client_id and oauth_scope are for auth_type oauth.")
-        }
-
-        if (args.extra_headers?.length && authType !== "header") {
-          return failure("extra_headers are for auth_type header.")
-        }
-
-        if (authType === "oauth" && args.secret && !args.client_id?.trim()) {
-          return failure(
-            "With oauth, secret names the client secret of the client in client_id: pass client_id too, or leave secret out.",
-          )
-        }
-
-        if (!isApi && !args.url?.trim()) {
-          return failure(
-            "An MCP server needs its address in url. To add an API instead, pass its OpenAPI document in openapi_schema, or its address in openapi_url.",
-          )
-        }
-
-        if (
-          !isApi &&
-          (args.read_only !== undefined || args.spec_patches !== undefined)
-        ) {
-          return failure(
-            "read_only and spec_patches are for an API: pass openapi_schema or openapi_url.",
-          )
-        }
+        const isApi = kind === "api"
 
         let authSecretId: string | null = null
+        let authUsername: string | null = null
         let newSecretName: string | null = null
         let secretName: string | null = null
         let authHeaderName: string | null = null
@@ -1159,14 +1194,9 @@ export function buildGatewayServer(
         const authExtraHeaders: NonNullable<RegisterArgs["authExtraHeaders"]> =
           []
 
-        if (authType === "header") {
-          if (!args.secret?.trim()) {
-            return failure(
-              "Header authentication needs the name of a secret the owner stored in PCP, in secret.",
-            )
-          }
-
-          const secret = await findTextSecretByName(scope.ctx, args.secret)
+        if (authType === "header" || authType === "basic") {
+          const named = args.secret!.trim()
+          const secret = await findTextSecretByName(scope.ctx, named)
 
           if (secret) {
             authSecretId = secret.id
@@ -1175,15 +1205,22 @@ export function buildGatewayServer(
             // A name PCP does not hold is a secret the owner types in on
             // PCP's page when they agree: the value never passes through
             // the conversation.
-            const problem = validateSecretName(args.secret.trim())
+            const problem = validateSecretName(named)
 
             if (problem) {
               return failure(`The secret's name: ${problem}`)
             }
 
-            newSecretName = args.secret.trim()
-            secretName = newSecretName
+            newSecretName = named
+            secretName = named
           }
+        }
+
+        if (authType === "basic") {
+          authUsername = validateUsername(args.username)
+        }
+
+        if (authType === "header") {
           authHeaderName = args.header_name?.trim() || DEFAULT_HEADER_NAME
           authValueTemplate =
             args.value_template?.trim() || DEFAULT_VALUE_TEMPLATE
@@ -1288,6 +1325,7 @@ export function buildGatewayServer(
           authHeaderName,
           authValueTemplate,
           authSecretId,
+          authUsername,
           secretName,
           authExtraHeaders,
           oauthClientId,
@@ -1295,6 +1333,8 @@ export function buildGatewayServer(
           ...(newSecretName ? { newSecretName } : {}),
           ...(newSecretOptional ? { newSecretOptional } : {}),
         }
+        const oauthScope =
+          authType === "oauth" ? args.oauth_scope?.trim() || null : null
         let input: RegisterArgs
         let problems: SchemaProblem[] = []
 
@@ -1323,16 +1363,16 @@ export function buildGatewayServer(
             readOnly: args.read_only,
             authSecretId,
             newSecretName,
-            authHeaderNames: authHeaderName
-              ? [
-                  authHeaderName,
-                  ...authExtraHeaders.map((extra) => extra.headerName),
-                ]
-              : [],
-            oauth:
-              authType === "oauth"
-                ? { scope: args.oauth_scope?.trim() || null }
-                : null,
+            authHeaderNames:
+              authType === "basic"
+                ? ["Authorization"]
+                : authHeaderName
+                  ? [
+                      authHeaderName,
+                      ...authExtraHeaders.map((extra) => extra.headerName),
+                    ]
+                  : [],
+            oauth: authType === "oauth" ? { scope: oauthScope } : null,
           })
 
           input = {
@@ -1341,18 +1381,72 @@ export function buildGatewayServer(
             description: prepared.description,
             url: prepared.url,
             oauthScope:
-              prepared.registration.preview.oauth?.scope ??
-              (args.oauth_scope?.trim() || null),
+              prepared.registration.preview.oauth?.scope ?? oauthScope,
             endpoint: prepared.registration,
           }
           problems = prepared.problems
+        } else if (isMailRegistrationKind(kind)) {
+          // The look at a JMAP address is a request PCP makes for the
+          // assistant: it shares the budget of the other registrations.
+          if (
+            !checkRateLimit(
+              `endpoint-register:${scope.tokenId}`,
+              ENDPOINT_CHANGES,
+            )
+          ) {
+            return failure(
+              "That is a lot of registrations in a short time. Wait a few minutes.",
+            )
+          }
+
+          const mailFrom = args.mail_from?.trim()
+            ? parseRecipient(args.mail_from).email
+            : null
+          let url: string
+          let smtpUrl: string | null = null
+          let probe: JmapProbe | null = null
+
+          if (kind === "jmap") {
+            url = completeSessionUrl(args.url!)
+            // A wrong address is refused here, before the owner is asked.
+            probe = await probeJmap(url)
+          } else {
+            url = formatMailServer("imap", parseImapAddress(args.url!))
+
+            if (args.smtp_url?.trim()) {
+              smtpUrl = formatMailServer(
+                "smtp",
+                parseSmtpAddress(args.smtp_url),
+              )
+            }
+          }
+
+          if (smtpUrl && !mailFrom && !(authUsername ?? "").includes("@")) {
+            return failure(
+              "Pass mail_from: the user name is not an email address, and an account that sends through SMTP needs the address to send from.",
+            )
+          }
+
+          input = {
+            ...common,
+            name: args.name.trim(),
+            url,
+            oauthScope,
+            mail: {
+              protocol: kind,
+              smtpUrl,
+              readOnly: args.read_only === true,
+              mailFrom,
+              checked: probe?.checked ?? null,
+              privateAddress: probe?.privateAddress ?? null,
+            },
+          }
         } else {
           input = {
             ...common,
             name: args.name.trim(),
             url: validateServerUrl(args.url!),
-            oauthScope:
-              authType === "oauth" ? args.oauth_scope?.trim() || null : null,
+            oauthScope,
           }
         }
 

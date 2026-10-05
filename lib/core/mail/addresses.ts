@@ -44,6 +44,28 @@ export function validateSessionUrl(raw: string): string {
   return url.toString()
 }
 
+/**
+ * A JMAP session URL as an assistant may name it: the full address, the
+ * server's origin (https://mail.example.com), or a bare host name. A server
+ * with no path gets the well-known one, which RFC 8620 puts the session at.
+ */
+export function completeSessionUrl(raw: string): string {
+  const trimmed = raw.trim()
+  const url = new URL(
+    validateSessionUrl(
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) || !trimmed
+        ? trimmed
+        : `https://${trimmed}`,
+    ),
+  )
+
+  if (url.pathname === "/" || url.pathname === "") {
+    url.pathname = "/.well-known/jmap"
+  }
+
+  return url.toString()
+}
+
 const SCHEMES = {
   imap: {
     secure: "imaps:",
