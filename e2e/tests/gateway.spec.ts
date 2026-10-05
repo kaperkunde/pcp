@@ -2,7 +2,13 @@ import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { OWNER_PASSWORD } from "../lib/auth"
-import { callTool, initialize, mcpRequest, toolText } from "../lib/mcp"
+import {
+  allToolText,
+  callTool,
+  initialize,
+  mcpRequest,
+  toolText,
+} from "../lib/mcp"
 import {
   addSecret,
   allowAllTools,
@@ -264,7 +270,7 @@ test("keeps a long answer whole, for read_result and this token only", async ({
     tool: "long_text",
     arguments: { length: 150_000 },
   })
-  const first = toolText(long)
+  const first = allToolText(long)
   expect(first).not.toContain("THE END")
   expect(first).toContain("PCP kept the whole answer: 150,000 characters")
   const id = /as result ([0-9a-f-]+),/.exec(first)![1]!
