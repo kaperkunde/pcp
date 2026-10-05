@@ -4,22 +4,46 @@
 // PCP's own page in this app's window: never to another site the window has
 // gone to, never to a frame inside a page.
 //
-// What the key opens is PCP's business (lib/core/device-keys.ts): the
-// wrapper keeps it, encrypted with safeStorage (a key macOS keeps in the
-// keychain for this app's code), and knows nothing else about it.
+// What the key opens is PCP's business (lib/core/device-keys.ts), and where
+// it is kept is touch-id-store.mjs's: a keychain item macOS opens only for a
+// fingerprint when the app is signed for it (native/keychain), otherwise a
+// file encrypted with safeStorage behind the app's own Touch ID prompt. The
+// wrapper knows nothing else about it.
 
 import { existsSync } from "node:fs"
+import { createRequire } from "node:module"
+import path from "node:path"
 
-import { ipcMain, safeStorage, systemPreferences } from "electron"
+import { app, ipcMain, safeStorage, systemPreferences } from "electron"
 
 import {
   forgetDeviceKey,
-  isDeviceKey,
   isPcpPage,
   readDeviceKey,
-  TOUCH_ID_REASONS,
+  touchIdAnswers,
   writeDeviceKey,
 } from "./touch-id-store.mjs"
+
+/**
+ * native/keychain as scripts/keychain.mjs built it: in the app's resources
+ * when packaged, in native-staged/ from a checkout. Null off macOS, or when
+ * it is not there or does not load; Touch ID then keeps the key in the file.
+ *
+ * @returns {import("./touch-id-store.mjs").KeychainModule | null}
+ */
+function loadKeychain() {
+  if (process.platform !== "darwin") {
+    return null
+  }
+  const built = app.isPackaged
+    ? path.join(process.resourcesPath, "native", "pcp_keychain.node")
+    : path.join(import.meta.dirname, "native-staged", "pcp_keychain.node")
+  try {
+    return createRequire(import.meta.url)(built)
+  } catch {
+    return null
+  }
+}
 
 /**
  * @param {{
@@ -29,16 +53,32 @@ import {
  * }} options
  */
 export function serveTouchId({ file, port, window }) {
-  // One prompt at a time: a second ask while one is showing is a no.
-  let asking = false
-
-  function available() {
-    return (
-      process.platform === "darwin" &&
-      systemPreferences.canPromptTouchID() &&
-      safeStorage.isEncryptionAvailable()
-    )
-  }
+  const answers = touchIdAnswers({
+    keychain: loadKeychain(),
+    file: {
+      usable: () =>
+        process.platform === "darwin" &&
+        systemPreferences.canPromptTouchID() &&
+        safeStorage.isEncryptionAvailable(),
+      exists: () => existsSync(file),
+      read: () =>
+        readDeviceKey(file, (encrypted) =>
+          safeStorage.decryptString(encrypted),
+        ),
+      write: (key) =>
+        writeDeviceKey(file, key, (plain) => safeStorage.encryptString(plain)),
+      forget: () => forgetDeviceKey(file),
+    },
+    prompt: async (reason) => {
+      try {
+        await systemPreferences.promptTouchID(reason)
+        return true
+      } catch {
+        // Cancelled, failed, or the owner chose their password instead.
+        return false
+      }
+    },
+  })
 
   /** @param {import("electron").IpcMainInvokeEvent} event */
   function fromPcp(event) {
@@ -55,25 +95,6 @@ export function serveTouchId({ file, port, window }) {
     )
   }
 
-  /** @param {keyof typeof TOUCH_ID_REASONS} purpose */
-  async function confirmed(purpose) {
-    if (asking) {
-      return false
-    }
-
-    asking = true
-
-    try {
-      await systemPreferences.promptTouchID(TOUCH_ID_REASONS[purpose])
-      return true
-    } catch {
-      // Cancelled, failed, or the owner chose their password instead.
-      return false
-    } finally {
-      asking = false
-    }
-  }
-
   /**
    * @param {string} channel
    * @param {(...args: unknown[]) => unknown} answer
@@ -88,42 +109,8 @@ export function serveTouchId({ file, port, window }) {
     })
   }
 
-  handle("touch-id:status", () => {
-    const can = available()
-    return { available: can, saved: can && existsSync(file) }
-  })
-
-  handle("touch-id:unlock", async (purpose) => {
-    if (!available()) {
-      return null
-    }
-
-    const key = readDeviceKey(file, (encrypted) =>
-      safeStorage.decryptString(encrypted),
-    )
-
-    if (!key) {
-      // Unreadable is as good as gone (macOS kept the keychain from this
-      // build): PCP's Settings then offers to set Touch ID up again.
-      forgetDeviceKey(file)
-      return null
-    }
-
-    return (await confirmed(purpose === "confirm" ? "confirm" : "unlock"))
-      ? key
-      : null
-  })
-
-  handle("touch-id:save", async (key) => {
-    if (!available() || !isDeviceKey(key) || !(await confirmed("save"))) {
-      return false
-    }
-
-    writeDeviceKey(file, key, (plain) => safeStorage.encryptString(plain))
-    return true
-  })
-
-  handle("touch-id:forget", () => {
-    forgetDeviceKey(file)
-  })
+  handle("touch-id:status", () => answers.status())
+  handle("touch-id:unlock", (purpose) => answers.unlock(purpose))
+  handle("touch-id:save", (key) => answers.save(key))
+  handle("touch-id:forget", () => answers.forget())
 }
