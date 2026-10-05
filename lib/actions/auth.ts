@@ -19,6 +19,7 @@ import {
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import {
   TOO_MANY_ATTEMPTS,
+  forgiveSignInTry,
   withinSignInLimits,
 } from "@/lib/server/password-attempts"
 import {
@@ -82,6 +83,8 @@ export async function loginAction(
     return { status: "error", error: "That password is not right." }
   }
 
+  await forgiveSignInTry("password")
+
   if (field(formData, "touchId") === "on") {
     return { status: "ok", deviceKey: await createDeviceKey(ctx) }
   }
@@ -114,6 +117,8 @@ export async function touchIdLoginAction(
   if (!ctx) {
     return { status: "error", error: TOUCH_ID_REJECTED }
   }
+
+  await forgiveSignInTry("touch-id")
 
   if (field(formData, "once") === "on") {
     await removeDeviceKeys(ctx.vaultId)

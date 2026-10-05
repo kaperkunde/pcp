@@ -115,9 +115,11 @@ someone with your finger and not your password cannot lock you out.
 Recovering with the recovery key, signing out everywhere and a restore turn
 it off.
 
-**Password guessing** is rate-limited: 10 attempts per 15 minutes per address
-on the sign-in page and per session inside PCP, 60 in all. scrypt makes each
-guess expensive.
+**Password guessing** is rate-limited: 10 wrong passwords per 15 minutes per
+address on the sign-in page and per session inside PCP, 60 in all. A right
+password gives its try back, since it is no guess and only someone who knows
+it can type it, so you never lock yourself out by signing in. scrypt makes
+each guess expensive.
 
 Not defended against:
 
