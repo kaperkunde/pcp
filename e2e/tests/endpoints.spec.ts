@@ -4,7 +4,7 @@ import path from "node:path"
 import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
-import { callTool, initialize, toolText } from "../lib/mcp"
+import { allToolText, callTool, initialize, toolText } from "../lib/mcp"
 import { OWNER_PASSWORD } from "../lib/auth"
 import {
   addSecret,
@@ -279,6 +279,37 @@ test("calling an operation makes the HTTP request, with the secret added by PCP"
   expect(JSON.stringify([list, created, one])).not.toContain(
     upstream.expectedToken,
   )
+})
+
+test("a kept value from one call goes into another's body by its handle", async ({
+  baseURL,
+}) => {
+  const list = await callTool(baseURL!, token, "call_tool", {
+    server: SLUG,
+    tool: "listPets",
+    arguments: { status: "available", limit: 1 },
+    keep: ["name"],
+  })
+  expect(list.body.result?.isError ?? false, toolText(list)).toBe(false)
+  const text = allToolText(list)
+  expect(text).toContain("PCP kept 1 value of this answer as results")
+  const [fido] = JSON.parse(text.split("\n").at(-1)!) as Array<{
+    name: { $result: string; preview: string }
+  }>
+  expect(fido!.name.preview).toBe("Fido")
+
+  const created = await callTool(baseURL!, token, "call_tool", {
+    server: SLUG,
+    tool: "createPet",
+    arguments: {
+      body: { name: { $result: fido!.name.$result }, status: "available" },
+    },
+  })
+  expect(created.body.result?.isError ?? false, toolText(created)).toBe(false)
+  expect(JSON.parse(lastRequest()!.body)).toEqual({
+    name: "Fido",
+    status: "available",
+  })
 })
 
 test("errors reach the assistant as readable results, and bad input never leaves PCP", async ({

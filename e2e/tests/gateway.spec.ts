@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test"
 
-import { startUpstream, type Upstream } from "../fixtures/upstream"
+import { PICTURE_PNG, startUpstream, type Upstream } from "../fixtures/upstream"
 import { OWNER_PASSWORD } from "../lib/auth"
 import {
   allToolText,
@@ -286,6 +286,86 @@ test("keeps a long answer whole, for read_result and this token only", async ({
   const refused = await callTool(baseURL!, other, "read_result", { id })
   expect(refused.body.result?.isError).toBe(true)
   expect(toolText(refused)).toContain("No result with that id for this token")
+})
+
+test("hands a file back as a handle, and puts it where a later call names it", async ({
+  page,
+  baseURL,
+}) => {
+  upstream.lateTools.add("picture")
+  upstream.lateTools.add("measure")
+  for (const tool of ["picture", "measure"]) {
+    const described = await callTool(baseURL!, token, "describe_tool", {
+      server: SLUG,
+      tool,
+    })
+    expect(described.body.result?.isError ?? false, toolText(described)).toBe(
+      false,
+    )
+  }
+  await allowAllTools(page, `Assistant ${RUN}`, SLUG)
+
+  // The PNG is kept on sight; the caption because keep names it.
+  const picture = await callTool(baseURL!, token, "call_tool", {
+    server: SLUG,
+    tool: "picture",
+    keep: ["caption"],
+  })
+  const shown = allToolText(picture)
+  const base64 = PICTURE_PNG.toString("base64")
+  expect(shown).not.toContain(base64.slice(0, 40))
+  expect(shown).toContain("PCP kept 2 values of this answer as results")
+  const answer = JSON.parse(shown.split("\n").at(-1)!) as {
+    name: string
+    caption: { $result: string; type: string }
+    data: { $result: string; type: string; size: number; name?: string }
+  }
+  expect(answer.name).toBe("dot.png")
+  expect(answer.data).toMatchObject({
+    type: "image/png",
+    size: PICTURE_PNG.length,
+    name: "dot.png",
+  })
+  expect(answer.caption.type).toBe("text/plain")
+
+  // read_result describes the file and reads the text.
+  const described = await callTool(baseURL!, token, "read_result", {
+    id: answer.data.$result,
+  })
+  expect(toolText(described)).toContain("PCP does not show binary data")
+  const caption = await callTool(baseURL!, token, "read_result", {
+    id: answer.caption.$result,
+  })
+  expect(toolText(caption)).toMatch(/A small dot, drawn for the test\.$/)
+
+  // The handle reaches the upstream as the file's base64.
+  const measured = await callTool(baseURL!, token, "call_tool", {
+    server: SLUG,
+    tool: "measure",
+    arguments: { text: { $result: answer.data.$result } },
+  })
+  expect(JSON.parse(toolText(measured))).toEqual({
+    length: base64.length,
+    startsWith: base64.slice(0, 12),
+  })
+  expect(upstream.calls.at(-1)).toMatchObject({
+    tool: "measure",
+    args: { text: base64 },
+  })
+
+  // Another token cannot use it, and nothing reaches the upstream.
+  const before = upstream.calls.length
+  const other = await createToken(page, `Borrower ${RUN}`)
+  const refused = await callTool(baseURL!, other, "call_tool", {
+    server: SLUG,
+    tool: "measure",
+    arguments: { text: { $result: answer.data.$result } },
+  })
+  expect(refused.body.result?.isError).toBe(true)
+  expect(toolText(refused)).toContain(
+    `No kept result "${answer.data.$result}" for this token`,
+  )
+  expect(upstream.calls.length).toBe(before)
 })
 
 test("a token scoped to other servers cannot see this one", async ({

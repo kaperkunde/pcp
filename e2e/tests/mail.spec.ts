@@ -199,6 +199,35 @@ test("an assistant reads, files and sends mail through the gateway", async ({
   })
   expect(upstream.jmap.sent).toHaveLength(1)
 
+  // The picture read above goes out as an attachment, by its handle.
+  const forwarded = json(
+    await callTool(baseURL!, token, "call_tool", {
+      server: SLUG,
+      tool: "send_email",
+      arguments: {
+        to: ["charles@example.com"],
+        subject: "The drawing",
+        text: "Here it is.",
+        attachments: [{ $result: (png.result as { $result: string }).$result }],
+      },
+    }),
+  )
+  expect(forwarded).toMatchObject({ sent: { subject: "The drawing" } })
+  expect(
+    upstream.jmap.requests.filter((request) =>
+      request.path.startsWith("/jmap/upload/"),
+    ),
+  ).toEqual([
+    expect.objectContaining({
+      method: "POST",
+      authorization: basic(),
+      body: "12 bytes",
+    }),
+  ])
+  expect(upstream.jmap.emails.at(-1)!.attachments).toEqual([
+    expect.objectContaining({ name: "drawing.png", type: "image/png" }),
+  ])
+
   json(
     await callTool(baseURL!, token, "call_tool", {
       server: SLUG,

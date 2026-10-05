@@ -22,7 +22,9 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   (`expectedToken`) when one is set. `echo_auth` returns the Authorization
  *   header it received, which is how the tests prove the secret PCP holds
  *   reached the upstream and nothing else did. `lateTools` holding
- *   "long_text" adds a tool whose answer is as long as it is asked to be.
+ *   "long_text" adds a tool whose answer is as long as it is asked to be;
+ *   "picture" answers JSON with a base64 PNG in it, and "measure" says how
+ *   long the text it was given is, for handles moving a file between tools.
  * - `/oauth/mcp` — the same server behind OAuth: an authorization server
  *   with metadata, dynamic client registration, an authorize page that
  *   approves at once, and a token endpoint. Enough for the real SDK flow
@@ -476,6 +478,12 @@ function buildServer(
       continue
     }
 
+    // "picture" and "measure" show a file moving between tools by its handle.
+    if (name === "picture" || name === "measure") {
+      registerHandleTools(server, name, calls, authorization)
+      continue
+    }
+
     server.registerTool(
       name,
       {
@@ -491,6 +499,80 @@ function buildServer(
   }
 
   return server
+}
+
+/** A PNG's first bytes and enough after them to be kept on sight. */
+export const PICTURE_PNG = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.alloc(1_200, 7),
+])
+
+function registerHandleTools(
+  server: McpServer,
+  name: "picture" | "measure",
+  calls: Upstream["calls"],
+  authorization: () => string | null,
+) {
+  if (name === "picture") {
+    server.registerTool(
+      "picture",
+      {
+        title: "Picture",
+        description:
+          "Answers with a small picture as base64 in JSON, and a caption.",
+        inputSchema: z.object({}),
+        annotations: { readOnlyHint: true },
+      },
+      async () => {
+        calls.push({
+          tool: "picture",
+          args: {},
+          authorization: authorization(),
+        })
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                name: "dot.png",
+                caption: "A small dot, drawn for the test.",
+                data: PICTURE_PNG.toString("base64"),
+              }),
+            },
+          ],
+        }
+      },
+    )
+    return
+  }
+
+  server.registerTool(
+    "measure",
+    {
+      title: "Measure",
+      description: "Says how long a text is and how it starts.",
+      inputSchema: z.object({ text: z.string() }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ text }) => {
+      calls.push({
+        tool: "measure",
+        args: { text },
+        authorization: authorization(),
+      })
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              length: text.length,
+              startsWith: text.slice(0, 12),
+            }),
+          },
+        ],
+      }
+    },
+  )
 }
 
 function registerLongText(
