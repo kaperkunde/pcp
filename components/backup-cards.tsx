@@ -452,6 +452,9 @@ function PreviewList({ preview }: { preview: ExportPreview }) {
     plural(counts.memories, "memory", "memories"),
     plural(counts.webFetchRules, "web fetch level"),
     plural(counts.pendingRequests, "request waiting", "requests waiting"),
+    ...(counts.browserSites > 0
+      ? [`browser sign-ins for ${plural(counts.browserSites, "site")}`]
+      : []),
   ]
 
   return (

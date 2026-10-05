@@ -31,11 +31,28 @@ import {
 /** basic: a user name and a secret (a mail account's login). */
 export type AuthType = "none" | "header" | "oauth" | "basic"
 
-export type ServerKind = "mcp" | "openapi" | "jmap" | "imap"
+export type ServerKind = "mcp" | "openapi" | "jmap" | "imap" | "browser"
 
 export type MailKind = Extract<ServerKind, "jmap" | "imap">
 
-const SERVER_KINDS: readonly ServerKind[] = ["mcp", "openapi", "jmap", "imap"]
+const SERVER_KINDS: readonly ServerKind[] = [
+  "mcp",
+  "openapi",
+  "jmap",
+  "imap",
+  "browser",
+]
+
+/**
+ * The browser's url: it is PCP's own headless browser (lib/core/browser/),
+ * not something reached at an address, so its row names none.
+ */
+export const BROWSER_URL = "pcp:browser"
+
+/** The vault's own headless browser, rather than something PCP reaches. */
+export function isBrowserKind(kind: string): kind is "browser" {
+  return kind === "browser"
+}
 
 /** A mail account rather than an MCP server or an API endpoint. */
 export function isMailKind(kind: string): kind is MailKind {
@@ -50,6 +67,8 @@ export function kindNoun(kind: string): string {
     case "jmap":
     case "imap":
       return "a mail account"
+    case "browser":
+      return "the browser"
     default:
       return "an MCP server"
   }

@@ -4,6 +4,7 @@ import type {
   ApiToken,
   ApiTokenServer,
   ApiTokenToolAccess,
+  BrowserProfile,
   HostSetting,
   KeyGrant,
   McpServer,
@@ -291,6 +292,17 @@ const OpenApiSpecRow = z.strictObject({
 
 const SettingRow = z.strictObject({ vaultId: id, key: str, value: str })
 
+// The browser's sign-ins, added in 0.3: absent from older files.
+const BrowserProfileRow = z.strictObject({
+  vaultId: id,
+  ciphertext: bytes,
+  sites: z.number().int().default(0),
+  cookies: z.number().int().default(0),
+  size: z.number().int().default(0),
+  partial: z.boolean().default(false),
+  savedAt: date,
+})
+
 /** The host settings that travel: the configuration, never a machine's status. */
 export const EXPORTED_HOST_KEYS = [DDNS_CONFIG_KEY, TLS_CONFIG_KEY] as const
 
@@ -333,6 +345,7 @@ export const PayloadSchema = z.strictObject({
     tools: z.array(McpToolRow),
     openApiSpecs: z.array(OpenApiSpecRow),
     settings: z.array(SettingRow),
+    browserProfiles: z.array(BrowserProfileRow).default([]),
   }),
   host: z.array(HostSettingRow),
 })
@@ -358,6 +371,8 @@ export type ExportPreview = {
     memories: number
     webFetchRules: number
     pendingRequests: number
+    /** Sites the browser keeps sign-ins for; 0 without any. */
+    browserSites: number
   }
   /** Null when the file carries no network settings. */
   host: { ddnsName: string | null; https: boolean } | null
@@ -462,6 +477,11 @@ export function checkReferences(payload: ExportPayload): void {
   ownedBy(tables.secrets, "secret")
   ownedBy(tables.servers, "server")
   ownedBy(tables.settings, "setting")
+  ownedBy(tables.browserProfiles, "browser profile")
+
+  if (tables.browserProfiles.length > 1) {
+    throw problem("it holds more than one browser profile")
+  }
 
   const pointsAt = (ref: string | null, known: Set<string>, what: string) => {
     if (ref !== null && !known.has(ref)) {
@@ -550,6 +570,7 @@ export function previewOf(payload: ExportPayload): ExportPreview {
       pendingRequests: tables.permissionRequests.filter(
         (row) => row.status === "pending",
       ).length,
+      browserSites: tables.browserProfiles[0]?.sites ?? 0,
     },
     host:
       ddns || tls
@@ -602,6 +623,7 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: Covers<McpTool, z.output<typeof McpToolRow>>
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   setting: Covers<Setting, z.output<typeof SettingRow>>
+  browserProfile: Covers<BrowserProfile, z.output<typeof BrowserProfileRow>>
   hostSetting: Covers<HostSetting, z.output<typeof HostSettingRow>>
 } = {
   vault: true,
@@ -619,5 +641,6 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: true,
   openApiSpec: true,
   setting: true,
+  browserProfile: true,
   hostSetting: true,
 }

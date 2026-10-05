@@ -6,7 +6,10 @@ import { Badge } from "@/components/ui/badge"
 import { Card } from "@/components/ui/card"
 import { isMailKind, type ServerSummary } from "@/lib/core/servers"
 
-/** The cards on the Servers page: servers, endpoints and mail accounts. */
+/**
+ * The cards on the Servers page: servers, endpoints, mail accounts and the
+ * browser.
+ */
 export function ServerList({
   servers,
   empty,
