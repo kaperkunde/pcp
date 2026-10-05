@@ -446,7 +446,7 @@ test("an assistant proposes a JMAP account; the owner types the app password in 
     page
       .getByRole("listitem")
       .filter({ hasText: secretName })
-      .getByText(proposed),
+      .getByText(proposed, { exact: true }),
   ).toBeVisible()
 })
 
