@@ -76,7 +76,7 @@ function firstLine(error: unknown): string {
 }
 
 /** A page address an assistant gave, checked. */
-function pageUrl(raw: string): URL {
+export function pageUrl(raw: string): URL {
   let url: URL
 
   try {

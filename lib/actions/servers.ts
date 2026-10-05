@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
+import { stopBrowser } from "@/lib/core/browser/owner"
 import { canRereadTools } from "@/lib/core/catalogue"
 import { disconnectOAuth } from "@/lib/core/oauth"
 import {
@@ -269,7 +270,14 @@ export async function disconnectOAuthAction(
 
 export async function deleteServerAction(id: string): Promise<void> {
   const ctx = await requireContext()
+  const removed = await getServer(ctx, id).catch(() => null)
   await deleteServer(ctx, id)
+
+  // Removing the browser closes it; its sign-ins stay until forgotten.
+  if (removed?.kind === "browser") {
+    await stopBrowser(ctx)
+  }
+
   revalidatePath("/servers")
   redirect("/servers")
 }

@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import Link from "next/link"
 
 import { AccessReview } from "@/components/access-review"
+import { BrowserTabView } from "@/components/browser-tab-view"
 import { LocalDate } from "@/components/local-date"
 import { PageHeader } from "@/components/page-header"
 import { PermissionDecision } from "@/components/permission-decision"
@@ -9,6 +10,7 @@ import { Badge } from "@/components/ui/badge"
 import { buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import type { MemoryShown } from "@/lib/core/memories"
+import { tabFor } from "@/lib/core/browser/owner"
 import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
@@ -76,6 +78,11 @@ export default async function PermissionPage({
       (memory && view.status === "declined")) &&
     view.outcome
   const proposal = access && pending ? await getAccessProposal(ctx, id) : null
+  // A tab handed to the owner is shown here, live, to do what was asked.
+  const handedTab =
+    view.kind === "browser_handover" && pending && view.browserTabId
+      ? await tabFor(ctx, view.browserTabId)
+      : null
 
   return (
     <>
@@ -96,7 +103,15 @@ export default async function PermissionPage({
           </>
         }
       />
-      <Card className={access && pending ? "max-w-4xl" : "max-w-2xl"}>
+      <Card
+        className={
+          handedTab
+            ? "max-w-6xl"
+            : access && pending
+              ? "max-w-4xl"
+              : "max-w-2xl"
+        }
+      >
         <CardHeader>
           <CardTitle className="break-words">{view.title}</CardTitle>
         </CardHeader>
@@ -169,6 +184,18 @@ export default async function PermissionPage({
                   </Link>
                   .
                 </p>
+              ) : view.kind === "browser_handover" && handedTab ? (
+                <>
+                  <BrowserTabView
+                    tabId={handedTab.id}
+                    initial={handedTab}
+                    mode="handover"
+                  />
+                  <p className="text-muted-foreground">
+                    Do what the assistant asks in the tab above, then say Done.
+                    It is yours until you answer.
+                  </p>
+                </>
               ) : view.kind === "browser_handover" ? (
                 <p className="text-muted-foreground">
                   {view.browserTabId ? (

@@ -1,3 +1,5 @@
+import { BROWSER_VIEWPORT } from "../constants"
+
 /**
  * Bounds on what the browser makes PCP do. Addresses, text to type and
  * how long to wait come from an assistant; pages and input from the web
@@ -25,7 +27,7 @@ export const MAX_READ_CHARS = 50_000
 /** A screenshot as it is handed back; its quality drops until it fits. */
 export const MAX_SCREENSHOT_BYTES = 1024 * 1024
 /** The size every tab renders at, in CSS pixels. */
-export const VIEWPORT = { width: 1280, height: 800 } as const
+export const VIEWPORT = BROWSER_VIEWPORT
 /** JPEG quality of the live view's frames. */
 export const SCREENCAST_QUALITY = 55
 /** People watching one tab at once. */

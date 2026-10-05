@@ -25,6 +25,7 @@ export default async function ServersPage() {
   const servers = all.filter((server) => server.kind === "mcp")
   const endpoints = all.filter((server) => server.kind === "openapi")
   const mail = all.filter((server) => isMailKind(server.kind))
+  const browser = all.filter((server) => server.kind === "browser")
   const now = new Date()
   const hasToken = tokens.some(
     (token) => !token.revokedAt && (!token.expiresAt || token.expiresAt > now),
@@ -34,7 +35,7 @@ export default async function ServersPage() {
     <>
       <PageHeader
         title="Servers"
-        description="What an assistant can reach through PCP: MCP servers, APIs described by an OpenAPI schema, and mail accounts. Each is described here in your words; that description is what the assistant reads when it searches for a tool."
+        description="What an assistant can reach through PCP: MCP servers, APIs described by an OpenAPI schema, mail accounts, and a browser on this machine. Each is described here in your words; that description is what the assistant reads when it searches for a tool."
       />
 
       {all.length === 0 ? <LetAnAssistantAddThem hasToken={hasToken} /> : null}
@@ -69,6 +70,19 @@ export default async function ServersPage() {
         <ServerList
           servers={mail}
           empty="No mail accounts yet. Add one over JMAP or IMAP, and an assistant can search, read and file its mail, and send from it unless you make it read-only."
+        />
+      </section>
+
+      <section className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg">Browser</h2>
+          <ButtonLink href="/browser" variant="outline">
+            {browser.length > 0 ? "Tabs and sign-ins" : "Add the browser"}
+          </ButtonLink>
+        </div>
+        <ServerList
+          servers={browser}
+          empty="No browser yet. Add it on the Browser page, and an assistant can open pages on this machine, while you decide which sites and can take any tab over."
         />
       </section>
     </>

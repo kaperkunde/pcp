@@ -138,6 +138,12 @@ export const FETCH_PRIVATE_LABELS: Record<
   allowed: "Allowed",
 }
 
+/** The size every browser tab renders at, in CSS pixels. */
+export const BROWSER_VIEWPORT = { width: 1280, height: 800 } as const
+
+/** How often the live view sends the owner's input, in milliseconds. */
+export const BROWSER_INPUT_EVERY_MS = 40
+
 /** The longest memory, in characters. */
 export const MAX_MEMORY_CHARS = 10_000
 

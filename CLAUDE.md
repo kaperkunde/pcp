@@ -138,9 +138,12 @@ so in the summary; the bump itself waits for the request.
   use `useActionState`. Route handlers exist only for the gateway, OAuth
   (redirects and PCP's client metadata document), the health check (which, in
   the desktop app only, also carries the version and the owner's install
-  request for the wrapper to read) and the export download (`app/api/export/route.ts`: a file needs
+  request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
-  origin itself, `lib/server/same-origin.ts`).
+  origin itself, `lib/server/same-origin.ts`), and the browser's live view
+  (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
+  owner's input, which an action cannot carry; the same origin check and
+  session).
 - The owner is asked by link only: a result hands the assistant a link to
   PCP's page, to end its reply with (`linkLastText`: nothing after it, or
   Claude's apps fold it out of sight), and a check to call once the owner
