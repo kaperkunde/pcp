@@ -399,6 +399,9 @@ async function wipeVault(
   const byToken = { where: { token: { vaultId } } }
 
   await tx.setting.deleteMany(byVault)
+  // Answers kept for read_result are not exported: a day's cache, bound to
+  // the tokens this restore replaces.
+  await tx.toolResult.deleteMany(byVault)
   await tx.memory.deleteMany(byVault)
   await tx.permissionRequest.deleteMany(byVault)
   await tx.webFetchRule.deleteMany(byVault)

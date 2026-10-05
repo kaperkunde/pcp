@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
 import { EndpointForm } from "@/components/endpoint-form"
+import { MailAccountForm } from "@/components/mail-account-form"
 import { PageHeader } from "@/components/page-header"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
@@ -12,8 +13,10 @@ import { readStoredPatches } from "@/lib/core/openapi/patch"
 import { readCallPlan } from "@/lib/core/openapi/plan"
 import { listSecrets } from "@/lib/core/secrets"
 import {
+  asServerKind,
   extraAuthHeaders,
   getServer,
+  isMailKind,
   type AuthType,
   type ServerStatus,
 } from "@/lib/core/servers"
@@ -46,7 +49,9 @@ export default async function ServerPage({
     throw error
   }
 
-  const endpoint = server.kind === "openapi"
+  const kind = asServerKind(server.kind)
+  const endpoint = kind === "openapi"
+  const mail = isMailKind(kind)
   const spec = endpoint
     ? await db().openApiSpec.findUnique({
         where: { serverId: server.id },
@@ -86,10 +91,11 @@ export default async function ServerPage({
       <ServerDetail
         server={{
           id: server.id,
-          kind: endpoint ? "openapi" : "mcp",
+          kind,
           name: server.name,
           slug: server.slug,
           url: server.url,
+          smtpUrl: server.smtpUrl,
           enabled: server.enabled,
           readOnly: server.readOnly,
           publicOnly: server.publicOnly,
@@ -122,7 +128,33 @@ export default async function ServerPage({
         redirectUrl={redirectUrl}
       />
       <h2 className="text-lg">Settings</h2>
-      {endpoint ? (
+      {mail ? (
+        <MailAccountForm
+          initial={{
+            id: server.id,
+            protocol: kind === "imap" ? "imap" : "jmap",
+            name: server.name,
+            slug: server.slug,
+            description: server.description,
+            url: server.url,
+            smtpUrl: server.smtpUrl ?? "",
+            readOnly: server.readOnly,
+            authType:
+              server.authType === "header" || server.authType === "oauth"
+                ? server.authType
+                : "basic",
+            authUsername: server.authUsername ?? "",
+            authSecretId: server.authSecretId ?? "",
+            mailFrom: server.mailFrom ?? "",
+            oauthClientId: server.oauthClientId ?? "",
+            oauthClientSecretId: server.oauthClientSecretId ?? "",
+            oauthScope: server.oauthScope ?? "",
+            oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+          }}
+          secrets={secrets}
+          redirectUrl={redirectUrl}
+        />
+      ) : endpoint ? (
         <EndpointForm
           initial={{
             id: server.id,

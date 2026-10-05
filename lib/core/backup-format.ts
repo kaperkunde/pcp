@@ -245,6 +245,15 @@ const McpServerRow = z.strictObject({
   readOnly: z.boolean(),
   publicOnly: z.boolean(),
   specUrlFromAssistant: z.boolean(),
+  // Mail accounts (kinds jmap and imap), added in 0.2: absent from older
+  // exports, which hold none.
+  authUsername: str.nullable().default(null),
+  mailApiUrl: str.nullable().default(null),
+  mailDownloadUrl: str.nullable().default(null),
+  mailAccountId: str.nullable().default(null),
+  mailSubmission: z.boolean().default(false),
+  smtpUrl: str.nullable().default(null),
+  mailFrom: str.nullable().default(null),
 })
 
 const ServerAuthHeaderRow = z.strictObject({
@@ -342,6 +351,7 @@ export type ExportPreview = {
   counts: {
     servers: number
     endpoints: number
+    mailAccounts: number
     tools: number
     secrets: number
     tokens: number
@@ -529,6 +539,9 @@ export function previewOf(payload: ExportPayload): ExportPreview {
     counts: {
       servers: tables.servers.filter((row) => row.kind === "mcp").length,
       endpoints: tables.servers.filter((row) => row.kind === "openapi").length,
+      mailAccounts: tables.servers.filter(
+        (row) => row.kind === "jmap" || row.kind === "imap",
+      ).length,
       tools: tables.tools.length,
       secrets: tables.secrets.filter((row) => row.kind === "text").length,
       tokens: tables.apiTokens.filter((row) => row.revokedAt === null).length,

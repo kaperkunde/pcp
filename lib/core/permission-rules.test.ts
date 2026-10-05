@@ -46,6 +46,12 @@ describe("previewArgs", () => {
     ])
   })
 
+  it("shows a handle to a kept result as it is, short whatever it stands for", () => {
+    expect(
+      previewArgs({ attachments: [{ $result: "r1", as: "base64" }] }),
+    ).toEqual(['attachments: [{"$result":"r1","as":"base64"}]'])
+  })
+
   it("says so when there are none, and clips long values", () => {
     expect(previewArgs({})).toEqual(["(no arguments)"])
     expect(previewArgs({ body: "x".repeat(20) }, 10)).toEqual([
@@ -70,6 +76,15 @@ describe("storedResultText", () => {
   it("cuts long results", () => {
     expect(storedResultText(["x".repeat(30)], 10)).toBe(
       "xxxxxxxxxx\n… (truncated)",
+    )
+  })
+
+  it("keeps the notes the cut would lose", () => {
+    expect(
+      storedResultText(["x".repeat(30), "NOTE"], 10, ["NOTE", "GONE?"]),
+    ).toBe("xxxxxxxxxx\n… (truncated)\nNOTE\nGONE?")
+    expect(storedResultText(["NOTE", "x".repeat(30)], 10, ["NOTE"])).toBe(
+      "NOTE\nxxxxx\n… (truncated)",
     )
   })
 })

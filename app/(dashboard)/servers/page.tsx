@@ -11,7 +11,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { listApiTokens } from "@/lib/core/api-tokens"
-import { listServers } from "@/lib/core/servers"
+import { isMailKind, listServers } from "@/lib/core/servers"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Servers" }
@@ -24,6 +24,7 @@ export default async function ServersPage() {
   ])
   const servers = all.filter((server) => server.kind === "mcp")
   const endpoints = all.filter((server) => server.kind === "openapi")
+  const mail = all.filter((server) => isMailKind(server.kind))
   const now = new Date()
   const hasToken = tokens.some(
     (token) => !token.revokedAt && (!token.expiresAt || token.expiresAt > now),
@@ -33,7 +34,7 @@ export default async function ServersPage() {
     <>
       <PageHeader
         title="Servers"
-        description="What an assistant can reach through PCP: MCP servers, and APIs described by an OpenAPI schema. Each is described here in your words; that description is what the assistant reads when it searches for a tool."
+        description="What an assistant can reach through PCP: MCP servers, APIs described by an OpenAPI schema, and mail accounts. Each is described here in your words; that description is what the assistant reads when it searches for a tool."
       />
 
       {all.length === 0 ? <LetAnAssistantAddThem hasToken={hasToken} /> : null}
@@ -57,6 +58,17 @@ export default async function ServersPage() {
         <ServerList
           servers={endpoints}
           empty="No API endpoints yet. Add one from an OpenAPI schema and its operations become tools an assistant can call."
+        />
+      </section>
+
+      <section className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg">Mail accounts</h2>
+          <ButtonLink href="/servers/mail/new">Add a mail account</ButtonLink>
+        </div>
+        <ServerList
+          servers={mail}
+          empty="No mail accounts yet. Add one over JMAP or IMAP, and an assistant can search, read and file its mail, and send from it unless you make it read-only."
         />
       </section>
     </>

@@ -14,6 +14,7 @@ import { storeTools } from "./catalogue"
 import { decrypt, deriveKek, type ScryptParams } from "./crypto"
 import { db } from "./db"
 import { getHostJson, setHostJson } from "./host-settings"
+import { createMailAccount } from "./mail/accounts"
 import { createMemory, listMemories } from "./memories"
 import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
 import { createSecret, deleteSecret, revealSecret } from "./secrets"
@@ -21,6 +22,7 @@ import { createServer } from "./servers"
 import { createSession, resolveSession } from "./sessions"
 import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
+import { keepResult, readResult } from "./tool-results"
 import {
   ownerVault,
   resetPasswordWithRecoveryKey,
@@ -206,6 +208,126 @@ describe("restoring", { timeout: 60_000 }, () => {
       "another good password",
     )
     expect(recovered.vaultId).toBe(ctx.vaultId)
+  })
+
+  it("brings a mail account back as it was, without the answers PCP kept for a day", async () => {
+    const { ctx, secretId } = await populate()
+    const imap = await createMailAccount(ctx, {
+      protocol: "imap",
+      name: "Post",
+      url: "imaps://mail.example:993",
+      smtpUrl: "smtps://mail.example:465",
+      readOnly: false,
+      authType: "basic",
+      authUsername: "ada@example.com",
+      authSecretId: secretId,
+      mailFrom: "Ada <ada@example.com>",
+    })
+    const jmap = await createMailAccount(ctx, {
+      protocol: "jmap",
+      name: "Stalwart",
+      url: "https://mail.example/.well-known/jmap",
+      readOnly: true,
+      authType: "basic",
+      authUsername: "ada",
+      authSecretId: secretId,
+    })
+    // What the session document said, as a check writes it.
+    await db().mcpServer.update({
+      where: { id: jmap.id },
+      data: {
+        mailApiUrl: "https://mail.example/jmap/",
+        mailDownloadUrl:
+          "https://mail.example/jmap/download/{accountId}/{blobId}/{name}",
+        mailAccountId: "a1",
+        mailSubmission: true,
+      },
+    })
+    const tokenId = (await db().apiToken.findFirstOrThrow()).id
+    const kept = await keepResult(ctx, {
+      tokenId,
+      serverId: imap.id,
+      toolName: "get_email",
+      text: "a long body ".repeat(10_000),
+      mediaType: "text/plain",
+    })
+    expect((await readResult(ctx, { tokenId, id: kept.id })).total).toBe(
+      kept.length,
+    )
+    const mail = await db().mcpServer.findMany({
+      where: { id: { in: [imap.id, jmap.id] } },
+      orderBy: { name: "asc" },
+    })
+
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const payload = await openRaw(file, EXPORT_PASSWORD)
+    expect(payload.tables).not.toHaveProperty("toolResults")
+    expect(JSON.stringify(payload)).not.toContain(kept.id)
+    const { payload: read, preview } = await readExport(file, EXPORT_PASSWORD)
+    expect(preview.counts).toMatchObject({
+      servers: 1,
+      endpoints: 0,
+      mailAccounts: 2,
+    })
+
+    await restoreExport(
+      read,
+      { into: "vault", vaultId: ctx.vaultId },
+      { restoreHostSettings: false },
+    )
+
+    expect(
+      await db().mcpServer.findMany({
+        where: { id: { in: [imap.id, jmap.id] } },
+        orderBy: { name: "asc" },
+      }),
+    ).toEqual(mail)
+    await expect(
+      readResult(ctx, { tokenId, id: kept.id }),
+    ).rejects.toMatchObject({ code: "not_found" })
+  })
+
+  it("restores a file from before mail accounts, with their columns empty", async () => {
+    const { ctx, serverId } = await populate()
+    const payload = await openRaw(
+      await exportVault(ctx, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    const older = structuredClone(payload)
+    for (const row of older.tables.servers as Record<string, unknown>[]) {
+      for (const column of [
+        "authUsername",
+        "mailApiUrl",
+        "mailDownloadUrl",
+        "mailAccountId",
+        "mailSubmission",
+        "smtpUrl",
+        "mailFrom",
+      ]) {
+        delete row[column]
+      }
+    }
+
+    const { payload: read } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      read,
+      { into: "vault", vaultId: ctx.vaultId },
+      { restoreHostSettings: false },
+    )
+
+    expect(
+      await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } }),
+    ).toMatchObject({
+      kind: "mcp",
+      authUsername: null,
+      mailApiUrl: null,
+      mailSubmission: false,
+      smtpUrl: null,
+      mailFrom: null,
+    })
   })
 
   it("replaces the host's network settings only when asked, and drops their status", async () => {

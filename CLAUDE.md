@@ -34,6 +34,11 @@ minor|major` in a commit on `develop`; the patch and the `v*` tags belong to
 the release workflow, never to a hand edit. Anything that states PCP's version
 uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
 
+Never change the version yourself. Build (patch) versions count up on their
+own on every push to `main`, and a MINOR or MAJOR bump is made only when the
+user asks for one in so many words. A change that could justify a bump is said
+so in the summary; the bump itself waits for the request.
+
 ## Boundaries
 
 - `lib/core` is framework-free. No `next/*`, no React, no `lib/actions`,
@@ -90,11 +95,26 @@ uses `PCP_VERSION` from `lib/core/version.ts`, not a literal.
   request's page (`applyAccessRequest`), with what they chose there. No
   decision and nothing the assistant sends writes them, and blocked tools
   stay out of what it can name.
+- Mail accounts (`lib/core/mail/`) never read a secret: `upstream.ts` hands
+  in a `MailCredential` (the header, the login, or an OAuth bearer from
+  `credential()`, renewed through `endpointToken` like an API endpoint's). Mail travels encrypted only (TLS, or STARTTLS that
+  is required, never optional); a JMAP session's API and download addresses
+  are taken only on the session URL's origin, and redirects are not
+  followed. Nothing deletes mail for good: delete moves to the Trash. Only
+  the owner adds or changes an account. A new mail tool goes in
+  `mail/tools.ts`, for both protocols where they allow, with its arguments
+  checked before anything connects, and is left out of a read-only account
+  and refused there if called anyway.
+- Long tool answers are kept only through `lib/core/tool-results.ts`:
+  encrypted with `tool_result:<id>`, readable by the token whose call
+  produced them, gone after a day, never logged and never exported.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
 - Web fetch (`lib/core/fetch/`, `lib/core/web-fetch.ts`) reaches public
-  addresses only, always, never reads a secret, never sends a header PCP owns
+  addresses, and private ones only where the owner allowed them for the
+  token (a `private` line in `web_fetch_rule`, never an assistant's to set
+  or ask for), never PCP's own address (`isOwnAddress`), never reads a secret, never sends a header PCP owns
   or one that carries a credential, and never follows a redirect to another
   site: that site gets its own decision. A site the token has no line for
   gets one of its own on first sight, so the owner sees every site it tried.
@@ -173,7 +193,8 @@ column with `ALTER TABLE … DROP COLUMN` instead.
 
 The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
-OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a note an
+OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
+signs in to is a "mail account"; a note an
 assistant keeps between conversations is a "memory", "shared" when every
 assistant reads it; what web_fetch reaches is a "site" (a host), and a level
 every token follows is "for all tokens" ("All tokens" in the UI). No operator

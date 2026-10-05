@@ -76,9 +76,19 @@ import {
   type ServerInput,
 } from "./servers"
 import { writeToolAccess } from "./tool-access"
+import { collectHandleIds } from "./result-handles"
+import {
+  describeResults,
+  keepWholeAnswer,
+  MAX_KEPT_RESULT_CHARS,
+  resultKeepers,
+  resultNotices,
+  resultOpener,
+} from "./tool-results"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
   describeFetchAsk,
+  privateAllowedFor,
   fetchHostOf,
   runFetch,
   writeSiteAccess,
@@ -226,8 +236,11 @@ export function permissionUrl(publicUrl: string, id: string): string {
 /**
  * One call to an upstream tool, its answer shaped for the assistant
  * (answers.ts): only `fields` when given, base64 text at `decode` decoded,
- * and never more than it should read. An OAuth server that is not connected (or whose sign-in expired)
- * answers with the link to connect it instead of an error.
+ * and never more than it should read. When shaping had to leave something
+ * out, the whole answer is kept for the token that asked and the assistant
+ * is told how to read it (lib/core/tool-results.ts). An OAuth server that is
+ * not connected (or whose sign-in expired) answers with the link to connect
+ * it instead of an error.
  */
 export async function runCall(
   ctx: VaultContext,
@@ -236,11 +249,14 @@ export async function runCall(
   args: Record<string, unknown>,
   {
     publicUrl,
+    tokenId,
     fields,
     decode,
     executor = defaultExecutor,
   }: {
     publicUrl: string
+    /** The token the call is made for: the one that may read a kept answer. */
+    tokenId: string
     executor?: PermissionExecutor
   } & AnswerShape,
 ): Promise<CallToolResult> {
@@ -249,9 +265,23 @@ export async function runCall(
   }
 
   try {
-    return shapeAnswer(
-      await executor.callTool(ctx, server, toolName, args, { publicUrl }),
-      { fields, decode },
+    const keepers = resultKeepers(ctx, tokenId)
+    const keep = keepers.text
+    const answer = await executor.callTool(ctx, server, toolName, args, {
+      publicUrl,
+      keep,
+      open: resultOpener(ctx, tokenId),
+    })
+
+    return await keepWholeAnswer(
+      {
+        raw: answer,
+        shown: shapeAnswer(answer, { fields, decode }),
+        whole: () =>
+          shapeAnswer(answer, { fields, decode, max: MAX_KEPT_RESULT_CHARS }),
+      },
+      keep,
+      { serverId: server.id, toolName },
     )
   } catch (error) {
     if (
@@ -423,7 +453,9 @@ async function summarizeRow(
   }
 
   if (row.kind === "fetch") {
-    const asked = describeFetchAsk(args as FetchArgs)
+    const asked = describeFetchAsk(args as FetchArgs, {
+      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+    })
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -548,11 +580,62 @@ async function summarizeRow(
       ...(about ? [`What it does: ${about}`] : []),
       asker,
       ...previewArgs(args),
+      ...(await handleLines(ctx, row.tokenId, args)),
     ],
     warning: destructive
       ? "The server marks this tool as destructive: it can change or delete things for good."
       : null,
   }
+}
+
+const COUNT = new Intl.NumberFormat("en-US")
+
+/**
+ * What each kept result a call's arguments name is, so the owner sees what
+ * the call carries without its content: its name, type and size, which
+ * server's tool kept it, and until when. An id the token no longer has is
+ * said too, since the call would fail.
+ */
+async function handleLines(
+  ctx: VaultContext,
+  tokenId: string,
+  args: Record<string, unknown>,
+): Promise<string[]> {
+  let ids: string[]
+
+  try {
+    ids = collectHandleIds(args)
+  } catch {
+    return []
+  }
+
+  const infos = await describeResults(ctx, tokenId, ids)
+  const serverIds = infos.flatMap((info) =>
+    info.found && info.serverId ? [info.serverId] : [],
+  )
+  const servers = serverIds.length
+    ? await db().mcpServer.findMany({
+        where: { id: { in: serverIds }, vaultId: ctx.vaultId },
+        select: { id: true, slug: true },
+      })
+    : []
+  const slugs = new Map(servers.map((server) => [server.id, server.slug]))
+
+  return infos.map((info) => {
+    if (!info.found) {
+      return `Kept result ${info.id}: no longer available for this token; the call will fail`
+    }
+
+    const size =
+      info.kind === "bytes"
+        ? `${COUNT.format(info.length)} bytes`
+        : `${COUNT.format(info.length)} characters`
+    const from = info.serverId
+      ? `${slugs.get(info.serverId) ?? "(removed server)"}/${info.toolName}`
+      : info.toolName
+
+    return `Kept result ${info.id}: ${info.name ?? "(unnamed)"}, ${info.mediaType}, ${size}, from ${from}, readable until ${info.expiresAt.toISOString()}`
+  })
 }
 
 async function toView(
@@ -911,7 +994,7 @@ export async function decidePermission(
               ),
             )
           : kind === "fetch"
-            ? await executeFetch(ctx, row, executor)
+            ? await executeFetch(ctx, row, publicUrl, executor)
             : await executeRegister(ctx, row, publicUrl, executor, secretValue)
   } catch (error) {
     if (!isPcpError(error)) {
@@ -931,9 +1014,10 @@ export async function decidePermission(
   // now needs connecting was added, which is what the owner agreed to.
   const failed =
     result.isError === true || (kind === "call" && isConnectResult(result))
-  const stored = storedResultText(
-    result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])),
+  const texts = result.content.flatMap((part) =>
+    part.type === "text" ? [part.text] : [],
   )
+  const stored = storedResultText(texts, undefined, resultNotices(texts))
 
   await db().permissionRequest.update({
     where: { id: row.id },
@@ -971,6 +1055,7 @@ async function executeCall(
 
   return runCall(ctx, row.server, row.toolName, readArgs(ctx, row), {
     publicUrl,
+    tokenId: row.tokenId,
     fields: readStoredFields(row.fields),
     decode: readStoredFields(row.decode),
     executor,
@@ -981,6 +1066,7 @@ async function executeCall(
 async function executeFetch(
   ctx: VaultContext,
   row: Row,
+  publicUrl: string,
   executor: PermissionExecutor,
 ): Promise<CallToolResult> {
   const token = await db().apiToken.findUnique({
@@ -995,12 +1081,10 @@ async function executeFetch(
     )
   }
 
-  return runFetch(
-    ctx,
-    row.tokenId,
-    readArgs(ctx, row) as FetchArgs,
-    executor.fetchWeb ?? fetchWeb,
-  )
+  return runFetch(ctx, row.tokenId, readArgs(ctx, row) as FetchArgs, {
+    publicUrl,
+    fetcher: executor.fetchWeb ?? fetchWeb,
+  })
 }
 
 /**
@@ -1074,6 +1158,23 @@ function secretFields(asked: RegisterArgs, secretId: string | null) {
     : { authSecretId: secretId }
 }
 
+/**
+ * How an API endpoint an assistant proposed signs in. register_server offers
+ * none, a header or OAuth; a user name and password (a mail account's) is
+ * the owner's to set up, never a proposal's.
+ */
+function endpointAuthType(
+  authType: RegisterArgs["authType"],
+): "none" | "header" | "oauth" {
+  if (authType === "basic") {
+    throw invalid(
+      "An API proposed through register_server cannot sign in with a user name and password.",
+    )
+  }
+
+  return authType
+}
+
 async function executeRegister(
   ctx: VaultContext,
   row: Row,
@@ -1091,7 +1192,7 @@ async function executeRegister(
           name: asked.name,
           description: asked.description,
           url: asked.url,
-          authType: asked.authType,
+          authType: endpointAuthType(asked.authType),
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
           authExtraHeaders: asked.authExtraHeaders,

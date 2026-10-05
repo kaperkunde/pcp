@@ -8,13 +8,17 @@ const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: path.join(__dirname),
   poweredByHeader: false,
-  // Native module: must be required at runtime, not bundled. acme-client
-  // (HTTPS, lib/core/network/tls.ts) brings axios and node-forge, which are
-  // happier required than bundled.
+  // Required at runtime, not bundled: better-sqlite3 is a native module;
+  // acme-client (HTTPS, lib/core/network/tls.ts) brings axios and
+  // node-forge, which are happier required than bundled; the mail libraries
+  // (lib/core/mail/imap.ts) load parts of themselves dynamically and only
+  // ever run on the server.
   serverExternalPackages: [
     "better-sqlite3",
     "@prisma/adapter-better-sqlite3",
     "acme-client",
+    "imapflow",
+    "nodemailer",
   ],
   experimental: {
     // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) and an export

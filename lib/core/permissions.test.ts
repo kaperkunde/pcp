@@ -16,6 +16,7 @@ import {
   getPermissionView,
   listPendingRequests,
   prunePermissionRequests,
+  runCall,
   withPermission,
   type PermissionExecutor,
   type PermissionScope,
@@ -24,6 +25,7 @@ import {
 import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
+import { keepBytes } from "./tool-results"
 import { setupVault } from "./vault"
 
 // The owner's permission against a scratch database, with the upstream
@@ -246,6 +248,112 @@ describe("asking the owner", () => {
   })
 })
 
+describe("kept results in a call", () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+  async function keepFile(
+    ctx: VaultContext,
+    serverId: string,
+    tokenId: string,
+  ) {
+    return (
+      await keepBytes(ctx, {
+        tokenId,
+        serverId,
+        toolName: "get_attachment",
+        bytes: PNG,
+        mediaType: "image/png",
+        name: "dot.png",
+      })
+    ).id
+  }
+
+  it("shows the owner what each handle is, and warns when one is gone", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const id = await keepFile(ctx, server.id, tokenId)
+    await withPermission(
+      scope,
+      call(server, "send_postcard", {
+        attachments: [{ $result: id }, { $result: "gone" }],
+      }),
+    )
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(view?.lines).toContain(
+      `attachments: [{"$result":"${id}"},{"$result":"gone"}]`,
+    )
+    expect(
+      view?.lines.find((line) => line.startsWith(`Kept result ${id}:`)),
+    ).toMatch(
+      /^Kept result [^:]+: dot\.png, image\/png, 8 bytes, from postcards\/get_attachment, readable until \d{4}-/,
+    )
+    expect(view?.lines).toContain(
+      "Kept result gone: no longer available for this token; the call will fail",
+    )
+  })
+
+  it("hands the upstream a way to open the token's own results, and no other's", async () => {
+    const { ctx, server, tokenId } = await setup()
+    const id = await keepFile(ctx, server.id, tokenId)
+    const seen: Array<{ own: unknown; other: unknown }> = []
+    const executor: PermissionExecutor = {
+      callTool: async (_ctx, _server, _tool, _args, options) => {
+        const opened = await options.open?.(id)
+        seen.push({ own: opened?.bytes().equals(PNG), other: null })
+
+        return { content: [{ type: "text", text: "ok" }] }
+      },
+      syncTools: async () => ({ status: "ok", message: "", toolCount: 3 }),
+    }
+
+    const row = await db().mcpServer.findFirstOrThrow()
+    await runCall(
+      ctx,
+      row,
+      "add_numbers",
+      {},
+      {
+        publicUrl: PUBLIC_URL,
+        tokenId,
+        executor,
+      },
+    )
+
+    const { id: other } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const foreign: PermissionExecutor = {
+      callTool: async (_ctx, _server, _tool, _args, options) => {
+        seen.push({ own: null, other: await options.open?.(id) })
+
+        return { content: [{ type: "text", text: "ok" }] }
+      },
+      syncTools: executor.syncTools,
+    }
+    await runCall(
+      ctx,
+      row,
+      "add_numbers",
+      {},
+      {
+        publicUrl: PUBLIC_URL,
+        tokenId: other,
+        executor: foreign,
+      },
+    )
+
+    expect(seen).toEqual([
+      { own: true, other: null },
+      { own: null, other: null },
+    ])
+  })
+})
+
 describe("check_permission", () => {
   it("waits while the owner answers, then gives the outcome", async () => {
     const { ctx, scope, server } = await setup()
@@ -394,6 +502,35 @@ describe("the owner's answer", () => {
     )
     expect(textOf(again)).toContain("allowed it and it ran")
     expect(calls).toHaveLength(1)
+  })
+
+  it("keeps a long answer for the token, and says so in the outcome", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const long = `${"word ".repeat(30_000)}THE END`
+    const executor: PermissionExecutor = {
+      callTool: async () => ({ content: [{ type: "text", text: long }] }),
+      syncTools: async () => ({ status: "ok", message: "", toolCount: 3 }),
+    }
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    const id = await onlyRequestId()
+
+    const ran = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(textOf(ran)).not.toContain("THE END")
+    expect(textOf(ran)).toContain("PCP kept the whole answer")
+
+    const kept = await db().toolResult.findFirstOrThrow()
+    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect(kept.length).toBe(long.length)
+
+    // The stored outcome is shorter still, and still names the result.
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.outcome).toContain(`as result ${kept.id}`)
   })
 
   it("runs once however many answers race for it", async () => {

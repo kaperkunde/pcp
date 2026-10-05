@@ -116,10 +116,10 @@ export function ExportCard({ username }: { username: string }) {
         <CardTitle>Export</CardTitle>
         <CardDescription>
           Everything PCP holds in one file, to keep as a backup or to restore on
-          another PCP: servers, API endpoints, secrets, API tokens, memories and
-          settings. The file is locked with an export password you choose, and
-          the vault inside it stays locked with your PCP password, as it is
-          here. Nothing is decrypted to make it.
+          another PCP: servers, API endpoints, mail accounts, secrets, API
+          tokens, memories and settings. The file is locked with an export
+          password you choose, and the vault inside it stays locked with your
+          PCP password, as it is here. Nothing is decrypted to make it.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
@@ -356,8 +356,8 @@ export function RestoreCard({
               {inSettings ? (
                 <li>
                   Everything in this PCP is replaced: servers, API endpoints,
-                  secrets, API tokens, memories and settings. Export this PCP
-                  first if you may want it back.
+                  mail accounts, secrets, API tokens, memories and settings.
+                  Export this PCP first if you may want it back.
                 </li>
               ) : null}
               <li>
@@ -445,6 +445,7 @@ function PreviewList({ preview }: { preview: ExportPreview }) {
   const items = [
     plural(counts.servers, "server"),
     plural(counts.endpoints, "API endpoint"),
+    plural(counts.mailAccounts, "mail account"),
     plural(counts.tools, "tool"),
     plural(counts.secrets, "secret"),
     plural(counts.tokens, "API token"),

@@ -2,7 +2,13 @@ import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { OWNER_PASSWORD } from "../lib/auth"
-import { callTool, initialize, mcpRequest, toolText } from "../lib/mcp"
+import {
+  allToolText,
+  callTool,
+  initialize,
+  mcpRequest,
+  toolText,
+} from "../lib/mcp"
 import {
   addSecret,
   allowAllTools,
@@ -120,6 +126,7 @@ test("issues an API token and describes the servers behind it", async ({
     "call_tool",
     "check_permission",
     "check_server",
+    "read_result",
     "register_server",
     "propose_tool_access",
   ])
@@ -242,6 +249,43 @@ test("picks up tools the server adds later", async ({ page, baseURL }) => {
     .click()
   await expect(page.getByText("Found 5 tools.")).toBeVisible()
   await expect(newTool).toHaveValue("ask")
+})
+
+test("keeps a long answer whole, for read_result and this token only", async ({
+  page,
+  baseURL,
+}) => {
+  upstream.lateTools.add("long_text")
+  const described = await callTool(baseURL!, token, "describe_tool", {
+    server: SLUG,
+    tool: "long_text",
+  })
+  expect(described.body.result?.isError ?? false, toolText(described)).toBe(
+    false,
+  )
+  await allowAllTools(page, `Assistant ${RUN}`, SLUG)
+
+  const long = await callTool(baseURL!, token, "call_tool", {
+    server: SLUG,
+    tool: "long_text",
+    arguments: { length: 150_000 },
+  })
+  const first = allToolText(long)
+  expect(first).not.toContain("THE END")
+  expect(first).toContain("PCP kept the whole answer: 150,000 characters")
+  const id = /as result ([0-9a-f-]+),/.exec(first)![1]!
+
+  const found = await callTool(baseURL!, token, "read_result", {
+    id,
+    find: "THE END",
+  })
+  expect(toolText(found)).toMatch(/characters 149993–150000 of 150000/)
+  expect(toolText(found)).toMatch(/\nTHE END$/)
+
+  const other = await createToken(page, `Reader ${RUN}`)
+  const refused = await callTool(baseURL!, other, "read_result", { id })
+  expect(refused.body.result?.isError).toBe(true)
+  expect(toolText(refused)).toContain("No result with that id for this token")
 })
 
 test("a token scoped to other servers cannot see this one", async ({

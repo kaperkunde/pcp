@@ -128,6 +128,15 @@ export default defineConfig({
       use: signedIn("endpoints"),
     },
     {
+      // A mail account: JMAP with an app password and with OAuth, read-only,
+      // a refused password, an unreachable IMAP server; its tools called
+      // through the gateway.
+      name: "mail",
+      testMatch: /mail\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("mail"),
+    },
+    {
       // Per-token tool access and the owner's permission: the link, the
       // client's own prompt, PCP's panel, copying access, and servers an
       // assistant proposes.

@@ -23,14 +23,44 @@ import {
 
 /**
  * The registry of servers a vault can reach, and how each one is
- * authenticated to. A server is either an MCP server or an API endpoint
- * (kind "openapi", lib/core/endpoints.ts). Talking to them is
- * lib/core/upstream.ts.
+ * authenticated to. A server is an MCP server, an API endpoint (kind
+ * "openapi", lib/core/endpoints.ts) or a mail account (kinds "jmap" and
+ * "imap", lib/core/mail/). Talking to them is lib/core/upstream.ts.
  */
 
-export type AuthType = "none" | "header" | "oauth"
+/** basic: a user name and a secret (a mail account's login). */
+export type AuthType = "none" | "header" | "oauth" | "basic"
 
-export type ServerKind = "mcp" | "openapi"
+export type ServerKind = "mcp" | "openapi" | "jmap" | "imap"
+
+export type MailKind = Extract<ServerKind, "jmap" | "imap">
+
+const SERVER_KINDS: readonly ServerKind[] = ["mcp", "openapi", "jmap", "imap"]
+
+/** A mail account rather than an MCP server or an API endpoint. */
+export function isMailKind(kind: string): kind is MailKind {
+  return kind === "jmap" || kind === "imap"
+}
+
+/** What a kind is called in a sentence: "an API endpoint". */
+export function kindNoun(kind: string): string {
+  switch (asServerKind(kind)) {
+    case "openapi":
+      return "an API endpoint"
+    case "jmap":
+    case "imap":
+      return "a mail account"
+    default:
+      return "an MCP server"
+  }
+}
+
+/** A row's kind; anything unknown reads as an MCP server, the default. */
+export function asServerKind(value: string): ServerKind {
+  return (SERVER_KINDS as readonly string[]).includes(value)
+    ? (value as ServerKind)
+    : "mcp"
+}
 
 /**
  * client_required: an OAuth server that does not let PCP register itself,
@@ -320,6 +350,50 @@ export async function normalizeHeaderAuth(
   }
 }
 
+/**
+ * Basic authentication: a user name and the secret that goes with it, sent
+ * together (a JMAP server's Basic authentication, an IMAP or SMTP login).
+ */
+export async function normalizeBasicAuth(
+  ctx: VaultContext,
+  input: { authUsername?: string | null; authSecretId?: string | null },
+): Promise<{ authUsername: string; authSecretId: string }> {
+  const authUsername = input.authUsername?.trim() ?? ""
+
+  if (!authUsername) {
+    throw invalid("Enter the user name to sign in with.")
+  }
+
+  if (authUsername.length > 320) {
+    throw invalid("That user name is too long.")
+  }
+
+  // Basic authentication joins the name and the password with a colon, and
+  // a login line ends at a line break: either would change what is sent.
+  if (/[\u0000-\u001f\u007f:]/.test(authUsername)) {
+    throw invalid(
+      "The user name cannot have a colon, line breaks or control characters.",
+    )
+  }
+
+  if (!input.authSecretId) {
+    throw invalid("Choose the secret that holds the password.")
+  }
+
+  await requireTextSecret(ctx, input.authSecretId)
+
+  return { authUsername, authSecretId: input.authSecretId }
+}
+
+export type OAuthClientInput = Pick<
+  ServerInput,
+  | "oauthClientId"
+  | "oauthClientSecretId"
+  | "oauthClientSecretValue"
+  | "oauthScope"
+  | "oauthAuthorizeParams"
+>
+
 /** A server's further secret headers, in the order they are sent. */
 export async function extraAuthHeaders(
   serverId: string,
@@ -508,6 +582,27 @@ export function secretColumns(
       }
 }
 
+/**
+ * Whether the OAuth tokens PCP holds for a server belong to a configuration
+ * it no longer has: it stopped using OAuth, moved, or signs in with another
+ * client. They are dropped then.
+ */
+export function oauthTokensObsolete(
+  existing: {
+    oauthTokensId: string | null
+    url: string
+    oauthClientId: string | null
+  },
+  next: { authType: string; url: string; oauthClientId: string | null },
+): boolean {
+  return (
+    existing.oauthTokensId !== null &&
+    (next.authType !== "oauth" ||
+      next.url !== existing.url ||
+      next.oauthClientId !== existing.oauthClientId)
+  )
+}
+
 async function normalizeInput(ctx: VaultContext, input: ServerInput) {
   const { name, description } = normalizeNameAndDescription(input)
   const url = validateServerUrl(input.url)
@@ -608,7 +703,7 @@ function summarize(row: {
 }): ServerSummary {
   return {
     id: row.id,
-    kind: row.kind === "openapi" ? "openapi" : "mcp",
+    kind: asServerKind(row.kind),
     name: row.name,
     slug: row.slug,
     description: row.description,
@@ -712,7 +807,7 @@ export async function updateServer(
   if (existing.kind !== "mcp") {
     throw new PcpError(
       "state",
-      "This is an API endpoint; change it in its own settings.",
+      `This is ${kindNoun(existing.kind)}; change it in its own settings.`,
     )
   }
 
@@ -721,11 +816,7 @@ export async function updateServer(
 
   // Switching away from OAuth, or to a different client, drops the tokens
   // PCP obtained: they belong to the old configuration.
-  const dropTokens =
-    existing.oauthTokensId !== null &&
-    (data.authType !== "oauth" ||
-      data.url !== existing.url ||
-      data.oauthClientId !== existing.oauthClientId)
+  const dropTokens = oauthTokensObsolete(existing, data)
 
   await withNewSecret(ctx, newSecret, async (secretId) => {
     Object.assign(data, secretColumns(data, secretId))

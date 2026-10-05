@@ -70,7 +70,9 @@ is re-run. The package's visibility is set on GitHub, not here: a package
 takes the repository's visibility when it is first pushed, and anonymous
 pulls need it public.
 
-MAJOR and MINOR are raised by hand, in a commit on `develop`:
+MAJOR and MINOR are raised by hand, in a commit on `develop`, when the
+maintainer decides a release warrants one; a contributor does not bump, and
+an automated assistant does so only when asked to in so many words:
 
 ```bash
 pnpm version:bump minor   # 0.1.4 → 0.2.0
@@ -155,6 +157,8 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/openapi/`                  | OpenAPI → tools and call plans; building and sending requests |
 | `lib/core/answers.ts`                | Shaping an answer for the assistant: fields, decode, preview  |
 | `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
+| `lib/core/mail/`                     | Mail accounts: JMAP and IMAP/SMTP behind one set of tools     |
+| `lib/core/tool-results.ts`           | Long answers kept, encrypted, for `read_result`               |
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
 | `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits  |
@@ -174,7 +178,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `app/mcp/route.ts`                   | The gateway endpoint                                          |
 | `app/api/oauth/`                     | OAuth callback; PCP's client metadata document                |
 | `app/api/servers/[id]/oauth/`        | OAuth start; the per-server callback older clients use        |
-| `e2e/fixtures/upstream.ts`           | The fake MCP + OAuth server the e2e suite talks to            |
+| `e2e/fixtures/upstream.ts`           | The fake MCP, OAuth, REST and JMAP servers the e2e suite uses |
 | `app/manifest.ts`, `public/icons/`   | The manifest and icon set; `assets/icon.png` is the master    |
 | `lib/core/local-address.ts`          | Whether PCP's own address is one only a home network reaches  |
 | `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                  |

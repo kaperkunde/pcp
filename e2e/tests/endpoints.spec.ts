@@ -390,6 +390,7 @@ const GATEWAY_TOOLS = [
   "call_tool",
   "check_permission",
   "check_server",
+  "read_result",
   "register_server",
   "propose_tool_access",
 ]

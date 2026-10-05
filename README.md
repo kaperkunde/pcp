@@ -43,6 +43,9 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **Web pages, on your terms.** A token can be given a `web_fetch` tool that
   reads public web pages as Markdown. You decide per method and per site, and
   every site an assistant tried is listed for you to allow or block.
+- **Mail without an MCP server.** Add a mail account over JMAP (Stalwart,
+  Fastmail, Cyrus) or IMAP with SMTP, and an assistant can search, read,
+  file and send its mail, with the same tools whichever protocol it speaks.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
@@ -193,14 +196,25 @@ required.
    with an uploaded file you enter the base URL yourself. **Edits** (a JSON
    Patch) fix or narrow a schema you do not control, and are kept when it is
    read again.
-4. **API tokens.** Create a token per assistant or machine; PCP asks for your
+4. **Mail accounts.** Add one over **JMAP** with its session URL (usually
+   `https://<mail server>/.well-known/jmap`), signing in with a user name and
+   an app password, a bearer token, or OAuth: choose **Connect** on its page,
+   as for an OAuth server (with Stalwart, put `offline_access` in the scope
+   so PCP stays signed in). Or add one over **IMAP**, with an SMTP server to
+   send through if it should send. Passwords and tokens are secrets you
+   pick, and mail only travels encrypted (TLS, or STARTTLS on `imap://` and
+   `smtp://`). Every account offers the same tools: list mailboxes, search,
+   read an email or a text attachment, move, flag, delete into the Trash
+   (never for good) and send, plus conversations and identities on JMAP.
+   **Read-only** offers only the tools that read.
+5. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password to make one. A token can reach every server and endpoint or only
    the ones you pick, and can expire. Revoking it destroys its copy of the
    vault key. A token's page sets each tool to **Allowed**, **Ask you first**
    (the default) or **Blocked**, a whole server at once, or copies all of it
    from another token. Tick **All tokens** beside a level to make it the one
    every token follows; a token's own level still wins over it.
-5. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
+6. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
    bearer token. For Claude Code:
 
    ```bash
@@ -222,8 +236,14 @@ and these tools:
 | `call_tool`           | Runs it, with PCP adding the credentials; `fields` keeps only the parts of a long JSON answer it needs, and `decode` decodes base64 text in it (an email's body). |
 | `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                         |
 | `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                   |
+| `read_result`         | Reads the whole of an answer too long to pass on in one piece, a slice at a time from any offset or from where a text appears.                                    |
 | `register_server`     | Proposes a new MCP server, or an API from an OpenAPI 3 schema (text or a URL), with no auth, a secret named by name, or OAuth.                                    |
 | `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                       |
+
+A shortened answer (a JSON preview, a long text cut off, a long email) ends
+with a result id. PCP keeps the whole of it, encrypted, for a day, for the
+token that asked, and `read_result` reads it from any offset or from the
+first place a text appears.
 
 A tool you have not decided about answers "Not done yet" and asks you: the
 assistant ends its reply with a link to the request in PCP. Answer there,
