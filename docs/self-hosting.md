@@ -19,7 +19,7 @@ What you end up with:
   laptop or mini PC running Linux, a NAS that runs Docker, or a small cloud
   server (a few euros or dollars a month). PCP is light: 1 GB of memory is
   plenty. If you add the browser, it runs Chromium while it is in use: give
-  it another 1 GB.
+  it another 1 GB. The image comes with Chromium.
 - **Docker or Podman.** Fedora Atomic systems such as Bazzite come with
   Podman. On other Linux systems, this installs Docker:
 

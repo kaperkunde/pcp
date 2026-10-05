@@ -56,3 +56,11 @@ export const PROXY_CONNECT_TIMEOUT_MS = 10_000
 export const DIALOG_DISMISS_MS = 60_000
 /** Matches find returns. */
 export const MAX_FIND_MATCHES = 50
+/**
+ * Installing Chromium (install.ts): Playwright's archive for 1.63 is
+ * 191 to 205 MB, depending on the platform (Windows the largest). The
+ * download gives up after this long in all, or this long without a byte.
+ */
+export const MAX_CHROMIUM_DOWNLOAD_BYTES = 512 * 1024 * 1024
+export const CHROMIUM_DOWNLOAD_TIMEOUT_MS = 30 * 60_000
+export const CHROMIUM_DOWNLOAD_STALL_MS = 60_000

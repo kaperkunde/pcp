@@ -414,11 +414,15 @@ server like any other, with tools to open a page (`navigate`, `tabs`), read
 it (`snapshot`, which names each element with a ref; `read_page`; `find`;
 `screenshot`), act on it (`click`, `type`, `select_option`, `press_key`,
 `scroll`, `wait_for`, `handle_dialog`) and `hand_over` a tab to you. It is
-Chromium without a window on PCP's machine (the Docker image includes it),
-started with the first page and closed after fifteen idle minutes. Which
+Chromium without a window on PCP's machine, started with the first page and
+closed after fifteen idle minutes. The Docker image includes it; elsewhere
+(the desktop app, a checkout), **Install Chromium** on the Browser page
+downloads it into PCP's data folder. Which
 sites a token opens follows the same lines as web fetch, on the token's page
 (as **Browser sites** for a token without web fetch): a site it has not opened before asks you, and
-**Allow once** lets that tab open the site's pages while it is open. Private
+**Allow once** lets that tab open the site's pages while it is open. When you
+allow a `navigate` call itself, you have seen the address, so it is not asked
+about again. Private
 addresses and PCP's own address work as for web fetch.
 
 The browser keeps its cookies, local storage and IndexedDB, encrypted in your

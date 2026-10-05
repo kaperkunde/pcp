@@ -11,7 +11,7 @@ import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import { listFetchRules, setFetchPrivate, setFetchSite } from "../web-fetch"
 import { callBrowserTool, finishHandover, performNavigate } from "./call"
-import { chromiumFromEnvironment } from "./executable"
+import { chromiumExecutable } from "./executable"
 import { loadProfile } from "./profile"
 import { closeAllBrowsers, closeBrowser, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
@@ -21,7 +21,7 @@ import { isOwnerNeeded, type OwnerNeeded } from "./types"
 // this machine. Skipped where no Chromium is installed (`pnpm exec
 // playwright install chromium`, or PCP_BROWSER_EXECUTABLE).
 
-const executable = await chromiumFromEnvironment()
+const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
 
 let cleanup: () => Promise<void>

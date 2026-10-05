@@ -201,6 +201,8 @@ export type PermissionView = {
   tokenName: string
   serverId: string | null
   serverName: string | null
+  /** The server's kind, for the page's note on what allowing does. */
+  serverKind: string | null
   tool: string
   title: string
   lines: string[]
@@ -280,11 +282,14 @@ export async function runCall(
     fields,
     decode,
     keep,
+    ownerAllowed = false,
     executor = defaultExecutor,
   }: {
     publicUrl: string
     /** The token the call is made for: the one that may read a kept answer. */
     tokenId: string
+    /** The owner allowed this very call, its arguments shown to them. */
+    ownerAllowed?: boolean
     executor?: PermissionExecutor
   } & AnswerShape,
 ): Promise<CallToolResult> {
@@ -318,6 +323,19 @@ export async function runCall(
       context,
     )
   } catch (error) {
+    // A site the owner just saw: a site is asked about only for the address
+    // in the call's arguments, so when they allowed the call, they allowed
+    // it for this tab.
+    if (ownerAllowed && isOwnerNeeded(error) && error.ask.kind === "browse") {
+      const { tabId, url } = error.ask.input
+
+      return (executor.browse ?? performNavigate)(
+        { ctx, tokenId, publicUrl, serverId: server.id },
+        { tabId, url },
+        { allowedByOwner: true },
+      )
+    }
+
     const owner = await ownerFirst(error, { ctx, tokenId, publicUrl, server })
 
     if (owner) {
@@ -880,6 +898,7 @@ async function toView(
     tokenName: row.token.name,
     serverId: row.serverId,
     serverName: row.server?.name ?? null,
+    serverKind: row.server?.kind ?? null,
     tool: row.toolName,
     ...summary,
     memory,
@@ -1330,6 +1349,7 @@ async function executeCall(
     fields: readStoredFields(row.fields),
     decode: readStoredFields(row.decode),
     keep: readStoredFields(row.keep),
+    ownerAllowed: true,
     executor,
   })
 }

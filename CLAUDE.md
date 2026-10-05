@@ -159,9 +159,14 @@ so in the summary; the bump itself waits for the request.
   request log keeps those). The owner's input enters through the DevTools
   protocol with each event's own time (`input.ts`), never as page script. A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
-  a permission request (`browse`, `browser_handover`). Its limits go in
+  a permission request (`browse`, `browser_handover`); a site is asked
+  about only for the address in the call's arguments, so a call the owner
+  allowed opens it without a second ask. Its limits go in
   `browser/limits.ts`; the Dockerfile's Chromium is the version
-  `playwright-core` drives (`scripts/docker.test.ts`).
+  `playwright-core` drives (`scripts/docker.test.ts`). Chromium is installed
+  only by the owner's click (`browser/install.ts`), only from the addresses
+  Playwright pins for that version, in PCP's process: never with a child
+  process, which the desktop app's fuses forbid.
 - A level can be a token's own or for all tokens (tools in
   `vault_tool_access`, web fetch in `web_fetch_rule` with scope `all`), and
   the token's own always wins. An owner's answer to a request writes the
@@ -224,7 +229,13 @@ so in the summary; the bump itself waits for the request.
   which answers PCP's own pages only and hands over the Touch ID key only
   after Touch ID. The fuses in `desktop/electron-builder.yml` keep other
   programs from running code as the app, and so from its keychain item:
-  leave them flipped. `desktop/scripts/stage.mjs` copies what the Dockerfile
+  leave them flipped. `desktop/native/keychain` is the only native code the
+  wrapper builds (Touch ID's keychain item); the keychain group goes on the
+  app alone, never on `entitlementsInherit`, and only with a profile
+  `desktop/scripts/keychain-profile.mjs` has checked: macOS kills a process
+  whose entitlements its profile does not cover. Whether the app has the
+  group is read off its own signature, never inferred from a keychain
+  answer. `desktop/scripts/stage.mjs` copies what the Dockerfile
   copies: a change to one is a change to both. (Its environment is the
   wrapper's own: the HTTPS ports stay 80 and 443, which the image moves.) It is its own pnpm project
   (`desktop/pnpm-workspace.yaml`); do not add it to the root workspace, or

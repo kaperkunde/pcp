@@ -6,7 +6,8 @@
 //
 // Chromium, which the Dockerfile installs for the browser, is not staged:
 // the app looks for one on the machine (PCP_BROWSER_EXECUTABLE, or where
-// Playwright installs it), and the Browser page says how to add it.
+// Playwright installs it), and the Browser page's Install Chromium puts one
+// in the data folder (lib/core/browser/install.ts, in the server's process).
 //
 //   node scripts/stage.mjs [--arch arm64|x64] [--electron-version x.y.z]
 //

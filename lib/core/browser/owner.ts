@@ -1,11 +1,19 @@
 import type { VaultContext } from "../context"
+import { dataDir } from "../data-dir"
 import { PcpError } from "../errors"
 import { isPcpSite } from "../fetch/fetch"
 import { resolvePrivateAccess } from "../fetch/rules"
-import { getHostSetting } from "../host-settings"
 import { loadSharedFetchRules } from "../web-fetch"
 import { pageUrl } from "./call"
-import { BROWSER_EXECUTABLE_KEY, chromiumExecutable } from "./executable"
+import { chromiumExecutable } from "./executable"
+import {
+  chromiumInstallState,
+  chromiumInstalling,
+  installChromium,
+  installedChromium,
+  olderChromiumInstalled,
+  type InstallState,
+} from "./install"
 import { NAVIGATION_TIMEOUT_MS } from "./limits"
 import { clearProfile, profileSummary, type ProfileSummary } from "./profile"
 import {
@@ -23,7 +31,7 @@ import {
   type BrowserStatus,
   type Tab,
 } from "./runtime"
-import { findBrowserServer } from "./server"
+import { findBrowserServer, syncAllBrowserTools } from "./server"
 import type { TabView } from "./types"
 
 /**
@@ -190,9 +198,45 @@ export async function forgetSites(ctx: VaultContext): Promise<void> {
   await clearProfile(ctx)
 }
 
+/**
+ * Installs Chromium for the machine, from Playwright's addresses
+ * (install.ts), unless it is already there or being installed. Returns at
+ * once: the Browser page follows it, and the browser rows turn ready when
+ * it is done.
+ */
+export async function startChromiumInstall(): Promise<void> {
+  if (chromiumInstalling()) {
+    return
+  }
+
+  if (await chromiumExecutable()) {
+    throw new PcpError("state", "Chromium is already on this machine.")
+  }
+
+  void installChromium({ dataDir: dataDir() })
+    .then(async (state) => {
+      if (state.stage === "done") {
+        await syncAllBrowserTools()
+      } else {
+        console.error("[browser] could not install Chromium", {
+          message: state.error,
+        })
+      }
+    })
+    .catch((error) => console.error("[browser] install failed", error))
+}
+
 export type BrowserOverview = {
   server: { id: string; name: string; enabled: boolean } | null
-  chromium: { path: string | null; fromInstall: boolean }
+  chromium: {
+    path: string | null
+    /** PCP installed it, under its data folder. */
+    fromInstall: boolean
+    /** PCP installed one for an earlier version, which no longer runs. */
+    outdated: boolean
+    install: InstallState
+    platform: NodeJS.Platform
+  }
   status: BrowserStatus
   profile: ProfileSummary | null
   tabs: TabView[]
@@ -201,10 +245,11 @@ export type BrowserOverview = {
 export async function browserOverview(
   ctx: VaultContext,
 ): Promise<BrowserOverview> {
-  const [server, path, installed, profile, tabs] = await Promise.all([
+  const [server, path, installed, outdated, profile, tabs] = await Promise.all([
     findBrowserServer(ctx),
     chromiumExecutable(),
-    getHostSetting(BROWSER_EXECUTABLE_KEY),
+    installedChromium(dataDir()),
+    olderChromiumInstalled(dataDir()),
     profileSummary(ctx.vaultId),
     listTabs(ctx.vaultId),
   ])
@@ -213,7 +258,13 @@ export async function browserOverview(
     server: server
       ? { id: server.id, name: server.name, enabled: server.enabled }
       : null,
-    chromium: { path, fromInstall: !!installed && installed === path },
+    chromium: {
+      path,
+      fromInstall: !!installed && installed === path,
+      outdated: outdated && !installed,
+      install: chromiumInstallState(),
+      platform: process.platform,
+    },
     status: browserStatus(ctx.vaultId),
     profile,
     tabs,

@@ -104,9 +104,12 @@ secret they could have seen.
 
 **Touch ID in the Mac app** unlocks PCP, and confirms a new API token, an
 export or a restore, with your fingerprint. It is a key of its own that PCP
-makes once you have typed your password, not your password: the app keeps it
-encrypted under a key in your login keychain and hands it to PCP's page only
-after Touch ID, and only to PCP's own pages. It cannot change your password,
+makes once you have typed your password, not your password. A release built
+with PCP's provisioning profile keeps it in a keychain item that macOS itself
+opens only for your fingerprint, on this Mac only; otherwise the app keeps it
+encrypted under a key in your login keychain and checks the fingerprint
+itself. Either way it reaches PCP's own pages only, and only after Touch
+ID. Adding or removing a fingerprint turns it off until you set it up again. It cannot change your password,
 make a recovery key or set Touch ID up again; those take the password, so
 someone with your finger and not your password cannot lock you out.
 Recovering with the recovery key, signing out everywhere and a restore turn
@@ -123,14 +126,15 @@ Not defended against:
   patched and the image current.
 - **A compromised browser or client.** A session cookie or an API token is
   a credential; treat it like one.
-- **Software already running as you on the Mac**, against Touch ID. The
-  fingerprint is the app's own check, not a keychain item macOS binds to it
-  (that takes a provisioning profile on top of the Developer ID signature
-  releases carry). The
-  keychain gives the key's encryption key to PCP's own code and asks you
-  before any other program, and PCP's build stops other programs from
-  running code as it; a program that gets past that can use the key without
-  your finger, as it could your signed-in session.
+- **Software already running as you on the Mac**, against your signed-in
+  session, and against Touch ID in a build without PCP's provisioning
+  profile. There the fingerprint is the app's own check: the keychain gives
+  the key's encryption key to PCP's own code and asks you before any other
+  program, and PCP's build stops other programs from running code as it,
+  but a program that gets past that can use the key without your finger, as
+  it could your session. With the profile, macOS asks for the finger itself
+  and the key is no use without it, but your signed-in session is as
+  exposed as before.
 - **The setup race.** Before the first setup, whoever reaches the site
   first becomes its owner. Set PCP up right after starting it, and do not
   expose an unconfigured instance to the internet.

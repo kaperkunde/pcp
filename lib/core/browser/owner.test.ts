@@ -11,13 +11,14 @@ import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchRuleShared } from "../web-fetch"
 import { callBrowserTool } from "./call"
-import { chromiumFromEnvironment } from "./executable"
+import { chromiumExecutable } from "./executable"
 import {
   browserOverview,
   forgetSites,
   handBackTab,
   openOwnerTab,
   ownerNavigate,
+  startChromiumInstall,
   takeOverTab,
 } from "./owner"
 import { loadProfile } from "./profile"
@@ -28,7 +29,7 @@ import { createBrowserServer } from "./server"
 // their own that assistants leave alone until handed back, and the sign-ins
 // forgotten.
 
-const executable = await chromiumFromEnvironment()
+const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
 
 let cleanup: () => Promise<void>
@@ -142,11 +143,20 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     expect(overview.status).toMatchObject({ running: true, tabs: 1 })
     expect(overview.tabs).toHaveLength(1)
     expect(overview.profile).toMatchObject({ cookies: 1 })
+    expect(overview.chromium).toMatchObject({
+      path: executable,
+      install: { stage: "idle" },
+    })
 
     await forgetSites(ctx)
     const after = await browserOverview(ctx)
     expect(after.status.running).toBe(false)
     expect(after.profile).toBeNull()
+  })
+
+  it("installs no Chromium where one is found", async () => {
+    await expect(startChromiumInstall()).rejects.toThrow(/already on this/)
+    expect((await browserOverview(ctx)).chromium.install.stage).toBe("idle")
   })
 
   it("asks to add the browser before it opens anything", async () => {

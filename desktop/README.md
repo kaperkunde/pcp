@@ -43,9 +43,12 @@ it.
 - **Touch ID** (macOS, with Touch ID set up). Turned on in PCP's Settings,
   or with the box under the password on the sign-in page, which takes the
   password once. PCP then makes a key of its own for the app (not the
-  password; `lib/core/device-keys.ts`), and the app keeps it in
+  password; `lib/core/device-keys.ts`). A release built with PCP's
+  provisioning profile keeps it in a keychain item macOS opens only for a
+  fingerprint (`native/keychain`, below); anything else keeps it in
   `…/PCP/touch-id.bin`, encrypted with `safeStorage` under a key macOS keeps
-  in the login keychain for this app. From then on the sign-in page asks for
+  in the login keychain for this app, and checks the fingerprint itself
+  (`touch-id-store.mjs` decides). From then on the sign-in page asks for
   Touch ID as it opens, and so does the password step of a new API token,
   an export and a restore; the password stays there for when Touch ID is
   not given. A new password and a new recovery key still take the password.
@@ -152,11 +155,12 @@ once, then System Settings → Privacy & Security → **Open Anyway**.
 
 The workflow signs with whatever of these repository secrets exist:
 
-| Secret                                                     | Used for                                                                            |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `CSC_LINK`, `CSC_KEY_PASSWORD`                             | The macOS Developer ID Application certificate, as a base64 `.p12` and its password |
-| `WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`                     | The Windows code signing certificate, as a base64 `.pfx` and its password           |
-| `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` | Notarization on macOS; `scripts/dist.mjs` turns it on when all three are set        |
+| Secret                                                     | Used for                                                                              |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `CSC_LINK`, `CSC_KEY_PASSWORD`                             | The macOS Developer ID Application certificate, as a base64 `.p12` and its password   |
+| `WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`                     | The Windows code signing certificate, as a base64 `.pfx` and its password             |
+| `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` | Notarization on macOS; `scripts/dist.mjs` turns it on when all three are set          |
+| `MAC_PROVISIONING_PROFILE`                                 | The Developer ID provisioning profile for Touch ID's keychain item, as base64 (below) |
 
 The Developer ID signature also lets an update keep using the keychain item
 that holds the Touch ID key and the cookies' key: macOS recognises each
@@ -168,3 +172,35 @@ Each platform signs only with its own certificate: `scripts/dist.mjs` keeps
 `CSC_LINK` away from the Windows build, where electron-builder would otherwise
 fall back to it and sign the installer with an Apple certificate Windows does
 not trust.
+
+### Touch ID's keychain item
+
+`native/keychain` is a small Node-API module in Objective-C that keeps the
+Touch ID key in the data-protection keychain, as an item made with
+`kSecAccessControlBiometryCurrentSet`: macOS opens it only for a
+fingerprint, to any process. `scripts/keychain.mjs` builds it for one Mac
+architecture into `native-staged/` (empty elsewhere), `dist.mjs` and
+`pnpm start` run it, and CI builds both architectures and loads one
+(`ci.yml`, "Touch ID keychain module").
+
+The data-protection keychain needs the `keychain-access-groups`
+entitlement, and a Developer ID app may carry it only with a provisioning
+profile that grants it. Making one, once, in the Apple Developer account
+that holds the Developer ID certificate:
+
+1. **Certificates, IDs & Profiles → Identifiers**: an App ID for macOS,
+   explicit, `com.kaperkunde.pcp` (no capabilities to tick).
+2. **Profiles → +** → Distribution → **Developer ID** → that App ID → the
+   Developer ID Application certificate `CSC_LINK` holds → a name such as
+   "PCP Developer ID" → download the `.provisionprofile`.
+3. `base64 -i PCP_Developer_ID.provisionprofile | pbcopy`, and save it as
+   the repository secret `MAC_PROVISIONING_PROFILE`.
+
+The next release then logs "Touch ID: a keychain item macOS opens only for
+a fingerprint". `dist.mjs` checks the profile first and stops the release
+over one that is not Developer ID, not for this app or `APPLE_TEAM_ID`, does
+not grant the keychain group, or has less than a year left (they are made
+for 18): macOS will not start an app whose profile does not cover its
+entitlements. Only the app is signed with the keychain group; its helpers
+keep `build/entitlements.mac.plist`, for the same reason. Without the
+secret, releases build as before and Touch ID uses the file.
