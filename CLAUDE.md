@@ -141,8 +141,9 @@ so in the summary; the bump itself waits for the request.
   setup page (its restore step included). Do not add a third.
 - An export (`lib/core/backup.ts`) is the vault's rows as they are, under the
   export password: nothing is decrypted to make it, and it never carries a
-  session grant. A restore replaces the vault whole, in one transaction,
-  after the owner has seen what the file holds and typed their password. A
+  session grant or the Touch ID key. A restore replaces the vault whole, in
+  one transaction, after the owner has seen what the file holds and
+  confirmed it with their password (or Touch ID). A
   migration that adds a column fails `pnpm typecheck` in
   `lib/core/backup-format.ts` until the format carries it, with the column's
   default so older files still restore.
@@ -150,10 +151,23 @@ so in the summary; the bump itself waits for the request.
   the machine, are read with no credential, and are stored unencrypted. Never
   copy anything from the vault into one. `lib/core/network/` starts nothing
   (timer, listener, request) while both features are off.
+- The Touch ID key (`lib/core/device-keys.ts`) is a credential the Mac app
+  keeps and hands to PCP's page only after Touch ID. It is made only with
+  the typed password (Settings, or the box on the sign-in page), a vault has
+  at most one, an export never carries it, and recovery, signing out
+  everywhere and a restore remove it. It stands in for the password to
+  unlock and in `confirmOwner` (a new API token, an export, a restore),
+  never for a new password, a new recovery key or another Touch ID key:
+  only the password and the recovery key decide who gets in. A new place
+  that accepts it goes through `confirmOwner`, with a test.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` (`lib/server/desktop.ts`), for copy that says how the
-  app is reached. `desktop/scripts/stage.mjs` copies what the Dockerfile
+  app is reached, and as `window.pcpDesktop` (`desktop/preload.cjs`, read
+  through `components/desktop-bridge.ts`), which answers PCP's own pages
+  only and hands over the Touch ID key only after Touch ID. The fuses in
+  `desktop/electron-builder.yml` keep other programs from running code as
+  the app, and so from its keychain item: leave them flipped. `desktop/scripts/stage.mjs` copies what the Dockerfile
   copies: a change to one is a change to both. (Its environment is the
   wrapper's own: the HTTPS ports stay 80 and 443, which the image moves.) It is its own pnpm project
   (`desktop/pnpm-workspace.yaml`); do not add it to the root workspace, or
@@ -197,6 +211,7 @@ OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
 signs in to is a "mail account"; a note an
 assistant keeps between conversations is a "memory", "shared" when every
 assistant reads it; what web_fetch reaches is a "site" (a host), and a level
-every token follows is "for all tokens" ("All tokens" in the UI). No operator
+every token follows is "for all tokens" ("All tokens" in the UI); unlocking
+or confirming with a fingerprint in the Mac app is "Touch ID". No operator
 vocabulary in the UI: no "DEK", "grant", "KEK" outside code comments and
 ARCHITECTURE.md.

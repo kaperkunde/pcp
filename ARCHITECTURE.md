@@ -53,6 +53,7 @@ encryption key (KEK)** — once per credential, in `key_grant`:
 | `recovery`  | `pcp_recovery_…`, shown once  | HKDF-SHA256 with a per-grant salt         | SHA-256 of the credential |
 | `session`   | a random secret in the cookie | HKDF-SHA256                               | SHA-256 of the secret     |
 | `api_token` | `pcp_…`, shown once           | HKDF-SHA256                               | SHA-256 of the token      |
+| `device`    | `pcp_device_…`, the Mac app's | HKDF-SHA256                               | SHA-256 of the key        |
 
 scrypt is slow on purpose: a copy of the database can only be attacked one
 password guess at a time. The other credentials have 256 bits of entropy of
@@ -69,12 +70,17 @@ Consequences:
   working.
 - **Revoking an API token** blanks its grant; **signing out** deletes the
   session's; **recovery** replaces the password grant, deletes every session
-  grant and, when asked, blanks every API token grant. **Signing out
-  everywhere** can blank them too.
+  grant and the Touch ID key (`device`) and, when asked, blanks every API
+  token grant. **Signing out everywhere** deletes the sessions and the Touch
+  ID key, and can blank the API tokens too.
 - **A session cannot outlast itself.** Making an API token or a recovery key
   asks for the password again (`lib/server/password-attempts.ts`). A session
   cookie can be copied, so it may use the DEK but not mint a grant that
-  survives the session.
+  survives the session. In the Mac app the Touch ID key stands in for the
+  password before a new API token, an export or a restore (`confirmOwner`),
+  never before a new recovery key, a new password or another Touch ID key:
+  only the password and the recovery key decide who gets in. See "Touch ID
+  in the Mac app".
 - **Losing every credential loses the data.** There is no back door because
   there is no key to keep one with.
 - Rotating the DEK itself (re-encrypting every row) is not implemented;
@@ -593,12 +599,59 @@ Linux):
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
 
-The desktop app keeps its own two files beside that directory, not in it:
-`desktop.json` (the port, whether other devices may connect) and the
+The desktop app keeps its own files beside that directory, not in it:
+`desktop.json` (the port, whether other devices may connect), on a Mac with
+Touch ID on `touch-id.bin` (the Touch ID key, encrypted; see below), and the
 server's stdout in the system's log folder (`~/Library/Logs/PCP` on macOS,
 `logs/` under the app folder elsewhere). Everything PCP remembers is in the
 database; the wrapper holds only what has to be known before the server is
-up.
+up, and the key it hands PCP's page after Touch ID.
+
+## Touch ID in the Mac app
+
+The owner can unlock with their fingerprint in the Mac app, and confirm a
+new API token, an export or a restore with it instead of typing the
+password. It is a credential of its own, not a stored password: a
+`device` grant (`lib/core/device-keys.ts`) whose key, `pcp_device_…`, the
+app keeps and hands over only after Touch ID.
+
+- **Turning it on takes the password**: in Settings, or with the box under
+  the password on the sign-in page. PCP makes the key, the page hands it to
+  the app, and the app asks for Touch ID before it keeps it. A vault has at
+  most one; a new one replaces it. If the app does not keep it, the page
+  turns Touch ID off again, so no key is left that nobody holds.
+- **Where the key lives.** `touch-id.bin` in the app's folder, encrypted
+  with Electron's `safeStorage`, whose own key macOS keeps in the login
+  keychain for this app's code. The server never reads that file, and an
+  export never carries the grant (`backup-format.ts` refuses one).
+- **How a page reaches it.** The window's preload (`desktop/preload.cjs`)
+  gives PCP's own pages, and only those (plain http on localhost at the
+  app's port), `window.pcpDesktop.touchId`: `status`, `unlock`, `save`,
+  `forget`. The main process (`desktop/touch-id.mjs`) checks again that the
+  call comes from the window's main frame on that address, shows the system
+  prompt with a reason of its own (never text from the page), and returns
+  the key only after Touch ID. The page sends it in a form field
+  (`deviceKey`) to `touchIdLoginAction` or `confirmOwner`, rate-limited like
+  the password, and keeps it nowhere. An OAuth provider's page in the same
+  window gets no bridge.
+- **What turns it off**: the Settings card, recovering with the recovery
+  key, signing out everywhere, and a restore (the vault is replaced, and the
+  file holds no `device` grant). A key PCP refuses is forgotten by the app
+  (`TOUCH_ID_REJECTED`), and the page falls back to the password.
+- **What it protects against.** Someone at the owner's unlocked Mac without
+  their finger, and a copy of the app's folder (a backup): the key and the
+  window's session cookie are both encrypted under the keychain key, the
+  cookie by the `enableCookieEncryption` fuse. It is not a keychain item
+  that macOS itself binds to the fingerprint: Electron's Touch ID prompt is
+  the app's own check, and a biometric keychain item needs a Developer ID
+  signature with a provisioning profile, which PCP's builds do not have.
+  What stops another program from simply asking the keychain as PCP are
+  the fuses (`desktop/electron-builder.yml`): no running the app as plain
+  Node, no `NODE_OPTIONS`, no inspector.
+- **Ad-hoc signed builds.** macOS ties the keychain item to the exact
+  build, so after an update it asks once for the Mac's password before PCP
+  may use it ("Always Allow"). A build signed with a Developer ID
+  (`desktop/scripts/dist.mjs`, `CSC_*`) is recognised across updates.
 
 ## Export and restore
 
@@ -615,8 +668,8 @@ recovery key and every API token work wherever the file is restored, which is
 what lets a PCP move to another machine without every assistant being set up
 again, and reading a secret out of the file takes what reading it off the
 disk takes: one of those credentials. Session grants are not in it (a
-session is one browser's), nor are OAuth authorizations in flight, the
-request log or the `tls/` directory.
+session is one browser's), nor is the Touch ID key (one app's), nor are
+OAuth authorizations in flight, the request log or the `tls/` directory.
 
 Around the rows: gzip, then AES-256-GCM under a key derived from an **export
 password** the owner chooses, with scrypt at the parameters of the password

@@ -12,6 +12,7 @@ import {
   RecoveryKeyCard,
   SessionsCard,
 } from "@/components/settings-forms"
+import { TouchIdCard } from "@/components/touch-id-card"
 import {
   Card,
   CardContent,
@@ -19,6 +20,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { deviceKeyInfo } from "@/lib/core/device-keys"
 import { isLocalAddress } from "@/lib/core/local-address"
 import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
@@ -36,13 +38,15 @@ export default async function SettingsPage({
 }) {
   const ctx = await requireContext()
   const query = await searchParams
-  const [pinned, detected, publicUrl, vault, network] = await Promise.all([
-    getSetting(ctx, SETTING_PUBLIC_URL),
-    requestOrigin(),
-    publicUrlFor(ctx),
-    getVault(ctx.vaultId),
-    networkOverview(),
-  ])
+  const [pinned, detected, publicUrl, vault, network, touchId] =
+    await Promise.all([
+      getSetting(ctx, SETTING_PUBLIC_URL),
+      requestOrigin(),
+      publicUrlFor(ctx),
+      getVault(ctx.vaultId),
+      networkOverview(),
+      deviceKeyInfo(ctx.vaultId),
+    ])
 
   return (
     <>
@@ -76,6 +80,7 @@ export default async function SettingsPage({
       />
       <ChangePasswordForm username={vault.name} />
       <RecoveryKeyCard username={vault.name} />
+      <TouchIdCard username={vault.name} info={touchId} />
       <SessionsCard />
       <ExportCard username={vault.name} />
       <RestoreCard username={vault.name} mode="settings" />

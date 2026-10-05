@@ -12,6 +12,7 @@ import {
 
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
+import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Button } from "@/components/ui/button"
 import {
@@ -23,7 +24,6 @@ import {
 } from "@/components/ui/card"
 import { Checkbox, Input } from "@/components/ui/input"
 import { Field, Label } from "@/components/ui/label"
-import { UsernameField } from "@/components/username-field"
 import {
   restoreAction,
   restoreAtSetupAction,
@@ -171,17 +171,12 @@ export function ExportCard({ username }: { username: string }) {
             </p>
             <input type="hidden" name="exportPassword" value={draft} />
             <input type="hidden" name="exportPasswordConfirm" value={draft} />
-            <UsernameField id="export-account" value={username} />
-            <Field label="Your password" htmlFor="export-owner-password">
-              <Input
-                id="export-owner-password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                autoFocus
-                required
-              />
-            </Field>
+            <OwnerConfirmFields
+              idPrefix="export-owner"
+              username={username}
+              error={error}
+              autoFocus
+            />
             <FormError error={error} />
             <div className="flex gap-2">
               <SubmitButton pendingText="Exporting…">Confirm</SubmitButton>
@@ -399,16 +394,13 @@ export function RestoreCard({
                   <Checkbox name="replace" required />
                   Replace everything in this PCP with the export
                 </Label>
-                <UsernameField id="restore-account" value={username} />
-                <Field label="Your password" htmlFor="restore-owner-password">
-                  <Input
-                    id="restore-owner-password"
-                    name="password"
-                    type="password"
-                    autoComplete="current-password"
-                    required
-                  />
-                </Field>
+                {/* Not asked for at once: the box above is ticked first. */}
+                <OwnerConfirmFields
+                  idPrefix="restore-owner"
+                  username={username}
+                  error={serverError}
+                  autoPrompt={false}
+                />
               </>
             ) : null}
             <FormError error={serverError} />

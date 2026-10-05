@@ -208,9 +208,9 @@ export function SessionsCard() {
       <CardHeader>
         <CardTitle>Sessions</CardTitle>
         <CardDescription>
-          Sign every browser out, including this one. If you think someone else
-          has had your password or a token, revoke every API token as well; your
-          assistants will need new ones.
+          Sign every browser out, including this one, and turn Touch ID off. If
+          you think someone else has had your password or a token, revoke every
+          API token as well; your assistants will need new ones.
         </CardDescription>
       </CardHeader>
       <CardContent className="items-start">

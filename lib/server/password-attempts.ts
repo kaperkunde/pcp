@@ -1,9 +1,11 @@
 import "server-only"
 
+import { verifyDeviceKey } from "@/lib/core/device-keys"
 import { PcpError } from "@/lib/core/errors"
 import { checkRateLimit } from "@/lib/core/rate-limit"
 import type { ResolvedSession } from "@/lib/core/sessions"
 import { verifyPassword } from "@/lib/core/vault"
+import { field } from "@/lib/server/action-state"
 import { clientIp } from "@/lib/server/client-ip"
 
 /**
@@ -24,10 +26,10 @@ export const TOO_MANY_ATTEMPTS =
 
 /**
  * A password, recovery key or export password typed on a signed-out page,
- * per address.
+ * or the Mac app's Touch ID key, per address.
  */
 export async function withinSignInLimits(
-  kind: "password" | "recovery-key" | "export",
+  kind: "password" | "recovery-key" | "export" | "touch-id",
 ): Promise<boolean> {
   return (
     checkRateLimit(`${kind}:${await clientIp()}`, PER_SOURCE) &&
@@ -73,4 +75,28 @@ export async function confirmPassword(
   }
 
   await verifyPassword(session.ctx, password)
+}
+
+/**
+ * The owner again, before a new API token, an export or a restore: the
+ * password (`password`), or in the Mac app the Touch ID key (`deviceKey`,
+ * lib/core/device-keys.ts), which that app hands over only after Touch ID.
+ * A new recovery key and a new password take the password itself: they
+ * decide who gets in, and Touch ID must not.
+ */
+export async function confirmOwner(
+  session: ResolvedSession,
+  formData: FormData,
+): Promise<void> {
+  const deviceKey = field(formData, "deviceKey")
+
+  if (!deviceKey) {
+    return confirmPassword(session, field(formData, "password"))
+  }
+
+  if (!withinSessionLimits(session.sessionId)) {
+    throw new PcpError("forbidden", TOO_MANY_ATTEMPTS)
+  }
+
+  await verifyDeviceKey(session.ctx, deviceKey)
 }

@@ -5,6 +5,14 @@
 
 export const MIN_PASSWORD_LENGTH = 10
 
+/**
+ * What PCP answers when the Mac app hands over a Touch ID key that no longer
+ * opens anything (lib/core/device-keys.ts). The page tells the app to forget
+ * its copy when it sees this.
+ */
+export const TOUCH_ID_REJECTED =
+  "Touch ID is no longer set up for PCP. Use your password."
+
 export const DEFAULT_HEADER_NAME = "Authorization"
 export const DEFAULT_VALUE_TEMPLATE = "Bearer {{secret}}"
 export const SECRET_PLACEHOLDER = "{{secret}}"

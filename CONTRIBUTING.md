@@ -144,9 +144,10 @@ A bug that regressed gets a test that fails before the fix and passes after
 | Path                                 | Purpose                                                       |
 | ------------------------------------ | ------------------------------------------------------------- |
 | `lib/core/crypto.ts`                 | Envelope encryption, KEK derivation, wrapping the data key    |
-| `lib/core/keys.ts`                   | Key grants: password, recovery, session, API token            |
+| `lib/core/keys.ts`                   | Key grants: password, recovery, session, API token, Touch ID  |
 | `lib/core/vault.ts`                  | Setup, sign-in, password change, recovery                     |
 | `lib/core/sessions.ts`               | Browser sessions (cookie secret → grant)                      |
+| `lib/core/device-keys.ts`            | The Mac app's Touch ID key: making it, unlocking, confirming  |
 | `lib/core/api-tokens.ts`             | Bearer tokens for the gateway and their scope                 |
 | `lib/core/secrets.ts`                | The secret store; the only place values are decrypted         |
 | `lib/core/servers.ts`                | The MCP server registry and its auth configuration            |
@@ -183,6 +184,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/local-address.ts`          | Whether PCP's own address is one only a home network reaches  |
 | `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                  |
 | `desktop/main.mjs`                   | The desktop app: starts the server, opens the window          |
+| `desktop/touch-id.mjs`               | Touch ID in the app: answers `preload.cjs`, keeps the key     |
 | `desktop/scripts/stage.mjs`          | Stages the server for the app, as the Dockerfile lays it out  |
 | `.github/workflows/release.yml`      | Tags, builds the apps and the image, publishes the release    |
 | `install.sh`                         | The one-line Linux install: Docker or Podman, published image |

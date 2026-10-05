@@ -3,6 +3,7 @@ import { MIN_PASSWORD_LENGTH } from "./constants"
 import type { VaultContext } from "./context"
 import { generateDek, randomSecret } from "./crypto"
 import { db } from "./db"
+import { removeDeviceKeys } from "./device-keys"
 import { invalid, PcpError } from "./errors"
 import { newId } from "./ids"
 import {
@@ -177,10 +178,10 @@ export async function changePassword(
 }
 
 /**
- * Sets a new password from the recovery key. Every session is signed out.
- * API tokens hold their own copy of the key and keep working, unless
- * `revokeApiTokens` is set: the choice for someone who thinks another
- * person has had their password or a token.
+ * Sets a new password from the recovery key. Every session is signed out and
+ * Touch ID is turned off. API tokens hold their own copy of the key and keep
+ * working, unless `revokeApiTokens` is set: the choice for someone who
+ * thinks another person has had their password or a token.
  */
 export async function resetPasswordWithRecoveryKey(
   recoveryKey: string,
@@ -206,6 +207,7 @@ export async function resetPasswordWithRecoveryKey(
   const ctx = { vaultId: grant.vaultId, dek }
   await replacePasswordGrant(grant.vaultId, dek, newPassword)
   await destroyAllSessions(grant.vaultId)
+  await removeDeviceKeys(grant.vaultId)
 
   if (revokeApiTokens) {
     await revokeAllApiTokens(ctx)

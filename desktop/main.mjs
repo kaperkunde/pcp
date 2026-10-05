@@ -2,7 +2,9 @@
 // the Docker image runs (scripts/stage.mjs puts it in resources/server),
 // with its data in the system's application data folder, waits until it
 // answers, and shows it in a window. Nothing of PCP runs in here: the
-// wrapper knows the server's address and its data directory, and no more.
+// wrapper knows the server's address and its data directory, and on a Mac
+// with Touch ID keeps the key PCP made for it (touch-id.mjs), which it hands
+// to PCP's own page after Touch ID and never reads itself.
 //
 // The server listens on this computer only until the owner turns on
 // "Accept connections from other devices" (then on every interface, for port
@@ -26,6 +28,7 @@ import net from "node:net"
 import path from "node:path"
 
 import { lanAddresses, readSettings, writeSettings } from "./settings.mjs"
+import { serveTouchId } from "./touch-id.mjs"
 
 const APP_ID = "com.kaperkunde.pcp"
 const REPOSITORY_URL = "https://github.com/kaperkunde/pcp"
@@ -45,6 +48,7 @@ const serverDir = app.isPackaged
 const userData = app.getPath("userData")
 const dataDir = path.join(userData, "data")
 const settingsFile = path.join(userData, "desktop.json")
+const touchIdFile = path.join(userData, "touch-id.bin")
 
 let settings = readSettings(settingsFile)
 /** @type {import("electron").UtilityProcess | null} */
@@ -98,6 +102,11 @@ function main() {
 async function start() {
   app.setAppLogsPath()
   Menu.setApplicationMenu(buildMenu())
+  serveTouchId({
+    file: touchIdFile,
+    port: () => settings.port,
+    window: () => window,
+  })
 
   try {
     await startServer()
@@ -270,6 +279,8 @@ function createWindow() {
     // checkout, and the taskbar on Linux.
     icon: path.join(serverDir, "public", "icons", "icon-512.png"),
     webPreferences: {
+      // window.pcpDesktop, for Touch ID; PCP's own pages only.
+      preload: path.join(import.meta.dirname, "preload.cjs"),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,

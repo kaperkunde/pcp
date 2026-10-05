@@ -21,7 +21,7 @@ import {
   fields,
   guarded,
 } from "@/lib/server/action-state"
-import { confirmPassword } from "@/lib/server/password-attempts"
+import { confirmOwner } from "@/lib/server/password-attempts"
 import { requireContext, requireSession } from "@/lib/server/session"
 
 export type CreateTokenResult = ActionState<{ token: string; id: string }>
@@ -52,7 +52,7 @@ export async function createTokenAction(
   const result = await guarded(async () => {
     // A token is a lasting copy of the vault key: the session alone is not
     // enough to make one.
-    await confirmPassword(session, field(formData, "password"))
+    await confirmOwner(session, formData)
 
     return createApiToken(session.ctx, {
       name: field(formData, "name"),

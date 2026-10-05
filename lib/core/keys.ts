@@ -19,7 +19,8 @@ import { newId } from "./ids"
  * credential. See lib/core/crypto.ts for the model.
  */
 
-export type GrantKind = "password" | "recovery" | "session" | "api_token"
+export type GrantKind =
+  "password" | "recovery" | "session" | "api_token" | "device"
 
 type GrantData = {
   id: string
@@ -95,7 +96,8 @@ export async function unlockWithPassword(
 
 /**
  * A grant for a random, high-entropy credential (a session secret, an API
- * token, the recovery key). Found again by the SHA-256 of the credential.
+ * token, the recovery key, the Touch ID key). Found again by the SHA-256 of
+ * the credential.
  */
 export async function createCredentialGrant(
   vaultId: string,

@@ -15,6 +15,7 @@ import { LocalDate } from "@/components/local-date"
 import { KeepMemoriesField } from "@/components/keep-memories-field"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { handOffNewToken } from "@/components/new-token-handoff"
+import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { WebFetchField } from "@/components/web-fetch-field"
@@ -29,7 +30,6 @@ import {
 } from "@/components/ui/card"
 import { Input, Select } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
-import { UsernameField } from "@/components/username-field"
 import {
   createTokenAction,
   deleteTokenAction,
@@ -171,17 +171,12 @@ function CreateTokenForm({
             {draft.map(([key, value], index) => (
               <input key={index} type="hidden" name={key} value={value} />
             ))}
-            <UsernameField id="token-account" value={username} />
-            <Field label="Your password" htmlFor="token-password">
-              <Input
-                id="token-password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                autoFocus
-                required
-              />
-            </Field>
+            <OwnerConfirmFields
+              idPrefix="token"
+              username={username}
+              error={state.status === "error" ? state.error : null}
+              autoFocus
+            />
             <FormError error={state.status === "error" ? state.error : null} />
             <FormNote message={made ? "Created. Opening it…" : null} />
             <div className="flex gap-2">
