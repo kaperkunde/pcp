@@ -801,15 +801,17 @@ app keeps and hands over only after Touch ID.
   window's session cookie are both encrypted under the keychain key, the
   cookie by the `enableCookieEncryption` fuse. It is not a keychain item
   that macOS itself binds to the fingerprint: Electron's Touch ID prompt is
-  the app's own check, and a biometric keychain item needs a Developer ID
-  signature with a provisioning profile, which PCP's builds do not have.
+  the app's own check, and a biometric keychain item needs a provisioning
+  profile on top of the Developer ID signature releases carry.
   What stops another program from simply asking the keychain as PCP are
   the fuses (`desktop/electron-builder.yml`): no running the app as plain
   Node, no `NODE_OPTIONS`, no inspector.
-- **Ad-hoc signed builds.** macOS ties the keychain item to the exact
-  build, so after an update it asks once for the Mac's password before PCP
-  may use it ("Always Allow"). A build signed with a Developer ID
-  (`desktop/scripts/dist.mjs`, `CSC_*`) is recognised across updates.
+- **Signing.** Releases carry PCP's Developer ID signature and are
+  notarized, so macOS recognises each update as the same app and the
+  keychain item stays readable. A build without the certificate (a fork, or
+  `pnpm dist` in a checkout) is signed ad hoc and tied to the exact build:
+  after a rebuild macOS asks once for the Mac's password before PCP may use
+  it ("Always Allow").
 
 ## Export and restore
 

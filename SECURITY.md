@@ -125,7 +125,8 @@ Not defended against:
   a credential; treat it like one.
 - **Software already running as you on the Mac**, against Touch ID. The
   fingerprint is the app's own check, not a keychain item macOS binds to it
-  (that takes a Developer ID signature with a provisioning profile). The
+  (that takes a provisioning profile on top of the Developer ID signature
+  releases carry). The
   keychain gives the key's encryption key to PCP's own code and asks you
   before any other program, and PCP's build stops other programs from
   running code as it; a program that gets past that can use the key without
@@ -204,10 +205,11 @@ Not defended against:
   once turned on under Settings, listens on ports 80 and 443 on every
   interface whatever that menu says, since a router's port forward needs
   exactly that. A tunnel needs neither.
-- macOS ties the Mac app's keychain item to the exact build when the app
-  has no Developer ID signature, so after an update it asks once for your
-  Mac's password before PCP may use it. Choose **Always Allow**; denying it
-  signs the app out and turns its Touch ID off.
+- Mac app releases carry PCP's Developer ID signature, so an update keeps
+  its keychain item. A Mac app you build yourself without the certificate is
+  signed ad hoc and tied to the exact build: after a rebuild macOS asks once
+  for your Mac's password before PCP may use it. Choose **Always Allow**;
+  denying it signs the app out and turns its Touch ID off.
 - Back up the data volume, or export from Settings. Losing both loses the
   vault.
 - An export file (Settings → Export) holds the vault's rows as they are: the

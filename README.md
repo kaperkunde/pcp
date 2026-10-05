@@ -78,10 +78,9 @@ reaches it at `http://localhost:3000/mcp`.
 - **Windows**:
   [Installer](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-windows-x64.exe)
 
-The apps are not signed with a developer certificate, so the first start
-needs a nod. macOS: open it, dismiss the warning, then System Settings →
-Privacy & Security → **Open Anyway**. Windows: SmartScreen → **More info** →
-**Run anyway**.
+The Mac apps are signed and notarized, so they open like any other app. The
+Windows app is not signed yet, so its first start needs a nod: SmartScreen →
+**More info** → **Run anyway**.
 
 The app answers this computer only until you turn on **Accept connections
 from other devices** in its menu. It keeps running when you close its window

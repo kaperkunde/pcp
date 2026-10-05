@@ -113,9 +113,8 @@ it, as any PCP does) and says so in its header and under **Settings →
 Updates**. In the app that page offers **Install and restart**; the menu's
 **Check for updates…** opens it.
 
-The page cannot reach the wrapper: there is no preload and no IPC, the window
-is a plain view of the server. So the button only records the owner's
-request, and the server repeats it in `/api/health` (only in the app, and
+The update does not go through the window's bridge (`preload.cjs`, which is
+for Touch ID alone): the button only records the owner's request, and the server repeats it in `/api/health` (only in the app, and
 only for a quarter of an hour). `main.mjs` reads that every 15 seconds; a
 request made after the app started, for a version later than its own, has
 electron-updater download the release and restart into it
@@ -138,15 +137,20 @@ unsigned update. A checkout (`pnpm start`) never updates itself.
 
 ### Signing
 
-Without certificates the builds are not signed by anyone, deliberately
-(`CSC_IDENTITY_AUTO_DISCOVERY=false`). On macOS they are signed ad hoc
-instead: Apple silicon will not run an app without a valid signature, and
-calls a download with a broken one "damaged", with no way past it. An ad-hoc
-signature gets the ordinary warning; the owner opens the app once, then
-System Settings → Privacy & Security → **Open Anyway**. Windows SmartScreen
-needs **More info → Run anyway**. The README says so where the links are.
+Releases are signed on macOS: the repository holds the macOS secrets below,
+so both Mac apps carry PCP's Developer ID signature, are notarized, and open
+without a warning. The Windows secrets are not set, so the installer is
+unsigned and SmartScreen needs **More info → Run anyway**. The README says so
+where the links are.
 
-To sign, add repository secrets and the workflow picks them up:
+Without certificates (a fork, or `pnpm dist` in a checkout) a build is not
+signed by anyone, deliberately (`CSC_IDENTITY_AUTO_DISCOVERY=false`). On
+macOS it is signed ad hoc instead: Apple silicon will not run an app without
+a valid signature, and calls a download with a broken one "damaged", with no
+way past it. An ad-hoc signature gets the ordinary warning; open the app
+once, then System Settings → Privacy & Security → **Open Anyway**.
+
+The workflow signs with whatever of these repository secrets exist:
 
 | Secret                                                     | Used for                                                                            |
 | ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
@@ -154,11 +158,11 @@ To sign, add repository secrets and the workflow picks them up:
 | `WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`                     | The Windows code signing certificate, as a base64 `.pfx` and its password           |
 | `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` | Notarization on macOS; `scripts/dist.mjs` turns it on when all three are set        |
 
-A Developer ID signature also lets an update keep using the keychain item
-that holds the Touch ID key and the cookies' key. An ad-hoc signed build is
-a stranger to it after every update: macOS asks once for the Mac's password
-(**Always Allow**), and if that is denied the app is signed out and forgets
-its Touch ID key.
+The Developer ID signature also lets an update keep using the keychain item
+that holds the Touch ID key and the cookies' key: macOS recognises each
+release as the same app. An ad-hoc signed build is a stranger to it after
+every rebuild: macOS asks once for the Mac's password (**Always Allow**), and
+if that is denied the app is signed out and forgets its Touch ID key.
 
 Each platform signs only with its own certificate: `scripts/dist.mjs` keeps
 `CSC_LINK` away from the Windows build, where electron-builder would otherwise
