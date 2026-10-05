@@ -1,6 +1,7 @@
 import {
   auth,
   Client,
+  discoverAuthorizationServerMetadata,
   SdkHttpError,
   StreamableHTTPClientTransport,
   UnauthorizedError,
@@ -296,18 +297,23 @@ export class PcpOAuthProvider implements OAuthClientProvider {
   }
 
   async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
-    // An endpoint's sign-in is the one its owner approved, never discovered.
+    const saved = this.interactive
+      ? ((await this.readFlowState())?.discovery ?? this.pendingDiscovery)
+      : this.pendingDiscovery
+    // An endpoint's sign-in is the one its owner approved, never discovered:
+    // what an authorization server published is taken only when it names
+    // those same addresses (verifiedEndpointDiscovery), and adds what the
+    // schema cannot say, such as where PCP registers itself.
     const fixed = endpointDiscovery(this.server)
 
     if (fixed) {
-      return fixed
+      return saved &&
+        endpointAddressesMatch(saved.authorizationServerMetadata, this.server)
+        ? saved
+        : fixed
     }
 
-    if (this.interactive) {
-      return (await this.readFlowState())?.discovery ?? this.pendingDiscovery
-    }
-
-    return this.pendingDiscovery
+    return saved
   }
 
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
@@ -480,6 +486,83 @@ export function endpointDiscovery(
 }
 
 /**
+ * Whether metadata an authorization server published names the sign-in and
+ * token addresses an endpoint was approved with, and no others. PCP signs in
+ * only where the owner saw, so this is the test for taking anything else the
+ * metadata says.
+ */
+export function endpointAddressesMatch(
+  metadata:
+    { authorization_endpoint?: string; token_endpoint?: string } | undefined,
+  server: Pick<McpServer, "oauthAuthorizationUrl" | "oauthTokenUrl">,
+): boolean {
+  const same = (given: string | undefined, approved: string | null) => {
+    try {
+      return (
+        given !== undefined &&
+        approved !== null &&
+        new URL(given).href === new URL(approved).href
+      )
+    } catch {
+      return false
+    }
+  }
+
+  return (
+    same(metadata?.authorization_endpoint, server.oauthAuthorizationUrl) &&
+    same(metadata?.token_endpoint, server.oauthTokenUrl)
+  )
+}
+
+/**
+ * An endpoint's sign-in, with what its authorization server publishes about
+ * itself (RFC 8414) when that agrees with the addresses the owner approved:
+ * the registration endpoint, the client authentication methods, the scopes.
+ * That is how PCP finds out a provider lets it register itself, which an
+ * OpenAPI schema has no way to say. Metadata that names other addresses is
+ * not used; `elsewhere` says where it pointed, for the owner. Anything that
+ * goes wrong reading it leaves the approved sign-in as it was. The request
+ * goes under the endpoint's address rule, like its other OAuth requests.
+ */
+export async function verifiedEndpointDiscovery(
+  server: McpServer,
+  fixed: OAuthDiscoveryState,
+): Promise<{
+  discovery: OAuthDiscoveryState
+  elsewhere: { authorization: string; token: string } | null
+}> {
+  let metadata: Awaited<ReturnType<typeof discoverAuthorizationServerMetadata>>
+
+  try {
+    metadata = await discoverAuthorizationServerMetadata(
+      fixed.authorizationServerUrl,
+      { fetchFn: oauthFetch(server) },
+    )
+  } catch {
+    return { discovery: fixed, elsewhere: null }
+  }
+
+  if (!metadata) {
+    return { discovery: fixed, elsewhere: null }
+  }
+
+  if (endpointAddressesMatch(metadata, server)) {
+    return {
+      discovery: { ...fixed, authorizationServerMetadata: metadata },
+      elsewhere: null,
+    }
+  }
+
+  return {
+    discovery: fixed,
+    elsewhere: {
+      authorization: String(metadata.authorization_endpoint),
+      token: String(metadata.token_endpoint),
+    },
+  }
+}
+
+/**
  * How PCP talks to an endpoint's authorization server: under the endpoint's
  * address rule, like its calls, since the token address came from a schema.
  * Undefined means the SDK's own fetch.
@@ -554,6 +637,16 @@ async function endpointToken(
       }
 
       throw new UnauthorizedError(signIn)
+    }
+
+    // A client PCP registered itself renews with the methods its server
+    // published; the owner's client keeps the approved sign-in as it is.
+    const fixed = server.oauthClientId ? undefined : endpointDiscovery(server)
+
+    if (fixed) {
+      await provider.saveDiscoveryState(
+        (await verifiedEndpointDiscovery(server, fixed)).discovery,
+      )
     }
 
     // A refresh token is spent on the way: the SDK saves the new set, or

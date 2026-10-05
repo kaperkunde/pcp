@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { db } from "./db"
 import { finishOAuth, reconcileIssuer, startOAuth } from "./oauth"
 import { legacyRedirectUrl, oauthRedirectUrl } from "./oauth-client"
+import { createMailAccount } from "./mail/accounts"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
 import {
   createServer,
@@ -459,6 +460,67 @@ describe("connecting an OAuth server", () => {
     expect(JSON.parse(registration.body).redirect_uris).toEqual([
       oauthRedirectUrl(HTTPS.publicUrl),
     ])
+  })
+
+  // The SDK adds offline_access to a scope when the server lists it; a mail
+  // account's refresh token, and so staying signed in, depends on that.
+  describe("the scope of a mail account", () => {
+    const MAIL = "urn:ietf:params:oauth:scope:mail"
+
+    async function jmapAccount(oauthScope: string | null) {
+      const { id } = await createMailAccount(ctx, {
+        protocol: "jmap",
+        name: "Mail",
+        url: `${as.origin}/mcp`,
+        readOnly: false,
+        authType: "oauth",
+        oauthScope,
+      })
+      return id
+    }
+
+    const scopeOf = (result: Awaited<ReturnType<typeof startOAuth>>) =>
+      signInAddress(result).searchParams.get("scope")
+
+    it("asks for offline_access when the server offers it, so PCP stays signed in", async () => {
+      metadata = {
+        registration_endpoint: `${as.origin}/register`,
+        scopes_supported: ["openid", "offline_access", MAIL],
+      }
+
+      expect(
+        scopeOf(await startOAuth(ctx, await jmapAccount(MAIL), HTTP)),
+      ).toBe(`${MAIL} offline_access`)
+      // Already there: not twice.
+      expect(
+        scopeOf(
+          await startOAuth(
+            ctx,
+            await jmapAccount(`offline_access ${MAIL}`),
+            HTTP,
+          ),
+        ),
+      ).toBe(`offline_access ${MAIL}`)
+    })
+
+    it("leaves the scope alone when the server does not list offline_access, or none was given", async () => {
+      metadata = {
+        registration_endpoint: `${as.origin}/register`,
+        scopes_supported: ["openid", MAIL],
+      }
+      expect(
+        scopeOf(await startOAuth(ctx, await jmapAccount(MAIL), HTTP)),
+      ).toBe(MAIL)
+
+      // One scope alone would replace the server's default: not added.
+      metadata = {
+        registration_endpoint: `${as.origin}/register`,
+        scopes_supported: ["openid", "offline_access", MAIL],
+      }
+      expect(
+        scopeOf(await startOAuth(ctx, await jmapAccount(null), HTTP)),
+      ).not.toBe("offline_access")
+    })
   })
 
   it("offers its client metadata document when that is the only way", async () => {
