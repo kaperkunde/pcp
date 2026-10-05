@@ -28,7 +28,8 @@ import {
   type OAuthClientInput,
 } from "../servers"
 import { deleteManagedSecret } from "../secrets"
-import type { ResultKeeper } from "../tool-results"
+import { resolveHandles } from "../result-handles"
+import type { ResultKeeper, ResultOpener } from "../tool-results"
 import {
   formatMailServer,
   parseImapAddress,
@@ -592,8 +593,15 @@ export async function callMailTool(
   {
     credential,
     keep,
+    open,
     imap = defaultImapDeps,
-  }: { credential: MailCredential; keep?: ResultKeeper; imap?: ImapDeps },
+  }: {
+    credential: MailCredential
+    keep?: ResultKeeper
+    /** Opens a result the token kept: handles in the arguments. */
+    open?: ResultOpener
+    imap?: ImapDeps
+  },
 ): Promise<CallToolResult> {
   const kind = server.kind as MailKind
   const spec = mailToolSpec(toolName)
@@ -612,8 +620,16 @@ export async function callMailTool(
     )
   }
 
-  // Checked before anything is opened: a bad argument never reaches the server.
-  const args = parseMailArgs(spec, kind, rawArgs)
+  // Checked before anything is opened: a bad argument never reaches the
+  // server. A handle is replaced by what it stands for first, so the limits
+  // apply to the real text; an attachment is resolved as bytes, later.
+  const args = parseMailArgs(
+    spec,
+    kind,
+    open
+      ? await resolveHandles(rawArgs, open, { skip: ["attachments"] })
+      : rawArgs,
+  )
 
   if (toolName === "send_email") {
     for (const key of ["to", "cc", "bcc"] as const) {

@@ -69,7 +69,8 @@ import {
 import { findTextSecretByName, validateSecretName } from "./secrets"
 import { validateServerUrl, type AuthType } from "./servers"
 import { effectiveAccess, loadToolAccess } from "./tool-access"
-import { readResult, RESULT_PAGE_CHARS } from "./tool-results"
+import { collectHandleIds, missingResultMessage } from "./result-handles"
+import { describeResults, readResult, RESULT_PAGE_CHARS } from "./tool-results"
 import { needsConnecting, syncServerTools } from "./upstream"
 import { PCP_VERSION } from "./version"
 import { decideFetch, runFetch } from "./web-fetch"
@@ -772,6 +773,19 @@ export function buildGatewayServer(
           return failure(
             `The owner has blocked ${target.slug}/${tool.name} for this token.`,
           )
+        }
+
+        // The owner is not asked about a call that cannot run: a handle
+        // the token has no kept result for is refused here, by name.
+        const handles = await describeResults(
+          scope.ctx,
+          scope.tokenId,
+          collectHandleIds(args.arguments ?? {}),
+        )
+        const missing = handles.find((handle) => !handle.found)
+
+        if (missing) {
+          return failure(missingResultMessage(missing.id))
         }
 
         if (tool.access === "ask") {

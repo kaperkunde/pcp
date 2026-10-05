@@ -46,6 +46,12 @@ describe("previewArgs", () => {
     ])
   })
 
+  it("shows a handle to a kept result as it is, short whatever it stands for", () => {
+    expect(
+      previewArgs({ attachments: [{ $result: "r1", as: "base64" }] }),
+    ).toEqual(['attachments: [{"$result":"r1","as":"base64"}]'])
+  })
+
   it("says so when there are none, and clips long values", () => {
     expect(previewArgs({})).toEqual(["(no arguments)"])
     expect(previewArgs({ body: "x".repeat(20) }, 10)).toEqual([

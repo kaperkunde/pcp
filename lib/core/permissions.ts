@@ -76,11 +76,14 @@ import {
   type ServerInput,
 } from "./servers"
 import { writeToolAccess } from "./tool-access"
+import { collectHandleIds } from "./result-handles"
 import {
+  describeResults,
   keepWholeAnswer,
   MAX_KEPT_RESULT_CHARS,
-  resultKeeper,
+  resultKeepers,
   resultNotices,
+  resultOpener,
 } from "./tool-results"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
@@ -261,10 +264,12 @@ export async function runCall(
   }
 
   try {
-    const keep = resultKeeper(ctx, tokenId)
+    const keepers = resultKeepers(ctx, tokenId)
+    const keep = keepers.text
     const answer = await executor.callTool(ctx, server, toolName, args, {
       publicUrl,
       keep,
+      open: resultOpener(ctx, tokenId),
     })
 
     return await keepWholeAnswer(
@@ -572,11 +577,62 @@ async function summarizeRow(
       ...(about ? [`What it does: ${about}`] : []),
       asker,
       ...previewArgs(args),
+      ...(await handleLines(ctx, row.tokenId, args)),
     ],
     warning: destructive
       ? "The server marks this tool as destructive: it can change or delete things for good."
       : null,
   }
+}
+
+const COUNT = new Intl.NumberFormat("en-US")
+
+/**
+ * What each kept result a call's arguments name is, so the owner sees what
+ * the call carries without its content: its name, type and size, which
+ * server's tool kept it, and until when. An id the token no longer has is
+ * said too, since the call would fail.
+ */
+async function handleLines(
+  ctx: VaultContext,
+  tokenId: string,
+  args: Record<string, unknown>,
+): Promise<string[]> {
+  let ids: string[]
+
+  try {
+    ids = collectHandleIds(args)
+  } catch {
+    return []
+  }
+
+  const infos = await describeResults(ctx, tokenId, ids)
+  const serverIds = infos.flatMap((info) =>
+    info.found && info.serverId ? [info.serverId] : [],
+  )
+  const servers = serverIds.length
+    ? await db().mcpServer.findMany({
+        where: { id: { in: serverIds }, vaultId: ctx.vaultId },
+        select: { id: true, slug: true },
+      })
+    : []
+  const slugs = new Map(servers.map((server) => [server.id, server.slug]))
+
+  return infos.map((info) => {
+    if (!info.found) {
+      return `Kept result ${info.id}: no longer available for this token; the call will fail`
+    }
+
+    const size =
+      info.kind === "bytes"
+        ? `${COUNT.format(info.length)} bytes`
+        : `${COUNT.format(info.length)} characters`
+    const from = info.serverId
+      ? `${slugs.get(info.serverId) ?? "(removed server)"}/${info.toolName}`
+      : info.toolName
+
+    return `Kept result ${info.id}: ${info.name ?? "(unnamed)"}, ${info.mediaType}, ${size}, from ${from}, readable until ${info.expiresAt.toISOString()}`
+  })
 }
 
 async function toView(

@@ -10,7 +10,12 @@ import { runCall } from "../permissions"
 import { createSecret, deleteSecret, listSecrets } from "../secrets"
 import { getServer, listServers, updateServer } from "../servers"
 import { scratchDatabase } from "../test-db"
-import { readResult, resultKeeper } from "../tool-results"
+import {
+  keepResult,
+  readResult,
+  resultKeeper,
+  resultOpener,
+} from "../tool-results"
 import { callServerTool, syncServerTools } from "../upstream"
 import { setupVault } from "../vault"
 import { createMailAccount, updateMailAccount } from "./accounts"
@@ -339,6 +344,53 @@ describe("calling its tools", () => {
       sent: { savedTo: "Sent", subject: "Hello" },
     })
     expect(fake.sent).toHaveLength(1)
+  })
+
+  it("sends the text a handle stands for, and refuses an unknown one before anything is sent", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const kept = await keepResult(ctx, {
+      tokenId,
+      serverId: server.id,
+      toolName: "get_attachment",
+      text: "The whole report, kept.",
+      mediaType: "text/plain",
+    })
+    const open = resultOpener(ctx, tokenId)
+
+    await callServerTool(
+      ctx,
+      server,
+      "send_email",
+      {
+        to: ["charles@example.com"],
+        subject: "Report",
+        text: { $result: kept.id },
+      },
+      { ...PUBLIC, open },
+    )
+    expect(fake.sent).toHaveLength(1)
+    expect(fake.emails.at(-1)).toMatchObject({
+      subject: "Report",
+      text: "The whole report, kept.",
+    })
+
+    const before = fake.requests.length
+
+    await expect(
+      callServerTool(
+        ctx,
+        server,
+        "send_email",
+        { to: ["charles@example.com"], subject: "x", text: { $result: "no" } },
+        { ...PUBLIC, open },
+      ),
+    ).rejects.toThrow(/No kept result "no" for this token/)
+    expect(fake.requests.length).toBe(before)
   })
 
   it("refuses bad arguments before anything is sent", async () => {
