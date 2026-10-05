@@ -13,7 +13,7 @@ import {
   MAX_MAILBOXES,
   MAX_THREAD_EMAILS,
 } from "./limits"
-import { bareType, charsetOf, decodeText, isTextType } from "./text"
+import { bareType, charsetOf, decodeText, isTextType } from "../media-types"
 import {
   MAILBOX_ROLES,
   MailAuthError,

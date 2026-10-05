@@ -20,7 +20,7 @@ import {
   MAX_MAILBOXES,
 } from "./limits"
 import { findMailbox, mailboxByRole } from "./mailboxes"
-import { bareType, isTextType } from "./text"
+import { bareType, isTextType } from "../media-types"
 import {
   MailAuthError,
   MailRequestError,

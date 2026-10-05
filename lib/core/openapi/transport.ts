@@ -28,7 +28,8 @@ export type SendOptions = {
 export type SendInit = {
   method?: string
   headers?: Record<string, string>
-  body?: string
+  /** Bytes go as they are (see asBytes in crypto.ts for a Buffer). */
+  body?: string | Uint8Array<ArrayBuffer>
   signal?: AbortSignal
 }
 
