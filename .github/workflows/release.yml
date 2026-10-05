@@ -154,6 +154,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The Developer ID provisioning profile that lets Touch ID keep its
+          # key in a keychain item macOS opens only for a fingerprint.
+          MAC_PROVISIONING_PROFILE: ${{ secrets.MAC_PROVISIONING_PROFILE }}
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -25,6 +25,10 @@ extraResources:
   # separately.
   - from: server/node_modules
     to: server/node_modules
+  # The Touch ID keychain module, built by scripts/keychain.mjs (an empty
+  # folder off macOS); touch-id.mjs loads it from resources/native.
+  - from: native-staged
+    to: native
 # The wrapper has no native dependencies of its own; the server's are handled
 # when it is staged.
 npmRebuild: false

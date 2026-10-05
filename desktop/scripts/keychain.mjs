@@ -9,8 +9,8 @@
 // Node-API is ABI-stable: a build against this Node's headers loads in
 // Electron, so there is nothing to rebuild per Electron version. --check
 // loads the staged module in this Node and asks it for its status, as CI
-// does on macOS (where Node has no keychain entitlement, so every answer is
-// errSecMissingEntitlement, and the point is that it loads and answers).
+// does on macOS. Node is never signed with PCP's keychain group, so the
+// module must say it is not entitled, and store nothing.
 
 import { execFileSync } from "node:child_process"
 import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs"
@@ -75,15 +75,16 @@ function check() {
     throw new Error(`status().code is not a number: ${status.code}`)
   }
 
-  // Without the entitlement nothing is stored; with it (a signed app),
-  // this check is not the place to touch the owner's keychain.
-  if (!status.entitled) {
-    const code = keychain.store(`pcp_device_${"A".repeat(43)}`)
-    if (code !== MISSING_ENTITLEMENT && code !== NOT_AVAILABLE) {
-      throw new Error(
-        `store() without the entitlement answered ${code}, not ${MISSING_ENTITLEMENT} or ${NOT_AVAILABLE}.`,
-      )
-    }
+  // The app decides between the keychain item and its own check by this
+  // answer, so a Node that claims the entitlement is a broken module.
+  if (status.entitled) {
+    throw new Error("status() says Node has PCP's keychain group; it cannot.")
+  }
+  const code = keychain.store(`pcp_device_${"A".repeat(43)}`)
+  if (code !== MISSING_ENTITLEMENT && code !== NOT_AVAILABLE) {
+    throw new Error(
+      `store() without the entitlement answered ${code}, not ${MISSING_ENTITLEMENT} or ${NOT_AVAILABLE}.`,
+    )
   }
 
   console.log(

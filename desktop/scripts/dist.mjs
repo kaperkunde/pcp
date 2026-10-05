@@ -11,8 +11,10 @@
 // Signing is by electron-builder's usual environment: CSC_LINK and
 // CSC_KEY_PASSWORD for the macOS certificate, WIN_CSC_LINK and
 // WIN_CSC_KEY_PASSWORD for the Windows one (never the other platform's);
-// APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and
-// APPLE_TEAM_ID to notarize on macOS. Without a certificate the build is not
+// APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID to notarize on
+// macOS; MAC_PROVISIONING_PROFILE, a Developer ID provisioning profile as
+// base64, to keep the Touch ID key in a keychain item macOS opens only for a
+// fingerprint (keychain-profile.mjs). Without a certificate the build is not
 // signed by anyone, deliberately rather than by whatever identity a keychain
 // happens to hold. On macOS it is then signed ad hoc: Apple silicon refuses
 // to run an app with no valid signature at all, and calls a download whose
@@ -24,6 +26,8 @@ import { readFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+
+import { prepareKeychainSigning } from "./keychain-profile.mjs"
 
 const desktopDir = fileURLToPath(new URL("..", import.meta.url))
 const rootDir = path.resolve(desktopDir, "..")
@@ -38,6 +42,7 @@ const SIGNING_VARIABLES = [
   "APPLE_ID",
   "APPLE_APP_SPECIFIC_PASSWORD",
   "APPLE_TEAM_ID",
+  "MAC_PROVISIONING_PROFILE",
 ]
 
 function parseArgs(argv) {
@@ -51,6 +56,19 @@ function parseArgs(argv) {
     throw new Error(`--arch must be arm64 or x64, not "${options.arch}".`)
   }
   return options
+}
+
+/** The app's identifier, as electron-builder.yml gives it. */
+function appIdFromConfig() {
+  const config = readFileSync(
+    path.join(desktopDir, "electron-builder.yml"),
+    "utf8",
+  )
+  const appId = config.match(/^appId:\s*(\S+)\s*$/m)?.[1]
+  if (!appId) {
+    throw new Error("electron-builder.yml has no appId.")
+  }
+  return appId
 }
 
 function platformFlag() {
@@ -75,6 +93,12 @@ function main() {
   execFileSync(
     process.execPath,
     [path.join(desktopDir, "scripts", "stage.mjs"), "--arch", options.arch],
+    { stdio: "inherit" },
+  )
+  // The Touch ID keychain module on macOS; elsewhere an empty native-staged/.
+  execFileSync(
+    process.execPath,
+    [path.join(desktopDir, "scripts", "keychain.mjs"), "--arch", options.arch],
     { stdio: "inherit" },
   )
 
@@ -114,6 +138,24 @@ function main() {
   // ad-hoc signed Mac build sends the owner to the download page instead.
   const updater = process.platform === "darwin" && !signing ? "manual" : "auto"
 
+  // With a profile, the app (never its helpers) is signed with the keychain
+  // group, and Touch ID keeps its key where only a fingerprint opens it.
+  // Without one, the app checks the fingerprint itself (touch-id.mjs).
+  const keychain =
+    process.platform === "darwin" && signing && env.MAC_PROVISIONING_PROFILE
+      ? prepareKeychainSigning({
+          desktopDir,
+          profileBase64: env.MAC_PROVISIONING_PROFILE,
+          appId: appIdFromConfig(),
+          team: env.APPLE_TEAM_ID,
+        })
+      : null
+  if (env.MAC_PROVISIONING_PROFILE && !keychain) {
+    console.log(
+      "MAC_PROVISIONING_PROFILE is set but this build is not signed with a certificate; it is left out.",
+    )
+  }
+
   const args = [
     require.resolve("electron-builder/cli.js"),
     platformFlag(),
@@ -131,6 +173,14 @@ function main() {
   if (!signing && process.platform === "darwin") {
     args.push("--config.mac.identity=-")
   }
+  if (keychain) {
+    // entitlementsInherit stays entitlements.mac.plist: a helper signed
+    // with an entitlement its profile does not cover is killed at launch.
+    args.push(
+      `--config.mac.entitlements=${keychain.entitlements}`,
+      `--config.mac.provisioningProfile=${keychain.profile}`,
+    )
+  }
   if (options.dir) args.push("--dir")
 
   const how = signing
@@ -141,7 +191,10 @@ function main() {
       ? "signed ad hoc"
       : "unsigned"
   console.log(
-    `Packaging PCP ${version} for ${process.platform}-${options.arch}, ${how}; updates ${updater === "auto" ? "install from the app" : "are downloaded by hand"}.`,
+    `Packaging PCP ${version} for ${process.platform}-${options.arch}, ${how}; updates ${updater === "auto" ? "install from the app" : "are downloaded by hand"}.` +
+      (process.platform === "darwin"
+        ? ` Touch ID: ${keychain ? `a keychain item macOS opens only for a fingerprint (team ${keychain.team})` : "the app's own check"}.`
+        : ""),
   )
   execFileSync(process.execPath, args, {
     cwd: desktopDir,

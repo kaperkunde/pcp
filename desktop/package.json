@@ -13,7 +13,7 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "stage": "node scripts/stage.mjs",
-    "start": "node scripts/stage.mjs && electron .",
+    "start": "node scripts/stage.mjs && node scripts/keychain.mjs && electron .",
     "dist": "node scripts/dist.mjs"
   },
   "devDependencies": {

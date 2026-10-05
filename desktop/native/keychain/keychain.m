@@ -6,9 +6,10 @@
 //
 // The data-protection keychain needs the keychain-access-groups
 // entitlement, which a Developer ID app gets only from an embedded
-// provisioning profile (scripts/dist.mjs). Without it every call answers
-// errSecMissingEntitlement (-34018), and the wrapper keeps the key its
-// other way.
+// provisioning profile (scripts/dist.mjs). Without it a read answers "not
+// found" and a write errSecMissingEntitlement (-34018), so the keychain is
+// no way to tell: status() reads the entitlement off this process's own
+// signature, and without it the wrapper keeps the key its other way.
 //
 //   status()     -> { biometrics, entitled, saved, stale, code }
 //   store(key)   -> OSStatus
@@ -23,6 +24,7 @@
 
 #import <Foundation/Foundation.h>
 #import <LocalAuthentication/LocalAuthentication.h>
+#import <Security/SecTask.h>
 #import <Security/Security.h>
 #include <node_api.h>
 #include <stdlib.h>
@@ -56,6 +58,24 @@ static NSData *EnrolledFingerprints(void) {
   return context.evaluatedPolicyDomainState;
 }
 
+// Whether this process was signed with a keychain group, which only the
+// app with its provisioning profile is (and never plain Node).
+static bool HasKeychainGroup(void) {
+  SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+  if (!task) {
+    return false;
+  }
+  CFTypeRef groups = SecTaskCopyValueForEntitlement(
+      task, CFSTR("keychain-access-groups"), NULL);
+  CFRelease(task);
+  bool found = groups && CFGetTypeID(groups) == CFArrayGetTypeID() &&
+               CFArrayGetCount((CFArrayRef)groups) > 0;
+  if (groups) {
+    CFRelease(groups);
+  }
+  return found;
+}
+
 static void Wipe(void *bytes, size_t length) {
   if (bytes && length > 0) {
     memset_s(bytes, length, 0, length);
@@ -84,21 +104,24 @@ static void Set(napi_env env, napi_value object, const char *name,
 static napi_value Status(napi_env env, napi_callback_info info) {
   @autoreleasepool {
     NSData *enrolled = EnrolledFingerprints();
+    bool entitled = HasKeychainGroup();
 
     // Asks for the item's attributes without ever showing a prompt: found,
-    // found but behind the fingerprint, not there, or not allowed at all.
-    LAContext *silent = [[LAContext alloc] init];
-    silent.interactionNotAllowed = YES;
-    NSMutableDictionary *query = ItemQuery();
-    query[(__bridge id)kSecReturnAttributes] = @YES;
-    query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
-    query[(__bridge id)kSecUseAuthenticationContext] = silent;
+    // found but behind the fingerprint, or not there.
+    OSStatus code = errSecMissingEntitlement;
+    NSDictionary *attributes = nil;
+    if (entitled) {
+      LAContext *silent = [[LAContext alloc] init];
+      silent.interactionNotAllowed = YES;
+      NSMutableDictionary *query = ItemQuery();
+      query[(__bridge id)kSecReturnAttributes] = @YES;
+      query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+      query[(__bridge id)kSecUseAuthenticationContext] = silent;
 
-    CFTypeRef found = NULL;
-    OSStatus code =
-        SecItemCopyMatching((__bridge CFDictionaryRef)query, &found);
-    NSDictionary *attributes =
-        found ? (__bridge_transfer NSDictionary *)found : nil;
+      CFTypeRef found = NULL;
+      code = SecItemCopyMatching((__bridge CFDictionaryRef)query, &found);
+      attributes = found ? (__bridge_transfer NSDictionary *)found : nil;
+    }
 
     bool saved = code == errSecSuccess || code == errSecInteractionNotAllowed;
     bool stale = false;
@@ -111,7 +134,7 @@ static napi_value Status(napi_env env, napi_callback_info info) {
     napi_value result = NULL;
     napi_create_object(env, &result);
     Set(env, result, "biometrics", Bool(env, enrolled != nil));
-    Set(env, result, "entitled", Bool(env, code != errSecMissingEntitlement));
+    Set(env, result, "entitled", Bool(env, entitled));
     Set(env, result, "saved", Bool(env, saved));
     Set(env, result, "stale", Bool(env, stale));
     Set(env, result, "code", Int(env, code));
