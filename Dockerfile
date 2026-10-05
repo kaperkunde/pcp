@@ -58,10 +58,14 @@ ENV NODE_ENV=production \
     PCP_HTTP_PORT=8080 \
     PCP_HTTPS_PORT=8443
 
+# /run/pcp-sandbox is where PCP listens for run_code's sandbox, when
+# docker-compose.sandbox.yaml adds it: a volume there takes this directory's
+# owner and mode, so only PCP and its group reach the socket.
 RUN groupadd --system --gid 1001 nodejs \
   && useradd --system --uid 1001 --gid nodejs pcp \
-  && mkdir -p /data \
-  && chown pcp:nodejs /data
+  && mkdir -p /data /run/pcp-sandbox \
+  && chown pcp:nodejs /data /run/pcp-sandbox \
+  && chmod 0770 /run/pcp-sandbox
 
 # The browser (lib/core/browser/): Playwright's build of Chromium and the
 # libraries it needs, the version the app's playwright-core drives

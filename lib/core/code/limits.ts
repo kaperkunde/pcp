@@ -42,3 +42,15 @@ export const MAX_OUTPUT_CHARS = 1_000_000
 export const MAX_RETURN_CHARS = 4_000_000
 /** An error's message and stack, as the assistant reads it. */
 export const MAX_ERROR_CHARS = 4_000
+
+/**
+ * The sandbox container (sandbox.ts): one message between PCP and its
+ * runner, as a line of JSON. Above a call's arguments and an answer, with
+ * room for escaping.
+ */
+export const MAX_SANDBOX_MESSAGE_BYTES = 24 * 1024 * 1024
+/**
+ * How long PCP waits for the runner to say a run it was told to stop has
+ * ended, before giving up on it.
+ */
+export const SANDBOX_STOP_GRACE_MS = 10_000

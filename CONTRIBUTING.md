@@ -65,7 +65,9 @@ publish job warns, and re-running the failed job attaches the app.
 
 The same run builds the container image from the tag, for amd64 and arm64,
 and pushes it to `ghcr.io/kaperkunde/pcp` as `<version>` and `latest`, which
-`install.sh` and `docker-compose.yaml` pull. It is held to the same rule: a
+`install.sh` and `docker-compose.yaml` pull, and run_code's sandbox
+(`sandbox/`) to `ghcr.io/kaperkunde/pcp-sandbox` the same way, which
+`docker-compose.sandbox.yaml` pulls. It is held to the same rule: a
 failed build warns and `latest` stays at the previous release until the job
 is re-run. The package's visibility is set on GitHub, not here: a package
 takes the repository's visibility when it is first pushed, and anonymous
@@ -169,7 +171,8 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
 | `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits  |
 | `lib/core/browser/`                  | The browser: Chromium, its proxy, profile, tabs, tools        |
-| `lib/core/code/`                     | run_code: the QuickJS executor, the bridge, limits            |
+| `lib/core/code/`                     | run_code: QuickJS, the bridge, the sandbox executor, limits   |
+| `sandbox/`                           | The sandbox container: its runner and the `pcp` command       |
 | `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input     |
 | `components/browser-tab-view.tsx`    | The live view: frames on a canvas, timed input sent back      |
 | `lib/core/catalogue.ts`              | Writing a server's tool list into the catalogue               |

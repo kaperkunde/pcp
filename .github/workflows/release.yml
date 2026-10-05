@@ -18,9 +18,11 @@
 #
 # The container image is built from the same tag for amd64 and arm64 and
 # pushed to ghcr.io/kaperkunde/pcp as <version> and latest, which install.sh
-# and docker-compose.yaml pull. It is independent of the apps in the same
-# way: a failed image build does not hold the release, and latest stays at
-# the previous release until the job is re-run.
+# and docker-compose.yaml pull, and run_code's sandbox beside it as
+# ghcr.io/kaperkunde/pcp-sandbox, which docker-compose.sandbox.yaml pulls.
+# They are independent of the apps in the same way: a failed image build
+# does not hold the release, and latest stays at the previous release until
+# the job is re-run.
 #
 # Pushes made with the workflow token start no workflows, so the release
 # commit does not release itself again.
@@ -215,6 +217,24 @@ jobs:
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # run_code's sandbox (sandbox/, docker-compose.sandbox.yaml), versioned
+      # with PCP: the runner and PCP speak one protocol.
+      - name: Build and push the sandbox
+        uses: docker/build-push-action@v6
+        with:
+          context: sandbox
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ github.repository }}-sandbox:${{ needs.release.outputs.version }}
+            ghcr.io/${{ github.repository }}-sandbox:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=sandbox
+          cache-to: type=gha,mode=max,scope=sandbox
 
   publish:
     name: publish
@@ -235,6 +255,6 @@ jobs:
             echo "::warning::A desktop app build did not succeed; v$VERSION is published without it. Re-run the failed job to attach it."
           fi
           if [ "$IMAGE" != "success" ]; then
-            echo "::warning::The container image did not build; v$VERSION is published without it and ghcr.io/$GH_REPO:latest stays at the previous release. Re-run the failed job."
+            echo "::warning::The container images did not build; v$VERSION is published without them and ghcr.io/$GH_REPO:latest (or ghcr.io/$GH_REPO-sandbox:latest) stays at the previous release. Re-run the failed job."
           fi
           gh release edit "v$VERSION" --draft=false

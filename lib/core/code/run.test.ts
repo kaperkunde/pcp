@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto"
+import { mkdtempSync, rmSync } from "node:fs"
+import { connect as connectSocket, type Socket } from "node:net"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -20,6 +24,7 @@ import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { MAX_CALLS_PER_RUN } from "./limits"
 import { runCode } from "./run"
+import { sandboxLanguages, startSandbox, stopSandbox } from "./sandbox"
 
 // run_code as an assistant meets it, through the gateway's MCP interface,
 // with the upstream replaced by a stub that records what actually ran: the
@@ -413,6 +418,86 @@ describe("a server the owner has to connect", () => {
     expect(text).toContain("check_server")
     expect(text).not.toContain("check_permission gives")
     expect(ran).toEqual([{ tool: "archive", args: {} }])
+  })
+})
+
+describe("the sandbox's languages", () => {
+  /** A stand-in runner: says hello, and answers each program with its code. */
+  async function fakeRunner(socketPath: string): Promise<Socket> {
+    const socket = connectSocket(socketPath)
+    await new Promise((resolve) => socket.once("connect", resolve))
+    socket.write(
+      `${JSON.stringify({ type: "hello", protocol: 1, languages: ["bash", "python"] })}\n`,
+    )
+    let buffer = ""
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString()
+      let at = buffer.indexOf("\n")
+      while (at !== -1) {
+        const message = JSON.parse(buffer.slice(0, at)) as {
+          type: string
+          job: string
+          language: string
+          code: string
+        }
+        buffer = buffer.slice(at + 1)
+        at = buffer.indexOf("\n")
+        if (message.type === "run") {
+          socket.write(
+            `${JSON.stringify({ type: "done", job: message.job, exit: 0, output: `${message.language}: ${message.code}\n`, dropped: 0 })}\n`,
+          )
+        }
+      }
+    })
+    const deadline = Date.now() + 5_000
+    while (sandboxLanguages().length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    return socket
+  }
+
+  it("offers bash and Python only while a runner is connected, and runs them there", async () => {
+    await connect()
+    const schema = async () =>
+      (await client.listTools()).tools.find((tool) => tool.name === "run_code")!
+        .inputSchema.properties as Record<string, { enum?: string[] }>
+
+    expect(Object.keys(await schema())).toEqual(["code"])
+
+    const dir = mkdtempSync(path.join(tmpdir(), "pcp-runner-"))
+    const socketPath = path.join(dir, "sandbox.sock")
+    await startSandbox(socketPath)
+    const runner = await fakeRunner(socketPath)
+
+    try {
+      // The gateway is built per request: a new one sees the runner.
+      await client.close()
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+      await buildGatewayServer(scope, await loadGatewayServers(scope), {
+        executor,
+      }).connect(serverSide)
+      client = new Client({ name: "test", version: "1.0.0" })
+      await client.connect(clientSide)
+
+      expect((await schema()).language?.enum).toEqual([
+        "javascript",
+        "bash",
+        "python",
+      ])
+
+      const result = await client.callTool({
+        name: "run_code",
+        arguments: { code: "echo hi", language: "bash" },
+      })
+      const text = JSON.stringify(result.content)
+      expect(text).toContain("It printed:\\nbash: echo hi")
+      // A shell program has no value to return.
+      expect(text).not.toContain("It returned")
+    } finally {
+      runner.destroy()
+      await stopSandbox()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

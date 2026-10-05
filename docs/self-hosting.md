@@ -66,6 +66,17 @@ Pi); `docker compose pull` first fetches the published image instead. The
 second file opens ports 80 and 443, like `PCP_HTTPS=1` above; leave it out
 for `docker compose up -d`.
 
+**Shell and Python programs (optional).** An assistant you let run code
+(a token setting) runs JavaScript programs inside PCP. From a checkout, a
+third file adds a sandbox container where it can also run bash and Python
+programs; it has no network and reaches PCP only through a shared volume:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.https.yaml -f docker-compose.sandbox.yaml up -d
+```
+
+Name the same files whenever you run `docker compose` for PCP afterwards.
+
 ## 3. Set up your vault
 
 Open `http://<this computer's address>:3000` in a browser, for example

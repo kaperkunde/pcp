@@ -145,7 +145,14 @@ so in the summary; the bump itself waits for the request.
   call in the request log, files as handles. No credential, network, file
   or timer ever reaches the program, and nothing but strings crosses into
   it. Its memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
-  own limit counts nothing in these builds). New limits go in
+  own limit counts nothing in these builds). The sandbox container
+  (`code/sandbox.ts`, `sandbox/`, `docker-compose.sandbox.yaml`) is a second
+  executor behind the same bridge: PCP only listens on its socket, and only
+  when `PCP_SANDBOX_SOCKET` is set; it never touches the Docker socket. The
+  container keeps no network, a read-only root and no capabilities but
+  SETUID/SETGID, programs run as their own user out of reach of PCP's
+  socket, and everything of theirs is killed and removed after each run
+  (`scripts/sandbox.test.ts` pins the compose file). New limits go in
   `code/limits.ts`, and a new bridge operation gets a test.
 - The browser (`lib/core/browser/`) runs Chromium for the vault and keeps
   nothing on disk: its sign-ins are the vault's `browser_profile`,

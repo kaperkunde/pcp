@@ -144,7 +144,11 @@ function seconds(ms: number): string {
  */
 export async function runCode(
   scope: PermissionScope,
-  input: { code: string },
+  input: {
+    code: string
+    /** A shell program has no value to return, only output and a status. */
+    returns?: boolean
+  },
   {
     call,
     signal,
@@ -429,9 +433,11 @@ export async function runCode(
         [
           `The program finished in ${did}.`,
           ...(output ? [`It printed:\n${output}`] : []),
-          result.returned === null
-            ? "It returned nothing."
-            : `It returned:\n${await shownReturn(scope, result.returned)}`,
+          ...(result.returned !== null
+            ? [`It returned:\n${await shownReturn(scope, result.returned)}`]
+            : input.returns === false
+              ? []
+              : ["It returned nothing."]),
         ].join("\n\n"),
       )
     }

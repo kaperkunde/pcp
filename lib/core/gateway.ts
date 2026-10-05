@@ -53,6 +53,11 @@ import { connectResult, type ServerState } from "./connect"
 import { waitForOwner } from "./owner-wait"
 import { MAX_CODE_ANSWER_CHARS, MAX_CODE_CHARS } from "./code/limits"
 import { runCode } from "./code/run"
+import {
+  sandboxExecutor,
+  sandboxLanguages,
+  type SandboxLanguage,
+} from "./code/sandbox"
 import type { Executor } from "./code/types"
 import {
   checkPermission,
@@ -2006,6 +2011,15 @@ export function buildGatewayServer(
   // makes is looked up and decided as call_tool's are (resolveCall), and
   // nothing else reaches it (lib/core/code/).
   if (scope.runCode) {
+    // The sandbox's languages, while its runner is connected (code/sandbox.ts).
+    const shells = sandboxLanguages()
+    const language = z
+      .enum(["javascript", ...shells] as [string, ...string[]])
+      .optional()
+      .describe(
+        `javascript (the default), or ${shells.join(" or ")} in PCP's sandbox.`,
+      )
+
     server.registerTool(
       "run_code",
       {
@@ -2018,6 +2032,11 @@ export function buildGatewayServer(
             " characters of JSON. A tool's error, a refusal and a blocked tool throw an Error the program may catch. A tool the owner has not allowed yet stops the program at that call (calls before it have run) and answers with the owner's link, handed over as a tool's is.",
           'Files in an answer (attachments, images) come back as handles, {"$result": id, "type", "size", …}: pass a handle as it is where a tool wants the file. await pcp.read(handle) reads a kept text; await pcp.keep(text, { name, type }) keeps a text (a CSV, a report) and returns its handle, to pass to a tool or to return.',
           "Limits: 3 minutes in all, 15 seconds of computing, 128 MB of memory, 100 calls, 5 at a time. What it prints and returns comes back in the answer; a long part is kept as a result to read with read_result.",
+          ...(shells.length > 0
+            ? [
+                `With language ${shells.map((shell) => `"${shell}"`).join(" or ")}, the program runs instead in PCP's sandbox: a container with no network, where bash has jq, the usual command-line tools and Python 3 with its standard library, and nothing is kept between runs. The pcp command calls tools: pcp call SERVER TOOL '{"arg": 1}' [--fields a,b] [--decode a] [--keep a] prints the answer as JSON (- reads the arguments from stdin); pcp read HANDLE prints a kept text; pcp keep [--name NAME] [--type TYPE] [FILE] keeps a text and prints its handle. A refusal or a tool's error goes to stderr with status 1. In Python, import pcp, then pcp.call(server, tool, args, fields=…), pcp.read(handle) and pcp.keep(text, name=…, type=…), which raise pcp.PcpError. What it prints, stdout and stderr together, comes back with how it exited; one program runs at a time.`,
+              ]
+            : []),
         ].join("\n\n"),
         inputSchema: z.object({
           code: z
@@ -2027,6 +2046,7 @@ export function buildGatewayServer(
             .describe(
               'The program: the body of an async function. For example: const issues = await pcp.call("github", "list_issues", { repo: "pcp" }); return issues.filter((issue) => issue.labels.length === 0).map((issue) => issue.number)',
             ),
+          ...(shells.length > 0 ? { language } : {}),
         }),
         annotations: {
           readOnlyHint: false,
@@ -2038,19 +2058,23 @@ export function buildGatewayServer(
       // The program, what it printed and its errors stay out of the log;
       // each call it makes is logged by server and tool (code/run.ts).
       logged("run_code", () => ({}), { quiet: true })(
-        async (args: { code: string }, ctx) => {
+        async (args: { code: string; language?: string }, ctx) => {
           if (!checkRateLimit(`run_code:${scope.tokenId}`, CODE_RUNS)) {
             return failure(
               "That is a lot of programs in a short time. Wait a few minutes.",
             )
           }
 
+          const shell = shells.find((name) => name === args.language) as
+            SandboxLanguage | undefined
+          const runner = shell ? sandboxExecutor(shell) : codeExecutor
+
           return runCode(
             scope,
-            { code: args.code },
+            { code: args.code, returns: !shell },
             {
               signal: ctx.mcpReq.signal,
-              ...(codeExecutor ? { executor: codeExecutor } : {}),
+              ...(runner ? { executor: runner } : {}),
               call: async ({
                 server: slug,
                 tool: name,

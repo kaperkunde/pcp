@@ -689,6 +689,32 @@ three parts:
   sight, so their bytes never enter the program. An OAuth server to connect
   or a browser site to allow stops the run the same way, with its link.
 
+**The sandbox** (`code/sandbox.ts`, `sandbox/`, `docker-compose.sandbox.yaml`)
+is a second executor behind the same bridge, for installs that run PCP in
+Docker or Podman: a container with bash, `jq` and Python 3 where a program in
+`bash` or `python` runs. It has no network (`network_mode: none`), a
+read-only root, every capability dropped but SETUID and SETGID, an init that
+reaps, and memory, CPU and process limits. PCP starts nothing and never
+touches the Docker socket: when `PCP_SANDBOX_SOCKET` is set (only the compose
+file sets it), it listens on a Unix socket in the `pcp-sandbox` volume, in a
+directory only PCP's group (1001) reaches, and the runner in the container
+(root with that group, `sandbox/runner.py`) connects, says which languages it
+has, and runs one program at a time as PCP asks. The program runs as its own
+user (2000, `sandbox/launcher.py`), which cannot reach PCP's socket, in a
+directory of its own on a tmpfs, with rlimits; its only way to PCP is a
+socket the runner makes for that program alone, where the `pcp` command and
+module (`sandbox/pcp.py`) send each request, and the runner passes it to PCP
+under the program's job. PCP hands it to the bridge as it would QuickJS's,
+so a shell program has exactly a JavaScript program's rights; a request for
+any other job is ignored. A stop from the bridge, an abort or the time limit
+makes the runner kill every process of the program's user and remove every
+file it owns, so nothing of one program, which may be another token's, is
+left for the next. What the program prints, stdout and stderr together,
+comes back with its exit status. `run_code` offers a `language` argument only
+while a runner is connected, so a token on an install without the sandbox
+never sees one. Its state is kept on `globalThis`, like the browser's,
+because the boot code that listens and the gateway are bundled apart.
+
 Each call is in the request log under `run_code`, by server and tool; the
 program, what it printed and its errors are not logged or kept. What it
 printed (up to a million characters) and what it returned come back in the

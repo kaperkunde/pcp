@@ -174,7 +174,11 @@ Not defended against:
   QuickJS compiled to WebAssembly, with no network, files or secrets, a
   memory the WebAssembly engine caps, and limits on time and calls; a flaw
   in QuickJS or in the WebAssembly engine of Node would be what let it out,
-  so keep PCP updated.
+  so keep PCP updated. A shell or Python program, where you added the
+  sandbox container, runs in a container with no network, a read-only file
+  system and no capabilities but changing user, as a user that cannot reach
+  PCP's socket; a flaw in the kernel or the container runtime would be what
+  let it out, so keep the host updated too.
 - **Site names on disk.** The sites a token reached, with when, are stored
   unencrypted, like server addresses, so the token's page can list them. A
   copy of the disk shows them.

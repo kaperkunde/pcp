@@ -49,5 +49,13 @@ export async function register() {
     // then there is no timer and no request (lib/core/updates/runtime.ts).
     const { startUpdates } = await import("@/lib/core/updates/runtime")
     await startUpdates()
+
+    // run_code's sandbox container, when the compose file for it set
+    // PCP_SANDBOX_SOCKET: PCP listens there for its runner. Without it
+    // nothing listens (lib/core/code/sandbox.ts).
+    const { startSandbox } = await import("@/lib/core/code/sandbox")
+    await startSandbox().catch((error) =>
+      console.error("[sandbox] could not listen for the runner", error),
+    )
   }
 }

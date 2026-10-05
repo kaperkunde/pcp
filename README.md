@@ -409,6 +409,24 @@ under `run_code`. A program has no network, no files, no timers and none of
 your secrets, and stops after 3 minutes, 15 seconds of computing, 128 MB of
 memory or 100 calls.
 
+**Shell and Python programs.** Where PCP runs in Docker or Podman from a
+checkout, add the sandbox and an assistant can also send a bash or Python
+program, which runs in a container of its own beside PCP, with `jq`, the
+usual command-line tools and Python 3, and calls tools with a `pcp` command
+(`pcp call github list_issues '{"repo": "pcp"}' | jq …`) or `import pcp`:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml up -d
+```
+
+The sandbox has no network at all and a read-only file system; it reaches
+PCP only through a socket on a volume they share, which PCP listens on (PCP
+never touches the Docker socket), and each program runs as a user of its
+own that cannot reach that socket, with everything it started or wrote
+removed when it ends. Its calls follow the token's levels exactly as a
+JavaScript program's do. The installer and the desktop apps do not add it;
+JavaScript works everywhere.
+
 **The browser.** On the **Browser** page, **Add the browser**: it becomes a
 server like any other, with tools to open a page (`navigate`, `tabs`), read
 it (`snapshot`, which names each element with a ref; `read_page`; `find`;
