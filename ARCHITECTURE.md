@@ -766,7 +766,8 @@ Linux):
 
 The desktop app keeps its own files beside that directory, not in it:
 `desktop.json` (the port, whether other devices may connect), on a Mac with
-Touch ID on `touch-id.bin` (the Touch ID key, encrypted; see below), and the
+Touch ID on and no keychain item for it `touch-id.bin` (the Touch ID key,
+encrypted; see below), and the
 server's stdout in the system's log folder (`~/Library/Logs/PCP` on macOS,
 `logs/` under the app folder elsewhere). Everything PCP remembers is in the
 database; the wrapper holds only what has to be known before the server is
@@ -782,13 +783,28 @@ app keeps and hands over only after Touch ID.
 
 - **Turning it on takes the password**: in Settings, or with the box under
   the password on the sign-in page. PCP makes the key, the page hands it to
-  the app, and the app asks for Touch ID before it keeps it. A vault has at
-  most one; a new one replaces it. If the app does not keep it, the page
+  the app, and the app keeps it only once Touch ID has said yes. A vault has
+  at most one; a new one replaces it. If the app does not keep it, the page
   turns Touch ID off again, so no key is left that nobody holds.
-- **Where the key lives.** `touch-id.bin` in the app's folder, encrypted
-  with Electron's `safeStorage`, whose own key macOS keeps in the login
-  keychain for this app's code. The server never reads that file, and an
-  export never carries the grant (`backup-format.ts` refuses one).
+- **Where the key lives**, one of two ways (`desktop/touch-id-store.mjs`
+  decides; the server never reads either, and an export never carries the
+  grant, `backup-format.ts` refuses one):
+  - **A keychain item macOS opens only for a fingerprint**, when the app is
+    signed with its keychain group. The item is in the data-protection
+    keychain (`desktop/native/keychain`, a small Node-API module), made with
+    `kSecAccessControlBiometryCurrentSet` and `…WhenPasscodeSetThisDeviceOnly`:
+    reading it is the Touch ID check, done by macOS, so no process reads the
+    key without a finger, PCP's own included. It never leaves this Mac (no
+    iCloud, no backup), and adding or removing a fingerprint voids it: the
+    item records the set it was made under, and the app drops it once the
+    set has changed, so the page offers the password and Settings offers
+    to set Touch ID up again. Saving reads the item back with the owner's
+    finger before it counts.
+  - **Otherwise a file**, `touch-id.bin` in the app's folder, encrypted with
+    Electron's `safeStorage` (whose own key macOS keeps in the login
+    keychain for this app's code) and handed over after the app's own Touch
+    ID prompt (`systemPreferences.promptTouchID`). A checkout, a fork, or a
+    release built without the profile works this way.
 - **How a page reaches it.** The window's preload (`desktop/preload.cjs`)
   gives PCP's own pages, and only those (plain http on localhost at the
   app's port), `window.pcpDesktop.touchId`: `status`, `unlock`, `save`,
@@ -804,21 +820,32 @@ app keeps and hands over only after Touch ID.
   file holds no `device` grant). A key PCP refuses is forgotten by the app
   (`TOUCH_ID_REJECTED`), and the page falls back to the password.
 - **What it protects against.** Someone at the owner's unlocked Mac without
-  their finger, and a copy of the app's folder (a backup): the key and the
-  window's session cookie are both encrypted under the keychain key, the
-  cookie by the `enableCookieEncryption` fuse. It is not a keychain item
-  that macOS itself binds to the fingerprint: Electron's Touch ID prompt is
-  the app's own check, and a biometric keychain item needs a provisioning
-  profile on top of the Developer ID signature releases carry.
-  What stops another program from simply asking the keychain as PCP are
-  the fuses (`desktop/electron-builder.yml`): no running the app as plain
-  Node, no `NODE_OPTIONS`, no inspector.
+  their finger, and a copy of the app's folder (a backup): the window's
+  session cookie is encrypted under the app's keychain key (the
+  `enableCookieEncryption` fuse), and so is the file when the key is kept
+  there. With the keychain item, also another program running as the owner:
+  macOS hands the key to nobody without a fingerprint. With the file, the
+  fingerprint is the app's own check, and what stops another program from
+  simply asking the keychain as PCP are the fuses
+  (`desktop/electron-builder.yml`): no running the app as plain Node, no
+  `NODE_OPTIONS`, no inspector. The session cookie relies on those fuses
+  either way.
 - **Signing.** Releases carry PCP's Developer ID signature and are
-  notarized, so macOS recognises each update as the same app and the
-  keychain item stays readable. A build without the certificate (a fork, or
-  `pnpm dist` in a checkout) is signed ad hoc and tied to the exact build:
-  after a rebuild macOS asks once for the Mac's password before PCP may use
-  it ("Always Allow").
+  notarized, so macOS recognises each update as the same app and its
+  keychain items stay readable. The keychain group takes more: a Developer
+  ID provisioning profile, the `MAC_PROVISIONING_PROFILE` secret.
+  `desktop/scripts/dist.mjs` checks it (`keychain-profile.mjs`: Developer
+  ID, this app, its team, the keychain group, a year or more left), embeds
+  it, and signs the app itself with `com.apple.application-identifier`,
+  the team and `keychain-access-groups`; the helpers keep
+  `entitlements.mac.plist`, since a process signed with an entitlement its
+  profile does not cover is killed at launch. The app finds out which it is
+  from its own signature (`SecTaskCopyValueForEntitlement`), not from the
+  keychain, which answers a process without the group "not found". A build
+  without the certificate (a fork, or `pnpm dist` in a checkout) is signed
+  ad hoc and tied to the exact build: after a rebuild macOS asks once for
+  the Mac's password before PCP may use its keychain key ("Always
+  Allow").
 
 ## Export and restore
 

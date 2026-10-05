@@ -212,7 +212,13 @@ so in the summary; the bump itself waits for the request.
   which answers PCP's own pages only and hands over the Touch ID key only
   after Touch ID. The fuses in `desktop/electron-builder.yml` keep other
   programs from running code as the app, and so from its keychain item:
-  leave them flipped. `desktop/scripts/stage.mjs` copies what the Dockerfile
+  leave them flipped. `desktop/native/keychain` is the only native code the
+  wrapper builds (Touch ID's keychain item); the keychain group goes on the
+  app alone, never on `entitlementsInherit`, and only with a profile
+  `desktop/scripts/keychain-profile.mjs` has checked: macOS kills a process
+  whose entitlements its profile does not cover. Whether the app has the
+  group is read off its own signature, never inferred from a keychain
+  answer. `desktop/scripts/stage.mjs` copies what the Dockerfile
   copies: a change to one is a change to both. (Its environment is the
   wrapper's own: the HTTPS ports stay 80 and 443, which the image moves.) It is its own pnpm project
   (`desktop/pnpm-workspace.yaml`); do not add it to the root workspace, or

@@ -195,6 +195,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                  |
 | `desktop/main.mjs`                   | The desktop app: starts the server, opens the window          |
 | `desktop/touch-id.mjs`               | Touch ID in the app: answers `preload.cjs`, keeps the key     |
+| `desktop/native/keychain/`           | Touch ID's keychain item; `scripts/keychain-profile.mjs`      |
 | `desktop/scripts/stage.mjs`          | Stages the server for the app, as the Dockerfile lays it out  |
 | `.github/workflows/release.yml`      | Tags, builds the apps and the image, publishes the release    |
 | `install.sh`                         | The one-line Linux install: Docker or Podman, published image |
