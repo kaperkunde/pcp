@@ -579,6 +579,24 @@ describe("sending", () => {
     expect(sent.messageId).toBe(mailed[0]!.messageId.slice(1, -1))
   })
 
+  it("sends attachments over SMTP and in the Sent copy alike", async () => {
+    const { mail, mailed } = setup()
+    const pdf = Buffer.from("%PDF-1.7 the plan")
+
+    await mail.sendEmail!({
+      to: [{ name: null, email: "x@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "The plan",
+      text: "Attached.",
+      attachments: [{ name: "plan.pdf", type: "application/pdf", bytes: pdf }],
+    })
+
+    expect(mailed[0]!.attachments).toEqual([
+      { filename: "plan.pdf", contentType: "application/pdf", content: pdf },
+    ])
+  })
+
   it("sends from the From address when the user name is not one", async () => {
     const { mail, mailed } = setup({ config: { from: "ada@example.org" } })
     await mail.sendEmail!({
@@ -629,6 +647,36 @@ describe("sending", () => {
     expect(raw).toMatch(/^In-Reply-To: <engine-1@example.com>$/m)
     expect(raw).toMatch(/^Message-ID: <m1@example.com>$/m)
     expect(raw).toContain("Thursday suits me.")
+  })
+
+  it("writes attachments into the message with their name and type", async () => {
+    const raw = (
+      await defaultImapDeps.compose({
+        from: { name: "", address: "ada@example.com" },
+        to: [{ name: "", address: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "Parts",
+        text: "Attached.",
+        messageId: "<m2@example.com>",
+        attachments: [
+          {
+            filename: "parts.csv",
+            contentType: "text/csv",
+            content: Buffer.from("part,count\ncog,42\n"),
+          },
+        ],
+      })
+    ).toString("utf8")
+
+    expect(raw).toMatch(/^Content-Type: multipart\/mixed;/m)
+    expect(raw).toMatch(/^Content-Type: text\/csv; name=parts\.csv$/m)
+    expect(raw).toMatch(
+      /^Content-Disposition: attachment; filename=parts\.csv$/m,
+    )
+    expect(raw).toContain(
+      Buffer.from("part,count\ncog,42\n").toString("base64"),
+    )
   })
 })
 

@@ -71,6 +71,7 @@ describe("the session", () => {
     expect(session).toEqual({
       apiUrl: `${origin}/jmap/api`,
       downloadUrl: `${origin}/jmap/download/{accountId}/{blobId}/{name}?type={type}`,
+      uploadUrl: `${origin}/jmap/upload/{accountId}`,
       accountId: "acct-1",
       submission: true,
     })
@@ -79,6 +80,18 @@ describe("the session", () => {
       path: "/jmap/session",
       authorization: BASIC,
     })
+  })
+
+  it("takes an upload address only on the session's origin", async () => {
+    const { sessionUrl } = await serve({
+      uploadUrl: "https://elsewhere.example.com/upload/{accountId}",
+    })
+    expect((await fetchJmapSession(sessionUrl, basic())).uploadUrl).toBeNull()
+
+    const none = await serve({ uploadUrl: null })
+    expect(
+      (await fetchJmapSession(none.sessionUrl, basic())).uploadUrl,
+    ).toBeNull()
   })
 
   it("says when the account may not send", async () => {
@@ -371,6 +384,78 @@ describe("the mail tools' work", () => {
       text: "Thursday suits me.",
     })
     expect(stored.keywords.$draft).toBeUndefined()
+  })
+
+  it("uploads each attachment, then sends the email carrying them", async () => {
+    const { mail, fake } = await backend()
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff,
+    ])
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "The drawing",
+      text: "Attached.",
+      attachments: [
+        { name: "drawing.png", type: "image/png", bytes: png },
+        { name: "parts.csv", type: "text/csv", bytes: Buffer.from("a,b\n") },
+      ],
+    })
+
+    const uploads = fake.requests.filter((request) =>
+      request.path.startsWith("/jmap/upload/"),
+    )
+    expect(uploads).toEqual([
+      expect.objectContaining({
+        method: "POST",
+        path: "/jmap/upload/acct-1",
+        authorization: BASIC,
+        body: "9 bytes",
+      }),
+      expect.objectContaining({ body: "4 bytes" }),
+    ])
+    expect(fake.uploads[0]).toMatchObject({ type: "image/png" })
+    expect(fake.uploads[0]!.content.equals(png)).toBe(true)
+
+    const stored = fake.emails.find((email) => email.id === sent.id)!
+    expect(stored.attachments).toEqual([
+      {
+        blobId: "blob-up-1",
+        name: "drawing.png",
+        type: "image/png",
+        content: png,
+      },
+      expect.objectContaining({ name: "parts.csv", type: "text/csv" }),
+    ])
+  })
+
+  it("sends nothing when it cannot upload an attachment", async () => {
+    const { mail, fake } = await backend({ uploadUrl: null })
+
+    await expect(
+      mail.sendEmail!({
+        to: [{ name: null, email: "x@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+        attachments: [
+          {
+            name: "a.bin",
+            type: "application/octet-stream",
+            bytes: Buffer.from([1]),
+          },
+        ],
+      }),
+    ).rejects.toThrow(/offers no uploads/)
+    expect(fake.sent).toEqual([])
+    expect(
+      fake.requests.some((request) =>
+        JSON.stringify(request.body).includes("Email/set"),
+      ),
+    ).toBe(false)
   })
 
   it("will not send from an account that may not", async () => {

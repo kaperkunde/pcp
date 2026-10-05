@@ -431,12 +431,12 @@ function registerLongText(
   )
 }
 
-async function readBody(request: IncomingMessage): Promise<string> {
+async function readBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = []
   for await (const chunk of request) {
     chunks.push(chunk as Buffer)
   }
-  return Buffer.concat(chunks).toString("utf8")
+  return Buffer.concat(chunks)
 }
 
 function toWebRequest(
@@ -581,7 +581,9 @@ export async function startUpstream({
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", origin)
-    const body = await readBody(req)
+    // Kept as bytes for the JMAP upload; everything else reads it as text.
+    const bytes = await readBody(req)
+    const body = bytes.toString("utf8")
     const authorization = req.headers.authorization ?? null
 
     try {
@@ -858,6 +860,7 @@ export async function startUpstream({
           url: req.url ?? "/",
           headers: req.headers,
           body,
+          bytes,
         })
 
         if (answer) {

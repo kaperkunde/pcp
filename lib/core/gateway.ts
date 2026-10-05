@@ -791,7 +791,7 @@ export function buildGatewayServer(
         const handles = await describeResults(
           scope.ctx,
           scope.tokenId,
-          collectHandleIds(args.arguments ?? {}),
+          collectHandleIds(args.arguments ?? {}, { loose: true }),
         )
         const missing = handles.find((handle) => !handle.found)
 

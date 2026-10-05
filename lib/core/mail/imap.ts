@@ -131,6 +131,11 @@ export type OutgoingMail = {
   messageId: string
   inReplyTo?: string
   references?: string[]
+  attachments?: Array<{
+    filename: string
+    contentType: string
+    content: Buffer
+  }>
 }
 
 export interface SmtpTransportLike {
@@ -915,6 +920,15 @@ export function openImapBackend(
         text: input.text,
         messageId,
         ...(inReplyTo ? { inReplyTo, references } : {}),
+        ...(input.attachments?.length
+          ? {
+              attachments: input.attachments.map((attachment) => ({
+                filename: attachment.name,
+                contentType: attachment.type,
+                content: attachment.bytes,
+              })),
+            }
+          : {}),
       }
       const transport = await deps.smtp(smtp, login)
       let sent: Awaited<ReturnType<SmtpTransportLike["sendMail"]>>

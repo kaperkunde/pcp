@@ -23,6 +23,9 @@ export const MAX_ATTACHMENTS_LISTED = 100
 export const MAX_RECIPIENTS = 50
 export const MAX_SUBJECT_CHARS = 500
 export const MAX_SEND_TEXT_CHARS = 100_000
+/** Files one email may carry, and their size together. */
+export const MAX_SEND_ATTACHMENTS = 10
+export const MAX_SEND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 export const MAX_SEARCH_TEXT_CHARS = 500
 
 /**

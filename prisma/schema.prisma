@@ -410,6 +410,8 @@ model McpServer {
   /// so the credential goes nowhere the owner did not type.
   mailApiUrl      String? @map("mail_api_url")
   mailDownloadUrl String? @map("mail_download_url")
+  /// jmap: where attachments to send are uploaded, on the same origin.
+  mailUploadUrl   String? @map("mail_upload_url")
   /// jmap: the account the session names for mail.
   mailAccountId   String? @map("mail_account_id")
   /// jmap: whether the server lets this account send (submission).
