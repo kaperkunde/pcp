@@ -43,6 +43,10 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **Web pages, on your terms.** A token can be given a `web_fetch` tool that
   reads public web pages as Markdown. You decide per method and per site, and
   every site an assistant tried is listed for you to allow or block.
+- **Large answers that never reach the assistant.** A token can be given a
+  `run_code` tool: a short JavaScript program, run inside PCP, that calls
+  the token's tools and filters, counts or passes on what they answer. Every
+  call follows the token's levels, and the program reaches nothing else.
 - **A browser that keeps your sign-ins.** Add PCP's browser and an assistant
   can open pages, read them, click, type and fill in forms in a headless
   Chromium on the machine PCP runs on, signed in where you signed it in. You
@@ -384,6 +388,26 @@ on your network; an assistant cannot ask for it), and never PCP's own
 address. It sends none of your secrets or cookies; it never sends an
 Authorization or Cookie header at all. The sites a token reached are on its
 page, not in the request log.
+
+A token made with **Let an assistant with this token run code that calls its
+tools** gets a `run_code` tool. The assistant sends a JavaScript program, the
+body of an async function, which PCP runs in a sandbox of its own: QuickJS,
+compiled to WebAssembly, with nothing of the machine it runs on. The program
+calls the token's tools with `await pcp.call(server, tool, args)` and gets
+each answer whole, as a value, so it can pick the ten rows the assistant needs
+out of ten thousand, join two tools' answers, or hand a file from one tool to
+another, and only what it prints and returns goes back to the assistant.
+Files move as handles, as they do between calls (above); `pcp.keep` keeps a
+text it made (a CSV, a report) as a handle to pass on.
+
+Each call is decided as if the assistant had made it with `call_tool`: an
+allowed tool runs, a blocked one is an error the program sees, and one that
+asks you first stops the program at that call (the calls before it have run),
+with the usual request for you to answer; for the program to make that call
+itself next time, choose **Always allow**. Every call is in the request log
+under `run_code`. A program has no network, no files, no timers and none of
+your secrets, and stops after 3 minutes, 15 seconds of computing, 128 MB of
+memory or 100 calls.
 
 **The browser.** On the **Browser** page, **Add the browser**: it becomes a
 server like any other, with tools to open a page (`navigate`, `tabs`), read

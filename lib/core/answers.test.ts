@@ -2,6 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 import { describe, expect, it } from "vitest"
 
 import {
+  answerValue,
   decodeBase64Text,
   MAX_AUTO_TEXT_HANDLES,
   MAX_HANDLES_PER_ANSWER,
@@ -661,5 +662,121 @@ describe("resource links", () => {
       false,
     )
     expect(small.shown.content.map((b) => b.type)).toEqual(["text"])
+  })
+})
+
+// What a program run by run_code is handed: values, not text to read.
+
+describe("answerValue", () => {
+  const MAX = 100_000
+
+  it("hands over JSON whole, as a value, with fields applied", async () => {
+    const { keepers } = fakeKeepers()
+
+    expect(
+      await answerValue(json(invoices), {}, keepers, { max: MAX }),
+    ).toEqual({ ok: true, value: invoices })
+    expect(
+      await answerValue(json(invoices), { fields: ["data.number"] }, keepers, {
+        max: MAX,
+      }),
+    ).toEqual({
+      ok: true,
+      value: { data: [{ number: "0001" }, { number: "0002" }] },
+    })
+  })
+
+  it("takes structuredContent when only it is JSON, and text as text", async () => {
+    const { keepers } = fakeKeepers()
+
+    expect(
+      await answerValue(
+        {
+          content: [{ type: "text", text: "Two invoices." }],
+          structuredContent: { count: 2 },
+        },
+        {},
+        keepers,
+        { max: MAX },
+      ),
+    ).toEqual({ ok: true, value: { count: 2 } })
+    expect(
+      await answerValue(
+        {
+          content: [
+            { type: "text", text: "one" },
+            { type: "text", text: "two" },
+          ],
+        },
+        {},
+        keepers,
+        { max: MAX },
+      ),
+    ).toEqual({ ok: true, value: "one\n\ntwo" })
+  })
+
+  it("keeps files as handles, so their bytes never reach the program", async () => {
+    const { kept, keepers } = fakeKeepers()
+    const answer = await answerValue(
+      {
+        content: [
+          { type: "text", text: "Here it is." },
+          {
+            type: "image",
+            data: PNG.toString("base64"),
+            mimeType: "image/png",
+          },
+        ],
+      },
+      {},
+      keepers,
+      { max: MAX },
+    )
+
+    expect(answer).toEqual({
+      ok: true,
+      value: [
+        "Here it is.",
+        {
+          $result: "r0",
+          type: "image/png",
+          size: PNG.length,
+          readableUntil: UNTIL.toISOString(),
+        },
+      ],
+    })
+    expect(kept[0]).toMatchObject({ kind: "bytes", mediaType: "image/png" })
+  })
+
+  it("keeps the longest texts when it is too long, and refuses what still is", async () => {
+    const { keepers } = fakeKeepers()
+    const shrunk = await answerValue(json(invoices), {}, keepers, {
+      max: 2_000,
+    })
+
+    expect(shrunk.ok).toBe(true)
+    expect(
+      (shrunk as { value: typeof invoices }).value.data[0]!.terms,
+    ).toMatchObject({ $result: expect.any(String) })
+
+    const many = Array.from({ length: 1000 }, (_, id) => ({ id }))
+    const refused = await answerValue(json(many), {}, keepers, { max: 2_000 })
+    expect(refused.ok).toBe(false)
+    expect((refused as { error: string }).error).toContain(
+      "more than a program is handed (2,000)",
+    )
+  })
+
+  it("is an error with the tool's own text when the tool failed", async () => {
+    const { keepers } = fakeKeepers()
+
+    expect(
+      await answerValue(
+        { content: [{ type: "text", text: "Not found." }], isError: true },
+        {},
+        keepers,
+        { max: MAX },
+      ),
+    ).toEqual({ ok: false, error: "Not found." })
   })
 })

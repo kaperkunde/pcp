@@ -373,7 +373,7 @@ function ChromiumInstall({
           : "Chromium is not on this machine yet."}
       </p>
       <p className="text-muted-foreground">
-        Install Chromium downloads the build PCP drives, under 200 MB, from
+        Install Chromium downloads the build PCP drives, about 200 MB, from
         Playwright&apos;s servers into PCP&apos;s data folder
         {chromium.outdated ? ", and removes the earlier one" : null}.
         {desktop ? null : (

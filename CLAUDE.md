@@ -135,6 +135,18 @@ so in the summary; the bump itself waits for the request.
   site: that site gets its own decision. A site the token has no line for
   gets one of its own on first sight, so the owner sees every site it tried.
   Its limits go in `fetch/limits.ts`. Sites stay out of the request log.
+- run_code (`lib/core/code/`) runs an assistant's program in QuickJS
+  compiled to WebAssembly, a fresh instance per run, never in Node itself
+  (not `vm`, not Node's permission model, not Pyodide in Node: none of
+  those is a boundary). The program's only way out is the bridge
+  (`code/run.ts`), and the bridge's only way to a tool is the gateway's
+  `resolveCall` and `runCodeCall`: the token's own tools at its own levels,
+  an "ask" tool stopping the run with the usual permission request, every
+  call in the request log, files as handles. No credential, network, file
+  or timer ever reaches the program, and nothing but strings crosses into
+  it. Its memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
+  own limit counts nothing in these builds). New limits go in
+  `code/limits.ts`, and a new bridge operation gets a test.
 - The browser (`lib/core/browser/`) runs Chromium for the vault and keeps
   nothing on disk: its sign-ins are the vault's `browser_profile`,
   encrypted, saved only while a request holds the key. Every connection goes

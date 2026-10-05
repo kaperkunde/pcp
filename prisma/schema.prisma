@@ -111,6 +111,10 @@ model ApiToken {
   /// (web_fetch), following the token's site and method levels
   /// (WebFetchRule). Off unless the owner turns it on.
   webFetch        Boolean   @default(false) @map("web_fetch")
+  /// Whether the assistant may run programs that call its tools through
+  /// the gateway (run_code), each call at the token's own levels. Off
+  /// unless the owner turns it on.
+  runCode         Boolean   @default(false) @map("run_code")
   expiresAt       DateTime? @map("expires_at")
   revokedAt       DateTime? @map("revoked_at")
   createdAt       DateTime  @default(now()) @map("created_at")

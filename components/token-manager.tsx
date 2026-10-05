@@ -18,6 +18,7 @@ import { handOffNewToken } from "@/components/new-token-handoff"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
+import { RunCodeField } from "@/components/run-code-field"
 import { WebFetchField } from "@/components/web-fetch-field"
 import { Badge } from "@/components/ui/badge"
 import { Button, ButtonLink } from "@/components/ui/button"
@@ -152,6 +153,7 @@ function CreateTokenForm({
             <ManageEndpointsField id="token-manage" />
             <KeepMemoriesField id="token-memories" />
             <WebFetchField id="token-fetch" />
+            <RunCodeField id="token-code" />
             {draft === null ? (
               <div>
                 <Button type="submit">Create token</Button>
@@ -257,6 +259,9 @@ function TokenRow({ token }: { token: ApiTokenSummary }) {
           ) : null}
           {!dead && token.webFetch ? (
             <Badge variant="outline">Fetches the web</Badge>
+          ) : null}
+          {!dead && token.runCode ? (
+            <Badge variant="outline">Runs code</Badge>
           ) : null}
           {!dead && token.openPermissions > 0 ? (
             <Badge variant="warning">{token.openPermissions} waiting</Badge>

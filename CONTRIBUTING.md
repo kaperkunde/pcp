@@ -169,6 +169,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
 | `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits  |
 | `lib/core/browser/`                  | The browser: Chromium, its proxy, profile, tabs, tools        |
+| `lib/core/code/`                     | run_code: the QuickJS executor, the bridge, limits            |
 | `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input     |
 | `components/browser-tab-view.tsx`    | The live view: frames on a canvas, timed input sent back      |
 | `lib/core/catalogue.ts`              | Writing a server's tool list into the catalogue               |
