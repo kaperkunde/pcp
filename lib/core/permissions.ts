@@ -611,7 +611,7 @@ async function handleLines(
   let ids: string[]
 
   try {
-    ids = collectHandleIds(args)
+    ids = collectHandleIds(args, { loose: true })
   } catch {
     return []
   }

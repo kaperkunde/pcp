@@ -154,6 +154,8 @@ export type SendInput = {
   inReplyTo?: string
   /** JMAP: the identity to send as. */
   identity?: string
+  /** Files to attach, read from results the token kept. */
+  attachments?: Array<{ name: string; type: string; bytes: Buffer }>
 }
 
 export type SendResult = {

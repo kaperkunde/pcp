@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/card"
 import {
   checkForUpdatesAction,
+  requestInstallAction,
   setUpdateCheckAction,
   type UpdatesResult,
 } from "@/lib/actions/updates"
@@ -63,9 +64,12 @@ function ExternalLink({
 export function UpdatesCard({
   overview,
   host,
+  desktopInstall,
 }: {
   overview: UpdatesOverview
   host: InstallKind
+  /** In the desktop app: whether it can install an update itself. */
+  desktopInstall: "auto" | "manual" | null
 }) {
   return (
     <Card id="updates" className="scroll-mt-6">
@@ -80,7 +84,11 @@ export function UpdatesCard({
         <UpdateStatusLine overview={overview} />
         <CheckNowButton />
         <UpdateCheckSwitch check={overview.check} />
-        <HowToUpdate host={host} />
+        <HowToUpdate
+          host={host}
+          desktopInstall={desktopInstall}
+          overview={overview}
+        />
       </CardContent>
     </Card>
   )
@@ -233,7 +241,103 @@ function UpdateCheckSwitch({ check }: { check: boolean }) {
   )
 }
 
-function HowToUpdate({ host }: { host: InstallKind }) {
+function InstallButton({ version }: { version: string }) {
+  const [state, action] = useActionState<UpdatesResult>(requestInstallAction, {
+    status: "idle",
+  })
+
+  return (
+    <form
+      action={action}
+      className="flex flex-wrap items-center gap-2"
+      aria-label="Install the update"
+    >
+      <SubmitButton pendingText="Asking the app…">
+        Install v{version} and restart
+      </SubmitButton>
+      <FormError error={state.status === "error" ? state.error : null} />
+      <FormNote message={state.status === "ok" ? state.message : null} />
+    </form>
+  )
+}
+
+function DownloadLinks() {
+  return (
+    <p className="flex flex-wrap gap-x-4 gap-y-1">
+      {DOWNLOADS.map(({ label, file }) => (
+        <ExternalLink
+          key={file}
+          href={`${REPOSITORY_URL}/releases/latest/download/${file}`}
+        >
+          {label}
+        </ExternalLink>
+      ))}
+      <ExternalLink href={`${REPOSITORY_URL}/releases`}>
+        All releases
+      </ExternalLink>
+    </p>
+  )
+}
+
+function DesktopUpdate({
+  desktopInstall,
+  overview,
+}: {
+  desktopInstall: "auto" | "manual" | null
+  overview: UpdatesOverview
+}) {
+  const { available, latest, installRequest } = overview
+
+  if (desktopInstall === "auto") {
+    return (
+      <>
+        {installRequest ? (
+          <p role="status">
+            The app is installing v{installRequest.version}. It downloads the
+            new version and restarts by itself; your vault stays where it is.
+          </p>
+        ) : available && latest ? (
+          <>
+            <p className="text-muted-foreground">
+              The app can install v{latest.version} itself: it downloads it from
+              GitHub, restarts, and your vault stays where it is.
+            </p>
+            <InstallButton version={latest.version} />
+          </>
+        ) : (
+          <p className="text-muted-foreground">
+            This is the PCP app. When a new version is out, you can install it
+            from here.
+          </p>
+        )}
+        <p className="text-xs text-muted-foreground">
+          If installing does not work, download the new version and open it:
+        </p>
+        <DownloadLinks />
+      </>
+    )
+  }
+
+  return (
+    <>
+      <p className="text-muted-foreground">
+        This is the PCP app. Download the new version for this computer and open
+        it. Your vault stays where it is.
+      </p>
+      <DownloadLinks />
+    </>
+  )
+}
+
+function HowToUpdate({
+  host,
+  desktopInstall,
+  overview,
+}: {
+  host: InstallKind
+  desktopInstall: "auto" | "manual" | null
+  overview: UpdatesOverview
+}) {
   return (
     <div className="flex flex-col gap-3 border-t border-border pt-4">
       <h3 className="font-medium">How to update this PCP</h3>
@@ -259,25 +363,7 @@ function HowToUpdate({ host }: { host: InstallKind }) {
           </p>
         </>
       ) : host === "desktop" ? (
-        <>
-          <p className="text-muted-foreground">
-            This is the PCP app. Download the new version for this computer and
-            open it. Your vault stays where it is.
-          </p>
-          <p className="flex flex-wrap gap-x-4 gap-y-1">
-            {DOWNLOADS.map(({ label, file }) => (
-              <ExternalLink
-                key={file}
-                href={`${REPOSITORY_URL}/releases/latest/download/${file}`}
-              >
-                {label}
-              </ExternalLink>
-            ))}
-            <ExternalLink href={`${REPOSITORY_URL}/releases`}>
-              All releases
-            </ExternalLink>
-          </p>
-        </>
+        <DesktopUpdate desktopInstall={desktopInstall} overview={overview} />
       ) : (
         <>
           <p className="text-muted-foreground">

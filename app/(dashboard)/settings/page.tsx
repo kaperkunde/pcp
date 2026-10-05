@@ -27,7 +27,7 @@ import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { updatesOverview } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
-import { isDesktopApp } from "@/lib/server/desktop"
+import { desktopUpdater, isDesktopApp } from "@/lib/server/desktop"
 import { installKind } from "@/lib/server/install-kind"
 import { publicUrlFor, requestOrigin } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
@@ -83,7 +83,11 @@ export default async function SettingsPage({
         ports={network.ports}
         pinnedPublicUrl={pinned}
       />
-      <UpdatesCard overview={updates} host={installKind()} />
+      <UpdatesCard
+        overview={updates}
+        host={installKind()}
+        desktopInstall={isDesktopApp() ? desktopUpdater() : null}
+      />
       <ChangePasswordForm username={vault.name} />
       <RecoveryKeyCard username={vault.name} />
       <TouchIdCard username={vault.name} info={touchId} />

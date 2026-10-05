@@ -90,6 +90,17 @@ describe("collectHandleIds", () => {
       }),
     ).toEqual(["x", "y"])
   })
+
+  it("with loose, also lists attachments that carry a name and type, never other objects", () => {
+    const args = {
+      attachments: [{ $result: "a", name: "f.pdf", type: "application/pdf" }],
+      api: { $result: "b", other: 1 },
+      text: { $result: "c" },
+    }
+
+    expect(collectHandleIds(args)).toEqual(["c"])
+    expect(collectHandleIds(args, { loose: true })).toEqual(["a", "c"])
+  })
 })
 
 describe("resolveHandles", () => {

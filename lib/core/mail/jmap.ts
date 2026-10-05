@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto"
 
+import { asBytes } from "../crypto"
+
 import { describeFetchError, discard, readCapped } from "../openapi/http"
 import { send } from "../openapi/transport"
 import { PCP_VERSION } from "../version"
@@ -57,6 +59,8 @@ export type JmapSession = {
   apiUrl: string
   /** The download URL template, made absolute; null when none was named. */
   downloadUrl: string | null
+  /** The upload URL template, made absolute; null when none was named. */
+  uploadUrl: string | null
   accountId: string
   /** Whether this account may send. */
   submission: boolean
@@ -88,7 +92,13 @@ function where(url: string): string {
  */
 async function exchange(
   url: string,
-  init: { method: "GET" | "POST"; body?: string; accept?: string },
+  init: {
+    method: "GET" | "POST"
+    /** JSON text, or bytes sent as `contentType` (an upload). */
+    body?: string | Buffer
+    contentType?: string
+    accept?: string
+  },
   credential: MailCredential,
   maxBytes = MAX_JMAP_RESPONSE_BYTES,
 ): Promise<{ status: number; bytes: Buffer; type: string }> {
@@ -102,11 +112,17 @@ async function exchange(
           accept: init.accept ?? "application/json",
           "user-agent": USER_AGENT,
           ...(init.body !== undefined
-            ? { "content-type": "application/json; charset=utf-8" }
+            ? {
+                "content-type":
+                  init.contentType ?? "application/json; charset=utf-8",
+              }
             : {}),
           ...credential.headers,
         },
-        body: init.body,
+        body:
+          init.body === undefined || typeof init.body === "string"
+            ? init.body
+            : asBytes(init.body),
         signal: AbortSignal.timeout(MAIL_CALL_TIMEOUT_MS),
       })
     } catch (error) {
@@ -242,6 +258,10 @@ export async function fetchJmapSession(
       typeof session.downloadUrl === "string"
         ? downloadTemplate(session.downloadUrl, sessionUrl)
         : null,
+    uploadUrl:
+      typeof session.uploadUrl === "string"
+        ? downloadTemplate(session.uploadUrl, sessionUrl)
+        : null,
     accountId,
     submission:
       SUBMISSION in capabilities &&
@@ -250,8 +270,8 @@ export async function fetchJmapSession(
 }
 
 /**
- * The download template made absolute, when it is on the session's origin.
- * Its {variables} are kept as they are; they are filled per download.
+ * A download or upload template made absolute, when it is on the session's
+ * origin. Its {variables} are kept as they are; they are filled per use.
  */
 function downloadTemplate(template: string, sessionUrl: string): string | null {
   const probe = template.replace(/\{[^{}]*\}/g, "x")
@@ -761,6 +781,18 @@ export function openJmapBackend(
         email: identity.email,
       }
       const onSuccess: Json = { "keywords/$draft": null }
+      // Uploaded first: a failed upload leaves nothing behind to clean up.
+      const attached: Json[] = []
+
+      for (const attachment of input.attachments ?? []) {
+        const blob = await upload(attachment)
+        attached.push({
+          blobId: blob.blobId,
+          type: blob.type ?? attachment.type,
+          name: attachment.name,
+          disposition: "attachment",
+        })
+      }
 
       if (drafts && sent) {
         onSuccess[`mailboxIds/${String(drafts.id)}`] = null
@@ -786,6 +818,7 @@ export function openJmapBackend(
                   ...(inReplyTo.length ? { inReplyTo, references } : {}),
                   bodyValues: { body: { value: input.text } },
                   textBody: [{ partId: "body", type: "text/plain" }],
+                  ...(attached.length ? { attachments: attached } : {}),
                 },
               },
             },
@@ -921,6 +954,54 @@ export function openJmapBackend(
     async close() {
       // Nothing stays open between requests.
     },
+  }
+
+  /** One attachment to send, uploaded as a blob; its id and type. */
+  async function upload(attachment: {
+    name: string
+    type: string
+    bytes: Buffer
+  }): Promise<{ blobId: string; type: string | null }> {
+    if (!config.uploadUrl) {
+      throw new MailRequestError(
+        "This JMAP server offers no uploads, so PCP cannot send attachments from it.",
+      )
+    }
+
+    const url = config.uploadUrl.replace(/\{(\w+)\}/g, (_, name: string) =>
+      name === "accountId" ? encodeURIComponent(accountId) : "",
+    )
+
+    if (!onSameOrigin(url, apiUrl)) {
+      throw new MailRequestError(
+        "The upload address is not on the mail server.",
+      )
+    }
+
+    const { status, bytes } = await exchange(
+      url,
+      { method: "POST", body: attachment.bytes, contentType: attachment.type },
+      credential,
+    )
+
+    if (status < 200 || status >= 300) {
+      throw new MailRequestError(
+        `The mail server did not take the attachment ${attachment.name} (HTTP ${status}); nothing was sent.`,
+      )
+    }
+
+    const answer = parseJson(bytes, "The upload answer")
+
+    if (typeof answer.blobId !== "string" || answer.blobId === "") {
+      throw new MailRequestError(
+        "The mail server's upload answer names no blob; nothing was sent.",
+      )
+    }
+
+    return {
+      blobId: answer.blobId,
+      type: typeof answer.type === "string" ? answer.type : null,
+    }
   }
 
   /** The attachment's bytes, when it is small enough. */

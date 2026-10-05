@@ -54,6 +54,28 @@ export function parseHandle(value: unknown): Handle | null {
   return { $result: id, ...(value.as ? { as: value.as } : {}) }
 }
 
+/**
+ * The result id an object names, looser than a handle: an attachment
+ * ({"$result", "name", "type"}) names one too. Used to say what a call
+ * carries and to check its ids exist, never to replace anything.
+ */
+function referenceOf(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const id = value.$result
+
+  return typeof id === "string" &&
+    id.length > 0 &&
+    id.length <= 64 &&
+    Object.keys(value).every((key) => REFERENCE_KEYS.has(key))
+    ? id
+    : null
+}
+
+const REFERENCE_KEYS = new Set(["$result", "as", "name", "type"])
+
 type Walk = { nodes: number }
 
 function step(walk: Walk, depth: number): void {
@@ -71,31 +93,38 @@ function collect(
   found: Set<string>,
   walk: Walk,
   depth: number,
+  loose: boolean,
 ): void {
   step(walk, depth)
 
-  const handle = parseHandle(value)
+  const id = loose ? referenceOf(value) : parseHandle(value)?.$result
 
-  if (handle) {
-    found.add(handle.$result)
+  if (id) {
+    found.add(id)
     return
   }
 
   if (Array.isArray(value)) {
     for (const item of value) {
-      collect(item, found, walk, depth + 1)
+      collect(item, found, walk, depth + 1, loose)
     }
   } else if (isRecord(value)) {
     for (const item of Object.values(value)) {
-      collect(item, found, walk, depth + 1)
+      collect(item, found, walk, depth + 1, loose)
     }
   }
 }
 
-/** Every result id the arguments name, once each, in order of appearance. */
-export function collectHandleIds(args: unknown): string[] {
+/**
+ * Every result id the arguments name, once each, in order of appearance:
+ * handles, and with `loose` attachments too ({"$result", "name", "type"}).
+ */
+export function collectHandleIds(
+  args: unknown,
+  { loose = false }: { loose?: boolean } = {},
+): string[] {
   const found = new Set<string>()
-  collect(args, found, { nodes: 0 }, 0)
+  collect(args, found, { nodes: 0 }, 0, loose)
 
   return [...found]
 }

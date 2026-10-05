@@ -11,7 +11,10 @@
 # macOS and Windows runners and attached to it under stable names, and it is
 # then published: releases/latest/download/<name> always points at a complete
 # release. A failed app build does not hold the release; the publish job
-# warns, and re-running the failed job attaches the missing app.
+# warns, and re-running the failed job attaches the missing app. Beside each
+# installer go the files the app's own updater reads (desktop/main.mjs): the
+# update file for its architecture, latest-<arch>[-mac].yml, and on macOS the
+# zip it installs from.
 #
 # The container image is built from the same tag for amd64 and arm64 and
 # pushed to ghcr.io/kaperkunde/pcp as <version> and latest, which install.sh
@@ -102,14 +105,17 @@ jobs:
             os: macos-latest
             arch: arm64
             asset: PCP-mac-arm64.dmg
+            updates: PCP-mac-arm64.zip latest-arm64-mac.yml
           - name: macOS app (Intel)
             os: macos-latest
             arch: x64
             asset: PCP-mac-x64.dmg
+            updates: PCP-mac-x64.zip latest-x64-mac.yml
           - name: Windows app
             os: windows-latest
             arch: x64
             asset: PCP-windows-x64.exe
+            updates: latest-x64.yml
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
@@ -154,9 +160,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.release.outputs.version }}
           ASSET: ${{ matrix.asset }}
+          UPDATES: ${{ matrix.updates }}
         run: |
           ls -la desktop/dist
           gh release upload "v$VERSION" "desktop/dist/$ASSET" --clobber
+          # Without these the app cannot update itself and sends the owner to
+          # the download page instead, so a missing one warns, not fails.
+          for file in $UPDATES; do
+            if [ -f "desktop/dist/$file" ]; then
+              gh release upload "v$VERSION" "desktop/dist/$file" --clobber
+            else
+              echo "::warning::desktop/dist/$file was not built; this app cannot install v$VERSION by itself."
+            fi
+          done
 
   image:
     name: container image

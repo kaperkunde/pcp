@@ -831,9 +831,20 @@ which version runs, what the last check found, with the release notes, and
 how to update this PCP for the way it was installed
 (`lib/server/install-kind.ts`): the container image sets `PCP_CONTAINER`
 (run the install line again, pull with compose, or redeploy from the tool that
-runs it), the desktop app sets `PCP_DESKTOP` (download the new version), and
+runs it), the desktop app sets `PCP_DESKTOP` (below), and
 anything else is a checkout (`git pull` and a build). A develop build ahead
 of the last release counts as up to date.
+
+**The desktop app installs it itself,** when it can. The page cannot reach
+the wrapper (no IPC), so **Install and restart** records the owner's request
+in `update.status`, and `/api/health` repeats it, in the app only and for
+fifteen minutes. The wrapper reads that every fifteen seconds and has
+electron-updater download the release from GitHub, check it against the
+update file's hashes, and restart into it; a request from before the app
+started is never acted on, so a failed install cannot loop. macOS lets an
+update replace only an app with the same real signature, so an ad-hoc signed
+build tells the server (`PCP_DESKTOP_UPDATER=manual`) and the page links to
+the download instead. `desktop/README.md` has the details.
 
 ## Connecting OAuth servers
 

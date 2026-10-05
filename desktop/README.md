@@ -61,6 +61,7 @@ it.
   vault. Cookie encryption is one way, so the fuse stays on. A sign-in from
   before it is encrypted the next time PCP writes it: lock and unlock once
   to do that at once.
+- **Updates from Settings.** See "Updating" below.
 
 ## Building it
 
@@ -100,6 +101,40 @@ points at the current one:
 
 - `PCP-mac-arm64.dmg`, `PCP-mac-x64.dmg`
 - `PCP-windows-x64.exe`
+
+and beside them the files the app's updater reads (below):
+`PCP-mac-arm64.zip`, `PCP-mac-x64.zip`, `latest-arm64-mac.yml`,
+`latest-x64-mac.yml` and `latest-x64.yml`.
+
+## Updating
+
+PCP checks once a day whether a newer release is out (the app's server does
+it, as any PCP does) and says so in its header and under **Settings →
+Updates**. In the app that page offers **Install and restart**; the menu's
+**Check for updates…** opens it.
+
+The page cannot reach the wrapper: there is no preload and no IPC, the window
+is a plain view of the server. So the button only records the owner's
+request, and the server repeats it in `/api/health` (only in the app, and
+only for a quarter of an hour). `main.mjs` reads that every 15 seconds; a
+request made after the app started, for a version later than its own, has
+electron-updater download the release and restart into it
+(`updates.mjs` holds the parts that decide, with their tests). A request is
+acted on once, and one from before the app started never is, so an update
+that fails cannot loop: the app says why and offers the download page.
+
+Where it downloads from is `publish` in `electron-builder.yml`: the latest
+GitHub Release, under the stable names the workflow uploads. The two Mac
+builds would both write `latest-mac.yml`, so `dist.mjs` gives each
+architecture a channel of its own (`latest-arm64`, `latest-x64`), and the
+app asks for its own. The files keep their names from one release to the
+next, so updates download whole rather than as a difference.
+
+macOS lets an update replace an app only when both carry the same real
+signature. A build without a Developer ID certificate is signed ad hoc and
+cannot, so `dist.mjs` writes `pcpUpdater: "manual"` into it and the page
+links to the download instead of offering the button. Windows installs an
+unsigned update. A checkout (`pnpm start`) never updates itself.
 
 ### Signing
 

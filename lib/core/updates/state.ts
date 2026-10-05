@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto"
+
+import { invalid } from "../errors"
 import { getHostJson, setHostJson } from "../host-settings"
 import { PCP_VERSION } from "../version"
 import { releasePageUrl } from "./limits"
@@ -13,6 +16,9 @@ import { isNewer } from "./semver"
  * check turned off stays off after a restore. `update.status` describes
  * this machine and never does.
  */
+
+/** How long an install request stays worth acting on (desktop/updates.mjs agrees). */
+export const INSTALL_REQUEST_FRESH_MS = 15 * 60_000
 
 export const UPDATE_CONFIG_KEY = "update.config"
 export const UPDATE_STATUS_KEY = "update.status"
@@ -70,7 +76,61 @@ export type UpdatesOverview = {
   latest: (Release & { url: string }) | null
   /** `latest` is later than `current`. */
   available: boolean
+  /** An install the owner asked the desktop app for, while it is fresh. */
   installRequest: { id: string; at: string; version: string } | null
+}
+
+type InstallRequest = NonNullable<UpdateStatus["installRequest"]>
+
+function freshRequest(
+  request: InstallRequest | undefined,
+  now: Date,
+): InstallRequest | null {
+  return request &&
+    now.getTime() - Date.parse(request.at) <= INSTALL_REQUEST_FRESH_MS &&
+    isNewer(request.version, PCP_VERSION)
+    ? request
+    : null
+}
+
+/** The install the desktop app should start, if the owner asked for one just now. */
+export async function pendingInstallRequest(
+  now = new Date(),
+): Promise<InstallRequest | null> {
+  return freshRequest((await getUpdateStatus()).installRequest, now)
+}
+
+/**
+ * The owner asks the desktop app to install the newer release the last check
+ * found. The app reads it from /api/health; PCP itself installs nothing.
+ */
+export async function requestInstall(
+  now = new Date(),
+): Promise<InstallRequest> {
+  const status = await getUpdateStatus()
+  const release = newerRelease(status)
+
+  if (!release) {
+    throw invalid("There is no newer version to install. Check now first.")
+  }
+
+  const request = {
+    id: randomUUID(),
+    at: now.toISOString(),
+    version: release.version,
+  }
+  await saveUpdateStatus({ ...status, installRequest: request })
+
+  return request
+}
+
+/** At boot: a request this version answers (or one too old to act on) is done. */
+export async function clearFinishedInstall(now = new Date()): Promise<void> {
+  const status = await getUpdateStatus()
+
+  if (status.installRequest && !freshRequest(status.installRequest, now)) {
+    await saveUpdateStatus({ ...status, installRequest: undefined })
+  }
 }
 
 export async function updatesOverview(): Promise<UpdatesOverview> {
@@ -89,7 +149,7 @@ export async function updatesOverview(): Promise<UpdatesOverview> {
       ? { ...status.latest, url: releasePageUrl(status.latest.version) }
       : null,
     available: newerRelease(status) !== null,
-    installRequest: status.installRequest ?? null,
+    installRequest: freshRequest(status.installRequest, new Date()),
   }
 }
 

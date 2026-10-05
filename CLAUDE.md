@@ -126,8 +126,9 @@ so in the summary; the bump itself waits for the request.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
-  (redirects and PCP's client metadata document), the health check and the
-  export download (`app/api/export/route.ts`: a file needs
+  (redirects and PCP's client metadata document), the health check (which, in
+  the desktop app only, also carries the version and the owner's install
+  request for the wrapper to read) and the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
   origin itself, `lib/server/same-origin.ts`).
 - The owner is asked by link only: a result hands the assistant a link to
@@ -169,12 +170,15 @@ so in the summary; the bump itself waits for the request.
   restarts itself.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
-  as `PCP_DESKTOP=1` (`lib/server/desktop.ts`), for copy that says how the
-  app is reached, and as `window.pcpDesktop` (`desktop/preload.cjs`, read
-  through `components/desktop-bridge.ts`), which answers PCP's own pages
-  only and hands over the Touch ID key only after Touch ID. The fuses in
-  `desktop/electron-builder.yml` keep other programs from running code as
-  the app, and so from its keychain item: leave them flipped. `desktop/scripts/stage.mjs` copies what the Dockerfile
+  as `PCP_DESKTOP=1` and `PCP_DESKTOP_UPDATER` (`lib/server/desktop.ts`), for
+  copy that says how the app is reached and whether it installs an update
+  itself, and never addresses it: the wrapper reads `/api/health`. PCP's
+  pages reach the wrapper only through `window.pcpDesktop`
+  (`desktop/preload.cjs`, read through `components/desktop-bridge.ts`),
+  which answers PCP's own pages only and hands over the Touch ID key only
+  after Touch ID. The fuses in `desktop/electron-builder.yml` keep other
+  programs from running code as the app, and so from its keychain item:
+  leave them flipped. `desktop/scripts/stage.mjs` copies what the Dockerfile
   copies: a change to one is a change to both. (Its environment is the
   wrapper's own: the HTTPS ports stay 80 and 443, which the image moves.) It is its own pnpm project
   (`desktop/pnpm-workspace.yaml`); do not add it to the root workspace, or

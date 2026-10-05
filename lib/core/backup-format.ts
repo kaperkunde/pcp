@@ -254,6 +254,7 @@ const McpServerRow = z.strictObject({
   authUsername: str.nullable().default(null),
   mailApiUrl: str.nullable().default(null),
   mailDownloadUrl: str.nullable().default(null),
+  mailUploadUrl: str.nullable().default(null),
   mailAccountId: str.nullable().default(null),
   mailSubmission: z.boolean().default(false),
   smtpUrl: str.nullable().default(null),
