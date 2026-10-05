@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { PCP_VERSION } from "../version"
 import type { CallPlan, ParamPlan } from "./plan"
-import { buildRequest } from "./request"
+import { buildRequest, type UploadFile } from "./request"
 
 const BASE = "https://api.example.com/v1"
 
@@ -337,6 +337,115 @@ describe("bodies", () => {
     expect(() => withBody("json", "x".repeat(1024 * 1024 + 1))).toThrow(
       /larger than 1 MB/,
     )
+  })
+})
+
+describe("uploads", () => {
+  const PDF: UploadFile = {
+    bytes: Buffer.from("%PDF-1.7 the plan"),
+    name: "plan.pdf",
+    type: "application/pdf",
+  }
+
+  const binary = (contentType: string) =>
+    plan({
+      method: "POST",
+      body: { arg: "body", contentType, encoding: "binary", required: true },
+    })
+
+  it("sends a binary body as the file's bytes, under the declared type or the file's own", () => {
+    const declared = buildRequest(
+      binary("application/pdf"),
+      BASE,
+      { body: { $result: "r1" } },
+      {},
+      { body: PDF },
+    )
+
+    expect(Buffer.from(declared.body as Uint8Array).equals(PDF.bytes)).toBe(
+      true,
+    )
+    expect(declared.headers["content-type"]).toBe("application/pdf")
+    expect(
+      buildRequest(
+        binary("*/*"),
+        BASE,
+        { body: { $result: "r1" } },
+        {},
+        {
+          body: PDF,
+        },
+      ).headers["content-type"],
+    ).toBe("application/pdf")
+    expect(
+      buildRequest(
+        binary("application/octet-stream"),
+        BASE,
+        { body: { $result: "r1" } },
+        {},
+        { body: { ...PDF, type: "not a type\r\nX: y" } },
+      ).headers["content-type"],
+    ).toBe("application/octet-stream")
+  })
+
+  it("refuses to send a binary body PCP did not read, or one too large", () => {
+    expect(() =>
+      buildRequest(
+        binary("application/pdf"),
+        BASE,
+        { body: { $result: "r1" } },
+        {},
+      ),
+    ).toThrow(/did not read the file/)
+    expect(() =>
+      buildRequest(
+        binary("application/pdf"),
+        BASE,
+        { body: { $result: "r1" } },
+        {},
+        {
+          body: { ...PDF, bytes: Buffer.alloc(25 * 1024 * 1024 + 1) },
+        },
+      ),
+    ).toThrow(/larger than 25 MB/)
+  })
+
+  it("writes multipart form data with the files and the other fields", () => {
+    const built = buildRequest(
+      plan({
+        method: "POST",
+        body: {
+          arg: "body",
+          contentType: "multipart/form-data",
+          encoding: "multipart",
+          required: true,
+          files: [{ name: "photo", many: false }],
+        },
+      }),
+      BASE,
+      {
+        body: {
+          caption: "The plan",
+          tags: ["a", "b"],
+          photo: { $result: "r1" },
+        },
+      },
+      {},
+      { fields: { photo: [{ ...PDF, name: 'pl"an\r\n.pdf' }] } },
+    )
+    const type = built.headers["content-type"]!
+    const boundary = /boundary=(.+)$/.exec(type)![1]!
+    const text = Buffer.from(built.body as Uint8Array).toString("utf8")
+
+    expect(type).toMatch(/^multipart\/form-data; boundary=----pcp[0-9a-f]{32}$/)
+    expect(text).toContain(
+      `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\nThe plan\r\n`,
+    )
+    expect(text.match(/name="tags"/g)).toHaveLength(2)
+    expect(text).toContain(
+      'Content-Disposition: form-data; name="photo"; filename="pl%22an .pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.7 the plan\r\n',
+    )
+    expect(text.endsWith(`--${boundary}--\r\n`)).toBe(true)
   })
 })
 

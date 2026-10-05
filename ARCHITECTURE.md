@@ -161,7 +161,14 @@ unchanged. Two functions in `lib/core/upstream.ts` branch on the kind:
   the body is encoded. The plan is stored beside the tool
   (`mcp_tool.operation`) and validated when read. What PCP cannot send is
   dropped when optional and skips the operation when required, with a reason
-  the owner sees (file uploads, cookies, a reference into another document).
+  the owner sees (cookies, a reference into another document, a multipart
+  body that names no file field). An upload is a tool too: a body of one
+  binary type (a PDF, an image, `application/octet-stream`) takes one kept
+  result's handle, and `multipart/form-data` takes a handle (or a list) in
+  each field its schema marks `format: binary` or with a `contentMediaType`.
+  `endpoints.ts` opens those files from the token's kept results before
+  anything is sent, and `request.ts` sends their bytes (at most 25 MB in
+  all, 20 files), never their base64.
 - `patch.ts` applies an endpoint's **edits**: a JSON Patch (RFC 6902) kept
   beside the schema and applied to it every time tools are generated, before
   `generate.ts` sees it. A schema read from a URL keeps its fixes when it is

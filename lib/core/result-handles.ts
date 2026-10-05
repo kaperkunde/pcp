@@ -76,6 +76,31 @@ function referenceOf(value: unknown): string | null {
 
 const REFERENCE_KEYS = new Set(["$result", "as", "name", "type"])
 
+/**
+ * A file argument: a handle with an optional name and type to send the
+ * file under ({"$result", "name", "type"}). Null when it is not one.
+ */
+export function parseUploadHandle(
+  value: unknown,
+): { $result: string; name?: string; type?: string } | null {
+  const id = referenceOf(value)
+
+  if (!id || !isRecord(value)) {
+    return null
+  }
+
+  const text = (key: string) =>
+    typeof value[key] === "string" && value[key] !== ""
+      ? (value[key] as string).slice(0, 255)
+      : undefined
+
+  return {
+    $result: id,
+    ...(text("name") ? { name: text("name") } : {}),
+    ...(text("type") ? { type: text("type") } : {}),
+  }
+}
+
 type Walk = { nodes: number }
 
 function step(walk: Walk, depth: number): void {
