@@ -66,12 +66,15 @@ import {
 
 /**
  * Mail accounts: servers of kind "jmap" and "imap". The owner adds one in
- * PCP with the account's address and how to sign in; PCP then offers the
- * fixed mail tools (tools.ts) through the gateway like any server's.
+ * PCP with the account's address and how to sign in, or agrees to one an
+ * assistant proposed through register_server (permissions.ts: executeRegister
+ * calls createMailAccount once they have answered on PCP's page, typing in a
+ * password or token PCP does not hold yet); PCP then offers the fixed mail
+ * tools (tools.ts) through the gateway like any server's.
  *
  * Secrets never come here: upstream.ts hands in a MailCredential with the
  * header or login already made, as it does for an API endpoint. Assistants
- * cannot add or change a mail account; only the owner can, in PCP.
+ * never change a mail account; only the owner can, in PCP.
  */
 
 export type MailAccountInput = OAuthClientInput & {
