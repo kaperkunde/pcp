@@ -1,0 +1,270 @@
+import type { CallToolResult } from "@modelcontextprotocol/server"
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest"
+
+import type { McpServer } from "@/lib/generated/prisma/client"
+
+import { createApiToken, resolveApiToken } from "../api-tokens"
+import type { VaultContext } from "../context"
+import { db } from "../db"
+import { startTestApi, type TestApi } from "../openapi/test-api"
+import { scratchDatabase } from "../test-db"
+import { setupVault } from "../vault"
+import { listFetchRules, setFetchPrivate, setFetchSite } from "../web-fetch"
+import { callBrowserTool, finishHandover, performNavigate } from "./call"
+import { chromiumFromEnvironment } from "./executable"
+import { loadProfile } from "./profile"
+import { closeAllBrowsers, closeBrowser, runningBrowser } from "./runtime"
+import { createBrowserServer } from "./server"
+import { isOwnerNeeded, type OwnerNeeded } from "./types"
+
+// The browser's tools against a real headless Chromium and pages served on
+// this machine. Skipped where no Chromium is installed (`pnpm exec
+// playwright install chromium`, or PCP_BROWSER_EXECUTABLE).
+
+const executable = await chromiumFromEnvironment()
+const PUBLIC_URL = "http://pcp.test"
+
+let cleanup: () => Promise<void>
+let api: TestApi
+let ctx: VaultContext
+let tokenId: string
+let server: McpServer
+
+const FORM = `<!doctype html><title>Form</title>
+<h1 id="greeting">Who are you?</h1>
+<label>Name <input id="name"></label>
+<button onclick="document.getElementById('greeting').textContent = 'Hello, ' + document.getElementById('name').value; document.cookie = 'seen=1; max-age=3600'">Say hello</button>
+<select aria-label="Pet"><option value="dog">Dog</option><option value="cat">Cat</option></select>
+<a href="__ELSEWHERE__">Elsewhere</a>`
+
+beforeEach(async () => {
+  ;({ cleanup } = await scratchDatabase())
+  ctx = await setupVault({
+    name: "Ada",
+    password: "correct horse battery staple",
+  })
+  const { token } = await createApiToken(ctx, {
+    name: "Claude",
+    allowAllServers: true,
+  })
+  tokenId = (await resolveApiToken(token))!.tokenId
+  server = await db().mcpServer.findUniqueOrThrow({
+    where: { id: (await createBrowserServer(ctx)).id },
+  })
+  api = await startTestApi((request, res) => {
+    res.setHeader("content-type", "text/html; charset=utf-8")
+    const port = new URL(api.origin).port
+
+    if (request.url.startsWith("/form")) {
+      return res.end(
+        FORM.replace("__ELSEWHERE__", `http://localhost:${port}/page`),
+      )
+    }
+
+    if (request.url.startsWith("/cookie")) {
+      return res.end(
+        `<title>Cookie</title><h1>cookie: ${request.headers.cookie ?? "none"}</h1>`,
+      )
+    }
+
+    res.end("<title>Page</title><h1>A page</h1>")
+  })
+})
+
+afterEach(async () => {
+  await closeAllBrowsers()
+  await api.close()
+  await cleanup()
+})
+
+afterAll(async () => {
+  await closeAllBrowsers()
+})
+
+function call(name: string, args: Record<string, unknown> = {}) {
+  return callBrowserTool(ctx, server, name, args, {
+    tokenId,
+    publicUrl: PUBLIC_URL,
+  })
+}
+
+function textOf(result: CallToolResult): string {
+  return result.content
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("\n")
+}
+
+function refOf(result: CallToolResult, pattern: RegExp): string {
+  const line = textOf(result)
+    .split("\n")
+    .find((candidate) => pattern.test(candidate))
+  const ref = line?.match(/\[ref=((?:f\d+)?e\d+)\]/)?.[1]
+
+  if (!ref) {
+    throw new Error(`no ref for ${pattern} in:\n${textOf(result)}`)
+  }
+
+  return ref
+}
+
+async function owner(promise: Promise<unknown>): Promise<OwnerNeeded> {
+  try {
+    await promise
+  } catch (error) {
+    if (isOwnerNeeded(error)) return error
+    throw error
+  }
+  throw new Error("expected the owner to be asked")
+}
+
+describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
+  it("asks about a new site, refuses a private address until allowed, then opens and acts on the page", async () => {
+    const host = new URL(api.origin).host
+
+    const asked = await owner(call("navigate", { url: `${api.origin}/form` }))
+    expect(asked.ask).toMatchObject({
+      kind: "browse",
+      input: { serverId: server.id, tabId: null, toolName: "navigate" },
+    })
+    // The site is on the token's page as one it tried, as web_fetch does.
+    expect(
+      (await listFetchRules(ctx, tokenId)).sites.map((site) => site.host),
+    ).toEqual([host])
+    expect(runningBrowser(ctx.vaultId)).toBeNull()
+
+    await setFetchSite(ctx, tokenId, host, "allowed")
+    const refused = await call("navigate", { url: `${api.origin}/form` })
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toContain("private or local address")
+    expect(api.requests).toHaveLength(0)
+
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    const opened = await call("navigate", { url: `${api.origin}/form` })
+    const text = textOf(opened)
+    expect(opened.isError, text).toBeUndefined()
+    expect(text).toContain(`Address: ${api.origin}/form`)
+    expect(text).toMatch(
+      /The owner can watch it or take over at http:\/\/pcp\.test\/browser\/tabs\/\S+/,
+    )
+    expect(text).toContain('textbox "Name"')
+    expect(api.requests[0]!.headers["user-agent"]).not.toContain("Headless")
+
+    const typed = await call("type", {
+      ref: refOf(opened, /textbox "Name"/),
+      text: "Ada",
+    })
+    const clicked = await call("click", {
+      ref: refOf(typed, /button "Say hello"/),
+    })
+    expect(textOf(clicked)).toContain("Hello, Ada")
+
+    const chosen = await call("select_option", {
+      ref: refOf(clicked, /combobox "Pet"/),
+      values: ["cat"],
+    })
+    expect(textOf(chosen)).toMatch(/option "Cat" \[selected\]/)
+
+    const found = await call("find", { text: "hello" })
+    expect(textOf(found)).toMatch(/heading "Hello, Ada"/)
+
+    const read = await call("read_page", {})
+    expect(textOf(read)).toContain("# Hello, Ada")
+
+    const picture = await call("screenshot", {})
+    expect(picture.content.some((part) => part.type === "image")).toBe(true)
+
+    const stale = await call("click", { ref: "e999" })
+    expect(stale.isError).toBe(true)
+    expect(textOf(stale)).toContain("Take a new snapshot")
+  })
+
+  it("stops a link to a site the token may not open, and lists the site", async () => {
+    const host = new URL(api.origin).host
+    await setFetchSite(ctx, tokenId, host, "allowed")
+    await setFetchPrivate(ctx, tokenId, "allowed")
+
+    const opened = await call("navigate", { url: `${api.origin}/form` })
+    const followed = await call("click", {
+      ref: refOf(opened, /link "Elsewhere"/),
+    })
+    const other = `localhost:${new URL(api.origin).port}`
+
+    expect(textOf(followed)).toContain(`The page tried to open ${other}`)
+    expect(textOf(followed)).toContain(`Address: ${api.origin}/form`)
+    expect(
+      (await listFetchRules(ctx, tokenId)).sites
+        .map((site) => site.host)
+        .sort(),
+    ).toEqual([host, other].sort())
+  })
+
+  it("keeps the sign-ins in the vault across a restart of the browser", async () => {
+    const host = new URL(api.origin).host
+    await setFetchSite(ctx, tokenId, host, "allowed")
+    await setFetchPrivate(ctx, tokenId, "allowed")
+
+    const opened = await call("navigate", { url: `${api.origin}/form` })
+    await call("click", { ref: refOf(opened, /button "Say hello"/) })
+    await closeBrowser(ctx.vaultId, { ctx })
+    expect(runningBrowser(ctx.vaultId)).toBeNull()
+    expect(
+      (await loadProfile(ctx))?.cookies.map((cookie) => cookie.name),
+    ).toEqual(["seen"])
+
+    const again = await call("navigate", { url: `${api.origin}/cookie` })
+    expect(textOf(again)).toContain("cookie: seen=1")
+  })
+
+  it("hands a tab to the owner and refuses it until they are done", async () => {
+    const host = new URL(api.origin).host
+    await setFetchSite(ctx, tokenId, host, "allowed")
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    await call("navigate", { url: `${api.origin}/form` })
+
+    const handed = await owner(
+      call("hand_over", { message: "Please sign in." }),
+    )
+    expect(handed.ask).toMatchObject({
+      kind: "browser_handover",
+      input: {
+        message: "Please sign in.",
+        url: `${api.origin}/form`,
+        title: "Form",
+      },
+    })
+    const tabId = (handed.ask.input as { tabId: string }).tabId
+
+    const refused = await call("snapshot", {})
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toContain("check_permission")
+
+    expect(await finishHandover(ctx, tabId)).toBe(true)
+    expect(textOf(await call("snapshot", {}))).toContain(`Tab ${tabId}`)
+  })
+
+  it("opens a site the owner allowed once, for that tab while it is open", async () => {
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    const scope = { ctx, tokenId, publicUrl: PUBLIC_URL, serverId: server.id }
+
+    const opened = await performNavigate(
+      scope,
+      { tabId: null, url: `${api.origin}/form` },
+      { allowedByOwner: true },
+    )
+    expect(textOf(opened)).toContain('textbox "Name"')
+
+    // Another page of the same site in that tab needs no asking.
+    const next = await call("navigate", { url: `${api.origin}/page` })
+    expect(textOf(next)).toContain("A page")
+
+    // A new tab does.
+    await owner(call("tabs", { action: "open", url: `${api.origin}/page` }))
+  })
+
+  it("never opens PCP's own address", async () => {
+    const own = await call("navigate", { url: `${PUBLIC_URL}/settings` })
+    expect(own.isError).toBe(true)
+    expect(textOf(own)).toContain("PCP's own address")
+    expect((await listFetchRules(ctx, tokenId)).sites).toEqual([])
+  })
+})

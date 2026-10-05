@@ -229,6 +229,15 @@ export async function decideSite(
   }
 }
 
+/** The lines for all tokens only: what a tab the owner opened follows. */
+export async function loadSharedFetchRules(
+  vaultId: string,
+): Promise<FetchRuleSet> {
+  return toRuleSet(
+    await db().webFetchRule.findMany({ where: { vaultId, scope: ALL_TOKENS } }),
+  )
+}
+
 /** Whether the owner allowed this token to reach private addresses. */
 export async function privateAllowedFor(
   vaultId: string,
