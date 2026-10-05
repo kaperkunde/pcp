@@ -59,9 +59,13 @@ so in the summary; the bump itself waits for the request.
   purpose. It registers one through `register_server` with OpenAPI text or a
   schema URL (downloaded at once, public addresses only, and approved as that
   copy), which is a permission request like any new server: the owner is shown
-  the address, the tools and the secret (by name), and nothing exists until
-  they agree. A secret PCP does not hold yet is typed in by the owner on PCP's
-  permission page, and its value never reaches the assistant. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
+  the address, the tools and the secret (by name, with the user name for a
+  basic login), and nothing exists until they agree. A secret PCP does not
+  hold yet is typed in by the owner on PCP's
+  permission page, and its value never reaches the assistant. OAuth at a
+  provider that lets apps register is found out by PCP when the owner
+  connects (the metadata counts only when it names the approved sign-in and
+  token addresses), so `client_id` is only for one that does not. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
   It never changes a credential and never clears `publicOnly`. On an
@@ -100,8 +104,14 @@ so in the summary; the bump itself waits for the request.
   `credential()`, renewed through `endpointToken` like an API endpoint's). Mail travels encrypted only (TLS, or STARTTLS that
   is required, never optional); a JMAP session's API and download addresses
   are taken only on the session URL's origin, and redirects are not
-  followed. Nothing deletes mail for good: delete moves to the Trash. Only
-  the owner adds or changes an account. A new mail tool goes in
+  followed. Nothing deletes mail for good: delete moves to the Trash. An
+  assistant adds one only through `register_server` (kind `jmap` or `imap`),
+  a permission request like any new server: the owner types the password or
+  token in on PCP's page or connects it, the assistant never sees a value, and
+  the JMAP address is looked at with no credential, public addresses only,
+  no redirect followed. Only the owner changes an account. Add a test for
+  each new `register_server` argument (`lib/core/register-rules.test.ts`,
+  `register-server.test.ts`). A new mail tool goes in
   `mail/tools.ts`, for both protocols where they allow, with its arguments
   checked before anything connects, and is left out of a read-only account
   and refused there if called anyway.

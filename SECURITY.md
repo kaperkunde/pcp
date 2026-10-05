@@ -51,7 +51,10 @@ read-only (or, over IMAP, gave it no SMTP server), send as you, move, flag
 and delete into the Trash. Nothing deletes mail for good, and sending cannot
 be undone, so leave `send_email` on Ask you first unless you mean otherwise.
 It never receives the password or token: PCP signs in itself and removes
-both from every answer. It cannot add or change a mail account. Over JMAP,
+both from every answer. It can propose a mail account, naming its password
+or token and never holding it: nothing is added until you agree on PCP's page,
+where you type the value in or connect it, and a private address it proposes is
+flagged there. It cannot change an account. Over JMAP,
 PCP sends the credential only to the session URL's origin and never follows
 a redirect; over IMAP and SMTP, only over an encrypted connection.
 

@@ -226,7 +226,21 @@ authorization server whose metadata is those two addresses, with no issuer
 address's origin stands in for it, and the owner's client is bound to that),
 and no resource indicator (a REST API names none, and providers that do not
 know RFC 8707 refuse it). The owner's client works as for an MCP server, and
-so do Google's sign-in defaults and the renewal notice. Token requests go
+so do Google's sign-in defaults and the renewal notice.
+
+A schema cannot say whether the provider lets an app register itself, so
+without a client of the owner's, `startOAuth` asks the provider
+(`upstream.ts: verifiedEndpointDiscovery`): it reads the authorization
+server's metadata (RFC 8414) at the sign-in address's origin, only when the
+owner chooses Connect, through the endpoint's address rule. The metadata is
+taken only when its sign-in and token addresses are exactly the stored ones,
+and then adds what the schema could not say (the registration endpoint, the
+client authentication methods, the scopes), so PCP registers itself (RFC 7591)
+as it does for an MCP server. Metadata that names other addresses is not used
+(the status says where it pointed), and nothing read there ever replaces the
+approved addresses; renewals read it the same way and fall back to the
+approved sign-in when it cannot be read. Only then is the owner asked for a
+client. Token requests go
 through `openapi/transport.ts` under the endpoint's address rule, like its
 calls. A call carries `Authorization: Bearer <token>`; a token that has run
 out is renewed first with the refresh token, and a 401 gets one renewed token
@@ -244,11 +258,17 @@ link-local and metadata ranges, and connect to the address it checked.
 
 ## Registering and managing endpoints through the gateway
 
-**Registering** is `register_server`, the same tool that adds MCP servers,
-with an OpenAPI document as text in `openapi_schema` or by its
-address in `openapi_url` (plus `spec_patches` to edit it, `url` for the base
-URL, `read_only`, and a secret named by NAME, or `auth_type` oauth for a
-document that declares a sign-in, with the owner's `client_id`). It is an assistant's request,
+**Registering** is `register_server`, the same tool that adds MCP servers
+and mail accounts, with an OpenAPI document as text in `openapi_schema` or by
+its address in `openapi_url` (plus `spec_patches` to edit it, `url` for the
+base URL, `read_only`, and a secret named by NAME, or `auth_type` basic with a
+`username` and the password's NAME, or `auth_type` oauth for a document that
+declares a sign-in, with `client_id` only for a provider that lets no app
+register itself). Which of the four things a call proposes is its `kind`
+(`mcp`, `api`, `jmap`, `imap`), inferred as before when it is left out, and
+the rules for which arguments go with which kind are
+`lib/core/register-rules.ts`: the refusals name what to pass instead, because
+the assistant reads them. It is an assistant's request,
 so it goes through the same owner approval as any other new server (below):
 PCP reads the document when the request is made (downloading it, for a URL),
 applies the edits, refuses one that cannot be used, and shows the owner the
@@ -380,8 +400,27 @@ and on JMAP `get_thread` and `list_identities`. Which ones an account has
 depends on read-only (the tools that change mail are left out, and refused if
 called anyway), and on whether it can send (JMAP: the session offers
 submission; IMAP: the owner gave an SMTP server). `mcp_tool.operation` is
-null; a call is dispatched by name. Only the owner adds or changes an
-account; `register_server` and the endpoint tools do not touch them.
+null; a call is dispatched by name. An assistant can propose an account
+through `register_server` (below); only the owner changes one, and the
+endpoint tools do not touch them.
+
+**Proposing one** is `register_server` with kind `jmap` or `imap`, a `url` (a
+JMAP server's origin or session URL, or an IMAP host), `smtp_url` and
+`mail_from` for IMAP sending, `read_only`, and an `auth_type`: `basic` (a
+`username` and the NAME of a secret holding the password), `header` (a bearer
+token's secret) or `oauth`. It is a permission request like any new server:
+`summarizeRow` shows the owner the protocol, the addresses, the user name, how
+PCP signs in and whether it can change mail, a password or token PCP does not
+hold yet is typed in on the approval page (labelled with the user name, saved
+under the proposed name, never in the conversation), and `executeRegister`
+creates the account with `createMailAccount` and reads its tools, or answers
+an OAuth account with the link to connect it. A JMAP address is completed (a
+server's origin gets `/.well-known/jmap`) and looked at before the owner is
+asked (`mail/probe.ts`): a GET with no credential, public addresses only and
+no redirect followed. A wrong address is refused at once, with where a
+redirect pointed; a private or local address is not looked at, and the owner
+is told so, because only they should send credentials into their own network.
+IMAP is not looked at (a connection without a login shows little).
 
 `upstream.ts` builds the credential and hands it to `mail/accounts.ts` as a
 `MailCredential`: the `Authorization` header for JMAP, the login for IMAP and
@@ -419,7 +458,9 @@ server `error`; a request the server refuses (no such email or mailbox) is
 an error answer and leaves the account as it is.
 
 **OAuth** uses the same Connect flow as an MCP server (below), discovering
-from the session URL. PCP makes a mail account's calls itself rather than
+from the session URL, registering PCP when the server lets apps and asking
+for `offline_access` (the SDK adds it when the server lists it) so the
+connection can be renewed. PCP makes a mail account's calls itself rather than
 through the MCP SDK's transport, so its bearer token comes from `credential()`
 in `upstream.ts`, as an OAuth API endpoint's does (`endpointToken`): renewed a
 minute before it runs out, and once more when the server refuses it. When that
@@ -763,9 +804,15 @@ A server that answers a signed-in request with 401 or 403 gets the status
 `WWW-Authenticate` challenge or error object, never its body: Google sends
 the whole answer with its refusals.
 
+An API endpoint takes the same steps with its sign-in fixed to the addresses
+the owner approved: the authorization server's metadata is read for what the
+schema cannot say, and used only when it names those addresses (see Signing
+in with OAuth under API endpoints).
+
 Only the owner's browser registers or signs in. A tool refresh or a gateway
 call on a server that is not connected stops at "needs connecting" without
-contacting the registration endpoint.
+contacting the registration endpoint, and a proposal from an assistant
+contacts nothing at that address but the JMAP look above.
 
 ## The gateway's tools
 
@@ -906,7 +953,8 @@ says what was saved, and how it differs from what was proposed.
 
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.
-Once the owner agrees, PCP adds the server, adds it to the asking token when
+Once the owner agrees, PCP adds the server (or the mail account: `executeRegister`
+has a branch for each of the three kinds), adds it to the asking token when
 that token is scoped to chosen servers, and reads its tools, or hands back
 the link to connect it for OAuth. With `openapi_schema` or `openapi_url` the
 request is an API endpoint instead: the gateway has

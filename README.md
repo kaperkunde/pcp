@@ -44,8 +44,9 @@ on its own, what it has to ask you about first, and what it cannot touch.
   reads public web pages as Markdown. You decide per method and per site, and
   every site an assistant tried is listed for you to allow or block.
 - **Mail without an MCP server.** Add a mail account over JMAP (Stalwart,
-  Fastmail, Cyrus) or IMAP with SMTP, and an assistant can search, read,
-  file and send its mail, with the same tools whichever protocol it speaks.
+  Fastmail, Cyrus) or IMAP with SMTP, or let an assistant propose one for you
+  to agree to, and an assistant can search, read, file and send its mail, with
+  the same tools whichever protocol it speaks.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
@@ -188,8 +189,11 @@ required.
    with the arguments the schema describes, and tells you what it left out
    (file uploads, cookies). Choose a secret to send in a header (more than
    one, each in its own header, for an API that wants a key and a secret
-   key), or, for an API whose schema declares an OAuth sign-in (Google's, Microsoft Graph),
-   your own OAuth client and **Connect**. **Read-only** offers only GET
+   key), a user name and password (HTTP Basic authentication, which PCP
+   encodes), or, for an API whose schema declares an OAuth sign-in (Google's,
+   Microsoft Graph, Stalwart), **Connect**: PCP registers itself with the
+   provider when it lets apps do that, and otherwise asks for your own OAuth
+   client. **Read-only** offers only GET
    operations. Requests go to the base URL saved on the endpoint, which PCP
    never changes on its own when the schema does. A secret is only sent to an
    address you typed, or to the origin the schema was downloaded from, so
@@ -199,14 +203,18 @@ required.
 4. **Mail accounts.** Add one over **JMAP** with its session URL (usually
    `https://<mail server>/.well-known/jmap`), signing in with a user name and
    an app password, a bearer token, or OAuth: choose **Connect** on its page,
-   as for an OAuth server (with Stalwart, put `offline_access` in the scope
-   so PCP stays signed in). Or add one over **IMAP**, with an SMTP server to
+   as for an OAuth server (PCP asks for `offline_access` itself when the
+   server offers it, so it stays signed in). Or add one over **IMAP**, with an SMTP server to
    send through if it should send. Passwords and tokens are secrets you
    pick, and mail only travels encrypted (TLS, or STARTTLS on `imap://` and
    `smtp://`). Every account offers the same tools: list mailboxes, search,
    read an email or a text attachment, move, flag, delete into the Trash
    (never for good) and send, plus conversations and identities on JMAP.
-   **Read-only** offers only the tools that read.
+   **Read-only** offers only the tools that read. An assistant can propose an
+   account too, with `register_server`: you see the server, the user name and
+   how PCP signs in, type the app password on that page (it never passes
+   through the assistant) or connect it with OAuth, and nothing exists until
+   you agree.
 5. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password to make one. A token can reach every server and endpoint or only
    the ones you pick, and can expire. Revoking it destroys its copy of the
@@ -237,7 +245,7 @@ and these tools:
 | `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                         |
 | `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                   |
 | `read_result`         | Reads the whole of an answer too long to pass on in one piece, a slice at a time from any offset or from where a text appears.                                    |
-| `register_server`     | Proposes a new MCP server, or an API from an OpenAPI 3 schema (text or a URL), with no auth, a secret named by name, or OAuth.                                    |
+| `register_server`     | Proposes a new MCP server, an API from an OpenAPI 3 schema, or a mail account (JMAP or IMAP), with no auth, a secret by name, a user name and password, or OAuth. |
 | `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                       |
 
 A shortened answer (a JSON preview, a long text cut off, a long email) ends
@@ -251,8 +259,9 @@ tell it you have, and it carries on. The bell at the top of every page in
 PCP shows how many requests are waiting and lists them, so you can answer
 one without the link. **Allow once** runs that one call, **Always allow** and
 **Block** also decide the calls after it, and **Not now** runs nothing. A
-server an assistant proposes is only added once you agree; an OAuth one is
-then connected from a link to its page in PCP.
+server, API or mail account an assistant proposes is only added once you
+agree; an OAuth one is then connected from a link to its page in PCP, where
+PCP registers itself with the provider if the provider lets apps do that.
 
 An assistant can also help with a large set of tools: `propose_tool_access`
 takes levels for many tools at once, by name or by pattern (`list_*`), and
@@ -264,8 +273,8 @@ An assistant can write an OpenAPI schema from an API's documentation and hand
 it to `register_server` as text, or name a schema's URL. You see what it asked
 for before anything is added: the address, how many tools and which
 operations, whether it can change things, and the secret it would send. A
-secret PCP does not hold yet is typed in by you on that page, so its value
-never passes through the assistant. An API added that way reaches public
+secret PCP does not hold yet, an API key or the password for a user name, is
+typed in by you on that page, so its value never passes through the assistant. An API added that way reaches public
 addresses only until you allow private ones on the endpoint's page.
 
 A token made with **Let an assistant with this token read and change API

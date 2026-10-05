@@ -158,6 +158,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/answers.ts`                | Shaping an answer for the assistant: fields, decode, preview  |
 | `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
 | `lib/core/mail/`                     | Mail accounts: JMAP and IMAP/SMTP behind one set of tools     |
+| `lib/core/register-rules.ts`         | What register_server accepts for each kind                    |
 | `lib/core/tool-results.ts`           | Long answers kept, encrypted, for `read_result`               |
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
