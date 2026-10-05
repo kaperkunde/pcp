@@ -135,8 +135,9 @@ export function PendingRequests({
             </div>
             {total === 0 && notices.length === 0 ? (
               <p className="px-3 pb-2 text-xs text-muted-foreground">
-                When an assistant asks before it runs a tool, adds a server or
-                shares a memory, it shows here.
+                When an assistant asks before it runs a tool, adds a server,
+                shares a memory or opens a site in the browser, or needs you in
+                a browser tab, it shows here.
               </p>
             ) : null}
             {requests.map((request) => (

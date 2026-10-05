@@ -159,6 +159,34 @@ export default async function PermissionPage({
                   </Link>{" "}
                   lists every site it reached for, and its method settings.
                 </p>
+              ) : view.kind === "browse" ? (
+                <p className="text-muted-foreground">
+                  Allow once lets this tab open the site&apos;s pages while it
+                  is open. Always allow this site and Block this site decide for
+                  the token, in the browser and in web fetch, as on{" "}
+                  <Link href={`/tokens/${view.tokenId}`} className="underline">
+                    the token&apos;s page
+                  </Link>
+                  .
+                </p>
+              ) : view.kind === "browser_handover" ? (
+                <p className="text-muted-foreground">
+                  {view.browserTabId ? (
+                    <>
+                      <Link
+                        href={`/browser/tabs/${view.browserTabId}`}
+                        className="underline"
+                      >
+                        Open the tab
+                      </Link>
+                      , do what the assistant asks there, then come back and say
+                      Done.
+                    </>
+                  ) : (
+                    "Do what the assistant asks in the tab, then say Done."
+                  )}{" "}
+                  The tab is yours until you answer.
+                </p>
               ) : view.kind === "memory_share" ? (
                 <p className="text-sm text-muted-foreground">
                   Kept for this assistant only, it is saved where only the
