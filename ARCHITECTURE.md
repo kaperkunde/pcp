@@ -1661,6 +1661,12 @@ have answered. In case they are still on it, the check holds the call while
 the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
 minute at which clients and proxies give up, checking every second, and
 dropping out when the client goes away) and answers as soon as they have.
+Which app is on the other end decides whether a link may come before a
+tool call, and PCP is only told when a client connects: the gateway writes
+each `initialize` to the server log (`[mcp] initialize`, from
+`lib/core/client-hello.ts`: the client's name, version and capabilities, the
+user agent, and header names, never another header's value), not to the
+request log.
 An OAuth server that needs signing in (a call to it, or one the owner just
 agreed to add) answers with a link to its page in PCP, handed over the same
 way, where Connect starts the sign-in; `check_server` then says whether it

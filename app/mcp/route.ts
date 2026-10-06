@@ -1,6 +1,7 @@
 import { createMcpHandler } from "@modelcontextprotocol/server"
 
 import { resolveApiToken } from "@/lib/core/api-tokens"
+import { clientHello } from "@/lib/core/client-hello"
 import {
   buildGatewayServer,
   ensureCatalogue,
@@ -142,14 +143,30 @@ async function handle(request: Request): Promise<Response> {
   // The rate limit counts requests. A JSON-RPC batch is many calls in one, so
   // it would get around it: the current protocol has no batches either.
   if (request.method === "POST") {
-    const start = (await request.clone().text()).trimStart().slice(0, 1)
+    const body = await request.clone().text()
 
-    if (start === "[") {
+    if (body.trimStart().startsWith("[")) {
       return withCors(
         jsonRpcError(
           400,
           "Send one message per request; batches are not supported.",
         ),
+      )
+    }
+
+    // Which app is on the other end, as it says when it connects: the server
+    // log only, never the request log (the Log page lists calls).
+    const hello = clientHello(body, request.headers)
+
+    if (hello) {
+      console.info(
+        "[mcp] initialize",
+        JSON.stringify({
+          token: resolved.tokenId,
+          tokenName: resolved.tokenName.slice(0, 80),
+          oauth: token?.startsWith(ACCESS_TOKEN_PREFIX) ?? false,
+          ...hello,
+        }),
       )
     }
   }
