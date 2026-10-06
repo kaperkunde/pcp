@@ -175,7 +175,8 @@ export function OutsideAccessCard({
             </li>
             <li>
               <strong>Port 80 blocked</strong>: some providers block it on home
-              plans, and Let&apos;s Encrypt needs it. Use a tunnel.
+              plans. PCP then gets its certificate on port 443 instead, so
+              forward that one; if both are blocked, use a tunnel.
             </li>
             <li>
               <strong>Two routers</strong>: a provider&apos;s modem with a

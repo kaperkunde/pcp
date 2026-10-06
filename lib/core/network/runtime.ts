@@ -29,6 +29,7 @@ import {
   clearTlsConfig,
   acmeIssuer,
   type ChallengeStore,
+  challengeStore,
   getTlsConfig,
   getTlsStatus,
   type Issuer,
@@ -88,7 +89,7 @@ function runtime(): Runtime {
   holder[RUNTIME] ??= {
     started: false,
     issuer: acmeIssuer,
-    challenges: new Map(),
+    challenges: challengeStore(),
     edge: null,
     pcpgg: null,
     ddnsTimer: null,

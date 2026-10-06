@@ -1148,17 +1148,44 @@ lookup fails, services that see the caller's address themselves still get an
 update, at most hourly.
 
 **HTTPS** (`tls.ts`, `edge.ts`, `proxy.ts`): `acme-client` gets a Let's
-Encrypt certificate (`PCP_ACME_DIRECTORY` overrides the directory) with the
-HTTP-01 challenge, for a typed name or the dynamic DNS one. The key and
-certificate are files under `tls/`: a server presenting a certificate needs
-its key before anyone signs in. While HTTPS is on, PCP opens two listeners of
-its own next to Next's:
+Encrypt certificate (`PCP_ACME_DIRECTORY` overrides the directory) for a
+typed name or the dynamic DNS one. The key and certificate are files under
+`tls/`: a server presenting a certificate needs its key before anyone signs
+in. While HTTPS is on, PCP opens two listeners of its own next to Next's:
 
 - port 80 (`PCP_HTTP_PORT`; 8080 in the Docker image, mapped by
   `docker-compose.https.yaml`) answers `/.well-known/acme-challenge/…`. Once
   a certificate works it redirects everything else to `https://<name>`;
   before that it forwards to the app, so the site is not broken while waiting.
-- port 443 (`PCP_HTTPS_PORT`, 8443 in Docker) serves the certificate.
+- port 443 (`PCP_HTTPS_PORT`, 8443 in Docker) serves the certificate, and
+  opens before there is one, for the TLS-ALPN-01 challenge.
+
+**Which challenge** (`challengeOrder` in `tls.ts`): Let's Encrypt proves the
+name is PCP's either with HTTP-01 (a file on port 80) or with TLS-ALPN-01
+(RFC 8737: a handshake on port 443 asking for the protocol `acme-tls/1`
+alone, answered with a self-signed certificate for the name that carries the
+key authorization's SHA-256 in its acmeIdentifier extension). A name of the
+owner's own tries HTTP-01 first, since a router forwards port 80 as readily
+as 443 and some providers block only 80; a pcp.gg name tries TLS-ALPN-01
+first, because pcp.gg carries port 443 to PCP untouched, while a proxy in
+front of pcp.gg can keep port 80's challenge path for itself (Coolify's
+Traefik, with a Let's Encrypt resolver of its own, answers every
+`/.well-known/acme-challenge/…` with 404, whatever the host). When the
+first fails, the other is tried once, in a new order; when PCP never got as
+far as a challenge (the directory out of reach, an order refused), nothing
+is tried again. The answers wait in the runtime's `ChallengeStore` (tokens
+for port 80, challenge certificates by name for 443) and are removed once
+validated or refused.
+
+Node's TLS server chooses the certificate before it says which protocols the
+client offered, so port 443 reads the ClientHello itself
+(`client-hello.ts`, adapted from pcp.gg's `tunnel/protocol/sni.ts`), and only
+while a TLS-ALPN-01 challenge is out: a connection for that name offering
+`acme-tls/1` and nothing else goes to a second TLS server that never listens
+(the challenge certificate, `acme-tls/1`, closed after the handshake); every
+other connection, Let's Encrypt's included at any other time, goes on to the
+HTTPS server with the bytes put back and gets the normal certificate. With no
+challenge out, nothing is read first.
 
 Both forward to the app on `127.0.0.1:$PORT`, streaming (MCP's server-sent
 events stay open) and passing upgrades through. They are the edge, so they
@@ -1174,7 +1201,8 @@ again and the card says why: what went wrong is usually the router or the
 name, which no retry fixes. Once a name has had a certificate, a failed
 renewal is retried after 1 hour, doubling to at most a day, and the
 header's bell says so on every page until it works. That keeps PCP well
-inside Let's Encrypt's limits on failed validations; "Try again now" skips
+inside Let's Encrypt's limits on failed validations (at most two a try, with
+the second challenge); "Try again now" skips
 the wait. A DNS lookup first warns, without blocking, when the name does not
 point at this network. Port 3000 keeps serving plain
 HTTP for the local network. In the desktop app the two ports stay 80 and 443
@@ -1190,16 +1218,17 @@ It holds one WebSocket to pcp.gg (`PCP_PCPGG_RELAY_URL` overrides the
 address) and answers each connection pcp.gg passes down by dialling the
 edge's own listeners on 127.0.0.1. Connections to the owner's name on port
 443 arrive still encrypted and end in the edge's HTTPS listener, so pcp.gg
-carries bytes it cannot read; on port 80 pcp.gg passes on only Let's
-Encrypt's challenge. The wire format (`pcpgg/frames.ts`, `mux.ts`,
+carries bytes it cannot read, Let's Encrypt's TLS-ALPN-01 validation among
+them; on port 80 pcp.gg passes on only Let's Encrypt's HTTP-01 challenge. The wire format (`pcpgg/frames.ts`, `mux.ts`,
 `control.ts`) is a copy of pcp.gg's `tunnel/protocol/`, protocol version 1;
 the tests run against a copy of pcp.gg's relay (`pcpgg/test-relay/`).
 
 `reconcileNetwork()` starts the connector while a key is saved and pcp.gg
 has not refused it, and stops it otherwise. pcp.gg's `ready` message names
 the hostnames; PCP keeps the first and, once online, turns HTTPS on for it
-(`tls.config` with `via: "pcpgg"`), so the HTTP-01 challenge reaches port 80
-through pcp.gg on the first try. A pcp.gg name skips the check that the name
+(`tls.config` with `via: "pcpgg"`), so the TLS-ALPN-01 challenge reaches
+port 443 through pcp.gg on the first try (HTTP-01 through port 80 if that
+fails). A pcp.gg name skips the check that the name
 points at this network, and the edge listens on 127.0.0.1 only: the name
 leads to pcp.gg, never to this network's own address, so nothing else needs
 to reach the listeners (the desktop app's 80 and 443 included). If Let's
