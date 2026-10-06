@@ -50,10 +50,12 @@ WORKDIR /app
 # PCP runs as an unprivileged user, so its own HTTPS listeners use ports
 # above 1024; the compose file maps 80 and 443 onto them. PCP_CONTAINER lets
 # Settings say how a container is updated (lib/server/install-kind.ts).
+# HOSTNAME=:: listens on IPv6 and IPv4, falling back to IPv4 alone on a
+# kernel without IPv6 (docker/start.cjs).
 ENV NODE_ENV=production \
     PCP_CONTAINER=1 \
     PORT=3000 \
-    HOSTNAME=0.0.0.0 \
+    HOSTNAME=:: \
     PCP_DATA_DIR=/data \
     PCP_HTTP_PORT=8080 \
     PCP_HTTPS_PORT=8443
@@ -85,6 +87,7 @@ COPY --from=builder --chown=pcp:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=pcp:nodejs /app/.next/static ./.next/static
 # Applied at boot by instrumentation.ts (lib/core/migrate.ts).
 COPY --from=builder /app/prisma/migrations ./prisma/migrations
+COPY docker/start.cjs ./start.cjs
 
 USER pcp
 
@@ -94,4 +97,4 @@ EXPOSE 3000 8080 8443
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3000/api/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
-CMD ["node", "server.js"]
+CMD ["node", "start.cjs"]
