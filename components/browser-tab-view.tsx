@@ -345,13 +345,15 @@ export function BrowserTabView({
                     : holding
                       ? handover
                         ? "What you do here goes to the page. The assistant waits until you answer below."
-                        : "What you do here goes to the page. Assistants wait until you hand it back."
+                        : view.ownersOwn
+                          ? "What you do here goes to the page. This tab is yours: assistants see only the tabs they opened."
+                          : "What you do here goes to the page. The assistant whose tab it is waits until you hand it back."
                       : "You are watching. Take it over to click and type."}
           </span>
         </div>
         <div className="flex flex-wrap gap-2">
           {holding ? (
-            handover ? null : (
+            handover || view.ownersOwn ? null : (
               <Button
                 type="button"
                 size="sm"

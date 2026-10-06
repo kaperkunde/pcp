@@ -58,7 +58,11 @@ export type Tab = {
   mainFrameId: string
   /** "owner", or the name of the token that opened it. */
   openedBy: string
-  /** The token that last drove the tab; null while only the owner has. */
+  /**
+   * The token whose tab it is: the one that opened it (or the tab a popup
+   * came from), and the only one that sees or drives it. Null for the
+   * owner's own, which no token does.
+   */
   tokenId: string | null
   /** That token's web fetch lines, as last read. */
   rules: FetchRuleSet | null
@@ -691,6 +695,7 @@ export async function tabView(tab: Tab): Promise<TabView> {
     url: tab.page.url(),
     title: await tabTitle(tab),
     openedBy: tab.openedBy,
+    ownersOwn: tab.tokenId === null,
     control: tab.control,
     handover: tab.handoverSince !== null,
     lastUsedAt: new Date(tab.lastUsedAt).toISOString(),
