@@ -4,7 +4,7 @@ import { ExportCard, RestoreCard } from "@/components/backup-cards"
 import { CleanupCard } from "@/components/cleanup-card"
 import { CopyableValue } from "@/components/copyable-value"
 import { FormNote } from "@/components/form-status"
-import { DdnsCard, HttpsCard } from "@/components/network-forms"
+import { DdnsCard, HttpsCard, PcpggCard } from "@/components/network-forms"
 import { OutsideAccessCard } from "@/components/outside-access-card"
 import { PageHeader } from "@/components/page-header"
 import { UpdatesCard } from "@/components/updates-card"
@@ -86,6 +86,11 @@ export default async function SettingsPage({
       {isLocalAddress(publicUrl) ? (
         <OutsideAccessCard address={publicUrl} desktop={isDesktopApp()} />
       ) : null}
+      <PcpggCard
+        pcpgg={network.pcpgg}
+        ports={network.ports}
+        pinnedPublicUrl={pinned}
+      />
       <DdnsCard ddns={network.ddns} />
       <HttpsCard
         https={network.https}
@@ -93,6 +98,7 @@ export default async function SettingsPage({
         ddnsName={network.ddnsName}
         ports={network.ports}
         pinnedPublicUrl={pinned}
+        pcpggName={network.pcpgg ? network.pcpgg.name : undefined}
       />
       <UpdatesCard
         overview={updates}

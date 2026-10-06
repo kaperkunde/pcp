@@ -5,6 +5,7 @@ import { defineConfig, devices } from "@playwright/test"
 import {
   E2E_EDGE_HTTP_PORT,
   E2E_EDGE_HTTPS_PORT,
+  E2E_PCPGG_RELAY_URL,
   E2E_RELEASES_URL,
 } from "./e2e/lib/network"
 
@@ -77,6 +78,8 @@ export default defineConfig({
       // The update check asks the fake upstream (the updates project starts
       // it on this port), never GitHub.
       PCP_RELEASES_URL: E2E_RELEASES_URL,
+      // The pcpgg project's copy of pcp.gg, never pcp.gg itself.
+      PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
     },
   },
   projects: [
@@ -170,6 +173,15 @@ export default defineConfig({
       testMatch: /network\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("network"),
+    },
+    {
+      // pcp.gg against a copy of its relay: a key it refuses (the card and
+      // the bell), a key it takes (online at the name, HTTPS for it turned
+      // on and, with no Let's Encrypt to answer, off again), disconnected.
+      name: "pcpgg",
+      testMatch: /pcpgg\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("pcpgg"),
     },
     {
       // An API that wants HTTP Basic authentication: a user name and a

@@ -1093,19 +1093,19 @@ rate-limited like password attempts. The download is a route handler (an
 action cannot send a file), so it checks the request's origin itself
 (`lib/server/same-origin.ts`), which Server Actions get built in.
 
-## Reaching PCP: dynamic DNS and HTTPS
+## Reaching PCP: pcp.gg, dynamic DNS and HTTPS
 
-Both are optional, off until the owner turns them on (in the step after setup
-or under Settings), and meant for someone running PCP at home without a proxy
-of their own. While both are off, nothing in `lib/core/network/` starts:
-no timer, no listener, no outbound request.
+All three are optional, off until the owner turns them on (in the step after
+setup or under Settings), and meant for someone running PCP at home without a
+proxy of their own. While all three are off, nothing in `lib/core/network/`
+starts: no timer, no listener, no outbound request or connection.
 
 **Host settings, not vault settings.** The configuration lives in the
 `host_setting` table (`lib/core/host-settings.ts`), not in the per-vault
 `setting` table. It belongs to the machine, and the work that uses it runs
 from a timer with no request and no `VaultContext`. So it is **stored
-unencrypted**: a dynamic DNS service's token or password has to be readable
-while nobody is signed in, and reading the vault without a credential is
+unencrypted**: a dynamic DNS service's token or password, and the pcp.gg
+connection key, have to be readable while nobody is signed in, and reading the vault without a credential is
 exactly what PCP refuses to allow. The owner is told so where they type it.
 Such a credential can only move a DNS name. Nothing from the vault (a secret,
 a token) is ever copied into a host setting, and the page never sends a saved
@@ -1162,7 +1162,41 @@ point at this network. Port 3000 keeps serving plain
 HTTP for the local network. In the desktop app the two ports stay 80 and 443
 (macOS and Windows let an ordinary program use them), and they listen on
 every interface even while the app keeps port 3000 to this computer: a
-router's forward needs exactly that.
+router's forward needs exactly that (with a pcp.gg name they listen on
+127.0.0.1 only, below).
+
+**pcp.gg** (`pcpgg.ts`, `pcpgg/`): the owner pastes a connection key from
+their pcp.gg dashboard, and PCP runs pcp.gg's connector itself
+(`pcpgg/connector.ts`, lifted from kaperkunde/pcp-gg's `tunnel/connector/`).
+It holds one WebSocket to pcp.gg (`PCP_PCPGG_RELAY_URL` overrides the
+address) and answers each connection pcp.gg passes down by dialling the
+edge's own listeners on 127.0.0.1. Connections to the owner's name on port
+443 arrive still encrypted and end in the edge's HTTPS listener, so pcp.gg
+carries bytes it cannot read; on port 80 pcp.gg passes on only Let's
+Encrypt's challenge. The wire format (`pcpgg/frames.ts`, `mux.ts`,
+`control.ts`) is a copy of pcp.gg's `tunnel/protocol/`, protocol version 1;
+the tests run against a copy of pcp.gg's relay (`pcpgg/test-relay/`).
+
+`reconcileNetwork()` starts the connector while a key is saved and pcp.gg
+has not refused it, and stops it otherwise. pcp.gg's `ready` message names
+the hostnames; PCP keeps the first and, once online, turns HTTPS on for it
+(`tls.config` with `via: "pcpgg"`), so the HTTP-01 challenge reaches port 80
+through pcp.gg on the first try. A pcp.gg name skips the check that the name
+points at this network, and the edge listens on 127.0.0.1 only: the name
+leads to pcp.gg, never to this network's own address, so nothing else needs
+to reach the listeners (the desktop app's 80 and 443 included). If Let's
+Encrypt refuses the first certificate for the name, HTTPS turns off as usual
+and stays off across reconnects until the owner asks again. A key pcp.gg
+refuses (close codes 4001, 4004) stops the connector and is not tried again,
+across restarts too, until the owner saves a key. Turning pcp.gg off stops
+the connector and turns HTTPS for the name off. The pcp.gg card and the
+header's bell (after two minutes offline, or at once for a refused key) show
+the state. The HTTPS card keeps its hands off while pcp.gg is on.
+
+Every connection through pcp.gg reaches the edge from 127.0.0.1, so the rate
+limiter sees one client address for all of them. Carrying the client's
+address (in the OPEN frame, then PROXY protocol v2 to the edge) is left for
+a later protocol version.
 
 ## Updates
 

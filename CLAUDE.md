@@ -215,10 +215,15 @@ so in the summary; the bump itself waits for the request.
   migration that adds a column fails `pnpm typecheck` in
   `lib/core/backup-format.ts` until the format carries it, with the column's
   default so older files still restore.
-- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS) belong to
-  the machine, are read with no credential, and are stored unencrypted. Never
-  copy anything from the vault into one. `lib/core/network/` starts nothing
-  (timer, listener, request) while both features are off.
+- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS, pcp.gg)
+  belong to the machine, are read with no credential, and are stored
+  unencrypted. Never copy anything from the vault into one, and never add the
+  pcp.gg key to an export (`EXPORTED_HOST_KEYS`). `lib/core/network/` starts
+  nothing (timer, listener, request, connection) while all three are off.
+- `lib/core/network/pcpgg/{frames,mux,control}.ts` are copies of pcp.gg's
+  `tunnel/protocol/` (kaperkunde/pcp-gg) and speak its wire protocol: change
+  them only together with pcp.gg, keeping `PROTOCOL_VERSION`. `test-relay/`
+  is pcp.gg's relay for tests; PCP never runs it.
 - The Touch ID key (`lib/core/device-keys.ts`) is a credential the Mac app
   keeps and hands to PCP's page only after Touch ID. It is made only with
   the typed password (Settings, or the box on the sign-in page), a vault has

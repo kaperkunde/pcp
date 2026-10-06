@@ -194,7 +194,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/migrate.ts`                | Boot-time migrations                                          |
 | `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts     |
 | `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
-| `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
+| `lib/core/network/`                  | Optional pcp.gg, dynamic DNS and HTTPS (Let's Encrypt, edge)  |
 | `lib/core/updates/`                  | The daily check for a newer release; what it found            |
 | `lib/core/version.ts`                | `PCP_VERSION`, read from `package.json`                       |
 | `scripts/version.mjs`                | The next release's version; `pnpm version:bump`               |

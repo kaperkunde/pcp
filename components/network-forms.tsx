@@ -20,10 +20,13 @@ import { Field, Label } from "@/components/ui/label"
 import {
   disableDdnsAction,
   disableHttpsAction,
+  disablePcpggAction,
   type NetworkResult,
   retryHttpsAction,
+  retryPcpggHttpsAction,
   saveDdnsAction,
   saveHttpsAction,
+  savePcpggAction,
   updateDdnsNowAction,
 } from "@/lib/actions/network"
 import { type SettingsResult, setPublicUrlAction } from "@/lib/actions/settings"
@@ -34,6 +37,7 @@ import {
   DUCKDNS_URL,
   DYNDNS2_SERVERS,
   LETS_ENCRYPT_TERMS_URL,
+  PCPGG_URL,
   readDuckDnsPaste,
 } from "@/lib/core/constants"
 import type { NetworkOverview } from "@/lib/core/network/runtime"
@@ -49,6 +53,244 @@ function confirmed(question: string) {
       event.preventDefault()
     }
   }
+}
+
+function LetsEncryptAgreement() {
+  return (
+    <Label className="font-normal">
+      <Checkbox name="agreed" required />
+      <span>
+        I accept the{" "}
+        <a
+          href={LETS_ENCRYPT_TERMS_URL}
+          target="_blank"
+          rel="noreferrer"
+          className="text-primary underline-offset-4 hover:underline"
+        >
+          Let&apos;s Encrypt Subscriber Agreement
+        </a>
+      </span>
+    </Label>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// pcp.gg
+
+export function PcpggCard({
+  pcpgg,
+  ports,
+  pinnedPublicUrl,
+}: {
+  pcpgg: NetworkOverview["pcpgg"]
+  ports: NetworkOverview["ports"]
+  pinnedPublicUrl: string | null
+}) {
+  const [state, action] = useActionState<NetworkResult, FormData>(
+    savePcpggAction,
+    { status: "idle" },
+  )
+
+  return (
+    <Card id="pcpgg" className="scroll-mt-6">
+      <CardHeader>
+        <CardTitle>pcp.gg</CardTitle>
+        <CardDescription>
+          pcp.gg gives PCP a name of its own, such as you.pcp.gg, and carries
+          connections to that name to this computer over a connection PCP opens
+          itself. Assistants reach PCP from anywhere, with nothing to change on
+          your router and nothing else to run. PCP gets its own certificate for
+          the name from Let&apos;s Encrypt, so what passes through pcp.gg stays
+          encrypted to PCP.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {pcpgg ? (
+          <PcpggStatus
+            pcpgg={pcpgg}
+            ports={ports}
+            pinnedPublicUrl={pinnedPublicUrl}
+          />
+        ) : null}
+        <form
+          action={action}
+          className="flex flex-col gap-4"
+          aria-label="pcp.gg"
+        >
+          {pcpgg ? null : (
+            <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm text-muted-foreground [&_strong]:font-medium [&_strong]:text-foreground">
+              <li>
+                Sign in at pcp.gg and choose your name.{" "}
+                <ButtonLink
+                  href={PCPGG_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  variant="outline"
+                  size="sm"
+                  className="ml-1"
+                >
+                  Open pcp.gg
+                </ButtonLink>
+              </li>
+              <li>
+                Copy the <strong>connection key</strong> from your pcp.gg
+                dashboard and paste it below.
+              </li>
+            </ol>
+          )}
+          <Field
+            label="Connection key"
+            htmlFor="pcpgg-key"
+            hint={
+              pcpgg
+                ? `Saved: ${pcpgg.keyHint} Paste a new one when you replace it on pcp.gg.`
+                : undefined
+            }
+          >
+            <Input
+              id="pcpgg-key"
+              name="key"
+              type="password"
+              autoComplete="off"
+              placeholder={pcpgg ? KEEP : "pcpgg_…"}
+              required={!pcpgg}
+            />
+          </Field>
+          <LetsEncryptAgreement />
+          <p className="text-xs text-muted-foreground">
+            Unlike your secrets, this key is stored on your server unencrypted,
+            so PCP stays connected while you are signed out. Someone who reads
+            it could answer for your pcp.gg name until you replace the key on
+            pcp.gg; it opens nothing in PCP.
+          </p>
+          <FormError error={state.status === "error" ? state.error : null} />
+          <FormNote message={state.status === "ok" ? state.message : null} />
+          <div>
+            <SubmitButton pendingText="Connecting…">
+              {pcpgg ? "Save and connect" : "Connect to pcp.gg"}
+            </SubmitButton>
+          </div>
+        </form>
+        {pcpgg ? (
+          <form
+            action={disablePcpggAction}
+            onSubmit={confirmed(
+              `Disconnect from pcp.gg? Assistants can no longer reach PCP${
+                pcpgg.name ? ` at ${pcpgg.name}` : ""
+              }, and PCP stops serving HTTPS for that name.`,
+            )}
+          >
+            <SubmitButton variant="outline" pendingText="Disconnecting…">
+              Disconnect from pcp.gg
+            </SubmitButton>
+          </form>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
+function PcpggStatus({
+  pcpgg,
+  ports,
+  pinnedPublicUrl,
+}: {
+  pcpgg: NonNullable<NetworkOverview["pcpgg"]>
+  ports: NetworkOverview["ports"]
+  pinnedPublicUrl: string | null
+}) {
+  const router = useRouter()
+  const { state, name, error, retryAt, https, httpsTurnedOff } = pcpgg
+  const waiting =
+    state === "connecting" || (state === "online" && !https && !httpsTurnedOff)
+
+  // Connecting takes a moment: follow along until it is online.
+  useEffect(() => {
+    if (!waiting) return
+    const timer = setInterval(() => router.refresh(), 3_000)
+    return () => clearInterval(timer)
+  }, [waiting, router])
+
+  return (
+    <div className="flex flex-col gap-3 text-sm" data-testid="pcpgg-status">
+      <div className="flex flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          {state === "online" ? (
+            <Badge>Online</Badge>
+          ) : state === "rejected" ? (
+            <Badge variant="destructive">Key not accepted</Badge>
+          ) : state === "offline" ? (
+            <Badge variant="warning">Offline</Badge>
+          ) : (
+            <Badge variant="outline">Connecting…</Badge>
+          )}
+          <span>
+            {state === "online" && name ? (
+              <>
+                Assistants reach PCP at <strong>{name}</strong>
+              </>
+            ) : name ? (
+              <strong>{name}</strong>
+            ) : (
+              "Your pcp.gg name"
+            )}
+          </span>
+        </div>
+        {state === "rejected" ? (
+          <p className="text-destructive" role="alert">
+            {error} PCP will not try again until you save a key.
+          </p>
+        ) : state === "offline" ? (
+          <>
+            {error ? <p className="text-warning">{error}</p> : null}
+            {retryAt ? (
+              <p className="text-muted-foreground">
+                PCP tries again at <LocalDate value={retryAt} />.
+              </p>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+      {state === "rejected" ? null : https ? (
+        <HttpsStatus
+          https={https}
+          ports={ports}
+          pinnedPublicUrl={pinnedPublicUrl}
+        />
+      ) : httpsTurnedOff ? (
+        <div
+          className="flex flex-col gap-2"
+          data-testid="pcpgg-https-turned-off"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="destructive">No certificate</Badge>
+          </div>
+          <p className="text-destructive" role="alert">
+            {httpsTurnedOff.error}
+          </p>
+          <p className="text-muted-foreground">
+            PCP stopped asking at <LocalDate value={httpsTurnedOff.at} />.
+          </p>
+          <PcpggRetryButton />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function PcpggRetryButton() {
+  const [state, action] = useActionState<NetworkResult>(retryPcpggHttpsAction, {
+    status: "idle",
+  })
+
+  return (
+    <form action={action} className="flex items-center gap-2">
+      <SubmitButton variant="outline" pendingText="Asking…">
+        Try again now
+      </SubmitButton>
+      <FormNote message={state.status === "ok" ? state.message : null} />
+    </form>
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -472,12 +714,15 @@ export function HttpsCard({
   ddnsName,
   ports,
   pinnedPublicUrl,
+  pcpggName,
 }: {
   https: NetworkOverview["https"]
   turnedOff: NetworkOverview["httpsTurnedOff"]
   ddnsName: string | null
   ports: NetworkOverview["ports"]
   pinnedPublicUrl: string | null
+  /** Set while PCP is connected to pcp.gg, which looks after HTTPS. */
+  pcpggName?: string | null
 }) {
   const [state, action] = useActionState<NetworkResult, FormData>(
     saveHttpsAction,
@@ -498,7 +743,8 @@ export function HttpsCard({
           itself over HTTPS, which most sign-ins with other services need. Your
           router has to forward ports 80 and 443 to this computer. Leave this
           off if something else (Caddy, Traefik, nginx, Coolify) already handles
-          HTTPS for PCP.{" "}
+          HTTPS for PCP, or if you connect to pcp.gg, which needs no ports
+          forwarded.{" "}
           <a
             href={SELF_HOSTING_GUIDE}
             target="_blank"
@@ -510,110 +756,110 @@ export function HttpsCard({
           walks through it.
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        {https ? (
-          <HttpsStatus
-            https={https}
-            ports={ports}
-            pinnedPublicUrl={pinnedPublicUrl}
-          />
-        ) : turnedOff ? (
-          <div
-            className="flex flex-col gap-2 text-sm"
-            data-testid="https-turned-off"
+      {pcpggName !== undefined ? (
+        <CardContent>
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="https-pcpgg"
           >
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="destructive">Turned off</Badge>
-              {turnedOff.domain ? <strong>{turnedOff.domain}</strong> : null}
+            While PCP is connected to pcp.gg, it serves HTTPS for its pcp.gg
+            name{pcpggName ? `, ${pcpggName}` : ""}: the pcp.gg card shows how
+            that goes. Disconnect from pcp.gg to use another name here.
+          </p>
+        </CardContent>
+      ) : (
+        <CardContent>
+          {https ? (
+            <HttpsStatus
+              https={https}
+              ports={ports}
+              pinnedPublicUrl={pinnedPublicUrl}
+            />
+          ) : turnedOff ? (
+            <div
+              className="flex flex-col gap-2 text-sm"
+              data-testid="https-turned-off"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="destructive">Turned off</Badge>
+                {turnedOff.domain ? <strong>{turnedOff.domain}</strong> : null}
+              </div>
+              <p className="text-destructive" role="alert">
+                {turnedOff.error}
+              </p>
+              <p className="text-muted-foreground">
+                PCP turned HTTPS off at <LocalDate value={turnedOff.at} />{" "}
+                rather than keep asking: a first try usually fails for a reason
+                that does not go away by itself. Fix what it says, then turn
+                HTTPS on again below.
+              </p>
             </div>
-            <p className="text-destructive" role="alert">
-              {turnedOff.error}
-            </p>
-            <p className="text-muted-foreground">
-              PCP turned HTTPS off at <LocalDate value={turnedOff.at} /> rather
-              than keep asking: a first try usually fails for a reason that does
-              not go away by itself. Fix what it says, then turn HTTPS on again
-              below.
-            </p>
-          </div>
-        ) : null}
-        <form
-          action={action}
-          className="flex flex-col gap-4"
-          aria-label="HTTPS"
-        >
-          {ddnsName ? (
-            <Label className="font-normal">
-              <Checkbox
-                name="useDdnsName"
-                checked={useDdnsName}
-                onChange={(event) => setUseDdnsName(event.target.checked)}
-              />
-              Use my dynamic DNS name, {ddnsName}
-            </Label>
           ) : null}
-          {!useDdnsName ? (
+          <form
+            action={action}
+            className="flex flex-col gap-4"
+            aria-label="HTTPS"
+          >
+            {ddnsName ? (
+              <Label className="font-normal">
+                <Checkbox
+                  name="useDdnsName"
+                  checked={useDdnsName}
+                  onChange={(event) => setUseDdnsName(event.target.checked)}
+                />
+                Use my dynamic DNS name, {ddnsName}
+              </Label>
+            ) : null}
+            {!useDdnsName ? (
+              <Field
+                label="The name PCP is reached on"
+                htmlFor="https-domain"
+                hint="It has to point at this network already."
+              >
+                <Input
+                  id="https-domain"
+                  name="domain"
+                  defaultValue={lastDomain ?? ""}
+                  placeholder="pcp.example.com"
+                  required
+                />
+              </Field>
+            ) : null}
             <Field
-              label="The name PCP is reached on"
-              htmlFor="https-domain"
-              hint="It has to point at this network already."
+              label="Email (optional)"
+              htmlFor="https-email"
+              hint="Let's Encrypt only writes about problems with your account."
             >
               <Input
-                id="https-domain"
-                name="domain"
-                defaultValue={lastDomain ?? ""}
-                placeholder="pcp.example.com"
-                required
+                id="https-email"
+                name="email"
+                type="email"
+                defaultValue={https?.email ?? ""}
               />
             </Field>
-          ) : null}
-          <Field
-            label="Email (optional)"
-            htmlFor="https-email"
-            hint="Let's Encrypt only writes about problems with your account."
-          >
-            <Input
-              id="https-email"
-              name="email"
-              type="email"
-              defaultValue={https?.email ?? ""}
-            />
-          </Field>
-          <Label className="font-normal">
-            <Checkbox name="agreed" required />
-            <span>
-              I accept the{" "}
-              <a
-                href={LETS_ENCRYPT_TERMS_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="text-primary underline-offset-4 hover:underline"
-              >
-                Let&apos;s Encrypt Subscriber Agreement
-              </a>
-            </span>
-          </Label>
-          <FormError error={state.status === "error" ? state.error : null} />
-          <FormNote message={state.status === "ok" ? state.message : null} />
-          <div>
-            <SubmitButton pendingText="Saving…">
-              {https ? "Save" : "Turn on HTTPS"}
-            </SubmitButton>
-          </div>
-        </form>
-        {https ? (
-          <form
-            action={disableHttpsAction}
-            onSubmit={confirmed(
-              "Turn HTTPS off? PCP stops answering on ports 80 and 443.",
-            )}
-          >
-            <SubmitButton variant="outline" pendingText="Turning off…">
-              Turn HTTPS off
-            </SubmitButton>
+            <LetsEncryptAgreement />
+            <FormError error={state.status === "error" ? state.error : null} />
+            <FormNote message={state.status === "ok" ? state.message : null} />
+            <div>
+              <SubmitButton pendingText="Saving…">
+                {https ? "Save" : "Turn on HTTPS"}
+              </SubmitButton>
+            </div>
           </form>
-        ) : null}
-      </CardContent>
+          {https ? (
+            <form
+              action={disableHttpsAction}
+              onSubmit={confirmed(
+                "Turn HTTPS off? PCP stops answering on ports 80 and 443.",
+              )}
+            >
+              <SubmitButton variant="outline" pendingText="Turning off…">
+                Turn HTTPS off
+              </SubmitButton>
+            </form>
+          ) : null}
+        </CardContent>
+      )}
     </Card>
   )
 }
@@ -678,7 +924,7 @@ function HttpsStatus({
           {error}
         </p>
       ))}
-      {edge && (ports.http !== 80 || ports.https !== 443) ? (
+      {edge && !https.viaPcpgg && (ports.http !== 80 || ports.https !== 443) ? (
         <p className="text-muted-foreground">
           PCP listens on ports {ports.http} and {ports.https}; your router or
           Docker should send ports 80 and 443 there.

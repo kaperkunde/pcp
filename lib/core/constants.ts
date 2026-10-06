@@ -227,3 +227,6 @@ export const DYNDNS2_SERVERS: Record<string, string> = {
 
 /** Let's Encrypt's agreements, which turning HTTPS on accepts. */
 export const LETS_ENCRYPT_TERMS_URL = "https://letsencrypt.org/repository/"
+
+/** Where the owner signs in to pcp.gg, picks a name and copies a key. */
+export const PCPGG_URL = "https://pcp.gg/"
