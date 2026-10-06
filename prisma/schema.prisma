@@ -38,6 +38,7 @@ model Vault {
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
   browserProfile     BrowserProfile?
+  oauthCredentials   OAuthCredential[]
 
   @@map("vault")
 }
@@ -51,7 +52,9 @@ model KeyGrant {
   id      String @id
   vaultId String @map("vault_id")
   vault   Vault  @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  /// password | recovery | session | api_token | device
+  /// password | recovery | session | api_token | device, and what PCP's
+  /// authorization server hands an assistant: oauth_code | oauth_access |
+  /// oauth_refresh
   kind    String
   /// SHA-256 of the credential, for grants looked up by it (everything but
   /// password, of which a vault has exactly one).
@@ -65,8 +68,9 @@ model KeyGrant {
   createdAt  DateTime @default(now()) @map("created_at")
   lastUsedAt DateTime? @map("last_used_at")
 
-  session Session?
-  token   ApiToken?
+  session         Session?
+  token           ApiToken?
+  oauthCredential OAuthCredential?
 
   @@index([vaultId, kind])
   @@map("key_grant")
@@ -120,6 +124,13 @@ model ApiToken {
   revokedAt       DateTime? @map("revoked_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   lastUsedAt      DateTime? @map("last_used_at")
+  /// Set when the token was made by an assistant signing in with OAuth at
+  /// PCP's own authorization server: the client_id it was issued to (a
+  /// registered client's id, or the URL of its metadata document) and the
+  /// name the client gave. Such a token has no pcp_ value: its grant is
+  /// empty, and the key travels in its OAuth credentials.
+  oauthClientId   String?   @map("oauth_client_id")
+  oauthClientName String?   @map("oauth_client_name")
 
   servers            ApiTokenServer[]
   toolAccess         ApiTokenToolAccess[]
@@ -127,6 +138,7 @@ model ApiToken {
   memories           Memory[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
+  oauthCredentials   OAuthCredential[]
 
   @@index([vaultId])
   @@map("api_token")
@@ -605,4 +617,64 @@ model BrowserProfile {
   savedAt    DateTime @map("saved_at")
 
   @@map("browser_profile")
+}
+
+/// What PCP's authorization server (lib/core/oauth-server/) hands an
+/// assistant for an API token made by OAuth sign-in: an authorization code,
+/// access tokens and refresh tokens. Each live one wraps the vault's data
+/// key in a grant of its own (oauth_code, oauth_access, oauth_refresh), the
+/// way an API token does; the database keeps only the SHA-256 of the value.
+/// A spent code or refresh token keeps its row, without a grant, until it
+/// would have expired: presented again, it ends the token's sign-in.
+model OAuthCredential {
+  id            String    @id
+  vaultId       String    @map("vault_id")
+  vault         Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId       String    @map("token_id")
+  token         ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  /// The grant that unwraps the data key; null once spent.
+  grantId       String?   @unique @map("grant_id")
+  grant         KeyGrant? @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  /// code | access | refresh
+  kind          String
+  /// SHA-256 of the value, kept after it is spent.
+  lookupHash    String    @unique @map("lookup_hash")
+  clientId      String    @map("client_id")
+  /// A code's redirect URI and PKCE challenge (S256), which the exchange
+  /// must match.
+  redirectUri   String?   @map("redirect_uri")
+  codeChallenge String?   @map("code_challenge")
+  /// The resource (PCP's /mcp) and scope the sign-in asked for.
+  resource      String?
+  scope         String?
+  expiresAt     DateTime  @map("expires_at")
+  usedAt        DateTime? @map("used_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([tokenId])
+  @@index([expiresAt])
+  @@map("oauth_credential")
+}
+
+/// A client that registered itself with PCP's authorization server
+/// (dynamic client registration, RFC 7591). It belongs to the instance, not
+/// to a vault: anyone may register, and a registration opens nothing until
+/// the owner approves a sign-in on PCP's page. A client secret is kept only
+/// as its SHA-256. Clients that identify themselves with a metadata document
+/// (a URL as client_id) have no row: the document is read at each sign-in.
+model OAuthClient {
+  id           String    @id
+  name         String
+  /// JSON array of the exact redirect URIs it registered.
+  redirectUris String    @map("redirect_uris")
+  clientUri    String?   @map("client_uri")
+  /// none | client_secret_basic | client_secret_post
+  authMethod   String    @map("auth_method")
+  secretHash   String?   @map("secret_hash")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  /// The last sign-in approved for it; registrations never used are pruned.
+  lastUsedAt   DateTime? @map("last_used_at")
+
+  @@index([createdAt])
+  @@map("oauth_client")
 }

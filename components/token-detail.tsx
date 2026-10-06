@@ -579,7 +579,9 @@ function SettingsCard({
         <CardDescription>
           {locked
             ? "This token is revoked; nothing about it can change."
-            : "The token itself stays the same, so clients using it keep working."}
+            : token.oauthClient
+              ? `${token.oauthClient.name} stays signed in with it.`
+              : "The token itself stays the same, so clients using it keep working."}
         </CardDescription>
       </CardHeader>
       <CardContent>

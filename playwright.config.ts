@@ -110,6 +110,15 @@ export default defineConfig({
       use: signedIn("oauth"),
     },
     {
+      // PCP's own authorization server: an assistant finds it from /mcp's
+      // 401, registers itself, the owner signs in and allows it, and the
+      // token it gets works, rotates, and is revoked under API tokens.
+      name: "oauth-server",
+      testMatch: /oauth-server\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("oauth-server"),
+    },
+    {
       // An API that signs in with OAuth: proposed by an assistant with the
       // owner's client ID, the client secret typed in on the approval page,
       // connected, and called with the token; and at a provider that lets

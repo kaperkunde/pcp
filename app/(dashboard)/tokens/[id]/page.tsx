@@ -57,7 +57,11 @@ export default async function TokenPage({
     <>
       <PageHeader
         title={token.name}
-        description={`API token ${token.prefix}… Choose which tools an assistant using it may run, which ask you first, and which are blocked.`}
+        description={`${
+          token.oauthClient
+            ? `API token for ${token.oauthClient.name}, which signed in with OAuth.`
+            : `API token ${token.prefix}…`
+        } Choose which tools an assistant using it may run, which ask you first, and which are blocked.`}
         action={
           <ButtonLink href="/tokens" variant="outline" size="sm">
             All tokens

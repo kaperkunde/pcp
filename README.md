@@ -291,8 +291,9 @@ page says when it is on.
    at once, or copies all of it from another token. Tick **All tokens** beside a
    level to make it the one every token follows; a token's own level still wins
    over it.
-6. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
-   bearer token. For Claude Code:
+6. **Connect an assistant** to `https://<your-pcp>/mcp`, in one of two ways.
+
+   **With a token.** Give it the token as a bearer token. For Claude Code:
 
    ```bash
    claude mcp add --transport http pcp https://<your-pcp>/mcp \
@@ -301,6 +302,20 @@ page says when it is on.
 
    Any client that speaks MCP over Streamable HTTP with a static bearer token
    works the same way.
+
+   **By signing in.** Apps that take only a URL, such as custom connectors in
+   claude.ai (on the web, the desktop and the phone) and ChatGPT's developer
+   mode, sign in with OAuth at PCP itself: add `https://<your-pcp>/mcp` as a
+   connector, and the app sends you to PCP's own page. There you unlock PCP
+   if it is locked, see which app asks and where PCP sends you back to,
+   choose what its token may reach as for a new token, and confirm with your
+   password (or Touch ID). The app gets a token of its own, listed under API
+   tokens as signed in from that app, with its own levels, memories and
+   request log, and revoking it there signs the app out. If the app signs in
+   again later, you can give it the token it had. The app must reach PCP at a
+   public https address (a pcp.gg name, or your own with HTTPS), and that
+   address is PCP's public address under Settings; claude.ai identifies
+   itself with its own metadata document, other apps register themselves.
 
 The assistant then sees a short description of the servers behind the token
 and these tools:
@@ -521,7 +536,8 @@ gives it back.
 The short version: everything sensitive is AES-256-GCM ciphertext under a
 per-vault data key, and that key is stored only wrapped under keys derived from
 credentials the server does not keep — your password (scrypt), a session cookie,
-an API token, the recovery key or the Mac app's Touch ID key (HKDF). A request
+an API token, what an app that signed in holds (its access and refresh tokens),
+the recovery key or the Mac app's Touch ID key (HKDF). A request
 that presents one of those unwraps the key for its own duration and drops it.
 Someone with the disk has ciphertext and hashes.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the full model;
@@ -533,7 +549,8 @@ Consequences worth knowing:
   working. Using the recovery key signs every browser out, turns Touch ID off
   and can revoke every API token.
 - A stolen session cannot make an API token or a recovery key: both ask for
-  the password again (a token, in the Mac app, takes Touch ID instead).
+  the password again (a token, in the Mac app, takes Touch ID instead). Letting
+  an app sign in makes a token, so it asks too.
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
 - An export is the encrypted vault as it is, under an export password of

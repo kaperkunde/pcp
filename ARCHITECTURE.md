@@ -10,6 +10,8 @@ without changing the single-user product.
 ```
 app/                 Routes and pages (Next.js App Router)
   mcp/route.ts       The gateway endpoint
+  oauth/…            PCP's own authorization server: sign-in page, token, register, revoke
+  .well-known/…      Its discovery documents (protected resource, authorization server)
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
   api/export/…       The export download (a file needs Content-Disposition)
@@ -26,6 +28,7 @@ lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   browser/           The headless Chromium: runtime and gate, proxy, profile, tools, install
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
   updates/           The daily check for a newer release, and what it found
+  oauth-server/      PCP's own OAuth server, for assistants that sign in to /mcp
 sandbox/             run_code's sandbox container: the runner, the launcher, the pcp command
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
@@ -59,13 +62,14 @@ associated data (a ciphertext cannot be moved to another row):
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
 
-| Grant kind  | Credential                    | KEK derivation                            | Found by                  |
-| ----------- | ----------------------------- | ----------------------------------------- | ------------------------- |
-| `password`  | the owner's password          | scrypt (N=2^16, r=8, p=1, per-grant salt) | the vault (one per vault) |
-| `recovery`  | `pcp_recovery_…`, shown once  | HKDF-SHA256 with a per-grant salt         | SHA-256 of the credential |
-| `session`   | a random secret in the cookie | HKDF-SHA256                               | SHA-256 of the secret     |
-| `api_token` | `pcp_…`, shown once           | HKDF-SHA256                               | SHA-256 of the token      |
-| `device`    | `pcp_device_…`, the Mac app's | HKDF-SHA256                               | SHA-256 of the key        |
+| Grant kind  | Credential                                                  | KEK derivation                            | Found by                  |
+| ----------- | ----------------------------------------------------------- | ----------------------------------------- | ------------------------- |
+| `password`  | the owner's password                                        | scrypt (N=2^16, r=8, p=1, per-grant salt) | the vault (one per vault) |
+| `recovery`  | `pcp_recovery_…`, shown once                                | HKDF-SHA256 with a per-grant salt         | SHA-256 of the credential |
+| `session`   | a random secret in the cookie                               | HKDF-SHA256                               | SHA-256 of the secret     |
+| `api_token` | `pcp_…`, shown once                                         | HKDF-SHA256                               | SHA-256 of the token      |
+| `device`    | `pcp_device_…`, the Mac app's                               | HKDF-SHA256                               | SHA-256 of the key        |
+| `oauth_*`   | `pcp_code_…`, `pcp_at_…`, `pcp_rt_…`: an app that signed in | HKDF-SHA256                               | SHA-256 of the value      |
 
 scrypt is slow on purpose: a copy of the database can only be attacked one
 password guess at a time. The other credentials have 256 bits of entropy of
@@ -80,7 +84,8 @@ Consequences:
 - **Changing the password** replaces the `password` grant. Every other grant
   wraps the same DEK, so sessions, API tokens and the recovery key keep
   working.
-- **Revoking an API token** blanks its grant; **signing out** deletes the
+- **Revoking an API token** blanks its grant, and deletes the grants of
+  whatever an app that signed in for it holds; **signing out** deletes the
   session's; **recovery** replaces the password grant, deletes every session
   grant and the Touch ID key (`device`) and, when asked, blanks every API
   token grant. **Signing out everywhere** deletes the sessions and the Touch
@@ -89,7 +94,8 @@ Consequences:
   asks for the password again (`lib/server/password-attempts.ts`). A session
   cookie can be copied, so it may use the DEK but not mint a grant that
   survives the session. In the Mac app the Touch ID key stands in for the
-  password before a new API token, an export or a restore (`confirmOwner`),
+  password before a new API token (an app's sign-in included), an export or
+  a restore (`confirmOwner`),
   never before a new recovery key, a new password or another Touch ID key:
   only the password and the recovery key decide who gets in. See "Touch ID
   in the Mac app".
@@ -117,8 +123,9 @@ A request resolves its vault in exactly one of two ways:
 
 - **Browser:** the session cookie → `resolveSession()` → `VaultContext`
   (`lib/server/session.ts`).
-- **MCP client:** the bearer token → `resolveApiToken()` → `VaultContext`
-  plus the servers the token may reach (`app/mcp/route.ts`).
+- **MCP client:** the bearer token → `resolveApiToken()` (an API token) or
+  `resolveAccessToken()` (an app that signed in, `lib/core/oauth-server/`)
+  → `VaultContext` plus the servers the token may reach (`app/mcp/route.ts`).
 
 The gateway is stateless per request: it builds an `McpServer` for the
 resolved token, serves the request and discards it. Upstream connections are
@@ -141,10 +148,11 @@ from one endpoint could be built on it. What that would take:
    `lib/server/session.ts` does. Creating a vault is `setupVault()` with the
    host's own password policy, or a variant that wraps under the host's KEK
    only.
-3. **Keep the gateway.** `/mcp` already serves any vault an API token names.
-   A host that wants OAuth-issued tokens instead of `pcp_…` tokens replaces
-   `resolveApiToken()` with its own resolver returning the same
-   `ResolvedToken` shape (vault, key, allowed servers).
+3. **Keep the gateway.** `/mcp` already serves any vault an API token, or an
+   access token from PCP's own authorization server, names. A host with an
+   authorization server of its own replaces `resolveAccessToken()` with its
+   own resolver returning the same `ResolvedToken` shape (vault, key,
+   allowed servers).
 4. **Move the database.** Prisma's schema is provider-neutral apart from the
    `datasource` block; a Postgres host generates its own migration history
    (`prisma migrate dev` against Postgres) and runs migrations as a deploy
@@ -1038,7 +1046,10 @@ what lets a PCP move to another machine without every assistant being set up
 again, and reading a secret out of the file takes what reading it off the
 disk takes: one of those credentials. Session grants are not in it (a
 session is one browser's), nor is the Touch ID key (one app's), nor are
-OAuth authorizations in flight, the request log or the `tls/` directory.
+OAuth authorizations in flight, the request log or the `tls/` directory. An
+app that signed in to PCP is like a session: its token comes along (with
+its levels and memories), its credentials do not, and after a restore it
+signs in again, where the owner can give it that token back.
 
 Around the rows: gzip, then AES-256-GCM under a key derived from an **export
 password** the owner chooses, with scrypt at the parameters of the password
@@ -1290,6 +1301,89 @@ Only the owner's browser registers or signs in. A tool refresh or a gateway
 call on a server that is not connected stops at "needs connecting" without
 contacting the registration endpoint, and a proposal from an assistant
 contacts nothing at that address but the JMAP look above.
+
+## Letting assistants sign in: PCP's authorization server
+
+An API token suits a client that takes a header. Custom connectors in
+claude.ai (web, desktop and phone) and ChatGPT's developer mode take a URL
+and sign in with OAuth, nothing else, so PCP is its own OAuth 2.1
+authorization server for `/mcp`, as the MCP authorization spec describes it
+(`lib/core/oauth-server/`, routes in `app/oauth/` and `app/.well-known/`).
+It has to be PCP's own: a relay in front of PCP (a pcp.gg name, where TLS
+ends at the owner's PCP) that issued the tokens could mint one for itself,
+and the relay's promise is that it cannot read the owner's data.
+
+**Discovery.** A request to `/mcp` without a valid token gets a 401 whose
+`WWW-Authenticate` names `resource_metadata` (RFC 9728) at
+`/.well-known/oauth-protected-resource/mcp`. That document names the
+resource, `<public URL>/mcp`, and PCP as its authorization server; PCP's
+metadata (RFC 8414) is at `/.well-known/oauth-authorization-server`. The
+issuer is PCP's public URL (`publicUrlWithoutSession`: the address pinned in
+Settings, or where the request came in), so the same build is
+`http://localhost:3000` at home and `https://alice.pcp.gg` behind the relay.
+The authorization response carries `iss` (RFC 9207).
+
+**Clients.** Two kinds, and neither gets anything before the owner approves:
+
+- A **client ID metadata document**: the client_id is an https URL (Claude
+  uses `https://claude.ai/oauth/mcp-oauth-client-metadata`). PCP reads it
+  when the signed-in owner opens the sign-in page and again when they
+  approve: public addresses only (the pinned transport API endpoints use),
+  no redirect followed, 5 KB at most, JSON. Its `client_id` must be its own
+  URL, it must list its `redirect_uris`, and it must not claim a secret or a
+  key (`token_endpoint_auth_method` `none`). Nothing about it is stored; no
+  one who has not signed in can make PCP fetch anything.
+- **Dynamic registration** (RFC 7591) at `/oauth/register`, for the others.
+  It is open, so it is rate-limited per address, registrations that no
+  sign-in has used are pruned after a day and capped in number, and they
+  live in `oauth_client`, which belongs to the instance, not a vault. A
+  client that does not ask for `none` gets a secret, kept as its SHA-256.
+
+Redirect URIs are https, http to this computer, or an app's private-use
+scheme, and are matched exactly. Until the client and its redirect URI check
+out, the page tells the owner what is wrong and sends nothing back; after
+that, a bad request goes back to the client as an OAuth error.
+
+**The owner's page** (`/oauth/authorize`) needs the owner signed in: a
+locked PCP sends them to `/login`, which goes on to the sign-in page and
+nowhere else (`lib/server/return-path.ts`). It shows the name the app gives
+and where it really comes from (its document's host, or "registered
+itself"), where PCP sends them back to, and the choices a new API token has:
+its name, its servers, and the options that add tools. Allowing it is
+`confirmOwner` (password or Touch ID), as making a token is, and the request
+is checked again on the server. It makes an API token with
+`oauth_client_id` set and no `pcp_…` value (an empty grant, as a revoked
+token has), so tool levels, permission requests, memories, web fetch sites,
+kept results and the request log, which all hang off the token, work as for
+any other. When this client had a live token before, the owner can give it
+that one instead; its earlier sign-ins end.
+
+**Credentials** (`oauth_credential`, `tokens.ts`). The approval wraps the
+DEK, which the owner's session unwrapped, under a new authorization code: a
+grant of kind `oauth_code`, like an API token's, with only the SHA-256 kept.
+The code lives two minutes and is bound to the client, the redirect URI and
+the PKCE challenge (S256 only, required). The token endpoint unwraps the DEK
+with the code and wraps it again under an access token (`oauth_access`, an
+hour) and a refresh token (`oauth_refresh`, thirty days), and spends the
+code. A refresh does the same with the refresh token, which is replaced at
+every use. So at every moment the DEK is wrapped only under values an
+assistant holds; the database has hashes and ciphertext, and the vault is
+no more readable without a credential than before.
+
+A code or refresh token works once: a second request with it loses the race
+(`claim` marks it used before anything is issued). A spent one keeps its row,
+without a grant, until it would have expired, and presenting it again ends
+every sign-in of its token, as OAuth 2.1 advises for a refresh token that may
+have been stolen. Any mismatch at the code exchange (verifier, redirect URI,
+client, expiry) spends the code too, so it gets one try.
+
+**Revoking.** The owner's Revoke, Delete, "revoke every token" on signing
+out everywhere, and recovery with revoking tokens all go through
+`endOAuthSignIns`, which deletes the credentials' grants (they hang off the
+grant, so deleting the token row alone would leave copies of the key). An app
+can revoke itself at `/oauth/revoke` (RFC 7009): its refresh token stands for
+the sign-in and revokes the token, an access token only itself. `/mcp`
+checks the token on every request, so a revoked one stops at once.
 
 ## The gateway's tools
 

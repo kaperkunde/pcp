@@ -138,6 +138,11 @@ const ApiTokenRow = z.strictObject({
   revokedAt: dateOrNull,
   createdAt: date,
   lastUsedAt: dateOrNull,
+  // A token an assistant got by signing in with OAuth. Its credentials
+  // (oauth_credential) are not exported, as a session's are not: after a
+  // restore the assistant signs in again.
+  oauthClientId: str.nullable().default(null),
+  oauthClientName: str.nullable().default(null),
 })
 
 const ApiTokenServerRow = z.strictObject({ tokenId: id, serverId: id })
