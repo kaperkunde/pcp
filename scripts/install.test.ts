@@ -651,18 +651,88 @@ describe("install.sh as root", () => {
     )
   })
 
-  it("does not take settings from a file an ordinary user may write", () => {
-    const machine = host({ docker: "works", uid: 0 })
+  // An install from before root had a place of its own kept its settings in
+  // HOME. They are carried over once, by an install run, and never read again.
+  const oldConf = (machine: ReturnType<typeof host>, text: string) => {
     mkdirSync(dirname(machine.conf), { recursive: true })
-    writeFileSync(
-      machine.conf,
-      "PCP_PORT=9999\nPCP_RUNTIME=podman\nPCP_AUTO_UPDATE=1\n",
+    writeFileSync(machine.conf, text)
+  }
+  const HTTPS_RUN = `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -p 80:8080 -p 443:8443 -v pcp-data:/data ${IMAGE}`
+
+  it("carries the settings of an older install over from HOME, once", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(machine, "PCP_PORT=8080\nPCP_HTTPS=1\n")
+    const first = machine.run([], user(machine))
+    expect(first.status).toBe(0)
+    expect(first.calls).toContain(HTTPS_RUN)
+    expect(first.stderr).toContain(machine.conf)
+    expect(first.stderr).toContain(machine.sys.conf)
+    expect(readFileSync(machine.sys.conf, "utf8")).toBe(
+      "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_RUNTIME=docker\nPCP_DATA_VOLUME=pcp-data\nPCP_AUTO_UPDATE=0\n",
     )
+
+    // The file in HOME is not read again, whatever it says now.
+    oldConf(machine, "PCP_PORT=9999\nPCP_HTTPS=0\nPCP_RUNTIME=podman\n")
+    const second = machine.run([], user(machine))
+    expect(second.status).toBe(0)
+    expect(second.calls).toContain(HTTPS_RUN)
+    expect(second.stderr).not.toContain(machine.conf)
+  })
+
+  it("lets the environment win over carried-over settings", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(machine, "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_DATA_VOLUME=vault\n")
+    const result = machine.run([], { ...user(machine), PCP_PORT: "7000" })
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      `docker run -d --name pcp --restart unless-stopped -p 7000:3000 -p 80:8080 -p 443:8443 -v vault:/data ${IMAGE}`,
+    )
+    expect(readFileSync(machine.sys.conf, "utf8")).toContain("PCP_PORT=7000\n")
+  })
+
+  it("checks carried-over settings like any others", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(machine, "PCP_PORT=abc\n")
     const result = machine.run([], user(machine))
+    expect(result.status).toBe(2)
+    expect(started(result.calls)).toBe(false)
+    expect(existsSync(machine.sys.conf)).toBe(false)
+  })
+
+  it("prefers the file in /etc to the one in HOME", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    expect(machine.run([], { ...user(machine), PCP_PORT: "8080" }).status).toBe(
+      0,
+    )
+    oldConf(machine, "PCP_PORT=9999\n")
+    const result = machine.run([], user(machine))
+    expect(result.calls.some((call) => call.includes("-p 8080:3000"))).toBe(
+      true,
+    )
+    expect(result.stderr).not.toContain(machine.conf)
+  })
+
+  it("never reads HOME's file in the daily update", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(
+      machine,
+      "PCP_PORT=9999\nPCP_HTTPS=1\nPCP_RUNTIME=podman\nPCP_AUTO_UPDATE=1\n",
+    )
+    const result = machine.run(["update"], user(machine))
     expect(result.status).toBe(0)
     expect(result.calls).toContain(`docker ${RUN}`)
+    expect(result.stderr).not.toContain(machine.conf)
     expect(existsSync(machine.sys.updater)).toBe(false)
-    expect(result.stderr).toContain(machine.sys.conf)
+    expect(readFileSync(machine.sys.conf, "utf8")).toContain("PCP_PORT=3000\n")
+  })
+
+  it("does not carry settings over on uninstall", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(machine, "PCP_DATA_VOLUME=vault\n")
+    const result = machine.run(["uninstall"], user(machine))
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("docker volume rm pcp-data")
+    expect(result.stderr).not.toContain(machine.conf)
   })
 
   it("needs no HOME, as in a system service", () => {

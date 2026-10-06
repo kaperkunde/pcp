@@ -59,7 +59,9 @@ installer prints the one command that does, if so.
 The installer never runs `sudo` and never installs Docker or Podman itself.
 A few more settings go before `sh` the same way. All but the last are
 remembered like `PCP_HTTPS` (in `~/.config/pcp/install.conf`, or in
-`/etc/pcp/install.conf` when you run it as root):
+`/etc/pcp/install.conf` when you run it as root; an older root install's
+file in `~/.config/pcp` is carried over the first time you run the
+installer again):
 
 - `PCP_PORT=3000`: the port PCP answers on, if another program has 3000.
 - `PCP_RUNTIME=docker` or `PCP_RUNTIME=podman`: when both are installed and

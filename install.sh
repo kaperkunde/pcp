@@ -34,7 +34,8 @@
 # ~/.local/share/pcp/install.sh, or, when run as root, in
 # /usr/local/lib/pcp/install.sh: root runs that file every day, so it and the
 # settings it reads (/etc/pcp/install.conf) sit where only root writes,
-# whatever HOME is. PCP_ROOT_PREFIX puts all of root's paths under another
+# whatever HOME is. (An install run as root that finds only the older file in
+# HOME carries its settings over once; the daily update never reads it.) PCP_ROOT_PREFIX puts all of root's paths under another
 # directory; it exists for the tests and nothing else.
 
 set -eu
@@ -71,16 +72,9 @@ require_linux() {
 
 # --- Settings ---------------------------------------------------------------
 
-# Reads the remembered settings. An allow-list, not `. file`, so the file
-# cannot run anything.
+# Reads the remembered settings from the file it is given. An allow-list, not
+# `. file`, so the file cannot run anything.
 load_conf() {
-  if [ ! -f "$CONF" ]; then
-    # Root no longer reads the file in HOME, which may be an ordinary user's.
-    if [ "$ROOT" = 1 ] && [ -n "${HOME:-}" ] && [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/pcp/install.conf" ]; then
-      warn "Note: as root this installer reads its remembered settings from $CONF, not from ${XDG_CONFIG_HOME:-$HOME/.config}/pcp/install.conf. Set them in the environment this once."
-    fi
-    return 0
-  fi
   while IFS='=' read -r key value || [ -n "$key" ]; do
     case "$key" in
       PCP_PORT) conf_port=$value ;;
@@ -89,7 +83,33 @@ load_conf() {
       PCP_DATA_VOLUME) conf_volume=$value ;;
       PCP_AUTO_UPDATE) conf_auto=$value ;;
     esac
-  done <"$CONF"
+  done <"$1"
+}
+
+# Where a root install before root had a place of its own kept its settings:
+# in the user's config directory, which may be an ordinary user's.
+legacy_conf() {
+  if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    printf '%s\n' "$XDG_CONFIG_HOME/pcp/install.conf"
+  elif [ -n "${HOME:-}" ]; then
+    printf '%s\n' "$HOME/.config/pcp/install.conf"
+  else
+    return 1
+  fi
+}
+
+# Root reads /etc/pcp/install.conf. Only when that is missing, and only in an
+# install run (somebody typing the command, never the unattended update),
+# the older file in HOME is read once through the same allow-list; the values
+# are checked like any others, and save_conf then writes /etc/pcp/install.conf,
+# so the file in HOME is not read again.
+read_conf() {
+  if [ -f "$CONF" ]; then
+    load_conf "$CONF"
+  elif [ "$ROOT" = 1 ] && [ "$MIGRATE" = 1 ] && old=$(legacy_conf) && [ -f "$old" ]; then
+    warn "Note: carrying the settings in $old over to $CONF, which is where this installer keeps them as root from now on. $old is not read again."
+    load_conf "$old"
+  fi
 }
 
 # The environment wins over the file, the file over the default.
@@ -99,7 +119,7 @@ resolve_settings() {
   conf_runtime=
   conf_volume=
   conf_auto=
-  load_conf
+  read_conf
   PCP_PORT=${PCP_PORT:-${conf_port:-3000}}
   PCP_HTTPS=${PCP_HTTPS:-${conf_https:-0}}
   PCP_RUNTIME=${PCP_RUNTIME:-${conf_runtime:-}}
@@ -635,6 +655,11 @@ main() {
     ROOT=0
   fi
   set_conf_path
+  # Only an install run may carry settings over from HOME.
+  case "${1:-}" in
+    '') MIGRATE=1 ;;
+    *) MIGRATE=0 ;;
+  esac
   resolve_settings
   pick_runtime
   set_paths
