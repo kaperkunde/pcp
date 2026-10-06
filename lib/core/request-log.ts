@@ -361,3 +361,16 @@ export async function pruneRequestLog(
 
   return removed
 }
+
+/** Deletes every day of the log: for the vault being deleted. */
+export async function deleteRequestLog(): Promise<void> {
+  for (const day of await logDays()) {
+    try {
+      await unlink(fileFor(day))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error
+      }
+    }
+  }
+}

@@ -280,5 +280,14 @@ export default defineConfig({
       dependencies: ["setup"],
       use: { ...devices["Desktop Chrome"] },
     },
+    {
+      // Deletes the vault from Settings and sets it up again with the same
+      // name and password, which ends every session and token: after
+      // backup, signing in on its own.
+      name: "reset",
+      testMatch: /reset\.spec\.ts/,
+      dependencies: ["setup"],
+      use: { ...devices["Desktop Chrome"] },
+    },
   ],
 })

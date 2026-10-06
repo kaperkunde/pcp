@@ -974,7 +974,8 @@ up, and the key it hands PCP's page after Touch ID.
 ## Touch ID in the Mac app
 
 The owner can unlock with their fingerprint in the Mac app, and confirm a
-new API token, an export or a restore with it instead of typing the
+new API token, an export, a restore or deleting the vault with it instead
+of typing the
 password. It is a credential of its own, not a stored password: a
 `device` grant (`lib/core/device-keys.ts`) whose key, `pcp_device_…`, the
 app keeps and hands over only after Touch ID.

@@ -23,26 +23,38 @@ import { destroyAllSessions } from "./sessions"
 
 const RECOVERY_PREFIX = "pcp_recovery_"
 
-let knownSetUp = false
+/**
+ * Whether setup has happened, once a check has found the vault. On
+ * globalThis because instrumentation.ts and the Server Actions are bundled
+ * apart: deleting the vault (lib/core/vault-reset.ts) must reach the copy
+ * the update check reads too.
+ */
+const SET_UP = Symbol.for("pcp.setUp")
+
+function setUpHolder(): { [SET_UP]?: boolean } {
+  return globalThis as unknown as { [SET_UP]?: boolean }
+}
 
 /**
- * Whether setup has happened. Once true it stays true (there is no way to
- * delete the vault from the UI), so after the first check this is free.
+ * Whether setup has happened. Once true it stays true until the owner
+ * deletes the vault, so after the first check this is free.
  */
 export async function isSetUp(): Promise<boolean> {
-  if (knownSetUp) {
+  const holder = setUpHolder()
+
+  if (holder[SET_UP]) {
     return true
   }
 
   const count = await db().vault.count()
-  knownSetUp = count > 0
+  holder[SET_UP] = count > 0
 
-  return knownSetUp
+  return holder[SET_UP]
 }
 
-/** Tests: forget the cached answer after wiping the database. */
+/** Forgets the cached answer: after the vault is deleted, and in tests. */
 export function forgetSetupState(): void {
-  knownSetUp = false
+  setUpHolder()[SET_UP] = false
 }
 
 export function validatePassword(password: string): string | null {
@@ -113,7 +125,7 @@ export async function setupVault({
     await tx.keyGrant.create({ data: recoveryGrant })
   })
 
-  knownSetUp = true
+  setUpHolder()[SET_UP] = true
 
   return { vaultId, dek, recoveryKey }
 }

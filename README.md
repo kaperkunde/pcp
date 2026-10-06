@@ -128,9 +128,10 @@ page links to the download instead; open it, and your vault stays where it is.
 
 On a Mac with Touch ID, **Settings → Touch ID** (or the box on the sign-in
 page) lets you unlock PCP with your fingerprint, and confirm a new API token,
-an export or a restore with it instead of your password. A new password or
-recovery key still takes the password, and recovering with the recovery key,
-signing out everywhere or a restore turns Touch ID off.
+an export, a restore or deleting the vault with it instead of your password.
+A new password or recovery key still takes the password, and recovering with
+the recovery key, signing out everywhere, a restore or deleting the vault
+turns Touch ID off.
 
 **From outside your home.** An assistant that runs elsewhere (Claude on the
 web, a phone) needs an address that reaches your computer from the internet,
@@ -257,6 +258,49 @@ program's memory, 10 to 256 MB), and what one token's kept results may hold
 together (a twentieth of the free disk, 50 MB to 4 GB). PCP refuses settings
 that would let programs together hold more than three quarters of the
 machine's memory, or kept results more than the disk.
+
+### Starting over or uninstalling
+
+**Settings → Delete vault** deletes everything PCP holds (servers, API
+endpoints, mail accounts, secrets, API tokens, memories, the browser's
+sign-ins, the request log, your password and recovery key) once you tick the
+box and confirm with your password or Touch ID. PCP is then back at its setup
+page. This machine's settings (pcp.gg, Dynamic DNS, HTTPS, updates, cleanup,
+resources) stay; turn them off first if you want them gone. Export first if
+you may want anything back: there is no undo. Until you set PCP up again, the
+first person to open it becomes its owner.
+
+To remove PCP itself:
+
+- **Mac**: if you use Touch ID, turn it off under **Settings → Touch ID**
+  first, so the app forgets its key. In the PCP menu, turn off starting at
+  sign-in, then quit PCP from the menu (closing the window leaves it
+  running), and drag PCP from Applications to the Trash. Your vault stays in
+  `~/Library/Application Support/PCP`; delete that folder and
+  `~/Library/Logs/PCP` to remove it too, and the **PCP Safe Storage** item in
+  your login keychain (Keychain Access) if you want nothing left.
+- **Windows**: turn off starting at sign-in in the PCP menu and quit PCP from
+  the tray icon, then uninstall it under **Settings → Apps → Installed apps**.
+  The uninstaller keeps your vault in `%APPDATA%\PCP`; delete that folder to
+  remove it too.
+- **Linux, from the installer**: run it with `uninstall`. It removes the
+  container, the systemd unit under Podman, the daily update timer and its
+  settings file, and keeps the `pcp-data` volume, your vault:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh -s -- uninstall
+  docker volume rm pcp-data              # the vault too (podman volume rm pcp-data)
+  docker image rm ghcr.io/kaperkunde/pcp # the image (podman image rm …)
+  ```
+
+  If the installer gave you a crontab line to update PCP (on a machine
+  without a systemd session), remove it with `crontab -e`.
+
+- **From a checkout with `docker compose`**: `docker compose down` stops and
+  removes PCP and keeps the vault; `docker compose down -v` deletes the
+  `pcp_pcp-data` volume with it. Then delete the checkout.
+- **Without Docker**: stop `pnpm start` and delete the checkout. The vault is
+  in `./data`, or wherever `PCP_DATA_DIR` points.
 
 ## Use it
 

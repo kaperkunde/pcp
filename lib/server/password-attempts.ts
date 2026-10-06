@@ -114,7 +114,8 @@ export async function confirmPassword(
 }
 
 /**
- * The owner again, before a new API token, an export or a restore: the
+ * The owner again, before a new API token, an export, a restore or deleting
+ * the vault: the
  * password (`password`), or in the Mac app the Touch ID key (`deviceKey`,
  * lib/core/device-keys.ts), which that app hands over only after Touch ID.
  * A new recovery key and a new password take the password itself: they

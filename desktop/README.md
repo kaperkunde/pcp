@@ -210,3 +210,11 @@ for 18): macOS will not start an app whose profile does not cover its
 entitlements. Only the app is signed with the keychain group; its helpers
 keep `build/entitlements.mac.plist`, for the same reason. Without the
 secret, releases build as before and Touch ID uses the file.
+
+## Uninstalling
+
+The app leaves the vault behind on purpose: the Windows uninstaller keeps
+`%APPDATA%\PCP` (`deleteAppDataOnUninstall: false`), and dragging the Mac
+app to the Trash keeps `~/Library/Application Support/PCP`. The owner's steps
+are in the main README, under "Starting over or uninstalling"; **Settings →
+Delete vault** empties the data folder's vault without removing the app.

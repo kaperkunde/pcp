@@ -140,7 +140,8 @@ everywhere** (Settings) ends every session and can revoke every API token with
 it; recovery can do the same. Rotate any secret they could have seen.
 
 **Touch ID in the Mac app** unlocks PCP, and confirms a new API token (an
-app's sign-in included), an export or a restore, with your fingerprint. It is a key of its own that PCP
+app's sign-in included), an export, a restore or deleting the vault, with
+your fingerprint. It is a key of its own that PCP
 makes once you have typed your password, not your password. A release built
 with PCP's provisioning profile keeps it in a keychain item that macOS itself
 opens only for your fingerprint, on this Mac only; otherwise the app keeps it
@@ -150,8 +151,8 @@ ID. In the keychain item, adding or removing a fingerprint turns it off
 until you set it up again. It cannot change your password,
 make a recovery key or set Touch ID up again; those take the password, so
 someone with your finger and not your password cannot lock you out.
-Recovering with the recovery key, signing out everywhere and a restore turn
-it off.
+Recovering with the recovery key, signing out everywhere, a restore and
+deleting the vault turn it off.
 
 **An app that signs in with OAuth** (a claude.ai connector, ChatGPT) gets an
 API token like any other, and only after you approve it on PCP's own page

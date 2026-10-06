@@ -245,6 +245,11 @@ so in the summary; the bump itself waits for the request.
   migration that adds a column fails `pnpm typecheck` in
   `lib/core/backup-format.ts` until the format carries it, with the column's
   default so older files still restore.
+- Deleting the vault (`lib/core/vault-reset.ts`, Settings → Delete vault)
+  wipes it as a restore does (`wipeVault`), with the request log, after
+  `confirmOwner`, and leaves PCP not set up. The machine's settings stay. A
+  new table that holds a vault's rows goes in `wipeVault`
+  (`vault-reset.test.ts` counts every table).
 - Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS, pcp.gg,
   the cleanup, resources)
   belong to the machine, are read with no credential, and are stored
@@ -261,7 +266,7 @@ so in the summary; the bump itself waits for the request.
   at most one, an export never carries it, and recovery, signing out
   everywhere and a restore remove it. It stands in for the password to
   unlock and in `confirmOwner` (a new API token or an app's sign-in, an
-  export, a restore),
+  export, a restore, deleting the vault),
   never for a new password, a new recovery key or another Touch ID key:
   only the password and the recovery key decide who gets in. A new place
   that accepts it goes through `confirmOwner`, with a test.

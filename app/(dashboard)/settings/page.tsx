@@ -3,6 +3,7 @@ import type { Metadata } from "next"
 import { ExportCard, RestoreCard } from "@/components/backup-cards"
 import { CleanupCard } from "@/components/cleanup-card"
 import { CopyableValue } from "@/components/copyable-value"
+import { DeleteVaultCard } from "@/components/delete-vault-card"
 import { FormNote } from "@/components/form-status"
 import { DdnsCard, HttpsCard, PcpggCard } from "@/components/network-forms"
 import { OutsideAccessCard } from "@/components/outside-access-card"
@@ -118,6 +119,7 @@ export default async function SettingsPage({
       <SessionsCard />
       <ExportCard username={vault.name} />
       <RestoreCard username={vault.name} mode="settings" />
+      <DeleteVaultCard username={vault.name} />
     </>
   )
 }

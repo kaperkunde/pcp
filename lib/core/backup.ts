@@ -420,8 +420,11 @@ async function writeExport(
   }
 }
 
-/** Everything of one vault, children before parents. */
-async function wipeVault(
+/**
+ * Everything of one vault, children before parents: for a restore, and for
+ * deleting the vault (lib/core/vault-reset.ts).
+ */
+export async function wipeVault(
   tx: Prisma.TransactionClient,
   vaultId: string,
 ): Promise<void> {
