@@ -1,5 +1,13 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest"
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest"
 
 import type { McpServer } from "@/lib/generated/prisma/client"
 
@@ -26,6 +34,8 @@ const PUBLIC_URL = "http://pcp.test"
 
 let cleanup: () => Promise<void>
 let api: TestApi
+/** A second site, which the token is never allowed to open. */
+let elsewhere: TestApi
 let ctx: VaultContext
 let tokenId: string
 let server: McpServer
@@ -51,9 +61,41 @@ beforeEach(async () => {
   server = await db().mcpServer.findUniqueOrThrow({
     where: { id: (await createBrowserServer(ctx)).id },
   })
+  elsewhere = await startTestApi((_, res) => {
+    res.setHeader("content-type", "text/html; charset=utf-8")
+    res.end("<title>Elsewhere</title><h1>Elsewhere</h1>")
+  })
   api = await startTestApi((request, res) => {
     res.setHeader("content-type", "text/html; charset=utf-8")
     const port = new URL(api.origin).port
+
+    // A page that opens windows on its own, without a click (Playwright's
+    // Chromium blocks no popups): elsewhere directly, without an opener,
+    // through a redirect, after starting blank, and from a frame; then one
+    // on this site, which may open.
+    if (request.url.startsWith("/popups")) {
+      return res.end(`<!doctype html><title>Popups</title><h1>Popups</h1>
+<iframe src="/frame"></iframe>
+<script>
+window.open("${elsewhere.origin}/direct")
+window.open("${elsewhere.origin}/no-opener", "_blank", "noopener")
+window.open("/redirect")
+window.open().location = "${elsewhere.origin}/later"
+setTimeout(() => window.open("/page"), 300)
+</script>`)
+    }
+
+    if (request.url.startsWith("/frame")) {
+      return res.end(
+        `<script>window.open("${elsewhere.origin}/from-frame")</script>`,
+      )
+    }
+
+    if (request.url.startsWith("/redirect")) {
+      res.statusCode = 302
+      res.setHeader("location", `${elsewhere.origin}/redirected`)
+      return res.end()
+    }
 
     if (request.url.startsWith("/form")) {
       return res.end(
@@ -74,6 +116,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await closeAllBrowsers()
   await api.close()
+  await elsewhere.close()
   await cleanup()
 })
 
@@ -214,6 +257,47 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
         .map((site) => site.host)
         .sort(),
     ).toEqual([host, other].sort())
+  })
+
+  it("lets no popup ask a site the token may not open for anything", async () => {
+    const host = new URL(api.origin).host
+    const other = new URL(elsewhere.origin).host
+    await setFetchSite(ctx, tokenId, host, "allowed")
+    await setFetchPrivate(ctx, tokenId, "allowed")
+
+    const opened = await call("navigate", { url: `${api.origin}/popups` })
+    const parentId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+    const vault = runningBrowser(ctx.vaultId)!
+
+    // The popup on the token's own site becomes a tab of the token's.
+    await vi.waitFor(
+      () => {
+        const popup = [...vault.tabs.values()].find(
+          (tab) => tab.page.url() === `${api.origin}/page`,
+        )
+        expect(popup?.openedBy).toBe("Claude")
+      },
+      { timeout: 10_000, interval: 50 },
+    )
+    // Long past when the others would have been asked for.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+
+    expect(elsewhere.requests.map((request) => request.url)).toEqual([])
+    expect(
+      [...vault.tabs.values()].filter((tab) =>
+        tab.page.url().startsWith(elsewhere.origin),
+      ),
+    ).toEqual([])
+    expect(api.requests.map((request) => request.url)).toContain("/redirect")
+
+    // The tab whose page tried says so, and the site is on the token's page.
+    const snapshot = await call("snapshot", { tab: parentId })
+    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
+      `The page tried to open ${other}`,
+    )
+    expect(
+      (await listFetchRules(ctx, tokenId)).sites.map((site) => site.host),
+    ).toContain(other)
   })
 
   it("keeps the sign-ins in the vault across a restart of the browser", async () => {
