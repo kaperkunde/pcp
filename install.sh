@@ -327,10 +327,14 @@ write_unit() {
       printf 'PublishPort=80:8080\nPublishPort=443:8443\n'
     fi
     printf 'Volume=%s:/data\n' "$PCP_DATA_VOLUME"
+    # The label is what podman-auto-update.timer looks for, so it goes only
+    # on a unit that asked for the daily update: the timer may be on for
+    # other containers.
     if [ "$PCP_AUTO_UPDATE" = 1 ]; then
       printf 'Environment=PCP_AUTO_UPDATE=1\n'
+      printf 'Label=io.containers.autoupdate=registry\n'
     fi
-    printf 'Label=io.containers.autoupdate=registry\n\n'
+    printf '\n'
     printf '[Service]\nRestart=always\n\n'
     printf '[Install]\nWantedBy=%s\n' "$WANTED_BY"
   } >"$UNIT"

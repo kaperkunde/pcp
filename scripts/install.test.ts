@@ -37,7 +37,6 @@ Image=${IMAGE}
 ContainerName=pcp
 PublishPort=3000:3000
 Volume=pcp-data:/data
-Label=io.containers.autoupdate=registry
 
 [Service]
 Restart=always
@@ -495,6 +494,19 @@ describe("install.sh updating PCP by itself", () => {
     )
     expect(existsSync(machine.timer)).toBe(false)
     expect(result.stdout).toContain("by itself, once a day")
+  })
+
+  it("takes Podman's auto-update label away with PCP_AUTO_UPDATE=0", () => {
+    const machine = host({ podman: "5.2.2" })
+    expect(machine.run([], { PCP_AUTO_UPDATE: "1" }).status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toContain(
+      "io.containers.autoupdate",
+    )
+
+    expect(machine.run([], { PCP_AUTO_UPDATE: "0" }).status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).not.toContain(
+      "io.containers.autoupdate",
+    )
   })
 
   it("gives the crontab line when there is no systemd session", () => {
