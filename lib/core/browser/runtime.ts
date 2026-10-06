@@ -58,7 +58,13 @@ export type Tab = {
   mainFrameId: string
   /** "owner", or the name of the token that opened it. */
   openedBy: string
-  /** The token that last drove the tab; null while only the owner has. */
+  /**
+   * The token whose tab it is, and the only one that sees or drives it:
+   * the one that opened it (or the tab a popup came from), or the one the
+   * owner last handed it to. It stays while the owner holds the tab, as the
+   * one Hand back offers first. Null for a tab the owner opened and no
+   * token had yet.
+   */
   tokenId: string | null
   /** That token's web fetch lines, as last read. */
   rules: FetchRuleSet | null
@@ -102,6 +108,8 @@ export type VaultBrowser = {
 type Runtime = {
   vaults: Map<string, VaultBrowser>
   starting: Map<string, Promise<VaultBrowser>>
+  /** Vaults whose browser may not start: a restore is writing them. */
+  held: Set<string>
   /** Replaces the address check; for tests that serve pages on loopback. */
   addressCheck: ((address: string, port: number) => boolean) | null
 }
@@ -114,6 +122,7 @@ function runtime(): Runtime {
   holder[RUNTIME] ??= {
     vaults: new Map(),
     starting: new Map(),
+    held: new Set(),
     addressCheck: null,
   }
 
@@ -252,6 +261,14 @@ export async function ensureBrowser(
   { publicUrl }: { publicUrl?: string } = {},
 ): Promise<VaultBrowser> {
   const state = runtime()
+
+  if (state.held.has(ctx.vaultId)) {
+    throw new PcpError(
+      "state",
+      "The vault is being restored from an export. Try again in a moment.",
+    )
+  }
+
   const running = state.vaults.get(ctx.vaultId)
 
   if (running) {
@@ -318,6 +335,13 @@ async function start(
     )
   }
 
+  await startGate(browser, () => vault).catch(async (error) => {
+    await browser.close().catch(() => {})
+    await proxy.close()
+    removeScratchDir(scratchDir)
+    throw error
+  })
+
   const major = browser.version().split(".")[0] ?? "141"
   const { locale, timeZone } = Intl.DateTimeFormat().resolvedOptions()
   const context = await browser.newContext({
@@ -354,7 +378,8 @@ async function start(
   const self = vault
   context.on("page", (page) => {
     // A page the browser opened itself (a popup, target=_blank): a tab of
-    // the one that opened it, if there is room.
+    // the one that opened it, if there is room. Until then the gate decides
+    // its pages by that tab (judge), so it has loaded nothing else.
     if ([...self.tabs.values()].some((tab) => tab.page === page)) return
     void adoptPopup(self, page).catch(() => page.close().catch(() => {}))
   })
@@ -398,6 +423,39 @@ export async function closeBrowser(
 
   forget(vault)
   await vault.browser.close().catch(() => {})
+}
+
+/**
+ * Runs `write` with the vault's browser closed, and none started until it
+ * is done: for a write that replaces the vault's rows, the profile's too. A
+ * call in flight finishes first, a browser still starting is waited for,
+ * and the profile is saved with the key (so a write that fails loses
+ * nothing). Nothing of the old browser can save over what `write` leaves.
+ */
+export async function withBrowserClosed<T>(
+  ctx: VaultContext,
+  write: () => Promise<T>,
+): Promise<T> {
+  const state = runtime()
+
+  if (state.held.has(ctx.vaultId)) {
+    throw new PcpError("state", "The vault is already being restored.")
+  }
+
+  state.held.add(ctx.vaultId)
+
+  try {
+    await state.starting.get(ctx.vaultId)?.catch(() => {})
+    const vault = runningBrowser(ctx.vaultId)
+
+    if (vault) {
+      await withVault(vault, () => closeBrowser(ctx.vaultId, { ctx }))
+    }
+
+    return await write()
+  } finally {
+    state.held.delete(ctx.vaultId)
+  }
 }
 
 /** Every vault's browser, at shutdown or between tests. */
@@ -464,6 +522,127 @@ export function mayOpen(vault: VaultBrowser, tab: Tab, url: string): boolean {
   )
 }
 
+/** What the gate is handed: a document request, paused before it is sent. */
+type PausedDocument = {
+  requestId: string
+  frameId?: string
+  request: { url: string }
+}
+
+/** Whether a request goes out, and a popup to close once it is answered. */
+type Verdict = { allow: boolean; close?: string }
+
+/** The tab whose main frame this is (a page's main frame is its target). */
+function tabOfFrame(vault: VaultBrowser, frameId: string): Tab | undefined {
+  return [...vault.tabs.values()].find((tab) => tab.mainFrameId === frameId)
+}
+
+function noteBlocked(tab: Tab, url: string): void {
+  try {
+    tab.lastBlocked = siteKey(new URL(url))
+  } catch {
+    tab.lastBlocked = null
+  }
+}
+
+async function judge(
+  vault: VaultBrowser,
+  gate: CDPSession,
+  event: PausedDocument,
+): Promise<Verdict> {
+  const url = event.request.url
+
+  if (!event.frameId) {
+    return { allow: false }
+  }
+
+  const tab = tabOfFrame(vault, event.frameId)
+
+  if (tab) {
+    if (mayOpen(vault, tab, url)) {
+      return { allow: true }
+    }
+
+    noteBlocked(tab, url)
+    return { allow: false }
+  }
+
+  // Not a tab's main frame. A frame inside a page has no target of its own
+  // yet, or one of type "iframe", and is not gated per site (the proxy
+  // still checks its addresses). Any other page is one PCP has not made a
+  // tab of yet: a popup Playwright has not reported, which opens what its
+  // opener's tab may open and is refused anything else.
+  const info = await gate
+    .send("Target.getTargetInfo", { targetId: event.frameId })
+    .then(({ targetInfo }) => targetInfo)
+    .catch(() => null)
+
+  if (!info || info.type === "iframe") {
+    return { allow: true }
+  }
+
+  const parent = info.openerId ? tabOfFrame(vault, info.openerId) : undefined
+  const allowed = parent !== undefined && mayOpen(vault, parent, url)
+
+  if (allowed && vault.tabs.size < MAX_TABS) {
+    return { allow: true }
+  }
+
+  if (parent && !allowed) {
+    // Said in the next answer about the tab whose page tried.
+    noteBlocked(parent, url)
+  }
+
+  // A popup is a window of its own, so it is closed rather than left blank;
+  // anything else (a page being prerendered) only loads nothing.
+  return { allow: false, close: info.openerId ? info.targetId : undefined }
+}
+
+/**
+ * The gate: every document a page's main frame is about to load, redirects
+ * included, paused before a byte is sent. It is the browser's, not a tab's,
+ * and on before the first page exists, so it holds for a popup from its
+ * very first request, before Playwright has reported the popup to PCP.
+ * Until the vault's state exists it refuses everything, as the proxy does.
+ */
+async function startGate(
+  browser: Browser,
+  current: () => VaultBrowser | null,
+): Promise<void> {
+  const gate = await browser.newBrowserCDPSession()
+
+  gate.on("Fetch.requestPaused", (event) => {
+    const vault = current()
+
+    void (vault ? judge(vault, gate, event) : Promise.resolve({ allow: false }))
+      .catch((): Verdict => ({ allow: false }))
+      .then(async (verdict: Verdict) => {
+        // A navigation answered 204 does not navigate: the tab stays on the
+        // page it was on, rather than showing an error page.
+        await (
+          verdict.allow
+            ? gate.send("Fetch.continueRequest", { requestId: event.requestId })
+            : gate.send("Fetch.fulfillRequest", {
+                requestId: event.requestId,
+                responseCode: 204,
+                responseHeaders: [],
+              })
+        ).catch(() => {})
+
+        if (verdict.close) {
+          await gate
+            .send("Target.closeTarget", { targetId: verdict.close })
+            .catch(() => {})
+        }
+      })
+  })
+  await gate.send("Fetch.enable", {
+    patterns: [
+      { urlPattern: "*", resourceType: "Document", requestStage: "Request" },
+    ],
+  })
+}
+
 async function attach(
   vault: VaultBrowser,
   page: Page,
@@ -492,40 +671,6 @@ async function attach(
     lastUsedAt: now,
     extra: new Map(),
   }
-
-  // The gate: every document the main frame is about to load, redirects
-  // included, before a byte is sent. Frames inside a page are not gated
-  // here (the proxy still checks their addresses).
-  cdp.on("Fetch.requestPaused", (event) => {
-    const allow =
-      event.frameId !== tab.mainFrameId ||
-      mayOpen(vault, tab, event.request.url)
-
-    if (!allow) {
-      try {
-        tab.lastBlocked = siteKey(new URL(event.request.url))
-      } catch {
-        tab.lastBlocked = null
-      }
-    }
-
-    // A navigation answered 204 does not navigate: the tab stays on the
-    // page it was on, rather than showing an error page.
-    void (
-      allow
-        ? cdp.send("Fetch.continueRequest", { requestId: event.requestId })
-        : cdp.send("Fetch.fulfillRequest", {
-            requestId: event.requestId,
-            responseCode: 204,
-            responseHeaders: [],
-          })
-    ).catch(() => {})
-  })
-  await cdp.send("Fetch.enable", {
-    patterns: [
-      { urlPattern: "*", resourceType: "Document", requestStage: "Request" },
-    ],
-  })
 
   page.on("dialog", (dialog) => {
     tab.dialog = dialog
@@ -572,14 +717,6 @@ async function adoptPopup(vault: VaultBrowser, page: Page): Promise<void> {
     allowedHosts: parent.allowedHosts,
   })
   tab.control = parent.control
-
-  // The popup may have started loading before the gate was on.
-  const url = page.url()
-
-  if (url && url !== "about:blank" && !mayOpen(vault, tab, url)) {
-    tab.lastBlocked = siteKey(new URL(url))
-    await page.goto("about:blank").catch(() => {})
-  }
 
   if (parent.tokenId) {
     vault.lastTabByToken.set(parent.tokenId, tab.id)
@@ -647,6 +784,7 @@ export async function tabView(tab: Tab): Promise<TabView> {
     url: tab.page.url(),
     title: await tabTitle(tab),
     openedBy: tab.openedBy,
+    tokenId: tab.tokenId,
     control: tab.control,
     handover: tab.handoverSince !== null,
     lastUsedAt: new Date(tab.lastUsedAt).toISOString(),

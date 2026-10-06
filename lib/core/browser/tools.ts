@@ -107,7 +107,7 @@ const SPECS: readonly BrowserToolSpec[] = [
   {
     name: "tabs",
     title: "Browser tabs",
-    description: `Lists, opens, closes or switches the browser's tabs. list: every tab with its id, title, address and the link where the owner can watch it. open: a new tab at url, answered with its snapshot. close: the tab. select: makes it the tab the other tools use when not given one, and shows it. ${ASKS_FIRST}`,
+    description: `Lists, opens, closes or switches this token's browser tabs (each assistant sees only the tabs it opened). list: each with its id, title, address and the link where the owner can watch it. open: a new tab at url, answered with its snapshot. close: the tab. select: makes it the tab the other tools use when not given one, and shows it. ${ASKS_FIRST}`,
     args: z
       .strictObject({
         action: z.enum(["list", "open", "close", "select"]),

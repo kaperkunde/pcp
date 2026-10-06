@@ -789,11 +789,11 @@ changed on its own since the last save is lost. Counts (sites, cookies,
 size) are kept in the clear for the page. An export carries the row as
 ciphertext; Forget all sites closes the browser unsaved and deletes it.
 
-**Which pages open** (the gate in `runtime.ts`). A tab's main frame loads
+**Which pages open** (the gate in `runtime.ts`). A page's main frame loads
 nothing the gate has not passed: the DevTools protocol pauses each document
 request (redirects included) before it is sent. It passes when the owner
 drives the tab, when the owner allowed the site for this tab, or when the
-web fetch lines of the token that drives the tab give GET to that site
+web fetch lines of the token whose tab it is give GET to that site
 `allowed`; never PCP's own site. Otherwise it is answered with 204, which
 leaves the tab on the page it was on, and the next answer says which site
 was stopped and puts it on the token's page (a line of its own on first
@@ -803,13 +803,18 @@ gated per site. `navigate` and `tabs` decide before anything opens, with
 which `runCall` turns into a `browse` request offering Allow once (the site
 for that tab while it is open), Always allow this site and Block this site
 (the token's site line, as for web fetch) and Not now. A popup becomes a tab
-of the tab that opened it. A token whose `navigate` tool is at ask is asked
-once: the call's request shows the address, and when the owner allows the
-call, `runCall` (told so by `executeCall`) opens the site for that tab as
-Allow once would, with no `browse` request after it. Only `navigate` and
-`tabs` ask about a site, and only for the address in their arguments, so
-the site is always one the owner saw. A blocked site stays blocked, and a
-hand-over during such a call is still asked.
+of the tab that opened it. The gate is the browser's, not a tab's (`Fetch`
+on the browser's own DevTools session, on before the first page exists), so
+it holds a popup from its very first request, before Playwright has
+reported the popup: until then the popup opens only what the tab that
+opened it may open, and is closed instead of opening anything else, or when
+the browser has no room for another tab. A token whose `navigate` tool is
+at ask is asked once: the call's request shows the address, and when the
+owner allows the call, `runCall` (told so by `executeCall`) opens the site
+for that tab as Allow once would, with no `browse` request after it. Only
+`navigate` and `tabs` ask about a site, and only for the address in their
+arguments, so the site is always one the owner saw. A blocked site stays
+blocked, and a hand-over during such a call is still asked.
 
 **Which addresses it reaches** (`proxy.ts`). Every connection goes through
 a forward proxy on 127.0.0.1 (`--proxy-server`, with loopback not
@@ -817,7 +822,7 @@ bypassed; QUIC off and WebRTC kept to the proxy, since UDP would go around
 it). PCP resolves each name, checks every address, and dials the one it
 checked, for pages, redirects, scripts and images alike, as web fetch's
 transport does. Public addresses pass; private ones pass while an open tab
-is driven by a token whose `private` line allows them (the proxy cannot tell
+belongs to a token whose `private` line allows them (the proxy cannot tell
 which tab a connection is for, so this is per browser; tabs the owner opens
 follow the line for all tokens); PCP's own address never. Refusals are
 remembered for half a minute so an answer can say why a page did not open.
@@ -834,12 +839,38 @@ scroll. It never gets a cookie or storage, never runs JavaScript, never
 downloads a file. A refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
 
-**The owner's control.** A tab is driven by the assistants or by the owner.
+**Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
+`tokenId`; a popup is its opener's) or that the owner last handed it to,
+and that token alone sees and drives it: `tabs` lists only its own, the current tab a call without one falls on
+is its own, and any tool given another token's tab, or the owner's own, is
+answered as for a tab that does not exist, in the same words, so its
+address and title never reach it. `navigate` naming such a tab opens a new
+one of the token's own, and a `browse` request never names another token's
+tab. So a site the owner allowed once stays with the token whose tab it
+is, and no token reads a page another opened under its own lines. Before a
+tool reads or acts on a page, the page's site is checked against the
+token's lines as they are now (`mayOpen`, as the gate does): a page at a
+site it may no longer open (its line changed since, or the tab's history
+went back to a page the owner opened there) is refused, though the tab can
+still be sent elsewhere or closed. The tabs share one profile, so the
+sign-ins are every token's; the eight tabs are shared too, and a token
+told the browser is full learns only how many are its own.
+
+**The owner's control.** A tab is driven by its assistant or by the owner.
 Take over on the tab's page makes it the owner's, and every browser tool
-refuses it until Hand back; a tab the owner opens starts as theirs.
-`hand_over` makes the tab the owner's and throws `OwnerNeeded` for a
-`browser_handover` request, which shows the assistant's message and the tab
-live; Done (or Not now) gives it back, saves the profile, and is what
+refuses it until Hand back. A tab the owner opens is theirs, seen by no
+token, until they hand it to one. Hand back gives the tab to the token the
+owner picks (`handBackTab`, `giveTab`): one of the vault's tokens that is
+neither revoked nor expired and reaches the browser, checked in the core
+whatever the form sent. The page offers the token whose tab it was first;
+a tab no token had yet waits for a choice. The token gets the tab as its
+own (its lines read again, its current tab), and the site the tab is at
+counts as one the owner allowed for that tab, as Allow once does; handed to
+another token than before, the tab first drops the sites allowed for the
+one before, which were that token's. `hand_over` makes the tab the
+owner's and throws `OwnerNeeded` for a `browser_handover` request, which
+shows the assistant's message and the tab live; Done (or Not now) gives it
+back to the token that handed it over, saves the profile, and is what
 `check_permission` reports. A hand-over nobody answers goes back when its
 request expires.
 
@@ -860,11 +891,11 @@ export download does. A WebSocket would answer a little sooner, but needs a
 server of its own around Next; the input's format is the same whatever
 carries it.
 
-**Bounded** (`browser/limits.ts`). Eight tabs per vault, the owner's
-included; thirty seconds per page load and ten per action; 300 tool calls
-per token per ten minutes; four people watching a tab; and the owner's
-input in batches of at most 500 events, 200 batches per session in ten
-seconds.
+**Bounded** (`browser/limits.ts`). Eight tabs per vault, every token's and
+the owner's together; thirty seconds per page load and ten per action; 300
+tool calls per token per ten minutes; four people watching a tab; and the
+owner's input in batches of at most 500 events, 200 batches per session in
+ten seconds.
 
 **Chromium on the machine** (`executable.ts`, `install.ts`).
 `PCP_BROWSER_EXECUTABLE`, then PCP's own install, then Playwright's own
@@ -1033,7 +1064,11 @@ adds a column the format does not carry yet.
 by table (not trusting cascades alone), and writes the file's rows in its
 place, parents before children, in chunks that keep under SQLite's variable
 limit; row ids and timestamps are the file's. On a PCP not set up yet the
-transaction first checks that there is no vault, as `setupVault` does. The
+transaction first checks that there is no vault, as `setupVault` does. Into
+a vault that exists, the vault's browser is closed first (`withBrowserClosed`:
+a call in flight finishes, the profile is saved with the owner's key, and no
+browser starts until the rows are written), since a browser left running
+would save its old sign-ins over the restored profile. The
 host's settings (`ddns.config`, `tls.config` and `update.config`, in plain
 text as they are in the database) are in the file and restored only when the
 owner ticks the box, with this machine's network status rows dropped so
