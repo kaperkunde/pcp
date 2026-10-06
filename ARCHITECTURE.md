@@ -888,7 +888,12 @@ request expires.
 `input.ts`, `components/browser-tab-view.tsx`). The tab's page draws
 Chromium's screencast (a JPEG each time the page repaints, shared by
 everyone watching) on a canvas, streamed as server-sent events by a route
-handler. While the owner has the tab, their pointer (with the samples the
+handler. The stream sends on only when its connection has room, keeping
+the newest frame and skipping the rest, and a frame is acknowledged to
+Chromium (which paints the next only then) once a viewer has sent it on:
+the screencast runs at the fastest viewer's pace, and a viewer on a slow
+link (through pcp.gg over a home upload) falls a frame behind, never a
+queue of them. While the owner has the tab, their pointer (with the samples the
 browser coalesced), wheel, keys and pastes go back in batches every 40 ms
 to a second route, each event with the time it happened. They are replayed
 through the DevTools protocol (`Input.dispatchMouseEvent` and
