@@ -33,6 +33,7 @@ import {
   encrypt,
   newScryptParams,
 } from "./crypto"
+import { withBrowserClosed } from "./browser/runtime"
 import { db } from "./db"
 import { invalid, isPcpError, PcpError } from "./errors"
 import { listMigrations } from "./migrate"
@@ -69,7 +70,7 @@ export type RestoreTarget =
   /** A PCP not set up yet: the file's vault becomes its owner's. */
   | { into: "fresh" }
   /** A signed-in owner's vault, replaced whole. */
-  | { into: "vault"; vaultId: string }
+  | { into: "vault"; ctx: VaultContext }
 
 export function exportFileName(at: Date): string {
   return `pcp-export-${at.toISOString().slice(0, 10)}${EXPORT_FILE_SUFFIX}`
@@ -298,6 +299,23 @@ function parseJson(buffer: Buffer, orElse: string): unknown {
 export async function restoreExport(
   payload: ExportPayload,
   target: RestoreTarget,
+  options: { restoreHostSettings: boolean },
+): Promise<void> {
+  if (target.into === "fresh") {
+    return writeExport(payload, target, options)
+  }
+
+  // The vault's browser holds sign-ins from before and would save them over
+  // the profile written here: closed first (its profile saved, so a restore
+  // that fails loses nothing) and kept from starting until the rows are in.
+  return withBrowserClosed(target.ctx, () =>
+    writeExport(payload, target, options),
+  )
+}
+
+async function writeExport(
+  payload: ExportPayload,
+  target: RestoreTarget,
   { restoreHostSettings }: { restoreHostSettings: boolean },
 ): Promise<void> {
   const { vault, tables, host } = payload
@@ -311,7 +329,7 @@ export async function restoreExport(
           }
         } else {
           const existing = await tx.vault.findUnique({
-            where: { id: target.vaultId },
+            where: { id: target.ctx.vaultId },
             select: { id: true },
           })
 
@@ -319,7 +337,7 @@ export async function restoreExport(
             throw new PcpError("state", "The vault to replace is gone.")
           }
 
-          await wipeVault(tx, target.vaultId)
+          await wipeVault(tx, target.ctx.vaultId)
         }
 
         if (restoreHostSettings) {
