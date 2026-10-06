@@ -8,16 +8,24 @@ import {
   type GatewayScope,
 } from "@/lib/core/gateway"
 import { instructionMemories } from "@/lib/core/memories"
+import { bearerChallenge } from "@/lib/core/oauth-server/metadata"
+import {
+  ACCESS_TOKEN_PREFIX,
+  resolveAccessToken,
+} from "@/lib/core/oauth-server/tokens"
 import { checkRateLimit } from "@/lib/core/rate-limit"
-import { publicUrlFor } from "@/lib/server/public-url"
+import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
 
 /**
  * The gateway endpoint: https://<pcp>/mcp
  *
- * A stateless Streamable HTTP MCP server. Every request carries an API
- * token as a bearer token; the token names the vault and unwraps its key,
- * so this one endpoint can serve any number of vaults without knowing
- * about them in advance. Without a valid token the answer is 401.
+ * A stateless Streamable HTTP MCP server. Every request carries a bearer
+ * token: an API token, or an access token from PCP's own authorization
+ * server (lib/core/oauth-server/) for an assistant that signed in. Either
+ * names the vault and unwraps its key, so this one endpoint can serve any
+ * number of vaults without knowing about them in advance. Without a valid
+ * token the answer is 401, whose challenge points at the resource's
+ * metadata: that is how a client that signs in finds out where.
  */
 
 export const runtime = "nodejs"
@@ -99,15 +107,22 @@ function bearerTokenFrom(request: Request): string | null {
 
 async function handle(request: Request): Promise<Response> {
   const token = bearerTokenFrom(request)
-  const resolved = token ? await resolveApiToken(token) : null
+  const resolved = !token
+    ? null
+    : token.startsWith(ACCESS_TOKEN_PREFIX)
+      ? await resolveAccessToken(token)
+      : await resolveApiToken(token)
 
   if (!resolved) {
     return withCors(
       jsonRpcError(
         401,
-        "This endpoint needs a PCP API token as a bearer token.",
+        "This endpoint needs a PCP API token as a bearer token, or an assistant that signs in with OAuth.",
         {
-          "WWW-Authenticate": 'Bearer realm="pcp", error="invalid_token"',
+          "WWW-Authenticate": bearerChallenge(
+            await publicUrlWithoutSession(request),
+            token !== null,
+          ),
         },
       ),
     )

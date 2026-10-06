@@ -166,6 +166,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/upstream.ts`               | Connecting to upstreams; the OAuth client provider            |
 | `lib/core/oauth.ts`                  | The authorization flow (start, callback, disconnect)          |
 | `lib/core/oauth-client.ts`           | How PCP gets a client ID; redirect URI; sign-in parameters    |
+| `lib/core/oauth-server/`             | PCP's own OAuth server, for apps that sign in to `/mcp`       |
 | `lib/core/endpoints.ts`              | API endpoints: reading a schema, creating them, calling them  |
 | `lib/core/openapi/`                  | OpenAPI → tools and call plans; building and sending requests |
 | `lib/core/answers.ts`                | Shaping an answer: fields, decode, handles, preview           |
@@ -194,15 +195,19 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/migrate.ts`                | Boot-time migrations                                          |
 | `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts     |
 | `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
-| `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
+| `lib/core/network/`                  | Optional pcp.gg, dynamic DNS and HTTPS (Let's Encrypt, edge)  |
 | `lib/core/updates/`                  | The daily check for a newer release; what it found            |
 | `lib/core/version.ts`                | `PCP_VERSION`, read from `package.json`                       |
 | `scripts/version.mjs`                | The next release's version; `pnpm version:bump`               |
+| `lib/core/request-log.ts`            | The request log: writing, reading a page, pruning old days    |
+| `lib/core/activity.ts`               | The Log page's lines: token names, how a request was answered |
+| `lib/core/cleanup/`                  | The scheduled cleanup (node-cron): schedule, parts, status    |
 | `lib/server/install-kind.ts`         | App, container or checkout: how Settings says to update       |
 | `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |
 | `lib/actions/`                       | Server Actions the forms call                                 |
 | `app/mcp/route.ts`                   | The gateway endpoint                                          |
 | `app/api/oauth/`                     | OAuth callback; PCP's client metadata document                |
+| `app/oauth/`, `app/.well-known/`     | PCP's OAuth server: sign-in page, token, register, discovery  |
 | `app/api/servers/[id]/oauth/`        | OAuth start; the per-server callback older clients use        |
 | `app/api/export/route.ts`            | The export download (a file needs `Content-Disposition`)      |
 | `app/api/health/route.ts`            | Health check; in the app, the version and an install request  |

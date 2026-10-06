@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache"
 
+import { endAllowance } from "@/lib/core/allowances"
 import {
   createApiToken,
   deleteApiToken,
@@ -153,6 +154,35 @@ export async function setToolAccessAction(
   })
 
   revalidateToken(tokenId)
+
+  return result
+}
+
+/** "End now" on a tool or site the owner allowed the token for a while. */
+export async function endAllowanceAction(
+  tokenId: string,
+  target:
+    | { kind: "tool"; serverId: string; toolName: string }
+    | { kind: "site"; host: string },
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await endAllowance(
+      ctx,
+      tokenId,
+      target?.kind === "site"
+        ? { kind: "site", host: String(target.host) }
+        : {
+            kind: "tool",
+            serverId: String(target?.serverId),
+            toolName: String(target?.toolName),
+          },
+    )
+    return {}
+  })
+
+  revalidatePath(`/tokens/${tokenId}`)
 
   return result
 }

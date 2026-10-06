@@ -162,8 +162,9 @@ export default async function PermissionPage({
             <>
               {view.kind === "call" ? (
                 <p className="text-muted-foreground">
-                  Always allow and Block also decide the calls after this one.
-                  You can change that on the token&apos;s page.
+                  Always allow and Block also decide the calls after this one;
+                  Allow for lets them run without asking you until that time is
+                  up. You can change that on the token&apos;s page.
                   {view.serverKind === "browser" &&
                   (view.tool === "navigate" || view.tool === "tabs")
                     ? " Allowing it also lets the tab open the site it names, unless you blocked that site for this token, and keep to its pages while the tab is open; other sites are asked about on their own."
@@ -172,7 +173,8 @@ export default async function PermissionPage({
               ) : view.kind === "fetch" ? (
                 <p className="text-muted-foreground">
                   Always allow this site and Block this site also decide this
-                  token&apos;s later requests to the site.{" "}
+                  token&apos;s later requests to the site, and Allow this site
+                  for lets them through without asking until that time is up.{" "}
                   <Link href={`/tokens/${view.tokenId}`} className="underline">
                     The token&apos;s page
                   </Link>{" "}
@@ -181,8 +183,9 @@ export default async function PermissionPage({
               ) : view.kind === "browse" ? (
                 <p className="text-muted-foreground">
                   Allow once lets this tab open the site&apos;s pages while it
-                  is open. Always allow this site and Block this site decide for
-                  the token, in the browser and in web fetch, as on{" "}
+                  is open. Allow this site for, Always allow this site and Block
+                  this site decide for the token, in the browser and in web
+                  fetch, as on{" "}
                   <Link href={`/tokens/${view.tokenId}`} className="underline">
                     the token&apos;s page
                   </Link>

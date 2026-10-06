@@ -15,9 +15,9 @@ const SELF_HOSTING_GUIDE = `${REPOSITORY_URL}/blob/main/docs/self-hosting.md#4-r
  * How to reach PCP from the internet when it runs at home. Shown on the
  * Settings page while PCP's address is one only the owner's own network can
  * reach (lib/core/local-address.ts): the usual case for the desktop app and
- * for Docker on a machine behind a home router. It sits above the Dynamic DNS
- * and HTTPS cards and leads to them; the tunnel and the troubleshooting are
- * what those cards do not cover.
+ * for Docker on a machine behind a home router. It sits above the pcp.gg,
+ * Dynamic DNS and HTTPS cards and leads to them; the other tunnels and the
+ * troubleshooting are what those cards do not cover.
  */
 export function OutsideAccessCard({
   address,
@@ -40,11 +40,24 @@ export function OutsideAccessCard({
           Claude Code or a desktop app, can use it as it is. One that runs
           somewhere else, such as Claude on the web or on a phone, needs an
           address that reaches this computer from the internet, and a home
-          router does not give it one by itself. There are two ways; a tunnel is
-          the easier.
+          router does not give it one by itself. pcp.gg is the easiest way.
         </CardDescription>
       </CardHeader>
       <CardContent className="gap-5">
+        <Section title="pcp.gg: paste a key">
+          <p>
+            pcp.gg gives PCP a name of its own, such as <code>you.pcp.gg</code>,
+            and carries connections to it to this computer over a connection PCP
+            opens itself. Nothing changes on your router and nothing else runs.
+            PCP gets its own certificate for the name, so what passes through
+            pcp.gg stays encrypted to PCP.
+          </p>
+          <p>
+            Under <strong>pcp.gg</strong> below, paste the connection key from
+            your pcp.gg dashboard.
+          </p>
+        </Section>
+
         <Section title="A tunnel: no router changes">
           <p>
             A tunnel program runs on this computer, connects out to a service
@@ -162,7 +175,8 @@ export function OutsideAccessCard({
             </li>
             <li>
               <strong>Port 80 blocked</strong>: some providers block it on home
-              plans, and Let&apos;s Encrypt needs it. Use a tunnel.
+              plans. PCP then gets its certificate on port 443 instead, so
+              forward that one; if both are blocked, use a tunnel.
             </li>
             <li>
               <strong>Two routers</strong>: a provider&apos;s modem with a

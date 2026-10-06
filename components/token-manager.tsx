@@ -208,7 +208,9 @@ function TokenRow({ token }: { token: ApiTokenSummary }) {
   function revoke() {
     if (
       !window.confirm(
-        `Revoke "${token.name}"? Clients using it stop working at once.`,
+        token.oauthClient
+          ? `Revoke "${token.name}"? ${token.oauthClient.name} is signed out at once.`
+          : `Revoke "${token.name}"? Clients using it stop working at once.`,
       )
     ) {
       return
@@ -237,7 +239,15 @@ function TokenRow({ token }: { token: ApiTokenSummary }) {
           >
             {token.name}
           </Link>
-          <code className="text-xs text-muted-foreground">{token.prefix}…</code>
+          {token.oauthClient ? (
+            <span className="text-xs text-muted-foreground">
+              signed in from {token.oauthClient.name}
+            </span>
+          ) : (
+            <code className="text-xs text-muted-foreground">
+              {token.prefix}…
+            </code>
+          )}
           {token.revokedAt ? (
             <Badge variant="destructive">Revoked</Badge>
           ) : expired ? (

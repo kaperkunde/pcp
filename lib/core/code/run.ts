@@ -4,7 +4,7 @@ import { readFields, type AnswerShape } from "../answers"
 import { isConnectResult } from "../connect"
 import { isPcpError } from "../errors"
 import type { CodeCallOutcome, PermissionScope } from "../permissions"
-import { appendRequestLog } from "../request-log"
+import { appendRequestLog, noteOwnerAsked, withLogNote } from "../request-log"
 import { MAX_HANDLE_DEPTH, missingResultMessage } from "../result-handles"
 import {
   handleOf,
@@ -282,13 +282,22 @@ export async function runCode(
       }
 
       const at = Date.now()
-      const outcome = await call({
-        server,
-        tool,
-        args: bareHandles(args) as Record<string, unknown>,
-        ...shape,
-      })
+      // A note of the call's own, for the request it made; the run itself
+      // asked the owner too, so it goes on run_code's note as well.
+      const { outcome, note } = await withLogNote(async (note) => ({
+        outcome: await call({
+          server,
+          tool,
+          args: bareHandles(args) as Record<string, unknown>,
+          ...shape,
+        }),
+        note,
+      }))
       const owner = "owner" in outcome
+
+      if (note.asked) {
+        noteOwnerAsked(note.request)
+      }
 
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
@@ -299,6 +308,8 @@ export async function runCode(
         ok: owner || outcome.ok,
         ms: Date.now() - at,
         ...(!owner && !outcome.ok ? { error: "The call failed." } : {}),
+        ...(owner || note.asked ? { asked: true } : {}),
+        ...(note.request ? { request: note.request } : {}),
       })
 
       if ("owner" in outcome) {
@@ -422,7 +433,7 @@ export async function runCode(
           ...(output ? [`It printed:\n${output}`] : []),
           isConnectResult(stop.result)
             ? "Once the owner has connected it (check_server says when), run the program again."
-            : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow).",
+            : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow, or Allow for while that lasts).",
         ].join("\n\n"),
         stop.result,
       )

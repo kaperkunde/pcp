@@ -434,12 +434,19 @@ async function wipeVault(
   // Answers kept for read_result are not exported: a day's cache, bound to
   // the tokens this restore replaces.
   await tx.toolResult.deleteMany(byVault)
+  // Nor are tools and sites allowed for a while: an answer to a request,
+  // for the tokens this restore replaces, and over within hours.
+  await tx.apiTokenToolAllowance.deleteMany(byToken)
+  await tx.apiTokenSiteAllowance.deleteMany(byToken)
   await tx.memory.deleteMany(byVault)
   await tx.permissionRequest.deleteMany(byVault)
   await tx.webFetchRule.deleteMany(byVault)
   await tx.vaultToolAccess.deleteMany(byVault)
   await tx.apiTokenToolAccess.deleteMany(byToken)
   await tx.apiTokenServer.deleteMany(byToken)
+  // An assistant's OAuth sign-ins are not exported (their grants are like a
+  // session's): it signs in again after a restore.
+  await tx.oAuthCredential.deleteMany(byVault)
   await tx.oAuthState.deleteMany(byServer)
   await tx.openApiSpec.deleteMany(byServer)
   await tx.mcpTool.deleteMany(byServer)

@@ -22,6 +22,7 @@ import {
   forgiveSignInTry,
   withinSignInLimits,
 } from "@/lib/server/password-attempts"
+import { returnPath } from "@/lib/server/return-path"
 import {
   clearSessionCookie,
   currentSession,
@@ -90,7 +91,7 @@ export async function loginAction(
   }
 
   await signIn(ctx)
-  redirect("/servers")
+  redirect(returnPath(field(formData, "next")) ?? "/servers")
 }
 
 export type TouchIdLoginResult = ActionState
@@ -125,7 +126,7 @@ export async function touchIdLoginAction(
   }
 
   await signIn(ctx)
-  redirect("/servers")
+  redirect(returnPath(field(formData, "next")) ?? "/servers")
 }
 
 export async function logoutAction(): Promise<void> {

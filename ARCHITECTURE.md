@@ -10,6 +10,8 @@ without changing the single-user product.
 ```
 app/                 Routes and pages (Next.js App Router)
   mcp/route.ts       The gateway endpoint
+  oauth/…            PCP's own authorization server: sign-in page, token, register, revoke
+  .well-known/…      Its discovery documents (protected resource, authorization server)
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
   api/export/…       The export download (a file needs Content-Disposition)
@@ -26,6 +28,7 @@ lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   browser/           The headless Chromium: runtime and gate, proxy, profile, tools, install
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
   updates/           The daily check for a newer release, and what it found
+  oauth-server/      PCP's own OAuth server, for assistants that sign in to /mcp
 sandbox/             run_code's sandbox container: the runner, the launcher, the pcp command
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
@@ -59,13 +62,14 @@ associated data (a ciphertext cannot be moved to another row):
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
 
-| Grant kind  | Credential                    | KEK derivation                            | Found by                  |
-| ----------- | ----------------------------- | ----------------------------------------- | ------------------------- |
-| `password`  | the owner's password          | scrypt (N=2^16, r=8, p=1, per-grant salt) | the vault (one per vault) |
-| `recovery`  | `pcp_recovery_…`, shown once  | HKDF-SHA256 with a per-grant salt         | SHA-256 of the credential |
-| `session`   | a random secret in the cookie | HKDF-SHA256                               | SHA-256 of the secret     |
-| `api_token` | `pcp_…`, shown once           | HKDF-SHA256                               | SHA-256 of the token      |
-| `device`    | `pcp_device_…`, the Mac app's | HKDF-SHA256                               | SHA-256 of the key        |
+| Grant kind  | Credential                                                  | KEK derivation                            | Found by                  |
+| ----------- | ----------------------------------------------------------- | ----------------------------------------- | ------------------------- |
+| `password`  | the owner's password                                        | scrypt (N=2^16, r=8, p=1, per-grant salt) | the vault (one per vault) |
+| `recovery`  | `pcp_recovery_…`, shown once                                | HKDF-SHA256 with a per-grant salt         | SHA-256 of the credential |
+| `session`   | a random secret in the cookie                               | HKDF-SHA256                               | SHA-256 of the secret     |
+| `api_token` | `pcp_…`, shown once                                         | HKDF-SHA256                               | SHA-256 of the token      |
+| `device`    | `pcp_device_…`, the Mac app's                               | HKDF-SHA256                               | SHA-256 of the key        |
+| `oauth_*`   | `pcp_code_…`, `pcp_at_…`, `pcp_rt_…`: an app that signed in | HKDF-SHA256                               | SHA-256 of the value      |
 
 scrypt is slow on purpose: a copy of the database can only be attacked one
 password guess at a time. The other credentials have 256 bits of entropy of
@@ -80,7 +84,8 @@ Consequences:
 - **Changing the password** replaces the `password` grant. Every other grant
   wraps the same DEK, so sessions, API tokens and the recovery key keep
   working.
-- **Revoking an API token** blanks its grant; **signing out** deletes the
+- **Revoking an API token** blanks its grant, and deletes the grants of
+  whatever an app that signed in for it holds; **signing out** deletes the
   session's; **recovery** replaces the password grant, deletes every session
   grant and the Touch ID key (`device`) and, when asked, blanks every API
   token grant. **Signing out everywhere** deletes the sessions and the Touch
@@ -89,7 +94,8 @@ Consequences:
   asks for the password again (`lib/server/password-attempts.ts`). A session
   cookie can be copied, so it may use the DEK but not mint a grant that
   survives the session. In the Mac app the Touch ID key stands in for the
-  password before a new API token, an export or a restore (`confirmOwner`),
+  password before a new API token (an app's sign-in included), an export or
+  a restore (`confirmOwner`),
   never before a new recovery key, a new password or another Touch ID key:
   only the password and the recovery key decide who gets in. See "Touch ID
   in the Mac app".
@@ -117,8 +123,9 @@ A request resolves its vault in exactly one of two ways:
 
 - **Browser:** the session cookie → `resolveSession()` → `VaultContext`
   (`lib/server/session.ts`).
-- **MCP client:** the bearer token → `resolveApiToken()` → `VaultContext`
-  plus the servers the token may reach (`app/mcp/route.ts`).
+- **MCP client:** the bearer token → `resolveApiToken()` (an API token) or
+  `resolveAccessToken()` (an app that signed in, `lib/core/oauth-server/`)
+  → `VaultContext` plus the servers the token may reach (`app/mcp/route.ts`).
 
 The gateway is stateless per request: it builds an `McpServer` for the
 resolved token, serves the request and discards it. Upstream connections are
@@ -141,10 +148,11 @@ from one endpoint could be built on it. What that would take:
    `lib/server/session.ts` does. Creating a vault is `setupVault()` with the
    host's own password policy, or a variant that wraps under the host's KEK
    only.
-3. **Keep the gateway.** `/mcp` already serves any vault an API token names.
-   A host that wants OAuth-issued tokens instead of `pcp_…` tokens replaces
-   `resolveApiToken()` with its own resolver returning the same
-   `ResolvedToken` shape (vault, key, allowed servers).
+3. **Keep the gateway.** `/mcp` already serves any vault an API token, or an
+   access token from PCP's own authorization server, names. A host with an
+   authorization server of its own replaces `resolveAccessToken()` with its
+   own resolver returning the same `ResolvedToken` shape (vault, key,
+   allowed servers).
 4. **Move the database.** Prisma's schema is provider-neutral apart from the
    `datasource` block; a Postgres host generates its own migration history
    (`prisma migrate dev` against Postgres) and runs migrations as a deploy
@@ -606,9 +614,9 @@ marked as the assistant's: that is how every site an assistant tried shows
 on the token's page. Ask goes through `permission_request` like a tool call
 (kind `fetch`, the checked request as its encrypted arguments). The owner's
 **Always allow this site** and **Block this site** write the token's own
-line for the site, as a tool's answer writes the token's own level; when
-they allow a request, `executeFetch` runs it only if the token still has web
-fetch on.
+line for the site, as a tool's answer writes the token's own level, and
+**Allow this site for** an allowance for the site (below); when they allow a
+request, `executeFetch` runs it only if the token still has web fetch on.
 
 **What a request may be** (`fetch/request.ts`). http and https, no user name
 or password in the address, no CONNECT or TRACE, at most twenty headers, and
@@ -705,7 +713,8 @@ three parts:
   result for, as for `call_tool`. An "ask" tool leaves the same permission
   request a `call_tool` would and stops the run, which answers with what ran
   before it and the owner's link last; the owner's Allow once runs that one
-  call for `check_permission`, and Always allow lets the next run make it.
+  call for `check_permission`, and Always allow (or Allow for, while it
+  lasts) lets the next run make it.
   An allowed tool runs through `runCodeCall` (`permissions.ts`), the same
   upstream path as `runCall`, with the answer turned into a value by
   `answerValue` (`answers.ts`): the JSON whole rather than a preview, its
@@ -801,8 +810,9 @@ sight, as web fetch does). Frames inside a page and subresources are not
 gated per site. `navigate` and `tabs` decide before anything opens, with
 `decideSite` (web-fetch.ts): blocked is refused; ask throws `OwnerNeeded`,
 which `runCall` turns into a `browse` request offering Allow once (the site
-for that tab while it is open), Always allow this site and Block this site
-(the token's site line, as for web fetch) and Not now. A popup becomes a tab
+for that tab while it is open), Allow this site for (an allowance, as for
+web fetch), Always allow this site and Block this site (the token's site
+line, as for web fetch) and Not now. A popup becomes a tab
 of the tab that opened it. The gate is the browser's, not a tab's (`Fetch`
 on the browser's own DevTools session, on before the first page exists), so
 it holds a popup from its very first request, before Playwright has
@@ -878,7 +888,12 @@ request expires.
 `input.ts`, `components/browser-tab-view.tsx`). The tab's page draws
 Chromium's screencast (a JPEG each time the page repaints, shared by
 everyone watching) on a canvas, streamed as server-sent events by a route
-handler. While the owner has the tab, their pointer (with the samples the
+handler. The stream sends on only when its connection has room, keeping
+the newest frame and skipping the rest, and a frame is acknowledged to
+Chromium (which paints the next only then) once a viewer has sent it on:
+the screencast runs at the fastest viewer's pace, and a viewer on a slow
+link (through pcp.gg over a home upload) falls a frame behind, never a
+queue of them. While the owner has the tab, their pointer (with the samples the
 browser coalesced), wheel, keys and pastes go back in batches every 40 ms
 to a second route, each event with the time it happened. They are replayed
 through the DevTools protocol (`Input.dispatchMouseEvent` and
@@ -928,8 +943,10 @@ Linux):
   bookkeeping (same table, same checksums), so a developer's
   `prisma migrate dev` and a container's boot agree on the history.
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
-  which tool, which upstream, how long, whether it worked. Never arguments
-  or results.
+  which tool, which upstream, how long, whether it worked, and whether it
+  stopped to ask the owner (with the permission request's id). Never
+  arguments or results. The Log page reads it back; the cleanup deletes the
+  days older than the owner keeps (see "Cleanup and the log").
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
@@ -1038,7 +1055,10 @@ what lets a PCP move to another machine without every assistant being set up
 again, and reading a secret out of the file takes what reading it off the
 disk takes: one of those credentials. Session grants are not in it (a
 session is one browser's), nor is the Touch ID key (one app's), nor are
-OAuth authorizations in flight, the request log or the `tls/` directory.
+OAuth authorizations in flight, the request log or the `tls/` directory. An
+app that signed in to PCP is like a session: its token comes along (with
+its levels and memories), its credentials do not, and after a restore it
+signs in again, where the owner can give it that token back.
 
 Around the rows: gzip, then AES-256-GCM under a key derived from an **export
 password** the owner chooses, with scrypt at the parameters of the password
@@ -1091,19 +1111,19 @@ rate-limited like password attempts. The download is a route handler (an
 action cannot send a file), so it checks the request's origin itself
 (`lib/server/same-origin.ts`), which Server Actions get built in.
 
-## Reaching PCP: dynamic DNS and HTTPS
+## Reaching PCP: pcp.gg, dynamic DNS and HTTPS
 
-Both are optional, off until the owner turns them on (in the step after setup
-or under Settings), and meant for someone running PCP at home without a proxy
-of their own. While both are off, nothing in `lib/core/network/` starts:
-no timer, no listener, no outbound request.
+All three are optional, off until the owner turns them on (in the step after
+setup or under Settings), and meant for someone running PCP at home without a
+proxy of their own. While all three are off, nothing in `lib/core/network/`
+starts: no timer, no listener, no outbound request or connection.
 
 **Host settings, not vault settings.** The configuration lives in the
 `host_setting` table (`lib/core/host-settings.ts`), not in the per-vault
 `setting` table. It belongs to the machine, and the work that uses it runs
 from a timer with no request and no `VaultContext`. So it is **stored
-unencrypted**: a dynamic DNS service's token or password has to be readable
-while nobody is signed in, and reading the vault without a credential is
+unencrypted**: a dynamic DNS service's token or password, and the pcp.gg
+connection key, have to be readable while nobody is signed in, and reading the vault without a credential is
 exactly what PCP refuses to allow. The owner is told so where they type it.
 Such a credential can only move a DNS name. Nothing from the vault (a secret,
 a token) is ever copied into a host setting, and the page never sends a saved
@@ -1128,17 +1148,44 @@ lookup fails, services that see the caller's address themselves still get an
 update, at most hourly.
 
 **HTTPS** (`tls.ts`, `edge.ts`, `proxy.ts`): `acme-client` gets a Let's
-Encrypt certificate (`PCP_ACME_DIRECTORY` overrides the directory) with the
-HTTP-01 challenge, for a typed name or the dynamic DNS one. The key and
-certificate are files under `tls/`: a server presenting a certificate needs
-its key before anyone signs in. While HTTPS is on, PCP opens two listeners of
-its own next to Next's:
+Encrypt certificate (`PCP_ACME_DIRECTORY` overrides the directory) for a
+typed name or the dynamic DNS one. The key and certificate are files under
+`tls/`: a server presenting a certificate needs its key before anyone signs
+in. While HTTPS is on, PCP opens two listeners of its own next to Next's:
 
 - port 80 (`PCP_HTTP_PORT`; 8080 in the Docker image, mapped by
   `docker-compose.https.yaml`) answers `/.well-known/acme-challenge/…`. Once
   a certificate works it redirects everything else to `https://<name>`;
   before that it forwards to the app, so the site is not broken while waiting.
-- port 443 (`PCP_HTTPS_PORT`, 8443 in Docker) serves the certificate.
+- port 443 (`PCP_HTTPS_PORT`, 8443 in Docker) serves the certificate, and
+  opens before there is one, for the TLS-ALPN-01 challenge.
+
+**Which challenge** (`challengeOrder` in `tls.ts`): Let's Encrypt proves the
+name is PCP's either with HTTP-01 (a file on port 80) or with TLS-ALPN-01
+(RFC 8737: a handshake on port 443 asking for the protocol `acme-tls/1`
+alone, answered with a self-signed certificate for the name that carries the
+key authorization's SHA-256 in its acmeIdentifier extension). A name of the
+owner's own tries HTTP-01 first, since a router forwards port 80 as readily
+as 443 and some providers block only 80; a pcp.gg name tries TLS-ALPN-01
+first, because pcp.gg carries port 443 to PCP untouched, while a proxy in
+front of pcp.gg can keep port 80's challenge path for itself (Coolify's
+Traefik, with a Let's Encrypt resolver of its own, answers every
+`/.well-known/acme-challenge/…` with 404, whatever the host). When the
+first fails, the other is tried once, in a new order; when PCP never got as
+far as a challenge (the directory out of reach, an order refused), nothing
+is tried again. The answers wait in the runtime's `ChallengeStore` (tokens
+for port 80, challenge certificates by name for 443) and are removed once
+validated or refused.
+
+Node's TLS server chooses the certificate before it says which protocols the
+client offered, so port 443 reads the ClientHello itself
+(`client-hello.ts`, adapted from pcp.gg's `tunnel/protocol/sni.ts`), and only
+while a TLS-ALPN-01 challenge is out: a connection for that name offering
+`acme-tls/1` and nothing else goes to a second TLS server that never listens
+(the challenge certificate, `acme-tls/1`, closed after the handshake); every
+other connection, Let's Encrypt's included at any other time, goes on to the
+HTTPS server with the bytes put back and gets the normal certificate. With no
+challenge out, nothing is read first.
 
 Both forward to the app on `127.0.0.1:$PORT`, streaming (MCP's server-sent
 events stay open) and passing upgrades through. They are the edge, so they
@@ -1154,13 +1201,49 @@ again and the card says why: what went wrong is usually the router or the
 name, which no retry fixes. Once a name has had a certificate, a failed
 renewal is retried after 1 hour, doubling to at most a day, and the
 header's bell says so on every page until it works. That keeps PCP well
-inside Let's Encrypt's limits on failed validations; "Try again now" skips
+inside Let's Encrypt's limits on failed validations (at most two a try, with
+the second challenge); "Try again now" skips
 the wait. A DNS lookup first warns, without blocking, when the name does not
 point at this network. Port 3000 keeps serving plain
 HTTP for the local network. In the desktop app the two ports stay 80 and 443
 (macOS and Windows let an ordinary program use them), and they listen on
 every interface even while the app keeps port 3000 to this computer: a
-router's forward needs exactly that.
+router's forward needs exactly that (with a pcp.gg name they listen on
+127.0.0.1 only, below).
+
+**pcp.gg** (`pcpgg.ts`, `pcpgg/`): the owner pastes a connection key from
+their pcp.gg dashboard, and PCP runs pcp.gg's connector itself
+(`pcpgg/connector.ts`, lifted from kaperkunde/pcp-gg's `tunnel/connector/`).
+It holds one WebSocket to pcp.gg (`PCP_PCPGG_RELAY_URL` overrides the
+address) and answers each connection pcp.gg passes down by dialling the
+edge's own listeners on 127.0.0.1. Connections to the owner's name on port
+443 arrive still encrypted and end in the edge's HTTPS listener, so pcp.gg
+carries bytes it cannot read, Let's Encrypt's TLS-ALPN-01 validation among
+them; on port 80 pcp.gg passes on only Let's Encrypt's HTTP-01 challenge. The wire format (`pcpgg/frames.ts`, `mux.ts`,
+`control.ts`) is a copy of pcp.gg's `tunnel/protocol/`, protocol version 1;
+the tests run against a copy of pcp.gg's relay (`pcpgg/test-relay/`).
+
+`reconcileNetwork()` starts the connector while a key is saved and pcp.gg
+has not refused it, and stops it otherwise. pcp.gg's `ready` message names
+the hostnames; PCP keeps the first and, once online, turns HTTPS on for it
+(`tls.config` with `via: "pcpgg"`), so the TLS-ALPN-01 challenge reaches
+port 443 through pcp.gg on the first try (HTTP-01 through port 80 if that
+fails). A pcp.gg name skips the check that the name
+points at this network, and the edge listens on 127.0.0.1 only: the name
+leads to pcp.gg, never to this network's own address, so nothing else needs
+to reach the listeners (the desktop app's 80 and 443 included). If Let's
+Encrypt refuses the first certificate for the name, HTTPS turns off as usual
+and stays off across reconnects until the owner asks again. A key pcp.gg
+refuses (close codes 4001, 4004) stops the connector and is not tried again,
+across restarts too, until the owner saves a key. Turning pcp.gg off stops
+the connector and turns HTTPS for the name off. The pcp.gg card and the
+header's bell (after two minutes offline, or at once for a refused key) show
+the state. The HTTPS card keeps its hands off while pcp.gg is on.
+
+Every connection through pcp.gg reaches the edge from 127.0.0.1, so the rate
+limiter sees one client address for all of them. Carrying the client's
+address (in the OPEN frame, then PROXY protocol v2 to the edge) is left for
+a later protocol version.
 
 ## Updates
 
@@ -1230,6 +1313,46 @@ which pulls the image and starts PCP again only when the image changed. The
 installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
 
+## Cleanup and the log
+
+**The request log** (`lib/core/request-log.ts`) is what assistants did with
+their tokens: one JSON line per gateway call, and one per call a `run_code`
+program made, written after the answer and never waited for. A line names the
+token by id, the tool, the server and upstream tool the arguments named (cut
+to 80 characters, so a caller cannot grow the log by what it sends), how long
+it took and how it ended: done, failed (with PCP's own refusal text, never an
+upstream's), or asked the owner. Code under a call notes an ask in async
+context (`noteOwnerAsked`, from `withPermission` and `connectResult`), so the
+line is right however the result is rewritten on its way out. A write that
+fails pauses the log for five minutes rather than failing the call.
+
+The **Log page** (`/log`, `lib/core/activity.ts`) reads the vault's own lines
+back, newest first, filtered by token, outcome or a tool or server name, and
+fills in from the database what the log does not hold: each token's name, and
+how a request a call made was answered while PCP still keeps it. Paging goes
+by position (`day:line`), which holds while today's file grows; a page stops
+after 50,000 lines read, matching or not, and carries on from there, so a rare
+filter reads a few days at a time. The page shows what the lines hold and
+nothing else: no arguments, no results, no sites.
+
+**The cleanup** (`lib/core/cleanup/`) removes what PCP keeps only for a while:
+ended sign-ins, unfinished OAuth sign-ins, apps' codes and tokens past their
+expiry (with their grants) and registrations no sign-in used within a day
+(PCP's authorization server), permission requests a week past
+their expiry, kept results past their day, and days of the request log older
+than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
+then on a node-cron task, one per process and kept on `globalThis` like the
+update timer, unref'd, with no overlap: runs from the start, the schedule and
+the owner's **Clean up now** go one at a time. Each part runs on its own, so
+one that fails does not stop the others, and the run's status (when, what
+started it, what it removed, what failed) is a host setting the settings page
+shows. The schedule is five cron fields in the machine's time zone, a preset
+or the owner's own; one that would leave more than a day between two runs is
+refused, because a kept result is promised gone a day after it was made. The
+cleanup needs no credential: it deletes rows and files by their dates and
+reads nothing it deletes. Its settings (`cleanup.config`) and status
+(`cleanup.status`) are the machine's and do not travel with an export.
+
 ## Connecting OAuth servers
 
 An OAuth server needs a client ID for PCP before anyone can sign in, and
@@ -1290,6 +1413,89 @@ Only the owner's browser registers or signs in. A tool refresh or a gateway
 call on a server that is not connected stops at "needs connecting" without
 contacting the registration endpoint, and a proposal from an assistant
 contacts nothing at that address but the JMAP look above.
+
+## Letting assistants sign in: PCP's authorization server
+
+An API token suits a client that takes a header. Custom connectors in
+claude.ai (web, desktop and phone) and ChatGPT's developer mode take a URL
+and sign in with OAuth, nothing else, so PCP is its own OAuth 2.1
+authorization server for `/mcp`, as the MCP authorization spec describes it
+(`lib/core/oauth-server/`, routes in `app/oauth/` and `app/.well-known/`).
+It has to be PCP's own: a relay in front of PCP (a pcp.gg name, where TLS
+ends at the owner's PCP) that issued the tokens could mint one for itself,
+and the relay's promise is that it cannot read the owner's data.
+
+**Discovery.** A request to `/mcp` without a valid token gets a 401 whose
+`WWW-Authenticate` names `resource_metadata` (RFC 9728) at
+`/.well-known/oauth-protected-resource/mcp`. That document names the
+resource, `<public URL>/mcp`, and PCP as its authorization server; PCP's
+metadata (RFC 8414) is at `/.well-known/oauth-authorization-server`. The
+issuer is PCP's public URL (`publicUrlWithoutSession`: the address pinned in
+Settings, or where the request came in), so the same build is
+`http://localhost:3000` at home and `https://alice.pcp.gg` behind the relay.
+The authorization response carries `iss` (RFC 9207).
+
+**Clients.** Two kinds, and neither gets anything before the owner approves:
+
+- A **client ID metadata document**: the client_id is an https URL (Claude
+  uses `https://claude.ai/oauth/mcp-oauth-client-metadata`). PCP reads it
+  when the signed-in owner opens the sign-in page and again when they
+  approve: public addresses only (the pinned transport API endpoints use),
+  no redirect followed, 5 KB at most, JSON. Its `client_id` must be its own
+  URL, it must list its `redirect_uris`, and it must not claim a secret or a
+  key (`token_endpoint_auth_method` `none`). Nothing about it is stored; no
+  one who has not signed in can make PCP fetch anything.
+- **Dynamic registration** (RFC 7591) at `/oauth/register`, for the others.
+  It is open, so it is rate-limited per address, registrations that no
+  sign-in has used are pruned after a day and capped in number, and they
+  live in `oauth_client`, which belongs to the instance, not a vault. A
+  client that does not ask for `none` gets a secret, kept as its SHA-256.
+
+Redirect URIs are https, http to this computer, or an app's private-use
+scheme, and are matched exactly. Until the client and its redirect URI check
+out, the page tells the owner what is wrong and sends nothing back; after
+that, a bad request goes back to the client as an OAuth error.
+
+**The owner's page** (`/oauth/authorize`) needs the owner signed in: a
+locked PCP sends them to `/login`, which goes on to the sign-in page and
+nowhere else (`lib/server/return-path.ts`). It shows the name the app gives
+and where it really comes from (its document's host, or "registered
+itself"), where PCP sends them back to, and the choices a new API token has:
+its name, its servers, and the options that add tools. Allowing it is
+`confirmOwner` (password or Touch ID), as making a token is, and the request
+is checked again on the server. It makes an API token with
+`oauth_client_id` set and no `pcp_…` value (an empty grant, as a revoked
+token has), so tool levels, permission requests, memories, web fetch sites,
+kept results and the request log, which all hang off the token, work as for
+any other. When this client had a live token before, the owner can give it
+that one instead; its earlier sign-ins end.
+
+**Credentials** (`oauth_credential`, `tokens.ts`). The approval wraps the
+DEK, which the owner's session unwrapped, under a new authorization code: a
+grant of kind `oauth_code`, like an API token's, with only the SHA-256 kept.
+The code lives two minutes and is bound to the client, the redirect URI and
+the PKCE challenge (S256 only, required). The token endpoint unwraps the DEK
+with the code and wraps it again under an access token (`oauth_access`, an
+hour) and a refresh token (`oauth_refresh`, thirty days), and spends the
+code. A refresh does the same with the refresh token, which is replaced at
+every use. So at every moment the DEK is wrapped only under values an
+assistant holds; the database has hashes and ciphertext, and the vault is
+no more readable without a credential than before.
+
+A code or refresh token works once: a second request with it loses the race
+(`claim` marks it used before anything is issued). A spent one keeps its row,
+without a grant, until it would have expired, and presenting it again ends
+every sign-in of its token, as OAuth 2.1 advises for a refresh token that may
+have been stolen. Any mismatch at the code exchange (verifier, redirect URI,
+client, expiry) spends the code too, so it gets one try.
+
+**Revoking.** The owner's Revoke, Delete, "revoke every token" on signing
+out everywhere, and recovery with revoking tokens all go through
+`endOAuthSignIns`, which deletes the credentials' grants (they hang off the
+grant, so deleting the token row alone would leave copies of the key). An app
+can revoke itself at `/oauth/revoke` (RFC 7009): its refresh token stands for
+the sign-in and revokes the token, an access token only itself. `/mcp`
+checks the token on every request, so a revoked one stops at once.
 
 ## The gateway's tools
 
@@ -1352,7 +1558,8 @@ the result's id and length. `read_result` decrypts it and returns one slice,
 for the token whose call produced it only; another token's, another vault's
 or an expired id reads as not found. A token keeps at most 300 results and
 50 million characters and bytes together, its oldest going first, and
-expired ones are pruned at boot. A permission request's stored outcome keeps
+expired ones are removed by the cleanup (see "Cleanup and the
+log"). A permission request's stored outcome keeps
 the notice when its text is shortened, so `check_permission` names the
 result too. Mail bodies and attachments use the same store from inside the
 mail tools. Kept results are not part of an export, and nothing kept is
@@ -1419,6 +1626,21 @@ owner answers on that page, and only there (the header's bell lists every
 request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
+
+"Allow for" (15 minutes, an hour or eight hours, `ALLOW_FOR_MINUTES`) writes
+no level: it leaves an allowance (`lib/core/allowances.ts`,
+`api_token_tool_allowance` and `api_token_site_allowance`), the token, the
+tool or site, and when it ends. It is read only where the levels come out
+at "ask" (`loadGatewayServers` for tools, which `call_tool` and run_code
+both go through; `resolveFetchAccess` for sites, which web fetch and the
+browser's page gate both go through) and lifts that to "allowed" until it
+ends. It never lifts a block, and when it ends the levels decide as they
+were, so a token's own "ask" over an "allowed" for all tokens asks again.
+The gateway has no sessions and nothing a client sends names a
+conversation, so a time is what "for now" can mean. The token's page lists
+them, and the owner can end one early; copying access removes the target's,
+cleanup removes the ended ones, and an export carries none (like kept
+results, they belong to the tokens a restore replaces).
 
 Nothing can wake an assistant from outside its conversation: an MCP server
 cannot start a turn, and an answer on PCP's page reaches no app. The link

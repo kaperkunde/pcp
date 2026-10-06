@@ -21,7 +21,8 @@ things it defends against, and the things it does not:
 **Someone with a copy of the disk or the database** sees AES-256-GCM
 ciphertext and SHA-256 hashes. The vault's data key is stored only wrapped
 under keys derived from your password (scrypt, 64 MiB), the recovery key, a
-session cookie or an API token — none of which are on the disk. The browser's
+session cookie, an API token or what an app that signed in holds (its access
+and refresh tokens) — none of which are on the disk. The browser's
 sign-ins and kept results are in the vault too, encrypted the same way. See
 [ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
 session cookie and the Touch ID key do sit in the app's folder, but encrypted
@@ -130,14 +131,14 @@ in your vault, encrypted, and shared by every token that reaches the
 browser; **Forget all sites** signs it out of everything.
 
 **Someone with your session cookie but not your password** can use PCP as you
-while the session lasts (30 days from sign-in). They cannot make an API token,
-a new recovery key, a Touch ID key or an export, because each asks for the
-password again, so they cannot keep a way in once the session ends. **Sign out
+while the session lasts (30 days from sign-in). They cannot make an API token
+(nor let an app sign in, which makes one), a new recovery key, a Touch ID key
+or an export, because each asks for the password again, so they cannot keep a way in once the session ends. **Sign out
 everywhere** (Settings) ends every session and can revoke every API token with
 it; recovery can do the same. Rotate any secret they could have seen.
 
-**Touch ID in the Mac app** unlocks PCP, and confirms a new API token, an
-export or a restore, with your fingerprint. It is a key of its own that PCP
+**Touch ID in the Mac app** unlocks PCP, and confirms a new API token (an
+app's sign-in included), an export or a restore, with your fingerprint. It is a key of its own that PCP
 makes once you have typed your password, not your password. A release built
 with PCP's provisioning profile keeps it in a keychain item that macOS itself
 opens only for your fingerprint, on this Mac only; otherwise the app keeps it
@@ -149,6 +150,16 @@ make a recovery key or set Touch ID up again; those take the password, so
 someone with your finger and not your password cannot lock you out.
 Recovering with the recovery key, signing out everywhere and a restore turn
 it off.
+
+**An app that signs in with OAuth** (a claude.ai connector, ChatGPT) gets an
+API token like any other, and only after you approve it on PCP's own page
+with your password or Touch ID; PCP is its own authorization server, so no
+relay in front of it can issue one. The page shows where the app really
+comes from and where PCP sends you back to; anyone can register an app and
+call it "Claude", so allow a sign-in only when you just started one. A
+stolen access token works for at most an hour. A refresh token works once;
+if a copy is used after the app has used it, PCP ends that app's sign-ins.
+Revoking the token under API tokens signs the app out.
 
 **Password guessing** is rate-limited: 10 wrong passwords per 15 minutes per
 address on the sign-in page and per session inside PCP, 60 in all. A right
@@ -311,12 +322,14 @@ Not defended against:
   data; that is the design.
 - The request log (`logs/*.jsonl` in the data directory) records which tools
   were called, by which token, and whether they worked, never their
-  arguments or results.
+  arguments or results. The Log page shows it to the signed-in owner, and the
+  cleanup deletes the days older than the owner keeps (Settings → Cleanup, 90
+  by default).
 - An answer too long to pass on in one piece (a large API response, a long
   email), and a file or value handed back as a handle (an attachment, an
   image), is kept for a day: encrypted under the vault's key, readable and
-  usable only by the token that asked, and deleted once it has expired (at the
-  next start, or when that token keeps another). A handle in a later call's
+  usable only by the token that asked, and deleted once it has expired (by the
+  cleanup, which runs at least once a day, or when that token keeps another). A handle in a later call's
   arguments is replaced only with that token's own results; the permission
   page shows what each handle is (name, type, size), never its content, and
   the request log records neither.

@@ -233,6 +233,15 @@ checkout PCP never pulls, builds or restarts itself; only the installer's
 daily update (`PCP_AUTO_UPDATE=1`, above) does that for a container, and the
 page says when it is on.
 
+### Cleanup
+
+PCP removes what it keeps only for a while (ended sign-ins, apps' expired
+sign-in tokens, results kept for a day, old permission requests, days of the log older than you keep) when it
+starts and then every hour. **Settings → Cleanup** changes when it runs (a
+preset, or five cron fields of your own, at least once a day), how many days
+of the log it keeps (90 unless you choose), shows what the last run removed,
+and cleans up at once with **Clean up now**.
+
 ## Use it
 
 1. **Secrets.** Add the API keys and personal access tokens your servers
@@ -291,8 +300,9 @@ page says when it is on.
    at once, or copies all of it from another token. Tick **All tokens** beside a
    level to make it the one every token follows; a token's own level still wins
    over it.
-6. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
-   bearer token. For Claude Code:
+6. **Connect an assistant** to `https://<your-pcp>/mcp`, in one of two ways.
+
+   **With a token.** Give it the token as a bearer token. For Claude Code:
 
    ```bash
    claude mcp add --transport http pcp https://<your-pcp>/mcp \
@@ -301,6 +311,20 @@ page says when it is on.
 
    Any client that speaks MCP over Streamable HTTP with a static bearer token
    works the same way.
+
+   **By signing in.** Apps that take only a URL, such as custom connectors in
+   claude.ai (on the web, the desktop and the phone) and ChatGPT's developer
+   mode, sign in with OAuth at PCP itself: add `https://<your-pcp>/mcp` as a
+   connector, and the app sends you to PCP's own page. There you unlock PCP
+   if it is locked, see which app asks and where PCP sends you back to,
+   choose what its token may reach as for a new token, and confirm with your
+   password (or Touch ID). The app gets a token of its own, listed under API
+   tokens as signed in from that app, with its own levels, memories and
+   request log, and revoking it there signs the app out. If the app signs in
+   again later, you can give it the token it had. The app must reach PCP at a
+   public https address (a pcp.gg name, or your own with HTTPS), and that
+   address is PCP's public address under Settings; claude.ai identifies
+   itself with its own metadata document, other apps register themselves.
 
 The assistant then sees a short description of the servers behind the token
 and these tools:
@@ -328,6 +352,11 @@ described further down:
 | `web_fetch`       | **fetch web pages**                             | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.              |
 | `run_code`        | **run code that calls its tools**               | Runs a program that calls the token's tools and works on their answers inside PCP.                                                         |
 
+The **Log** page lists what assistants did with their tokens: every call,
+by token, tool and server, how long it took and whether it was done, failed
+or asked you (with how you answered). Never what they sent or what came back.
+Filter it by token, outcome or name; each token's page links to its own.
+
 A shortened answer (a JSON preview, a long text cut off, a long email) ends
 with a result id. PCP keeps the whole of it, encrypted, for a day, for the
 token that asked, and `read_result` reads it from any offset or from the
@@ -350,7 +379,11 @@ assistant ends its reply with a link to the request in PCP. Answer there,
 tell it you have, and it carries on. The bell at the top of every page in
 PCP shows how many requests are waiting and lists them, so you can answer
 one without the link. **Allow once** runs that one call, **Always allow** and
-**Block** also decide the calls after it, and **Not now** runs nothing. A
+**Block** also decide the calls after it, **Allow for** (15 minutes, an hour or
+eight hours) lets the calls after it run without asking until that time is up,
+and **Not now** runs nothing. What you allowed for a while is listed on the
+token's page under **Allowed for now**, where **End now** takes it back; it
+changes none of the token's settings and never lifts a block. A
 server, API or mail account an assistant proposes is only added once you
 agree; an OAuth one is then connected from a link to its page in PCP, where
 PCP registers itself with the provider if the provider lets apps do that.
@@ -430,8 +463,8 @@ requests too. What it may do is on the token's page:
   decides every request there, whatever the method. You can add a site before
   any assistant asks for it, and remove one.
 
-A request that asks you offers **Allow once**, **Always allow this site**,
-**Block this site** and **Not now**. A site is its host: `example.com` and
+A request that asks you offers **Allow once**, **Allow this site for** a
+while, **Always allow this site**, **Block this site** and **Not now**. A site is its host: `example.com` and
 `www.example.com` are two sites, and a redirect from one to the other is
 reported to the assistant rather than followed, so you decide the second one
 too. Every line, method or site, has an **All tokens** box like the tools do.
@@ -458,8 +491,8 @@ Each call is decided as if the assistant had made it with `call_tool`: an
 allowed tool runs, a blocked one is an error the program sees, and one that
 asks you first stops the program at that call (the calls before it have run),
 with the usual request for you to answer; for the program to make that call
-itself next time, choose **Always allow**. Every call is in the request log
-under `run_code`. A program has no network, no files, no timers and none of
+itself next time, choose **Always allow**, or **Allow for** while that lasts. Every call is in the request log
+under `run_code`, and on the **Log** page. A program has no network, no files, no timers and none of
 your secrets, and stops after 3 minutes, 15 seconds of computing, 128 MB of
 memory or 100 calls (five of them at a time).
 
@@ -497,8 +530,9 @@ page downloads it, about 200 MB, into PCP's data folder; outside the app,
 `PCP_BROWSER_EXECUTABLE` can point at a Chromium or Chrome already installed.
 Which sites a token opens follows the same lines as web fetch, on the token's
 page (as **Browser sites** for a token without web fetch): a site it has not
-opened before asks you, and **Allow once** lets that tab open the site's pages
-while it is open. When you allow a `navigate` call itself, you have seen the
+opened before asks you, **Allow once** lets that tab open the site's pages
+while it is open, and **Allow this site for** lets every tab of the token open
+them for that long. When you allow a `navigate` call itself, you have seen the
 address, so it is not asked about again. Private addresses and PCP's own address
 work as for web fetch. Each token sees and drives only its own tabs (the ones
 it opened and the ones you hand it), not another token's or yours, and leaves
@@ -521,7 +555,8 @@ gives it back.
 The short version: everything sensitive is AES-256-GCM ciphertext under a
 per-vault data key, and that key is stored only wrapped under keys derived from
 credentials the server does not keep — your password (scrypt), a session cookie,
-an API token, the recovery key or the Mac app's Touch ID key (HKDF). A request
+an API token, what an app that signed in holds (its access and refresh tokens),
+the recovery key or the Mac app's Touch ID key (HKDF). A request
 that presents one of those unwraps the key for its own duration and drops it.
 Someone with the disk has ciphertext and hashes.
 [ARCHITECTURE.md](ARCHITECTURE.md) has the full model;
@@ -533,7 +568,8 @@ Consequences worth knowing:
   working. Using the recovery key signs every browser out, turns Touch ID off
   and can revoke every API token.
 - A stolen session cannot make an API token or a recovery key: both ask for
-  the password again (a token, in the Mac app, takes Touch ID instead).
+  the password again (a token, in the Mac app, takes Touch ID instead). Letting
+  an app sign in makes a token, so it asks too.
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
 - An export is the encrypted vault as it is, under an export password of

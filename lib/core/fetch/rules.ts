@@ -33,6 +33,11 @@ export type FetchRuleSet = {
   /** null: no line, so private addresses stay blocked. */
   ownPrivate: ToolAccess | null
   sharedPrivate: ToolAccess | null
+  /**
+   * Sites the owner allowed the token for a while (lib/core/allowances.ts),
+   * to when (ms): they lift "ask" to "allowed" until then, and no further.
+   */
+  allowedSites: Map<string, number>
 }
 
 export type FetchDecision = {
@@ -54,6 +59,7 @@ export function emptyRules(): FetchRuleSet {
     sharedSites: new Map(),
     ownPrivate: null,
     sharedPrivate: null,
+    allowedSites: new Map(),
   }
 }
 
@@ -148,6 +154,20 @@ function siteAccess(rules: FetchRuleSet, host: string): ToolAccess | null {
 }
 
 export function resolveFetchAccess(
+  rules: FetchRuleSet,
+  host: string,
+  group: FetchMethodGroup,
+  now = Date.now(),
+): FetchDecision {
+  const decision = resolveLevel(rules, host, group)
+  const until = rules.allowedSites.get(host)
+
+  return decision.access === "ask" && until !== undefined && until > now
+    ? { access: "allowed", by: "site" }
+    : decision
+}
+
+function resolveLevel(
   rules: FetchRuleSet,
   host: string,
   group: FetchMethodGroup,

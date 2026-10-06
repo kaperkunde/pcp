@@ -1,11 +1,13 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { listTokenAllowances } from "./allowances"
 import { createApiToken, resolveApiToken, updateApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import type { FetchArgs } from "./fetch/request"
 import { prepareFetch } from "./fetch/request"
+import { resolveFetchAccess } from "./fetch/rules"
 import { buildInstructions } from "./gateway"
 import {
   decidePermission,
@@ -21,6 +23,7 @@ import {
   addFetchSite,
   decideFetch,
   listFetchRules,
+  loadFetchRules,
   recordFetch,
   removeFetchSite,
   privateAllowedFor,
@@ -460,6 +463,7 @@ describe("the owner's answer to a request", () => {
     })
     expect(view?.decisions.map((decision) => decision.label)).toEqual([
       "Allow once",
+      "Allow this site for",
       "Always allow this site",
       "Block this site",
       "Not now",
@@ -478,6 +482,63 @@ describe("the owner's answer to a request", () => {
     expect(
       (await decideFetch(scope, get("https://example.com/other"))).access,
     ).toBe("allowed")
+  })
+
+  it("Allow this site for runs it once and lets the site through for that long, changing no level", async () => {
+    const { ctx, scope, tokenId, other } = await setup()
+    const { fetched, executor } = stub()
+    await setFetchMethod(ctx, tokenId, "DELETE", "blocked")
+    const { id } = await ask(scope, get("https://example.com/news"))
+
+    const ran = await decidePermission(
+      ctx,
+      id,
+      "allow_for",
+      { publicUrl: PUBLIC_URL, minutes: 15 },
+      executor,
+    )
+    expect(textOf(ran)).toBe("fetched https://example.com/news")
+    expect(fetched).toHaveLength(1)
+    // The site keeps following the method settings: the allowance is not a level.
+    expect((await sites(ctx, tokenId))["example.com"]?.level).toBe("default")
+    expect(await listTokenAllowances(ctx, tokenId)).toMatchObject([
+      { kind: "site", host: "example.com" },
+    ])
+
+    // Every method that would ask goes ahead; a blocked one stays blocked.
+    expect(
+      (await decideFetch(scope, get("https://example.com/other"))).access,
+    ).toBe("allowed")
+    expect(
+      (
+        await decideFetch(
+          scope,
+          get("https://example.com/form", { method: "POST" }),
+        )
+      ).access,
+    ).toBe("allowed")
+    expect(
+      (
+        await decideFetch(
+          scope,
+          get("https://example.com/item", { method: "DELETE" }),
+        )
+      ).access,
+    ).toBe("blocked")
+    // Only for this token, and only for this site.
+    expect(
+      (await decideFetch(other, get("https://example.com/news"))).access,
+    ).toBe("ask")
+    expect(
+      (await decideFetch(scope, get("https://www.example.com/"))).access,
+    ).toBe("ask")
+
+    // Once the time is up, it asks again.
+    const rules = await loadFetchRules(ctx.vaultId, tokenId)
+    expect(
+      resolveFetchAccess(rules, "example.com", "GET", Date.now() + 16 * 60_000)
+        .access,
+    ).toBe("ask")
   })
 
   it("warns about a request that can change things, and Block this site runs nothing", async () => {

@@ -1,18 +1,24 @@
 import http from "node:http"
 import https from "node:https"
-import type { AddressInfo } from "node:net"
+import type { AddressInfo, Socket } from "node:net"
+import tls from "node:tls"
 
+import { normalizeServerName, peekClientHello } from "./client-hello"
 import { proxyRequest, proxyUpgrade, type ProxyTarget } from "./proxy"
 import type { Certificate, ChallengeStore } from "./tls"
 
 /**
  * The listeners PCP opens itself when HTTPS is on: plain HTTP (port 80) for
- * Let's Encrypt's challenge and a redirect, and HTTPS (port 443) with the
- * certificate. Both forward to the app on loopback (proxy.ts). Nothing here
- * runs unless the owner turned HTTPS on.
+ * Let's Encrypt's HTTP-01 challenge and a redirect, and HTTPS (port 443)
+ * with the certificate and the TLS-ALPN-01 challenge. Both forward to the
+ * app on loopback (proxy.ts). Nothing here runs unless the owner turned
+ * HTTPS on.
  */
 
 const CHALLENGE_PREFIX = "/.well-known/acme-challenge/"
+
+/** The protocol Let's Encrypt offers, and only it, to validate TLS-ALPN-01. */
+export const ACME_TLS_PROTOCOL = "acme-tls/1"
 
 export type ListenerStatus = {
   port: number
@@ -62,6 +68,14 @@ export function listenError(port: number, error: unknown): string {
 export class Edge {
   private httpServer: http.Server | null = null
   private httpsServer: https.Server | null = null
+  /**
+   * Answers TLS-ALPN-01 validations with the challenge certificate. It
+   * never listens: port 443 hands it the connections that ask for
+   * `acme-tls/1` at a name with a challenge waiting.
+   */
+  private readonly challengeServer: tls.Server
+  /** Every connection port 443 took, so stop() can close them all. */
+  private readonly sockets = new Set<Socket>()
   private certificate: Certificate | null = null
   private domain: string | null = null
   readonly status: EdgeStatus
@@ -72,18 +86,61 @@ export class Edge {
       challenges: ChallengeStore
       httpPort: number
       httpsPort: number
+      /**
+       * The address to listen on: every interface when unset, as a
+       * router's forward needs; 127.0.0.1 when only the pcp.gg connector
+       * (pcpgg/connector.ts) reaches the listeners.
+       */
+      host?: string
     },
   ) {
     this.status = {
       http: { port: options.httpPort, listening: false },
       https: { port: options.httpsPort, listening: false },
     }
+    this.challengeServer = tls.createServer({
+      ALPNProtocols: [ACME_TLS_PROTOCOL],
+      handshakeTimeout: 10_000,
+      SNICallback: (name, done) => {
+        const answer = this.options.challenges.tlsAlpn.get(
+          normalizeServerName(name) ?? "",
+        )
+        done(null, answer ? tls.createSecureContext(answer) : undefined)
+      },
+    })
+    // RFC 8737: the handshake is the whole answer; nothing else is said.
+    this.challengeServer.on("secureConnection", (socket) => socket.end())
+    this.challengeServer.on("tlsClientError", (_error, socket) =>
+      socket.destroy(),
+    )
   }
 
-  /** Opens port 80 (if not open yet) for the name. */
+  get host(): string | undefined {
+    return this.options.host
+  }
+
+  /**
+   * Opens ports 80 and 443 (those not open yet) for the name. Port 443 opens
+   * before there is a certificate, for the TLS-ALPN-01 challenge; until one
+   * arrives, every other handshake there fails.
+   */
   async start(domain: string): Promise<void> {
     this.domain = domain
+    await Promise.all([this.openHttp(), this.openHttps()])
+  }
 
+  /** Serves `certificate` on port 443, opening it if it is not open yet. */
+  async useCertificate(certificate: Certificate): Promise<void> {
+    this.certificate = certificate
+    // New connections get the new certificate, no restart.
+    this.httpsServer?.setSecureContext({
+      key: certificate.key,
+      cert: certificate.cert,
+    })
+    await this.openHttps()
+  }
+
+  private async openHttp(): Promise<void> {
     if (this.httpServer) {
       return
     }
@@ -100,31 +157,72 @@ export class Edge {
     }
   }
 
-  /** Serves `certificate` on port 443, opening it the first time. */
-  async useCertificate(certificate: Certificate): Promise<void> {
-    this.certificate = certificate
-
+  private async openHttps(): Promise<void> {
     if (this.httpsServer) {
-      // A renewal: new connections get the new certificate, no restart.
-      this.httpsServer.setSecureContext({
-        key: certificate.key,
-        cert: certificate.cert,
-      })
       return
     }
 
+    const certificate = this.certificate
     const server = https.createServer(
-      { key: certificate.key, cert: certificate.cert },
+      certificate ? { key: certificate.key, cert: certificate.cert } : {},
       (req, res) => proxyRequest(req, res, this.options.target, "https"),
     )
     server.on("upgrade", (req, socket, head) =>
       proxyUpgrade(req, socket, head, this.options.target, "https"),
+    )
+
+    // The TLS server starts its handshake from its "connection" listener.
+    // Each connection passes through route() first, which hands it on to
+    // that handshake or to the challenge server.
+    const handshakes = server.listeners("connection") as ((
+      socket: Socket,
+    ) => void)[]
+    server.removeAllListeners("connection")
+    server.on("connection", (socket: Socket) =>
+      this.route(socket, (passed) => {
+        for (const handshake of handshakes) handshake.call(server, passed)
+      }),
     )
     this.httpsServer = server
 
     if (!(await this.listen(server, this.status.https))) {
       this.httpsServer = null
     }
+  }
+
+  /**
+   * Sends Let's Encrypt's TLS-ALPN-01 validation to the challenge server and
+   * every other connection to the HTTPS server. Only while a challenge is
+   * waiting is the ClientHello read first; otherwise a connection goes
+   * straight on.
+   */
+  private route(socket: Socket, handshake: (socket: Socket) => void): void {
+    this.sockets.add(socket)
+    socket.once("close", () => this.sockets.delete(socket))
+
+    if (this.options.challenges.tlsAlpn.size === 0) {
+      handshake(socket)
+      return
+    }
+
+    peekClientHello(socket).then(
+      ({ result, head }) => {
+        socket.unshift(head)
+        const validation =
+          result.status === "done" &&
+          result.serverName !== null &&
+          result.protocols.length === 1 &&
+          result.protocols[0] === ACME_TLS_PROTOCOL &&
+          this.options.challenges.tlsAlpn.has(result.serverName)
+
+        if (validation) {
+          this.challengeServer.emit("connection", socket)
+        } else {
+          handshake(socket)
+        }
+      },
+      () => socket.destroy(),
+    )
   }
 
   async stop(): Promise<void> {
@@ -139,6 +237,10 @@ export class Edge {
 
             server.close(() => resolve())
             server.closeAllConnections()
+
+            if (server === this.httpsServer) {
+              for (const socket of this.sockets) socket.destroy()
+            }
           }),
       ),
     )
@@ -161,7 +263,7 @@ export class Edge {
     const url = req.url ?? "/"
 
     if (url.startsWith(CHALLENGE_PREFIX)) {
-      const answer = this.options.challenges.get(
+      const answer = this.options.challenges.http.get(
         url.slice(CHALLENGE_PREFIX.length),
       )
       res.writeHead(answer ? 200 : 404, {
@@ -195,7 +297,7 @@ export class Edge {
       }
 
       server.once("error", failed)
-      server.listen(status.port, () => {
+      server.listen({ port: status.port, host: this.options.host }, () => {
         server.off("error", failed)
         status.listening = true
         delete status.error

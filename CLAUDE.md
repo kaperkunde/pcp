@@ -124,6 +124,15 @@ so in the summary; the bump itself waits for the request.
   and `mail/accounts.ts` (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
   never the content.
+- The request log (`lib/core/request-log.ts`) is a token's calls by name:
+  tool, server, upstream tool, time, outcome, and the permission request an
+  ask made. Never arguments, results, sites or a secret; the Log page
+  (`lib/core/activity.ts`) reads only the vault's own lines. A new way a call
+  can ask the owner calls `noteOwnerAsked`. The cleanup
+  (`lib/core/cleanup/`) deletes rows and log days by their dates, needs no
+  credential and reads nothing it deletes; its schedule is refused if it
+  leaves more than a day between runs. Anything new that PCP keeps only for
+  a while is removed by a part there, with a test.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.
@@ -174,14 +183,34 @@ so in the summary; the bump itself waits for the request.
   only by the owner's click (`browser/install.ts`), only from the addresses
   Playwright pins for that version, in PCP's process: never with a child
   process, which the desktop app's fuses forbid.
+- PCP's own authorization server (`lib/core/oauth-server/`), for apps that
+  sign in to `/mcp` with a URL alone (claude.ai's connectors, ChatGPT), is
+  PCP's and never a relay's: whoever issues the tokens could mint one for
+  itself. Every code, access token and refresh token wraps the vault key in
+  a grant of its own and is stored as a hash, like an API token; the first
+  is made only from the owner's session after `confirmOwner`, on PCP's page
+  (`app/oauth/authorize/`), and what it makes is an API token
+  (`oauth_client_id` set, empty grant), so everything keyed on tokens works
+  unchanged. PKCE is S256 and required, redirect URIs match exactly, codes
+  and refresh tokens work once (a second use ends the token's sign-ins), and
+  nothing goes back to a client before its redirect URI checked out. A
+  client's metadata document is read only for a signed-in owner, from public
+  addresses, with no redirect. Anything that revokes or deletes a token ends
+  its sign-ins through `endOAuthSignIns`, whose grants would otherwise
+  outlive the token row. A new grant type, client kind or endpoint gets a
+  test in `oauth-server.test.ts`.
 - A level can be a token's own or for all tokens (tools in
   `vault_tool_access`, web fetch in `web_fetch_rule` with scope `all`), and
   the token's own always wins. An owner's answer to a request writes the
-  token's own level.
+  token's own level. "Allow for" (`lib/core/allowances.ts`) is not a level:
+  it is read only where the levels come out at "ask", lifts that to allowed
+  until it ends, never lifts a block, and is not exported.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth
-  (redirects and PCP's client metadata document), the health check (which, in
+  (redirects and PCP's client metadata document), PCP's own authorization
+  server (`app/oauth/token`, `register`, `revoke`, and the discovery
+  documents under `app/.well-known/`), the health check (which, in
   the desktop app only, also carries the version and the owner's install
   request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
@@ -206,16 +235,22 @@ so in the summary; the bump itself waits for the request.
   migration that adds a column fails `pnpm typecheck` in
   `lib/core/backup-format.ts` until the format carries it, with the column's
   default so older files still restore.
-- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS) belong to
-  the machine, are read with no credential, and are stored unencrypted. Never
-  copy anything from the vault into one. `lib/core/network/` starts nothing
-  (timer, listener, request) while both features are off.
+- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS, pcp.gg)
+  belong to the machine, are read with no credential, and are stored
+  unencrypted. Never copy anything from the vault into one, and never add the
+  pcp.gg key to an export (`EXPORTED_HOST_KEYS`). `lib/core/network/` starts
+  nothing (timer, listener, request, connection) while all three are off.
+- `lib/core/network/pcpgg/{frames,mux,control}.ts` are copies of pcp.gg's
+  `tunnel/protocol/` (kaperkunde/pcp-gg) and speak its wire protocol: change
+  them only together with pcp.gg, keeping `PROTOCOL_VERSION`. `test-relay/`
+  is pcp.gg's relay for tests; PCP never runs it.
 - The Touch ID key (`lib/core/device-keys.ts`) is a credential the Mac app
   keeps and hands to PCP's page only after Touch ID. It is made only with
   the typed password (Settings, or the box on the sign-in page), a vault has
   at most one, an export never carries it, and recovery, signing out
   everywhere and a restore remove it. It stands in for the password to
-  unlock and in `confirmOwner` (a new API token, an export, a restore),
+  unlock and in `confirmOwner` (a new API token or an app's sign-in, an
+  export, a restore),
   never for a new password, a new recovery key or another Touch ID key:
   only the password and the recovery key decide who gets in. A new place
   that accepts it goes through `confirmOwner`, with a test.

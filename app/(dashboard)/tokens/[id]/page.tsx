@@ -4,6 +4,7 @@ import { notFound } from "next/navigation"
 import { PageHeader } from "@/components/page-header"
 import { TokenDetail } from "@/components/token-detail"
 import { ButtonLink } from "@/components/ui/button"
+import { listTokenAllowances } from "@/lib/core/allowances"
 import { getApiToken, listApiTokens } from "@/lib/core/api-tokens"
 import { isPcpError } from "@/lib/core/errors"
 import { listOpenPermissions } from "@/lib/core/permissions"
@@ -36,11 +37,12 @@ export default async function TokenPage({
   }
 
   const publicUrl = await publicUrlFor(ctx)
-  const [servers, access, tokens, waiting] = await Promise.all([
+  const [servers, access, tokens, waiting, allowances] = await Promise.all([
     listServers(ctx),
     listTokenToolAccess(ctx, id),
     listApiTokens(ctx),
     listOpenPermissions(ctx, id, publicUrl),
+    listTokenAllowances(ctx, id),
   ])
   // The browser follows the token's web fetch sites: a token that reaches
   // it has them, web fetch or not.
@@ -57,17 +59,34 @@ export default async function TokenPage({
     <>
       <PageHeader
         title={token.name}
-        description={`API token ${token.prefix}… Choose which tools an assistant using it may run, which ask you first, and which are blocked.`}
+        description={`${
+          token.oauthClient
+            ? `API token for ${token.oauthClient.name}, which signed in with OAuth.`
+            : `API token ${token.prefix}…`
+        } Choose which tools an assistant using it may run, which ask you first, and which are blocked.`}
         action={
-          <ButtonLink href="/tokens" variant="outline" size="sm">
-            All tokens
-          </ButtonLink>
+          <div className="flex gap-2">
+            <ButtonLink
+              href={`/log?token=${encodeURIComponent(id)}`}
+              variant="outline"
+              size="sm"
+            >
+              Its log
+            </ButtonLink>
+            <ButtonLink href="/tokens" variant="outline" size="sm">
+              All tokens
+            </ButtonLink>
+          </div>
         }
       />
       <TokenDetail
         token={token}
         servers={servers.map(({ id, name, kind }) => ({ id, name, kind }))}
         access={access}
+        allowances={allowances.map((allowance) => ({
+          ...allowance,
+          until: allowance.until.toISOString(),
+        }))}
         otherTokens={tokens
           .filter((other) => other.id !== id)
           .map(({ id, name }) => ({ id, name }))}
