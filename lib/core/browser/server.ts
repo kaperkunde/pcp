@@ -18,13 +18,14 @@ import { browserTools } from "./tools"
 /**
  * The browser's row in the registry: a server of kind "browser", one per
  * vault, added by the owner. Its tools are fixed (tools.ts), so they are
- * written when it is added and whenever it is checked; checking it is
- * finding Chromium on this machine.
+ * written when it is added, when PCP starts (instrumentation.ts: a newer
+ * version may have changed them) and whenever it is checked; checking it
+ * is finding Chromium on this machine.
  */
 
 export const BROWSER_NAME = "Browser"
 export const BROWSER_DESCRIPTION =
-  "A web browser on the machine PCP runs on, shared by assistants: open pages, read them, click, type and fill in forms, keeping its sign-ins between conversations. The owner decides which sites each token opens, and can watch any tab and take it over."
+  "A web browser on the machine PCP runs on, shared by assistants, each with tabs of its own: open pages, read them, click, type and fill in forms, keeping its sign-ins between conversations. The owner decides which sites each token opens, and can watch any tab and take it over."
 
 export async function findBrowserServer(
   ctx: VaultContext,

@@ -162,6 +162,8 @@ test("the tab's page shows it live, and a click there reaches the page as a pers
   )
   await frame.click()
   await replayed
+  // Hand back offers the token whose tab it is.
+  await expect(page.getByLabel("Hand back to")).toHaveValue(tokenId)
   await page.getByRole("button", { name: "Hand back" }).click()
   await expect(page.getByText("Assistants have this tab")).toBeVisible()
 

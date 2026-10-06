@@ -45,12 +45,13 @@ model Vault {
 /// A copy of the vault's data encryption key, wrapped under a key derived
 /// from one credential. `password` and `recovery` grants are the ones a
 /// person types; `session` and `api_token` grants are minted for a browser
-/// cookie or a bearer token. Deleting a grant revokes that credential.
+/// cookie or a bearer token, and a `device` grant for the Mac app's Touch ID
+/// key. Deleting a grant revokes that credential.
 model KeyGrant {
   id      String @id
   vaultId String @map("vault_id")
   vault   Vault  @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  /// password | recovery | session | api_token
+  /// password | recovery | session | api_token | device
   kind    String
   /// SHA-256 of the credential, for grants looked up by it (everything but
   /// password, of which a vault has exactly one).

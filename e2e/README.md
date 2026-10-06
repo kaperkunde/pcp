@@ -2,8 +2,9 @@
 
 Playwright drives the real app (`pnpm dev`) against its own SQLite database
 (`e2e/.state/data`, set through `PCP_DATA_DIR` in `playwright.config.ts`) and
-a fake upstream MCP server that runs inside the test process
-(`e2e/fixtures/upstream.ts`). Nothing leaves the machine.
+a fake upstream that runs inside the test process (`e2e/fixtures/upstream.ts`:
+MCP servers, OAuth, REST APIs, a JMAP mail server, GitHub's release
+address). Nothing leaves the machine.
 
 ## Running
 
@@ -83,10 +84,17 @@ every other project's session.
 
 ## The fake upstream
 
-`startUpstream()` returns an HTTP server with:
+`startUpstream()` (`e2e/fixtures/upstream.ts`) returns an HTTP server with:
 
 - `/mcp` — an MCP server (three tools) that demands `Authorization: Bearer
 <expectedToken>`. Its `echo_auth` tool returns the header it received.
+  It records every tool call in `calls`, which is how the tests assert what
+  reached the upstream. A name added to `lateTools` becomes a tool on both
+  MCP servers from the next request on, for tests of a tool list that
+  changes; `long_text` among them answers with as many characters as it is
+  asked for, ending in THE END, for the answers PCP keeps for
+  `read_result`; `picture` answers JSON with a base64 PNG and `measure` says
+  how long a text it was given is, for handles.
 - `/oauth/mcp` — the same tools behind OAuth, with metadata at
   `/.well-known/oauth-authorization-server`, dynamic registration, an
   `/authorize` that approves at once, and a `/token` endpoint that checks
@@ -100,6 +108,7 @@ every other project's session.
 - `/closed-api/*` — a small API behind that same authorization server, with
   its OpenAPI document (declaring the `oauth2` sign-in) at
   `/closed-api/openapi.json`, for API endpoints that sign in with OAuth.
+  `closedApiRequests` records what reached it.
 - `/open-api/openapi.json` and `/open-api/*` — a REST API that signs in with
   OAuth at the open authorization server above, the one that lets apps
   register themselves: its document declares the flow at `/authorize` and
@@ -110,30 +119,30 @@ every other project's session.
   Basic authentication (`basicUser`). `/basic-api/whoami` answers with the
   Authorization header it got, as an API that echoes a credential would;
   requests are recorded in `basicApiRequests`.
-  `closedApiRequests` records what reached it.
-
-It records every tool call in `calls`, which is how the tests assert what
-reached the upstream. A name added to `lateTools` becomes a tool on both MCP
-servers from the next request on, for tests of a tool list that changes;
-`long_text` among them answers with as many characters as it is asked for,
-ending in THE END, for the answers PCP keeps for `read_result`; `picture` answers JSON with a base64 PNG and `measure` says how long a text it was given is, for handles.
-
-- `/ddns/update` — a dynamic DNS update URL. It records every request in
-  `ddns.updates` and answers with `ddns.status`.
+- `/keyed/openapi.json` and `/keyed/*` — an API whose credential is a key
+  and a secret key, each in its own header (`keyedKeys`). `/keyed/ping`
+  answers with the secret key it got; `keyedRequests` records every
+  request's headers.
 - `/openapi.json` and `/api/*` — a small pet store and its OpenAPI document
   (the server is `${origin}/api`; two operations are there to be left out, one
   needing a cookie and one a file upload). `/api/*` wants the same bearer
   token and records every request in `requests` (method, path, query, headers
   that matter, body). `e2e/fixtures/petstore.yaml` is the same API as a file,
   with a relative server address, for the upload path.
+- `/ddns/update` — a dynamic DNS update URL. It records every request in
+  `ddns.updates` and answers with `ddns.status`.
 - `/releases/latest` — GitHub's latest release for PCP's update check
   (`PCP_RELEASES_URL` points the dev server at it, so `startUpstream({ port:
 E2E_RELEASES_PORT })` listens on a fixed port). It answers
   `releases.latest` (404 while that is null) and records what each request
   carried in `releases.requests`.
 - `/page` — an HTML page for `web_fetch`. Every request to it is recorded in
-  `pageHits`, which stays empty: the server is on 127.0.0.1, and web_fetch
-  only reaches public addresses.
+  `pageHits`, which stays empty until the owner allows private addresses for
+  the token: the server is on 127.0.0.1.
+- `/browser/form`, `/browser/button`, `/browser/cookie` — pages for the
+  browser: a form that greets by name and sets a cookie, a button that fills
+  the page (for a click on the live view), and one that shows the cookie it
+  was sent.
 - `/jmap/*` — a JMAP mail server (`lib/core/mail/fake-jmap.ts`, which the
   unit tests use too): a session at `/jmap/session`, the API at `/jmap/api`
   and downloads, signing in `ada@example.com` with `expectedToken` as the

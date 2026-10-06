@@ -102,7 +102,7 @@ export async function restoreAction(
     await confirmOwner(session, formData)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: session.ctx.vaultId },
+      { into: "vault", ctx: session.ctx },
       { restoreHostSettings },
     )
     restored = true

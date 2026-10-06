@@ -228,7 +228,15 @@ async function runInQuickJs(
 
   /** Why the program stopped when the engine interrupted it or it threw. */
   function failure(thrown: QuickJSHandle): RunResult {
-    const value: unknown = vm.dump(thrown)
+    // Dumping a thrown object runs its getters and toJSON, which are the
+    // program's code: on its CPU budget, so one that never returns is
+    // interrupted rather than holding the process.
+    let value: unknown
+    try {
+      value = inGuest(() => vm.dump(thrown))
+    } catch {
+      value = undefined
+    }
     thrown.dispose()
 
     if (stopped) {
@@ -381,13 +389,14 @@ async function runInQuickJs(
       const state = vm.getPromiseState(promise)
 
       if (state.type === "fulfilled") {
-        const returned: unknown = vm.dump(state.value)
+        // The wrapper returns the program's value as JSON text, or null. Only
+        // a string is read: dumping anything else (a program can replace
+        // JSON.stringify) would run its code outside the CPU budget.
+        const returned =
+          vm.typeof(state.value) === "string" ? vm.getString(state.value) : null
         state.value.dispose()
 
-        return ended({
-          kind: "done",
-          returned: typeof returned === "string" ? returned : null,
-        })
+        return ended({ kind: "done", returned })
       }
 
       if (state.type === "rejected") {

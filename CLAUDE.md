@@ -120,8 +120,8 @@ so in the summary; the bump itself waits for the request.
   `lib/core/tool-results.ts`: text or bytes, encrypted with
   `tool_result:<id>`, readable by the token whose call produced them, gone
   after a day, never logged and never exported. A handle (`{"$result": id}`)
-  in a call's arguments is replaced only in `upstream.ts` and
-  `mail/accounts.ts` (`lib/core/result-handles.ts`), with the token's own
+  in a call's arguments is replaced only in `upstream.ts`, `endpoints.ts`
+  and `mail/accounts.ts` (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
   never the content.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:

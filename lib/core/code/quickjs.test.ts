@@ -174,6 +174,26 @@ describe("how a run ends", () => {
     expect(Date.now() - started).toBeLessThan(5_000)
   })
 
+  it("stops a thrown value whose getter never returns", async () => {
+    const result = await javaScriptExecutor({ cpuMs: 300 })({
+      code: `const e = {}; Object.defineProperty(e, "x", { enumerable: true, get() { for (;;) {} } }); throw e`,
+      bridge: async () => ({ ok: true, value: null }),
+      signal: new AbortController().signal,
+    })
+
+    expect(result.kind).toBe("error")
+  })
+
+  it("reads no value a program made that is not its JSON text", async () => {
+    const result = await javaScriptExecutor({ cpuMs: 300 })({
+      code: `JSON.stringify = () => ({ toJSON() { for (;;) {} } }); return 1`,
+      bridge: async () => ({ ok: true, value: null }),
+      signal: new AbortController().signal,
+    })
+
+    expect(result).toMatchObject({ kind: "done", returned: null })
+  })
+
   it("stops a program that waits on a promise nothing settles", async () => {
     const result = await run(`await new Promise(() => {})`)
 

@@ -35,6 +35,13 @@ export async function register() {
       })
       .catch((error) => console.error("[endpoints] rebuild failed", error))
 
+    // The browser's tools are fixed in the code, so a new version brings
+    // them up to date; and whether Chromium is here can change with it.
+    const { syncAllBrowserTools } = await import("@/lib/core/browser/server")
+    void syncAllBrowserTools().catch((error) =>
+      console.error("[browser] could not update the browser's tools", error),
+    )
+
     // Dynamic DNS and HTTPS, if the owner turned them on: off by default,
     // so nothing listens or runs here for anyone with a proxy of their own.
     const { startNetwork } = await import("@/lib/core/network/runtime")

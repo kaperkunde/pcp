@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState, useTransition } from "react"
 import { FormError } from "@/components/form-status"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Input, Select } from "@/components/ui/input"
 import {
   backTabAction,
   closeTabAction,
@@ -48,11 +48,14 @@ export function BrowserTabView({
   tabId,
   initial,
   mode = "tab",
+  tokens = [],
 }: {
   tabId: string
   initial: TabView
   /** handover: the owner has the tab until they answer the request below. */
   mode?: "tab" | "handover"
+  /** The tokens Hand back can give the tab to (those that reach the browser). */
+  tokens?: Array<{ id: string; name: string }>
 }) {
   const router = useRouter()
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -64,6 +67,13 @@ export function BrowserTabView({
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pending, startTransition] = useTransition()
+  // Hand back offers the token whose tab it was; a tab you opened that no
+  // token had yet waits for you to choose one.
+  const [handTo, setHandTo] = useState(
+    initial.tokenId && tokens.some((token) => token.id === initial.tokenId)
+      ? initial.tokenId
+      : "",
+  )
 
   const queue = useRef<InputEvent[]>([])
   const sending = useRef(false)
@@ -345,21 +355,50 @@ export function BrowserTabView({
                     : holding
                       ? handover
                         ? "What you do here goes to the page. The assistant waits until you answer below."
-                        : "What you do here goes to the page. Assistants wait until you hand it back."
+                        : view.tokenId === null
+                          ? "What you do here goes to the page. No assistant sees this tab until you hand it to one."
+                          : "What you do here goes to the page. The assistant whose tab it is waits until you hand it back."
                       : "You are watching. Take it over to click and type."}
           </span>
         </div>
         <div className="flex flex-wrap gap-2">
           {holding ? (
-            handover ? null : (
-              <Button
-                type="button"
-                size="sm"
-                disabled={pending}
-                onClick={() => act(() => handBackTabAction(tabId), "assistant")}
-              >
-                Hand back
-              </Button>
+            handover ? null : tokens.length === 0 ? (
+              <span className="text-muted-foreground">
+                No token can use the browser yet, so there is no one to hand it
+                to.
+              </span>
+            ) : (
+              <>
+                <Select
+                  aria-label="Hand back to"
+                  className="h-8 w-auto"
+                  value={handTo}
+                  disabled={pending}
+                  onChange={(event) => setHandTo(event.target.value)}
+                >
+                  {handTo === "" ? (
+                    <option value="" disabled>
+                      Choose a token…
+                    </option>
+                  ) : null}
+                  {tokens.map((token) => (
+                    <option key={token.id} value={token.id}>
+                      {token.name}
+                    </option>
+                  ))}
+                </Select>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={pending || handTo === ""}
+                  onClick={() =>
+                    act(() => handBackTabAction(tabId, handTo), "assistant")
+                  }
+                >
+                  Hand back
+                </Button>
+              </>
             )
           ) : (
             <Button

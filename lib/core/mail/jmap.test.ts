@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import { createFakeJmap, type FakeJmap } from "./fake-jmap"
-import { fetchJmapSession, jmapRequest, openJmapBackend } from "./jmap"
+import {
+  fetchJmapSession,
+  implicitKey,
+  jmapRequest,
+  openJmapBackend,
+} from "./jmap"
 import {
   MailAuthError,
   MailRequestError,
@@ -237,6 +242,36 @@ describe("requests", () => {
     ).rejects.toBeInstanceOf(MailTransportError)
   })
 
+  it("keeps an answer the server adds under a call's id apart from the call's own", async () => {
+    // RFC 8621 7.5: a submission's onSuccessUpdateEmail is answered by an
+    // Email/set of the server's, under the submission's call id, after it.
+    api = await startTestApi((_, res) => {
+      res.setHeader("content-type", "application/json")
+      res.end(
+        JSON.stringify({
+          methodResponses: [
+            ["EmailSubmission/set", { created: { send: { id: "s1" } } }, "s"],
+            ["Email/set", { updated: { e9: null } }, "s"],
+            ["error", { type: "serverFail" }, "s"],
+          ],
+        }),
+      )
+    })
+
+    const answers = await jmapRequest(`${api.origin}/api`, basic(), [
+      ["EmailSubmission/set", {}, "s"],
+    ])
+
+    expect(answers.get("s")).toEqual({ created: { send: { id: "s1" } } })
+    expect(answers.get(implicitKey("s", "Email/set"))).toEqual({
+      updated: { e9: null },
+    })
+    // A failure of the server's own call is not the submission failing.
+    expect(answers.get(implicitKey("s", "error"))).toEqual({
+      type: "serverFail",
+    })
+  })
+
   it("says when the server cannot be reached", async () => {
     const { sessionUrl } = await serve()
     await api!.close()
@@ -384,6 +419,72 @@ describe("the mail tools' work", () => {
       text: "Thursday suits me.",
     })
     expect(stored.keywords.$draft).toBeUndefined()
+    // The email it answers is marked answered, as a mail app would.
+    expect(sent.answered).toBe(true)
+    expect(
+      fake.emails.find((email) => email.id === "e1")!.keywords,
+    ).toMatchObject({ $answered: true })
+  })
+
+  it("sends when the server will not move the email to Sent, and says it is left in Drafts", async () => {
+    for (const onSuccessUpdate of ["refuse", "error"] as const) {
+      const { mail, fake } = await backend({ onSuccessUpdate })
+
+      const sent = await mail.sendEmail!({
+        to: [{ name: null, email: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "The engine",
+        text: "Thursday suits me.",
+      })
+
+      expect(fake.sent).toEqual([{ emailId: sent.id, identityId: "ident-1" }])
+      expect(sent.savedTo).toBe("Drafts")
+      // Not a reply: nothing to mark.
+      expect(sent).not.toHaveProperty("answered")
+      await api!.close()
+      api = null
+    }
+  })
+
+  it("says so when the email it answers cannot be marked, and the email still goes", async () => {
+    const fake = createFakeJmap({ authorize: (header) => header === BASIC })
+    api = await startTestApi((request, res) => {
+      // The server refuses only the change that marks the original.
+      if (request.body.includes("keywords/$answered")) {
+        res.setHeader("content-type", "application/json")
+        res.end(
+          JSON.stringify({
+            methodResponses: [
+              ["Email/set", { notUpdated: { e1: { type: "forbidden" } } }, "s"],
+            ],
+          }),
+        )
+        return
+      }
+
+      const answer = fake.handle(request)
+      res.statusCode = answer?.status ?? 404
+      res.setHeader("content-type", answer?.type ?? "text/plain")
+      res.end(answer?.body ?? "")
+    })
+    const session = await fetchJmapSession(
+      `${api.origin}/jmap/session`,
+      basic(),
+    )
+    const mail = openJmapBackend({ ...session, from: null }, basic())
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: "e1",
+    })
+
+    expect(fake.sent).toHaveLength(1)
+    expect(sent).toMatchObject({ savedTo: "Sent", answered: false })
   })
 
   it("uploads each attachment, then sends the email carrying them", async () => {

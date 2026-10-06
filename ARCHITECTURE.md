@@ -13,14 +13,20 @@ app/                 Routes and pages (Next.js App Router)
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
   api/export/…       The export download (a file needs Content-Disposition)
+  api/health/…       The health check; in the desktop app, the version and an install request
+  api/browser/…      A browser tab's live view: its pictures out, the owner's input in
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
   mail/              Mail accounts: JMAP and IMAP/SMTP behind one set of mail tools
+  fetch/             web_fetch: the request, the page, which level applies
+  code/              run_code: QuickJS, the bridge to the tools, the sandbox's socket
+  browser/           The headless Chromium: runtime and gate, proxy, profile, tools, install
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
   updates/           The daily check for a newer release, and what it found
+sandbox/             run_code's sandbox container: the runner, the launcher, the pcp command
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
 desktop/             The Mac and Windows app: Electron around the production build, nothing of PCP in it
@@ -41,10 +47,14 @@ associated data (a ciphertext cannot be moved to another row):
 - OAuth token sets and the clients PCP registered (a `secret` row of kind
   `oauth`, owned by the server that uses it); an OAuth client secret the
   owner gives PCP is one of their own `text` secrets,
-- the PKCE verifier of an authorization in flight (`oauth_state`).
-- a memory's path and text (`memory.ciphertext`, as one JSON value).
+- the PKCE verifier of an authorization in flight (`oauth_state`),
+- a memory's path and text (`memory.ciphertext`, as one JSON value),
 - a tool answer or a file kept for `read_result` and handles
-  (`tool_result.ciphertext`).
+  (`tool_result.ciphertext`),
+- what a request waiting for the owner holds: the call's arguments or the
+  new server's settings, and the outcome (`permission_request`),
+- the browser's sign-ins (`browser_profile`, bound to the vault's id, as
+  there is one per vault).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -83,6 +93,14 @@ Consequences:
   never before a new recovery key, a new password or another Touch ID key:
   only the password and the recovery key decide who gets in. See "Touch ID
   in the Mac app".
+- **Guesses are counted.** The password, the recovery key and an export
+  password may be tried ten times per address (inside a session, per
+  session) and sixty times for the whole instance in fifteen minutes
+  (`lib/server/password-attempts.ts`). A right password gives its count
+  back, so the owner signing in and confirming all day spends none of the
+  tries a guesser is held to. The Touch ID key has a budget of its own,
+  given back the same way: it is no password guess, and must not spend the
+  owner's tries.
 - **Losing every credential loses the data.** There is no back door because
   there is no key to keep one with.
 - Rotating the DEK itself (re-encrypting every row) is not implemented;
@@ -454,7 +472,14 @@ the address or sign-in changes. Redirects are never followed: PCP names
 where the server pointed, for the owner to enter instead. A call is one or
 two POSTs of method calls. Sending uploads each attachment to the upload
 address first, then creates the email in Drafts with the blobs attached and
-submits it in the same request, moving it to Sent when it went.
+submits it in the same request, moving it to Sent when it went. That move is
+the server's own Email/set (`onSuccessUpdateEmail`, RFC 8621 7.5), answered
+under the submission's call id after the submission's answer: `jmapRequest`
+takes a call's answer as the first under its id named after its method, and
+keeps any other apart (`implicitKey`), so the move's answer never reads as
+the submission's and a failed move only means the copy stayed in Drafts. A
+reply then marks the email it answers (`$answered`, `\Answered` over IMAP),
+after the send, and says whether it could.
 
 **IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
@@ -736,8 +761,12 @@ proposed for and called like any server, and a long snapshot is kept for
 owner) and closed after fifteen minutes with no tool call, no input and
 nobody watching. The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
-Chromium runs with one in-memory context: nothing is written to disk. It
-starts without `--enable-automation`, with
+Chromium runs with one in-memory context: no profile is written to disk.
+Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
+private temporary folder of its own, removed once it has closed: its crash
+reporter keeps its database there, and without a folder it can write to
+(a system user with no home, as the Docker image runs as) Chromium can abort
+as it starts. It starts without `--enable-automation`, with
 `--disable-blink-features=AutomationControlled`, a desktop user agent without
 "Headless", the host's locale and time zone and a 1280 by 800 viewport, and
 with service workers blocked (one could answer a navigation without the
@@ -760,11 +789,11 @@ changed on its own since the last save is lost. Counts (sites, cookies,
 size) are kept in the clear for the page. An export carries the row as
 ciphertext; Forget all sites closes the browser unsaved and deletes it.
 
-**Which pages open** (the gate in `runtime.ts`). A tab's main frame loads
+**Which pages open** (the gate in `runtime.ts`). A page's main frame loads
 nothing the gate has not passed: the DevTools protocol pauses each document
 request (redirects included) before it is sent. It passes when the owner
 drives the tab, when the owner allowed the site for this tab, or when the
-web fetch lines of the token that drives the tab give GET to that site
+web fetch lines of the token whose tab it is give GET to that site
 `allowed`; never PCP's own site. Otherwise it is answered with 204, which
 leaves the tab on the page it was on, and the next answer says which site
 was stopped and puts it on the token's page (a line of its own on first
@@ -774,13 +803,18 @@ gated per site. `navigate` and `tabs` decide before anything opens, with
 which `runCall` turns into a `browse` request offering Allow once (the site
 for that tab while it is open), Always allow this site and Block this site
 (the token's site line, as for web fetch) and Not now. A popup becomes a tab
-of the tab that opened it. A token whose `navigate` tool is at ask is asked
-once: the call's request shows the address, and when the owner allows the
-call, `runCall` (told so by `executeCall`) opens the site for that tab as
-Allow once would, with no `browse` request after it. Only `navigate` and
-`tabs` ask about a site, and only for the address in their arguments, so
-the site is always one the owner saw. A blocked site stays blocked, and a
-hand-over during such a call is still asked.
+of the tab that opened it. The gate is the browser's, not a tab's (`Fetch`
+on the browser's own DevTools session, on before the first page exists), so
+it holds a popup from its very first request, before Playwright has
+reported the popup: until then the popup opens only what the tab that
+opened it may open, and is closed instead of opening anything else, or when
+the browser has no room for another tab. A token whose `navigate` tool is
+at ask is asked once: the call's request shows the address, and when the
+owner allows the call, `runCall` (told so by `executeCall`) opens the site
+for that tab as Allow once would, with no `browse` request after it. Only
+`navigate` and `tabs` ask about a site, and only for the address in their
+arguments, so the site is always one the owner saw. A blocked site stays
+blocked, and a hand-over during such a call is still asked.
 
 **Which addresses it reaches** (`proxy.ts`). Every connection goes through
 a forward proxy on 127.0.0.1 (`--proxy-server`, with loopback not
@@ -788,13 +822,16 @@ bypassed; QUIC off and WebRTC kept to the proxy, since UDP would go around
 it). PCP resolves each name, checks every address, and dials the one it
 checked, for pages, redirects, scripts and images alike, as web fetch's
 transport does. Public addresses pass; private ones pass while an open tab
-is driven by a token whose `private` line allows them (the proxy cannot tell
+belongs to a token whose `private` line allows them (the proxy cannot tell
 which tab a connection is for, so this is per browser; tabs the owner opens
 follow the line for all tokens); PCP's own address never. Refusals are
 remembered for half a minute so an answer can say why a page did not open.
 Hosts are never logged.
 
-**What an assistant gets.** A snapshot (Playwright's accessibility tree
+**What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
+`snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
+`select_option`, `scroll`, `wait_for`, `screenshot`, `handle_dialog` and
+`hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
 with refs), the page as Markdown (`htmlToMarkdown`, read from the live
 page), a screenshot of the viewport, and the tab's address, title and the
 link to it in PCP. It acts by ref (click, type, select), by key or by
@@ -802,12 +839,38 @@ scroll. It never gets a cookie or storage, never runs JavaScript, never
 downloads a file. A refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
 
-**The owner's control.** A tab is driven by the assistants or by the owner.
+**Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
+`tokenId`; a popup is its opener's) or that the owner last handed it to,
+and that token alone sees and drives it: `tabs` lists only its own, the current tab a call without one falls on
+is its own, and any tool given another token's tab, or the owner's own, is
+answered as for a tab that does not exist, in the same words, so its
+address and title never reach it. `navigate` naming such a tab opens a new
+one of the token's own, and a `browse` request never names another token's
+tab. So a site the owner allowed once stays with the token whose tab it
+is, and no token reads a page another opened under its own lines. Before a
+tool reads or acts on a page, the page's site is checked against the
+token's lines as they are now (`mayOpen`, as the gate does): a page at a
+site it may no longer open (its line changed since, or the tab's history
+went back to a page the owner opened there) is refused, though the tab can
+still be sent elsewhere or closed. The tabs share one profile, so the
+sign-ins are every token's; the eight tabs are shared too, and a token
+told the browser is full learns only how many are its own.
+
+**The owner's control.** A tab is driven by its assistant or by the owner.
 Take over on the tab's page makes it the owner's, and every browser tool
-refuses it until Hand back; a tab the owner opens starts as theirs.
-`hand_over` makes the tab the owner's and throws `OwnerNeeded` for a
-`browser_handover` request, which shows the assistant's message and the tab
-live; Done (or Not now) gives it back, saves the profile, and is what
+refuses it until Hand back. A tab the owner opens is theirs, seen by no
+token, until they hand it to one. Hand back gives the tab to the token the
+owner picks (`handBackTab`, `giveTab`): one of the vault's tokens that is
+neither revoked nor expired and reaches the browser, checked in the core
+whatever the form sent. The page offers the token whose tab it was first;
+a tab no token had yet waits for a choice. The token gets the tab as its
+own (its lines read again, its current tab), and the site the tab is at
+counts as one the owner allowed for that tab, as Allow once does; handed to
+another token than before, the tab first drops the sites allowed for the
+one before, which were that token's. `hand_over` makes the tab the
+owner's and throws `OwnerNeeded` for a `browser_handover` request, which
+shows the assistant's message and the tab live; Done (or Not now) gives it
+back to the token that handed it over, saves the profile, and is what
 `check_permission` reports. A hand-over nobody answers goes back when its
 request expires.
 
@@ -827,6 +890,12 @@ metadata. Both routes check PCP's origin and the owner's session, as the
 export download does. A WebSocket would answer a little sooner, but needs a
 server of its own around Next; the input's format is the same whatever
 carries it.
+
+**Bounded** (`browser/limits.ts`). Eight tabs per vault, every token's and
+the owner's together; thirty seconds per page load and ten per action; 300
+tool calls per token per ten minutes; four people watching a tab; and the
+owner's input in batches of at most 500 events, 200 batches per session in
+ten seconds.
 
 **Chromium on the machine** (`executable.ts`, `install.ts`).
 `PCP_BROWSER_EXECUTABLE`, then PCP's own install, then Playwright's own
@@ -913,12 +982,12 @@ app keeps and hands over only after Touch ID.
     ID prompt (`systemPreferences.promptTouchID`). A checkout, a fork, or a
     release built without the profile works this way.
 - **How a page reaches it.** The window's preload (`desktop/preload.cjs`)
-  gives PCP's own pages, and only those (plain http on localhost at the
-  app's port), `window.pcpDesktop.touchId`: `status`, `unlock`, `save`,
-  `forget`. The main process (`desktop/touch-id.mjs`) checks again that the
-  call comes from the window's main frame on that address, shows the system
-  prompt with a reason of its own (never text from the page), and returns
-  the key only after Touch ID. The page sends it in a form field
+  gives PCP's own pages, and only those (plain http on localhost),
+  `window.pcpDesktop.touchId`: `status`, `unlock`, `save`, `forget`. The
+  main process (`desktop/touch-id.mjs`) checks again that the call comes
+  from the window's main frame at the app's own address and port, shows the
+  system prompt with a reason of its own (never text from the page), and
+  returns the key only after Touch ID. The page sends it in a form field
   (`deviceKey`) to `touchIdLoginAction` or `confirmOwner`, rate-limited like
   the password but on a budget of its own (a random key is no password
   guess, and must not spend the owner's tries), and keeps it nowhere. An OAuth provider's page in the same
@@ -997,7 +1066,11 @@ adds a column the format does not carry yet.
 by table (not trusting cascades alone), and writes the file's rows in its
 place, parents before children, in chunks that keep under SQLite's variable
 limit; row ids and timestamps are the file's. On a PCP not set up yet the
-transaction first checks that there is no vault, as `setupVault` does. The
+transaction first checks that there is no vault, as `setupVault` does. Into
+a vault that exists, the vault's browser is closed first (`withBrowserClosed`:
+a call in flight finishes, the profile is saved with the owner's key, and no
+browser starts until the rows are written), since a browser left running
+would save its old sign-ins over the restored profile. The
 host's settings (`ddns.config`, `tls.config` and `update.config`, in plain
 text as they are in the database) are in the file and restored only when the
 owner ticks the box, with this machine's network status rows dropped so
@@ -1010,15 +1083,15 @@ with the vault; the action signs them in again when the password they typed
 opens the restored vault (their own export), and otherwise sends them to sign
 in with the exported PCP's password.
 
-**Who may.** The export asks for the owner's password again, as making a
-token does: a copied session cookie may use the vault but not walk off with
-it. The restore, when signed in, asks for it too, so a copied cookie cannot
-replace the owner's vault with one it holds the password to; on the setup
-page there is no password yet, and whoever reaches that page could set up
-instead. Both are rate-limited like password attempts. The download is a
-route handler (an action cannot send a file), so it checks the request's
-origin itself (`lib/server/same-origin.ts`), which Server Actions get built
-in.
+**Who may.** The export asks for the owner's password again (or Touch ID in
+the Mac app: `confirmOwner`), as making a token does: a copied session
+cookie may use the vault but not walk off with it. The restore, when signed
+in, asks for it too, so a copied cookie cannot replace the owner's vault
+with one it holds the password to; on the setup page there is no password
+yet, and whoever reaches that page could set up instead. Both are
+rate-limited like password attempts. The download is a route handler (an
+action cannot send a file), so it checks the request's origin itself
+(`lib/server/same-origin.ts`), which Server Actions get built in.
 
 ## Reaching PCP: dynamic DNS and HTTPS
 
@@ -1078,10 +1151,14 @@ then work unchanged.
 A certificate is renewed once less than a third of its life is left, which
 keeps working as Let's Encrypt shortens lifetimes. The check runs every 30
 minutes, and the new one is swapped in with `setSecureContext`, without a
-restart. A failed request is retried after 1 hour, doubling to at most a day.
-That keeps PCP well inside Let's Encrypt's limits on failed validations;
-"Try again now" skips the wait. A DNS lookup first warns, without blocking,
-when the name does not point at this network. Port 3000 keeps serving plain
+restart. When the first certificate for a name fails, PCP turns HTTPS off
+again and the card says why: what went wrong is usually the router or the
+name, which no retry fixes. Once a name has had a certificate, a failed
+renewal is retried after 1 hour, doubling to at most a day, and the
+header's bell says so on every page until it works. That keeps PCP well
+inside Let's Encrypt's limits on failed validations; "Try again now" skips
+the wait. A DNS lookup first warns, without blocking, when the name does not
+point at this network. Port 3000 keeps serving plain
 HTTP for the local network. In the desktop app the two ports stay 80 and 443
 (macOS and Windows let an ordinary program use them), and they listen on
 every interface even while the app keeps port 3000 to this computer: a
@@ -1261,7 +1338,9 @@ listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
 for a token with the right to manage endpoints, `memory` for a token that
 keeps memories, `web_fetch` for a token that fetches web pages, and
-`run_code` for a token that runs code, all above):
+`run_code` for a token that runs code, all above). A request without a valid
+token is answered 401, and a token makes at most 240 requests a minute, one
+message each (`app/mcp/route.ts`). The tools:
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with
@@ -1303,24 +1382,26 @@ gateway finds a server with no tools. It is a cache of the upstream's
 ### Long answers and kept results
 
 `runCall` (`lib/core/permissions.ts`) shapes an upstream's answer for the
-assistant with `shapeAnswer` (above). When that left something out (a JSON
-preview, a text cut at 60,000 characters), the answer shaped the same way but
-not cut is handed to `lib/core/tool-results.ts`: up to 4 million characters
-are kept in `tool_result`, encrypted under the vault's data key with
-`tool_result:<id>` as associated data, for a day, and a notice after the
-shortened answer gives the result's id and length. `read_result` decrypts it
-and returns one slice, for the token whose call produced it only; another
-token's, another vault's or an expired id reads as not found. A token keeps
-at most 100 results and 50 million characters, its oldest going first, and
-expired ones are removed by the cleanup (see "Cleanup and the log"). A permission request's stored outcome keeps
-the notice when its text is shortened, so `check_permission` names the result
-too. Mail bodies and attachments use the same store from inside the mail
-tools. Kept results are not part of an export, and nothing kept is logged.
+assistant with `shapeAnswerKeeping` (the shaping above, and the handles
+below). When that left something out (a JSON preview, a text cut at 60,000
+characters), the answer shaped the same way but not cut is handed to
+`lib/core/tool-results.ts`: up to 4 million characters are kept in
+`tool_result`, encrypted under the vault's data key with `tool_result:<id>`
+as associated data, for a day, and a notice after the shortened answer gives
+the result's id and length. `read_result` decrypts it and returns one slice,
+for the token whose call produced it only; another token's, another vault's
+or an expired id reads as not found. A token keeps at most 300 results and
+50 million characters and bytes together, its oldest going first, and
+expired ones are removed by the cleanup (see "Cleanup and the
+log"). A permission request's stored outcome keeps
+the notice when its text is shortened, so `check_permission` names the
+result too. Mail bodies and attachments use the same store from inside the
+mail tools. Kept results are not part of an export, and nothing kept is
+logged.
 
 A kept result is a text or a file's bytes (`tool_result.kind`, with `name`
 and any media type), encrypted the same way. A file over 10 MiB is refused
-rather than cut. A token keeps at most 300 results and 50 million
-characters and bytes together.
+rather than cut.
 
 **Handles** move a kept value between tools without the assistant reading it.
 `shapeAnswerKeeping` (`lib/core/answers.ts`) makes them while it shapes an
@@ -1338,10 +1419,12 @@ none.
 
 In arguments, an object of only `$result` (and `as`) is replaced before the
 call is sent (`lib/core/result-handles.ts`, called from `upstream.ts` for MCP
-servers and API endpoints and from `mail/accounts.ts`): a text as its text, a
-file as base64, or the other way with `as`. Only the token's own results
-resolve; an unknown or expired id is refused by name before anything is
-sent, and the gateway checks the ids before it asks the owner. A request
+servers and the browser, from `endpoints.ts` for API endpoints, whose upload
+fields take a file's bytes instead, and from `mail/accounts.ts`, whose
+attachments do too): a text as its text, a file as base64, or the other way
+with `as`. Only the token's own results resolve; an unknown or expired id is
+refused by name before anything is sent, and the gateway checks the ids
+before it asks the owner. A request
 waiting for the owner stores the handle, never the content, and its page
 shows each one's name, type, size and the tool that kept it.
 
@@ -1351,8 +1434,9 @@ Every token has a level per tool (`api_token_tool_access`,
 `lib/core/tool-access.ts`): **allowed**, **blocked**, or, when there is no
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
-instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
-them. The gateway loads the levels by token id.
+instructions, `search_tools`, `list_tools` and `describe_tool`, and
+`call_tool` and `run_code` refuse them. The gateway loads the levels by
+token id.
 
 A tool can also have a level for **all tokens** (`vault_tool_access`, the
 "All tokens" box on a token's page), and a token's own level wins over it:
