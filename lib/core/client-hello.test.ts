@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { clientHello } from "./client-hello"
+import { clientHello, clientSeen } from "./client-hello"
 
 const initialize = {
   jsonrpc: "2.0",
@@ -66,5 +66,51 @@ describe("clientHello", () => {
 
     expect(hello?.client.name).toHaveLength(200)
     expect(Object.keys(hello?.capabilities ?? {})).toHaveLength(40)
+  })
+})
+
+describe("clientSeen", () => {
+  const call = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call" })
+
+  it("describes a token's client the first time only", () => {
+    const headers = new Headers({
+      "User-Agent": "Claude-User",
+      Authorization: "Bearer pcp_secret",
+    })
+
+    expect(clientSeen("token-a", call, headers)).toEqual({
+      method: "tools/call",
+      userAgent: "Claude-User",
+      headers: ["authorization", "user-agent"],
+    })
+    expect(clientSeen("token-a", call, headers)).toBeNull()
+    expect(clientSeen("token-b", call, headers)).not.toBeNull()
+  })
+
+  it("sees a new user agent or header set as a new client", () => {
+    const first = new Headers({ "User-Agent": "one" })
+
+    expect(clientSeen("token-c", call, first)).not.toBeNull()
+    expect(
+      clientSeen("token-c", call, new Headers({ "User-Agent": "two" })),
+    ).not.toBeNull()
+    expect(
+      clientSeen(
+        "token-c",
+        call,
+        new Headers({ "User-Agent": "one", "X-Extra": "1" }),
+      ),
+    ).not.toBeNull()
+  })
+
+  it("never keeps a header's value but the user agent's", () => {
+    const seen = clientSeen(
+      "token-d",
+      "not json",
+      new Headers({ Authorization: "Bearer pcp_secret" }),
+    )
+
+    expect(JSON.stringify(seen)).not.toContain("pcp_secret")
+    expect(seen?.method).toBeUndefined()
   })
 })

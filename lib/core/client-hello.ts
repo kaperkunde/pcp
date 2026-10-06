@@ -78,3 +78,50 @@ export function clientHello(
     headers: [...headers.keys()].sort().slice(0, MAX_NAMES),
   }
 }
+
+/**
+ * What a request says about the app sending it, the first time this process
+ * sees it from a token: its user agent and header names, and the JSON-RPC
+ * method it carried. A client that connected before PCP started (Claude's
+ * connectors keep calling a stateless server without a new `initialize`)
+ * still shows up this way. Null for one seen before.
+ */
+export type ClientSeen = {
+  method?: string
+  userAgent?: string
+  headers: string[]
+}
+
+const MAX_SEEN = 1_000
+const seen = new Set<string>()
+
+export function clientSeen(
+  tokenId: string,
+  body: string,
+  headers: Headers,
+): ClientSeen | null {
+  const userAgent = text(headers.get("user-agent") ?? undefined)
+  const headerNames = [...headers.keys()].sort().slice(0, MAX_NAMES)
+  const key = JSON.stringify([tokenId, userAgent, headerNames])
+
+  if (seen.has(key)) {
+    return null
+  }
+
+  // Forget the oldest rather than grow without end.
+  if (seen.size >= MAX_SEEN) {
+    seen.delete(seen.values().next().value as string)
+  }
+
+  seen.add(key)
+
+  let method: string | undefined
+
+  try {
+    method = text((JSON.parse(body) as { method?: unknown } | null)?.method)
+  } catch {
+    method = undefined
+  }
+
+  return { method, userAgent, headers: headerNames }
+}

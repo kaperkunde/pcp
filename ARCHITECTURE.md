@@ -1666,7 +1666,10 @@ tool call, and PCP is only told when a client connects: the gateway writes
 each `initialize` to the server log (`[mcp] initialize`, from
 `lib/core/client-hello.ts`: the client's name, version and capabilities, the
 user agent, and header names, never another header's value), not to the
-request log.
+request log. Claude's connectors keep calling a stateless server without a
+new `initialize` (none came after PCP restarted), so the first request from
+each token with a new user agent or set of header names is written too
+(`[mcp] client`, with its method).
 An OAuth server that needs signing in (a call to it, or one the owner just
 agreed to add) answers with a link to its page in PCP, handed over the same
 way, where Connect starts the sign-in; `check_server` then says whether it

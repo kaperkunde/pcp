@@ -1,7 +1,7 @@
 import { createMcpHandler } from "@modelcontextprotocol/server"
 
 import { resolveApiToken } from "@/lib/core/api-tokens"
-import { clientHello } from "@/lib/core/client-hello"
+import { clientHello, clientSeen } from "@/lib/core/client-hello"
 import {
   buildGatewayServer,
   ensureCatalogue,
@@ -154,20 +154,24 @@ async function handle(request: Request): Promise<Response> {
       )
     }
 
-    // Which app is on the other end, as it says when it connects: the server
-    // log only, never the request log (the Log page lists calls).
+    // Which app is on the other end, as it says when it connects and as its
+    // requests show: the server log only, never the request log (the Log
+    // page lists calls).
+    const who = {
+      token: resolved.tokenId,
+      tokenName: resolved.tokenName.slice(0, 80),
+      oauth: token?.startsWith(ACCESS_TOKEN_PREFIX) ?? false,
+    }
     const hello = clientHello(body, request.headers)
 
     if (hello) {
-      console.info(
-        "[mcp] initialize",
-        JSON.stringify({
-          token: resolved.tokenId,
-          tokenName: resolved.tokenName.slice(0, 80),
-          oauth: token?.startsWith(ACCESS_TOKEN_PREFIX) ?? false,
-          ...hello,
-        }),
-      )
+      console.info("[mcp] initialize", JSON.stringify({ ...who, ...hello }))
+    }
+
+    const seen = clientSeen(resolved.tokenId, body, request.headers)
+
+    if (seen) {
+      console.info("[mcp] client", JSON.stringify({ ...who, ...seen }))
     }
   }
 
