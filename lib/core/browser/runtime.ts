@@ -1,4 +1,7 @@
 import { randomBytes } from "node:crypto"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 
 import type {
   Browser,
@@ -82,6 +85,8 @@ export type VaultBrowser = {
   proxy: BrowserProxy
   /** Chromium's own sandbox: off when the machine cannot give it one. */
   sandbox: boolean
+  /** Chromium's folder for what it keeps outside the profile (launch). */
+  scratchDir: string
   tabs: Map<string, Tab>
   lastTabByToken: Map<string, string>
   /** PCP's own public address, never opened. */
@@ -184,10 +189,27 @@ function platformToken(): string {
   }
 }
 
+/**
+ * Chromium keeps its crash reporter's database in the user's config folder
+ * (~/.config), and when it cannot make one there it can abort as it starts:
+ * a system user with no home, as PCP's image runs as, has none. Each
+ * browser gets a private folder for it under the system's temporary folder
+ * instead, removed once the browser has closed, so nothing of it lands in
+ * the user's home and a crash report does not outlive the browser.
+ */
+async function makeScratchDir(): Promise<string> {
+  return fs.mkdtemp(path.join(os.tmpdir(), "pcp-chromium-"))
+}
+
+function removeScratchDir(dir: string): void {
+  void fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+}
+
 async function launch(
   executablePath: string,
   proxyPort: number,
   sandbox: boolean,
+  scratchDir: string,
 ): Promise<Browser> {
   const { chromium } = await import("playwright-core")
 
@@ -195,6 +217,11 @@ async function launch(
     executablePath,
     headless: true,
     chromiumSandbox: sandbox,
+    env: {
+      ...process.env,
+      XDG_CONFIG_HOME: path.join(scratchDir, "config"),
+      XDG_CACHE_HOME: path.join(scratchDir, "cache"),
+    },
     // What tells a page it is being driven: the automation switch and the
     // webdriver flag. The rest of headless Chromium is as it is.
     ignoreDefaultArgs: ["--enable-automation"],
@@ -270,18 +297,20 @@ async function start(
 
   let browser: Browser
   let sandbox = sandboxSetting() !== "off"
+  const scratchDir = await makeScratchDir()
 
   try {
     try {
-      browser = await launch(executable, proxy.port, sandbox)
+      browser = await launch(executable, proxy.port, sandbox, scratchDir)
     } catch (error) {
       // An unprivileged container, or root, has no sandbox to give.
       if (!sandbox || sandboxSetting() === "on") throw error
       sandbox = false
-      browser = await launch(executable, proxy.port, false)
+      browser = await launch(executable, proxy.port, false, scratchDir)
     }
   } catch (error) {
     await proxy.close()
+    removeScratchDir(scratchDir)
     console.error("[browser] Chromium did not start", error)
     throw new PcpError(
       "state",
@@ -310,6 +339,7 @@ async function start(
     context,
     proxy,
     sandbox,
+    scratchDir,
     tabs: new Map(),
     lastTabByToken: new Map(),
     publicUrl,
@@ -332,6 +362,7 @@ async function start(
     if (runtime().vaults.get(self.vaultId) === self) {
       forget(self)
     }
+    removeScratchDir(self.scratchDir)
   })
 
   runtime().vaults.set(ctx.vaultId, vault)

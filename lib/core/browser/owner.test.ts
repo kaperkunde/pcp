@@ -1,5 +1,10 @@
+import { existsSync } from "node:fs"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { McpServer } from "@/lib/generated/prisma/client"
 
@@ -19,10 +24,11 @@ import {
   openOwnerTab,
   ownerNavigate,
   startChromiumInstall,
+  stopBrowser,
   takeOverTab,
 } from "./owner"
 import { loadProfile } from "./profile"
-import { closeAllBrowsers } from "./runtime"
+import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 
 // What the owner does from PCP's pages, against a real Chromium: a tab of
@@ -152,6 +158,28 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     const after = await browserOverview(ctx)
     expect(after.status.running).toBe(false)
     expect(after.profile).toBeNull()
+  })
+
+  it("gives Chromium a folder of its own outside the user's home, gone once it closes", async () => {
+    // A system user with no home, as PCP's image runs as: Chromium's crash
+    // reporter cannot make its database under ~/.config.
+    const home = process.env.HOME
+    process.env.HOME = "/nonexistent/pcp-home"
+    try {
+      await openOwnerTab(ctx, { url: `${api.origin}/`, publicUrl: PUBLIC_URL })
+    } finally {
+      process.env.HOME = home
+    }
+
+    const { scratchDir } = runningBrowser(ctx.vaultId)!
+    expect(path.dirname(scratchDir)).toBe(os.tmpdir())
+    const [product] = await fs.readdir(path.join(scratchDir, "config"))
+    expect(
+      existsSync(path.join(scratchDir, "config", product!, "Crash Reports")),
+    ).toBe(true)
+
+    await stopBrowser(ctx)
+    await vi.waitFor(() => expect(existsSync(scratchDir)).toBe(false))
   })
 
   it("installs no Chromium where one is found", async () => {

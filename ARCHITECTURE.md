@@ -761,8 +761,12 @@ proposed for and called like any server, and a long snapshot is kept for
 owner) and closed after fifteen minutes with no tool call, no input and
 nobody watching. The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
-Chromium runs with one in-memory context: nothing is written to disk. It
-starts without `--enable-automation`, with
+Chromium runs with one in-memory context: no profile is written to disk.
+Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
+private temporary folder of its own, removed once it has closed: its crash
+reporter keeps its database there, and without a folder it can write to
+(a system user with no home, as the Docker image runs as) Chromium can abort
+as it starts. It starts without `--enable-automation`, with
 `--disable-blink-features=AutomationControlled`, a desktop user agent without
 "Headless", the host's locale and time zone and a 1280 by 800 viewport, and
 with service workers blocked (one could answer a navigation without the
