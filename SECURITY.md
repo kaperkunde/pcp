@@ -115,12 +115,16 @@ the Browser page, whose tools ask you first like any other's) drives a
 Chromium on PCP's machine, and acts as you on every site you signed in to
 there. It opens only the sites the token's web fetch lines allow (Browser
 sites, for a token without web fetch), sites you allowed for that tab, and
-private addresses only as for web fetch; never PCP's own site. Every
-connection goes through PCP's proxy, which checks the address it dials, so
-a page, a redirect or a script on it cannot reach your network either. No
-tool runs a script, reads cookies or storage, or downloads a file. The
-sign-ins are kept in your vault, encrypted, and **Forget all sites** signs
-it out of everything.
+private addresses only as for web fetch; never PCP's own site. It sees and
+drives only the tabs it opened: another token's tabs and yours are not there
+for it, so it cannot read a page another token or you opened, nor use a site
+you allowed for another token's tab, and it leaves a page alone once its
+lines no longer let it open the site. Every connection goes through PCP's
+proxy, which checks the address it dials, so a page, a redirect or a script
+on it cannot reach your network either. No tool runs a script, reads cookies
+or storage, or downloads a file. The sign-ins are kept in your vault,
+encrypted, and shared by every token that reaches the browser; **Forget all
+sites** signs it out of everything.
 
 **Someone with your session cookie but not your password** can use PCP as you
 while the session lasts (30 days from sign-in). They cannot make an API token,

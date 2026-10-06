@@ -93,8 +93,9 @@ async function go(tab: Tab, raw: string, publicUrl: string): Promise<void> {
 }
 
 /**
- * A tab of the owner's own, theirs to drive until they hand it back. It
- * reaches private addresses only where the line for all tokens allows.
+ * A tab of the owner's own, theirs alone: no assistant sees it or is
+ * handed it. It reaches private addresses only where the line for all
+ * tokens allows.
  */
 export async function openOwnerTab(
   ctx: VaultContext,
@@ -156,15 +157,23 @@ export async function takeOverTab(
 }
 
 /**
- * Back to the assistants, who may go on from the site the owner left it
- * at. A tab handed over by an assistant goes back when the owner answers
- * its request instead.
+ * Back to the assistant whose tab it is, which may go on from the site the
+ * owner left it at. A tab handed over by an assistant goes back when the
+ * owner answers its request instead, and the owner's own tab is no
+ * assistant's to go back to.
  */
 export async function handBackTab(
   ctx: VaultContext,
   tabId: string,
 ): Promise<void> {
   const tab = tabOf(ctx, tabId)
+
+  if (tab.tokenId === null) {
+    throw new PcpError(
+      "state",
+      "You opened this tab, so it stays yours: an assistant opens tabs of its own, and your sign-ins go with them.",
+    )
+  }
 
   if (tab.handoverSince !== null) {
     throw new PcpError(

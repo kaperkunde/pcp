@@ -24,7 +24,7 @@ import { browserTools } from "./tools"
 
 export const BROWSER_NAME = "Browser"
 export const BROWSER_DESCRIPTION =
-  "A web browser on the machine PCP runs on, shared by assistants: open pages, read them, click, type and fill in forms, keeping its sign-ins between conversations. The owner decides which sites each token opens, and can watch any tab and take it over."
+  "A web browser on the machine PCP runs on, shared by assistants, each with tabs of its own: open pages, read them, click, type and fill in forms, keeping its sign-ins between conversations. The owner decides which sites each token opens, and can watch any tab and take it over."
 
 export async function findBrowserServer(
   ctx: VaultContext,

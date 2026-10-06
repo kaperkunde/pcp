@@ -88,6 +88,24 @@ function call(name: string, args: Record<string, unknown> = {}) {
   })
 }
 
+/** A second token, which reaches the browser too. */
+async function otherToken() {
+  const { token } = await createApiToken(ctx, {
+    name: "Other",
+    allowAllServers: true,
+  })
+  const other = (await resolveApiToken(token))!.tokenId
+
+  return {
+    tokenId: other,
+    call: (name: string, args: Record<string, unknown> = {}) =>
+      callBrowserTool(ctx, server, name, args, {
+        tokenId: other,
+        publicUrl: PUBLIC_URL,
+      }),
+  }
+}
+
 function textOf(result: CallToolResult): string {
   return result.content
     .map((part) => (part.type === "text" ? part.text : ""))
@@ -259,6 +277,131 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
 
     // A new tab does.
     await owner(call("tabs", { action: "open", url: `${api.origin}/page` }))
+  })
+
+  it("keeps a token's tabs its own: another token cannot list, read or act on them, nor fall onto them", async () => {
+    const host = new URL(api.origin).host
+    await setFetchSite(ctx, tokenId, host, "allowed")
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    const opened = await call("navigate", { url: `${api.origin}/form` })
+    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+    const other = await otherToken()
+
+    // The other token sees no tab, and A's tab answers as one that does
+    // not exist: the same words, with nothing of its address or title.
+    const listed = textOf(await other.call("tabs", { action: "list" }))
+    expect(listed).toContain("This token has no tab open")
+    expect(listed).not.toContain(tabId)
+    expect(listed).not.toContain(api.origin)
+
+    const unknown = textOf(await other.call("snapshot", { tab: "nosuchtab" }))
+    for (const [name, args] of [
+      ["snapshot", {}],
+      ["read_page", {}],
+      ["find", { text: "Name" }],
+      ["screenshot", {}],
+      ["click", { ref: refOf(opened, /button "Say hello"/) }],
+      ["type", { ref: refOf(opened, /textbox "Name"/), text: "Mallory" }],
+      ["press_key", { key: "Enter" }],
+      ["scroll", { direction: "down" }],
+      ["back", {}],
+      ["wait_for", { ms: 1 }],
+      ["handle_dialog", { action: "accept" }],
+      ["hand_over", { message: "Mine now." }],
+      ["tabs", { action: "select" }],
+      ["tabs", { action: "close" }],
+    ] as const) {
+      const result = await other.call(name, { ...args, tab: tabId })
+      expect(result.isError, name).toBe(true)
+      expect(textOf(result), name).toBe(unknown.replace("nosuchtab", tabId))
+      expect(textOf(result), name).not.toContain(api.origin)
+
+      // Nor does a call without a tab fall onto it (tabs needs one).
+      if (name !== "tabs") {
+        const current = await other.call(name, args)
+        expect(current.isError, name).toBe(true)
+        expect(textOf(current), name).toContain("This token has no tab open")
+      }
+    }
+
+    // A navigate in A's tab opens a tab of the other token's own instead.
+    await setFetchSite(ctx, other.tokenId, host, "allowed")
+    await setFetchPrivate(ctx, other.tokenId, "allowed")
+    const elsewhere = await other.call("navigate", {
+      tab: tabId,
+      url: `${api.origin}/page`,
+    })
+    expect(textOf(elsewhere)).toContain("A page")
+    expect(textOf(elsewhere)).not.toContain(`Tab ${tabId}:`)
+    expect(textOf(await other.call("tabs", { action: "list" }))).not.toContain(
+      tabId,
+    )
+
+    // A's tab is as A left it, and A's alone.
+    const mine = textOf(await call("snapshot", {}))
+    expect(mine).toContain(`Tab ${tabId}:`)
+    expect(mine).toContain(`Address: ${api.origin}/form`)
+    expect(mine).toContain("Who are you?")
+    expect(textOf(await call("tabs", { action: "list" }))).toMatch(
+      new RegExp(`^\\* ${tabId}: Form`, "m"),
+    )
+  })
+
+  it("keeps a site the owner allowed once with the token whose tab it is", async () => {
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    const scope = { ctx, tokenId, publicUrl: PUBLIC_URL, serverId: server.id }
+    const opened = await performNavigate(
+      scope,
+      { tabId: null, url: `${api.origin}/form` },
+      { allowedByOwner: true },
+    )
+    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+    const other = await otherToken()
+    await setFetchPrivate(ctx, other.tokenId, "allowed")
+
+    // Another token is asked about the site, for a tab of its own.
+    const asked = await owner(
+      other.call("navigate", { tab: tabId, url: `${api.origin}/page` }),
+    )
+    expect(asked.ask).toMatchObject({
+      kind: "browse",
+      input: { tabId: null, url: `${api.origin}/page` },
+    })
+
+    // And an answer that names A's tab opens a new one, not A's.
+    const allowed = await performNavigate(
+      { ...scope, tokenId: other.tokenId },
+      { tabId, url: `${api.origin}/page` },
+      { allowedByOwner: true },
+    )
+    expect(textOf(allowed)).toContain("A page")
+    expect(textOf(allowed)).not.toContain(`Tab ${tabId}:`)
+    expect(textOf(await call("snapshot", {}))).toContain(
+      `Address: ${api.origin}/form`,
+    )
+  })
+
+  it("leaves a page alone once the token may no longer open its site", async () => {
+    const host = new URL(api.origin).host
+    await setFetchSite(ctx, tokenId, host, "allowed")
+    await setFetchPrivate(ctx, tokenId, "allowed")
+    const opened = await call("navigate", { url: `${api.origin}/form` })
+    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+
+    await setFetchSite(ctx, tokenId, host, "blocked")
+    for (const name of ["snapshot", "read_page", "screenshot"]) {
+      const refused = await call(name, {})
+      expect(refused.isError, name).toBe(true)
+      expect(textOf(refused), name).toContain(
+        `${host}, which this token may not open now`,
+      )
+      expect(textOf(refused), name).not.toContain("Who are you?")
+    }
+
+    // Closing it is still the token's to do.
+    expect(
+      textOf(await call("tabs", { action: "close", tab: tabId })),
+    ).toContain(`Closed tab ${tabId}`)
   })
 
   it("never opens PCP's own address", async () => {

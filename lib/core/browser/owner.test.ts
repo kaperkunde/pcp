@@ -14,8 +14,8 @@ import { db } from "../db"
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
-import { setFetchPrivate, setFetchRuleShared } from "../web-fetch"
-import { callBrowserTool } from "./call"
+import { setFetchPrivate, setFetchRuleShared, setFetchSite } from "../web-fetch"
+import { callBrowserTool, performNavigate } from "./call"
 import { chromiumExecutable } from "./executable"
 import {
   browserOverview,
@@ -32,8 +32,8 @@ import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 
 // What the owner does from PCP's pages, against a real Chromium: a tab of
-// their own that assistants leave alone until handed back, and the sign-ins
-// forgotten.
+// their own that no assistant sees, an assistant's tab taken over and handed
+// back to that assistant alone, and the sign-ins forgotten.
 
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
@@ -82,14 +82,22 @@ function textOf(result: CallToolResult): string {
     .join("\n")
 }
 
+function call(name: string, args: Record<string, unknown> = {}) {
+  return callBrowserTool(ctx, server, name, args, {
+    tokenId,
+    publicUrl: PUBLIC_URL,
+  })
+}
+
 describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
-  it("opens a tab of their own, which assistants leave alone until it is handed back", async () => {
+  it("opens a tab of their own, which no assistant sees or is handed", async () => {
     const tab = await openOwnerTab(ctx, {
       url: `${api.origin}/login`,
       publicUrl: PUBLIC_URL,
     })
     expect(tab).toMatchObject({
       openedBy: "owner",
+      ownersOwn: true,
       control: "owner",
       url: `${api.origin}/login`,
     })
@@ -97,15 +105,11 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
       (await loadProfile(ctx))?.cookies.map((cookie) => cookie.name),
     ).toEqual(["session"])
 
-    const call = (name: string, args: Record<string, unknown>) =>
-      callBrowserTool(ctx, server, name, args, {
-        tokenId,
-        publicUrl: PUBLIC_URL,
-      })
-
+    // To an assistant it is a tab that does not exist.
     const refused = await call("snapshot", { tab: tab.id })
     expect(refused.isError).toBe(true)
-    expect(textOf(refused)).toContain("taken over")
+    expect(textOf(refused)).toContain(`There is no tab ${tab.id}`)
+    expect(textOf(await call("tabs", { action: "list" }))).not.toContain(tab.id)
 
     await ownerNavigate(ctx, tab.id, {
       url: `${api.origin}/account`,
@@ -118,24 +122,70 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
       }),
     ).rejects.toThrow(/its own pages/)
 
-    await handBackTab(ctx, tab.id)
-    const seen = await call("snapshot", { tab: tab.id })
-    expect(textOf(seen)).toContain(`Address: ${api.origin}/account`)
+    // There is no assistant to hand it back to.
+    await expect(handBackTab(ctx, tab.id)).rejects.toThrow(/stays yours/)
+    expect((await browserOverview(ctx)).tabs[0]).toMatchObject({
+      control: "owner",
+    })
+    expect(textOf(await call("snapshot", { tab: tab.id }))).toContain(
+      `There is no tab ${tab.id}`,
+    )
 
-    // Where the owner left it, the assistant may go on from, unasked.
-    const next = await call("navigate", {
+    // A navigate naming it opens a tab of the assistant's own.
+    await setFetchSite(ctx, tokenId, new URL(api.origin).host, "allowed")
+    const elsewhere = await call("navigate", {
       tab: tab.id,
       url: `${api.origin}/next`,
     })
+    expect(textOf(elsewhere)).toContain('heading "/next"')
+    expect(textOf(elsewhere)).not.toContain(`Tab ${tab.id}:`)
+    expect((await browserOverview(ctx)).tabs[0]).toMatchObject({
+      id: tab.id,
+      url: `${api.origin}/account`,
+    })
+  })
+
+  it("takes over an assistant's tab and hands it back to that assistant alone", async () => {
+    const port = new URL(api.origin).port
+    const opened = await performNavigate(
+      { ctx, tokenId, publicUrl: PUBLIC_URL, serverId: server.id },
+      { tabId: null, url: `${api.origin}/start` },
+      { allowedByOwner: true },
+    )
+    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+
+    await takeOverTab(ctx, tabId)
+    expect(textOf(await call("snapshot", {}))).toContain("taken over")
+    await ownerNavigate(ctx, tabId, {
+      url: `http://localhost:${port}/account`,
+      publicUrl: PUBLIC_URL,
+    })
+    await handBackTab(ctx, tabId)
+
+    const seen = textOf(await call("snapshot", {}))
+    expect(seen).toContain(`Tab ${tabId}:`)
+    expect(seen).toContain(`Address: http://localhost:${port}/account`)
+
+    // Where the owner left it, the assistant may go on from, unasked.
+    const next = await call("navigate", {
+      url: `http://localhost:${port}/next`,
+    })
     expect(textOf(next)).toContain('heading "/next"')
 
-    await takeOverTab(ctx, tab.id)
-    await expect(
-      ownerNavigate(ctx, tab.id, {
-        url: `${api.origin}/again`,
-        publicUrl: PUBLIC_URL,
-      }),
-    ).resolves.toBeUndefined()
+    // Another assistant neither sees it nor is handed it.
+    const { token } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+    })
+    const other = (await resolveApiToken(token))!.tokenId
+    const theirs = await callBrowserTool(
+      ctx,
+      server,
+      "snapshot",
+      { tab: tabId },
+      { tokenId: other, publicUrl: PUBLIC_URL },
+    )
+    expect(textOf(theirs)).toContain(`There is no tab ${tabId}`)
   })
 
   it("shows the tabs and the sign-ins, and forgets them all", async () => {
