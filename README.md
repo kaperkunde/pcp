@@ -70,11 +70,41 @@ on its own, what it has to ask you about first, and what it cannot touch.
 
 ## Run it
 
+### Quick start
+
+1. **Start PCP**, whichever way suits you:
+   - **On a Mac or a Windows PC**, download the app and open it:
+     [Mac, Apple silicon](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-mac-arm64.dmg) ·
+     [Mac, Intel](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-mac-x64.dmg) ·
+     [Windows](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-windows-x64.exe)
+   - **On a Linux server** with Docker or Podman, run
+     `curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh`
+   - **From a checkout**, run
+     `git clone https://github.com/kaperkunde/pcp.git && cd pcp && docker compose up -d`
+2. **Open http://localhost:3000** (the app opens its own window on it; on a
+   server, use the address the installer prints). Pick your name and a
+   password, and store the **recovery key** you are shown in a password
+   manager: it is shown once, and nothing else resets a password.
+3. **Create a token** under **API tokens**. Copy it when it is shown; the
+   page also gives you the command for Claude Code.
+4. **Connect your assistant** to PCP's `/mcp` address with the token
+   (`http://localhost:3000/mcp` on the same computer):
+
+   ```bash
+   claude mcp add --transport http pcp http://localhost:3000/mcp \
+     --header "Authorization: Bearer pcp_…"
+   ```
+
+Then add the servers, APIs and mail accounts you use under **Servers**, or
+ask the assistant to find one and propose it to you. The sections below have
+the details, and how to reach PCP from outside your home.
+
 ### On your own computer
 
 Download the app and open it. It runs PCP on your computer, keeps the vault in
 your user folder, and opens a window on it. An assistant on the same computer
-reaches it at `http://localhost:3000/mcp`.
+reaches it at `http://localhost:3000/mcp`; if another program uses port
+3000, **Change the port…** in the app's menu says how to pick another.
 
 - **Mac**:
   [Apple silicon](https://github.com/kaperkunde/pcp/releases/latest/download/PCP-mac-arm64.dmg) ·
@@ -91,10 +121,16 @@ from other devices** in its menu. It keeps running when you close its window
 (quit from the menu, or the tray icon on Windows) and can start when you sign
 in. Its data is in `~/Library/Application Support/PCP` on a Mac and
 `%APPDATA%\PCP` on Windows; back that folder up like a Docker volume. When a
-new version is out, PCP says so in its header, and **Settings → Updates →
-Install and restart** downloads it and restarts the app. A Mac app that is not
-signed with a developer certificate cannot replace itself, so there the page
-links to the download instead; open it, and your vault stays where it is.
+new version is out, PCP says so in its header, and **Install … and restart**
+under **Settings → Updates** downloads it and restarts the app. A Mac app that
+is not signed with a developer certificate cannot replace itself, so there the
+page links to the download instead; open it, and your vault stays where it is.
+
+On a Mac with Touch ID, **Settings → Touch ID** (or the box on the sign-in
+page) lets you unlock PCP with your fingerprint, and confirm a new API token,
+an export or a restore with it instead of your password. A new password or
+recovery key still takes the password, and recovering with the recovery key,
+signing out everywhere or a restore turns Touch ID off.
 
 **From outside your home.** An assistant that runs elsewhere (Claude on the
 web, a phone) needs an address that reaches your computer from the internet,
@@ -123,11 +159,14 @@ curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh
 The installer finds Docker or Podman on the computer (Bazzite and other
 Fedora Atomic systems come with Podman), pulls the published image
 (`ghcr.io/kaperkunde/pcp`) and keeps PCP running on port 3000 across reboots:
-as a container Docker restarts, or as a systemd unit under Podman. Run the
-same line again to update PCP, or once with `PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`)
-to have it update PCP by itself once a day. The top of [`install.sh`](install.sh) lists
-its settings (`PCP_PORT`, `PCP_HTTPS` and a few more), and
-`… | sh -s -- uninstall` removes it and keeps your data.
+as a container Docker restarts, or as a systemd unit under Podman. It never
+runs `sudo` or installs Docker for you; when neither is usable, it prints what
+to run. Run the same line again to update PCP, or once with
+`PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`) to have it update PCP by
+itself once a day. The top of [`install.sh`](install.sh) lists its settings
+(`PCP_PORT`, `PCP_HTTPS`, `PCP_AUTO_UPDATE` and a few more); it remembers
+them in `~/.config/pcp/install.conf`, so a later run keeps them.
+`… | sh -s -- uninstall` removes PCP and keeps your data.
 
 From a checkout, `docker compose` does the same with the file in it:
 
@@ -137,10 +176,12 @@ cd pcp
 docker compose up -d
 ```
 
-Open http://localhost:3000. The first visit shows the setup page: pick your
-name and a password. You will be shown a **recovery key** once — store it in a
-password manager. There is no password reset without it, because there is
-nothing on the server that could reset it.
+Open http://localhost:3000 (the installer also prints the address other
+devices on your network use). The first visit shows the setup page, and the
+first person to open it becomes the owner: pick your name and a password.
+You will be shown a **recovery key** once — store it in a password manager.
+There is no password reset without it, because there is nothing on the
+server that could reset it.
 
 For anything beyond your own machine, PCP needs HTTPS: most OAuth servers
 require an `https` redirect URL, and the session cookie is only marked
@@ -186,8 +227,10 @@ header when a newer one is out. **Settings → Updates** shows what it found,
 with the release notes, and says how to update the PCP you are looking at:
 the app, the container or a checkout. GitHub sees this PCP's address and
 version, nothing else. Turn the daily check off there (or in the step after
-setup) and PCP asks only when you choose **Check now**. PCP never updates
-itself in a container or a checkout.
+setup) and PCP asks only when you choose **Check now**. In a container or a
+checkout PCP never pulls, builds or restarts itself; only the installer's
+daily update (`PCP_AUTO_UPDATE=1`, above) does that for a container, and the
+page says when it is on.
 
 ## Use it
 
@@ -208,45 +251,45 @@ itself in a container or a checkout.
    **Extra sign-in parameters** takes anything else. A server that refuses
    PCP shows why on its page. PCP reads each server's tool list; you can
    rewrite any tool's description so an assistant picks it correctly.
-3. **API endpoints.** Add an API by giving PCP its OpenAPI 3 schema, as a URL
-   or an uploaded JSON or YAML file. PCP turns each operation into a tool,
-   with the arguments the schema describes, and tells you what it left out
-   (cookies, for one). An operation that takes a file upload takes a file
-   PCP kept for the assistant, such as an email attachment, by its handle. Choose a secret to send in a header (more than
-   one, each in its own header, for an API that wants a key and a secret
-   key), a user name and password (HTTP Basic authentication, which PCP
-   encodes), or, for an API whose schema declares an OAuth sign-in (Google's,
-   Microsoft Graph, Stalwart), **Connect**: PCP registers itself with the
-   provider when it lets apps do that, and otherwise asks for your own OAuth
-   client. **Read-only** offers only GET
-   operations. Requests go to the base URL saved on the endpoint, which PCP
-   never changes on its own when the schema does. A secret is only sent to an
-   address you typed, or to the origin the schema was downloaded from, so
-   with an uploaded file you enter the base URL yourself. **Edits** (a JSON
-   Patch) fix or narrow a schema you do not control, and are kept when it is
-   read again.
+3. **API endpoints.** Add an API by giving PCP its OpenAPI 3 schema, as a URL or
+   an uploaded JSON or YAML file. PCP turns each operation into a tool, with the
+   arguments the schema describes, and tells you what it left out (cookies, for
+   one). An operation that takes a file upload takes a file PCP kept for the
+   assistant, such as an email attachment, by its handle. Choose a secret to
+   send in a header (more than one, each in its own header, for an API that
+   wants a key and a secret key), a user name and password (HTTP Basic
+   authentication, which PCP encodes), or, for an API whose schema declares an
+   OAuth sign-in (Google's, Microsoft Graph, Stalwart), **Connect**: PCP
+   registers itself with the provider when it lets apps do that, and otherwise
+   asks for your own OAuth client. **Read-only** offers only GET operations.
+   Requests go to the base URL saved on the endpoint, which PCP never changes on
+   its own when the schema does. A secret is only sent to an address you typed,
+   or to the origin the schema was downloaded from, so with an uploaded file you
+   enter the base URL yourself. **Edits** (a JSON Patch) fix or narrow a schema
+   you do not control, and are kept when it is read again.
 4. **Mail accounts.** Add one over **JMAP** with its session URL (usually
-   `https://<mail server>/.well-known/jmap`), signing in with a user name and
-   an app password, a bearer token, or OAuth: choose **Connect** on its page,
-   as for an OAuth server (PCP asks for `offline_access` itself when the
-   server offers it, so it stays signed in). Or add one over **IMAP**, with an SMTP server to
-   send through if it should send. Passwords and tokens are secrets you
-   pick, and mail only travels encrypted (TLS, or STARTTLS on `imap://` and
-   `smtp://`). Every account offers the same tools: list mailboxes, search,
-   read an email or a text attachment, move, flag, delete into the Trash
-   (never for good) and send, plus conversations and identities on JMAP.
-   **Read-only** offers only the tools that read. An assistant can propose an
-   account too, with `register_server`: you see the server, the user name and
-   how PCP signs in, type the app password on that page (it never passes
-   through the assistant) or connect it with OAuth, and nothing exists until
-   you agree.
+   `https://<mail server>/.well-known/jmap`), signing in with a user name and an
+   app password, a bearer token, or OAuth: choose **Connect** on its page, as
+   for an OAuth server (PCP asks for `offline_access` itself when the server
+   offers it, so it stays signed in). Or add one over **IMAP**, with an SMTP
+   server to send through if it should send. Passwords and tokens are secrets
+   you pick, and mail only travels encrypted (TLS, or STARTTLS on `imap://` and
+   `smtp://`). Every account offers the same tools: list mailboxes, search, read
+   an email or an attachment (a text one as text, any other as a handle), move,
+   flag, delete into the Trash (never for good) and send, plus conversations and
+   identities on JMAP. **Read-only** offers only the tools that read. An
+   assistant can propose an account too, with `register_server`: you see the
+   server, the user name and how PCP signs in, type the app password on that
+   page (it never passes through the assistant) or connect it with OAuth, and
+   nothing exists until you agree.
 5. **API tokens.** Create a token per assistant or machine; PCP asks for your
-   password to make one. A token can reach every server and endpoint or only
-   the ones you pick, and can expire. Revoking it destroys its copy of the
-   vault key. A token's page sets each tool to **Allowed**, **Ask you first**
-   (the default) or **Blocked**, a whole server at once, or copies all of it
-   from another token. Tick **All tokens** beside a level to make it the one
-   every token follows; a token's own level still wins over it.
+   password (or Touch ID in the Mac app) to make one. A token can reach every
+   server and endpoint or only the ones you pick, and can expire. Revoking it
+   destroys its copy of the vault key. A token's page sets each tool to
+   **Allowed**, **Ask you first** (the default) or **Blocked**, a whole server
+   at once, or copies all of it from another token. Tick **All tokens** beside a
+   level to make it the one every token follows; a token's own level still wins
+   over it.
 6. **Connect an assistant** to `https://<your-pcp>/mcp` with the token as a
    bearer token. For Claude Code:
 
@@ -273,6 +316,17 @@ and these tools:
 | `register_server`     | Proposes a new MCP server, an API from an OpenAPI 3 schema, or a mail account (JMAP or IMAP), with no auth, a secret by name, a user name and password, or OAuth. |
 | `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                       |
 
+Options on a token's page, each off until you tick it, add more tools,
+described further down:
+
+| Tool              | Option (**Let an assistant with this token …**) | What it does                                                                                                                               |
+| ----------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `get_endpoint`    | **read and change API endpoints**               | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.         |
+| `update_endpoint` | **read and change API endpoints**               | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again. |
+| `memory`          | **keep memories**                               | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                               |
+| `web_fetch`       | **fetch web pages**                             | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.              |
+| `run_code`        | **run code that calls its tools**               | Runs a program that calls the token's tools and works on their answers inside PCP.                                                         |
+
 A shortened answer (a JSON preview, a long text cut off, a long email) ends
 with a result id. PCP keeps the whole of it, encrypted, for a day, for the
 token that asked, and `read_result` reads it from any offset or from the
@@ -286,7 +340,9 @@ call's arguments and PCP puts the value there: a text as text, a file as
 base64. `get_attachment` reads any attachment that way, and `send_email`
 takes handles as attachments, so an attachment from one mail account can be
 sent from another, or handed to an API. The permission page shows what each
-handle is, never its content.
+handle is, never its content. A `call_tool` answer also links its handles as
+MCP resources (`pcp://results/<id>`), so a client that reads resources can
+open a kept file itself.
 
 A tool you have not decided about answers "Not done yet" and asks you: the
 assistant ends its reply with a link to the request in PCP. Answer there,
@@ -309,23 +365,19 @@ it to `register_server` as text, or name a schema's URL. You see what it asked
 for before anything is added: the address, how many tools and which
 operations, whether it can change things, and the secret it would send. A
 secret PCP does not hold yet, an API key or the password for a user name, is
-typed in by you on that page, so its value never passes through the assistant. An API added that way reaches public
-addresses only until you allow private ones on the endpoint's page.
+typed in by you on that page, so its value never passes through the
+assistant. An API added that way reaches public addresses only until you
+allow private ones on the endpoint's page.
 
-A token made with **Let an assistant with this token read and change API
-endpoints** gets two more tools:
-
-| Tool              | What it does                                                                                                                       |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `update_endpoint` | Changes an endpoint's name, description, edits, base URL, read-only setting or tool descriptions, or reads its schema URL again.   |
-| `get_endpoint`    | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make. |
-
-What an assistant can do here is narrower than what you can. It can change an
-endpoint it registered only while nothing of yours is attached to it (no
-secret or OAuth sign-in, public addresses only), and a change disables the endpoint until you
-enable it again, because the words it writes reach every other assistant. It
-can never see, choose or change a secret afterwards. Once an endpoint sends
-your secret or OAuth token, or you allow private addresses, it is yours: an assistant can
+With **read and change API endpoints**, `get_endpoint` and `update_endpoint`
+let an assistant fix an endpoint's schema, but what it can do there is
+narrower than what you can. It can change an endpoint it registered only
+while nothing of yours is attached to it (no secret or OAuth sign-in, public
+addresses only), and a change disables the endpoint until you enable it
+again, because the words it writes reach every other assistant. It can send
+a whole new schema only to an endpoint it registered as text, and can never
+see, choose or change a secret afterwards. Once an endpoint sends your secret
+or OAuth token, or you allow private addresses, it is yours: an assistant can
 read it and turn read-only on, and it can ask you to fix the schema with
 edits, rename it, reword its tools or read its schema URL again. You are shown
 every edit and description in full and what it does to the tools, and nothing
@@ -363,9 +415,10 @@ tick it again. Memories are encrypted like everything else.
 
 A token made with **Let an assistant with this token fetch web pages** gets a
 `web_fetch` tool, like the web fetch Claude has: it takes an address and
-returns the page, HTML as Markdown and JSON or text as they are, a part at a
-time for a long page. With a method, headers and a body it can send other
-requests too. What it may do is on the token's page, in two parts:
+returns the page, HTML as Markdown (or as it is, if asked), JSON
+pretty-printed and text as it is, 20,000 characters at a time unless it asks
+for up to 50,000. With a method, headers and a body it can send other
+requests too. What it may do is on the token's page:
 
 - **Methods.** GET, POST, PUT, PATCH, DELETE and Other methods, each
   **Allowed**, **Ask you first** (the default) or **Blocked**. They decide
@@ -407,7 +460,7 @@ with the usual request for you to answer; for the program to make that call
 itself next time, choose **Always allow**. Every call is in the request log
 under `run_code`. A program has no network, no files, no timers and none of
 your secrets, and stops after 3 minutes, 15 seconds of computing, 128 MB of
-memory or 100 calls.
+memory or 100 calls (five of them at a time).
 
 **Shell and Python programs.** Where PCP runs in Docker or Podman from a
 checkout, add the sandbox and an assistant can also send a bash or Python
@@ -419,29 +472,34 @@ usual command-line tools and Python 3, and calls tools with a `pcp` command
 docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml up -d
 ```
 
-The sandbox has no network at all and a read-only file system; it reaches
-PCP only through a socket on a volume they share, which PCP listens on (PCP
-never touches the Docker socket), and each program runs as a user of its
-own that cannot reach that socket, with everything it started or wrote
-removed when it ends. Its calls follow the token's levels exactly as a
-JavaScript program's do. The installer and the desktop apps do not add it;
-JavaScript works everywhere.
+(Add `-f docker-compose.https.yaml` too when PCP serves HTTPS itself.) The
+`language` argument of `run_code` then offers `bash` and `python` beside
+JavaScript.
+
+The sandbox has no network at all, a read-only file system, 1 GB of memory and
+one CPU, and runs one program at a time; it reaches PCP only through a socket on
+a volume they share, which PCP listens on (PCP never touches the Docker socket),
+and each program runs as a user of its own that cannot reach that socket, with
+everything it started or wrote removed when it ends. Its calls follow the
+token's levels exactly as a JavaScript program's do. The installer and the
+desktop apps do not add it; JavaScript works everywhere.
 
 **The browser.** On the **Browser** page, **Add the browser**: it becomes a
-server like any other, with tools to open a page (`navigate`, `tabs`), read
-it (`snapshot`, which names each element with a ref; `read_page`; `find`;
+server like any other, with tools to open a page (`navigate`, `back`, `tabs`),
+read it (`snapshot`, which names each element with a ref; `read_page`; `find`;
 `screenshot`), act on it (`click`, `type`, `select_option`, `press_key`,
 `scroll`, `wait_for`, `handle_dialog`) and `hand_over` a tab to you. It is
-Chromium without a window on PCP's machine, started with the first page and
-closed after fifteen idle minutes. The Docker image includes it; elsewhere
-(the desktop app, a checkout), **Install Chromium** on the Browser page
-downloads it into PCP's data folder. Which
-sites a token opens follows the same lines as web fetch, on the token's page
-(as **Browser sites** for a token without web fetch): a site it has not opened before asks you, and
-**Allow once** lets that tab open the site's pages while it is open. When you
-allow a `navigate` call itself, you have seen the address, so it is not asked
-about again. Private
-addresses and PCP's own address work as for web fetch.
+Chromium without a window on PCP's machine, with up to eight tabs, started with
+the first page and closed after fifteen idle minutes. The Docker image includes
+it; elsewhere (the desktop app, a checkout), **Install Chromium** on the Browser
+page downloads it, about 200 MB, into PCP's data folder; outside the app,
+`PCP_BROWSER_EXECUTABLE` can point at a Chromium or Chrome already installed.
+Which sites a token opens follows the same lines as web fetch, on the token's
+page (as **Browser sites** for a token without web fetch): a site it has not
+opened before asks you, and **Allow once** lets that tab open the site's pages
+while it is open. When you allow a `navigate` call itself, you have seen the
+address, so it is not asked about again. Private addresses and PCP's own address
+work as for web fetch.
 
 The browser keeps its cookies, local storage and IndexedDB, encrypted in your
 vault, so a sign-in lasts between conversations; an assistant acts as you
@@ -456,21 +514,21 @@ page, and **Done** gives it back.
 ## How it is secured
 
 The short version: everything sensitive is AES-256-GCM ciphertext under a
-per-vault data key, and that key is stored only wrapped under keys derived
-from credentials the server does not keep — your password (scrypt), a session
-cookie, an API token or the recovery key (HKDF). A request that presents one
-of those unwraps the key for its own duration and drops it. Someone with the
-disk has ciphertext and hashes. [ARCHITECTURE.md](ARCHITECTURE.md) has the
-full model; [SECURITY.md](SECURITY.md) has the threat model and how to report
-a problem.
+per-vault data key, and that key is stored only wrapped under keys derived from
+credentials the server does not keep — your password (scrypt), a session cookie,
+an API token, the recovery key or the Mac app's Touch ID key (HKDF). A request
+that presents one of those unwraps the key for its own duration and drops it.
+Someone with the disk has ciphertext and hashes.
+[ARCHITECTURE.md](ARCHITECTURE.md) has the full model;
+[SECURITY.md](SECURITY.md) has the threat model and how to report a problem.
 
 Consequences worth knowing:
 
 - Changing the password re-wraps the key; sessions and API tokens keep
-  working. Using the recovery key signs every browser out and can revoke
-  every API token.
+  working. Using the recovery key signs every browser out, turns Touch ID off
+  and can revoke every API token.
 - A stolen session cannot make an API token or a recovery key: both ask for
-  the password again.
+  the password again (a token, in the Mac app, takes Touch ID instead).
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
 - An export is the encrypted vault as it is, under an export password of
@@ -498,6 +556,7 @@ pnpm test:e2e        # Playwright, against a fresh e2e database
 | ------------------ | ------------------------------------------------- |
 | `pnpm dev`         | Dev server (Turbopack); migrations apply at boot  |
 | `pnpm build`       | Production build                                  |
+| `pnpm start`       | Serve the production build                        |
 | `pnpm lint`        | ESLint (`pnpm lint:fix` to auto-fix)              |
 | `pnpm format`      | Prettier, writing (`pnpm format:check` to verify) |
 | `pnpm typecheck`   | `tsc --noEmit`                                    |
@@ -511,7 +570,8 @@ pnpm test:e2e        # Playwright, against a fresh e2e database
 Next.js 15 (App Router, Server Actions), React 19, TypeScript, Tailwind CSS 4
 with shadcn/ui primitives, Prisma 7 on SQLite (`better-sqlite3`), the
 `@modelcontextprotocol` v2 SDK for both the gateway and the upstream client,
-Vitest, Playwright, pnpm.
+QuickJS in WebAssembly for `run_code`, `playwright-core` driving Chromium for
+the browser, Electron for the desktop apps, Vitest, Playwright, pnpm.
 
 ## Licence
 

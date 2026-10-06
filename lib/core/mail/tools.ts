@@ -152,7 +152,7 @@ const SPECS: readonly MailToolSpec[] = [
     name: "get_attachment",
     title: "Read an attachment",
     description:
-      "Reads one text attachment of an email (plain text, CSV, JSON, XML, HTML, calendar files and the like). Other kinds, such as images and PDFs, are described, not returned.",
+      "Reads one attachment of an email and keeps it as a handle, to pass to another tool or to send_email as an attachment. Text (plain text, CSV, JSON, XML, HTML, calendar files and the like) comes back as text too; any other file, such as an image or a PDF, only as the handle.",
     args: () =>
       z.strictObject({
         id,

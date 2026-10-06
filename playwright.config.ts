@@ -105,7 +105,7 @@ export default defineConfig({
     {
       // Connecting an OAuth upstream through the browser, then using it.
       name: "oauth",
-      testMatch: /oauth\.spec\.ts/,
+      testMatch: /(^|\/)oauth\.spec\.ts$/,
       dependencies: ["setup"],
       use: signedIn("oauth"),
     },
@@ -146,9 +146,9 @@ export default defineConfig({
       use: signedIn("mail"),
     },
     {
-      // Per-token tool access and the owner's permission: the link, the
-      // client's own prompt, PCP's panel, copying access, and servers an
-      // assistant proposes.
+      // Per-token tool access and the owner's permission: the link (also for
+      // a client that offers prompts and panels), copying access, and servers
+      // an assistant proposes.
       name: "permissions",
       testMatch: /permissions\.spec\.ts/,
       dependencies: ["setup"],
