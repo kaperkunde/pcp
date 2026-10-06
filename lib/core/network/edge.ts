@@ -72,12 +72,22 @@ export class Edge {
       challenges: ChallengeStore
       httpPort: number
       httpsPort: number
+      /**
+       * The address to listen on: every interface when unset, as a
+       * router's forward needs; 127.0.0.1 when only the pcp.gg connector
+       * (pcpgg/connector.ts) reaches the listeners.
+       */
+      host?: string
     },
   ) {
     this.status = {
       http: { port: options.httpPort, listening: false },
       https: { port: options.httpsPort, listening: false },
     }
+  }
+
+  get host(): string | undefined {
+    return this.options.host
   }
 
   /** Opens port 80 (if not open yet) for the name. */
@@ -195,7 +205,7 @@ export class Edge {
       }
 
       server.once("error", failed)
-      server.listen(status.port, () => {
+      server.listen({ port: status.port, host: this.options.host }, () => {
         server.off("error", failed)
         status.listening = true
         delete status.error

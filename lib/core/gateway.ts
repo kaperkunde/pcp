@@ -70,7 +70,7 @@ import {
 import { MAX_PATCH_OPERATIONS } from "./openapi/limits"
 import type { SchemaProblem } from "./openapi/lint"
 import { checkRateLimit } from "./rate-limit"
-import { appendRequestLog } from "./request-log"
+import { appendRequestLog, withLogNote } from "./request-log"
 import { canRereadTools, type SyncResult } from "./catalogue"
 import {
   completeSessionUrl,
@@ -592,47 +592,50 @@ export function buildGatewayServer(
       { quiet = false }: { quiet?: boolean } = {},
     ) =>
     (run: (args: never, ctx: ServerContext) => Promise<ToolResult>) =>
-    async (args: unknown, ctx: ServerContext): Promise<ToolResult> => {
-      const started = Date.now()
-      let result: ToolResult
+    (args: unknown, ctx: ServerContext): Promise<ToolResult> =>
+      withLogNote(async (note) => {
+        const started = Date.now()
+        let result: ToolResult
 
-      try {
-        result = await run(args as never, ctx)
-      } catch (error) {
-        const message = isPcpError(error)
-          ? error.message
-          : "Something went wrong inside PCP."
+        try {
+          result = await run(args as never, ctx)
+        } catch (error) {
+          const message = isPcpError(error)
+            ? error.message
+            : "Something went wrong inside PCP."
 
-        if (!isPcpError(error)) {
-          console.error("[gateway] tool failed", { tool, error })
+          if (!isPcpError(error)) {
+            console.error("[gateway] tool failed", { tool, error })
+          }
+
+          result = failure(message)
         }
 
-        result = failure(message)
-      }
+        const failed = result.isError === true
+        const firstText =
+          result.content[0]?.type === "text" ? result.content[0].text : ""
 
-      const failed = result.isError === true
-      const firstText =
-        result.content[0]?.type === "text" ? result.content[0].text : ""
+        void appendRequestLog({
+          vaultId: scope.ctx.vaultId,
+          tokenId: scope.tokenId,
+          tool,
+          ...extra(args),
+          ok: !failed,
+          ms: Date.now() - started,
+          ...(failed
+            ? {
+                error:
+                  !quiet && authored.has(result)
+                    ? String(firstText).slice(0, 200)
+                    : "The tool reported an error.",
+              }
+            : {}),
+          ...(note.asked ? { asked: true } : {}),
+          ...(note.request ? { request: note.request } : {}),
+        })
 
-      void appendRequestLog({
-        vaultId: scope.ctx.vaultId,
-        tokenId: scope.tokenId,
-        tool,
-        ...extra(args),
-        ok: !failed,
-        ms: Date.now() - started,
-        ...(failed
-          ? {
-              error:
-                !quiet && authored.has(result)
-                  ? String(firstText).slice(0, 200)
-                  : "The tool reported an error.",
-            }
-          : {}),
+        return result
       })
-
-      return result
-    }
 
   const serverArg = z
     .string()

@@ -12,16 +12,11 @@ export async function register() {
       )
     }
 
-    const { pruneExpiredSessions } = await import("@/lib/core/sessions")
-    const { pruneOAuthStates } = await import("@/lib/core/oauth")
-    const { prunePermissionRequests } = await import("@/lib/core/permissions")
-    const { pruneToolResults } = await import("@/lib/core/tool-results")
-    await Promise.all([
-      pruneExpiredSessions(),
-      pruneOAuthStates(),
-      prunePermissionRequests(),
-      pruneToolResults(),
-    ]).catch((error) => console.error("[db] cleanup failed", error))
+    // What PCP keeps only for a while (ended sign-ins, kept results, old
+    // permission requests, old days of the request log): removed once now,
+    // then on the owner's schedule (lib/core/cleanup/runtime.ts).
+    const { startCleanup } = await import("@/lib/core/cleanup/runtime")
+    await startCleanup()
 
     // Not waited for: until it is done, endpoints answer with the tools
     // they had.

@@ -13,3 +13,11 @@ export const E2E_EDGE_HTTPS_PORT = 18443
  */
 export const E2E_RELEASES_PORT = 18090
 export const E2E_RELEASES_URL = `http://127.0.0.1:${E2E_RELEASES_PORT}/releases/latest`
+
+/**
+ * Where the copy of pcp.gg's relay takes PCP's connection during the suite
+ * (PCP_PCPGG_RELAY_URL in playwright.config.ts): the pcpgg project starts it
+ * on this port, and nothing answers there otherwise.
+ */
+export const E2E_PCPGG_RELAY_PORT = 18092
+export const E2E_PCPGG_RELAY_URL = `ws://127.0.0.1:${E2E_PCPGG_RELAY_PORT}/v1/connect`

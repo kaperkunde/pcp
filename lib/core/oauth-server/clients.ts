@@ -305,11 +305,11 @@ export async function registerClient(
 }
 
 /** Registrations no sign-in has used within a day. */
-export async function pruneUnusedClients(): Promise<number> {
+export async function pruneUnusedClients(now = new Date()): Promise<number> {
   const result = await db().oAuthClient.deleteMany({
     where: {
       lastUsedAt: null,
-      createdAt: { lt: new Date(Date.now() - UNUSED_REGISTRATION_TTL_MS) },
+      createdAt: { lt: new Date(now.getTime() - UNUSED_REGISTRATION_TTL_MS) },
     },
   })
 

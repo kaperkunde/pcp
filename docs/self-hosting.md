@@ -123,7 +123,13 @@ page; see [Backing up](#6-keeping-it-running).
 
 ## 4. Reach PCP from outside your home (optional)
 
-This needs three things to line up: a **name** that points at your home
+The easiest way is **pcp.gg**: sign in at [pcp.gg](https://pcp.gg), choose a
+name, and paste the connection key from your pcp.gg dashboard under
+**Settings → pcp.gg**. PCP connects to pcp.gg itself, comes online at your
+name and gets its own HTTPS certificate for it. Nothing changes on your
+router, and the rest of this section does not apply.
+
+To do it with your own name and router instead, three things to line up: a **name** that points at your home
 connection, your **router** sending the traffic to the computer running PCP,
 and **HTTPS**. Do them in this order.
 
@@ -360,5 +366,5 @@ address**.
 
 PCP needs no environment variables. The optional ones (`PCP_DATA_DIR`,
 `PORT`, `PCP_HTTP_PORT`, `PCP_HTTPS_PORT`, `PCP_ACME_DIRECTORY`,
-`PCP_PUBLIC_IP_URL`) are listed in [`.env.example`](../.env.example), for a
+`PCP_PUBLIC_IP_URL`, `PCP_PCPGG_RELAY_URL`) are listed in [`.env.example`](../.env.example), for a
 checkout or a deployment of your own; the installer does not pass them on.

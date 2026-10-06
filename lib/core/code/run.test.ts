@@ -31,7 +31,10 @@ import { sandboxLanguages, startSandbox, stopSandbox } from "./sandbox"
 // token's levels for each call, files as handles, kept results, and what
 // the answer says.
 
-vi.mock("../request-log", () => ({ appendRequestLog: vi.fn(async () => {}) }))
+vi.mock("../request-log", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../request-log")>()),
+  appendRequestLog: vi.fn(async () => {}),
+}))
 
 const PUBLIC_URL = "http://localhost:3000"
 const PDF = Buffer.concat([
@@ -271,6 +274,19 @@ describe("a program's calls", () => {
       toolName: "send_postcard",
       tokenId: scope.tokenId,
     })
+
+    // The call and the run that stopped at it are both in the log as asked,
+    // with the request, so the Log page can link it.
+    const lines = logLines()
+    expect(
+      lines.find((line) => line.upstreamTool === "send_postcard"),
+    ).toMatchObject({ tool: "run_code", asked: true, request: request.id })
+    expect(
+      lines.find((line) => line.tool === "run_code" && !line.upstreamTool),
+    ).toMatchObject({ asked: true, request: request.id })
+    expect(
+      lines.find((line) => line.upstreamTool === "archive"),
+    ).not.toHaveProperty("asked")
   })
 
   it("gets a file as a handle, never its bytes, and passes it on as one", async () => {

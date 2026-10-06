@@ -5,6 +5,7 @@ import { defineConfig, devices } from "@playwright/test"
 import {
   E2E_EDGE_HTTP_PORT,
   E2E_EDGE_HTTPS_PORT,
+  E2E_PCPGG_RELAY_URL,
   E2E_RELEASES_URL,
 } from "./e2e/lib/network"
 
@@ -77,6 +78,8 @@ export default defineConfig({
       // The update check asks the fake upstream (the updates project starts
       // it on this port), never GitHub.
       PCP_RELEASES_URL: E2E_RELEASES_URL,
+      // The pcpgg project's copy of pcp.gg, never pcp.gg itself.
+      PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
     },
   },
   projects: [
@@ -181,6 +184,15 @@ export default defineConfig({
       use: signedIn("network"),
     },
     {
+      // pcp.gg against a copy of its relay: a key it refuses (the card and
+      // the bell), a key it takes (online at the name, HTTPS for it turned
+      // on and, with no Let's Encrypt to answer, off again), disconnected.
+      name: "pcpgg",
+      testMatch: /pcpgg\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("pcpgg"),
+    },
+    {
       // An API that wants HTTP Basic authentication: a user name and a
       // password typed into the form, or proposed by an assistant and typed
       // in on the approval page; the login sent, and kept from the assistant.
@@ -235,6 +247,14 @@ export default defineConfig({
       testMatch: /updates\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("updates"),
+    },
+    {
+      // The Log page (a token's calls by tool and outcome, the filters, the
+      // token's own link) and Settings → Cleanup.
+      name: "log",
+      testMatch: /log\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("log"),
     },
     {
       // Touch ID with a stand-in for the Mac app. Signs every browser out,

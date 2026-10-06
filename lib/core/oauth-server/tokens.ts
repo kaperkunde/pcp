@@ -122,7 +122,7 @@ export async function issueCode(
     db().keyGrant.create({ data: code.grant }),
     db().oAuthCredential.create({ data: code.credential }),
   ])
-  void pruneOAuthCredentials().catch(() => {})
+  pruneSoon()
 
   return code.value
 }
@@ -190,7 +190,7 @@ async function issuePair(
     db().oAuthCredential.create({ data: access.credential }),
     db().oAuthCredential.create({ data: refresh.credential }),
   ])
-  void pruneOAuthCredentials().catch(() => {})
+  pruneSoon()
 
   return {
     access_token: access.value,
@@ -527,25 +527,32 @@ export async function resolveAccessToken(
   return dek ? liveToken({ id: row.tokenId }, dek) : null
 }
 
+/**
+ * Deletes credentials past their expiry, with their grants (a spent code or
+ * refresh token, kept to catch a second use, goes once it would have
+ * expired too). The scheduled cleanup runs it, and issuing does at most
+ * once a minute. Returns how many went.
+ */
+export async function pruneOAuthCredentials(now = new Date()): Promise<number> {
+  const expired = { expiresAt: { lte: now } }
+  const [count] = await db().$transaction([
+    db().oAuthCredential.count({ where: expired }),
+    db().keyGrant.deleteMany({ where: { oauthCredential: { is: expired } } }),
+    // The spent ones, which have no grant to take them along.
+    db().oAuthCredential.deleteMany({ where: expired }),
+  ])
+
+  return count
+}
+
 const PRUNE_INTERVAL_MS = 60_000
 let lastPruned = 0
 
-/**
- * Deletes credentials past their expiry, with their grants. At most once a
- * minute; `force` for tests.
- */
-export async function pruneOAuthCredentials(force = false): Promise<void> {
-  if (!force && Date.now() - lastPruned < PRUNE_INTERVAL_MS) {
+function pruneSoon(): void {
+  if (Date.now() - lastPruned < PRUNE_INTERVAL_MS) {
     return
   }
 
   lastPruned = Date.now()
-  const now = new Date()
-
-  await db().$transaction([
-    db().keyGrant.deleteMany({
-      where: { oauthCredential: { is: { expiresAt: { lte: now } } } },
-    }),
-    db().oAuthCredential.deleteMany({ where: { expiresAt: { lte: now } } }),
-  ])
+  void pruneOAuthCredentials().catch(() => {})
 }

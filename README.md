@@ -233,6 +233,15 @@ checkout PCP never pulls, builds or restarts itself; only the installer's
 daily update (`PCP_AUTO_UPDATE=1`, above) does that for a container, and the
 page says when it is on.
 
+### Cleanup
+
+PCP removes what it keeps only for a while (ended sign-ins, apps' expired
+sign-in tokens, results kept for a day, old permission requests, days of the log older than you keep) when it
+starts and then every hour. **Settings → Cleanup** changes when it runs (a
+preset, or five cron fields of your own, at least once a day), how many days
+of the log it keeps (90 unless you choose), shows what the last run removed,
+and cleans up at once with **Clean up now**.
+
 ## Use it
 
 1. **Secrets.** Add the API keys and personal access tokens your servers
@@ -342,6 +351,11 @@ described further down:
 | `memory`          | **keep memories**                               | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                               |
 | `web_fetch`       | **fetch web pages**                             | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.              |
 | `run_code`        | **run code that calls its tools**               | Runs a program that calls the token's tools and works on their answers inside PCP.                                                         |
+
+The **Log** page lists what assistants did with their tokens: every call,
+by token, tool and server, how long it took and whether it was done, failed
+or asked you (with how you answered). Never what they sent or what came back.
+Filter it by token, outcome or name; each token's page links to its own.
 
 A shortened answer (a JSON preview, a long text cut off, a long email) ends
 with a result id. PCP keeps the whole of it, encrypted, for a day, for the
@@ -474,7 +488,7 @@ allowed tool runs, a blocked one is an error the program sees, and one that
 asks you first stops the program at that call (the calls before it have run),
 with the usual request for you to answer; for the program to make that call
 itself next time, choose **Always allow**. Every call is in the request log
-under `run_code`. A program has no network, no files, no timers and none of
+under `run_code`, and on the **Log** page. A program has no network, no files, no timers and none of
 your secrets, and stops after 3 minutes, 15 seconds of computing, 128 MB of
 memory or 100 calls (five of them at a time).
 

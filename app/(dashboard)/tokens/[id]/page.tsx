@@ -63,9 +63,18 @@ export default async function TokenPage({
             : `API token ${token.prefix}…`
         } Choose which tools an assistant using it may run, which ask you first, and which are blocked.`}
         action={
-          <ButtonLink href="/tokens" variant="outline" size="sm">
-            All tokens
-          </ButtonLink>
+          <div className="flex gap-2">
+            <ButtonLink
+              href={`/log?token=${encodeURIComponent(id)}`}
+              variant="outline"
+              size="sm"
+            >
+              Its log
+            </ButtonLink>
+            <ButtonLink href="/tokens" variant="outline" size="sm">
+              All tokens
+            </ButtonLink>
+          </div>
         }
       />
       <TokenDetail

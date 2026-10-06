@@ -936,8 +936,10 @@ Linux):
   bookkeeping (same table, same checksums), so a developer's
   `prisma migrate dev` and a container's boot agree on the history.
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
-  which tool, which upstream, how long, whether it worked. Never arguments
-  or results.
+  which tool, which upstream, how long, whether it worked, and whether it
+  stopped to ask the owner (with the permission request's id). Never
+  arguments or results. The Log page reads it back; the cleanup deletes the
+  days older than the owner keeps (see "Cleanup and the log").
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
@@ -1102,19 +1104,19 @@ rate-limited like password attempts. The download is a route handler (an
 action cannot send a file), so it checks the request's origin itself
 (`lib/server/same-origin.ts`), which Server Actions get built in.
 
-## Reaching PCP: dynamic DNS and HTTPS
+## Reaching PCP: pcp.gg, dynamic DNS and HTTPS
 
-Both are optional, off until the owner turns them on (in the step after setup
-or under Settings), and meant for someone running PCP at home without a proxy
-of their own. While both are off, nothing in `lib/core/network/` starts:
-no timer, no listener, no outbound request.
+All three are optional, off until the owner turns them on (in the step after
+setup or under Settings), and meant for someone running PCP at home without a
+proxy of their own. While all three are off, nothing in `lib/core/network/`
+starts: no timer, no listener, no outbound request or connection.
 
 **Host settings, not vault settings.** The configuration lives in the
 `host_setting` table (`lib/core/host-settings.ts`), not in the per-vault
 `setting` table. It belongs to the machine, and the work that uses it runs
 from a timer with no request and no `VaultContext`. So it is **stored
-unencrypted**: a dynamic DNS service's token or password has to be readable
-while nobody is signed in, and reading the vault without a credential is
+unencrypted**: a dynamic DNS service's token or password, and the pcp.gg
+connection key, have to be readable while nobody is signed in, and reading the vault without a credential is
 exactly what PCP refuses to allow. The owner is told so where they type it.
 Such a credential can only move a DNS name. Nothing from the vault (a secret,
 a token) is ever copied into a host setting, and the page never sends a saved
@@ -1171,7 +1173,41 @@ point at this network. Port 3000 keeps serving plain
 HTTP for the local network. In the desktop app the two ports stay 80 and 443
 (macOS and Windows let an ordinary program use them), and they listen on
 every interface even while the app keeps port 3000 to this computer: a
-router's forward needs exactly that.
+router's forward needs exactly that (with a pcp.gg name they listen on
+127.0.0.1 only, below).
+
+**pcp.gg** (`pcpgg.ts`, `pcpgg/`): the owner pastes a connection key from
+their pcp.gg dashboard, and PCP runs pcp.gg's connector itself
+(`pcpgg/connector.ts`, lifted from kaperkunde/pcp-gg's `tunnel/connector/`).
+It holds one WebSocket to pcp.gg (`PCP_PCPGG_RELAY_URL` overrides the
+address) and answers each connection pcp.gg passes down by dialling the
+edge's own listeners on 127.0.0.1. Connections to the owner's name on port
+443 arrive still encrypted and end in the edge's HTTPS listener, so pcp.gg
+carries bytes it cannot read; on port 80 pcp.gg passes on only Let's
+Encrypt's challenge. The wire format (`pcpgg/frames.ts`, `mux.ts`,
+`control.ts`) is a copy of pcp.gg's `tunnel/protocol/`, protocol version 1;
+the tests run against a copy of pcp.gg's relay (`pcpgg/test-relay/`).
+
+`reconcileNetwork()` starts the connector while a key is saved and pcp.gg
+has not refused it, and stops it otherwise. pcp.gg's `ready` message names
+the hostnames; PCP keeps the first and, once online, turns HTTPS on for it
+(`tls.config` with `via: "pcpgg"`), so the HTTP-01 challenge reaches port 80
+through pcp.gg on the first try. A pcp.gg name skips the check that the name
+points at this network, and the edge listens on 127.0.0.1 only: the name
+leads to pcp.gg, never to this network's own address, so nothing else needs
+to reach the listeners (the desktop app's 80 and 443 included). If Let's
+Encrypt refuses the first certificate for the name, HTTPS turns off as usual
+and stays off across reconnects until the owner asks again. A key pcp.gg
+refuses (close codes 4001, 4004) stops the connector and is not tried again,
+across restarts too, until the owner saves a key. Turning pcp.gg off stops
+the connector and turns HTTPS for the name off. The pcp.gg card and the
+header's bell (after two minutes offline, or at once for a refused key) show
+the state. The HTTPS card keeps its hands off while pcp.gg is on.
+
+Every connection through pcp.gg reaches the edge from 127.0.0.1, so the rate
+limiter sees one client address for all of them. Carrying the client's
+address (in the OPEN frame, then PROXY protocol v2 to the edge) is left for
+a later protocol version.
 
 ## Updates
 
@@ -1240,6 +1276,46 @@ label; otherwise a systemd timer runs a copy of the installer with `update`,
 which pulls the image and starts PCP again only when the image changed. The
 installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
+
+## Cleanup and the log
+
+**The request log** (`lib/core/request-log.ts`) is what assistants did with
+their tokens: one JSON line per gateway call, and one per call a `run_code`
+program made, written after the answer and never waited for. A line names the
+token by id, the tool, the server and upstream tool the arguments named (cut
+to 80 characters, so a caller cannot grow the log by what it sends), how long
+it took and how it ended: done, failed (with PCP's own refusal text, never an
+upstream's), or asked the owner. Code under a call notes an ask in async
+context (`noteOwnerAsked`, from `withPermission` and `connectResult`), so the
+line is right however the result is rewritten on its way out. A write that
+fails pauses the log for five minutes rather than failing the call.
+
+The **Log page** (`/log`, `lib/core/activity.ts`) reads the vault's own lines
+back, newest first, filtered by token, outcome or a tool or server name, and
+fills in from the database what the log does not hold: each token's name, and
+how a request a call made was answered while PCP still keeps it. Paging goes
+by position (`day:line`), which holds while today's file grows; a page stops
+after 50,000 lines read, matching or not, and carries on from there, so a rare
+filter reads a few days at a time. The page shows what the lines hold and
+nothing else: no arguments, no results, no sites.
+
+**The cleanup** (`lib/core/cleanup/`) removes what PCP keeps only for a while:
+ended sign-ins, unfinished OAuth sign-ins, apps' codes and tokens past their
+expiry (with their grants) and registrations no sign-in used within a day
+(PCP's authorization server), permission requests a week past
+their expiry, kept results past their day, and days of the request log older
+than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
+then on a node-cron task, one per process and kept on `globalThis` like the
+update timer, unref'd, with no overlap: runs from the start, the schedule and
+the owner's **Clean up now** go one at a time. Each part runs on its own, so
+one that fails does not stop the others, and the run's status (when, what
+started it, what it removed, what failed) is a host setting the settings page
+shows. The schedule is five cron fields in the machine's time zone, a preset
+or the owner's own; one that would leave more than a day between two runs is
+refused, because a kept result is promised gone a day after it was made. The
+cleanup needs no credential: it deletes rows and files by their dates and
+reads nothing it deletes. Its settings (`cleanup.config`) and status
+(`cleanup.status`) are the machine's and do not travel with an export.
 
 ## Connecting OAuth servers
 
@@ -1446,7 +1522,8 @@ the result's id and length. `read_result` decrypts it and returns one slice,
 for the token whose call produced it only; another token's, another vault's
 or an expired id reads as not found. A token keeps at most 300 results and
 50 million characters and bytes together, its oldest going first, and
-expired ones are pruned at boot. A permission request's stored outcome keeps
+expired ones are removed by the cleanup (see "Cleanup and the
+log"). A permission request's stored outcome keeps
 the notice when its text is shortened, so `check_permission` names the
 result too. Mail bodies and attachments use the same store from inside the
 mail tools. Kept results are not part of an export, and nothing kept is

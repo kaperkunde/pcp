@@ -25,6 +25,12 @@ export type TlsConfig = {
   email: string | null
   /** When the owner accepted Let's Encrypt's agreement. */
   agreedAt: string
+  /**
+   * Set while the name is the owner's pcp.gg name (pcpgg.ts): pcp.gg
+   * carries port 80 and 443 to PCP, so neither the router nor the name's
+   * address has anything to do with it.
+   */
+  via?: "pcpgg"
 }
 
 export type TlsState = "issuing" | "active" | "failed"
@@ -272,16 +278,23 @@ export async function checkDns(
   }
 }
 
-function explain(domain: string, error: unknown): string {
+function explain(
+  domain: string,
+  error: unknown,
+  via: TlsConfig["via"],
+): string {
   const message = (error instanceof Error ? error.message : String(error))
     .trim()
     .replace(/\.+$/, "")
-  const hint =
+  const unreachable =
     /connection|timeout|firewall|refused|unauthorized|invalid response|404|dns/i.test(
       message,
     )
-      ? ` Check that ${domain} points at this network and that port 80 on your router is forwarded to this computer.`
-      : ""
+  const hint = !unreachable
+    ? ""
+    : via === "pcpgg"
+      ? " Check that PCP shows as online at pcp.gg, then try again."
+      : ` Check that ${domain} points at this network and that port 80 on your router is forwarded to this computer.`
 
   return `Let's Encrypt did not issue a certificate for ${domain}: ${message}.${hint}`
 }
@@ -359,7 +372,11 @@ export async function runTlsRound({
     return { status: previous, certificate: existing }
   }
 
-  const warning = await checkDns(domain, expectedIp, resolve4)
+  // A pcp.gg name points at pcp.gg, not at this network, and should.
+  const warning =
+    config.via === "pcpgg"
+      ? undefined
+      : await checkDns(domain, expectedIp, resolve4)
   await onIssuing?.({
     ...previous,
     state: existing ? "active" : "issuing",
@@ -391,7 +408,7 @@ export async function runTlsRound({
       certificate: saved,
     }
   } catch (error) {
-    const lastError = explain(domain, error)
+    const lastError = explain(domain, error, config.via)
 
     if (!existing && !previous.notAfter) {
       return {
@@ -484,6 +501,22 @@ export function tlsNotice(
   return status.state === "active"
     ? `PCP could not renew the HTTPS certificate${name}. It keeps trying.`
     : `HTTPS is not working${name}: PCP has no certificate to serve.`
+}
+
+/**
+ * Turns HTTPS on for the owner's pcp.gg name, once PCP is connected and
+ * pcp.gg carries Let's Encrypt's challenge to port 80. A fresh start, like
+ * the owner's own save.
+ */
+export async function saveTlsForPcpgg(
+  name: string,
+  agreedAt: string,
+  email: string | null,
+): Promise<TlsConfig> {
+  const config: TlsConfig = { domain: name, email, agreedAt, via: "pcpgg" }
+  await setHostJson(TLS_CONFIG_KEY, config)
+  await setHostJson(TLS_STATUS_KEY, null)
+  return config
 }
 
 /** Turns HTTPS off. The certificate files stay, for turning it on again. */
