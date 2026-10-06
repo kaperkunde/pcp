@@ -49,6 +49,8 @@ const PUBLIC_URL = "http://pcp.test"
 
 let cleanup: () => Promise<void>
 let api: TestApi
+/** Another site on the same machine: the same pages, another port. */
+let elsewhere: TestApi
 let ctx: VaultContext
 let tokenId: string
 let server: McpServer
@@ -67,13 +69,15 @@ beforeEach(async () => {
   server = await db().mcpServer.findUniqueOrThrow({
     where: { id: (await createBrowserServer(ctx)).id },
   })
-  api = await startTestApi((request, res) => {
+  const pages: Parameters<typeof startTestApi>[0] = (request, res) => {
     res.setHeader("content-type", "text/html")
     if (request.url === "/login") {
       res.setHeader("set-cookie", "session=signed-in; Max-Age=3600")
     }
     res.end(`<title>${request.url}</title><h1>${request.url}</h1>`)
-  })
+  }
+  api = await startTestApi(pages)
+  elsewhere = await startTestApi(pages)
   // The owner's own tab follows the line for all tokens.
   await setFetchPrivate(ctx, tokenId, "allowed")
   await setFetchRuleShared(ctx, tokenId, "private", "private", true)
@@ -82,6 +86,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await closeAllBrowsers()
   await api.close()
+  await elsewhere.close()
   await cleanup()
 })
 
@@ -181,7 +186,6 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
   })
 
   it("takes over an assistant's tab and hands it back to that assistant by default", async () => {
-    const port = new URL(api.origin).port
     const opened = await performNavigate(
       { ctx, tokenId, publicUrl: PUBLIC_URL, serverId: server.id },
       { tabId: null, url: `${api.origin}/start` },
@@ -197,18 +201,18 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
       tokenId,
     })
     await ownerNavigate(ctx, tabId, {
-      url: `http://localhost:${port}/account`,
+      url: `${elsewhere.origin}/account`,
       publicUrl: PUBLIC_URL,
     })
     await handBackTab(ctx, tabId, tokenId)
 
     const seen = textOf(await call("snapshot", {}))
     expect(seen).toContain(`Tab ${tabId}:`)
-    expect(seen).toContain(`Address: http://localhost:${port}/account`)
+    expect(seen).toContain(`Address: ${elsewhere.origin}/account`)
 
     // Where the owner left it, the assistant may go on from, unasked.
     const next = await call("navigate", {
-      url: `http://localhost:${port}/next`,
+      url: `${elsewhere.origin}/next`,
     })
     expect(textOf(next)).toContain('heading "/next"')
 
@@ -220,7 +224,6 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
   })
 
   it("hands a tab to another token without the sites allowed for the one before", async () => {
-    const port = new URL(api.origin).port
     const host = new URL(api.origin).host
     const opened = await performNavigate(
       { ctx, tokenId, publicUrl: PUBLIC_URL, serverId: server.id },
@@ -231,7 +234,7 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
 
     await takeOverTab(ctx, tabId)
     await ownerNavigate(ctx, tabId, {
-      url: `http://localhost:${port}/account`,
+      url: `${elsewhere.origin}/account`,
       publicUrl: PUBLIC_URL,
     })
     const other = await otherToken()
@@ -241,9 +244,9 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     // tab over at is allowed for it now.
     expect([
       ...runningBrowser(ctx.vaultId)!.tabs.get(tabId)!.allowedHosts,
-    ]).toEqual([`localhost:${port}`])
+    ]).toEqual([new URL(elsewhere.origin).host])
     expect(textOf(await other.call("snapshot", {}))).toContain(
-      `Address: http://localhost:${port}/account`,
+      `Address: ${elsewhere.origin}/account`,
     )
     await expect(
       other.call("navigate", { url: `${api.origin}/again` }),
