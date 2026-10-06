@@ -544,7 +544,7 @@ describe("changing", () => {
 
 describe("sending", () => {
   it("sends over SMTP as the user name, into the conversation, and files a copy in Sent", async () => {
-    const { mail, mailed, imap } = setup()
+    const { mail, mailed, imap, boxes } = setup()
 
     const sent = await mail.sendEmail!({
       to: [{ name: "Charles Babbage", email: "charles@example.com" }],
@@ -575,8 +575,31 @@ describe("sending", () => {
       id: encodeImapId(1, 8n, "Sent"),
       savedTo: "Sent",
       from: { email: "ada@example.com" },
+      answered: true,
     })
     expect(sent.messageId).toBe(mailed[0]!.messageId.slice(1, -1))
+    // The email it answers is marked answered, as a mail app would.
+    const original = boxes
+      .get("INBOX")!
+      .messages.find((message) => message.uid === 1)!
+    expect(original.flags.has("\\Answered")).toBe(true)
+  })
+
+  it("says so when the email it answers cannot be marked, and the email still goes", async () => {
+    const { mail, mailed, imap } = setup()
+    imap.messageFlagsAdd = async () => false
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: encodeImapId(1, 7n, "INBOX"),
+    })
+
+    expect(mailed).toHaveLength(1)
+    expect(sent).toMatchObject({ savedTo: "Sent", answered: false })
   })
 
   it("sends attachments over SMTP and in the Sent copy alike", async () => {

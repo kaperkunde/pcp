@@ -169,6 +169,11 @@ export type SendResult = {
   subject: string
   /** The mailbox the sent copy is in, when there is one. */
   savedTo: string | null
+  /**
+   * With inReplyTo: whether the email it answers is now marked as answered.
+   * False when the server refused that; the email was sent all the same.
+   */
+  answered?: boolean
 }
 
 export type MoveResult = {

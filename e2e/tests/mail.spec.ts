@@ -195,9 +195,13 @@ test("an assistant reads, files and sends mail through the gateway", async ({
     }),
   )
   expect(sent).toMatchObject({
-    sent: { savedTo: "Sent", subject: "Re: The engine" },
+    sent: { savedTo: "Sent", subject: "Re: The engine", answered: true },
   })
   expect(upstream.jmap.sent).toHaveLength(1)
+  // The email it answers is marked answered, as a mail app would.
+  expect(
+    upstream.jmap.emails.find((email) => email.id === "e1")!.keywords,
+  ).toMatchObject({ $answered: true })
 
   // The picture read above goes out as an attachment, by its handle.
   const forwarded = json(
