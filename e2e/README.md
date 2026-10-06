@@ -36,7 +36,7 @@ pnpm test:e2e
 ```
 
 This catches what the dev server cannot, such as the container binding
-`0.0.0.0` (see `reconcileIssuer` in `lib/core/oauth.ts`). Use a fresh volume:
+every address, `::` (see `reconcileIssuer` in `lib/core/oauth.ts`). Use a fresh volume:
 `setup` expects either no owner or the one it created.
 
 ### A Chromium of your own
