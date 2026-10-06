@@ -22,6 +22,7 @@ import {
   type AccessAsk,
   type AccessLevel,
 } from "./access-requests"
+import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
 import type { SyncResult } from "./catalogue"
 import type { PermissionDecision, PermissionKind } from "./constants"
 import type { VaultContext } from "./context"
@@ -129,7 +130,8 @@ import {
  *
  * An answer can also settle the tool for the calls after it ("Always
  * allow", "Block"), and for a web request the site ("Always allow this
- * site", "Block this site").
+ * site", "Block this site"), or let them go ahead for a while ("Allow for",
+ * lib/core/allowances.ts) without changing a level.
  */
 
 /** What the gateway knows about the request it is serving. */
@@ -1129,8 +1131,9 @@ export async function withPermission(
 
 /**
  * The owner's answer on PCP's page. "Always allow" and "Block" also set the
- * tool's level for the token; "Allow once" and "Always allow" run the call,
- * once, however many answers race for it.
+ * tool's level for the token, and "Allow for" lets it run without asking
+ * for `minutes`; every answer that agrees runs the call, once, however many
+ * answers race for it.
  */
 export async function decidePermission(
   ctx: VaultContext,
@@ -1141,6 +1144,7 @@ export async function decidePermission(
     tokenId,
     secretValue,
     always,
+    minutes,
   }: {
     publicUrl: string
     tokenId?: string
@@ -1148,6 +1152,8 @@ export async function decidePermission(
     secretValue?: string
     /** A memory to share: read it in every conversation, ticked on the page. */
     always?: boolean
+    /** "Allow for": how long, one of ALLOW_FOR_MINUTES. */
+    minutes?: number
   },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
@@ -1167,10 +1173,11 @@ export async function decidePermission(
 
   const kind = row.kind as PermissionKind
   // Only a tool call (for the tool) and a web request (for the site) have
-  // "always" and "block": any other answer is about this one request.
+  // "always", "allow_for" and "block": any other answer is about this one
+  // request.
   const settles = kind === "call" || kind === "fetch" || kind === "browse"
   const choice: PermissionDecision = !settles
-    ? decision === "always"
+    ? decision === "always" || decision === "allow_for"
       ? "allow_once"
       : decision === "block"
         ? "decline"
@@ -1180,6 +1187,8 @@ export async function decidePermission(
   if (!decisionsFor(kind).some((offered) => offered.value === choice)) {
     return text("That is not one of the answers to this request.", true)
   }
+
+  const allowFor = choice === "allow_for" ? parseAllowForMinutes(minutes) : null
 
   if (!tokenIsLive(row.token)) {
     return finishUnrun(
@@ -1260,6 +1269,10 @@ export async function decidePermission(
     await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
   } else if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
+  } else if (allowFor && host) {
+    await allowSiteFor(row.tokenId, host, allowFor)
+  } else if (allowFor && row.serverId) {
+    await allowToolFor(row.tokenId, row.serverId, row.toolName, allowFor)
   }
 
   // One winner, however many answers race for it.

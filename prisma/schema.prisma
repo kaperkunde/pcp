@@ -139,6 +139,8 @@ model ApiToken {
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
   oauthCredentials   OAuthCredential[]
+  toolAllowances     ApiTokenToolAllowance[]
+  siteAllowances     ApiTokenSiteAllowance[]
 
   @@index([vaultId])
   @@map("api_token")
@@ -171,6 +173,40 @@ model ApiTokenToolAccess {
 
   @@id([tokenId, serverId, toolName])
   @@map("api_token_tool_access")
+}
+
+/// A tool the owner allowed one token for a while ("Allow for" on a
+/// request, lib/core/allowances.ts): until `until`, a call that its level
+/// would ask about runs without asking. It changes no level, never lifts
+/// a blocked tool, and is not exported.
+model ApiTokenToolAllowance {
+  tokenId   String    @map("token_id")
+  token     ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  serverId  String    @map("server_id")
+  server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  toolName  String    @map("tool_name")
+  until     DateTime
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@id([tokenId, serverId, toolName])
+  @@index([until])
+  @@map("api_token_tool_allowance")
+}
+
+/// A site the owner allowed one token for a while, for web fetch and the
+/// browser alike: until `until`, a request its levels would ask about goes
+/// ahead. Like a tool's, it changes no level and never lifts a block.
+model ApiTokenSiteAllowance {
+  tokenId   String   @map("token_id")
+  token     ApiToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  /// The site's host, as WebFetchRule keys it.
+  host      String
+  until     DateTime
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@id([tokenId, host])
+  @@index([until])
+  @@map("api_token_site_allowance")
 }
 
 /// A tool's level for every token of the vault ("All tokens" on a token's
@@ -444,6 +480,7 @@ model McpServer {
   oauthStates        OAuthState[]
   toolAccess         ApiTokenToolAccess[]
   sharedToolAccess   VaultToolAccess[]
+  toolAllowances     ApiTokenToolAllowance[]
   permissionRequests PermissionRequest[]
   spec               OpenApiSpec?
   authHeaders        ServerAuthHeader[]

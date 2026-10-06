@@ -1,3 +1,4 @@
+import { pruneAllowances } from "../allowances"
 import { pruneOAuthStates } from "../oauth"
 import { pruneUnusedClients } from "../oauth-server/clients"
 import { pruneOAuthCredentials } from "../oauth-server/tokens"
@@ -56,6 +57,11 @@ const PARTS: Part[] = [
     run: (_, now) => pruneToolResults(now),
   },
   {
+    key: "allowances",
+    label: "ended time-limited allowances",
+    run: (_, now) => pruneAllowances(now),
+  },
+  {
     key: "logDays",
     label: "old days of the log",
     run: (logDays, now) => pruneRequestLog(logDays, now),
@@ -74,6 +80,7 @@ export async function runCleanup(
     apps: 0,
     requests: 0,
     results: 0,
+    allowances: 0,
     logDays: 0,
   }
   const problems: string[] = []

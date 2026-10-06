@@ -614,9 +614,9 @@ marked as the assistant's: that is how every site an assistant tried shows
 on the token's page. Ask goes through `permission_request` like a tool call
 (kind `fetch`, the checked request as its encrypted arguments). The owner's
 **Always allow this site** and **Block this site** write the token's own
-line for the site, as a tool's answer writes the token's own level; when
-they allow a request, `executeFetch` runs it only if the token still has web
-fetch on.
+line for the site, as a tool's answer writes the token's own level, and
+**Allow this site for** an allowance for the site (below); when they allow a
+request, `executeFetch` runs it only if the token still has web fetch on.
 
 **What a request may be** (`fetch/request.ts`). http and https, no user name
 or password in the address, no CONNECT or TRACE, at most twenty headers, and
@@ -713,7 +713,8 @@ three parts:
   result for, as for `call_tool`. An "ask" tool leaves the same permission
   request a `call_tool` would and stops the run, which answers with what ran
   before it and the owner's link last; the owner's Allow once runs that one
-  call for `check_permission`, and Always allow lets the next run make it.
+  call for `check_permission`, and Always allow (or Allow for, while it
+  lasts) lets the next run make it.
   An allowed tool runs through `runCodeCall` (`permissions.ts`), the same
   upstream path as `runCall`, with the answer turned into a value by
   `answerValue` (`answers.ts`): the JSON whole rather than a preview, its
@@ -809,8 +810,9 @@ sight, as web fetch does). Frames inside a page and subresources are not
 gated per site. `navigate` and `tabs` decide before anything opens, with
 `decideSite` (web-fetch.ts): blocked is refused; ask throws `OwnerNeeded`,
 which `runCall` turns into a `browse` request offering Allow once (the site
-for that tab while it is open), Always allow this site and Block this site
-(the token's site line, as for web fetch) and Not now. A popup becomes a tab
+for that tab while it is open), Allow this site for (an allowance, as for
+web fetch), Always allow this site and Block this site (the token's site
+line, as for web fetch) and Not now. A popup becomes a tab
 of the tab that opened it. The gate is the browser's, not a tab's (`Fetch`
 on the browser's own DevTools session, on before the first page exists), so
 it holds a popup from its very first request, before Playwright has
@@ -1590,6 +1592,21 @@ owner answers on that page, and only there (the header's bell lists every
 request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
+
+"Allow for" (15 minutes, an hour or eight hours, `ALLOW_FOR_MINUTES`) writes
+no level: it leaves an allowance (`lib/core/allowances.ts`,
+`api_token_tool_allowance` and `api_token_site_allowance`), the token, the
+tool or site, and when it ends. It is read only where the levels come out
+at "ask" (`loadGatewayServers` for tools, which `call_tool` and run_code
+both go through; `resolveFetchAccess` for sites, which web fetch and the
+browser's page gate both go through) and lifts that to "allowed" until it
+ends. It never lifts a block, and when it ends the levels decide as they
+were, so a token's own "ask" over an "allowed" for all tokens asks again.
+The gateway has no sessions and nothing a client sends names a
+conversation, so a time is what "for now" can mean. The token's page lists
+them, and the owner can end one early; copying access removes the target's,
+cleanup removes the ended ones, and an export carries none (like kept
+results, they belong to the tokens a restore replaces).
 
 Nothing can wake an assistant from outside its conversation: an MCP server
 cannot start a turn, and an answer on PCP's page reaches no app. The link

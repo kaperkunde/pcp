@@ -37,6 +37,7 @@ import { Input, Select } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import {
   copyTokenAccessAction,
+  endAllowanceAction,
   setServerToolAccessAction,
   setToolAccessAction,
   setToolAccessSharedAction,
@@ -75,10 +76,22 @@ export type WaitingRequest = {
   every: { asked: boolean } | null
 }
 
+/** A tool or a site allowed for a while, as the page is handed it. */
+export type AllowanceItem =
+  | {
+      kind: "tool"
+      serverId: string
+      serverName: string
+      toolName: string
+      until: string
+    }
+  | { kind: "site"; host: string; until: string }
+
 export function TokenDetail({
   token,
   servers,
   access,
+  allowances = [],
   otherTokens,
   waiting,
   endpointUrl,
@@ -88,6 +101,8 @@ export function TokenDetail({
   token: ApiTokenSummary
   servers: Array<{ id: string; name: string; kind?: ServerKind }>
   access: TokenServerAccess[]
+  /** What the owner allowed it for a while, from "Allow for" on a request. */
+  allowances?: AllowanceItem[]
   otherTokens: Array<{ id: string; name: string }>
   waiting: WaitingRequest[]
   endpointUrl: string
@@ -112,6 +127,9 @@ export function TokenDetail({
         />
       ) : null}
       {waiting.length > 0 ? <WaitingCard waiting={waiting} /> : null}
+      {allowances.length > 0 ? (
+        <AllowancesCard tokenId={token.id} allowances={allowances} />
+      ) : null}
       {otherTokens.length > 0 && !locked ? (
         <CopyCard tokenId={token.id} otherTokens={otherTokens} />
       ) : null}
@@ -212,6 +230,83 @@ function WaitingCard({ waiting }: { waiting: WaitingRequest[] }) {
             </li>
           ))}
         </ul>
+      </CardContent>
+    </Card>
+  )
+}
+
+function AllowancesCard({
+  tokenId,
+  allowances,
+}: {
+  tokenId: string
+  allowances: AllowanceItem[]
+}) {
+  const [pending, startTransition] = useTransition()
+  const [result, setResult] = useState<ActionState>({ status: "idle" })
+
+  function end(allowance: AllowanceItem) {
+    startTransition(async () => {
+      setResult(
+        await endAllowanceAction(
+          tokenId,
+          allowance.kind === "site"
+            ? { kind: "site", host: allowance.host }
+            : {
+                kind: "tool",
+                serverId: allowance.serverId,
+                toolName: allowance.toolName,
+              },
+        ),
+      )
+    })
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Allowed for now</CardTitle>
+        <CardDescription>
+          What you allowed for a while when an assistant using this token asked.
+          Until then it goes ahead without asking you; afterwards the settings
+          below decide again. A blocked tool or site stays blocked.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-2">
+        <ul className="flex flex-col divide-y divide-border">
+          {allowances.map((allowance) => (
+            <li
+              key={
+                allowance.kind === "site"
+                  ? `site:${allowance.host}`
+                  : `tool:${allowance.serverId}/${allowance.toolName}`
+              }
+              className="flex flex-wrap items-center justify-between gap-2 py-2"
+            >
+              <div className="flex min-w-0 flex-col">
+                <span className="font-medium break-words">
+                  {allowance.kind === "site"
+                    ? allowance.host
+                    : `${allowance.serverName} · ${allowance.toolName}`}
+                </span>
+                <span className="text-muted-foreground">
+                  {allowance.kind === "site" ? "Site" : "Tool"}, until{" "}
+                  <LocalDate value={allowance.until} />
+                </span>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={pending}
+                onClick={() => end(allowance)}
+              >
+                End now
+              </Button>
+            </li>
+          ))}
+        </ul>
+        <FormError error={result.status === "error" ? result.error : null} />
       </CardContent>
     </Card>
   )

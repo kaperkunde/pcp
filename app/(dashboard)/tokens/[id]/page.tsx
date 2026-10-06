@@ -4,6 +4,7 @@ import { notFound } from "next/navigation"
 import { PageHeader } from "@/components/page-header"
 import { TokenDetail } from "@/components/token-detail"
 import { ButtonLink } from "@/components/ui/button"
+import { listTokenAllowances } from "@/lib/core/allowances"
 import { getApiToken, listApiTokens } from "@/lib/core/api-tokens"
 import { isPcpError } from "@/lib/core/errors"
 import { listOpenPermissions } from "@/lib/core/permissions"
@@ -36,11 +37,12 @@ export default async function TokenPage({
   }
 
   const publicUrl = await publicUrlFor(ctx)
-  const [servers, access, tokens, waiting] = await Promise.all([
+  const [servers, access, tokens, waiting, allowances] = await Promise.all([
     listServers(ctx),
     listTokenToolAccess(ctx, id),
     listApiTokens(ctx),
     listOpenPermissions(ctx, id, publicUrl),
+    listTokenAllowances(ctx, id),
   ])
   // The browser follows the token's web fetch sites: a token that reaches
   // it has them, web fetch or not.
@@ -81,6 +83,10 @@ export default async function TokenPage({
         token={token}
         servers={servers.map(({ id, name, kind }) => ({ id, name, kind }))}
         access={access}
+        allowances={allowances.map((allowance) => ({
+          ...allowance,
+          until: allowance.until.toISOString(),
+        }))}
         otherTokens={tokens
           .filter((other) => other.id !== id)
           .map(({ id, name }) => ({ id, name }))}

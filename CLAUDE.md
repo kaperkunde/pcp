@@ -202,7 +202,9 @@ so in the summary; the bump itself waits for the request.
 - A level can be a token's own or for all tokens (tools in
   `vault_tool_access`, web fetch in `web_fetch_rule` with scope `all`), and
   the token's own always wins. An owner's answer to a request writes the
-  token's own level.
+  token's own level. "Allow for" (`lib/core/allowances.ts`) is not a level:
+  it is read only where the levels come out at "ask", lifts that to allowed
+  until it ends, never lifts a block, and is not exported.
 - Server Actions live in `lib/actions/`, read the session with
   `requireContext()`, call `lib/core`, and return an `ActionState`. Forms
   use `useActionState`. Route handlers exist only for the gateway, OAuth

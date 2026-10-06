@@ -63,10 +63,12 @@ export const TOOL_ACCESS_LABELS: Record<ToolAccess, string> = {
 /**
  * How the owner can answer an assistant's request. Each kind offers some of
  * them (lib/core/permission-rules.ts); "discard" is only for a memory an
- * assistant wants to share.
+ * assistant wants to share, and "allow_for" (for one of ALLOW_FOR_MINUTES)
+ * only where "always" is offered.
  */
 export const PERMISSION_DECISIONS = [
   "allow_once",
+  "allow_for",
   "always",
   "block",
   "decline",
@@ -74,6 +76,25 @@ export const PERMISSION_DECISIONS = [
 ] as const
 
 export type PermissionDecision = (typeof PERMISSION_DECISIONS)[number]
+
+/**
+ * How long "Allow for" lets a tool, or a site, run without asking the owner
+ * (lib/core/allowances.ts), in minutes.
+ */
+export const ALLOW_FOR_MINUTES = [15, 60, 480] as const
+
+export type AllowForMinutes = (typeof ALLOW_FOR_MINUTES)[number]
+
+/** What the owner's page offers first. */
+export const DEFAULT_ALLOW_FOR_MINUTES: AllowForMinutes = 60
+
+export function allowForLabel(minutes: number): string {
+  return minutes < 60
+    ? `${minutes} minutes`
+    : minutes === 60
+      ? "1 hour"
+      : `${minutes / 60} hours`
+}
 
 export type PermissionKind =
   | "call"

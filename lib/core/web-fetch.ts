@@ -2,6 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type { WebFetchRule } from "@/lib/generated/prisma/client"
 
+import { loadSiteAllowances } from "./allowances"
 import { requireLiveToken, requireToken } from "./api-tokens"
 import {
   FETCH_METHOD_GROUPS,
@@ -131,11 +132,17 @@ function toRuleSet(rows: WebFetchRule[]): FetchRuleSet {
   return rules
 }
 
+/** The token's lines and the ones for all tokens, with its sites allowed for now. */
 export async function loadFetchRules(
   vaultId: string,
   tokenId: string,
 ): Promise<FetchRuleSet> {
-  return toRuleSet(await ruleRows(vaultId, tokenId))
+  const [rows, allowedSites] = await Promise.all([
+    ruleRows(vaultId, tokenId),
+    loadSiteAllowances(tokenId),
+  ])
+
+  return { ...toRuleSet(rows), allowedSites }
 }
 
 /** The site a request goes to. */

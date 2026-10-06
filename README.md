@@ -379,7 +379,11 @@ assistant ends its reply with a link to the request in PCP. Answer there,
 tell it you have, and it carries on. The bell at the top of every page in
 PCP shows how many requests are waiting and lists them, so you can answer
 one without the link. **Allow once** runs that one call, **Always allow** and
-**Block** also decide the calls after it, and **Not now** runs nothing. A
+**Block** also decide the calls after it, **Allow for** (15 minutes, an hour or
+eight hours) lets the calls after it run without asking until that time is up,
+and **Not now** runs nothing. What you allowed for a while is listed on the
+token's page under **Allowed for now**, where **End now** takes it back; it
+changes none of the token's settings and never lifts a block. A
 server, API or mail account an assistant proposes is only added once you
 agree; an OAuth one is then connected from a link to its page in PCP, where
 PCP registers itself with the provider if the provider lets apps do that.
@@ -459,8 +463,8 @@ requests too. What it may do is on the token's page:
   decides every request there, whatever the method. You can add a site before
   any assistant asks for it, and remove one.
 
-A request that asks you offers **Allow once**, **Always allow this site**,
-**Block this site** and **Not now**. A site is its host: `example.com` and
+A request that asks you offers **Allow once**, **Allow this site for** a
+while, **Always allow this site**, **Block this site** and **Not now**. A site is its host: `example.com` and
 `www.example.com` are two sites, and a redirect from one to the other is
 reported to the assistant rather than followed, so you decide the second one
 too. Every line, method or site, has an **All tokens** box like the tools do.
@@ -487,7 +491,7 @@ Each call is decided as if the assistant had made it with `call_tool`: an
 allowed tool runs, a blocked one is an error the program sees, and one that
 asks you first stops the program at that call (the calls before it have run),
 with the usual request for you to answer; for the program to make that call
-itself next time, choose **Always allow**. Every call is in the request log
+itself next time, choose **Always allow**, or **Allow for** while that lasts. Every call is in the request log
 under `run_code`, and on the **Log** page. A program has no network, no files, no timers and none of
 your secrets, and stops after 3 minutes, 15 seconds of computing, 128 MB of
 memory or 100 calls (five of them at a time).
@@ -526,8 +530,9 @@ page downloads it, about 200 MB, into PCP's data folder; outside the app,
 `PCP_BROWSER_EXECUTABLE` can point at a Chromium or Chrome already installed.
 Which sites a token opens follows the same lines as web fetch, on the token's
 page (as **Browser sites** for a token without web fetch): a site it has not
-opened before asks you, and **Allow once** lets that tab open the site's pages
-while it is open. When you allow a `navigate` call itself, you have seen the
+opened before asks you, **Allow once** lets that tab open the site's pages
+while it is open, and **Allow this site for** lets every tab of the token open
+them for that long. When you allow a `navigate` call itself, you have seen the
 address, so it is not asked about again. Private addresses and PCP's own address
 work as for web fetch. Each token sees and drives only its own tabs (the ones
 it opened and the ones you hand it), not another token's or yours, and leaves

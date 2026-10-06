@@ -14,6 +14,7 @@ import type {
 } from "@/lib/generated/prisma/client"
 
 import { resolveAccessChanges, type AccessChange } from "./access-requests"
+import { allowanceHolds, loadToolAllowances } from "./allowances"
 import type { ResolvedToken } from "./api-tokens"
 import {
   DEFAULT_HEADER_NAME,
@@ -95,7 +96,7 @@ import {
 } from "./search"
 import { findTextSecretByName, validateSecretName } from "./secrets"
 import { validateServerUrl, validateUsername, type AuthType } from "./servers"
-import { effectiveAccess, loadToolAccess } from "./tool-access"
+import { accessKey, effectiveAccess, loadToolAccess } from "./tool-access"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
 import {
   describeResults,
@@ -173,10 +174,16 @@ const WEB_FETCHES = { max: 120, windowMs: 10 * 60_000 }
 /** run_code runs per token; each may make many calls (code/limits.ts). */
 const CODE_RUNS = { max: 60, windowMs: 10 * 60_000 }
 
+/**
+ * The servers a token reaches, each tool with the level its calls get: its
+ * levels, with "ask" lifted to "allowed" where the owner allowed the tool
+ * for a while (lib/core/allowances.ts) and that time has not run out.
+ */
 export async function loadGatewayServers(
   scope: GatewayScope,
+  now = new Date(),
 ): Promise<GatewayServer[]> {
-  const [servers, stored] = await Promise.all([
+  const [servers, stored, allowances] = await Promise.all([
     db().mcpServer.findMany({
       where: {
         vaultId: scope.ctx.vaultId,
@@ -198,14 +205,23 @@ export async function loadGatewayServers(
       orderBy: { name: "asc" },
     }),
     loadToolAccess(scope.ctx.vaultId, scope.tokenId),
+    loadToolAllowances(scope.tokenId, now),
   ])
 
   return servers.map((server) => ({
     ...server,
-    tools: server.tools.map((tool) => ({
-      ...tool,
-      access: effectiveAccess(stored, server.id, tool.name),
-    })),
+    tools: server.tools.map((tool) => {
+      const level = effectiveAccess(stored, server.id, tool.name)
+      const until = allowances.get(accessKey(server.id, tool.name))
+
+      return {
+        ...tool,
+        access:
+          level === "ask" && allowanceHolds(until, now.getTime())
+            ? "allowed"
+            : level,
+      }
+    }),
   }))
 }
 

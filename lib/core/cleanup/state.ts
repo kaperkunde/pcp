@@ -42,6 +42,7 @@ export type CleanupCounts = {
   apps?: number
   requests: number
   results: number
+  allowances: number
   logDays: number
 }
 
@@ -187,6 +188,11 @@ const REMOVED: Array<[keyof CleanupCounts, string, string]> = [
   ["apps", "expired app sign-in", "expired app sign-ins"],
   ["requests", "old permission request", "old permission requests"],
   ["results", "kept result past its day", "kept results past their day"],
+  [
+    "allowances",
+    "ended time-limited allowance",
+    "ended time-limited allowances",
+  ],
   ["logDays", "day of log", "days of log"],
 ]
 

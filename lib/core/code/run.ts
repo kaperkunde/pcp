@@ -433,7 +433,7 @@ export async function runCode(
           ...(output ? [`It printed:\n${output}`] : []),
           isConnectResult(stop.result)
             ? "Once the owner has connected it (check_server says when), run the program again."
-            : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow).",
+            : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow, or Allow for while that lasts).",
         ].join("\n\n"),
         stop.result,
       )
