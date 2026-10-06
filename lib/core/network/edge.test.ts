@@ -1,15 +1,25 @@
+import crypto from "node:crypto"
 import http from "node:http"
 import https from "node:https"
 import type { AddressInfo } from "node:net"
+import tls from "node:tls"
+
+import acme from "acme-client"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { Edge, listenError } from "./edge"
+import { ACME_TLS_PROTOCOL, Edge, listenError } from "./edge"
 import { selfSignedCertificate } from "./test-certificate"
-import type { Certificate, ChallengeStore } from "./tls"
+import {
+  alpnCertificate,
+  type Certificate,
+  type ChallengeStore,
+  challengeStore,
+} from "./tls"
 
 // The listeners PCP opens for HTTPS, against a stand-in for the app: what
-// they forward, the challenge answers, the redirect, and a port in use.
+// they forward, the challenge answers (HTTP-01 on port 80, TLS-ALPN-01 on
+// 443), the redirect, and a port in use.
 
 const domain = "pcp.example.com"
 
@@ -23,7 +33,7 @@ let challenges: ChallengeStore
 
 beforeEach(async () => {
   seen = []
-  challenges = new Map()
+  challenges = challengeStore()
   edge = null
   app = http.createServer((req, res) => {
     seen.push({ headers: req.headers, url: req.url })
@@ -109,7 +119,7 @@ describe("port 80", () => {
     const edge = makeEdge()
     await edge.start(domain)
     const port = edge.boundPorts().http!
-    challenges.set("tok", "tok.key-authorization")
+    challenges.http.set("tok", "tok.key-authorization")
 
     const answer = await get(port, "/.well-known/acme-challenge/tok")
     expect(answer).toMatchObject({ status: 200, body: "tok.key-authorization" })
@@ -154,7 +164,7 @@ describe("port 80", () => {
     expect(answer.headers.location).toBe(`https://${domain}/mcp?a=b`)
 
     // The challenge is still answered over plain HTTP, for renewals.
-    challenges.set("renew", "renew.answer")
+    challenges.http.set("renew", "renew.answer")
     expect(
       (await get(edge.boundPorts().http!, "/.well-known/acme-challenge/renew"))
         .body,
@@ -207,6 +217,136 @@ describe("port 443", () => {
     await edge.useCertificate(certificate())
     expect(edge.boundPorts().https).toBe(port)
     expect((await get(port, "/", { tls: true })).status).toBe(200)
+  })
+})
+
+/** A TLS handshake with port 443: what it negotiated and the certificate. */
+function handshake(
+  port: number,
+  options: { servername?: string; ALPNProtocols?: string[] },
+): Promise<
+  | { ok: true; protocol: string | false | null; cert: string }
+  | { ok: false; error: string }
+> {
+  return new Promise((resolve) => {
+    const socket = tls.connect({
+      host: "127.0.0.1",
+      port,
+      servername: options.servername ?? domain,
+      ALPNProtocols: options.ALPNProtocols,
+      rejectUnauthorized: false,
+    })
+    socket.once("secureConnect", () => {
+      resolve({
+        ok: true,
+        protocol: socket.alpnProtocol,
+        cert: socket.getPeerX509Certificate()?.toString() ?? "",
+      })
+      socket.destroy()
+    })
+    socket.once("error", (error) =>
+      resolve({ ok: false, error: error.message }),
+    )
+  })
+}
+
+describe("the TLS-ALPN-01 challenge on port 443", () => {
+  const keyAuthorization = "tok.thumbprint"
+
+  async function pending() {
+    challenges.tlsAlpn.set(
+      domain,
+      await alpnCertificate(domain, keyAuthorization),
+    )
+  }
+
+  it("is answered on acme-tls/1 before there is a certificate", async () => {
+    const edge = makeEdge()
+    await edge.start(domain)
+    const port = edge.boundPorts().https!
+    expect(port).toBeGreaterThan(0)
+    await pending()
+
+    const answer = await handshake(port, { ALPNProtocols: [ACME_TLS_PROTOCOL] })
+    expect(answer.ok).toBe(true)
+    if (!answer.ok) return
+    expect(answer.protocol).toBe(ACME_TLS_PROTOCOL)
+    // The acmeIdentifier extension carries the key authorization's hash.
+    expect(
+      acme.crypto.isAlpnCertificateAuthorizationValid(
+        answer.cert,
+        keyAuthorization,
+      ),
+    ).toBe(true)
+    expect(new crypto.X509Certificate(answer.cert).checkHost(domain)).toBe(
+      domain,
+    )
+
+    // Nothing else is served without a certificate.
+    expect((await handshake(port, { ALPNProtocols: ["http/1.1"] })).ok).toBe(
+      false,
+    )
+  })
+
+  it("leaves every other connection the normal certificate", async () => {
+    const edge = makeEdge()
+    await edge.start(domain)
+    const normal = certificate()
+    await edge.useCertificate(normal)
+    const port = edge.boundPorts().https!
+    await pending()
+
+    const isNormal = (answer: Awaited<ReturnType<typeof handshake>>) =>
+      answer.ok &&
+      new crypto.X509Certificate(answer.cert).fingerprint256 ===
+        new crypto.X509Certificate(normal.cert).fingerprint256
+
+    // A browser or an assistant while the challenge is out.
+    expect(
+      isNormal(await handshake(port, { ALPNProtocols: ["http/1.1"] })),
+    ).toBe(true)
+    expect(isNormal(await handshake(port, {}))).toBe(true)
+    // acme-tls/1 offered beside another protocol is not Let's Encrypt.
+    const mixed = await handshake(port, {
+      ALPNProtocols: [ACME_TLS_PROTOCOL, "http/1.1"],
+    })
+    expect(mixed.ok && mixed.protocol).not.toBe(ACME_TLS_PROTOCOL)
+    // Another name gets no challenge certificate.
+    const other = await handshake(port, {
+      servername: "other.example.com",
+      ALPNProtocols: [ACME_TLS_PROTOCOL],
+    })
+    expect(other.ok && other.protocol).not.toBe(ACME_TLS_PROTOCOL)
+
+    // HTTP still works through it.
+    expect((await get(port, "/servers", { tls: true })).body).toBe(
+      "app saw GET /servers",
+    )
+
+    // Once validated and taken away, acme-tls/1 gets nothing special.
+    challenges.tlsAlpn.delete(domain)
+    const after = await handshake(port, { ALPNProtocols: [ACME_TLS_PROTOCOL] })
+    expect(after.ok && after.protocol).not.toBe(ACME_TLS_PROTOCOL)
+    expect(
+      isNormal(await handshake(port, { ALPNProtocols: ["http/1.1"] })),
+    ).toBe(true)
+  })
+
+  it("closes a connection still being read when it stops", async () => {
+    const edge = makeEdge()
+    await edge.start(domain)
+    await pending()
+    const net = await import("node:net")
+    const socket = net.connect(edge.boundPorts().https!, "127.0.0.1")
+    socket.on("error", () => {})
+    await new Promise((resolve) => socket.once("connect", resolve))
+    // Half a ClientHello: the edge waits for the rest.
+    socket.write(Buffer.from([22, 3, 1, 0, 200, 1]))
+    const closed = new Promise((resolve) => socket.once("close", resolve))
+
+    await edge.stop()
+    await closed
+    expect(socket.destroyed).toBe(true)
   })
 })
 

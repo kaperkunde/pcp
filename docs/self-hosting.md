@@ -307,16 +307,18 @@ checkout, `docker compose down` stops PCP and keeps the volume;
 ## When something does not work
 
 **"Let's Encrypt did not issue a certificate … Timeout during connect" or
-"Connection refused".** Let's Encrypt could not reach port 80 at your name.
-Check, in order:
+"Connection refused".** Let's Encrypt could not reach PCP at your name: it
+asks on port 80 first, and when that fails once more on port 443. Check, in
+order:
 
 - The name points at your connection: the Dynamic DNS card says "Working",
   and the address it shows matches what [ipify.org](https://api.ipify.org)
   shows from your home network.
-- Port 80 is forwarded to the right computer (4b), and PCP was started with
-  `PCP_HTTPS=1` (or `docker-compose.https.yaml`).
-- Your internet provider does not block port 80. Some do, mostly on
-  residential plans. Ask them, or see "Neither works" below.
+- Ports 80 and 443 are forwarded to the right computer (4b), and PCP was
+  started with `PCP_HTTPS=1` (or `docker-compose.https.yaml`).
+- Your internet provider does not block both. Some block port 80, mostly on
+  residential plans; PCP then manages with port 443 alone. Ask them, or see
+  "Neither works" below.
 
 If this happens on the first try, PCP turns HTTPS off again and the card
 says why: these problems do not go away by themselves, and Let's Encrypt is
@@ -343,7 +345,7 @@ again with `PCP_HTTPS=0`. If it names port 3000, choose another with
 **Cloudflare: the name works but HTTPS does not.** Set the record to "DNS
 only" (the grey cloud) in Cloudflare, so Let's Encrypt reaches PCP directly.
 
-**Neither works (CGNAT, or port 80 blocked).** A tunnel avoids port forwarding
+**Neither works (CGNAT, or ports 80 and 443 blocked).** A tunnel avoids port forwarding
 entirely:
 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
 or [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) can publish

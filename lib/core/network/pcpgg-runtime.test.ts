@@ -4,6 +4,7 @@ import type net from "node:net"
 import tls from "node:tls"
 import { setTimeout as sleep } from "node:timers/promises"
 
+import acme from "acme-client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { getHostSetting } from "../host-settings"
@@ -21,11 +22,18 @@ import {
   setNetworkIssuer,
 } from "./runtime"
 import { selfSignedCertificate } from "./test-certificate"
-import { clearTlsConfig, getTlsConfig, type Issuer } from "./tls"
+import { ACME_TLS_PROTOCOL } from "./edge"
+import {
+  alpnCertificate,
+  clearTlsConfig,
+  getTlsConfig,
+  type Issuer,
+} from "./tls"
 
 // PCP connected to pcp.gg, against a copy of pcp.gg's relay: the key saved,
 // the name it is online at, HTTPS turned on for that name once Let's
-// Encrypt's challenge reaches PCP through pcp.gg, an assistant's connection
+// Encrypt's challenge reaches PCP through pcp.gg (TLS-ALPN-01 on port 443,
+// or HTTP-01 on port 80 where that gets through), an assistant's connection
 // to the name reaching the app, and everything stopped again.
 
 const NAME = "alice.pcp.test"
@@ -68,6 +76,7 @@ const listen = (server: net.Server | http.Server) =>
 
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
+  issuerTypes = []
   process.env.PCP_HTTP_PORT = "0"
   process.env.PCP_HTTPS_PORT = "0"
   process.env.PCP_PUBLIC_IP_URL = "http://127.0.0.1:9/ip"
@@ -119,9 +128,61 @@ function getThroughRelay(
   })
 }
 
-/** A Let's Encrypt that checks the challenge the way it would: from outside. */
-const issuer: Issuer = async ({ domain, challenges }) => {
-  challenges.set("token-1", "token-1.thumbprint")
+/** Let's Encrypt's TLS-ALPN-01 check through pcp.gg's port 443. */
+async function validateThroughRelay443(keyAuthorization: string) {
+  const cert = await new Promise<string>((resolve, reject) => {
+    const socket = tls.connect({
+      host: "127.0.0.1",
+      port: relayHttps,
+      servername: NAME,
+      ALPNProtocols: [ACME_TLS_PROTOCOL],
+      rejectUnauthorized: false,
+    })
+    socket.once("secureConnect", () => {
+      resolve(socket.getPeerX509Certificate()?.toString() ?? "")
+      socket.destroy()
+    })
+    socket.once("error", reject)
+  })
+
+  if (
+    !acme.crypto.isAlpnCertificateAuthorizationValid(cert, keyAuthorization)
+  ) {
+    throw new Error("Incorrect validation certificate for tls-alpn-01")
+  }
+}
+
+let issuerTypes: string[][]
+
+/**
+ * A Let's Encrypt that checks the challenge the way it would, from outside,
+ * with pcp.gg behind a proxy that keeps port 80's challenge path for itself
+ * (Coolify's Traefik): only TLS-ALPN-01 on port 443 gets through.
+ */
+const issuer: Issuer = async ({ domain, challenges, challengeTypes }) => {
+  issuerTypes.push(challengeTypes)
+
+  if (challengeTypes[0] !== "tls-alpn-01") {
+    throw new Error("Invalid response from the challenge: 404")
+  }
+
+  challenges.tlsAlpn.set(
+    domain,
+    await alpnCertificate(domain, "token-1.thumbprint"),
+  )
+
+  try {
+    await validateThroughRelay443("token-1.thumbprint")
+  } finally {
+    challenges.tlsAlpn.delete(domain)
+  }
+
+  return selfSignedCertificate(domain)
+}
+
+/** HTTP-01 through pcp.gg's port 80, where nothing in front answers it. */
+const httpIssuer: Issuer = async ({ domain, challenges }) => {
+  challenges.http.set("token-1", "token-1.thumbprint")
 
   try {
     const answer = await getThroughRelay("/.well-known/acme-challenge/token-1")
@@ -130,7 +191,7 @@ const issuer: Issuer = async ({ domain, challenges }) => {
       throw new Error(`Invalid response from the challenge: ${answer.status}`)
     }
   } finally {
-    challenges.delete("token-1")
+    challenges.http.delete("token-1")
   }
 
   return selfSignedCertificate(domain)
@@ -180,7 +241,7 @@ describe("PCP connected to pcp.gg", () => {
     })
 
     // HTTPS turned on for the name, and the certificate got through
-    // pcp.gg's port 80 on the first try.
+    // pcp.gg's port 443 on the first try, port 80 being out of reach.
     expect(await getTlsConfig()).toMatchObject({ domain: NAME, via: "pcpgg" })
     const overview = await waitFor(async () => {
       const next = await networkOverview()
@@ -189,6 +250,7 @@ describe("PCP connected to pcp.gg", () => {
         : null
     })
     expect(overview.pcpgg?.https?.domain).toBe(NAME)
+    expect(issuerTypes).toEqual([["tls-alpn-01", "http-01"]])
     // No warning that the name points elsewhere: it should.
     expect(overview.pcpgg?.https?.status.warning).toBeUndefined()
 
@@ -214,6 +276,16 @@ describe("PCP connected to pcp.gg", () => {
     expect(body).toContain("app saw /hello")
     expect(appSeen.at(-1)?.["x-forwarded-proto"]).toBe("https")
     expect(appSeen.at(-1)?.["x-forwarded-host"]).toBe(NAME)
+  })
+
+  it("still gets a certificate with HTTP-01 through pcp.gg's port 80", async () => {
+    setNetworkIssuer(httpIssuer)
+    await connect()
+
+    await waitFor(async () => {
+      const next = await networkOverview()
+      return next.pcpgg?.https?.status.state === "active"
+    })
   })
 
   it("keeps the listeners to this computer", async () => {
