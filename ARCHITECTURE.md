@@ -1033,7 +1033,11 @@ adds a column the format does not carry yet.
 by table (not trusting cascades alone), and writes the file's rows in its
 place, parents before children, in chunks that keep under SQLite's variable
 limit; row ids and timestamps are the file's. On a PCP not set up yet the
-transaction first checks that there is no vault, as `setupVault` does. The
+transaction first checks that there is no vault, as `setupVault` does. Into
+a vault that exists, the vault's browser is closed first (`withBrowserClosed`:
+a call in flight finishes, the profile is saved with the owner's key, and no
+browser starts until the rows are written), since a browser left running
+would save its old sign-ins over the restored profile. The
 host's settings (`ddns.config`, `tls.config` and `update.config`, in plain
 text as they are in the database) are in the file and restored only when the
 owner ticks the box, with this machine's network status rows dropped so

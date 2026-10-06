@@ -199,7 +199,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 
@@ -299,7 +299,7 @@ describe("restoring", { timeout: 60_000 }, () => {
 
     await restoreExport(
       read,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 
@@ -346,7 +346,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     await db().browserProfile.delete({ where: { vaultId: ctx.vaultId } })
     await restoreExport(
       read,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
     const after = await db().browserProfile.findUniqueOrThrow({
@@ -374,7 +374,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(oldPreview.counts.browserSites).toBe(0)
     await restoreExport(
       oldRead,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
     expect(await db().browserProfile.count()).toBe(0)
@@ -407,7 +407,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     )
     await restoreExport(
       read,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 
@@ -436,7 +436,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: true },
     )
 
@@ -468,7 +468,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     await expect(
       restoreExport(
         payload,
-        { into: "vault", vaultId: ctx.vaultId },
+        { into: "vault", ctx },
         { restoreHostSettings: false },
       ),
     ).rejects.toThrow(/gone/)
@@ -507,7 +507,7 @@ describe("restoring", { timeout: 60_000 }, () => {
 
     await restoreExport(
       payload,
-      { into: "vault", vaultId: second.vaultId },
+      { into: "vault", ctx: second },
       { restoreHostSettings: false },
     )
 
@@ -534,7 +534,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 

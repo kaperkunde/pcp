@@ -102,6 +102,8 @@ export type VaultBrowser = {
 type Runtime = {
   vaults: Map<string, VaultBrowser>
   starting: Map<string, Promise<VaultBrowser>>
+  /** Vaults whose browser may not start: a restore is writing them. */
+  held: Set<string>
   /** Replaces the address check; for tests that serve pages on loopback. */
   addressCheck: ((address: string, port: number) => boolean) | null
 }
@@ -114,6 +116,7 @@ function runtime(): Runtime {
   holder[RUNTIME] ??= {
     vaults: new Map(),
     starting: new Map(),
+    held: new Set(),
     addressCheck: null,
   }
 
@@ -252,6 +255,14 @@ export async function ensureBrowser(
   { publicUrl }: { publicUrl?: string } = {},
 ): Promise<VaultBrowser> {
   const state = runtime()
+
+  if (state.held.has(ctx.vaultId)) {
+    throw new PcpError(
+      "state",
+      "The vault is being restored from an export. Try again in a moment.",
+    )
+  }
+
   const running = state.vaults.get(ctx.vaultId)
 
   if (running) {
@@ -398,6 +409,39 @@ export async function closeBrowser(
 
   forget(vault)
   await vault.browser.close().catch(() => {})
+}
+
+/**
+ * Runs `write` with the vault's browser closed, and none started until it
+ * is done: for a write that replaces the vault's rows, the profile's too. A
+ * call in flight finishes first, a browser still starting is waited for,
+ * and the profile is saved with the key (so a write that fails loses
+ * nothing). Nothing of the old browser can save over what `write` leaves.
+ */
+export async function withBrowserClosed<T>(
+  ctx: VaultContext,
+  write: () => Promise<T>,
+): Promise<T> {
+  const state = runtime()
+
+  if (state.held.has(ctx.vaultId)) {
+    throw new PcpError("state", "The vault is already being restored.")
+  }
+
+  state.held.add(ctx.vaultId)
+
+  try {
+    await state.starting.get(ctx.vaultId)?.catch(() => {})
+    const vault = runningBrowser(ctx.vaultId)
+
+    if (vault) {
+      await withVault(vault, () => closeBrowser(ctx.vaultId, { ctx }))
+    }
+
+    return await write()
+  } finally {
+    state.held.delete(ctx.vaultId)
+  }
 }
 
 /** Every vault's browser, at shutdown or between tests. */
