@@ -325,8 +325,14 @@ export async function runCall(
   } catch (error) {
     // A site the owner just saw: a site is asked about only for the address
     // in the call's arguments, so when they allowed the call, they allowed
-    // it for this tab.
-    if (ownerAllowed && isOwnerNeeded(error) && error.ask.kind === "browse") {
+    // it for this tab. Not when the arguments held a kept result: the owner
+    // saw its name, not the address in it, so the site is asked about.
+    if (
+      ownerAllowed &&
+      isOwnerNeeded(error) &&
+      error.ask.kind === "browse" &&
+      collectHandleIds(args).length === 0
+    ) {
       const { tabId, url } = error.ask.input
 
       return (executor.browse ?? performNavigate)(

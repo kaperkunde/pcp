@@ -27,6 +27,7 @@ import { startTestApi, type TestApi } from "./openapi/test-api"
 import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
+import { OwnerNeeded } from "./browser/types"
 import { keepBytes } from "./tool-results"
 import { callServerTool, syncServerTools } from "./upstream"
 import { setupVault } from "./vault"
@@ -398,6 +399,51 @@ describe("kept results in a call", () => {
       { own: true, other: null },
       { own: null, other: null },
     ])
+  })
+})
+
+describe("a site the browser asks about", () => {
+  async function allowedNavigate(args: Record<string, unknown>) {
+    const { ctx, server, tokenId } = await setup()
+    const opened: string[] = []
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => {
+        throw new OwnerNeeded({
+          kind: "browse",
+          input: {
+            serverId: server.id,
+            tabId: null,
+            url: "https://hidden.example/",
+            toolName: "navigate",
+          },
+        })
+      },
+      browse: async (_scope, { url }) => {
+        opened.push(url)
+        return { content: [{ type: "text", text: "opened" }] }
+      },
+    }
+    const row = await db().mcpServer.findFirstOrThrow()
+
+    await runCall(ctx, row, "navigate", args, {
+      publicUrl: PUBLIC_URL,
+      tokenId,
+      ownerAllowed: true,
+      executor,
+    }).catch(() => null)
+
+    return opened
+  }
+
+  it("opens the address the owner saw in the call they allowed", async () => {
+    expect(await allowedNavigate({ url: "https://hidden.example/" })).toEqual([
+      "https://hidden.example/",
+    ])
+  })
+
+  it("asks again when the address was a kept result the owner did not see", async () => {
+    expect(await allowedNavigate({ url: { $result: "r1" } })).toEqual([])
   })
 })
 
