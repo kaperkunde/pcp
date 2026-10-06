@@ -81,6 +81,7 @@ describe("clientSeen", () => {
     expect(clientSeen("token-a", call, headers)).toEqual({
       method: "tools/call",
       userAgent: "Claude-User",
+      labels: {},
       headers: ["authorization", "user-agent"],
     })
     expect(clientSeen("token-a", call, headers)).toBeNull()
@@ -112,5 +113,55 @@ describe("clientSeen", () => {
 
     expect(JSON.stringify(seen)).not.toContain("pcp_secret")
     expect(seen?.method).toBeUndefined()
+  })
+
+  it("reads the client from a 2026-07-28 request's _meta and its label headers", () => {
+    const listen = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "subscriptions/listen",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": {
+            name: "claude-ai",
+            version: "1.0",
+          },
+          "io.modelcontextprotocol/clientCapabilities": { elicitation: {} },
+        },
+      },
+    })
+    const headers = new Headers({
+      "User-Agent": "Claude-User",
+      "X-Anthropic-Client": "claude-ai",
+      "Mcp-Protocol-Version": "2026-07-28",
+      Authorization: "Bearer pcp_secret",
+    })
+
+    expect(clientSeen("token-e", listen, headers)).toEqual({
+      method: "subscriptions/listen",
+      client: { name: "claude-ai", version: "1.0" },
+      protocolVersion: "2026-07-28",
+      capabilities: { elicitation: [] },
+      userAgent: "Claude-User",
+      labels: {
+        "mcp-protocol-version": "2026-07-28",
+        "x-anthropic-client": "claude-ai",
+      },
+      headers: [
+        "authorization",
+        "mcp-protocol-version",
+        "user-agent",
+        "x-anthropic-client",
+      ],
+    })
+    // The same client calling something else is not new.
+    expect(
+      clientSeen(
+        "token-e",
+        listen.replace("subscriptions/listen", "tools/call"),
+        headers,
+      ),
+    ).toBeNull()
   })
 })
