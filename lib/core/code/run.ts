@@ -3,12 +3,15 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 import { readFields, type AnswerShape } from "../answers"
 import { isConnectResult } from "../connect"
 import { isPcpError } from "../errors"
+import { bareType, isTextType } from "../media-types"
 import type { CodeCallOutcome, PermissionScope } from "../permissions"
 import { appendRequestLog, noteOwnerAsked, withLogNote } from "../request-log"
 import { MAX_HANDLE_DEPTH, missingResultMessage } from "../result-handles"
 import {
   handleOf,
+  keepBytes,
   keepResult,
+  MAX_KEPT_RESULT_BYTES,
   MAX_KEPT_RESULT_CHARS,
   openResult,
   resultNotice,
@@ -41,13 +44,17 @@ import type { Bridge, BridgeReply, Executor } from "./types"
  *   call_tool would leave), and an allowed tool runs through the same
  *   upstream path as call_tool (permissions.ts runCodeCall). Every call is
  *   in the request log, under run_code, by server and tool.
- * - `read` opens one of the token's own kept results, as text.
- * - `keep` keeps a text as a result of the token's, and hands back its
- *   handle, which any later call (the program's or the assistant's) can
- *   name in place of the text.
+ * - `read` opens one of the token's own kept results, as text, or as
+ *   base64 for a file's bytes.
+ * - `keep` keeps a text, or bytes sent as base64, as a result of the
+ *   token's, and hands back its handle, which any later call (the
+ *   program's or the assistant's) can name in place of the value.
+ * - `tools` lists what the gateway's list_tools would: the token's servers,
+ *   or one server's tools it can see, at its levels. It reaches no server.
  *
  * Files move as handles: a file in an answer is kept and the program gets
- * its handle, never its bytes, and passes the handle on.
+ * its handle, and passes the handle on; it reads the bytes only when it
+ * asks to (`read` as base64).
  *
  * Nothing here reads a secret or opens a connection, and the program's text
  * is not logged or kept.
@@ -61,6 +68,14 @@ export type CodeCaller = (
     args: Record<string, unknown>
   } & AnswerShape,
 ) => Promise<CodeCallOutcome>
+
+/**
+ * How the gateway lists for a program: with no server, the token's servers;
+ * with one, the tools on it the token can see. Nothing is fetched.
+ */
+export type CodeLister = (
+  server: string | null,
+) => { ok: true; value: unknown } | { ok: false; error: string }
 
 /** What run_code shows of each part before keeping the rest. */
 const SHOWN_OUTPUT_CHARS = 20_000
@@ -124,6 +139,7 @@ export function bareHandles(value: unknown, depth = 0): unknown {
 }
 
 const MEDIA_TYPE = /^[\w.+-]+\/[\w.+-]+(\s*;.*)?$/
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 
 function refuse(error: string): BridgeReply {
   return { ok: false, error }
@@ -151,11 +167,13 @@ export async function runCode(
   },
   {
     call,
+    list,
     signal,
     executor = runJavaScript,
     timeoutMs = RUN_TIMEOUT_MS,
   }: {
     call: CodeCaller
+    list?: CodeLister
     /** The request's own: the run stops when it goes away. */
     signal?: AbortSignal
     executor?: Executor
@@ -323,9 +341,14 @@ export async function runCode(
 
   async function read(payload: unknown): Promise<BridgeReply> {
     const id = isRecord(payload) ? payload.id : undefined
+    const as = isRecord(payload) ? (payload.as ?? "text") : undefined
 
     if (typeof id !== "string" || id === "" || id.length > 64) {
       return refuse("pcp.read takes a handle, or its id: pcp.read(handle).")
+    }
+
+    if (as !== "text" && as !== "base64") {
+      return refuse('pcp.read reads as "text" (the default) or "base64".')
     }
 
     if (++reads > MAX_READS_PER_RUN) {
@@ -338,8 +361,19 @@ export async function runCode(
       return refuse(missingResultMessage(id))
     }
 
+    if (
+      as === "text" &&
+      opened.kind === "bytes" &&
+      !isTextType(opened.mediaType)
+    ) {
+      return refuse(
+        `Result ${id} is ${bareType(opened.mediaType)}, not text: read its bytes as base64 instead (as: "base64").`,
+      )
+    }
+
     try {
-      const value = opened.text()
+      const value =
+        as === "base64" ? opened.bytes().toString("base64") : opened.text()
 
       if (value.length > MAX_CODE_ANSWER_CHARS) {
         return refuse(
@@ -364,7 +398,15 @@ export async function runCode(
       )
     }
 
-    const type = payload.type ?? "text/plain"
+    const encoding = payload.encoding ?? "text"
+
+    if (encoding !== "text" && encoding !== "base64") {
+      return refuse('pcp.keep\'s encoding is "text" (the default) or "base64".')
+    }
+
+    const type =
+      payload.type ??
+      (encoding === "base64" ? "application/octet-stream" : "text/plain")
     const name = payload.name ?? null
 
     if (
@@ -377,6 +419,10 @@ export async function runCode(
 
     if (name !== null && typeof name !== "string") {
       return refuse("pcp.keep's name is a file name.")
+    }
+
+    if (encoding === "base64") {
+      return keepFile(payload.value, type, name)
     }
 
     if (payload.value.length > MAX_KEPT_RESULT_CHARS) {
@@ -401,6 +447,71 @@ export async function runCode(
     return { ok: true, value: handleOf(kept) }
   }
 
+  /** Bytes sent as base64, kept as a file of the token's. */
+  async function keepFile(
+    base64: string,
+    type: string,
+    name: string | null,
+  ): Promise<BridgeReply> {
+    // Base64 is 4 characters for every 3 bytes; anything longer than the
+    // largest file is refused before it is decoded.
+    if (base64.length > Math.ceil(MAX_KEPT_RESULT_BYTES / 3) * 4 + 4) {
+      return refuse(
+        `That is more than PCP keeps of one file (${MAX_KEPT_RESULT_BYTES.toLocaleString("en")} bytes).`,
+      )
+    }
+
+    const bare = base64.replace(/\s+/g, "")
+
+    if (bare.length % 4 === 1 || !BASE64.test(bare)) {
+      return refuse(
+        'pcp.keep was told the value is base64, and it is not: only A-Z, a-z, 0-9, "+", "/" and "=" at the end.',
+      )
+    }
+
+    if (++keeps > MAX_KEEPS_PER_RUN) {
+      return refuse(`A run keeps at most ${MAX_KEEPS_PER_RUN} values.`)
+    }
+
+    try {
+      const kept = await keepBytes(scope.ctx, {
+        tokenId: scope.tokenId,
+        serverId: null,
+        toolName: "run_code",
+        bytes: Buffer.from(bare, "base64"),
+        mediaType: type,
+        name,
+      })
+
+      return { ok: true, value: handleOf(kept) }
+    } catch (error) {
+      if (isPcpError(error)) {
+        return refuse(error.message)
+      }
+
+      throw error
+    }
+  }
+
+  function tools(payload: unknown): BridgeReply {
+    const server = isRecord(payload) ? (payload.server ?? null) : undefined
+
+    if (
+      server !== null &&
+      (typeof server !== "string" || server === "" || server.length > 200)
+    ) {
+      return refuse(
+        'pcp.tools lists the servers, or with a server\'s name its tools: pcp.tools("github").',
+      )
+    }
+
+    if (!list) {
+      return refuse("PCP cannot list tools here.")
+    }
+
+    return list(server)
+  }
+
   const bridge: Bridge = async (op, payload) => {
     switch (op) {
       case "call":
@@ -409,6 +520,8 @@ export async function runCode(
         return read(payload)
       case "keep":
         return keep(payload)
+      case "tools":
+        return tools(payload)
       default:
         return refuse(`PCP does not know "${String(op).slice(0, 40)}".`)
     }

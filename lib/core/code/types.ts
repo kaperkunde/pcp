@@ -6,7 +6,7 @@
  */
 
 /** The operations a program can ask the bridge for. */
-export type BridgeOp = "call" | "read" | "keep"
+export type BridgeOp = "call" | "read" | "keep" | "tools"
 
 /**
  * The bridge's answer to one request. `ok: false` is an error the program

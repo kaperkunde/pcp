@@ -485,7 +485,14 @@ each answer whole, as a value, so it can pick the ten rows the assistant needs
 out of ten thousand, join two tools' answers, or hand a file from one tool to
 another, and only what it prints and returns goes back to the assistant.
 Files move as handles, as they do between calls (above); `pcp.keep` keeps a
-text it made (a CSV, a report) as a handle to pass on.
+text it made (a CSV, a report), or bytes, as a handle to pass on, and
+`pcp.read(handle, { as: "base64" })` reads a file's bytes when the program
+has to build something from them (a MIME message with an attachment). With
+`keep`, a value one tool makes, such as a password a server generates, goes
+into another tool's arguments as a handle, never read by the program or the
+assistant. `pcp.tools()` lists the token's servers and tools, as `list_tools`
+does. The program also has `atob`, `btoa`, `TextEncoder`, `TextDecoder` and
+`crypto.getRandomValues`, so it can make a strong secret itself.
 
 Each call is decided as if the assistant had made it with `call_tool`: an
 allowed tool runs, a blocked one is an error the program sees, and one that

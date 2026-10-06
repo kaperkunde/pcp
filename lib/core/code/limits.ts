@@ -28,6 +28,8 @@ export const MAX_PARALLEL_CALLS = 5
 export const MAX_KEEPS_PER_RUN = 50
 /** Kept results one run may read (pcp.read). */
 export const MAX_READS_PER_RUN = 50
+/** Random bytes one crypto.getRandomValues fills, as the web allows. */
+export const MAX_RANDOM_BYTES = 65_536
 /**
  * The most of one tool's answer a program is handed, in characters of JSON.
  * Its longest texts are kept as results first; an answer still longer is an

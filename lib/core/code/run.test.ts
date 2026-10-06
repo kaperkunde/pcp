@@ -347,6 +347,98 @@ describe("a program's calls", () => {
     expect(row).toMatchObject({ tokenId: scope.tokenId, toolName: "run_code" })
   })
 
+  it("reads a file's bytes only as base64, and keeps bytes sent so", async () => {
+    const { text } = await run(`
+      const scanned = await pcp.call("postcards", "scan_card")
+      let refused
+      try { await pcp.read(scanned.data) } catch (error) { refused = error.message }
+      const base64 = await pcp.read(scanned.data, { as: "base64" })
+      const copy = await pcp.keep(base64.slice(0, 12), { encoding: "base64", name: "head.pdf", type: "application/pdf" })
+      const bytes = await pcp.keep(new Uint8Array([1, 2, 3]))
+      let notBase64
+      try { await pcp.keep("not base64!", { encoding: "base64" }) } catch (error) { notBase64 = error.message }
+      return { refused, same: base64 === ${JSON.stringify(PDF)}, copy, bytes, notBase64 }
+    `)
+
+    const value = returned(text) as {
+      refused: string
+      same: boolean
+      copy: { $result: string; type: string; name: string; size: number }
+      bytes: { $result: string; type: string; size: number }
+      notBase64: string
+    }
+    expect(value.refused).toContain(
+      'read its bytes as base64 instead (as: "base64")',
+    )
+    expect(value.same).toBe(true)
+    expect(value.copy).toMatchObject({
+      type: "application/pdf",
+      name: "head.pdf",
+      size: 9,
+    })
+    expect(value.bytes).toMatchObject({
+      type: "application/octet-stream",
+      size: 3,
+    })
+    expect(value.notBase64).toContain("is not")
+
+    const row = await db().toolResult.findUniqueOrThrow({
+      where: { id: value.copy.$result },
+    })
+    expect(row).toMatchObject({
+      tokenId: scope.tokenId,
+      kind: "bytes",
+      toolName: "run_code",
+    })
+  })
+
+  it("lists the token's servers and the tools it can see, as list_tools does", async () => {
+    const { text } = await run(`
+      const servers = await pcp.tools()
+      const tools = await pcp.tools("postcards")
+      let missing
+      try { await pcp.tools("nowhere") } catch (error) { missing = error.message }
+      return { servers, tools: tools.map((tool) => [tool.name, tool.access]), missing }
+    `)
+
+    expect(returned(text)).toEqual({
+      servers: [
+        {
+          server: "postcards",
+          name: "Postcards",
+          description: "",
+          tools: 5,
+        },
+      ],
+      tools: [
+        ["archive", "allowed"],
+        ["broken", "allowed"],
+        ["list_cards", "allowed"],
+        ["scan_card", "allowed"],
+        ["send_postcard", "ask"],
+      ],
+      missing: "No server called nowhere. Servers: postcards.",
+    })
+    expect(ran).toEqual([])
+  })
+
+  it("says in its description what the program has, and that no sandbox runs", async () => {
+    const { tools } = await client.listTools()
+    const description =
+      tools.find((tool) => tool.name === "run_code")?.description ?? ""
+
+    for (const part of [
+      "crypto.getRandomValues",
+      'as: "base64"',
+      'encoding: "base64"',
+      "pcp.tools()",
+      'keep: ["password"]',
+      "not running on this PCP",
+    ]) {
+      expect(description).toContain(part)
+    }
+  })
+
   it("keeps a long returned value as a result, to read or pass on", async () => {
     const { text } = await run(
       `return await pcp.call("postcards", "list_cards")`,

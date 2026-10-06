@@ -151,7 +151,8 @@ so in the summary; the bump itself waits for the request.
   (`code/run.ts`), and the bridge's only way to a tool is the gateway's
   `resolveCall` and `runCodeCall`: the token's own tools at its own levels,
   an "ask" tool stopping the run with the usual permission request, every
-  call in the request log, files as handles. No credential, network, file
+  call in the request log, files as handles (read as base64 only when the
+  program asks). Listing (`pcp.tools`) shows what `list_tools` would. No credential, network, file
   or timer ever reaches the program, and nothing but strings crosses into
   it. Its memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
   own limit counts nothing in these builds). The sandbox container
