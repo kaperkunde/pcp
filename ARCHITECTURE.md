@@ -13,14 +13,20 @@ app/                 Routes and pages (Next.js App Router)
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
   api/export/…       The export download (a file needs Content-Disposition)
+  api/health/…       The health check; in the desktop app, the version and an install request
+  api/browser/…      A browser tab's live view: its pictures out, the owner's input in
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
   mail/              Mail accounts: JMAP and IMAP/SMTP behind one set of mail tools
+  fetch/             web_fetch: the request, the page, which level applies
+  code/              run_code: QuickJS, the bridge to the tools, the sandbox's socket
+  browser/           The headless Chromium: runtime and gate, proxy, profile, tools, install
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
   updates/           The daily check for a newer release, and what it found
+sandbox/             run_code's sandbox container: the runner, the launcher, the pcp command
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
 desktop/             The Mac and Windows app: Electron around the production build, nothing of PCP in it
@@ -41,10 +47,14 @@ associated data (a ciphertext cannot be moved to another row):
 - OAuth token sets and the clients PCP registered (a `secret` row of kind
   `oauth`, owned by the server that uses it); an OAuth client secret the
   owner gives PCP is one of their own `text` secrets,
-- the PKCE verifier of an authorization in flight (`oauth_state`).
-- a memory's path and text (`memory.ciphertext`, as one JSON value).
+- the PKCE verifier of an authorization in flight (`oauth_state`),
+- a memory's path and text (`memory.ciphertext`, as one JSON value),
 - a tool answer or a file kept for `read_result` and handles
-  (`tool_result.ciphertext`).
+  (`tool_result.ciphertext`),
+- what a request waiting for the owner holds: the call's arguments or the
+  new server's settings, and the outcome (`permission_request`),
+- the browser's sign-ins (`browser_profile`, bound to the vault's id, as
+  there is one per vault).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -83,6 +93,14 @@ Consequences:
   never before a new recovery key, a new password or another Touch ID key:
   only the password and the recovery key decide who gets in. See "Touch ID
   in the Mac app".
+- **Guesses are counted.** The password, the recovery key and an export
+  password may be tried ten times per address (inside a session, per
+  session) and sixty times for the whole instance in fifteen minutes
+  (`lib/server/password-attempts.ts`). A right password gives its count
+  back, so the owner signing in and confirming all day spends none of the
+  tries a guesser is held to. The Touch ID key has a budget of its own,
+  given back the same way: it is no password guess, and must not spend the
+  owner's tries.
 - **Losing every credential loses the data.** There is no back door because
   there is no key to keep one with.
 - Rotating the DEK itself (re-encrypting every row) is not implemented;
@@ -794,7 +812,10 @@ follow the line for all tokens); PCP's own address never. Refusals are
 remembered for half a minute so an answer can say why a page did not open.
 Hosts are never logged.
 
-**What an assistant gets.** A snapshot (Playwright's accessibility tree
+**What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
+`snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
+`select_option`, `scroll`, `wait_for`, `screenshot`, `handle_dialog` and
+`hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
 with refs), the page as Markdown (`htmlToMarkdown`, read from the live
 page), a screenshot of the viewport, and the tab's address, title and the
 link to it in PCP. It acts by ref (click, type, select), by key or by
@@ -827,6 +848,12 @@ metadata. Both routes check PCP's origin and the owner's session, as the
 export download does. A WebSocket would answer a little sooner, but needs a
 server of its own around Next; the input's format is the same whatever
 carries it.
+
+**Bounded** (`browser/limits.ts`). Eight tabs per vault, the owner's
+included; thirty seconds per page load and ten per action; 300 tool calls
+per token per ten minutes; four people watching a tab; and the owner's
+input in batches of at most 500 events, 200 batches per session in ten
+seconds.
 
 **Chromium on the machine** (`executable.ts`, `install.ts`).
 `PCP_BROWSER_EXECUTABLE`, then PCP's own install, then Playwright's own
@@ -911,12 +938,12 @@ app keeps and hands over only after Touch ID.
     ID prompt (`systemPreferences.promptTouchID`). A checkout, a fork, or a
     release built without the profile works this way.
 - **How a page reaches it.** The window's preload (`desktop/preload.cjs`)
-  gives PCP's own pages, and only those (plain http on localhost at the
-  app's port), `window.pcpDesktop.touchId`: `status`, `unlock`, `save`,
-  `forget`. The main process (`desktop/touch-id.mjs`) checks again that the
-  call comes from the window's main frame on that address, shows the system
-  prompt with a reason of its own (never text from the page), and returns
-  the key only after Touch ID. The page sends it in a form field
+  gives PCP's own pages, and only those (plain http on localhost),
+  `window.pcpDesktop.touchId`: `status`, `unlock`, `save`, `forget`. The
+  main process (`desktop/touch-id.mjs`) checks again that the call comes
+  from the window's main frame at the app's own address and port, shows the
+  system prompt with a reason of its own (never text from the page), and
+  returns the key only after Touch ID. The page sends it in a form field
   (`deviceKey`) to `touchIdLoginAction` or `confirmOwner`, rate-limited like
   the password but on a budget of its own (a random key is no password
   guess, and must not spend the owner's tries), and keeps it nowhere. An OAuth provider's page in the same
@@ -1008,15 +1035,15 @@ with the vault; the action signs them in again when the password they typed
 opens the restored vault (their own export), and otherwise sends them to sign
 in with the exported PCP's password.
 
-**Who may.** The export asks for the owner's password again, as making a
-token does: a copied session cookie may use the vault but not walk off with
-it. The restore, when signed in, asks for it too, so a copied cookie cannot
-replace the owner's vault with one it holds the password to; on the setup
-page there is no password yet, and whoever reaches that page could set up
-instead. Both are rate-limited like password attempts. The download is a
-route handler (an action cannot send a file), so it checks the request's
-origin itself (`lib/server/same-origin.ts`), which Server Actions get built
-in.
+**Who may.** The export asks for the owner's password again (or Touch ID in
+the Mac app: `confirmOwner`), as making a token does: a copied session
+cookie may use the vault but not walk off with it. The restore, when signed
+in, asks for it too, so a copied cookie cannot replace the owner's vault
+with one it holds the password to; on the setup page there is no password
+yet, and whoever reaches that page could set up instead. Both are
+rate-limited like password attempts. The download is a route handler (an
+action cannot send a file), so it checks the request's origin itself
+(`lib/server/same-origin.ts`), which Server Actions get built in.
 
 ## Reaching PCP: dynamic DNS and HTTPS
 
@@ -1076,10 +1103,14 @@ then work unchanged.
 A certificate is renewed once less than a third of its life is left, which
 keeps working as Let's Encrypt shortens lifetimes. The check runs every 30
 minutes, and the new one is swapped in with `setSecureContext`, without a
-restart. A failed request is retried after 1 hour, doubling to at most a day.
-That keeps PCP well inside Let's Encrypt's limits on failed validations;
-"Try again now" skips the wait. A DNS lookup first warns, without blocking,
-when the name does not point at this network. Port 3000 keeps serving plain
+restart. When the first certificate for a name fails, PCP turns HTTPS off
+again and the card says why: what went wrong is usually the router or the
+name, which no retry fixes. Once a name has had a certificate, a failed
+renewal is retried after 1 hour, doubling to at most a day, and the
+header's bell says so on every page until it works. That keeps PCP well
+inside Let's Encrypt's limits on failed validations; "Try again now" skips
+the wait. A DNS lookup first warns, without blocking, when the name does not
+point at this network. Port 3000 keeps serving plain
 HTTP for the local network. In the desktop app the two ports stay 80 and 443
 (macOS and Windows let an ordinary program use them), and they listen on
 every interface even while the app keeps port 3000 to this computer: a
@@ -1221,7 +1252,9 @@ listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
 for a token with the right to manage endpoints, `memory` for a token that
 keeps memories, `web_fetch` for a token that fetches web pages, and
-`run_code` for a token that runs code, all above):
+`run_code` for a token that runs code, all above). A request without a valid
+token is answered 401, and a token makes at most 240 requests a minute, one
+message each (`app/mcp/route.ts`). The tools:
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with
@@ -1263,24 +1296,25 @@ gateway finds a server with no tools. It is a cache of the upstream's
 ### Long answers and kept results
 
 `runCall` (`lib/core/permissions.ts`) shapes an upstream's answer for the
-assistant with `shapeAnswer` (above). When that left something out (a JSON
-preview, a text cut at 60,000 characters), the answer shaped the same way but
-not cut is handed to `lib/core/tool-results.ts`: up to 4 million characters
-are kept in `tool_result`, encrypted under the vault's data key with
-`tool_result:<id>` as associated data, for a day, and a notice after the
-shortened answer gives the result's id and length. `read_result` decrypts it
-and returns one slice, for the token whose call produced it only; another
-token's, another vault's or an expired id reads as not found. A token keeps
-at most 100 results and 50 million characters, its oldest going first, and
+assistant with `shapeAnswerKeeping` (the shaping above, and the handles
+below). When that left something out (a JSON preview, a text cut at 60,000
+characters), the answer shaped the same way but not cut is handed to
+`lib/core/tool-results.ts`: up to 4 million characters are kept in
+`tool_result`, encrypted under the vault's data key with `tool_result:<id>`
+as associated data, for a day, and a notice after the shortened answer gives
+the result's id and length. `read_result` decrypts it and returns one slice,
+for the token whose call produced it only; another token's, another vault's
+or an expired id reads as not found. A token keeps at most 300 results and
+50 million characters and bytes together, its oldest going first, and
 expired ones are pruned at boot. A permission request's stored outcome keeps
-the notice when its text is shortened, so `check_permission` names the result
-too. Mail bodies and attachments use the same store from inside the mail
-tools. Kept results are not part of an export, and nothing kept is logged.
+the notice when its text is shortened, so `check_permission` names the
+result too. Mail bodies and attachments use the same store from inside the
+mail tools. Kept results are not part of an export, and nothing kept is
+logged.
 
 A kept result is a text or a file's bytes (`tool_result.kind`, with `name`
 and any media type), encrypted the same way. A file over 10 MiB is refused
-rather than cut. A token keeps at most 300 results and 50 million
-characters and bytes together.
+rather than cut.
 
 **Handles** move a kept value between tools without the assistant reading it.
 `shapeAnswerKeeping` (`lib/core/answers.ts`) makes them while it shapes an
@@ -1298,10 +1332,12 @@ none.
 
 In arguments, an object of only `$result` (and `as`) is replaced before the
 call is sent (`lib/core/result-handles.ts`, called from `upstream.ts` for MCP
-servers and API endpoints and from `mail/accounts.ts`): a text as its text, a
-file as base64, or the other way with `as`. Only the token's own results
-resolve; an unknown or expired id is refused by name before anything is
-sent, and the gateway checks the ids before it asks the owner. A request
+servers and the browser, from `endpoints.ts` for API endpoints, whose upload
+fields take a file's bytes instead, and from `mail/accounts.ts`, whose
+attachments do too): a text as its text, a file as base64, or the other way
+with `as`. Only the token's own results resolve; an unknown or expired id is
+refused by name before anything is sent, and the gateway checks the ids
+before it asks the owner. A request
 waiting for the owner stores the handle, never the content, and its page
 shows each one's name, type, size and the tool that kept it.
 
@@ -1311,8 +1347,9 @@ Every token has a level per tool (`api_token_tool_access`,
 `lib/core/tool-access.ts`): **allowed**, **blocked**, or, when there is no
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
-instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
-them. The gateway loads the levels by token id.
+instructions, `search_tools`, `list_tools` and `describe_tool`, and
+`call_tool` and `run_code` refuse them. The gateway loads the levels by
+token id.
 
 A tool can also have a level for **all tokens** (`vault_tool_access`, the
 "All tokens" box on a token's page), and a token's own level wins over it:
