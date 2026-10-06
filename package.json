@@ -44,6 +44,7 @@
     "imapflow": "^2.2.2",
     "lucide-react": "^1.48.0",
     "next": "15.5.26",
+    "node-cron": "^4.6.0",
     "nodemailer": "^10.0.14",
     "playwright-core": "1.63.0",
     "prisma": "7.10.0",

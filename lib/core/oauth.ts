@@ -384,6 +384,10 @@ export async function disconnectOAuth(
   await forgetOAuthTokens(ctx, server)
 }
 
-export async function pruneOAuthStates(): Promise<void> {
-  await db().oAuthState.deleteMany({ where: { expiresAt: { lt: new Date() } } })
+export async function pruneOAuthStates(): Promise<number> {
+  const { count } = await db().oAuthState.deleteMany({
+    where: { expiresAt: { lt: new Date() } },
+  })
+
+  return count
 }

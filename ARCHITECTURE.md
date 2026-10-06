@@ -859,8 +859,10 @@ Linux):
   bookkeeping (same table, same checksums), so a developer's
   `prisma migrate dev` and a container's boot agree on the history.
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
-  which tool, which upstream, how long, whether it worked. Never arguments
-  or results.
+  which tool, which upstream, how long, whether it worked, and whether it
+  stopped to ask the owner (with the permission request's id). Never
+  arguments or results. The Log page reads it back; the cleanup deletes the
+  days older than the owner keeps (see "Cleanup and the log").
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
@@ -1153,6 +1155,44 @@ which pulls the image and starts PCP again only when the image changed. The
 installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
 
+## Cleanup and the log
+
+**The request log** (`lib/core/request-log.ts`) is what assistants did with
+their tokens: one JSON line per gateway call, and one per call a `run_code`
+program made, written after the answer and never waited for. A line names the
+token by id, the tool, the server and upstream tool the arguments named (cut
+to 80 characters, so a caller cannot grow the log by what it sends), how long
+it took and how it ended: done, failed (with PCP's own refusal text, never an
+upstream's), or asked the owner. Code under a call notes an ask in async
+context (`noteOwnerAsked`, from `withPermission` and `connectResult`), so the
+line is right however the result is rewritten on its way out. A write that
+fails pauses the log for five minutes rather than failing the call.
+
+The **Log page** (`/log`, `lib/core/activity.ts`) reads the vault's own lines
+back, newest first, filtered by token, outcome or a tool or server name, and
+fills in from the database what the log does not hold: each token's name, and
+how a request a call made was answered while PCP still keeps it. Paging goes
+by position (`day:line`), which holds while today's file grows; a page stops
+after 50,000 lines read, matching or not, and carries on from there, so a rare
+filter reads a few days at a time. The page shows what the lines hold and
+nothing else: no arguments, no results, no sites.
+
+**The cleanup** (`lib/core/cleanup/`) removes what PCP keeps only for a while:
+ended sign-ins, unfinished OAuth sign-ins, permission requests a week past
+their expiry, kept results past their day, and days of the request log older
+than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
+then on a node-cron task, one per process and kept on `globalThis` like the
+update timer, unref'd, with no overlap: runs from the start, the schedule and
+the owner's **Clean up now** go one at a time. Each part runs on its own, so
+one that fails does not stop the others, and the run's status (when, what
+started it, what it removed, what failed) is a host setting the settings page
+shows. The schedule is five cron fields in the machine's time zone, a preset
+or the owner's own; one that would leave more than a day between two runs is
+refused, because a kept result is promised gone a day after it was made. The
+cleanup needs no credential: it deletes rows and files by their dates and
+reads nothing it deletes. Its settings (`cleanup.config`) and status
+(`cleanup.status`) are the machine's and do not travel with an export.
+
 ## Connecting OAuth servers
 
 An OAuth server needs a client ID for PCP before anyone can sign in, and
@@ -1272,7 +1312,7 @@ shortened answer gives the result's id and length. `read_result` decrypts it
 and returns one slice, for the token whose call produced it only; another
 token's, another vault's or an expired id reads as not found. A token keeps
 at most 100 results and 50 million characters, its oldest going first, and
-expired ones are pruned at boot. A permission request's stored outcome keeps
+expired ones are removed by the cleanup (see "Cleanup and the log"). A permission request's stored outcome keeps
 the notice when its text is shortened, so `check_permission` names the result
 too. Mail bodies and attachments use the same store from inside the mail
 tools. Kept results are not part of an export, and nothing kept is logged.

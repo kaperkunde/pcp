@@ -124,6 +124,15 @@ so in the summary; the bump itself waits for the request.
   `mail/accounts.ts` (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
   never the content.
+- The request log (`lib/core/request-log.ts`) is a token's calls by name:
+  tool, server, upstream tool, time, outcome, and the permission request an
+  ask made. Never arguments, results, sites or a secret; the Log page
+  (`lib/core/activity.ts`) reads only the vault's own lines. A new way a call
+  can ask the owner calls `noteOwnerAsked`. The cleanup
+  (`lib/core/cleanup/`) deletes rows and log days by their dates, needs no
+  credential and reads nothing it deletes; its schedule is refused if it
+  leaves more than a day between runs. Anything new that PCP keeps only for
+  a while is removed by a part there, with a test.
 - `lib/core/openapi` never fetches a remote `$ref`, never follows a redirect
   on a call, and never lets an argument set a header or leave the base URL.
   A schema is untrusted input: new limits go in `openapi/limits.ts`.

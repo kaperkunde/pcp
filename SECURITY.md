@@ -241,11 +241,13 @@ Not defended against:
 - Keep the recovery key somewhere safe. Losing it and the password loses the
   data; that is the design.
 - The request log (`logs/*.jsonl` in the data directory) records which tools
-  were called, never their arguments or results.
+  were called, never their arguments or results. The Log page shows it to the
+  signed-in owner, and the cleanup deletes the days older than the owner keeps
+  (Settings → Cleanup, 90 by default).
 - An answer too long to pass on in one piece (a large API response, a long
   email), and a file or value handed back as a handle (an attachment, an
   image), is kept for a day: encrypted under the vault's key, readable and
-  usable only by the token that asked, and pruned at the next start after it
-  expires. A handle in a later call's arguments is replaced only with that
+  usable only by the token that asked, and removed by the cleanup, which runs
+  at least once a day, after it expires. A handle in a later call's arguments is replaced only with that
   token's own results; the permission page shows what each handle is (name,
   type, size), never its content, and the request log records neither.

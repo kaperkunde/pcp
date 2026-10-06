@@ -189,6 +189,15 @@ version, nothing else. Turn the daily check off there (or in the step after
 setup) and PCP asks only when you choose **Check now**. PCP never updates
 itself in a container or a checkout.
 
+### Cleanup
+
+PCP removes what it keeps only for a while (ended sign-ins, results kept for
+a day, old permission requests, days of the log older than you keep) when it
+starts and then every hour. **Settings → Cleanup** changes when it runs (a
+preset, or five cron fields of your own, at least once a day), how many days
+of the log it keeps (90 unless you choose), shows what the last run removed,
+and cleans up at once with **Clean up now**.
+
 ## Use it
 
 1. **Secrets.** Add the API keys and personal access tokens your servers
@@ -272,6 +281,11 @@ and these tools:
 | `read_result`         | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                              |
 | `register_server`     | Proposes a new MCP server, an API from an OpenAPI 3 schema, or a mail account (JMAP or IMAP), with no auth, a secret by name, a user name and password, or OAuth. |
 | `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                       |
+
+The **Log** page lists what assistants did with their tokens: every call,
+by token, tool and server, how long it took and whether it was done, failed
+or asked you (with how you answered). Never what they sent or what came back.
+Filter it by token, outcome or name; each token's page links to its own.
 
 A shortened answer (a JSON preview, a long text cut off, a long email) ends
 with a result id. PCP keeps the whole of it, encrypted, for a day, for the
@@ -405,7 +419,7 @@ allowed tool runs, a blocked one is an error the program sees, and one that
 asks you first stops the program at that call (the calls before it have run),
 with the usual request for you to answer; for the program to make that call
 itself next time, choose **Always allow**. Every call is in the request log
-under `run_code`. A program has no network, no files, no timers and none of
+under `run_code`, and on the **Log** page. A program has no network, no files, no timers and none of
 your secrets, and stops after 3 minutes, 15 seconds of computing, 128 MB of
 memory or 100 calls.
 

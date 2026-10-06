@@ -187,6 +187,9 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
 | `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
 | `lib/core/updates/`                  | The daily check for a newer release; what it found            |
+| `lib/core/request-log.ts`            | The request log: writing, reading a page, pruning old days    |
+| `lib/core/activity.ts`               | The Log page's lines: token names, how a request was answered |
+| `lib/core/cleanup/`                  | The scheduled cleanup (node-cron): schedule, parts, status    |
 | `lib/server/install-kind.ts`         | App, container or checkout: how Settings says to update       |
 | `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |
 | `lib/actions/`                       | Server Actions the forms call                                 |

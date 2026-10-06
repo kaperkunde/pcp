@@ -1,5 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
+import { noteOwnerAsked } from "./request-log"
 import { oauthStartUrl } from "./upstream"
 
 /**
@@ -61,6 +62,7 @@ export function connectResult(
   { lead = "Not done yet", state }: { lead?: string; state?: ServerState } = {},
 ): CallToolResult {
   const connect = connectLinks(server, publicUrl)
+  noteOwnerAsked()
   const wait = `When they say they have, call check_server with server "${server.slug}": it answers once it is connected (and waits a little if they are still signing in). Then try again.`
 
   // The server will not let PCP register itself: signing in cannot work

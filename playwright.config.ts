@@ -228,6 +228,14 @@ export default defineConfig({
       use: signedIn("updates"),
     },
     {
+      // The Log page (a token's calls by tool and outcome, the filters, the
+      // token's own link) and Settings → Cleanup.
+      name: "log",
+      testMatch: /log\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("log"),
+    },
+    {
       // Touch ID with a stand-in for the Mac app. Signs every browser out,
       // so it comes after the projects that start signed in, and signs in
       // on its own.

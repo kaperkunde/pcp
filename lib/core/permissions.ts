@@ -83,6 +83,7 @@ import {
   type ServerInput,
 } from "./servers"
 import { writeToolAccess } from "./tool-access"
+import { noteOwnerAsked } from "./request-log"
 import { collectHandleIds } from "./result-handles"
 import {
   describeResults,
@@ -1091,6 +1092,8 @@ export async function withPermission(
       },
     })
   }
+
+  noteOwnerAsked(id)
 
   const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
   // The assistant hears which tools it named, to check its own patterns;
