@@ -166,6 +166,13 @@ function redirectUrisFrom(value: unknown): string[] {
   return [...new Set(value as string[])]
 }
 
+/**
+ * grant_types must include authorization_code, the only way in; any other
+ * grant a client lists (Claude's document names jwt-bearer) is one it will
+ * not get: the token endpoint answers unsupported_grant_type to all but
+ * authorization_code and refresh_token, and a registration is told it has
+ * those two.
+ */
 function checkGrantAndResponseTypes(
   metadata: Record<string, unknown>,
   error: string,
@@ -176,15 +183,10 @@ function checkGrantAndResponseTypes(
   if (
     grants !== undefined &&
     (!Array.isArray(grants) ||
-      !grants.every(
-        (grant) => grant === "authorization_code" || grant === "refresh_token",
-      ) ||
+      !grants.every((grant) => typeof grant === "string") ||
       !grants.includes("authorization_code"))
   ) {
-    throw new OAuthError(
-      error,
-      "grant_types may name authorization_code and refresh_token only.",
-    )
+    throw new OAuthError(error, "grant_types must name authorization_code.")
   }
 
   if (
