@@ -58,7 +58,10 @@ installer prints the one command that does, if so.
 
 The installer never runs `sudo` and never installs Docker or Podman itself.
 A few more settings go before `sh` the same way. All but the last are
-remembered like `PCP_HTTPS` (in `~/.config/pcp/install.conf`):
+remembered like `PCP_HTTPS` (in `~/.config/pcp/install.conf`, or in
+`/etc/pcp/install.conf` when you run it as root; an older root install's
+file in `~/.config/pcp` is carried over the first time you run the
+installer again):
 
 - `PCP_PORT=3000`: the port PCP answers on, if another program has 3000.
 - `PCP_RUNTIME=docker` or `PCP_RUNTIME=podman`: when both are installed and
@@ -241,10 +244,12 @@ curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | PC
 Under Podman 4.4 or newer with systemd that turns on Podman's own
 `podman-auto-update.timer`. Otherwise it adds a daily `pcp-update.timer` to
 systemd (your user's, or the system's when you run it as root), or, without
-a systemd session, prints the line for your crontab. `PCP_AUTO_UPDATE=0`
-takes it away again: `pcp-update.timer`, or under Podman the auto-update
-label on PCP's unit (Podman's timer stays on, since other containers may use
-it).
+a systemd session, prints the line for your crontab. The timer runs a copy
+of the installer, kept in `~/.local/share/pcp/install.sh`; as root, in
+`/usr/local/lib/pcp/install.sh`, whatever `HOME` is, so that only root can
+change what root runs. `PCP_AUTO_UPDATE=0` takes it away again:
+`pcp-update.timer` and the copy, or under Podman the auto-update label on
+PCP's unit (Podman's timer stays on, since other containers may use it).
 
 **Backing up.** **Settings → Export** writes everything PCP holds to one
 file, locked with an export password you choose. **Settings → Restore** (or

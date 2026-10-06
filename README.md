@@ -165,7 +165,8 @@ to run. Run the same line again to update PCP, or once with
 `PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`) to have it update PCP by
 itself once a day. The top of [`install.sh`](install.sh) lists its settings
 (`PCP_PORT`, `PCP_HTTPS`, `PCP_AUTO_UPDATE` and a few more); it remembers
-them in `~/.config/pcp/install.conf`, so a later run keeps them.
+them in `~/.config/pcp/install.conf` (`/etc/pcp/install.conf` as root), so a
+later run keeps them.
 `… | sh -s -- uninstall` removes PCP and keeps your data.
 
 From a checkout, `docker compose` does the same with the file in it:
