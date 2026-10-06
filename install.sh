@@ -16,7 +16,8 @@
 # and starts PCP again only when there is a new one.
 #
 # Settings, by environment variable. The first five are remembered in
-# ~/.config/pcp/install.conf, so a later run without them keeps them:
+# ~/.config/pcp/install.conf, so a later run without them keeps them (run as
+# root, in /etc/pcp/install.conf instead):
 #
 #   PCP_PORT=3000                     the port PCP answers on
 #   PCP_HTTPS=1                       also publish 80 and 443 for PCP's own HTTPS
@@ -28,6 +29,13 @@
 #
 # It never runs sudo and never installs Docker or Podman itself: when neither
 # is usable, it prints what to run. POSIX sh, so it runs under dash too.
+#
+# The copy of this installer for the daily update is kept in
+# ~/.local/share/pcp/install.sh, or, when run as root, in
+# /usr/local/lib/pcp/install.sh: root runs that file every day, so it and the
+# settings it reads (/etc/pcp/install.conf) sit where only root writes,
+# whatever HOME is. PCP_ROOT_PREFIX puts all of root's paths under another
+# directory; it exists for the tests and nothing else.
 
 set -eu
 
@@ -66,7 +74,13 @@ require_linux() {
 # Reads the remembered settings. An allow-list, not `. file`, so the file
 # cannot run anything.
 load_conf() {
-  [ -f "$CONF" ] || return 0
+  if [ ! -f "$CONF" ]; then
+    # Root no longer reads the file in HOME, which may be an ordinary user's.
+    if [ "$ROOT" = 1 ] && [ -n "${HOME:-}" ] && [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/pcp/install.conf" ]; then
+      warn "Note: as root this installer reads its remembered settings from $CONF, not from ${XDG_CONFIG_HOME:-$HOME/.config}/pcp/install.conf. Set them in the environment this once."
+    fi
+    return 0
+  fi
   while IFS='=' read -r key value || [ -n "$key" ]; do
     case "$key" in
       PCP_PORT) conf_port=$value ;;
@@ -121,10 +135,22 @@ usage_error() {
   exit 2
 }
 
+# A directory root reads or runs from is 0755 whatever root's umask, so an
+# unusual umask leaves nothing group- or world-writable, or unreadable.
+make_dir() {
+  mkdir -p "$1"
+  if [ "$ROOT" = 1 ]; then
+    chmod 0755 "$1"
+  fi
+}
+
 save_conf() {
-  mkdir -p "$(dirname "$CONF")"
+  make_dir "$(dirname "$CONF")"
   printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\nPCP_AUTO_UPDATE=%s\n' \
     "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" "$PCP_AUTO_UPDATE" >"$CONF"
+  if [ "$ROOT" = 1 ]; then
+    chmod 0644 "$CONF"
+  fi
 }
 
 # --- Which runtime ----------------------------------------------------------
@@ -230,9 +256,21 @@ systemd_ok() {
   unit_ctl show-environment >/dev/null 2>&1
 }
 
+# Where the installer keeps its own files. As root they are in system places
+# that only root writes, never under HOME or XDG_*: root runs the updater
+# every day, and `sudo -E` or a sudo that keeps HOME would otherwise point
+# them into a directory an ordinary user owns.
+set_conf_path() {
+  if [ "$ROOT" = 1 ]; then
+    CONF="${PCP_ROOT_PREFIX:-}/etc/pcp/install.conf"
+  else
+    CONF="${XDG_CONFIG_HOME:-${HOME:?}/.config}/pcp/install.conf"
+  fi
+}
+
 set_paths() {
   if [ "$ROOT" = 1 ]; then
-    UNIT_DIR=/etc/containers/systemd
+    UNIT_DIR="${PCP_ROOT_PREFIX:-}/etc/containers/systemd"
     WANTED_BY=multi-user.target
     JOURNAL="journalctl -u $CONTAINER -f"
   else
@@ -243,11 +281,12 @@ set_paths() {
   UNIT="$UNIT_DIR/$CONTAINER.container"
   LOGS="$RUNTIME logs -f $CONTAINER"
   if [ "$ROOT" = 1 ]; then
-    TIMER_DIR=/etc/systemd/system
+    TIMER_DIR="${PCP_ROOT_PREFIX:-}/etc/systemd/system"
+    UPDATER="${PCP_ROOT_PREFIX:-}/usr/local/lib/pcp/install.sh"
   else
     TIMER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    UPDATER="${XDG_DATA_HOME:-$HOME/.local/share}/pcp/install.sh"
   fi
-  UPDATER="${XDG_DATA_HOME:-$HOME/.local/share}/pcp/install.sh"
 }
 
 # --- Checks before anything changes -----------------------------------------
@@ -381,7 +420,7 @@ fetch_to() {
 # A copy of this installer for the timer to run: the file this run came
 # from, or, through a pipe, the address it is published at.
 save_updater() {
-  mkdir -p "$(dirname "$UPDATER")"
+  make_dir "$(dirname "$UPDATER")"
   source_file=
   case "$0" in
     */* | *.sh)
@@ -394,7 +433,11 @@ save_updater() {
     cp "$source_file" "$UPDATER.new"
   else
     fetch_to "$SCRIPT_URL" "$UPDATER.new"
-  fi && mv "$UPDATER.new" "$UPDATER"
+  fi || return 1
+  if [ "$ROOT" = 1 ]; then
+    chmod 0644 "$UPDATER.new"
+  fi
+  mv "$UPDATER.new" "$UPDATER"
 }
 
 write_update_timer() {
@@ -418,6 +461,9 @@ disable_auto_update() {
   [ -f "$TIMER_DIR/pcp-update.timer" ] || return 0
   unit_ctl disable --now pcp-update.timer >/dev/null 2>&1 || true
   rm -f "$TIMER_DIR/pcp-update.timer" "$TIMER_DIR/pcp-update.service" "$UPDATER"
+  if [ "$ROOT" = 1 ]; then
+    rmdir "$(dirname "$UPDATER")" >/dev/null 2>&1 || true
+  fi
   unit_ctl daemon-reload >/dev/null 2>&1 || true
 }
 
@@ -570,6 +616,9 @@ uninstall() {
   "$RUNTIME" rm -f "$CONTAINER" >/dev/null 2>&1 || true
   disable_auto_update
   rm -f "$CONF"
+  if [ "$ROOT" = 1 ]; then
+    rmdir "$(dirname "$CONF")" >/dev/null 2>&1 || true
+  fi
   say "PCP is removed. The $PCP_DATA_VOLUME volume, with your vault, is kept. To delete it too:" "" \
     "  $RUNTIME volume rm $PCP_DATA_VOLUME"
 }
@@ -580,12 +629,12 @@ main() {
     *) usage ;;
   esac
   require_linux
-  CONF="${XDG_CONFIG_HOME:-${HOME:?}/.config}/pcp/install.conf"
   if [ "$(id -u)" = 0 ]; then
     ROOT=1
   else
     ROOT=0
   fi
+  set_conf_path
   resolve_settings
   pick_runtime
   set_paths
