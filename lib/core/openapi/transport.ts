@@ -21,14 +21,19 @@ import { AddressBlockedError, bareHostname, isPublicAddress } from "./address"
 export type SendOptions = {
   /** Refuse private, loopback and link-local addresses. */
   publicOnly?: boolean
-  /** Replaces the address check; for tests of the transport itself. */
-  addressCheck?: (address: string) => boolean
+  /**
+   * Replaces the address check: web_fetch's when the owner allowed private
+   * addresses, and tests of the transport itself. Called with the address
+   * the socket would connect to and the port.
+   */
+  addressCheck?: (address: string, port: number) => boolean
 }
 
 export type SendInit = {
   method?: string
   headers?: Record<string, string>
-  body?: string
+  /** Bytes go as they are (see asBytes in crypto.ts for a Buffer). */
+  body?: string | Uint8Array<ArrayBuffer>
   signal?: AbortSignal
 }
 
@@ -63,11 +68,12 @@ export async function send(
 function sendPinned(
   url: URL,
   init: SendInit,
-  allowed: (address: string) => boolean,
+  allowed: (address: string, port: number) => boolean,
 ): Promise<Response> {
   const host = bareHostname(url)
+  const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80)
 
-  if (isIP(host) && !allowed(host)) {
+  if (isIP(host) && !allowed(host, port)) {
     return Promise.reject(new AddressBlockedError(host, host))
   }
 
@@ -82,7 +88,7 @@ function sendPinned(
       }
 
       const addresses = found as dns.LookupAddress[]
-      const bad = addresses.find((entry) => !allowed(entry.address))
+      const bad = addresses.find((entry) => !allowed(entry.address, port))
 
       if (bad || addresses.length === 0) {
         return (callback as (error: Error) => void)(

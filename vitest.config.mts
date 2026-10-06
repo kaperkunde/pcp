@@ -9,7 +9,12 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["lib/**/*.test.ts", "scripts/**/*.test.ts", "desktop/*.test.mjs"],
+    include: [
+      "lib/**/*.test.ts",
+      "scripts/**/*.test.ts",
+      "desktop/*.test.mjs",
+      "desktop/scripts/*.test.mjs",
+    ],
     environment: "node",
   },
 })

@@ -22,7 +22,9 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   (`expectedToken`) when one is set. `echo_auth` returns the Authorization
  *   header it received, which is how the tests prove the secret PCP holds
  *   reached the upstream and nothing else did. `lateTools` holding
- *   "long_text" adds a tool whose answer is as long as it is asked to be.
+ *   "long_text" adds a tool whose answer is as long as it is asked to be;
+ *   "picture" answers JSON with a base64 PNG in it, and "measure" says how
+ *   long the text it was given is, for handles moving a file between tools.
  * - `/oauth/mcp` — the same server behind OAuth: an authorization server
  *   with metadata, dynamic client registration, an authorize page that
  *   approves at once, and a token endpoint. Enough for the real SDK flow
@@ -40,6 +42,17 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   takes only a token that server issued. Requests are recorded in
  *   `closedApiRequests`.
  *
+ * - `/open-api/openapi.json` and `/open-api/*` — a REST API that signs in
+ *   with OAuth at the open authorization server above, the one that lets
+ *   apps register themselves: its document declares an oauth2 flow at
+ *   `${origin}/authorize` and `${origin}/token`, so PCP can register itself
+ *   when the owner connects it. `/open-api/whoami` takes only a token that
+ *   server issued; requests are recorded in `openApiRequests`, and every
+ *   client the server registered in `registrations`.
+ * - `/basic-api/openapi.json` and `/basic-api/*` — a REST API that wants
+ *   HTTP Basic authentication (`basicUser`). `/basic-api/whoami` answers
+ *   with the Authorization header it got, as an API that echoes a
+ *   credential would; requests are recorded in `basicApiRequests`.
  * - `/openapi.json` and `/api/*` — a small REST API (a pet store) with its
  *   OpenAPI document, for PCP's API endpoints. `/api/*` wants the same
  *   bearer token as `/mcp` and records every request in `requests`, which is
@@ -51,8 +64,13 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   as an API that echoes a credential back would, and records every
  *   request's headers in `keyedRequests`.
  * - `/page` — an HTML page for web_fetch, recording each request in
- *   `pageHits`. The server is on 127.0.0.1, which web_fetch refuses, so the
- *   tests show that `pageHits` stays empty.
+ *   `pageHits`. The server is on 127.0.0.1, which web_fetch refuses until
+ *   the owner allows private addresses for the token, so `pageHits` stays
+ *   empty until then.
+ * - `/browser/form`, `/browser/button`, `/browser/cookie` — pages for the
+ *   browser: a form that greets by name and sets a cookie, a button that
+ *   fills the page (for a click on the live view), and one that shows the
+ *   cookie it was sent.
  *
  * - `/ddns/update` — a dynamic DNS service's update URL. It records every
  *   update in `ddns.updates` and answers with `ddns.status`.
@@ -61,6 +79,10 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   password (Basic). `/oauth/jmap/*` is the same behind the OAuth
  *   authorization server above; `tokenLifetime.seconds` sets how long the
  *   tokens it hands out last, and `tokenRequests` records each grant.
+ * - `/releases/latest` — GitHub's latest release, as PCP's update check asks
+ *   for it (PCP_RELEASES_URL in playwright.config.ts, on the fixed port
+ *   `startUpstream({ port })` takes). It answers `releases.latest` and
+ *   records what each request carried in `releases.requests`.
  *
  * Everything is in memory. Start one per test file.
  */
@@ -102,6 +124,22 @@ export type Upstream = {
   closedApiUrl: string
   /** Every request to /closed-api/* past the document, with its token. */
   closedApiRequests: Array<{ path: string; authorization: string | null }>
+  /** The OpenAPI document of the API behind the open authorization server. */
+  openApiSpecUrl: string
+  /** Where its requests go. */
+  openApiUrl: string
+  /** Every request to /open-api/* past the document, with its token. */
+  openApiRequests: Array<{ path: string; authorization: string | null }>
+  /** Every client the open authorization server registered, in order. */
+  registrations: Registered[]
+  /** The OpenAPI document of the API that wants HTTP Basic. */
+  basicApiSpecUrl: string
+  /** Where its requests go. */
+  basicApiUrl: string
+  /** The user name and password /basic-api/* wants. */
+  basicUser: { username: string; password: string }
+  /** Every request to /basic-api/* past the document, with its header. */
+  basicApiRequests: Array<{ path: string; authorization: string | null }>
   /** The OpenAPI document of the pet store. */
   openapiUrl: string
   /** The key and secret key /keyed/* wants, in their two headers. */
@@ -136,9 +174,22 @@ export type Upstream = {
     }>
     status: number
   }
+  /** GitHub's latest release for the update check: what it answers, and what it was sent. */
+  releases: {
+    /** The release JSON; null answers 404, as GitHub does before a first release. */
+    latest: Record<string, unknown> | null
+    requests: Array<{
+      userAgent: string | null
+      accept: string | null
+      authorization: string | null
+      cookie: string | null
+    }>
+  }
   /** The HTML page for web_fetch. */
   pageUrl: string
-  /** Every request to /page, by method; web_fetch should make none. */
+  /** Where the browser's pages are: `${browserUrl}/form` and the rest. */
+  browserUrl: string
+  /** Every request to /page, by method; none until private addresses are allowed. */
   pageHits: string[]
   close: () => Promise<void>
 }
@@ -172,6 +223,66 @@ function closedApiSpec(origin: string) {
           operationId: "whoami",
           summary: "Who signed in",
           security: [{ closed: ["whoami.read"] }],
+        },
+      },
+    },
+  }
+}
+
+/** The document of the API behind the open authorization server. */
+function openApiSpec(origin: string) {
+  return {
+    openapi: "3.0.3",
+    info: {
+      title: "Open whoami",
+      description: "Says who signed in, behind OAuth that lets apps register.",
+    },
+    servers: [{ url: `${origin}/open-api` }],
+    components: {
+      securitySchemes: {
+        open: {
+          type: "oauth2",
+          flows: {
+            authorizationCode: {
+              authorizationUrl: `${origin}/authorize`,
+              tokenUrl: `${origin}/token`,
+              scopes: { postcards: "Read who you are" },
+            },
+          },
+        },
+      },
+    },
+    paths: {
+      "/whoami": {
+        get: {
+          operationId: "whoami",
+          summary: "Who signed in",
+          security: [{ open: ["postcards"] }],
+        },
+      },
+    },
+  }
+}
+
+/** The document of the API that wants a user name and a password. */
+function basicApiSpec(origin: string) {
+  return {
+    openapi: "3.0.3",
+    info: {
+      title: "Basic whoami",
+      description: "Says who signed in, with a user name and password.",
+    },
+    servers: [{ url: `${origin}/basic-api` }],
+    security: [{ basic: [] }],
+    components: {
+      securitySchemes: { basic: { type: "http", scheme: "basic" } },
+    },
+    paths: {
+      "/whoami": {
+        get: {
+          operationId: "whoami",
+          summary: "Who signed in",
+          responses: { "200": { description: "Who you are" } },
         },
       },
     },
@@ -367,6 +478,12 @@ function buildServer(
       continue
     }
 
+    // "picture" and "measure" show a file moving between tools by its handle.
+    if (name === "picture" || name === "measure") {
+      registerHandleTools(server, name, calls, authorization)
+      continue
+    }
+
     server.registerTool(
       name,
       {
@@ -382,6 +499,80 @@ function buildServer(
   }
 
   return server
+}
+
+/** A PNG's first bytes and enough after them to be kept on sight. */
+export const PICTURE_PNG = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.alloc(1_200, 7),
+])
+
+function registerHandleTools(
+  server: McpServer,
+  name: "picture" | "measure",
+  calls: Upstream["calls"],
+  authorization: () => string | null,
+) {
+  if (name === "picture") {
+    server.registerTool(
+      "picture",
+      {
+        title: "Picture",
+        description:
+          "Answers with a small picture as base64 in JSON, and a caption.",
+        inputSchema: z.object({}),
+        annotations: { readOnlyHint: true },
+      },
+      async () => {
+        calls.push({
+          tool: "picture",
+          args: {},
+          authorization: authorization(),
+        })
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                name: "dot.png",
+                caption: "A small dot, drawn for the test.",
+                data: PICTURE_PNG.toString("base64"),
+              }),
+            },
+          ],
+        }
+      },
+    )
+    return
+  }
+
+  server.registerTool(
+    "measure",
+    {
+      title: "Measure",
+      description: "Says how long a text is and how it starts.",
+      inputSchema: z.object({ text: z.string() }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ text }) => {
+      calls.push({
+        tool: "measure",
+        args: { text },
+        authorization: authorization(),
+      })
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              length: text.length,
+              startsWith: text.slice(0, 12),
+            }),
+          },
+        ],
+      }
+    },
+  )
 }
 
 function registerLongText(
@@ -415,12 +606,12 @@ function registerLongText(
   )
 }
 
-async function readBody(request: IncomingMessage): Promise<string> {
+async function readBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = []
   for await (const chunk of request) {
     chunks.push(chunk as Buffer)
   }
-  return Buffer.concat(chunks).toString("utf8")
+  return Buffer.concat(chunks)
 }
 
 function toWebRequest(
@@ -494,7 +685,8 @@ export function keyedSpec(origin: string) {
 
 export async function startUpstream({
   expectedToken = `upstream-secret-${randomBytes(6).toString("hex")}`,
-}: { expectedToken?: string } = {}): Promise<Upstream> {
+  port: listenPort = 0,
+}: { expectedToken?: string; port?: number } = {}): Promise<Upstream> {
   const calls: Upstream["calls"] = []
   const lateTools = new Set<string>()
   const requests: Upstream["requests"] = []
@@ -518,7 +710,15 @@ export async function startUpstream({
   }
   const closedSignIns: Upstream["closedSignIns"] = []
   const ddns: Upstream["ddns"] = { updateUrl: "", updates: [], status: 200 }
+  const releases: Upstream["releases"] = { latest: null, requests: [] }
   const closedApiRequests: Upstream["closedApiRequests"] = []
+  const openApiRequests: Upstream["openApiRequests"] = []
+  const registrations: Upstream["registrations"] = []
+  const basicUser = {
+    username: "ada",
+    password: `basic-secret-${randomBytes(6).toString("hex")}`,
+  }
+  const basicApiRequests: Upstream["basicApiRequests"] = []
   const tokenLifetime = { seconds: 3600 }
   const tokenRequests: Upstream["tokenRequests"] = []
   const jmap = createFakeJmap({
@@ -563,7 +763,9 @@ export async function startUpstream({
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", origin)
-    const body = await readBody(req)
+    // Kept as bytes for the JMAP upload; everything else reads it as text.
+    const bytes = await readBody(req)
+    const body = bytes.toString("utf8")
     const authorization = req.headers.authorization ?? null
 
     try {
@@ -685,6 +887,18 @@ export async function startUpstream({
         })
       }
 
+      if (url.pathname === "/releases/latest") {
+        releases.requests.push({
+          userAgent: req.headers["user-agent"] ?? null,
+          accept: req.headers.accept ?? null,
+          authorization,
+          cookie: req.headers.cookie ?? null,
+        })
+        return releases.latest
+          ? json(res, 200, releases.latest)
+          : json(res, 404, { message: "Not Found" })
+      }
+
       if (url.pathname === "/ddns/update") {
         ddns.updates.push({
           query: Object.fromEntries(url.searchParams),
@@ -711,6 +925,48 @@ export async function startUpstream({
 
         if (url.pathname === "/closed-api/whoami") {
           return json(res, 200, { you: "the owner", scope: "whoami.read" })
+        }
+      }
+
+      if (url.pathname === "/open-api/openapi.json") {
+        return json(res, 200, openApiSpec(origin))
+      }
+
+      if (url.pathname.startsWith("/open-api/")) {
+        openApiRequests.push({ path: url.pathname, authorization })
+        const token = authorization?.startsWith("Bearer ")
+          ? authorization.slice(7)
+          : ""
+
+        if (!issuedTokens.has(token)) {
+          res.setHeader("www-authenticate", 'Bearer error="invalid_token"')
+          return json(res, 401, { error: "invalid_token" })
+        }
+
+        if (url.pathname === "/open-api/whoami") {
+          return json(res, 200, { you: "the owner", scope: "postcards" })
+        }
+      }
+
+      if (url.pathname === "/basic-api/openapi.json") {
+        return json(res, 200, basicApiSpec(origin))
+      }
+
+      if (url.pathname.startsWith("/basic-api/")) {
+        basicApiRequests.push({ path: url.pathname, authorization })
+        const wanted = `Basic ${Buffer.from(`${basicUser.username}:${basicUser.password}`).toString("base64")}`
+
+        if (authorization !== wanted) {
+          res.setHeader("www-authenticate", 'Basic realm="basic-api"')
+          return json(res, 401, { error: "unauthorized" })
+        }
+
+        if (url.pathname === "/basic-api/whoami") {
+          // An API that repeats the credential it was sent.
+          return json(res, 200, {
+            you: basicUser.username,
+            echo: authorization,
+          })
         }
       }
 
@@ -745,6 +1001,32 @@ export async function startUpstream({
         }
 
         return json(res, 404, { error: "not_found" })
+      }
+
+      if (url.pathname === "/browser/form") {
+        res.setHeader("content-type", "text/html; charset=utf-8")
+        return res.end(
+          `<!doctype html><title>Browser form</title>
+<h1 id="greeting">Who are you?</h1>
+<label>Name <input id="name"></label>
+<button onclick="document.getElementById('greeting').textContent = 'Hello, ' + document.getElementById('name').value; document.cookie = 'seen=yes; max-age=3600; path=/'">Say hello</button>
+<a href="http://localhost:${(server.address() as AddressInfo).port}/page">Elsewhere</a>`,
+        )
+      }
+
+      if (url.pathname === "/browser/button") {
+        res.setHeader("content-type", "text/html; charset=utf-8")
+        return res.end(
+          `<!doctype html><title>Big button</title><style>html,body{margin:0;height:100%}button{width:100vw;height:100vh;font-size:48px}</style>
+<button onclick="this.textContent = 'Clicked by a person: ' + event.isTrusted">Press me</button>`,
+        )
+      }
+
+      if (url.pathname === "/browser/cookie") {
+        res.setHeader("content-type", "text/html; charset=utf-8")
+        return res.end(
+          `<!doctype html><title>Cookie</title><h1>Cookie: ${(req.headers.cookie ?? "none").replace(/[<>&]/g, "")}</h1>`,
+        )
       }
 
       if (url.pathname === "/page") {
@@ -828,6 +1110,7 @@ export async function startUpstream({
           url: req.url ?? "/",
           headers: req.headers,
           body,
+          bytes,
         })
 
         if (answer) {
@@ -867,10 +1150,12 @@ export async function startUpstream({
       if (url.pathname === "/register" && req.method === "POST") {
         const metadata = JSON.parse(body) as { redirect_uris?: string[] }
         const client_id = `client-${randomBytes(4).toString("hex")}`
-        clients.set(client_id, {
+        const registered = {
           client_id,
           redirect_uris: metadata.redirect_uris ?? [],
-        })
+        }
+        clients.set(client_id, registered)
+        registrations.push(registered)
         return json(res, 201, {
           client_id,
           redirect_uris: metadata.redirect_uris ?? [],
@@ -948,7 +1233,9 @@ export async function startUpstream({
     }
   })
 
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  await new Promise<void>((resolve) =>
+    server.listen(listenPort, "127.0.0.1", resolve),
+  )
   const { port } = server.address() as AddressInfo
   origin = `http://127.0.0.1:${port}`
   ddns.updateUrl = `${origin}/ddns/update`
@@ -963,10 +1250,19 @@ export async function startUpstream({
     closedApiSpecUrl: `${origin}/closed-api/openapi.json`,
     closedApiUrl: `${origin}/closed-api`,
     closedApiRequests,
+    openApiSpecUrl: `${origin}/open-api/openapi.json`,
+    openApiUrl: `${origin}/open-api`,
+    openApiRequests,
+    registrations,
+    basicApiSpecUrl: `${origin}/basic-api/openapi.json`,
+    basicApiUrl: `${origin}/basic-api`,
+    basicUser,
+    basicApiRequests,
     openapiUrl: `${origin}/openapi.json`,
     keyedKeys,
     keyedRequests,
     pageUrl: `${origin}/page`,
+    browserUrl: `${origin}/browser`,
     pageHits,
     jmapSessionUrl: `${origin}/jmap/session`,
     oauthJmapSessionUrl: `${origin}/oauth/jmap/session`,
@@ -980,6 +1276,7 @@ export async function startUpstream({
     calls,
     requests,
     ddns,
+    releases,
     close: () =>
       new Promise((resolve, reject) => {
         for (const handler of Object.values(handlers)) void handler.close()

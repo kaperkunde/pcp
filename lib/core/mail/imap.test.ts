@@ -468,7 +468,7 @@ describe("reading", () => {
     ).rejects.toThrow(/not there any more/)
   })
 
-  it("reads text attachments and never downloads the rest", async () => {
+  it("downloads attachments of any kind, as their bytes", async () => {
     const { mail, imap } = setup()
     const id = encodeImapId(1, 7n, "INBOX")
 
@@ -476,16 +476,18 @@ describe("reading", () => {
       name: "parts.csv",
       type: "text/csv",
       size: 18,
-      text: "part,count\ncog,42\n",
+      bytes: Buffer.from("part,count\ncog,42\n"),
+      charset: "utf-8",
     })
     expect(
       await mail.getAttachment(id, "3", { maxBytes: 100_000 }),
     ).toMatchObject({
       name: "plan.pdf",
-      text: null,
+      charset: null,
     })
     expect(imap.calls.filter((call) => call.startsWith("download"))).toEqual([
       "download 1 2",
+      "download 1 3",
     ])
     await expect(
       mail.getAttachment(id, "1.1", { maxBytes: 1000 }),
@@ -542,7 +544,7 @@ describe("changing", () => {
 
 describe("sending", () => {
   it("sends over SMTP as the user name, into the conversation, and files a copy in Sent", async () => {
-    const { mail, mailed, imap } = setup()
+    const { mail, mailed, imap, boxes } = setup()
 
     const sent = await mail.sendEmail!({
       to: [{ name: "Charles Babbage", email: "charles@example.com" }],
@@ -573,8 +575,49 @@ describe("sending", () => {
       id: encodeImapId(1, 8n, "Sent"),
       savedTo: "Sent",
       from: { email: "ada@example.com" },
+      answered: true,
     })
     expect(sent.messageId).toBe(mailed[0]!.messageId.slice(1, -1))
+    // The email it answers is marked answered, as a mail app would.
+    const original = boxes
+      .get("INBOX")!
+      .messages.find((message) => message.uid === 1)!
+    expect(original.flags.has("\\Answered")).toBe(true)
+  })
+
+  it("says so when the email it answers cannot be marked, and the email still goes", async () => {
+    const { mail, mailed, imap } = setup()
+    imap.messageFlagsAdd = async () => false
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: encodeImapId(1, 7n, "INBOX"),
+    })
+
+    expect(mailed).toHaveLength(1)
+    expect(sent).toMatchObject({ savedTo: "Sent", answered: false })
+  })
+
+  it("sends attachments over SMTP and in the Sent copy alike", async () => {
+    const { mail, mailed } = setup()
+    const pdf = Buffer.from("%PDF-1.7 the plan")
+
+    await mail.sendEmail!({
+      to: [{ name: null, email: "x@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "The plan",
+      text: "Attached.",
+      attachments: [{ name: "plan.pdf", type: "application/pdf", bytes: pdf }],
+    })
+
+    expect(mailed[0]!.attachments).toEqual([
+      { filename: "plan.pdf", contentType: "application/pdf", content: pdf },
+    ])
   })
 
   it("sends from the From address when the user name is not one", async () => {
@@ -627,6 +670,36 @@ describe("sending", () => {
     expect(raw).toMatch(/^In-Reply-To: <engine-1@example.com>$/m)
     expect(raw).toMatch(/^Message-ID: <m1@example.com>$/m)
     expect(raw).toContain("Thursday suits me.")
+  })
+
+  it("writes attachments into the message with their name and type", async () => {
+    const raw = (
+      await defaultImapDeps.compose({
+        from: { name: "", address: "ada@example.com" },
+        to: [{ name: "", address: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "Parts",
+        text: "Attached.",
+        messageId: "<m2@example.com>",
+        attachments: [
+          {
+            filename: "parts.csv",
+            contentType: "text/csv",
+            content: Buffer.from("part,count\ncog,42\n"),
+          },
+        ],
+      })
+    ).toString("utf8")
+
+    expect(raw).toMatch(/^Content-Type: multipart\/mixed;/m)
+    expect(raw).toMatch(/^Content-Type: text\/csv; name=parts\.csv$/m)
+    expect(raw).toMatch(
+      /^Content-Disposition: attachment; filename=parts\.csv$/m,
+    )
+    expect(raw).toContain(
+      Buffer.from("part,count\ncog,42\n").toString("base64"),
+    )
   })
 })
 

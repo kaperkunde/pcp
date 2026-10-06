@@ -2,7 +2,11 @@ import path from "node:path"
 
 import { defineConfig, devices } from "@playwright/test"
 
-import { E2E_EDGE_HTTP_PORT, E2E_EDGE_HTTPS_PORT } from "./e2e/lib/network"
+import {
+  E2E_EDGE_HTTP_PORT,
+  E2E_EDGE_HTTPS_PORT,
+  E2E_RELEASES_URL,
+} from "./e2e/lib/network"
 
 const baseURL = process.env.PCP_URL ?? "http://localhost:3000"
 
@@ -70,6 +74,9 @@ export default defineConfig({
       PCP_HTTPS_PORT: String(E2E_EDGE_HTTPS_PORT),
       PCP_ACME_DIRECTORY: "http://127.0.0.1:9/directory",
       PCP_PUBLIC_IP_URL: "http://127.0.0.1:9/ip",
+      // The update check asks the fake upstream (the updates project starts
+      // it on this port), never GitHub.
+      PCP_RELEASES_URL: E2E_RELEASES_URL,
     },
   },
   projects: [
@@ -98,14 +105,15 @@ export default defineConfig({
     {
       // Connecting an OAuth upstream through the browser, then using it.
       name: "oauth",
-      testMatch: /oauth\.spec\.ts/,
+      testMatch: /(^|\/)oauth\.spec\.ts$/,
       dependencies: ["setup"],
       use: signedIn("oauth"),
     },
     {
       // An API that signs in with OAuth: proposed by an assistant with the
       // owner's client ID, the client secret typed in on the approval page,
-      // connected, and called with the token.
+      // connected, and called with the token; and at a provider that lets
+      // apps register themselves, with no client at all.
       name: "endpoint-oauth",
       testMatch: /endpoint-oauth\.spec\.ts/,
       dependencies: ["setup"],
@@ -130,16 +138,17 @@ export default defineConfig({
     {
       // A mail account: JMAP with an app password and with OAuth, read-only,
       // a refused password, an unreachable IMAP server; its tools called
-      // through the gateway.
+      // through the gateway; and accounts an assistant proposes, which the
+      // owner agrees to on PCP's page.
       name: "mail",
       testMatch: /mail\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("mail"),
     },
     {
-      // Per-token tool access and the owner's permission: the link, the
-      // client's own prompt, PCP's panel, copying access, and servers an
-      // assistant proposes.
+      // Per-token tool access and the owner's permission: the link (also for
+      // a client that offers prompts and panels), copying access, and servers
+      // an assistant proposes.
       name: "permissions",
       testMatch: /permissions\.spec\.ts/,
       dependencies: ["setup"],
@@ -163,6 +172,15 @@ export default defineConfig({
       use: signedIn("network"),
     },
     {
+      // An API that wants HTTP Basic authentication: a user name and a
+      // password typed into the form, or proposed by an assistant and typed
+      // in on the approval page; the login sent, and kept from the assistant.
+      name: "endpoint-basic",
+      testMatch: /endpoint-basic\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("endpoint-basic"),
+    },
+    {
       // An API whose credential is a key and a secret key in two headers:
       // added by the owner, called through /mcp, proposed by an assistant.
       name: "secret-headers",
@@ -178,6 +196,45 @@ export default defineConfig({
       testMatch: /web-fetch\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("web-fetch"),
+    },
+    {
+      // A token that runs code: the tool and its instructions, a program
+      // calling tools with the server's secret, a picture moved by its
+      // handle, a blocked tool caught, and an "ask" tool stopping the
+      // program until the owner allows it.
+      name: "run-code",
+      testMatch: /run-code\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("run-code"),
+    },
+    {
+      // The browser: added by the owner, its tools and instructions, a new
+      // site asking first, refs to act on a page, a link to another site
+      // stopped, the live view with a click on it, hand_over on the
+      // request's page, and the sign-ins kept across a restart and
+      // forgotten.
+      name: "browser",
+      testMatch: /browser\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("browser"),
+    },
+    {
+      // The update check: Check now against the fake upstream's release, the
+      // header's notice and the Settings card, the daily check off and on
+      // (Settings and the setup step), and how this PCP is updated.
+      name: "updates",
+      testMatch: /updates\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("updates"),
+    },
+    {
+      // Touch ID with a stand-in for the Mac app. Signs every browser out,
+      // so it comes after the projects that start signed in, and signs in
+      // on its own.
+      name: "touch-id",
+      testMatch: /touch-id\.spec\.ts/,
+      dependencies: ["setup"],
+      use: { ...devices["Desktop Chrome"] },
     },
     {
       // Signs every browser out, so it comes last and signs in on its own.

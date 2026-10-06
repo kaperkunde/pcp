@@ -5,6 +5,14 @@
 
 export const MIN_PASSWORD_LENGTH = 10
 
+/**
+ * What PCP answers when the Mac app hands over a Touch ID key that no longer
+ * opens anything (lib/core/device-keys.ts). The page tells the app to forget
+ * its copy when it sees this.
+ */
+export const TOUCH_ID_REJECTED =
+  "Touch ID is no longer set up for PCP. Use your password."
+
 export const DEFAULT_HEADER_NAME = "Authorization"
 export const DEFAULT_VALUE_TEMPLATE = "Bearer {{secret}}"
 export const SECRET_PLACEHOLDER = "{{secret}}"
@@ -75,6 +83,8 @@ export type PermissionKind =
   | "access"
   | "endpoint_change"
   | "fetch"
+  | "browse"
+  | "browser_handover"
 
 /**
  * The HTTP methods web_fetch has a level for. Each is the default for a
@@ -114,6 +124,26 @@ export const FETCH_SITE_LABELS: Record<FetchSiteLevel, string> = {
   ...TOOL_ACCESS_LABELS,
 }
 
+/**
+ * Whether web_fetch and the browser may reach private addresses (the
+ * owner's own network): blocked unless the owner allows it; never asked.
+ */
+export const FETCH_PRIVATE_LEVELS = ["blocked", "allowed"] as const
+
+export const FETCH_PRIVATE_LABELS: Record<
+  (typeof FETCH_PRIVATE_LEVELS)[number],
+  string
+> = {
+  blocked: "Blocked",
+  allowed: "Allowed",
+}
+
+/** The size every browser tab renders at, in CSS pixels. */
+export const BROWSER_VIEWPORT = { width: 1280, height: 800 } as const
+
+/** How often the live view sends the owner's input, in milliseconds. */
+export const BROWSER_INPUT_EVERY_MS = 40
+
 /** The longest memory, in characters. */
 export const MAX_MEMORY_CHARS = 10_000
 
@@ -146,7 +176,7 @@ export const DDNS_PROVIDER_LABELS: Record<
 > = {
   duckdns: {
     label: "DuckDNS",
-    hint: "Free. Sign in at duckdns.org, pick a name, and copy your token.",
+    hint: "Free, and the easiest: a name and a token.",
   },
   dyndns2: {
     label: "No-IP, Dynu and others",
@@ -160,6 +190,33 @@ export const DDNS_PROVIDER_LABELS: Record<
     label: "Another service (an update URL)",
     hint: "Any service that updates when PCP opens a URL.",
   },
+}
+
+/** Where the owner signs in to DuckDNS, adds a name and finds the token. */
+export const DUCKDNS_URL = "https://www.duckdns.org/"
+
+const DUCKDNS_TOKEN =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+const DUCKDNS_NAME =
+  /(?:[?&]domains=([a-z0-9-]+)|\b(?!www\.)([a-z0-9-]+)\.duckdns\.org)/i
+
+/**
+ * The token, and the name if it is there, in whatever the owner pasted from
+ * duckdns.org: the token alone, or a whole update line from its install
+ * page (…/update?domains=name&token=…). DuckDNS has no way to hand a token
+ * over but the screen, and copying exactly the token from it is fiddly,
+ * on a phone above all. Shared by the form and lib/core/network/ddns.ts.
+ */
+export function readDuckDnsPaste(text: string): {
+  token: string | null
+  subdomain: string | null
+} {
+  const name = DUCKDNS_NAME.exec(text)
+
+  return {
+    token: DUCKDNS_TOKEN.exec(text)?.[0].toLowerCase() ?? null,
+    subdomain: (name?.[1] ?? name?.[2])?.toLowerCase() ?? null,
+  }
 }
 
 /** dyndns2 services PCP knows the update address of. */

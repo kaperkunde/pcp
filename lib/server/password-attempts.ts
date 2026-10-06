@@ -1,15 +1,22 @@
 import "server-only"
 
+import { verifyDeviceKey } from "@/lib/core/device-keys"
 import { PcpError } from "@/lib/core/errors"
-import { checkRateLimit } from "@/lib/core/rate-limit"
+import { checkRateLimit, refundRateLimit } from "@/lib/core/rate-limit"
 import type { ResolvedSession } from "@/lib/core/sessions"
 import { verifyPassword } from "@/lib/core/vault"
+import { field } from "@/lib/server/action-state"
 import { clientIp } from "@/lib/server/client-ip"
 
 /**
  * How often a password or recovery key may be tried. Every guess is a
  * 64 MiB scrypt run, and a stolen session must be no better a place to guess
  * the password from than the sign-in page.
+ *
+ * The limits are for guesses. A try that turns out right gives its count
+ * back (forgiveSignInTry, forgiveSessionTry): someone without the password
+ * cannot do that, and the owner signing in and confirming all day never
+ * locks themselves out, nor spends the tries an attacker is held to.
  */
 
 const WINDOW_MS = 15 * 60 * 1000
@@ -24,15 +31,23 @@ export const TOO_MANY_ATTEMPTS =
 
 /**
  * A password, recovery key or export password typed on a signed-out page,
- * per address.
+ * or the Mac app's Touch ID key, per address.
  */
 export async function withinSignInLimits(
-  kind: "password" | "recovery-key" | "export",
+  kind: "password" | "recovery-key" | "export" | "touch-id",
 ): Promise<boolean> {
   return (
     checkRateLimit(`${kind}:${await clientIp()}`, PER_SOURCE) &&
     checkRateLimit(`${kind}:*`, GLOBAL)
   )
+}
+
+/** A sign-in of `kind` was right: its try was no guess. */
+export async function forgiveSignInTry(
+  kind: "password" | "recovery-key" | "export" | "touch-id",
+): Promise<void> {
+  refundRateLimit(`${kind}:${await clientIp()}`)
+  refundRateLimit(`${kind}:*`)
 }
 
 /**
@@ -45,6 +60,28 @@ export function withinSessionLimits(sessionId: string): boolean {
     checkRateLimit(`password:session:${sessionId}`, PER_SOURCE) &&
     checkRateLimit("password:*", GLOBAL)
   )
+}
+
+/**
+ * The Mac app's Touch ID key handed over inside a session (confirmOwner).
+ * Not a guess at the password: a random 256-bit key checked with HKDF, not
+ * a 64 MiB scrypt run. So it neither spends the owner's password tries nor
+ * goes unlimited: a budget of its own, per session and for the instance.
+ */
+export function withinTouchIdLimits(sessionId: string): boolean {
+  return (
+    checkRateLimit(`touch-id:session:${sessionId}`, PER_SOURCE) &&
+    checkRateLimit("touch-id:*", GLOBAL)
+  )
+}
+
+/** The password (or the Touch ID key) inside a session was right. */
+export function forgiveSessionTry(
+  sessionId: string,
+  kind: "password" | "touch-id" = "password",
+): void {
+  refundRateLimit(`${kind}:session:${sessionId}`)
+  refundRateLimit(`${kind}:*`)
 }
 
 /**
@@ -73,4 +110,30 @@ export async function confirmPassword(
   }
 
   await verifyPassword(session.ctx, password)
+  forgiveSessionTry(session.sessionId)
+}
+
+/**
+ * The owner again, before a new API token, an export or a restore: the
+ * password (`password`), or in the Mac app the Touch ID key (`deviceKey`,
+ * lib/core/device-keys.ts), which that app hands over only after Touch ID.
+ * A new recovery key and a new password take the password itself: they
+ * decide who gets in, and Touch ID must not.
+ */
+export async function confirmOwner(
+  session: ResolvedSession,
+  formData: FormData,
+): Promise<void> {
+  const deviceKey = field(formData, "deviceKey")
+
+  if (!deviceKey) {
+    return confirmPassword(session, field(formData, "password"))
+  }
+
+  if (!withinTouchIdLimits(session.sessionId)) {
+    throw new PcpError("forbidden", TOO_MANY_ATTEMPTS)
+  }
+
+  await verifyDeviceKey(session.ctx, deviceKey)
+  forgiveSessionTry(session.sessionId, "touch-id")
 }

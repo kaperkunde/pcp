@@ -6,7 +6,12 @@ import type {
   PermissionRequest,
 } from "@/lib/generated/prisma/client"
 
-import { readFields, shapeAnswer, type AnswerShape } from "./answers"
+import {
+  answerValue,
+  readFields,
+  shapeAnswerKeeping,
+  type AnswerShape,
+} from "./answers"
 import {
   accessReview,
   checkAccessLevels,
@@ -32,6 +37,7 @@ import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
 import { newId } from "./ids"
+import { createMailAccount } from "./mail/accounts"
 import {
   decideMemoryAsk,
   describeMemoryAsk,
@@ -61,6 +67,7 @@ import {
   summaryText,
   type PermissionStatus,
 } from "./permission-rules"
+import type { MailRegistration } from "./register-rules"
 import { summarize } from "./search"
 import {
   createSecretNamedAfter,
@@ -76,15 +83,26 @@ import {
   type ServerInput,
 } from "./servers"
 import { writeToolAccess } from "./tool-access"
+import { collectHandleIds } from "./result-handles"
 import {
+  describeResults,
   keepWholeAnswer,
   MAX_KEPT_RESULT_CHARS,
-  resultKeeper,
+  resultKeepers,
   resultNotices,
+  resultOpener,
 } from "./tool-results"
+import { finishHandover, performNavigate } from "./browser/call"
+import { describeBrowseAsk, describeHandoverAsk } from "./browser/describe"
+import {
+  isOwnerNeeded,
+  type BrowseAsk,
+  type HandoverAsk,
+} from "./browser/types"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
   describeFetchAsk,
+  privateAllowedFor,
   fetchHostOf,
   runFetch,
   writeSiteAccess,
@@ -128,6 +146,8 @@ export type PermissionScope = {
  */
 export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   secretName?: string | null
+  /** basic: the user name the secret (the password) goes with. */
+  authUsername?: string | null
   /** Further headers, each with its stored secret's name for the owner. */
   authExtraHeaders?: Array<ExtraAuthHeader & { secretName: string }>
   newSecretName?: string | null
@@ -138,6 +158,8 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
    */
   newSecretOptional?: boolean
   endpoint?: EndpointRegistration
+  /** A mail account (JMAP or IMAP) rather than an MCP server or an API. */
+  mail?: MailRegistration
 }
 
 export type PermissionAsk =
@@ -153,6 +175,8 @@ export type PermissionAsk =
   | MemoryAsk
   | AccessAsk
   | { kind: "fetch"; input: FetchArgs }
+  | { kind: "browse"; input: BrowseAsk }
+  | { kind: "browser_handover"; input: HandoverAsk }
 
 /** Runs what the owner allowed. Tests swap in a stub. */
 export type PermissionExecutor = {
@@ -160,6 +184,8 @@ export type PermissionExecutor = {
   syncTools: typeof syncServerTools
   /** web_fetch's request; the real one when left out. */
   fetchWeb?: typeof fetchWeb
+  /** The browser opening a site the owner allowed; the real one when left out. */
+  browse?: typeof performNavigate
 }
 
 const defaultExecutor: PermissionExecutor = {
@@ -175,12 +201,16 @@ export type PermissionView = {
   tokenName: string
   serverId: string | null
   serverName: string | null
+  /** The server's kind, for the page's note on what allowing does. */
+  serverKind: string | null
   tool: string
   title: string
   lines: string[]
   warning: string | null
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
+  /** The browser tab a request is about, for the page to show it live. */
+  browserTabId: string | null
   url: string
   createdAt: Date
   expiresAt: Date
@@ -201,6 +231,8 @@ export type PermissionView = {
     optional: boolean
     /** Set when it is an OAuth client's secret: the client's ID. */
     clientId: string | null
+    /** Set when it is the password for this user name (basic authentication). */
+    login: string | null
   } | null
 }
 
@@ -232,7 +264,8 @@ export function permissionUrl(publicUrl: string, id: string): string {
 /**
  * One call to an upstream tool, its answer shaped for the assistant
  * (answers.ts): only `fields` when given, base64 text at `decode` decoded,
- * and never more than it should read. When shaping had to leave something
+ * the parts at `keep`, files and texts too long to read kept as results and
+ * shown as handles, and never more than it should read. When shaping had to leave something
  * out, the whole answer is kept for the token that asked and the assistant
  * is told how to read it (lib/core/tool-results.ts). An OAuth server that is
  * not connected (or whose sign-in expired) answers with the link to connect
@@ -248,11 +281,15 @@ export async function runCall(
     tokenId,
     fields,
     decode,
+    keep,
+    ownerAllowed = false,
     executor = defaultExecutor,
   }: {
     publicUrl: string
     /** The token the call is made for: the one that may read a kept answer. */
     tokenId: string
+    /** The owner allowed this very call, its arguments shown to them. */
+    ownerAllowed?: boolean
     executor?: PermissionExecutor
   } & AnswerShape,
 ): Promise<CallToolResult> {
@@ -261,29 +298,155 @@ export async function runCall(
   }
 
   try {
-    const keep = resultKeeper(ctx, tokenId)
+    const keepers = resultKeepers(ctx, tokenId)
+    const context = { serverId: server.id, toolName }
     const answer = await executor.callTool(ctx, server, toolName, args, {
       publicUrl,
-      keep,
+      tokenId,
+      keep: keepers.text,
+      keepBytes: keepers.bytes,
+      open: resultOpener(ctx, tokenId),
     })
+    const { shown, whole } = await shapeAnswerKeeping(
+      answer,
+      { fields, decode, keep },
+      {
+        text: (input) => keepers.text({ ...input, ...context }),
+        bytes: (input) => keepers.bytes({ ...input, ...context }),
+      },
+      { wholeMax: MAX_KEPT_RESULT_CHARS, links: true },
+    )
 
     return await keepWholeAnswer(
-      {
-        raw: answer,
-        shown: shapeAnswer(answer, { fields, decode }),
-        whole: () =>
-          shapeAnswer(answer, { fields, decode, max: MAX_KEPT_RESULT_CHARS }),
-      },
-      keep,
-      { serverId: server.id, toolName },
+      { raw: answer, shown, whole },
+      keepers.text,
+      context,
     )
   } catch (error) {
+    // A site the owner just saw: a site is asked about only for the address
+    // in the call's arguments, so when they allowed the call, they allowed
+    // it for this tab. Not when the arguments held a kept result: the owner
+    // saw its name, not the address in it, so the site is asked about.
     if (
-      isPcpError(error) &&
-      error.code === "unauthorized" &&
-      server.authType === "oauth"
+      ownerAllowed &&
+      isOwnerNeeded(error) &&
+      error.ask.kind === "browse" &&
+      collectHandleIds(args).length === 0
     ) {
-      return connectResult(server, publicUrl)
+      const { tabId, url } = error.ask.input
+
+      return (executor.browse ?? performNavigate)(
+        { ctx, tokenId, publicUrl, serverId: server.id },
+        { tabId, url },
+        { allowedByOwner: true },
+      )
+    }
+
+    const owner = await ownerFirst(error, { ctx, tokenId, publicUrl, server })
+
+    if (owner) {
+      return owner
+    }
+
+    throw error
+  }
+}
+
+/**
+ * What the owner has to do before a call that failed this way can run, as
+ * the result that hands them the link; null for any other failure.
+ */
+async function ownerFirst(
+  error: unknown,
+  { ctx, tokenId, publicUrl, server }: PermissionScope & { server: McpServer },
+): Promise<CallToolResult | null> {
+  // The browser needs the owner first: a site to allow, or a tab handed
+  // over. Asked like any other request.
+  if (isOwnerNeeded(error)) {
+    return withPermission({ ctx, tokenId, publicUrl }, error.ask)
+  }
+
+  if (
+    isPcpError(error) &&
+    error.code === "unauthorized" &&
+    server.authType === "oauth"
+  ) {
+    return connectResult(server, publicUrl)
+  }
+
+  return null
+}
+
+/** What one call of a program run by run_code came to. */
+export type CodeCallOutcome =
+  | { ok: true; value: unknown }
+  | { ok: false; error: string }
+  /** The owner has to act first: the result with their link. */
+  | { owner: CallToolResult }
+
+/**
+ * One call a program makes (lib/core/code/run.ts), through the same
+ * upstream path as runCall, with the answer handed to the program as a
+ * value (answers.ts answerValue) rather than shaped for an assistant to
+ * read. An OAuth server to connect, or a browser site to allow, comes back
+ * as `owner`: the run stops there and the assistant hands over the link.
+ * What PCP refused, and what the tool answered as an error, are errors the
+ * program sees.
+ */
+export async function runCodeCall(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  {
+    publicUrl,
+    tokenId,
+    fields,
+    decode,
+    keep,
+    max,
+    executor = defaultExecutor,
+  }: {
+    publicUrl: string
+    tokenId: string
+    /** The most characters of JSON the program is handed. */
+    max: number
+    executor?: PermissionExecutor
+  } & AnswerShape,
+): Promise<CodeCallOutcome> {
+  if (needsConnecting(server)) {
+    return { owner: connectResult(server, publicUrl) }
+  }
+
+  try {
+    const keepers = resultKeepers(ctx, tokenId)
+    const context = { serverId: server.id, toolName }
+    const answer = await executor.callTool(ctx, server, toolName, args, {
+      publicUrl,
+      tokenId,
+      keep: keepers.text,
+      keepBytes: keepers.bytes,
+      open: resultOpener(ctx, tokenId),
+    })
+
+    return await answerValue(
+      answer,
+      { fields, decode, keep },
+      {
+        text: (input) => keepers.text({ ...input, ...context }),
+        bytes: (input) => keepers.bytes({ ...input, ...context }),
+      },
+      { max },
+    )
+  } catch (error) {
+    const owner = await ownerFirst(error, { ctx, tokenId, publicUrl, server })
+
+    if (owner) {
+      return { owner }
+    }
+
+    if (isPcpError(error)) {
+      return { ok: false, error: error.message }
     }
 
     throw error
@@ -296,10 +459,10 @@ function describeAsk(ask: PermissionAsk): {
 } {
   switch (ask.kind) {
     case "call":
-      // The same call asking for other fields, or to decode other
+      // The same call asking for other fields, or to decode or keep other
       // paths, is another request.
       return {
-        target: `${ask.server.id}/${ask.tool.name}${ask.fields ? `\n${canonicalJson(ask.fields)}` : ""}${ask.decode ? `\ndecode ${canonicalJson(ask.decode)}` : ""}`,
+        target: `${ask.server.id}/${ask.tool.name}${ask.fields ? `\n${canonicalJson(ask.fields)}` : ""}${ask.decode ? `\ndecode ${canonicalJson(ask.decode)}` : ""}${ask.keep ? `\nkeep ${canonicalJson(ask.keep)}` : ""}`,
         args: ask.args,
       }
     case "register":
@@ -329,6 +492,16 @@ function describeAsk(ask: PermissionAsk): {
         target: `fetch:${ask.input.method} ${ask.input.url}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "browse":
+      return {
+        target: `browse:${ask.input.tabId ?? "new"} ${ask.input.url}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "browser_handover":
+      return {
+        target: `handover:${ask.input.tabId}`,
+        args: ask.input as Record<string, unknown>,
+      }
   }
 }
 
@@ -348,6 +521,10 @@ function toolNameOf(ask: PermissionAsk): string {
       return "update_endpoint"
     case "fetch":
       return "web_fetch"
+    case "browse":
+      return ask.input.toolName
+    case "browser_handover":
+      return "hand_over"
     default:
       return "memory"
   }
@@ -414,7 +591,15 @@ function registerOAuthLines(input: RegisterArgs, publicUrl: string): string[] {
       : []),
     ...(input.oauthClientId
       ? [`Redirect URI your client needs: ${oauthRedirectUrl(publicUrl)}`]
-      : []),
+      : input.mail
+        ? [
+            "Sign-in: PCP finds where the mail server signs you in when you connect it, and registers itself there if the server allows it; otherwise its page asks you for an OAuth client",
+          ]
+        : input.endpoint
+          ? [
+              "Client: none given. When you connect it, PCP registers itself with the provider if the provider allows that; otherwise its page asks you for an OAuth client",
+            ]
+          : []),
   ]
 }
 
@@ -446,8 +631,24 @@ async function summarizeRow(
     return { ...shown, lines: [...shown.lines, asker] }
   }
 
+  if (row.kind === "browse") {
+    const asked = describeBrowseAsk(args as BrowseAsk, {
+      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+    })
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "browser_handover") {
+    const asked = describeHandoverAsk(args as HandoverAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
   if (row.kind === "fetch") {
-    const asked = describeFetchAsk(args as FetchArgs)
+    const asked = describeFetchAsk(args as FetchArgs, {
+      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+    })
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -484,20 +685,72 @@ async function summarizeRow(
     ]
       .map((name) => `"${name}"`)
       .join(" and ")
+    const login = input.authUsername ?? "?"
+    const mailAuth = Boolean(input.mail)
     const auth =
-      input.authType === "header" && input.newSecretName
-        ? `Authentication: sends a new secret, saved as "${input.newSecretName}", in the ${input.authHeaderName || "Authorization"} header${andExtras}; you enter its value here when you agree`
-        : input.authType === "header"
-          ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header${andExtras}`
-          : input.authType === "oauth"
-            ? oauthLines[0]!
-            : "Authentication: none"
+      input.authType === "basic" && input.newSecretName
+        ? mailAuth
+          ? `Authentication: user name and password; the password is saved as a new secret "${input.newSecretName}", and you enter it here when you agree`
+          : `Authentication: sends a new secret, saved as "${input.newSecretName}", as the password for ${login} (HTTP Basic); you enter its value here when you agree`
+        : input.authType === "basic"
+          ? mailAuth
+            ? `Authentication: user name and your secret "${input.secretName ?? "?"}" as the password`
+            : `Authentication: sends your secret "${input.secretName ?? "?"}" as the password for ${login} (HTTP Basic)`
+          : input.authType === "header" && mailAuth
+            ? input.newSecretName
+              ? `Authentication: a bearer token, saved as a new secret "${input.newSecretName}"; you enter it here when you agree`
+              : `Authentication: your secret "${input.secretName ?? "?"}" as a bearer token`
+            : input.authType === "header" && input.newSecretName
+              ? `Authentication: sends a new secret, saved as "${input.newSecretName}", in the ${input.authHeaderName || "Authorization"} header${andExtras}; you enter its value here when you agree`
+              : input.authType === "header"
+                ? `Authentication: sends your secret "${input.secretName ?? "?"}" in the ${input.authHeaderName || "Authorization"} header${andExtras}`
+                : input.authType === "oauth"
+                  ? oauthLines[0]!
+                  : "Authentication: none"
+    const where = mailAuth ? "this mail server" : "this address"
     const warning =
-      input.authType === "header"
-        ? `PCP will send the ${extras.length > 0 ? "secrets" : "secret"} ${secrets} to this address with every call. Only add it if you trust the address.`
-        : input.authType === "oauth" && input.endpoint
-          ? "PCP will send your OAuth token for this account to this address with every call. Only add it if you trust the address and the sign-in addresses."
-          : null
+      input.authType === "basic"
+        ? `PCP will send the user name ${login} and the secret "${input.secretName ?? "?"}" to ${where} with every call. Only add it if you trust the address.`
+        : input.authType === "header"
+          ? `PCP will send the ${extras.length > 0 ? "secrets" : "secret"} ${secrets} to ${where} with every call. Only add it if you trust the address.`
+          : input.authType === "oauth" && (input.endpoint || input.mail)
+            ? `PCP will send your OAuth token for this account to ${where} with every call. Only add it if you trust the address${input.endpoint ? " and the sign-in addresses" : ""}.`
+            : null
+
+    if (input.mail) {
+      const { protocol, smtpUrl, readOnly, mailFrom, checked, privateAddress } =
+        input.mail
+      const jmap = protocol === "jmap"
+
+      return {
+        title: `Add the mail account ${input.name}?`,
+        lines: [
+          jmap
+            ? "Protocol: JMAP"
+            : smtpUrl
+              ? "Protocol: IMAP, sending through SMTP"
+              : "Protocol: IMAP (it cannot send: no SMTP server was named)",
+          jmap ? `Session URL: ${input.url}` : `IMAP server: ${input.url}`,
+          ...(smtpUrl ? [`SMTP server: ${smtpUrl}`] : []),
+          ...(checked ? [`Checked: ${checked}`] : []),
+          ...(privateAddress
+            ? [
+                `${privateAddress} If you agree, PCP signs in there from your own network.`,
+              ]
+            : []),
+          ...(input.authType === "basic" ? [`User name: ${login}`] : []),
+          auth,
+          ...oauthLines.slice(1),
+          readOnly
+            ? "Read-only: only the tools that read mail"
+            : "Can change things: its tools may send as you where the server allows it, move and flag mail, and delete into the Trash (never for good)",
+          ...(mailFrom ? [`From address: ${mailFrom}`] : []),
+          ...(input.description ? [`Description: ${input.description}`] : []),
+          asker,
+        ],
+        warning,
+      }
+    }
 
     if (input.endpoint) {
       const { preview, readOnly, specUrl, patches } = input.endpoint
@@ -572,11 +825,62 @@ async function summarizeRow(
       ...(about ? [`What it does: ${about}`] : []),
       asker,
       ...previewArgs(args),
+      ...(await handleLines(ctx, row.tokenId, args)),
     ],
     warning: destructive
       ? "The server marks this tool as destructive: it can change or delete things for good."
       : null,
   }
+}
+
+const COUNT = new Intl.NumberFormat("en-US")
+
+/**
+ * What each kept result a call's arguments name is, so the owner sees what
+ * the call carries without its content: its name, type and size, which
+ * server's tool kept it, and until when. An id the token no longer has is
+ * said too, since the call would fail.
+ */
+async function handleLines(
+  ctx: VaultContext,
+  tokenId: string,
+  args: Record<string, unknown>,
+): Promise<string[]> {
+  let ids: string[]
+
+  try {
+    ids = collectHandleIds(args, { loose: true })
+  } catch {
+    return []
+  }
+
+  const infos = await describeResults(ctx, tokenId, ids)
+  const serverIds = infos.flatMap((info) =>
+    info.found && info.serverId ? [info.serverId] : [],
+  )
+  const servers = serverIds.length
+    ? await db().mcpServer.findMany({
+        where: { id: { in: serverIds }, vaultId: ctx.vaultId },
+        select: { id: true, slug: true },
+      })
+    : []
+  const slugs = new Map(servers.map((server) => [server.id, server.slug]))
+
+  return infos.map((info) => {
+    if (!info.found) {
+      return `Kept result ${info.id}: no longer available for this token; the call will fail`
+    }
+
+    const size =
+      info.kind === "bytes"
+        ? `${COUNT.format(info.length)} bytes`
+        : `${COUNT.format(info.length)} characters`
+    const from = info.serverId
+      ? `${slugs.get(info.serverId) ?? "(removed server)"}/${info.toolName}`
+      : info.toolName
+
+    return `Kept result ${info.id}: ${info.name ?? "(unnamed)"}, ${info.mediaType}, ${size}, from ${from}, readable until ${info.expiresAt.toISOString()}`
+  })
 }
 
 async function toView(
@@ -600,9 +904,11 @@ async function toView(
     tokenName: row.token.name,
     serverId: row.serverId,
     serverName: row.server?.name ?? null,
+    serverKind: row.server?.kind ?? null,
     tool: row.toolName,
     ...summary,
     memory,
+    browserTabId: browserTabOf(ctx, row),
     url: permissionUrl(publicUrl, row.id),
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
@@ -617,11 +923,29 @@ async function toView(
   }
 }
 
+/** The tab a browser request is about, if it names one. */
+function browserTabOf(
+  ctx: VaultContext,
+  row: PermissionRequest,
+): string | null {
+  if (row.kind !== "browse" && row.kind !== "browser_handover") {
+    return null
+  }
+
+  const tabId = (readArgs(ctx, row) as { tabId?: unknown }).tabId
+  return typeof tabId === "string" ? tabId : null
+}
+
 /** A secret the owner types in to agree to a new server, if there is one. */
 function newSecretOf(
   ctx: VaultContext,
   row: PermissionRequest,
-): { name: string; optional: boolean; clientId: string | null } | null {
+): {
+  name: string
+  optional: boolean
+  clientId: string | null
+  login: string | null
+} | null {
   if (row.kind !== "register") {
     return null
   }
@@ -634,6 +958,7 @@ function newSecretOf(
         optional: args.newSecretOptional === true,
         clientId:
           args.authType === "oauth" ? (args.oauthClientId ?? null) : null,
+        login: args.authType === "basic" ? (args.authUsername ?? null) : null,
       }
     : null
 }
@@ -707,7 +1032,9 @@ function pendingText(view: PermissionView, detail?: string): string {
   const typed = view.secretToEnter
     ? view.secretToEnter.clientId
       ? ` They type the client secret of their OAuth client in there, if it has one; do not ask them for it here.`
-      : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
+      : view.secretToEnter.login
+        ? ` They type the password for ${view.secretToEnter.login} in there, and it is saved as the secret "${view.secretToEnter.name}"; do not ask them for it here.`
+        : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
     : ""
 
   return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
@@ -751,7 +1078,9 @@ export async function withPermission(
         serverId:
           ask.kind === "call"
             ? ask.server.id
-            : ask.kind === "endpoint_change"
+            : ask.kind === "endpoint_change" ||
+                ask.kind === "browse" ||
+                ask.kind === "browser_handover"
               ? ask.input.serverId
               : null,
         toolName: toolNameOf(ask),
@@ -759,6 +1088,7 @@ export async function withPermission(
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
         decode:
           ask.kind === "call" && ask.decode ? JSON.stringify(ask.decode) : null,
+        keep: ask.kind === "call" && ask.keep ? JSON.stringify(ask.keep) : null,
         argsCiphertext: asBytes(
           encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
         ),
@@ -835,7 +1165,7 @@ export async function decidePermission(
   const kind = row.kind as PermissionKind
   // Only a tool call (for the tool) and a web request (for the site) have
   // "always" and "block": any other answer is about this one request.
-  const settles = kind === "call" || kind === "fetch"
+  const settles = kind === "call" || kind === "fetch" || kind === "browse"
   const choice: PermissionDecision = !settles
     ? decision === "always"
       ? "allow_once"
@@ -865,13 +1195,28 @@ export async function decidePermission(
 
   // The site a web request goes to, for the answers that settle it.
   const host =
-    kind === "fetch" ? fetchHostOf(readArgs(ctx, row) as FetchArgs) : null
+    kind === "fetch"
+      ? fetchHostOf(readArgs(ctx, row) as FetchArgs)
+      : kind === "browse"
+        ? fetchHostOf(readArgs(ctx, row) as BrowseAsk)
+        : null
 
   if (choice === "block" || choice === "decline") {
     if (choice === "block" && host) {
       await writeSiteAccess(ctx.vaultId, row.tokenId, host, "blocked")
     } else if (choice === "block" && row.serverId) {
       await writeToolAccess(row.tokenId, row.serverId, row.toolName, "blocked")
+    }
+
+    if (kind === "browser_handover") {
+      await finishHandover(ctx, (readArgs(ctx, row) as HandoverAsk).tabId)
+
+      return finishUnrun(
+        ctx,
+        row,
+        publicUrl,
+        "The owner said not now, so they did not do it, and the tab is back with the browser tools.",
+      )
     }
 
     return finishUnrun(
@@ -935,8 +1280,18 @@ export async function decidePermission(
               ),
             )
           : kind === "fetch"
-            ? await executeFetch(ctx, row, executor)
-            : await executeRegister(ctx, row, publicUrl, executor, secretValue)
+            ? await executeFetch(ctx, row, publicUrl, executor)
+            : kind === "browse"
+              ? await executeBrowse(ctx, row, publicUrl, executor)
+              : kind === "browser_handover"
+                ? await executeHandover(ctx, row)
+                : await executeRegister(
+                    ctx,
+                    row,
+                    publicUrl,
+                    executor,
+                    secretValue,
+                  )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -999,14 +1354,62 @@ async function executeCall(
     tokenId: row.tokenId,
     fields: readStoredFields(row.fields),
     decode: readStoredFields(row.decode),
+    keep: readStoredFields(row.keep),
+    ownerAllowed: true,
     executor,
   })
+}
+
+/**
+ * A site the owner let the browser open: opened in the tab the assistant
+ * asked for (or a new one), which may then open that site's pages while
+ * it is open, if the browser is still there for the token.
+ */
+async function executeBrowse(
+  ctx: VaultContext,
+  row: Row,
+  publicUrl: string,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  if (!row.server || row.server.kind !== "browser") {
+    return text("The browser was removed from PCP, so nothing ran.", true)
+  }
+
+  if (!row.server.enabled) {
+    return text("The browser is switched off in PCP, so nothing ran.", true)
+  }
+
+  const asked = readArgs(ctx, row) as BrowseAsk
+
+  return (executor.browse ?? performNavigate)(
+    { ctx, tokenId: row.tokenId, publicUrl, serverId: row.server.id },
+    { tabId: asked.tabId, url: asked.url },
+    { allowedByOwner: true },
+  )
+}
+
+/** The owner is done in a tab an assistant handed them. */
+async function executeHandover(
+  ctx: VaultContext,
+  row: Row,
+): Promise<CallToolResult> {
+  const { tabId } = readArgs(ctx, row) as HandoverAsk
+
+  return (await finishHandover(ctx, tabId))
+    ? text(
+        `The owner is done in tab ${tabId}, and it is back with the browser tools. Take a snapshot to see where it is now.`,
+      )
+    : text(
+        `Tab ${tabId} is gone (it was closed, or the browser has closed since), so there is nothing to go on from. Open the page again.`,
+        true,
+      )
 }
 
 /** A web request the owner allowed, if the token may still make one. */
 async function executeFetch(
   ctx: VaultContext,
   row: Row,
+  publicUrl: string,
   executor: PermissionExecutor,
 ): Promise<CallToolResult> {
   const token = await db().apiToken.findUnique({
@@ -1021,12 +1424,10 @@ async function executeFetch(
     )
   }
 
-  return runFetch(
-    ctx,
-    row.tokenId,
-    readArgs(ctx, row) as FetchArgs,
-    executor.fetchWeb ?? fetchWeb,
-  )
+  return runFetch(ctx, row.tokenId, readArgs(ctx, row) as FetchArgs, {
+    publicUrl,
+    fetcher: executor.fetchWeb ?? fetchWeb,
+  })
 }
 
 /**
@@ -1082,7 +1483,11 @@ async function secretForRegister(
     description:
       asked.authType === "oauth"
         ? `Client secret for the OAuth client ${asked.oauthClientId ?? "?"}.`
-        : `Sent to ${asked.name} in the ${asked.authHeaderName || "Authorization"} header.`,
+        : asked.authType === "basic"
+          ? `The password for ${asked.authUsername ?? "?"} at ${asked.name}.`
+          : asked.mail
+            ? `Sent to ${asked.name} as a bearer token.`
+            : `Sent to ${asked.name} in the ${asked.authHeaderName || "Authorization"} header.`,
   })
 
   return { id: saved.id, saved }
@@ -1098,23 +1503,6 @@ function secretFields(asked: RegisterArgs, secretId: string | null) {
         oauthScope: asked.oauthScope ?? null,
       }
     : { authSecretId: secretId }
-}
-
-/**
- * How an API endpoint an assistant proposed signs in. register_server offers
- * none, a header or OAuth; a user name and password (a mail account's) is
- * the owner's to set up, never a proposal's.
- */
-function endpointAuthType(
-  authType: RegisterArgs["authType"],
-): "none" | "header" | "oauth" {
-  if (authType === "basic") {
-    throw invalid(
-      "An API proposed through register_server cannot sign in with a user name and password.",
-    )
-  }
-
-  return authType
 }
 
 async function executeRegister(
@@ -1134,23 +1522,37 @@ async function executeRegister(
           name: asked.name,
           description: asked.description,
           url: asked.url,
-          authType: endpointAuthType(asked.authType),
+          authType: asked.authType,
+          authUsername: asked.authUsername,
           authHeaderName: asked.authHeaderName,
           authValueTemplate: asked.authValueTemplate,
           authExtraHeaders: asked.authExtraHeaders,
           ...secretFields(asked, secret.id),
           endpoint: asked.endpoint,
         })
-      : await createServer(ctx, {
-          name: asked.name,
-          url: asked.url,
-          description: asked.description,
-          authType: asked.authType,
-          authHeaderName: asked.authHeaderName,
-          authValueTemplate: asked.authValueTemplate,
-          authExtraHeaders: asked.authExtraHeaders,
-          ...secretFields(asked, secret.id),
-        })
+      : asked.mail
+        ? await createMailAccount(ctx, {
+            protocol: asked.mail.protocol,
+            name: asked.name,
+            description: asked.description,
+            url: asked.url,
+            smtpUrl: asked.mail.smtpUrl,
+            readOnly: asked.mail.readOnly,
+            mailFrom: asked.mail.mailFrom,
+            authType: asked.authType as "basic" | "header" | "oauth",
+            authUsername: asked.authUsername ?? null,
+            ...secretFields(asked, secret.id),
+          })
+        : await createServer(ctx, {
+            name: asked.name,
+            url: asked.url,
+            description: asked.description,
+            authType: asked.authType,
+            authHeaderName: asked.authHeaderName,
+            authValueTemplate: asked.authValueTemplate,
+            authExtraHeaders: asked.authExtraHeaders,
+            ...secretFields(asked, secret.id),
+          })
   } catch (error) {
     // The secret was typed in for this server alone.
     if (secret.saved) {

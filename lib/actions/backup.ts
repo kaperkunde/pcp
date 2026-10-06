@@ -9,6 +9,7 @@ import { MAX_EXPORT_FILE_BYTES } from "@/lib/core/constants"
 import { rebuildOutdatedEndpoints } from "@/lib/core/endpoints"
 import { invalid, PcpError } from "@/lib/core/errors"
 import { reconcileNetwork } from "@/lib/core/network/runtime"
+import { reconcileUpdates } from "@/lib/core/updates/runtime"
 import { isSetUp, unlockOwnerVault } from "@/lib/core/vault"
 import {
   type ActionState,
@@ -17,7 +18,7 @@ import {
   guarded,
 } from "@/lib/server/action-state"
 import {
-  confirmPassword,
+  confirmOwner,
   TOO_MANY_ATTEMPTS,
   withinExportLimits,
   withinSignInLimits,
@@ -63,6 +64,7 @@ async function afterRestore(restoreHostSettings: boolean): Promise<void> {
 
   if (restoreHostSettings) {
     await reconcileNetwork({ ddnsNow: true, tlsNow: true })
+    await reconcileUpdates()
   }
 
   revalidatePath("/", "layout")
@@ -97,10 +99,10 @@ export async function restoreAction(
       throw invalid("Tick the box to confirm that everything here is replaced.")
     }
 
-    await confirmPassword(session, password)
+    await confirmOwner(session, formData)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: session.ctx.vaultId },
+      { into: "vault", ctx: session.ctx },
       { restoreHostSettings },
     )
     restored = true
@@ -114,9 +116,10 @@ export async function restoreAction(
 
   await afterRestore(restoreHostSettings)
 
-  // The session went with the vault. The owner's own export opens with the
-  // password they just typed; another PCP's opens with its own.
-  const ctx = await unlockOwnerVault(password)
+  // The session went with the vault, and Touch ID with it. The owner's own
+  // export opens with the password they just typed; another PCP's opens
+  // with its own, and a restore confirmed with Touch ID asks for it.
+  const ctx = password ? await unlockOwnerVault(password) : null
 
   if (ctx) {
     await signIn(ctx)

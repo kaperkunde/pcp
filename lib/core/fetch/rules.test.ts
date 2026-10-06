@@ -6,6 +6,7 @@ import {
   normalizeMethod,
   normalizeSite,
   resolveFetchAccess,
+  resolvePrivateAccess,
   siteKey,
 } from "./rules"
 
@@ -119,5 +120,28 @@ describe("deciding a request", () => {
       access: "blocked",
       by: "method",
     })
+  })
+})
+
+describe("private addresses", () => {
+  it("are blocked without a line, and the token's own line wins over all tokens'", () => {
+    const rules = emptyRules()
+    expect(resolvePrivateAccess(rules)).toBe(false)
+
+    rules.sharedPrivate = "allowed"
+    expect(resolvePrivateAccess(rules)).toBe(true)
+
+    rules.ownPrivate = "blocked"
+    expect(resolvePrivateAccess(rules)).toBe(false)
+
+    rules.sharedPrivate = null
+    rules.ownPrivate = "allowed"
+    expect(resolvePrivateAccess(rules)).toBe(true)
+  })
+
+  it("never come from asking: only allowed allows", () => {
+    const rules = emptyRules()
+    rules.ownPrivate = "ask"
+    expect(resolvePrivateAccess(rules)).toBe(false)
   })
 })

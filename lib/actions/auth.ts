@@ -2,6 +2,12 @@
 
 import { redirect } from "next/navigation"
 
+import { TOUCH_ID_REJECTED } from "@/lib/core/constants"
+import {
+  createDeviceKey,
+  removeDeviceKeys,
+  unlockWithDeviceKey,
+} from "@/lib/core/device-keys"
 import { invalid } from "@/lib/core/errors"
 import { destroySession } from "@/lib/core/sessions"
 import {
@@ -13,6 +19,7 @@ import {
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import {
   TOO_MANY_ATTEMPTS,
+  forgiveSignInTry,
   withinSignInLimits,
 } from "@/lib/server/password-attempts"
 import {
@@ -49,7 +56,14 @@ export async function setupAction(
   })
 }
 
-export type LoginResult = ActionState
+/**
+ * With `touchId` ticked (the Mac app, where Touch ID is available), the
+ * password turns Touch ID on instead of signing in: the new key comes back
+ * once, the app keeps it, and the page signs in with it
+ * (`touchIdLoginAction`). Signing in here would send the page on to the
+ * servers before the app had the key.
+ */
+export type LoginResult = ActionState<{ deviceKey?: string }>
 
 export async function loginAction(
   _previous: LoginResult,
@@ -67,6 +81,47 @@ export async function loginAction(
 
   if (!ctx) {
     return { status: "error", error: "That password is not right." }
+  }
+
+  await forgiveSignInTry("password")
+
+  if (field(formData, "touchId") === "on") {
+    return { status: "ok", deviceKey: await createDeviceKey(ctx) }
+  }
+
+  await signIn(ctx)
+  redirect("/servers")
+}
+
+export type TouchIdLoginResult = ActionState
+
+/**
+ * Unlocks with the key the Mac app hands over after Touch ID. With `once`,
+ * a key just made that the app did not keep: it signs in this once, and is
+ * gone after.
+ */
+export async function touchIdLoginAction(
+  _previous: TouchIdLoginResult,
+  formData: FormData,
+): Promise<TouchIdLoginResult> {
+  if (!(await isSetUp())) {
+    redirect("/setup")
+  }
+
+  if (!(await withinSignInLimits("touch-id"))) {
+    return { status: "error", error: TOO_MANY_ATTEMPTS }
+  }
+
+  const ctx = await unlockWithDeviceKey(field(formData, "deviceKey"))
+
+  if (!ctx) {
+    return { status: "error", error: TOUCH_ID_REJECTED }
+  }
+
+  await forgiveSignInTry("touch-id")
+
+  if (field(formData, "once") === "on") {
+    await removeDeviceKeys(ctx.vaultId)
   }
 
   await signIn(ctx)

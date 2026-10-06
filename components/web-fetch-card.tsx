@@ -20,12 +20,15 @@ import {
   addFetchSiteAction,
   removeFetchSiteAction,
   setFetchMethodAction,
+  setFetchPrivateAction,
   setFetchRuleSharedAction,
   setFetchSiteAction,
   type AddFetchSiteResult,
 } from "@/lib/actions/web-fetch"
 import {
   FETCH_METHOD_LABELS,
+  FETCH_PRIVATE_LABELS,
+  FETCH_PRIVATE_LEVELS,
   FETCH_SITE_LABELS,
   FETCH_SITE_LEVELS,
   TOOL_ACCESS_LABELS,
@@ -35,6 +38,8 @@ import {
 } from "@/lib/core/constants"
 import type {
   FetchMethodView,
+  FetchPrivateLevel,
+  FetchPrivateView,
   FetchSiteView,
   TokenFetchRules,
 } from "@/lib/core/web-fetch"
@@ -43,28 +48,45 @@ import { cn } from "@/lib/utils"
 /**
  * What an assistant with this token may fetch through web_fetch: a level
  * per method, then every site it reached for (and the ones you added), each
- * with a level of its own or following the methods. Any line can be made
- * the one for all tokens.
+ * with a level of its own or following the methods, and whether it reaches
+ * private addresses (the browser follows the same lines). Any line can be
+ * made the one for all tokens.
  */
 export function WebFetchCard({
   tokenId,
   rules,
   locked,
+  webFetch = true,
+  browser = false,
 }: {
   tokenId: string
   rules: TokenFetchRules
   locked: boolean
+  /** The token fetches web pages (web_fetch). */
+  webFetch?: boolean
+  /** The token reaches the browser, which follows these sites too. */
+  browser?: boolean
 }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Web fetch</CardTitle>
+        <CardTitle>
+          {webFetch
+            ? browser
+              ? "Web fetch and the browser"
+              : "Web fetch"
+            : "Browser sites"}
+        </CardTitle>
         <CardDescription>
-          An assistant with this token can fetch web pages through PCP, from
-          public addresses only and with none of your secrets. A site&apos;s own
-          setting decides every request to it; a site that uses the method
-          settings gets the level of the request&apos;s method. Each site an
-          assistant reaches for shows up here the first time.
+          {webFetch
+            ? "An assistant with this token can fetch web pages through PCP, with none of your secrets, and from your own network only if you allow it below. "
+            : "An assistant with this token can open pages in PCP's browser, from your own network only if you allow it below. "}
+          A site&apos;s own setting decides every request to it; a site that
+          uses the method settings gets the level of the request&apos;s method.
+          Each site an assistant reaches for shows up here the first time.
+          {browser
+            ? " The browser opens a page where a GET request may go, and asks you first where one would ask."
+            : null}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
@@ -84,6 +106,14 @@ export function WebFetchCard({
               />
             ))}
           </ul>
+        </section>
+        <section aria-label="Private addresses" className="flex flex-col gap-2">
+          <h3 className="font-medium">Private addresses</h3>
+          <PrivateRow
+            tokenId={tokenId}
+            rule={rules.privateAddresses}
+            locked={locked}
+          />
         </section>
         <section aria-label="Sites" className="flex flex-col gap-2">
           <h3 className="font-medium">Sites</h3>
@@ -187,6 +217,77 @@ function MethodRow({
       </div>
       <FormError error={error} className="basis-full" />
     </li>
+  )
+}
+
+function PrivateRow({
+  tokenId,
+  rule,
+  locked,
+}: {
+  tokenId: string
+  rule: FetchPrivateView
+  locked: boolean
+}) {
+  const [pending, startTransition] = useTransition()
+  const [shown, setShown] = useOptimistic({
+    access: rule.access,
+    shared: rule.own === null && rule.shared !== null,
+  })
+  const [error, setError] = useState<string | null>(null)
+
+  function change(access: FetchPrivateLevel) {
+    startTransition(async () => {
+      setShown({ access, shared: false })
+      const result = await setFetchPrivateAction(tokenId, access)
+      setError(result.status === "error" ? result.error : null)
+    })
+  }
+
+  function share(shared: boolean) {
+    startTransition(async () => {
+      setShown({ ...shown, shared })
+      const result = await setFetchRuleSharedAction(
+        tokenId,
+        "private",
+        "private",
+        shared,
+      )
+      setError(result.status === "error" ? result.error : null)
+    })
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <p className="min-w-0 basis-80 grow text-xs text-muted-foreground">
+        Loopback, private and link-local addresses: a device at home, a service
+        on this machine. Blocked unless you allow it; an assistant cannot ask
+        for it. PCP&apos;s own address is never reached.
+      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        <AllTokensCheckbox
+          checked={shown.shared}
+          disabled={locked || pending}
+          label="All tokens for private addresses"
+          sharedLevel={rule.shared ? FETCH_PRIVATE_LABELS[rule.shared] : null}
+          onChange={share}
+        />
+        <Select
+          aria-label="Web fetch private addresses"
+          value={shown.access}
+          disabled={locked || pending}
+          onChange={(event) => change(event.target.value as FetchPrivateLevel)}
+          className={levelClass(shown.access)}
+        >
+          {FETCH_PRIVATE_LEVELS.map((level) => (
+            <option key={level} value={level}>
+              {FETCH_PRIVATE_LABELS[level]}
+            </option>
+          ))}
+        </Select>
+      </div>
+      <FormError error={error} className="basis-full" />
+    </div>
   )
 }
 

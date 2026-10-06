@@ -29,7 +29,8 @@ function ago(iso: string): string {
 
 /**
  * The header's bell: how many requests from assistants are waiting for the
- * owner, and a list of them that leads to each one's page. The layout gives
+ * owner, and a list of them that leads to each one's page. Above them, what
+ * PCP itself needs looked at (HTTPS that stopped renewing). The layout gives
  * the first count; it is read again on every navigation, when the menu
  * opens, when the tab comes back into view, and every little while.
  */
@@ -70,11 +71,14 @@ export function PendingRequests({
     }
   }, [refresh])
 
-  const { total, requests } = state
+  const { total, requests, notices } = state
+  const count = total + notices.length
   const label =
-    total === 0
-      ? "Requests from assistants: none waiting"
-      : `Requests from assistants: ${total} waiting for you`
+    notices.length > 0
+      ? `${count} waiting for you`
+      : total === 0
+        ? "Requests from assistants: none waiting"
+        : `Requests from assistants: ${total} waiting for you`
 
   return (
     <Menu.Root
@@ -87,16 +91,16 @@ export function PendingRequests({
         title={label}
         className={cn(
           "relative inline-flex size-8 cursor-pointer items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors outline-none hover:bg-foreground/5 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 data-popup-open:bg-foreground/5 data-popup-open:text-foreground",
-          total > 0 && "border-primary/50 text-primary",
+          count > 0 && "border-primary/50 text-primary",
         )}
       >
         <Bell className="size-4" aria-hidden />
-        {total > 0 ? (
+        {count > 0 ? (
           <span
             aria-hidden
             className="absolute -top-1.5 -right-1.5 flex h-4.5 min-w-4.5 items-center justify-center rounded-full bg-destructive px-1 text-[0.7rem] leading-none font-semibold text-background"
           >
-            {total > 99 ? "99+" : total}
+            {count > 99 ? "99+" : count}
           </span>
         ) : null}
       </Menu.Trigger>
@@ -107,15 +111,33 @@ export function PendingRequests({
           align="end"
         >
           <Menu.Popup className="w-80 max-w-[calc(100vw-2rem)] origin-[var(--transform-origin)] rounded-lg border border-border bg-popover p-1 text-sm text-popover-foreground shadow-lg outline-none transition-[scale,opacity] duration-100 data-ending-style:scale-95 data-ending-style:opacity-0 data-starting-style:scale-95 data-starting-style:opacity-0">
+            {notices.map((notice) => (
+              <Menu.LinkItem
+                key={notice.id}
+                closeOnClick
+                render={<Link href={notice.href} />}
+                className="flex cursor-pointer flex-col gap-0.5 rounded-md px-3 py-2 outline-none data-highlighted:bg-foreground/5"
+              >
+                <span className="font-medium text-destructive">
+                  {notice.title}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  Open Settings to see why
+                </span>
+              </Menu.LinkItem>
+            ))}
             <div className="px-3 pt-2 pb-1 text-xs font-medium text-muted-foreground">
               {total === 0
-                ? "Nothing is waiting for you."
+                ? notices.length > 0
+                  ? "No requests from assistants."
+                  : "Nothing is waiting for you."
                 : `Waiting for you (${total})`}
             </div>
-            {total === 0 ? (
+            {total === 0 && notices.length === 0 ? (
               <p className="px-3 pb-2 text-xs text-muted-foreground">
-                When an assistant asks before it runs a tool, adds a server or
-                shares a memory, it shows here.
+                When an assistant asks before it runs a tool, adds a server,
+                shares a memory or opens a site in the browser, or needs you in
+                a browser tab, it shows here.
               </p>
             ) : null}
             {requests.map((request) => (

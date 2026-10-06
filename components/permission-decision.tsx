@@ -40,6 +40,8 @@ export function PermissionDecision({
     exists: boolean
     optional?: boolean
     clientId?: string | null
+    /** The user name this is the password for (basic authentication). */
+    login?: string | null
   } | null
   every?: { asked: boolean } | null
 }) {
@@ -63,7 +65,11 @@ export function PermissionDecision({
       !secret.optional &&
       !secretValue
     ) {
-      setError(`Enter the value of the secret "${secret.name}" first.`)
+      setError(
+        secret.login
+          ? `Enter the password for ${secret.login} first.`
+          : `Enter the value of the secret "${secret.name}" first.`,
+      )
       return
     }
 
@@ -112,7 +118,9 @@ export function PermissionDecision({
           label={
             secret.clientId
               ? `Client secret of the OAuth client "${secret.clientId}"`
-              : `Value of the secret "${secret.name}"`
+              : secret.login
+                ? `Password for ${secret.login}`
+                : `Value of the secret "${secret.name}"`
           }
           htmlFor={`permission-${id}-secret`}
           hint={
@@ -120,7 +128,9 @@ export function PermissionDecision({
               ? `You have added a secret named "${secret.name}" since; leave this empty to use it, or enter a value to save a new one.`
               : secret.clientId
                 ? `From the provider's developer settings, where you created the client. It is saved under Secrets as "${secret.name}", encrypted, and sent only to the token address above; the assistant never sees it. Leave it empty for a client without a secret.`
-                : "The key or token itself. It is saved under Secrets, encrypted, and sent only to the address above; the assistant never sees it."
+                : secret.login
+                  ? `An app password, if the server offers them, rather than your own. It is saved under Secrets as "${secret.name}", encrypted, and sent only to the address above; the assistant never sees it.`
+                  : "The key or token itself. It is saved under Secrets, encrypted, and sent only to the address above; the assistant never sees it."
           }
         >
           <Input

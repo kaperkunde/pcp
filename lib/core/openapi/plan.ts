@@ -41,8 +41,17 @@ export const callPlanSchema = z.object({
     .object({
       arg: z.string(),
       contentType: z.string(),
-      encoding: z.enum(["json", "form", "text"]),
+      /**
+       * binary: the body is one file, a kept result's bytes. multipart:
+       * form fields, the ones named in `files` taking kept results.
+       */
+      encoding: z.enum(["json", "form", "text", "binary", "multipart"]),
       required: z.boolean(),
+      /** multipart: the fields that are files, and whether each takes many. */
+      files: z
+        .array(z.object({ name: z.string(), many: z.boolean() }))
+        .max(50)
+        .optional(),
     })
     .nullable(),
   accept: z.string(),

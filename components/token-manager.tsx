@@ -15,8 +15,10 @@ import { LocalDate } from "@/components/local-date"
 import { KeepMemoriesField } from "@/components/keep-memories-field"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { handOffNewToken } from "@/components/new-token-handoff"
+import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
+import { RunCodeField } from "@/components/run-code-field"
 import { WebFetchField } from "@/components/web-fetch-field"
 import { Badge } from "@/components/ui/badge"
 import { Button, ButtonLink } from "@/components/ui/button"
@@ -29,7 +31,6 @@ import {
 } from "@/components/ui/card"
 import { Input, Select } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
-import { UsernameField } from "@/components/username-field"
 import {
   createTokenAction,
   deleteTokenAction,
@@ -152,6 +153,7 @@ function CreateTokenForm({
             <ManageEndpointsField id="token-manage" />
             <KeepMemoriesField id="token-memories" />
             <WebFetchField id="token-fetch" />
+            <RunCodeField id="token-code" />
             {draft === null ? (
               <div>
                 <Button type="submit">Create token</Button>
@@ -171,17 +173,12 @@ function CreateTokenForm({
             {draft.map(([key, value], index) => (
               <input key={index} type="hidden" name={key} value={value} />
             ))}
-            <UsernameField id="token-account" value={username} />
-            <Field label="Your password" htmlFor="token-password">
-              <Input
-                id="token-password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                autoFocus
-                required
-              />
-            </Field>
+            <OwnerConfirmFields
+              idPrefix="token"
+              username={username}
+              error={state.status === "error" ? state.error : null}
+              autoFocus
+            />
             <FormError error={state.status === "error" ? state.error : null} />
             <FormNote message={made ? "Created. Opening it…" : null} />
             <div className="flex gap-2">
@@ -262,6 +259,9 @@ function TokenRow({ token }: { token: ApiTokenSummary }) {
           ) : null}
           {!dead && token.webFetch ? (
             <Badge variant="outline">Fetches the web</Badge>
+          ) : null}
+          {!dead && token.runCode ? (
+            <Badge variant="outline">Runs code</Badge>
           ) : null}
           {!dead && token.openPermissions > 0 ? (
             <Badge variant="warning">{token.openPermissions} waiting</Badge>

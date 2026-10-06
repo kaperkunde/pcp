@@ -1,0 +1,48 @@
+# Adds run_code's sandbox: a container where an assistant's shell and
+# Python programs run, beside PCP. JavaScript programs run inside PCP
+# without it.
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml up -d
+#
+# (and -f docker-compose.https.yaml too when PCP serves HTTPS itself).
+#
+# The sandbox has no network: not the internet, not your network, not PCP's
+# address. The one thing it shares with PCP is the pcp-sandbox volume, where
+# PCP listens on a socket for the sandbox's runner. PCP never touches the
+# Docker socket and cannot start, stop or change this container; the runner
+# connects to it. Each program runs as its own user, which cannot reach that
+# socket, and everything it started or wrote is removed when it ends.
+services:
+  pcp:
+    environment:
+      PCP_SANDBOX_SOCKET: /run/pcp-sandbox/sandbox.sock
+    volumes:
+      - pcp-sandbox:/run/pcp-sandbox
+
+  sandbox:
+    image: ghcr.io/kaperkunde/pcp-sandbox:latest
+    build: sandbox
+    restart: unless-stopped
+    depends_on: [pcp]
+    # An init that reaps what a program left running when it was killed.
+    init: true
+    network_mode: none
+    read_only: true
+    # Root inside, with PCP's group for the socket and nothing else: the
+    # runner only switches to the programs' own user.
+    user: "0:1001"
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
+    tmpfs:
+      - /work:mode=1777,size=256m
+      - /tmp:mode=1777,size=64m
+      - /var/tmp:mode=1777,size=16m
+    volumes:
+      - pcp-sandbox:/run/pcp
+
+volumes:
+  pcp-sandbox:

@@ -8,6 +8,7 @@ import {
   EXPORT_AAD,
   EXPORT_FORMAT,
   EXPORT_VERSION,
+  EXPORTED_HOST_KEYS,
   type ExportedHostKey,
   type ExportPayload,
   type ExportPayloadJson,
@@ -32,11 +33,13 @@ import {
   encrypt,
   newScryptParams,
 } from "./crypto"
+import { withBrowserClosed } from "./browser/runtime"
 import { db } from "./db"
 import { invalid, isPcpError, PcpError } from "./errors"
 import { listMigrations } from "./migrate"
 import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
 import { TLS_CONFIG_KEY, TLS_STATUS_KEY } from "./network/tls"
+import { UPDATE_CONFIG_KEY } from "./updates/state"
 import { SETTING_PUBLIC_URL } from "./settings"
 import { validatePassword } from "./vault"
 import { PCP_VERSION } from "./version"
@@ -67,7 +70,7 @@ export type RestoreTarget =
   /** A PCP not set up yet: the file's vault becomes its owner's. */
   | { into: "fresh" }
   /** A signed-in owner's vault, replaced whole. */
-  | { into: "vault"; vaultId: string }
+  | { into: "vault"; ctx: VaultContext }
 
 export function exportFileName(at: Date): string {
   return `pcp-export-${at.toISOString().slice(0, 10)}${EXPORT_FILE_SUFFIX}`
@@ -103,7 +106,7 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
       const vault = await tx.vault.findUniqueOrThrow({ where: { id: vaultId } })
       const settings = await tx.setting.findMany(byVault)
       const host = await tx.hostSetting.findMany({
-        where: { key: { in: [DDNS_CONFIG_KEY, TLS_CONFIG_KEY] } },
+        where: { key: { in: [...EXPORTED_HOST_KEYS] } },
       })
 
       return {
@@ -147,6 +150,9 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           tools: (await tx.mcpTool.findMany(byServer)).map(rowJson),
           openApiSpecs: (await tx.openApiSpec.findMany(byServer)).map(rowJson),
           settings: settings.map(rowJson),
+          browserProfiles: (await tx.browserProfile.findMany(byVault)).map(
+            rowJson,
+          ),
         },
         host: host.filter(isExportedHostRow).map(rowJson),
       }
@@ -293,6 +299,23 @@ function parseJson(buffer: Buffer, orElse: string): unknown {
 export async function restoreExport(
   payload: ExportPayload,
   target: RestoreTarget,
+  options: { restoreHostSettings: boolean },
+): Promise<void> {
+  if (target.into === "fresh") {
+    return writeExport(payload, target, options)
+  }
+
+  // The vault's browser holds sign-ins from before and would save them over
+  // the profile written here: closed first (its profile saved, so a restore
+  // that fails loses nothing) and kept from starting until the rows are in.
+  return withBrowserClosed(target.ctx, () =>
+    writeExport(payload, target, options),
+  )
+}
+
+async function writeExport(
+  payload: ExportPayload,
+  target: RestoreTarget,
   { restoreHostSettings }: { restoreHostSettings: boolean },
 ): Promise<void> {
   const { vault, tables, host } = payload
@@ -306,7 +329,7 @@ export async function restoreExport(
           }
         } else {
           const existing = await tx.vault.findUnique({
-            where: { id: target.vaultId },
+            where: { id: target.ctx.vaultId },
             select: { id: true },
           })
 
@@ -314,7 +337,7 @@ export async function restoreExport(
             throw new PcpError("state", "The vault to replace is gone.")
           }
 
-          await wipeVault(tx, target.vaultId)
+          await wipeVault(tx, target.ctx.vaultId)
         }
 
         if (restoreHostSettings) {
@@ -326,6 +349,8 @@ export async function restoreExport(
                   DDNS_STATUS_KEY,
                   TLS_CONFIG_KEY,
                   TLS_STATUS_KEY,
+                  // The update status stays: what GitHub said is true here too.
+                  UPDATE_CONFIG_KEY,
                 ],
               },
             },
@@ -374,6 +399,12 @@ export async function restoreExport(
         await inChunks(tables.settings, (data) =>
           tx.setting.createMany({ data }),
         )
+        // One row of up to MAX_PROFILE_BYTES of ciphertext.
+        await inChunks(
+          tables.browserProfiles,
+          (data) => tx.browserProfile.createMany({ data }),
+          1,
+        )
       },
       { timeout: 60_000 },
     )
@@ -399,6 +430,7 @@ async function wipeVault(
   const byToken = { where: { token: { vaultId } } }
 
   await tx.setting.deleteMany(byVault)
+  await tx.browserProfile.deleteMany(byVault)
   // Answers kept for read_result are not exported: a day's cache, bound to
   // the tokens this restore replaces.
   await tx.toolResult.deleteMany(byVault)

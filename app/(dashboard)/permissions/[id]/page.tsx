@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import Link from "next/link"
 
 import { AccessReview } from "@/components/access-review"
+import { BrowserTabView } from "@/components/browser-tab-view"
 import { LocalDate } from "@/components/local-date"
 import { PageHeader } from "@/components/page-header"
 import { PermissionDecision } from "@/components/permission-decision"
@@ -9,6 +10,7 @@ import { Badge } from "@/components/ui/badge"
 import { buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import type { MemoryShown } from "@/lib/core/memories"
+import { tabFor } from "@/lib/core/browser/owner"
 import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
@@ -76,6 +78,11 @@ export default async function PermissionPage({
       (memory && view.status === "declined")) &&
     view.outcome
   const proposal = access && pending ? await getAccessProposal(ctx, id) : null
+  // A tab handed to the owner is shown here, live, to do what was asked.
+  const handedTab =
+    view.kind === "browser_handover" && pending && view.browserTabId
+      ? await tabFor(ctx, view.browserTabId)
+      : null
 
   return (
     <>
@@ -96,7 +103,15 @@ export default async function PermissionPage({
           </>
         }
       />
-      <Card className={access && pending ? "max-w-4xl" : "max-w-2xl"}>
+      <Card
+        className={
+          handedTab
+            ? "max-w-6xl"
+            : access && pending
+              ? "max-w-4xl"
+              : "max-w-2xl"
+        }
+      >
         <CardHeader>
           <CardTitle className="break-words">{view.title}</CardTitle>
         </CardHeader>
@@ -149,6 +164,10 @@ export default async function PermissionPage({
                 <p className="text-muted-foreground">
                   Always allow and Block also decide the calls after this one.
                   You can change that on the token&apos;s page.
+                  {view.serverKind === "browser" &&
+                  (view.tool === "navigate" || view.tool === "tabs")
+                    ? " Allowing it also lets the tab open the site it names, unless you blocked that site for this token, and keep to its pages while the tab is open; other sites are asked about on their own."
+                    : null}
                 </p>
               ) : view.kind === "fetch" ? (
                 <p className="text-muted-foreground">
@@ -158,6 +177,46 @@ export default async function PermissionPage({
                     The token&apos;s page
                   </Link>{" "}
                   lists every site it reached for, and its method settings.
+                </p>
+              ) : view.kind === "browse" ? (
+                <p className="text-muted-foreground">
+                  Allow once lets this tab open the site&apos;s pages while it
+                  is open. Always allow this site and Block this site decide for
+                  the token, in the browser and in web fetch, as on{" "}
+                  <Link href={`/tokens/${view.tokenId}`} className="underline">
+                    the token&apos;s page
+                  </Link>
+                  .
+                </p>
+              ) : view.kind === "browser_handover" && handedTab ? (
+                <>
+                  <BrowserTabView
+                    tabId={handedTab.id}
+                    initial={handedTab}
+                    mode="handover"
+                  />
+                  <p className="text-muted-foreground">
+                    Do what the assistant asks in the tab above, then say Done.
+                    It is yours until you answer.
+                  </p>
+                </>
+              ) : view.kind === "browser_handover" ? (
+                <p className="text-muted-foreground">
+                  {view.browserTabId ? (
+                    <>
+                      <Link
+                        href={`/browser/tabs/${view.browserTabId}`}
+                        className="underline"
+                      >
+                        Open the tab
+                      </Link>
+                      , do what the assistant asks there, then come back and say
+                      Done.
+                    </>
+                  ) : (
+                    "Do what the assistant asks in the tab, then say Done."
+                  )}{" "}
+                  The tab is yours until you answer.
                 </p>
               ) : view.kind === "memory_share" ? (
                 <p className="text-sm text-muted-foreground">

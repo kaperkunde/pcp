@@ -12,13 +12,19 @@ const nextConfig: NextConfig = {
   // acme-client (HTTPS, lib/core/network/tls.ts) brings axios and
   // node-forge, which are happier required than bundled; the mail libraries
   // (lib/core/mail/imap.ts) load parts of themselves dynamically and only
-  // ever run on the server.
+  // ever run on the server; playwright-core drives the browser's Chromium
+  // (lib/core/browser/) and is never bundled; QuickJS (run_code,
+  // lib/core/code/) carries its WebAssembly engine in a large script that
+  // gains nothing from bundling.
   serverExternalPackages: [
     "better-sqlite3",
     "@prisma/adapter-better-sqlite3",
     "acme-client",
     "imapflow",
     "nodemailer",
+    "playwright-core",
+    "quickjs-emscripten-core",
+    "@jitl/quickjs-singlefile-cjs-release-sync",
   ],
   experimental: {
     // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) and an export

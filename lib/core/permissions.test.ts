@@ -16,14 +16,20 @@ import {
   getPermissionView,
   listPendingRequests,
   prunePermissionRequests,
+  runCall,
   withPermission,
   type PermissionExecutor,
   type PermissionScope,
   type RegisterArgs,
 } from "./permissions"
+import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
+import { startTestApi, type TestApi } from "./openapi/test-api"
 import { createSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
+import { OwnerNeeded } from "./browser/types"
+import { keepBytes } from "./tool-results"
+import { callServerTool, syncServerTools } from "./upstream"
 import { setupVault } from "./vault"
 
 // The owner's permission against a scratch database, with the upstream
@@ -190,6 +196,50 @@ describe("asking the owner", () => {
     expect(textOf(result)).toBe('{"data":[{"id":1}]}')
   })
 
+  it("keeps what the assistant asked to once the owner allows the call", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              report: `${"x".repeat(300)} THE END`,
+              n: 1,
+            }),
+          },
+        ],
+      }),
+    }
+    const asked = {
+      ...call(server, "add_numbers", { a: 1 }),
+      keep: ["report"],
+    }
+
+    await withPermission(scope, asked)
+    // Keeping something else is another request.
+    await withPermission(scope, { ...asked, keep: ["n"] })
+    expect(await db().permissionRequest.count()).toBe(2)
+
+    const row = await db().permissionRequest.findFirstOrThrow({
+      where: { keep: JSON.stringify(["report"]) },
+    })
+    const result = await decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    const kept = await db().toolResult.findFirstOrThrow()
+
+    expect(kept).toMatchObject({ tokenId, toolName: "add_numbers" })
+    expect(textOf(result)).toContain(`report → ${kept.id} (text/plain`)
+    expect(textOf(result)).toContain(`"report":{"$result":"${kept.id}"`)
+    expect(textOf(result)).not.toContain("THE END")
+  })
+
   it("decodes what the assistant asked to once the owner allows the call", async () => {
     const { ctx, scope, server } = await setup()
     const executor: PermissionExecutor = {
@@ -243,6 +293,157 @@ describe("asking the owner", () => {
     expect(view?.lines).toContain("to: Ada")
     expect(view?.lines).toContain('Asked by the token "Claude"')
     expect(view?.warning).toMatch(/destructive/)
+  })
+})
+
+describe("kept results in a call", () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+  async function keepFile(
+    ctx: VaultContext,
+    serverId: string,
+    tokenId: string,
+  ) {
+    return (
+      await keepBytes(ctx, {
+        tokenId,
+        serverId,
+        toolName: "get_attachment",
+        bytes: PNG,
+        mediaType: "image/png",
+        name: "dot.png",
+      })
+    ).id
+  }
+
+  it("shows the owner what each handle is, and warns when one is gone", async () => {
+    const { ctx, scope, server, tokenId } = await setup()
+    const id = await keepFile(ctx, server.id, tokenId)
+    await withPermission(
+      scope,
+      call(server, "send_postcard", {
+        attachments: [{ $result: id }, { $result: "gone" }],
+      }),
+    )
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(view?.lines).toContain(
+      `attachments: [{"$result":"${id}"},{"$result":"gone"}]`,
+    )
+    expect(
+      view?.lines.find((line) => line.startsWith(`Kept result ${id}:`)),
+    ).toMatch(
+      /^Kept result [^:]+: dot\.png, image\/png, 8 bytes, from postcards\/get_attachment, readable until \d{4}-/,
+    )
+    expect(view?.lines).toContain(
+      "Kept result gone: no longer available for this token; the call will fail",
+    )
+  })
+
+  it("hands the upstream a way to open the token's own results, and no other's", async () => {
+    const { ctx, server, tokenId } = await setup()
+    const id = await keepFile(ctx, server.id, tokenId)
+    const seen: Array<{ own: unknown; other: unknown }> = []
+    const executor: PermissionExecutor = {
+      callTool: async (_ctx, _server, _tool, _args, options) => {
+        const opened = await options.open?.(id)
+        seen.push({ own: opened?.bytes().equals(PNG), other: null })
+
+        return { content: [{ type: "text", text: "ok" }] }
+      },
+      syncTools: async () => ({ status: "ok", message: "", toolCount: 3 }),
+    }
+
+    const row = await db().mcpServer.findFirstOrThrow()
+    await runCall(
+      ctx,
+      row,
+      "add_numbers",
+      {},
+      {
+        publicUrl: PUBLIC_URL,
+        tokenId,
+        executor,
+      },
+    )
+
+    const { id: other } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const foreign: PermissionExecutor = {
+      callTool: async (_ctx, _server, _tool, _args, options) => {
+        seen.push({ own: null, other: await options.open?.(id) })
+
+        return { content: [{ type: "text", text: "ok" }] }
+      },
+      syncTools: executor.syncTools,
+    }
+    await runCall(
+      ctx,
+      row,
+      "add_numbers",
+      {},
+      {
+        publicUrl: PUBLIC_URL,
+        tokenId: other,
+        executor: foreign,
+      },
+    )
+
+    expect(seen).toEqual([
+      { own: true, other: null },
+      { own: null, other: null },
+    ])
+  })
+})
+
+describe("a site the browser asks about", () => {
+  async function allowedNavigate(args: Record<string, unknown>) {
+    const { ctx, server, tokenId } = await setup()
+    const opened: string[] = []
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => {
+        throw new OwnerNeeded({
+          kind: "browse",
+          input: {
+            serverId: server.id,
+            tabId: null,
+            url: "https://hidden.example/",
+            toolName: "navigate",
+          },
+        })
+      },
+      browse: async (_scope, { url }) => {
+        opened.push(url)
+        return { content: [{ type: "text", text: "opened" }] }
+      },
+    }
+    const row = await db().mcpServer.findFirstOrThrow()
+
+    await runCall(ctx, row, "navigate", args, {
+      publicUrl: PUBLIC_URL,
+      tokenId,
+      ownerAllowed: true,
+      executor,
+    }).catch(() => null)
+
+    return opened
+  }
+
+  it("opens the address the owner saw in the call they allowed", async () => {
+    expect(await allowedNavigate({ url: "https://hidden.example/" })).toEqual([
+      "https://hidden.example/",
+    ])
+  })
+
+  it("asks again when the address was a kept result the owner did not see", async () => {
+    expect(await allowedNavigate({ url: { $result: "r1" } })).toEqual([])
   })
 })
 
@@ -1084,6 +1285,7 @@ describe("a new secret the owner types in", () => {
       exists: false,
       optional: false,
       clientId: null,
+      login: null,
     })
     expect(view?.lines).toContain(
       'Authentication: sends a new secret, saved as "Pets API key", in the X-API-Key header; you enter its value here when you agree',
@@ -1306,6 +1508,7 @@ describe("an API that signs in with OAuth", () => {
       exists: false,
       optional: true,
       clientId: "owner-client",
+      login: null,
     })
     expect(view?.lines).toEqual(
       expect.arrayContaining([
@@ -1514,5 +1717,437 @@ describe("pruning", () => {
     expect(
       (await db().permissionRequest.findMany()).map((row) => row.id),
     ).toEqual([recent.id])
+  })
+})
+
+describe("an API with a user name and password", () => {
+  /** register_server with auth_type basic, the password typed in on PCP. */
+  async function withLogin(ctx: VaultContext): Promise<RegisterArgs> {
+    const prepared = await prepareRegistration(ctx, {
+      name: "Pets",
+      spec: PETS_SPEC,
+      baseUrl: "https://api.example.com/v1",
+      newSecretName: "Pets password",
+      authHeaderNames: ["Authorization"],
+    })
+
+    return {
+      name: prepared.name,
+      description: prepared.description,
+      url: prepared.url,
+      authType: "basic",
+      authUsername: "ada",
+      authSecretId: null,
+      secretName: "Pets password",
+      newSecretName: "Pets password",
+      oauthScope: null,
+      endpoint: prepared.registration,
+    }
+  }
+
+  it("tells the owner the user name and where the password goes, and the assistant only that they type it in", async () => {
+    const { ctx, scope } = await setup()
+
+    const asked = await withPermission(scope, {
+      kind: "register",
+      input: await withLogin(ctx),
+    })
+    expect(textOf(asked)).toMatch(
+      /They type the password for ada in there, and it is saved as the secret "Pets password"; do not ask them for it here/,
+    )
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(view?.secretToEnter).toEqual({
+      name: "Pets password",
+      exists: false,
+      optional: false,
+      clientId: null,
+      login: "ada",
+    })
+    expect(view?.lines).toContain(
+      'Authentication: sends a new secret, saved as "Pets password", as the password for ada (HTTP Basic); you enter its value here when you agree',
+    )
+    expect(view?.warning).toMatch(
+      /user name ada and the secret "Pets password" to this address/,
+    )
+  })
+
+  it("saves the typed password under the proposed name and adds the endpoint with the user name", async () => {
+    const { ctx, scope } = await setup()
+    const { executor } = stub()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: await withLogin(ctx),
+    })
+    const added = await decidePermission(
+      ctx,
+      await onlyRequestId(),
+      "allow_once",
+      { publicUrl: PUBLIC_URL, secretValue: "pw-123" },
+      executor,
+    )
+
+    expect(textOf(added)).toMatch(/Added Pets as "pets"/)
+    expect(textOf(added)).not.toContain("pw-123")
+
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "Pets password" },
+    })
+    expect(await revealSecret(ctx, secret.id)).toBe("pw-123")
+    expect(secret.description).toBe("The password for ada at Pets.")
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Pets" } }),
+    ).toMatchObject({
+      kind: "openapi",
+      authType: "basic",
+      authUsername: "ada",
+      authSecretId: secret.id,
+      authHeaderName: "Authorization",
+      url: "https://api.example.com/v1",
+      publicOnly: true,
+    })
+  })
+})
+
+describe("a mail account an assistant proposes", () => {
+  const PASSWORD = "app-password-1234"
+  const BASIC = `Basic ${Buffer.from(`ada@example.com:${PASSWORD}`).toString("base64")}`
+  let api: TestApi
+  let fake: FakeJmap
+
+  beforeEach(async () => {
+    fake = createFakeJmap({
+      authorize: (header) => header === BASIC || header === "Bearer token-1",
+    })
+    api = await startTestApi((request, res) => {
+      const answer = fake.handle(request)
+      res.statusCode = answer?.status ?? 404
+      res.setHeader("content-type", answer?.type ?? "text/plain")
+      res.end(answer?.body ?? "")
+    })
+  })
+
+  afterEach(async () => {
+    await api.close()
+  })
+
+  /** What register_server hands the request for a JMAP account. */
+  function proposal(overrides: Partial<RegisterArgs> = {}): RegisterArgs {
+    return {
+      name: "Mail",
+      description: "",
+      url: `${api.origin}/jmap/session`,
+      authType: "basic",
+      authUsername: "ada@example.com",
+      authSecretId: null,
+      secretName: "Mail password",
+      newSecretName: "Mail password",
+      oauthScope: null,
+      mail: {
+        protocol: "jmap",
+        smtpUrl: null,
+        readOnly: false,
+        mailFrom: null,
+        checked: `A server answers at ${api.origin}/jmap/session and asks for a sign-in (Basic).`,
+        privateAddress: null,
+      },
+      ...overrides,
+    }
+  }
+
+  const real: PermissionExecutor = {
+    callTool: callServerTool,
+    syncTools: syncServerTools,
+  }
+  const web = { publicUrl: PUBLIC_URL }
+
+  it("is asked for with the password typed in on PCP's page, and nothing is contacted or made", async () => {
+    const { ctx, scope } = await setup()
+
+    const asked = await withPermission(scope, {
+      kind: "register",
+      input: proposal(),
+    })
+    expect(textOf(asked)).toMatch(
+      /They type the password for ada@example\.com in there, and it is saved as the secret "Mail password"/,
+    )
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(view?.title).toBe("Add the mail account Mail?")
+    expect(view?.secretToEnter).toEqual({
+      name: "Mail password",
+      exists: false,
+      optional: false,
+      clientId: null,
+      login: "ada@example.com",
+    })
+    expect(view?.lines).toEqual(
+      expect.arrayContaining([
+        "Protocol: JMAP",
+        `Session URL: ${api.origin}/jmap/session`,
+        expect.stringMatching(/^Checked: A server answers at /),
+        "User name: ada@example.com",
+        'Authentication: user name and password; the password is saved as a new secret "Mail password", and you enter it here when you agree',
+        expect.stringMatching(/^Can change things: .*never for good/),
+        'Asked by the token "Claude"',
+      ]),
+    )
+    expect(view?.warning).toMatch(
+      /user name ada@example\.com and the secret "Mail password" to this mail server/,
+    )
+    // Only the owner's yes starts anything: Postcards is the one server.
+    expect(await db().mcpServer.count()).toBe(1)
+    expect(fake.requests).toHaveLength(0)
+  })
+
+  it("adds it with the typed password, signs in to read its tools and lets a scoped token reach it", async () => {
+    const { ctx, scope, tokenId } = await setup({ allowAllServers: false })
+
+    await withPermission(scope, { kind: "register", input: proposal() })
+    const id = await onlyRequestId()
+    const added = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { ...web, secretValue: PASSWORD },
+      real,
+    )
+
+    expect(textOf(added)).toMatch(/Added Mail as "mail" with 10 tools/)
+    expect(textOf(added)).toMatch(/saved in PCP as "Mail password"/)
+    expect(textOf(added)).not.toContain(PASSWORD)
+
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "Mail password" },
+    })
+    expect(await revealSecret(ctx, secret.id)).toBe(PASSWORD)
+    expect(secret.description).toBe("The password for ada@example.com at Mail.")
+    const account = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Mail" },
+    })
+    expect(account).toMatchObject({
+      kind: "jmap",
+      authType: "basic",
+      authUsername: "ada@example.com",
+      authSecretId: secret.id,
+      status: "ok",
+      mailAccountId: "acct-1",
+    })
+    expect(fake.requests[0]!.authorization).toBe(BASIC)
+    expect(
+      await db().apiTokenServer.count({
+        where: { tokenId, serverId: account.id },
+      }),
+    ).toBe(1)
+    // The value is on no request row.
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    expect(
+      Buffer.from(row.resultCiphertext ?? []).toString("utf8"),
+    ).not.toContain(PASSWORD)
+  })
+
+  it("cannot be agreed to without the password, and nothing is made", async () => {
+    const { ctx, scope } = await setup()
+
+    await withPermission(scope, { kind: "register", input: proposal() })
+    const refused = await decidePermission(
+      ctx,
+      await onlyRequestId(),
+      "allow_once",
+      web,
+      real,
+    )
+
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toMatch(/Enter/)
+    expect(await db().secret.count()).toBe(0)
+    expect(await db().mcpServer.count()).toBe(1)
+    expect(fake.requests).toHaveLength(0)
+  })
+
+  it("uses a password the owner already stored, by its name", async () => {
+    const { ctx, scope } = await setup()
+    const stored = await createSecret(ctx, {
+      name: "Mail password",
+      value: PASSWORD,
+    })
+
+    await withPermission(scope, {
+      kind: "register",
+      input: proposal({
+        authSecretId: stored.id,
+        newSecretName: undefined,
+      }),
+    })
+    const view = await getPermissionView(ctx, await onlyRequestId(), web)
+    expect(view?.secretToEnter).toBeNull()
+    expect(view?.lines).toContain(
+      'Authentication: user name and your secret "Mail password" as the password',
+    )
+
+    const added = await decidePermission(
+      ctx,
+      await onlyRequestId(),
+      "allow_once",
+      web,
+      real,
+    )
+    expect(textOf(added)).toMatch(/Added Mail as "mail" with 10 tools/)
+    expect(fake.requests[0]!.authorization).toBe(BASIC)
+  })
+
+  it("takes a bearer token and a read-only account, with the reading tools only", async () => {
+    const { ctx, scope } = await setup()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: proposal({
+        authType: "header",
+        authUsername: undefined,
+        secretName: "Mail token",
+        newSecretName: "Mail token",
+        authHeaderName: "Authorization",
+        authValueTemplate: "Bearer {{secret}}",
+        mail: { ...proposal().mail!, readOnly: true },
+      }),
+    })
+    const id = await onlyRequestId()
+    const view = await getPermissionView(ctx, id, web)
+    expect(view?.lines).toEqual(
+      expect.arrayContaining([
+        'Authentication: a bearer token, saved as a new secret "Mail token"; you enter it here when you agree',
+        "Read-only: only the tools that read mail",
+      ]),
+    )
+
+    const added = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { ...web, secretValue: "token-1" },
+      real,
+    )
+    expect(textOf(added)).toMatch(/Added Mail as "mail" with 6 tools/)
+    expect(fake.requests[0]!.authorization).toBe("Bearer token-1")
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
+    ).toMatchObject({
+      kind: "jmap",
+      authType: "header",
+      readOnly: true,
+      authValueTemplate: "Bearer {{secret}}",
+    })
+  })
+
+  it("answers an OAuth account with the link to connect it, and contacts nothing before that", async () => {
+    const { ctx, scope } = await setup()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: proposal({
+        authType: "oauth",
+        authUsername: undefined,
+        secretName: null,
+        newSecretName: undefined,
+        oauthScope: "urn:ietf:params:oauth:scope:mail offline_access",
+      }),
+    })
+    const id = await onlyRequestId()
+    const view = await getPermissionView(ctx, id, web)
+    expect(view?.lines).toEqual(
+      expect.arrayContaining([
+        "Authentication: OAuth; you sign in when you connect it (scope urn:ietf:params:oauth:scope:mail offline_access)",
+        expect.stringMatching(/^Sign-in: PCP finds where the mail server/),
+      ]),
+    )
+    expect(view?.warning).toMatch(
+      /OAuth token for this account to this mail server/,
+    )
+
+    const added = await decidePermission(ctx, id, "allow_once", web, real)
+
+    expect(textOf(added)).toMatch(/Added Mail as "mail"/)
+    expect(
+      (added.structuredContent as { kind?: string } | undefined)?.kind,
+    ).toBe("connect")
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
+    ).toMatchObject({
+      kind: "jmap",
+      authType: "oauth",
+      oauthConnectedAt: null,
+      oauthScope: "urn:ietf:params:oauth:scope:mail offline_access",
+    })
+    expect(fake.requests).toHaveLength(0)
+  })
+
+  it("says so after it is added when the server cannot be reached", async () => {
+    const { ctx, scope } = await setup()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: proposal({
+        url: "imaps://127.0.0.1:1",
+        mail: {
+          protocol: "imap",
+          smtpUrl: null,
+          readOnly: false,
+          mailFrom: null,
+          checked: null,
+          privateAddress: null,
+        },
+      }),
+    })
+    const id = await onlyRequestId()
+    const view = await getPermissionView(ctx, id, web)
+    expect(view?.lines).toEqual(
+      expect.arrayContaining([
+        "Protocol: IMAP (it cannot send: no SMTP server was named)",
+        "IMAP server: imaps://127.0.0.1:1",
+      ]),
+    )
+
+    const added = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { ...web, secretValue: PASSWORD },
+      real,
+    )
+    expect(textOf(added)).toMatch(
+      /Added Mail as "mail", but its tools could not be read yet/,
+    )
+    expect(
+      await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
+    ).toMatchObject({ kind: "imap", status: "error" })
+  })
+
+  it("notes a private address that PCP did not look at, for the owner to weigh", async () => {
+    const { ctx, scope } = await setup()
+
+    await withPermission(scope, {
+      kind: "register",
+      input: proposal({
+        mail: {
+          ...proposal().mail!,
+          checked: null,
+          privateAddress:
+            "127.0.0.1 is, or resolves to, a private or local address, so PCP did not look at it from here.",
+        },
+      }),
+    })
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), web)
+    expect(view?.lines).toContain(
+      "127.0.0.1 is, or resolves to, a private or local address, so PCP did not look at it from here. If you agree, PCP signs in there from your own network.",
+    )
+    expect(view?.lines.some((line) => line.startsWith("Checked:"))).toBe(false)
   })
 })

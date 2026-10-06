@@ -6,12 +6,14 @@ import { FormNote } from "@/components/form-status"
 import { DdnsCard, HttpsCard } from "@/components/network-forms"
 import { OutsideAccessCard } from "@/components/outside-access-card"
 import { PageHeader } from "@/components/page-header"
+import { UpdatesCard } from "@/components/updates-card"
 import {
   ChangePasswordForm,
   PublicUrlForm,
   RecoveryKeyCard,
   SessionsCard,
 } from "@/components/settings-forms"
+import { TouchIdCard } from "@/components/touch-id-card"
 import {
   Card,
   CardContent,
@@ -19,11 +21,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { deviceKeyInfo } from "@/lib/core/device-keys"
 import { isLocalAddress } from "@/lib/core/local-address"
 import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
+import { updatesOverview } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
-import { isDesktopApp } from "@/lib/server/desktop"
+import { desktopUpdater, isDesktopApp } from "@/lib/server/desktop"
+import { autoUpdated, installKind } from "@/lib/server/install-kind"
 import { publicUrlFor, requestOrigin } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -36,13 +41,16 @@ export default async function SettingsPage({
 }) {
   const ctx = await requireContext()
   const query = await searchParams
-  const [pinned, detected, publicUrl, vault, network] = await Promise.all([
-    getSetting(ctx, SETTING_PUBLIC_URL),
-    requestOrigin(),
-    publicUrlFor(ctx),
-    getVault(ctx.vaultId),
-    networkOverview(),
-  ])
+  const [pinned, detected, publicUrl, vault, network, updates, touchId] =
+    await Promise.all([
+      getSetting(ctx, SETTING_PUBLIC_URL),
+      requestOrigin(),
+      publicUrlFor(ctx),
+      getVault(ctx.vaultId),
+      networkOverview(),
+      updatesOverview(),
+      deviceKeyInfo(ctx.vaultId),
+    ])
 
   return (
     <>
@@ -70,12 +78,20 @@ export default async function SettingsPage({
       <DdnsCard ddns={network.ddns} />
       <HttpsCard
         https={network.https}
+        turnedOff={network.httpsTurnedOff}
         ddnsName={network.ddnsName}
         ports={network.ports}
         pinnedPublicUrl={pinned}
       />
+      <UpdatesCard
+        overview={updates}
+        host={installKind()}
+        desktopInstall={isDesktopApp() ? desktopUpdater() : null}
+        autoUpdated={autoUpdated()}
+      />
       <ChangePasswordForm username={vault.name} />
       <RecoveryKeyCard username={vault.name} />
+      <TouchIdCard username={vault.name} info={touchId} />
       <SessionsCard />
       <ExportCard username={vault.name} />
       <RestoreCard username={vault.name} mode="settings" />

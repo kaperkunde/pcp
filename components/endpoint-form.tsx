@@ -3,6 +3,7 @@
 import { useActionState, useState } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
+import { BasicAuthFields } from "@/components/basic-auth-fields"
 import {
   HeaderAuthFields,
   type ExtraHeaderValues,
@@ -49,7 +50,8 @@ export type EndpointFormValues = {
   readOnly: boolean
   /** Refuse private, local and link-local addresses. */
   publicOnly: boolean
-  authType: "none" | "header" | "oauth"
+  authType: "none" | "header" | "basic" | "oauth"
+  authUsername: string
   authHeaderName: string
   authValueTemplate: string
   authSecretId: string
@@ -66,6 +68,7 @@ export const EMPTY_ENDPOINT: EndpointFormValues = {
   readOnly: false,
   publicOnly: false,
   authType: "none",
+  authUsername: "",
   authHeaderName: DEFAULT_HEADER_NAME,
   authValueTemplate: DEFAULT_VALUE_TEMPLATE,
   authSecretId: "",
@@ -354,6 +357,9 @@ export function EndpointForm({
               <option value="header">
                 Secret in a header — an API key or token
               </option>
+              <option value="basic">
+                User name and password — HTTP Basic authentication
+              </option>
               <option value="oauth">
                 OAuth — sign in with your account, as the schema says
               </option>
@@ -362,6 +368,14 @@ export function EndpointForm({
 
           {authType === "header" ? (
             <HeaderAuthFields
+              prefix={prefix}
+              secrets={secrets}
+              initial={initial}
+            />
+          ) : null}
+
+          {authType === "basic" ? (
+            <BasicAuthFields
               prefix={prefix}
               secrets={secrets}
               initial={initial}

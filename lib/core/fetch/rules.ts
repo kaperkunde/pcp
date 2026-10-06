@@ -17,6 +17,11 @@ import { MAX_SITE_LENGTH } from "./limits"
  * token's own level wins over the one for all tokens, and a token's own site
  * set to "Use the method settings" goes straight to the methods: the line
  * for this token is what it says, even where all tokens have another.
+ *
+ * Private addresses (loopback, private and link-local ranges: the owner's
+ * own network) are a line of their own, allowed or blocked and never asked
+ * about: blocked unless the owner allowed them for the token or for all
+ * tokens, the token's own line winning.
  */
 
 export type FetchRuleSet = {
@@ -25,6 +30,9 @@ export type FetchRuleSet = {
   /** null: the site follows the method levels. */
   ownSites: Map<string, ToolAccess | null>
   sharedSites: Map<string, ToolAccess | null>
+  /** null: no line, so private addresses stay blocked. */
+  ownPrivate: ToolAccess | null
+  sharedPrivate: ToolAccess | null
 }
 
 export type FetchDecision = {
@@ -44,6 +52,8 @@ export function emptyRules(): FetchRuleSet {
     sharedMethods: new Map(),
     ownSites: new Map(),
     sharedSites: new Map(),
+    ownPrivate: null,
+    sharedPrivate: null,
   }
 }
 
@@ -160,4 +170,14 @@ export function resolveFetchAccess(
 /** Whether a token already has a line for a site, its own or all tokens'. */
 export function knowsSite(rules: FetchRuleSet, host: string): boolean {
   return rules.ownSites.has(host) || rules.sharedSites.has(host)
+}
+
+/**
+ * Whether requests may reach private addresses: the token's own line, else
+ * the one for all tokens, else no. Only "allowed" allows; there is no
+ * asking, because the address is known only once the name is looked up,
+ * after the owner would have been asked about the site.
+ */
+export function resolvePrivateAccess(rules: FetchRuleSet): boolean {
+  return (rules.ownPrivate ?? rules.sharedPrivate) === "allowed"
 }

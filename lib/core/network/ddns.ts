@@ -1,12 +1,16 @@
 import { isIP } from "node:net"
 
-import { DDNS_PROVIDERS, type DdnsProvider } from "../constants"
+import {
+  DDNS_PROVIDERS,
+  type DdnsProvider,
+  readDuckDnsPaste,
+} from "../constants"
 import { invalid } from "../errors"
 import { getHostJson, setHostJson } from "../host-settings"
 import { PCP_VERSION } from "../version"
 
 /**
- * Dynamic DNS: keeping a name (pcp-you.duckdns.org) pointed at the public
+ * Dynamic DNS: keeping a name (yourname.duckdns.org) pointed at the public
  * address of the network PCP runs on, for an owner whose internet provider
  * changes it now and then.
  *
@@ -137,10 +141,14 @@ export function parseDdnsInput(
 
   switch (provider) {
     case "duckdns": {
-      const subdomain = (input.subdomain ?? "")
-        .trim()
-        .toLowerCase()
-        .replace(/\.duckdns\.org\.?$/, "")
+      const pasted = readDuckDnsPaste(input.token ?? "")
+      const subdomain =
+        (input.subdomain ?? "")
+          .trim()
+          .toLowerCase()
+          .replace(/^https?:\/\//, "")
+          .replace(/\.duckdns\.org\.?\/?$/, "") ||
+        (pasted.subdomain ?? "")
 
       if (!DUCKDNS_SUBDOMAIN.test(subdomain)) {
         throw invalid(
@@ -148,7 +156,13 @@ export function parseDdnsInput(
         )
       }
 
-      const token = kept(input.token, "token")
+      if (input.token?.trim() && !pasted.token) {
+        throw invalid(
+          "That is not a DuckDNS token. It is shown at the top of duckdns.org once you sign in, like a7c4d0ad-114e-40ef-ba1d-d217904a50f2.",
+        )
+      }
+
+      const token = pasted.token ?? kept(undefined, "token")
 
       if (!token) {
         throw invalid("Paste your DuckDNS token (it is on duckdns.org).")

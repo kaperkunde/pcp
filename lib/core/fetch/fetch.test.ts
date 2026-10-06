@@ -202,7 +202,9 @@ describe("public addresses only", () => {
       fetchWeb(prepareFetch({ url: `${api.origin}/admin` })),
     ).rejects.toMatchObject({
       code: "forbidden",
-      message: expect.stringMatching(/127\.0\.0\.1 .*only reaches public ones/),
+      message: expect.stringMatching(
+        /127\.0\.0\.1 .*private or local address, which the owner has not allowed/,
+      ),
     })
     expect(api.requests).toHaveLength(0)
   })
@@ -214,6 +216,55 @@ describe("public addresses only", () => {
     await expect(
       fetchWeb(prepareFetch({ url: `http://localhost:${port}/admin` })),
     ).rejects.toMatchObject({ code: "forbidden" })
+    expect(api.requests).toHaveLength(0)
+  })
+})
+
+describe("private addresses, where the owner allowed them", () => {
+  it("reaches a server on this machine's loopback address", async () => {
+    api = await startTestApi((_, res) => {
+      res.setHeader("content-type", "text/plain")
+      res.end("the printer's page")
+    })
+
+    const result = await fetchWeb(prepareFetch({ url: `${api.origin}/` }), {
+      allowPrivate: true,
+    })
+
+    expect(textOf(result)).toContain("the printer's page")
+    expect(api.requests).toHaveLength(1)
+  })
+
+  it("still refuses PCP's own port and its public address", async () => {
+    api = await startTestApi((_, res) => res.end("PCP itself"))
+    const port = new URL(api.origin).port
+    const before = process.env.PORT
+
+    try {
+      process.env.PORT = port
+      await expect(
+        fetchWeb(prepareFetch({ url: `${api.origin}/` }), {
+          allowPrivate: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "forbidden",
+        message: expect.stringMatching(/PCP's own address/),
+      })
+    } finally {
+      if (before === undefined) delete process.env.PORT
+      else process.env.PORT = before
+    }
+
+    await expect(
+      fetchWeb(prepareFetch({ url: "https://pcp.example.org/settings" }), {
+        allowPrivate: true,
+        publicUrl: "https://pcp.example.org",
+      }),
+    ).rejects.toMatchObject({
+      code: "forbidden",
+      message:
+        "pcp.example.org is PCP's own address, which web_fetch never reaches.",
+    })
     expect(api.requests).toHaveLength(0)
   })
 })

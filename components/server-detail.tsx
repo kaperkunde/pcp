@@ -84,6 +84,7 @@ export function ServerDetail({
 }: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
   const mail = server.kind === "jmap" || server.kind === "imap"
+  const browser = server.kind === "browser"
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
   // Kept here rather than in the form: saving moves the server on from
@@ -163,7 +164,9 @@ export function ServerDetail({
                       ? "Re-read schema"
                       : mail
                         ? "Check account"
-                        : "Refresh tools"}
+                        : browser
+                          ? "Check browser"
+                          : "Refresh tools"}
                 </Button>
               ) : null}
               <Button
@@ -180,7 +183,11 @@ export function ServerDetail({
           </div>
           <CardDescription>
             {endpoint ? "Requests go to " : mail ? "Signs in at " : null}
-            <code className="text-xs">{server.url}</code>
+            {browser ? (
+              "A headless browser on the machine PCP runs on"
+            ) : (
+              <code className="text-xs">{server.url}</code>
+            )}
             {mail && server.smtpUrl ? (
               <>
                 {" "}
@@ -258,6 +265,7 @@ export function ServerDetail({
         tools={tools}
         endpoint={endpoint}
         mail={mail}
+        browser={browser}
       />
 
       <Card>
@@ -268,7 +276,9 @@ export function ServerDetail({
               ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."
               : mail
                 ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your mail stays on the server, and secrets you added stay."
-                : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
+                : browser
+                  ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
+                  : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
           </CardDescription>
         </CardHeader>
         <CardContent className="items-start">
@@ -299,11 +309,13 @@ function ToolsCard({
   tools,
   endpoint,
   mail,
+  browser,
 }: {
   serverId: string
   tools: ServerDetailProps["tools"]
   endpoint: boolean
   mail: boolean
+  browser: boolean
 }) {
   const [open, setOpen] = useState(false)
   const listId = useId()
@@ -338,7 +350,9 @@ function ToolsCard({
             ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
             : mail
               ? "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
-              : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
+              : browser
+                ? "What an assistant can find with search_tools: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
+                : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
         </CardDescription>
       </CardHeader>
       {tools.length === 0 ? (
@@ -348,7 +362,9 @@ function ToolsCard({
               ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
               : mail
                 ? "No tools yet: PCP offers them once it has signed in. Check the settings below, then check the account again, or connect it."
-                : "No tools known yet. Connect the server, or refresh its tools."}
+                : browser
+                  ? "No tools yet: check the browser again."
+                  : "No tools known yet. Connect the server, or refresh its tools."}
           </p>
         </CardContent>
       ) : open ? (

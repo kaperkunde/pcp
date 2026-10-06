@@ -154,6 +154,8 @@ export type SendInput = {
   inReplyTo?: string
   /** JMAP: the identity to send as. */
   identity?: string
+  /** Files to attach, read from results the token kept. */
+  attachments?: Array<{ name: string; type: string; bytes: Buffer }>
 }
 
 export type SendResult = {
@@ -167,6 +169,11 @@ export type SendResult = {
   subject: string
   /** The mailbox the sent copy is in, when there is one. */
   savedTo: string | null
+  /**
+   * With inReplyTo: whether the email it answers is now marked as answered.
+   * False when the server refused that; the email was sent all the same.
+   */
+  answered?: boolean
 }
 
 export type MoveResult = {
@@ -183,8 +190,10 @@ export type AttachmentContent = {
   name: string | null
   type: string
   size: number
-  /** Null when it is not text. */
-  text: string | null
+  /** The attachment's bytes, its transfer encoding undone. */
+  bytes: Buffer
+  /** The charset its text is in, when it is text and says one. */
+  charset: string | null
 }
 
 export interface MailBackend {

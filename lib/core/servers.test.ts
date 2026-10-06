@@ -2,15 +2,19 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { NEW_SECRET } from "./constants"
 import { createSecret, listSecrets } from "./secrets"
 import {
   asServerKind,
   createServer,
+  isBrowserKind,
   isMailKind,
+  kindNoun,
   normalizeBasicAuth,
   normalizeOAuthClient,
   oauthTokensObsolete,
   updateServer,
+  validateUsername,
 } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
@@ -24,6 +28,14 @@ describe("kinds", () => {
     expect(isMailKind("imap")).toBe(true)
     expect(isMailKind("mcp")).toBe(false)
     expect(isMailKind("openapi")).toBe(false)
+  })
+
+  it("tells the browser from everything PCP reaches at an address", () => {
+    expect(isBrowserKind("browser")).toBe(true)
+    expect(isBrowserKind("mcp")).toBe(false)
+    expect(isMailKind("browser")).toBe(false)
+    expect(asServerKind("browser")).toBe("browser")
+    expect(kindNoun("browser")).toBe("the browser")
   })
 
   it("reads an unknown kind as an MCP server", () => {
@@ -101,6 +113,8 @@ describe("with a vault", () => {
   })
 
   describe("normalizeBasicAuth", () => {
+    const sender = { name: "Mail" }
+
     it("takes a user name and one of the owner's secrets", async () => {
       const { id } = await createSecret(ctx, {
         name: "Mail password",
@@ -108,11 +122,70 @@ describe("with a vault", () => {
       })
 
       expect(
-        await normalizeBasicAuth(ctx, {
-          authUsername: "  ada@example.com ",
-          authSecretId: id,
-        }),
-      ).toEqual({ authUsername: "ada@example.com", authSecretId: id })
+        await normalizeBasicAuth(
+          ctx,
+          { authUsername: "  ada@example.com ", authSecretId: id },
+          sender,
+        ),
+      ).toEqual({
+        authUsername: "ada@example.com",
+        authSecretId: id,
+        newSecret: null,
+      })
+    })
+
+    it("holds a typed password back, to be saved with the row", async () => {
+      const data = await normalizeBasicAuth(
+        ctx,
+        {
+          authUsername: "ada@example.com",
+          authSecretId: NEW_SECRET,
+          authSecretName: " Ada mail ",
+          authSecretValue: "app-password",
+        },
+        sender,
+      )
+
+      expect(data).toEqual({
+        authUsername: "ada@example.com",
+        authSecretId: null,
+        newSecret: {
+          name: "Ada mail",
+          base: "Mail password",
+          value: "app-password",
+          description: "The password for ada@example.com at Mail.",
+        },
+      })
+      // Nothing is saved until the row is.
+      expect(await listSecrets(ctx)).toHaveLength(0)
+    })
+
+    it("refuses a typed password with no value, or a name in use", async () => {
+      await createSecret(ctx, { name: "Taken", value: "x" })
+
+      await expect(
+        normalizeBasicAuth(
+          ctx,
+          {
+            authUsername: "ada",
+            authSecretId: NEW_SECRET,
+            authSecretValue: "",
+          },
+          sender,
+        ),
+      ).rejects.toThrow(/value/i)
+      await expect(
+        normalizeBasicAuth(
+          ctx,
+          {
+            authUsername: "ada",
+            authSecretId: NEW_SECRET,
+            authSecretName: "Taken",
+            authSecretValue: "app-password",
+          },
+          sender,
+        ),
+      ).rejects.toThrow(/Taken/)
     })
 
     it("refuses what would change what is sent", async () => {
@@ -120,25 +193,28 @@ describe("with a vault", () => {
         name: "Mail password",
         value: "app-password",
       })
+      const basic = (authUsername: string, authSecretId: string | null) =>
+        normalizeBasicAuth(ctx, { authUsername, authSecretId }, sender)
 
-      await expect(
-        normalizeBasicAuth(ctx, { authUsername: "", authSecretId: id }),
-      ).rejects.toThrow(/user name/)
-      await expect(
-        normalizeBasicAuth(ctx, { authUsername: "ada:x", authSecretId: id }),
-      ).rejects.toThrow(/colon/)
-      await expect(
-        normalizeBasicAuth(ctx, {
-          authUsername: "ada\r\nA1 LOGOUT",
-          authSecretId: id,
-        }),
-      ).rejects.toThrow(/line breaks/)
-      await expect(
-        normalizeBasicAuth(ctx, { authUsername: "ada", authSecretId: null }),
-      ).rejects.toThrow(/secret/)
-      await expect(
-        normalizeBasicAuth(ctx, { authUsername: "ada", authSecretId: "nope" }),
-      ).rejects.toThrow(/does not exist/)
+      await expect(basic("", id)).rejects.toThrow(/user name/)
+      await expect(basic("ada:x", id)).rejects.toThrow(/colon/)
+      await expect(basic("ada\r\nA1 LOGOUT", id)).rejects.toThrow(/line breaks/)
+      await expect(basic("ada", null)).rejects.toThrow(/secret/)
+      await expect(basic("ada", "nope")).rejects.toThrow(/does not exist/)
+    })
+  })
+
+  describe("validateUsername", () => {
+    it("trims a mailbox address", () => {
+      expect(validateUsername(" ada@example.com ")).toBe("ada@example.com")
+    })
+
+    it("refuses an empty one, a colon, control characters and a long one", () => {
+      expect(() => validateUsername("")).toThrow(/user name/)
+      expect(() => validateUsername(null)).toThrow(/user name/)
+      expect(() => validateUsername("a:b")).toThrow(/colon/)
+      expect(() => validateUsername("a\nb")).toThrow(/line breaks/)
+      expect(() => validateUsername("a".repeat(321))).toThrow(/too long/)
     })
   })
 

@@ -36,13 +36,22 @@ export default async function TokenPage({
   }
 
   const publicUrl = await publicUrlFor(ctx)
-  const [servers, access, tokens, waiting, fetchRules] = await Promise.all([
+  const [servers, access, tokens, waiting] = await Promise.all([
     listServers(ctx),
     listTokenToolAccess(ctx, id),
     listApiTokens(ctx),
     listOpenPermissions(ctx, id, publicUrl),
-    token.webFetch ? listFetchRules(ctx, id) : null,
   ])
+  // The browser follows the token's web fetch sites: a token that reaches
+  // it has them, web fetch or not.
+  const reachesBrowser = servers.some(
+    (server) =>
+      server.kind === "browser" &&
+      (token.allowAllServers ||
+        token.servers.some((picked) => picked.id === server.id)),
+  )
+  const fetchRules =
+    token.webFetch || reachesBrowser ? await listFetchRules(ctx, id) : null
 
   return (
     <>
@@ -77,6 +86,7 @@ export default async function TokenPage({
         }))}
         endpointUrl={`${publicUrl}/mcp`}
         fetchRules={fetchRules}
+        browser={reachesBrowser}
       />
     </>
   )

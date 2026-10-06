@@ -48,9 +48,21 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
     await expect(
       page.getByRole("heading", { name: "Reach PCP from anywhere (optional)" }),
     ).toBeVisible()
-    await expect(page.getByRole("form", { name: "Dynamic DNS" })).toBeVisible()
+    const ddns = page.getByRole("form", { name: "Dynamic DNS" })
+    await expect(ddns).toBeVisible()
+    // DuckDNS, suggested first, is a link away.
+    await expect(
+      ddns.getByRole("link", { name: "Open duckdns.org" }),
+    ).toHaveAttribute("href", "https://www.duckdns.org/")
     await page.getByRole("link", { name: "Skip for now — open PCP" }).click()
     await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
+
+    // Nothing added yet: an assistant can do it, given a token.
+    const start = page.getByTestId("servers-start")
+    await expect(start.getByText("Have PCP add my Gmail")).toBeVisible()
+    await expect(
+      start.getByRole("link", { name: "Create your first API token" }),
+    ).toHaveAttribute("href", "/tokens")
   }
 
   // The header says which release this is, as package.json has it.

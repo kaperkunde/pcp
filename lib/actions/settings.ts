@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
 import { revokeAllApiTokens } from "@/lib/core/api-tokens"
+import { createDeviceKey, removeDeviceKeys } from "@/lib/core/device-keys"
 import { destroyAllSessions } from "@/lib/core/sessions"
 import {
   normalizePublicUrl,
@@ -14,6 +15,7 @@ import { changePassword, rotateRecoveryKey } from "@/lib/core/vault"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import {
   confirmPassword,
+  forgiveSessionTry,
   TOO_MANY_ATTEMPTS,
   withinSessionLimits,
 } from "@/lib/server/password-attempts"
@@ -68,6 +70,7 @@ export async function changePasswordAction(
 
   return guarded(async () => {
     await changePassword(session.ctx, field(formData, "current"), password)
+    forgiveSessionTry(session.sessionId)
     return { message: "Password changed." }
   })
 }
@@ -87,6 +90,40 @@ export async function rotateRecoveryKeyAction(
   })
 }
 
+export type TouchIdResult = ActionState<{ deviceKey: string }>
+
+/**
+ * Turns Touch ID on for the Mac app (lib/core/device-keys.ts). The new key
+ * comes back once, for the app to keep in the macOS keychain; the page hands
+ * it over and forgets it.
+ */
+export async function enableTouchIdAction(
+  _previous: TouchIdResult,
+  formData: FormData,
+): Promise<TouchIdResult> {
+  const session = await requireSession()
+
+  const result = await guarded(async () => {
+    // A lasting way in, like a token: the session alone is not enough to
+    // make one, and neither is Touch ID.
+    await confirmPassword(session, field(formData, "password"))
+
+    return { deviceKey: await createDeviceKey(session.ctx) }
+  })
+
+  revalidatePath("/settings")
+
+  return result
+}
+
+export async function disableTouchIdAction(): Promise<ActionState> {
+  const ctx = await requireContext()
+  await removeDeviceKeys(ctx.vaultId)
+  revalidatePath("/settings")
+
+  return { status: "ok" }
+}
+
 export async function signOutEverywhereAction(
   formData: FormData,
 ): Promise<void> {
@@ -96,6 +133,8 @@ export async function signOutEverywhereAction(
     await revokeAllApiTokens(ctx)
   }
 
+  // Touch ID signs in, so it goes with the sessions.
+  await removeDeviceKeys(ctx.vaultId)
   await destroyAllSessions(ctx.vaultId)
   await clearSessionCookie()
   redirect("/login")

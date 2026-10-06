@@ -826,6 +826,32 @@ function planBody(
     content.find(([type]) => type.toLowerCase().startsWith("text/")) ??
     content.find(([type]) => type === "*/*")
 
+  const arg = Object.hasOwn(properties, "body")
+    ? Object.hasOwn(properties, "requestBody")
+      ? null
+      : "requestBody"
+    : "body"
+  const description = shorten(ownString(body, "description"), 1000)
+
+  // An upload: a file the assistant hands over as a kept result's handle.
+  const upload = pick ? null : planUpload(doc, content, budget)
+
+  if (upload) {
+    if (!arg) {
+      throw new Skip(
+        "its parameters already use the names body and requestBody",
+      )
+    }
+
+    return {
+      plan: { arg, required, ...upload.plan },
+      schema: {
+        ...upload.schema,
+        ...(description ? { description } : {}),
+      },
+    }
+  }
+
   if (!pick) {
     const types = content.map(([type]) => type.toLowerCase())
     return drop(
@@ -858,17 +884,9 @@ function planBody(
         : {}
       : toJsonSchema(inlineRefs(doc, declared, budget), doc.openapi)
 
-  const arg = Object.hasOwn(properties, "body")
-    ? Object.hasOwn(properties, "requestBody")
-      ? null
-      : "requestBody"
-    : "body"
-
   if (!arg) {
     throw new Skip("its parameters already use the names body and requestBody")
   }
-
-  const description = shorten(ownString(body, "description"), 1000)
 
   return {
     plan: {
@@ -882,6 +900,124 @@ function planBody(
       ...(description ? { description } : {}),
     },
   }
+}
+
+/** What a file argument takes: a kept result's handle. */
+const FILE_SCHEMA: JsonObject = {
+  type: "object",
+  description:
+    'A file PCP kept for you (an attachment, a file a tool answered with), as its handle: {"$result": "<id>"}, with a name and a type to send it under if you want others than its own.',
+  properties: {
+    $result: { type: "string", description: "The kept result's id." },
+    name: { type: "string" },
+    type: { type: "string" },
+  },
+  required: ["$result"],
+  additionalProperties: false,
+}
+
+/** A property of a multipart body that is a file, or a list of files. */
+function fileProperty(schema: unknown): { many: boolean } | null {
+  if (!isObject(schema)) {
+    return null
+  }
+
+  const isFile = (value: unknown) =>
+    isObject(value) &&
+    (own(value, "format") === "binary" ||
+      typeof own(value, "contentMediaType") === "string")
+
+  if (isFile(schema)) {
+    return { many: false }
+  }
+
+  return own(schema, "type") === "array" && isFile(own(schema, "items"))
+    ? { many: true }
+    : null
+}
+
+/**
+ * A body PCP can send as an upload: one file of a binary type (a PDF, an
+ * image, application/octet-stream), or multipart/form-data whose schema
+ * names its file fields. Null when it is neither.
+ */
+function planUpload(
+  doc: OpenApiDocument,
+  content: Array<[string, unknown]>,
+  budget: RefBudget,
+): {
+  plan: Pick<BodyPlan, "contentType" | "encoding" | "files">
+  schema: JsonObject
+} | null {
+  const multipart = content.find(([type]) =>
+    type.toLowerCase().startsWith("multipart/form-data"),
+  )
+
+  if (multipart) {
+    const declared = own(multipart[1], "schema")
+    const converted =
+      declared === undefined
+        ? {}
+        : toJsonSchema(inlineRefs(doc, declared, budget), doc.openapi)
+    const props = isObject(converted) ? own(converted, "properties") : null
+
+    if (!isObject(props)) {
+      return null
+    }
+
+    const files: NonNullable<BodyPlan["files"]> = []
+    const shaped: JsonObject = {}
+
+    for (const [name, schema] of entries(props)) {
+      const file = fileProperty(schema)
+
+      if (file) {
+        files.push({ name, many: file.many })
+        shaped[name] = file.many
+          ? { type: "array", items: FILE_SCHEMA }
+          : FILE_SCHEMA
+      } else {
+        shaped[name] = schema
+      }
+    }
+
+    if (files.length === 0 || files.length > 50) {
+      return null
+    }
+
+    const required = own(converted as JsonObject, "required")
+
+    return {
+      plan: {
+        contentType: "multipart/form-data",
+        encoding: "multipart",
+        files,
+      },
+      schema: {
+        type: "object",
+        properties: shaped,
+        ...(Array.isArray(required) ? { required } : {}),
+        additionalProperties: false,
+      },
+    }
+  }
+
+  const binary = content.find(([type]) => {
+    const lower = type.toLowerCase()
+    return (
+      !lower.startsWith("multipart/") &&
+      !isJsonMediaType(lower) &&
+      !lower.startsWith("application/x-www-form-urlencoded") &&
+      !lower.startsWith("text/")
+    )
+  })
+
+  return binary
+    ? {
+        plan: { contentType: binary[0], encoding: "binary" },
+        schema: { ...FILE_SCHEMA },
+      }
+    : null
 }
 
 function successResponses(doc: OpenApiDocument, operation: JsonObject) {

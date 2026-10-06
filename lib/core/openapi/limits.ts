@@ -4,6 +4,8 @@
  * in it is allowed to cost more than these.
  */
 
+import { PCP_VERSION } from "../version"
+
 /** Operations in one schema; more is refused rather than cut. */
 export const MAX_OPERATIONS = 2000
 /** One tool's argument schema, as JSON; a larger one skips the operation. */
@@ -60,6 +62,10 @@ export const SPEC_MAX_REDIRECTS = 3
 
 export const CALL_TIMEOUT_MS = 60_000
 export const MAX_REQUEST_BODY_BYTES = 1024 * 1024
+/** An upload's body: kept files (10 MiB each at most) and its form fields. */
+export const MAX_UPLOAD_BODY_BYTES = 25 * 1024 * 1024
+/** Files one multipart upload may carry. */
+export const MAX_UPLOAD_FILES = 20
 export const MAX_RESPONSE_BYTES = 1024 * 1024
 /** structuredContent is only added when it is at most this long as JSON. */
 export const MAX_STRUCTURED_CHARS = 60_000
@@ -67,7 +73,7 @@ export const MAX_STRUCTURED_CHARS = 60_000
 export const MAX_ERROR_EXCERPT = 2000
 export const MAX_HEADER_VALUE = 8192
 
-export const USER_AGENT = "pcp/0.1.0"
+export const USER_AGENT = `pcp/${PCP_VERSION}`
 
 /** Edits (JSON Patch operations) kept on one endpoint. */
 export const MAX_PATCH_OPERATIONS = 1000

@@ -26,8 +26,15 @@ import {
   readStoredPatches,
   type PatchOperation,
 } from "./openapi/patch"
-import { readCallPlan } from "./openapi/plan"
-import { buildRequest } from "./openapi/request"
+import { isObject } from "./openapi/json"
+import { readCallPlan, type CallPlan } from "./openapi/plan"
+import { buildRequest, type UploadFile, type Uploads } from "./openapi/request"
+import {
+  missingResultMessage,
+  parseUploadHandle,
+  resolveHandles,
+} from "./result-handles"
+import type { ResultOpener } from "./tool-results"
 import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
 import { deleteManagedSecret } from "./secrets"
 import {
@@ -35,6 +42,7 @@ import {
   extraAuthHeadersWrite,
   getServer,
   kindNoun,
+  normalizeBasicAuth,
   normalizeHeaderAuth,
   normalizeOAuthClient,
   secretColumns,
@@ -87,7 +95,7 @@ export type EndpointInput = {
   publicOnly?: boolean
   /** Off until the owner enables it. Default on. */
   enabled?: boolean
-  authType: "none" | "header" | "oauth"
+  authType: "none" | "header" | "basic" | "oauth"
   authHeaderName?: string | null
   authValueTemplate?: string | null
   /** A secret's id, or NEW_SECRET for one typed into the form. */
@@ -95,6 +103,8 @@ export type EndpointInput = {
   /** With NEW_SECRET: what to call it, and its value. */
   authSecretName?: string | null
   authSecretValue?: string | null
+  /** basic: the user name the secret (the password) goes with. */
+  authUsername?: string | null
   /** Further headers, each with a stored secret, sent with the first. */
   authExtraHeaders?: ExtraAuthHeaderInput[] | null
   /**
@@ -110,20 +120,20 @@ export type EndpointInput = {
   oauthAuthorizeParams?: string | null
 }
 
-/** The header an OAuth endpoint's token goes in. */
+/** The header an OAuth endpoint's token, or a login, goes in. */
 const BEARER_HEADER = "Authorization"
 
-/** Whether an endpoint sends the owner something: a secret, or a token. */
+/** Whether an endpoint sends the owner something: a secret, a login or a token. */
 function sendsCredential(authType: string): boolean {
-  return authType === "header" || authType === "oauth"
+  return authType === "header" || authType === "basic" || authType === "oauth"
 }
 
 async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
   const { name, description } = normalizeNameAndDescription(input)
 
-  if (!["none", "header", "oauth"].includes(input.authType)) {
+  if (!["none", "header", "basic", "oauth"].includes(input.authType)) {
     throw invalid(
-      "An API endpoint sends a secret in a header, an OAuth token, or no credential at all.",
+      "An API endpoint sends a secret in a header, a user name and password, an OAuth token, or no credential at all.",
     )
   }
 
@@ -137,28 +147,41 @@ async function normalizeEndpoint(ctx: VaultContext, input: EndpointInput) {
     input.authType === "header"
       ? {
           authType: "header",
+          authUsername: null,
           ...(await normalizeHeaderAuth(ctx, input, { name })),
           ...noClient,
         }
-      : input.authType === "oauth"
+      : input.authType === "basic"
         ? {
-            authType: "oauth",
-            authSecretId: null,
-            // Blocks the header from being an operation's argument.
+            authType: "basic",
+            // The login is the Authorization header: no operation may set it.
             authHeaderName: BEARER_HEADER,
             authValueTemplate: null,
             authExtraHeaders: [] as ExtraAuthHeader[],
-            ...(await normalizeOAuthClient(ctx, input, { name })),
-          }
-        : {
-            authType: "none",
-            authSecretId: null,
-            authHeaderName: null,
-            authValueTemplate: null,
-            authExtraHeaders: [] as ExtraAuthHeader[],
-            newSecret: null,
+            ...(await normalizeBasicAuth(ctx, input, { name })),
             ...noClient,
           }
+        : input.authType === "oauth"
+          ? {
+              authType: "oauth",
+              authSecretId: null,
+              authUsername: null,
+              // Blocks the header from being an operation's argument.
+              authHeaderName: BEARER_HEADER,
+              authValueTemplate: null,
+              authExtraHeaders: [] as ExtraAuthHeader[],
+              ...(await normalizeOAuthClient(ctx, input, { name })),
+            }
+          : {
+              authType: "none",
+              authSecretId: null,
+              authUsername: null,
+              authHeaderName: null,
+              authValueTemplate: null,
+              authExtraHeaders: [] as ExtraAuthHeader[],
+              newSecret: null,
+              ...noClient,
+            }
 
   const specSource = input.specSource === "upload" ? "upload" : "url"
 
@@ -323,7 +346,7 @@ function statusNotes(
     notes.push(
       `The schema says requests need ${generated.security}; this endpoint sends none.`,
     )
-  } else if (server.authType === "header") {
+  } else if (server.authType === "header" || server.authType === "basic") {
     const lower = new Set(sent.map((name) => name.toLowerCase()))
     const missing = generated.securityHeaders.filter(
       (name) => !lower.has(name.toLowerCase()),
@@ -657,6 +680,7 @@ export async function createEndpoint(
         specUrlFromAssistant:
           data.specSource === "url" && input.specUrlFromAssistant === true,
         authType: data.authType,
+        authUsername: data.authUsername,
         authHeaderName: data.authHeaderName,
         authValueTemplate: data.authValueTemplate,
         ...secretColumns(data, secretId),
@@ -805,6 +829,7 @@ export async function updateEndpoint(
         publicOnly: data.publicOnly,
         specUrlFromAssistant,
         authType: data.authType,
+        authUsername: data.authUsername,
         authHeaderName: data.authHeaderName,
         authValueTemplate: data.authValueTemplate,
         ...secretColumns(data, secretId),
@@ -1056,6 +1081,103 @@ export async function syncEndpointTools(
  * by upstream.ts; nothing here reads a secret. `redact` lists the values an
  * answer must not repeat back to the assistant.
  */
+/**
+ * An upload's files, opened from the token's kept results, and the
+ * arguments with every other handle resolved. A file field takes only a
+ * handle; an unknown id is refused by name before anything is sent.
+ */
+async function openUploads(
+  plan: CallPlan,
+  args: Record<string, unknown>,
+  open: ResultOpener | undefined,
+): Promise<{ args: Record<string, unknown>; uploads: Uploads }> {
+  const body = plan.body
+
+  if (!body || (body.encoding !== "binary" && body.encoding !== "multipart")) {
+    return { args: open ? await resolveHandles(args, open) : args, uploads: {} }
+  }
+
+  const readFile = async (
+    value: unknown,
+    field: string,
+  ): Promise<UploadFile> => {
+    const handle = parseUploadHandle(value)
+
+    if (!handle) {
+      throw invalid(
+        `"${field}" is a file: pass a result PCP kept for you, as {"$result": "<id>"}.`,
+      )
+    }
+
+    if (!open) {
+      throw invalid(`"${field}" is a file PCP cannot read for this call.`)
+    }
+
+    const opened = await open(handle.$result)
+
+    if (!opened) {
+      throw invalid(missingResultMessage(handle.$result))
+    }
+
+    return {
+      bytes: opened.bytes(),
+      name: handle.name ?? opened.name,
+      type: handle.type ?? opened.mediaType,
+    }
+  }
+
+  const value = args[body.arg]
+  const rest = Object.fromEntries(
+    Object.entries(args).filter(([key]) => key !== body.arg),
+  )
+  const resolved = open ? await resolveHandles(rest, open) : rest
+
+  if (value === undefined || value === null) {
+    return { args: resolved, uploads: {} }
+  }
+
+  if (body.encoding === "binary") {
+    return {
+      args: { ...resolved, [body.arg]: value },
+      uploads: { body: await readFile(value, body.arg) },
+    }
+  }
+
+  if (!isObject(value)) {
+    throw invalid(`"${body.arg}" must be an object of form fields.`)
+  }
+
+  const fields: Record<string, UploadFile[]> = {}
+  const others: Record<string, unknown> = {}
+
+  for (const [key, item] of Object.entries(value)) {
+    const file = body.files?.find((entry) => entry.name === key)
+
+    if (!file) {
+      others[key] = item
+      continue
+    }
+
+    if (item === undefined || item === null) {
+      continue
+    }
+
+    const items = file.many && Array.isArray(item) ? item : [item]
+    fields[key] = []
+
+    for (const entry of items) {
+      fields[key].push(await readFile(entry, `${body.arg}.${key}`))
+    }
+  }
+
+  const resolvedOthers = open ? await resolveHandles(others, open) : others
+
+  return {
+    args: { ...resolved, [body.arg]: { ...value, ...resolvedOthers } },
+    uploads: { fields },
+  }
+}
+
 export async function callEndpointTool(
   server: McpServer,
   toolName: string,
@@ -1064,8 +1186,14 @@ export async function callEndpointTool(
     authHeaders,
     redact,
     renew,
+    open,
   }: {
     authHeaders: Record<string, string>
+    /**
+     * Opens a result the token kept: handles in the arguments, and the
+     * files of an upload.
+     */
+    open?: ResultOpener
     /** The credential's values, to keep out of what the API answers. */
     redact: string[]
     /**
@@ -1095,15 +1223,28 @@ export async function callEndpointTool(
     )
   }
 
+  // Before anything is sent: an unknown id or a bad file argument sends
+  // nothing.
+  const prepared = await openUploads(plan, args, open)
+
   const attempt = async (
     headers: Record<string, string>,
     secrets: string[],
   ): Promise<Awaited<ReturnType<typeof executeCall>>> => {
     try {
-      return await executeCall(buildRequest(plan, server.url, args, headers), {
-        redact: secrets,
-        publicOnly: server.publicOnly,
-      })
+      return await executeCall(
+        buildRequest(
+          plan,
+          server.url,
+          prepared.args,
+          headers,
+          prepared.uploads,
+        ),
+        {
+          redact: secrets,
+          publicOnly: server.publicOnly,
+        },
+      )
     } catch (error) {
       // The endpoint refusing an address is its rule working, not an outage:
       // say so, and leave its status alone.

@@ -1,6 +1,6 @@
 # Checks on pull requests. Pushes run nothing: the pre-commit hook covers
 # lint, formatting and types locally, and a pull request is where the
-# result is looked at. The three jobs are independent and run side by side.
+# result is looked at. The jobs are independent and run side by side.
 
 name: ci
 
@@ -55,6 +55,10 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Generate Prisma client
         run: pnpm db:generate
+      - name: Install Chromium
+        # The browser's tests (lib/core/browser/) drive a real one; without
+        # it they are skipped.
+        run: pnpm exec playwright install --with-deps chromium
       - name: Test
         run: pnpm test
 
@@ -87,3 +91,31 @@ jobs:
             e2e/.artifacts/test-results
           retention-days: 14
           if-no-files-found: ignore
+
+  keychain:
+    # The Touch ID keychain module (desktop/native/keychain) compiles only
+    # on macOS. Releases build it again, for the app (release.yml).
+    name: Touch ID keychain module
+    runs-on: macos-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install pnpm
+        run: npm install -g --no-update-notifier pnpm@10.33.0
+      - name: Install node-gyp
+        run: pnpm install --frozen-lockfile
+        env:
+          # Compiling a Node-API module needs no Electron binary.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      - name: Build for Intel
+        run: node scripts/keychain.mjs --arch x64
+      - name: Build for Apple silicon, load it and ask it
+        # The runner is Apple silicon, and its Node has no keychain
+        # entitlement: the module must load and answer, and store nothing.
+        run: node scripts/keychain.mjs --arch arm64 --check

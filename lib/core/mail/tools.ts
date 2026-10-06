@@ -8,6 +8,7 @@ import {
   DEFAULT_SEARCH_LIMIT,
   MAX_RECIPIENTS,
   MAX_SEARCH_LIMIT,
+  MAX_SEND_ATTACHMENTS,
   MAX_SEARCH_OFFSET,
   MAX_SEARCH_TEXT_CHARS,
   MAX_SEND_TEXT_CHARS,
@@ -151,7 +152,7 @@ const SPECS: readonly MailToolSpec[] = [
     name: "get_attachment",
     title: "Read an attachment",
     description:
-      "Reads one text attachment of an email (plain text, CSV, JSON, XML, HTML, calendar files and the like). Other kinds, such as images and PDFs, are described, not returned.",
+      "Reads one attachment of an email and keeps it as a handle, to pass to another tool or to send_email as an attachment. Text (plain text, CSV, JSON, XML, HTML, calendar files and the like) comes back as text too; any other file, such as an image or a PDF, only as the handle.",
     args: () =>
       z.strictObject({
         id,
@@ -193,7 +194,7 @@ const SPECS: readonly MailToolSpec[] = [
     name: "send_email",
     title: "Send an email",
     description:
-      "Sends a plain-text email from this account, and keeps a copy in Sent. To reply, pass the id of the email you answer as inReplyTo: the reply then joins its conversation. Sending cannot be undone.",
+      'Sends a plain-text email from this account, and keeps a copy in Sent. To reply, pass the id of the email you answer as inReplyTo: the reply then joins its conversation, and that email is marked answered (answered in the result says whether it could be). To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]: an attachment get_attachment read (from this account or another), or any file a tool answered with. Sending cannot be undone.',
     args: (kind) =>
       z.strictObject({
         to: recipients.min(1),
@@ -207,6 +208,38 @@ const SPECS: readonly MailToolSpec[] = [
         inReplyTo: id
           .optional()
           .describe("The id of the email this answers, from search_emails."),
+        attachments: z
+          .array(
+            z.strictObject({
+              $result: z
+                .string()
+                .min(1)
+                .max(64)
+                .describe("A kept result's id, from its handle."),
+              name: z
+                .string()
+                .min(1)
+                .max(255)
+                .regex(/^[^\u0000-\u001f\u007f/\\]+$/, {
+                  message: "A file name, without a path or control characters.",
+                })
+                .optional()
+                .describe("The file's name; the kept result's own by default."),
+              type: z
+                .string()
+                .max(200)
+                .regex(/^[\w.+-]+\/[\w.+-]+$/, {
+                  message: "A media type, like application/pdf.",
+                })
+                .optional()
+                .describe("Its media type; the kept result's own by default."),
+            }),
+          )
+          .max(MAX_SEND_ATTACHMENTS)
+          .optional()
+          .describe(
+            'Files to attach: kept results, as {"$result": "<id>"} with an optional name and type.',
+          ),
         ...(kind === "jmap"
           ? {
               identity: z

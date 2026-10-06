@@ -40,9 +40,29 @@ export async function register() {
       })
       .catch((error) => console.error("[endpoints] rebuild failed", error))
 
+    // The browser's tools are fixed in the code, so a new version brings
+    // them up to date; and whether Chromium is here can change with it.
+    const { syncAllBrowserTools } = await import("@/lib/core/browser/server")
+    void syncAllBrowserTools().catch((error) =>
+      console.error("[browser] could not update the browser's tools", error),
+    )
+
     // Dynamic DNS and HTTPS, if the owner turned them on: off by default,
     // so nothing listens or runs here for anyone with a proxy of their own.
     const { startNetwork } = await import("@/lib/core/network/runtime")
     await startNetwork()
+
+    // The daily check for a newer release, unless the owner turned it off:
+    // then there is no timer and no request (lib/core/updates/runtime.ts).
+    const { startUpdates } = await import("@/lib/core/updates/runtime")
+    await startUpdates()
+
+    // run_code's sandbox container, when the compose file for it set
+    // PCP_SANDBOX_SOCKET: PCP listens there for its runner. Without it
+    // nothing listens (lib/core/code/sandbox.ts).
+    const { startSandbox } = await import("@/lib/core/code/sandbox")
+    await startSandbox().catch((error) =>
+      console.error("[sandbox] could not listen for the runner", error),
+    )
   }
 }

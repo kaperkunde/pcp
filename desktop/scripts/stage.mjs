@@ -4,6 +4,11 @@
 // Electron's Node. Nothing of the app changes; the wrapper is a second host
 // for the same build.
 //
+// Chromium, which the Dockerfile installs for the browser, is not staged:
+// the app looks for one on the machine (PCP_BROWSER_EXECUTABLE, or where
+// Playwright installs it), and the Browser page's Install Chromium puts one
+// in the data folder (lib/core/browser/install.ts, in the server's process).
+//
 //   node scripts/stage.mjs [--arch arm64|x64] [--electron-version x.y.z]
 //
 // Reads ../.next/standalone (run `pnpm build` at the repository root first)

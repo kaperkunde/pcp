@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { isPublicAddress } from "./address"
+import { isOwnAddress, isPublicAddress, pcpPorts } from "./address"
 
 describe("isPublicAddress", () => {
   it("accepts ordinary public addresses", () => {
@@ -96,5 +96,48 @@ describe("isPublicAddress", () => {
   it("accepts an IPv6 literal with brackets, as a URL host has them", () => {
     expect(isPublicAddress("[2606:4700:4700::1111]")).toBe(true)
     expect(isPublicAddress("[::1]")).toBe(false)
+  })
+})
+
+describe("isOwnAddress", () => {
+  it("is PCP's own ports on loopback, unspecified and this machine's addresses", () => {
+    const [app] = pcpPorts()
+
+    for (const address of [
+      "127.0.0.1",
+      "127.1.2.3",
+      "0.0.0.0",
+      "::1",
+      "[::1]",
+      "::",
+      "::ffff:127.0.0.1",
+    ]) {
+      expect(isOwnAddress(address, app!), address).toBe(true)
+    }
+  })
+
+  it("leaves other ports and other machines alone", () => {
+    const [app] = pcpPorts()
+
+    expect(isOwnAddress("127.0.0.1", 5173)).toBe(false)
+    expect(isOwnAddress("192.168.1.20", app!)).toBe(false)
+    expect(isOwnAddress("8.8.8.8", app!)).toBe(false)
+  })
+
+  it("counts extra listeners of PCP's own, such as the browser's proxy", () => {
+    expect(isOwnAddress("127.0.0.1", 41234)).toBe(false)
+    expect(isOwnAddress("127.0.0.1", 41234, [41234])).toBe(true)
+  })
+
+  it("follows the ports PCP is told to use", () => {
+    const before = process.env.PORT
+
+    try {
+      process.env.PORT = "4321"
+      expect(isOwnAddress("127.0.0.1", 4321)).toBe(true)
+    } finally {
+      if (before === undefined) delete process.env.PORT
+      else process.env.PORT = before
+    }
   })
 })

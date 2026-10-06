@@ -23,6 +23,7 @@ import {
   oauthFetch,
   PcpOAuthProvider,
   syncServerTools,
+  verifiedEndpointDiscovery,
 } from "./upstream"
 
 /**
@@ -65,10 +66,21 @@ export async function startOAuth(
     )
   }
 
-  // An endpoint's sign-in is the one stored from its schema; an MCP server's
-  // is discovered, unless the owner's client makes that unnecessary.
-  const discovery =
-    fixed ?? (server.oauthClientId ? undefined : await discover(server))
+  // An endpoint's sign-in is the one stored from its schema, which its
+  // authorization server may add to (where PCP registers itself) but never
+  // change; an MCP server's is discovered. The owner's client makes either
+  // unnecessary.
+  let discovery: OAuthDiscoveryState | undefined
+  let elsewhere: { authorization: string; token: string } | null = null
+
+  if (fixed) {
+    ;({ discovery, elsewhere } = server.oauthClientId
+      ? { discovery: fixed, elsewhere: null }
+      : await verifiedEndpointDiscovery(server, fixed))
+  } else if (!server.oauthClientId) {
+    discovery = await discover(server)
+  }
+
   const method = chooseRegistration({
     clientId: server.oauthClientId,
     storedClient: storedClient !== undefined,
@@ -77,7 +89,13 @@ export async function startOAuth(
   })
 
   if (method === "needs-client") {
-    throw await needsClient(server, publicUrl)
+    throw await needsClient(
+      server,
+      publicUrl,
+      elsewhere
+        ? `it publishes its sign-in at ${elsewhere.authorization} and its tokens at ${elsewhere.token}, not the addresses this endpoint was approved with, and PCP signs in only where you approved`
+        : undefined,
+    )
   }
 
   const provider = new PcpOAuthProvider(ctx, server, {

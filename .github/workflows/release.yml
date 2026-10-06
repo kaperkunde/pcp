@@ -11,13 +11,18 @@
 # macOS and Windows runners and attached to it under stable names, and it is
 # then published: releases/latest/download/<name> always points at a complete
 # release. A failed app build does not hold the release; the publish job
-# warns, and re-running the failed job attaches the missing app.
+# warns, and re-running the failed job attaches the missing app. Beside each
+# installer go the files the app's own updater reads (desktop/main.mjs): the
+# update file for its architecture, latest-<arch>[-mac].yml, and on macOS the
+# zip it installs from.
 #
 # The container image is built from the same tag for amd64 and arm64 and
 # pushed to ghcr.io/kaperkunde/pcp as <version> and latest, which install.sh
-# and docker-compose.yaml pull. It is independent of the apps in the same
-# way: a failed image build does not hold the release, and latest stays at
-# the previous release until the job is re-run.
+# and docker-compose.yaml pull, and run_code's sandbox beside it as
+# ghcr.io/kaperkunde/pcp-sandbox, which docker-compose.sandbox.yaml pulls.
+# They are independent of the apps in the same way: a failed image build
+# does not hold the release, and latest stays at the previous release until
+# the job is re-run.
 #
 # Pushes made with the workflow token start no workflows, so the release
 # commit does not release itself again.
@@ -102,14 +107,17 @@ jobs:
             os: macos-latest
             arch: arm64
             asset: PCP-mac-arm64.dmg
+            updates: PCP-mac-arm64.zip latest-arm64-mac.yml
           - name: macOS app (Intel)
             os: macos-latest
             arch: x64
             asset: PCP-mac-x64.dmg
+            updates: PCP-mac-x64.zip latest-x64-mac.yml
           - name: Windows app
             os: windows-latest
             arch: x64
             asset: PCP-windows-x64.exe
+            updates: latest-x64.yml
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
@@ -148,15 +156,28 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The Developer ID provisioning profile that lets Touch ID keep its
+          # key in a keychain item macOS opens only for a fingerprint.
+          MAC_PROVISIONING_PROFILE: ${{ secrets.MAC_PROVISIONING_PROFILE }}
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.release.outputs.version }}
           ASSET: ${{ matrix.asset }}
+          UPDATES: ${{ matrix.updates }}
         run: |
           ls -la desktop/dist
           gh release upload "v$VERSION" "desktop/dist/$ASSET" --clobber
+          # Without these the app cannot update itself and sends the owner to
+          # the download page instead, so a missing one warns, not fails.
+          for file in $UPDATES; do
+            if [ -f "desktop/dist/$file" ]; then
+              gh release upload "v$VERSION" "desktop/dist/$file" --clobber
+            else
+              echo "::warning::desktop/dist/$file was not built; this app cannot install v$VERSION by itself."
+            fi
+          done
 
   image:
     name: container image
@@ -196,6 +217,24 @@ jobs:
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # run_code's sandbox (sandbox/, docker-compose.sandbox.yaml), versioned
+      # with PCP: the runner and PCP speak one protocol.
+      - name: Build and push the sandbox
+        uses: docker/build-push-action@v6
+        with:
+          context: sandbox
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ github.repository }}-sandbox:${{ needs.release.outputs.version }}
+            ghcr.io/${{ github.repository }}-sandbox:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=sandbox
+          cache-to: type=gha,mode=max,scope=sandbox
 
   publish:
     name: publish
@@ -216,6 +255,6 @@ jobs:
             echo "::warning::A desktop app build did not succeed; v$VERSION is published without it. Re-run the failed job to attach it."
           fi
           if [ "$IMAGE" != "success" ]; then
-            echo "::warning::The container image did not build; v$VERSION is published without it and ghcr.io/$GH_REPO:latest stays at the previous release. Re-run the failed job."
+            echo "::warning::The container images did not build; v$VERSION is published without them and ghcr.io/$GH_REPO:latest (or ghcr.io/$GH_REPO-sandbox:latest) stays at the previous release. Re-run the failed job."
           fi
           gh release edit "v$VERSION" --draft=false

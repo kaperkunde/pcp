@@ -4,6 +4,7 @@ import type {
   ApiToken,
   ApiTokenServer,
   ApiTokenToolAccess,
+  BrowserProfile,
   HostSetting,
   KeyGrant,
   McpServer,
@@ -23,6 +24,7 @@ import { asBytes } from "./crypto"
 import { invalid } from "./errors"
 import { DDNS_CONFIG_KEY, ddnsHostname, type DdnsConfig } from "./network/ddns"
 import { TLS_CONFIG_KEY } from "./network/tls"
+import { UPDATE_CONFIG_KEY } from "./updates/state"
 
 /**
  * The shape of an export file (lib/core/backup.ts): what is in it, and the
@@ -131,6 +133,7 @@ const ApiTokenRow = z.strictObject({
   manageEndpoints: z.boolean(),
   keepMemories: z.boolean(),
   webFetch: z.boolean(),
+  runCode: z.boolean().default(false),
   expiresAt: dateOrNull,
   revokedAt: dateOrNull,
   createdAt: date,
@@ -180,6 +183,8 @@ const PermissionRequestRow = z.strictObject({
   argsHash: str,
   fields: str.nullable(),
   decode: str.nullable(),
+  // Added in 0.2: absent from older files.
+  keep: str.nullable().default(null),
   status: str,
   via: str.nullable(),
   resultCiphertext: bytesOrNull,
@@ -250,6 +255,7 @@ const McpServerRow = z.strictObject({
   authUsername: str.nullable().default(null),
   mailApiUrl: str.nullable().default(null),
   mailDownloadUrl: str.nullable().default(null),
+  mailUploadUrl: str.nullable().default(null),
   mailAccountId: str.nullable().default(null),
   mailSubmission: z.boolean().default(false),
   smtpUrl: str.nullable().default(null),
@@ -291,8 +297,23 @@ const OpenApiSpecRow = z.strictObject({
 
 const SettingRow = z.strictObject({ vaultId: id, key: str, value: str })
 
+// The browser's sign-ins, added in 0.3: absent from older files.
+const BrowserProfileRow = z.strictObject({
+  vaultId: id,
+  ciphertext: bytes,
+  sites: z.number().int().default(0),
+  cookies: z.number().int().default(0),
+  size: z.number().int().default(0),
+  partial: z.boolean().default(false),
+  savedAt: date,
+})
+
 /** The host settings that travel: the configuration, never a machine's status. */
-export const EXPORTED_HOST_KEYS = [DDNS_CONFIG_KEY, TLS_CONFIG_KEY] as const
+export const EXPORTED_HOST_KEYS = [
+  DDNS_CONFIG_KEY,
+  TLS_CONFIG_KEY,
+  UPDATE_CONFIG_KEY,
+] as const
 
 export type ExportedHostKey = (typeof EXPORTED_HOST_KEYS)[number]
 
@@ -333,6 +354,7 @@ export const PayloadSchema = z.strictObject({
     tools: z.array(McpToolRow),
     openApiSpecs: z.array(OpenApiSpecRow),
     settings: z.array(SettingRow),
+    browserProfiles: z.array(BrowserProfileRow).default([]),
   }),
   host: z.array(HostSettingRow),
 })
@@ -358,9 +380,17 @@ export type ExportPreview = {
     memories: number
     webFetchRules: number
     pendingRequests: number
+    /** Sites the browser keeps sign-ins for; 0 without any. */
+    browserSites: number
   }
-  /** Null when the file carries no network settings. */
-  host: { ddnsName: string | null; https: boolean } | null
+  /** Null when the file carries no settings of the machine. */
+  host: {
+    ddns: boolean
+    ddnsName: string | null
+    https: boolean
+    /** Whether PCP looks for new releases; null when the file does not say. */
+    updateCheck: boolean | null
+  } | null
 }
 
 /**
@@ -402,7 +432,8 @@ const GRANT_KINDS = new Set(["password", "recovery", "api_token"])
  * any of them is written: a file put together by hand, or cut short, is
  * refused with a reason rather than a rolled-back foreign key error. Also
  * where the kinds the schema leaves as text are pinned down: a key grant is
- * one the owner may carry (never a session's).
+ * one the owner may carry (never a session's or the Touch ID key, which stay
+ * with the PCP that made them).
  */
 export function checkReferences(payload: ExportPayload): void {
   const { vault, tables } = payload
@@ -462,6 +493,11 @@ export function checkReferences(payload: ExportPayload): void {
   ownedBy(tables.secrets, "secret")
   ownedBy(tables.servers, "server")
   ownedBy(tables.settings, "setting")
+  ownedBy(tables.browserProfiles, "browser profile")
+
+  if (tables.browserProfiles.length > 1) {
+    throw problem("it holds more than one browser profile")
+  }
 
   const pointsAt = (ref: string | null, known: Set<string>, what: string) => {
     if (ref !== null && !known.has(ref)) {
@@ -530,6 +566,7 @@ export function previewOf(payload: ExportPayload): ExportPreview {
   const { tables, host } = payload
   const ddns = host.find((row) => row.key === DDNS_CONFIG_KEY)
   const tls = host.find((row) => row.key === TLS_CONFIG_KEY)
+  const update = host.find((row) => row.key === UPDATE_CONFIG_KEY)
 
   return {
     exportedAt: payload.exportedAt,
@@ -550,11 +587,26 @@ export function previewOf(payload: ExportPayload): ExportPreview {
       pendingRequests: tables.permissionRequests.filter(
         (row) => row.status === "pending",
       ).length,
+      browserSites: tables.browserProfiles[0]?.sites ?? 0,
     },
     host:
-      ddns || tls
-        ? { ddnsName: ddns ? ddnsNameOf(ddns.value) : null, https: !!tls }
+      ddns || tls || update
+        ? {
+            ddns: !!ddns,
+            ddnsName: ddns ? ddnsNameOf(ddns.value) : null,
+            https: !!tls,
+            updateCheck: update ? updateCheckOf(update.value) : null,
+          }
         : null,
+  }
+}
+
+function updateCheckOf(value: string): boolean | null {
+  try {
+    const check = (JSON.parse(value) as { check?: unknown }).check
+    return typeof check === "boolean" ? check : null
+  } catch {
+    return null
   }
 }
 
@@ -602,6 +654,7 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: Covers<McpTool, z.output<typeof McpToolRow>>
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   setting: Covers<Setting, z.output<typeof SettingRow>>
+  browserProfile: Covers<BrowserProfile, z.output<typeof BrowserProfileRow>>
   hostSetting: Covers<HostSetting, z.output<typeof HostSettingRow>>
 } = {
   vault: true,
@@ -619,5 +672,6 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: true,
   openApiSpec: true,
   setting: true,
+  browserProfile: true,
   hostSetting: true,
 }

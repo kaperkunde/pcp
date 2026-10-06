@@ -1,7 +1,16 @@
+import { randomBytes } from "node:crypto"
+
+import { asBytes } from "../crypto"
 import { invalid, PcpError } from "../errors"
 import { isBlockedHeader } from "./headers"
 import { entries, isObject } from "./json"
-import { MAX_HEADER_VALUE, MAX_REQUEST_BODY_BYTES, USER_AGENT } from "./limits"
+import {
+  MAX_HEADER_VALUE,
+  MAX_REQUEST_BODY_BYTES,
+  MAX_UPLOAD_BODY_BYTES,
+  MAX_UPLOAD_FILES,
+  USER_AGENT,
+} from "./limits"
 import type { CallPlan, ParamPlan } from "./plan"
 
 /**
@@ -17,7 +26,114 @@ export type BuiltRequest = {
   url: string
   method: CallPlan["method"]
   headers: Record<string, string>
-  body?: string
+  /** Text, or the bytes of an upload. */
+  body?: string | Uint8Array<ArrayBuffer>
+}
+
+/** A kept file an upload sends, read by the caller (endpoints.ts). */
+export type UploadFile = { bytes: Buffer; name: string | null; type: string }
+
+/**
+ * The files of an upload, by where the plan puts them: the whole body
+ * (binary), or a multipart field. The caller opens each handle the
+ * arguments name; this file never reads a kept result itself.
+ */
+export type Uploads = {
+  body?: UploadFile
+  fields?: Record<string, UploadFile[]>
+}
+
+/** A header parameter's value: no quote, no line break. */
+function dispositionValue(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").replace(/"/g, "%22")
+}
+
+function bareType(type: string): string {
+  return type.split(";")[0]!.trim().toLowerCase()
+}
+
+/** A declared type to send as it is, or a wildcard the file's type fills. */
+function uploadType(declared: string, file: UploadFile): string {
+  const bare = bareType(declared)
+  const fileType = bareType(file.type)
+  const own = /^[\w.+-]+\/[\w.+-]+$/.test(fileType)
+    ? fileType
+    : "application/octet-stream"
+
+  return bare.includes("*") || bare === "application/octet-stream"
+    ? own
+    : declared
+}
+
+function multipartBody(
+  plan: NonNullable<CallPlan["body"]>,
+  value: unknown,
+  uploads: Uploads,
+): { bytes: Buffer; contentType: string } {
+  if (!isObject(value)) {
+    throw invalid(`"${plan.arg}" must be an object of form fields.`)
+  }
+
+  const boundary = `----pcp${randomBytes(16).toString("hex")}`
+  const parts: Buffer[] = []
+  const fileFields = new Set((plan.files ?? []).map((file) => file.name))
+  let count = 0
+
+  const head = (name: string, extra = "") =>
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${dispositionValue(name)}"${extra}\r\n`,
+      "utf8",
+    )
+
+  for (const [key, item] of entries(value)) {
+    if (item === undefined || item === null) continue
+
+    if (fileFields.has(key)) {
+      const files = uploads.fields?.[key]
+
+      if (!files || files.length === 0) {
+        throw new PcpError(
+          "state",
+          `PCP did not read the file for "${key}"; nothing was sent.`,
+        )
+      }
+
+      for (const file of files) {
+        count += 1
+        parts.push(
+          head(key, `; filename="${dispositionValue(file.name ?? "file")}"`),
+          Buffer.from(
+            `Content-Type: ${uploadType("application/octet-stream", file)}\r\n\r\n`,
+          ),
+          file.bytes,
+          Buffer.from("\r\n"),
+        )
+      }
+      continue
+    }
+
+    const values =
+      Array.isArray(item) && item.every((x) => !isObject(x)) ? item : [item]
+
+    for (const entry of values) {
+      const text =
+        isObject(entry) || Array.isArray(entry)
+          ? JSON.stringify(entry)
+          : loose(entry, plan.arg)
+      parts.push(head(key), Buffer.from(`\r\n${text}\r\n`, "utf8"))
+    }
+  }
+
+  if (count > MAX_UPLOAD_FILES) {
+    throw invalid(`An upload carries at most ${MAX_UPLOAD_FILES} files.`)
+  }
+
+  parts.push(Buffer.from(`--${boundary}--\r\n`))
+
+  return {
+    bytes: Buffer.concat(parts),
+    contentType: `multipart/form-data; boundary=${boundary}`,
+  }
 }
 
 const HEADER_VALUE = new RegExp(`^[\\t\\x20-\\x7e]{0,${MAX_HEADER_VALUE}}$`)
@@ -197,6 +313,9 @@ function encodeBody(
     }
     case "text":
       return loose(value, plan.arg)
+    case "binary":
+    case "multipart":
+      throw new PcpError("state", "An upload is not encoded as text.")
   }
 }
 
@@ -205,6 +324,7 @@ export function buildRequest(
   baseUrl: string,
   args: unknown,
   auth: Record<string, string>,
+  uploads: Uploads = {},
 ): BuiltRequest {
   if (args !== undefined && !isObject(args)) {
     throw invalid("The arguments must be an object.")
@@ -268,7 +388,7 @@ export function buildRequest(
     )
   }
 
-  let body: string | undefined
+  let body: string | Uint8Array<ArrayBuffer> | undefined
 
   if (plan.body) {
     const value = valueOf(plan.body.arg)
@@ -277,6 +397,37 @@ export function buildRequest(
       if (plan.body.required) {
         throw invalid(`Missing argument "${plan.body.arg}".`)
       }
+    } else if (
+      plan.body.encoding === "binary" ||
+      plan.body.encoding === "multipart"
+    ) {
+      let bytes: Buffer
+
+      if (plan.body.encoding === "binary") {
+        const file = uploads.body
+
+        if (!file) {
+          throw new PcpError(
+            "state",
+            `PCP did not read the file for "${plan.body.arg}"; nothing was sent.`,
+          )
+        }
+
+        bytes = file.bytes
+        headers["content-type"] = uploadType(plan.body.contentType, file)
+      } else {
+        const built = multipartBody(plan.body, value, uploads)
+        bytes = built.bytes
+        headers["content-type"] = built.contentType
+      }
+
+      if (bytes.length > MAX_UPLOAD_BODY_BYTES) {
+        throw invalid(
+          `The upload is larger than ${MAX_UPLOAD_BODY_BYTES / 1024 / 1024} MB.`,
+        )
+      }
+
+      body = asBytes(bytes)
     } else {
       body = encodeBody(plan.body, value)
 

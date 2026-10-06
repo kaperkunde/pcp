@@ -1,4 +1,5 @@
 import { BlockList, isIP } from "node:net"
+import os from "node:os"
 
 /**
  * Which addresses count as "public". An endpoint that only reaches public
@@ -62,6 +63,75 @@ export function isPublicAddress(address: string): boolean {
   }
 
   return !blocked.check(bare, family === 4 ? "ipv4" : "ipv6")
+}
+
+const loopback = new BlockList()
+loopback.addSubnet("127.0.0.0", 8, "ipv4")
+loopback.addSubnet("0.0.0.0", 8, "ipv4")
+loopback.addSubnet("::", 127, "ipv6") // unspecified and ::1
+
+function portFromEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name])
+  return Number.isInteger(value) && value > 0 && value < 65536
+    ? value
+    : fallback
+}
+
+/**
+ * The ports PCP itself listens on: the app (Next's PORT) and its own HTTP
+ * and HTTPS listeners (lib/core/network/edge.ts reads the same variables).
+ */
+export function pcpPorts(): number[] {
+  return [
+    portFromEnv("PORT", 3000),
+    portFromEnv("PCP_HTTP_PORT", 80),
+    portFromEnv("PCP_HTTPS_PORT", 443),
+  ]
+}
+
+/** The addresses of this machine's own network interfaces. */
+function interfaceAddresses(): Set<string> {
+  const found = new Set<string>()
+
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      found.add(entry.address.replace(/%.*$/, "").toLowerCase())
+    }
+  }
+
+  return found
+}
+
+/**
+ * Whether an address and port reach PCP itself: one of its ports on a
+ * loopback or unspecified address, or on an address of this machine. A
+ * request there would hand an assistant PCP's own pages, so it is refused
+ * even where private addresses are allowed. `extraPorts` adds listeners of
+ * PCP's own that are not in the environment (the browser's proxy).
+ */
+export function isOwnAddress(
+  address: string,
+  port: number,
+  extraPorts: readonly number[] = [],
+): boolean {
+  if (!pcpPorts().includes(port) && !extraPorts.includes(port)) {
+    return false
+  }
+
+  const bare = address
+    .replace(/%.*$/, "")
+    .replace(/^\[|\]$/g, "")
+    .toLowerCase()
+  const family = isIP(bare)
+
+  if (family === 0) {
+    return true
+  }
+
+  return (
+    loopback.check(bare, family === 4 ? "ipv4" : "ipv6") ||
+    interfaceAddresses().has(bare)
+  )
 }
 
 /** The host of a URL without the brackets an IPv6 literal carries. */

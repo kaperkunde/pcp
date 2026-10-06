@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import Link from "next/link"
 import { notFound } from "next/navigation"
 
 import { EndpointForm } from "@/components/endpoint-form"
@@ -52,6 +53,7 @@ export default async function ServerPage({
   const kind = asServerKind(server.kind)
   const endpoint = kind === "openapi"
   const mail = isMailKind(kind)
+  const browser = kind === "browser"
   const spec = endpoint
     ? await db().openApiSpec.findUnique({
         where: { serverId: server.id },
@@ -128,7 +130,16 @@ export default async function ServerPage({
         redirectUrl={redirectUrl}
       />
       <h2 className="text-lg">Settings</h2>
-      {mail ? (
+      {browser ? (
+        <p className="text-muted-foreground">
+          The browser&apos;s name, its tabs and the sign-ins it keeps are on the{" "}
+          <Link href="/browser" className="underline">
+            Browser
+          </Link>{" "}
+          page. Which sites each token may open is on the token&apos;s page,
+          with web fetch.
+        </p>
+      ) : mail ? (
         <MailAccountForm
           initial={{
             id: server.id,
@@ -173,9 +184,12 @@ export default async function ServerPage({
             readOnly: server.readOnly,
             publicOnly: server.publicOnly,
             authType:
-              server.authType === "header" || server.authType === "oauth"
+              server.authType === "header" ||
+              server.authType === "basic" ||
+              server.authType === "oauth"
                 ? server.authType
                 : "none",
+            authUsername: server.authUsername ?? "",
             authHeaderName: server.authHeaderName ?? "Authorization",
             authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
             authSecretId: server.authSecretId ?? "",

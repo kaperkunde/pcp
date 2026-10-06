@@ -322,6 +322,55 @@ describe("registering an endpoint from text", () => {
     expect(JSON.stringify(details)).not.toContain(secretKey.id)
   })
 
+  it("reads a user name and password as Basic on the Authorization header, and never the name or the secret", async () => {
+    const password = await createSecret(ctx, {
+      name: "Pets password",
+      value: "app-password",
+    })
+
+    // A password goes to an address the owner is shown, like any secret.
+    await expect(
+      prepareRegistration(ctx, {
+        name: "Pets",
+        spec: spec(api.origin),
+        authHeaderNames: ["Authorization"],
+        newSecretName: "Pets password to come",
+      }),
+    ).rejects.toThrow(/pass the base URL in url/)
+
+    const prepared = await prepareRegistration(ctx, {
+      name: "Pets",
+      spec: spec(api.origin),
+      baseUrl: `${api.origin}/api`,
+      authSecretId: password.id,
+      authHeaderNames: ["Authorization"],
+    })
+    const { id } = await createApprovedEndpoint(ctx, {
+      name: prepared.name,
+      url: prepared.url,
+      authType: "basic",
+      authUsername: "ada@example.com",
+      authSecretId: password.id,
+      endpoint: prepared.registration,
+    })
+    const details = await getEndpoint(scope, (await getServer(ctx, id)).slug)
+
+    expect(details).toMatchObject({
+      belongsTo: "owner",
+      authentication: {
+        type: "basic",
+        header: "Authorization",
+        headers: ["Authorization"],
+      },
+      publicOnly: true,
+    })
+    expect(JSON.stringify(details)).not.toContain(password.id)
+    expect(JSON.stringify(details)).not.toContain("ada@example.com")
+    expect(
+      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({ authType: "basic", authUsername: "ada@example.com" })
+  })
+
   it("notes a private address it can see, and does not look up names", async () => {
     // The test API is on 127.0.0.1.
     const literal = await prepareRegistration(ctx, {

@@ -26,6 +26,8 @@ let ctx: Awaited<ReturnType<typeof setupVault>>
 let valid: Set<string>
 /** What the token endpoint answers next. */
 let tokenAnswers: Array<[number, Record<string, unknown>]>
+/** What the authorization server publishes (RFC 8414); undefined: nothing. */
+let metadata: Record<string, unknown> | undefined
 
 const HTTP = { publicUrl: "http://pcp.lan:3000" }
 
@@ -114,8 +116,24 @@ beforeEach(async () => {
       },
     ],
   ]
+  metadata = undefined
   api = await startTestApi((req, res) => {
     const path = req.url.split("?")[0]
+
+    if (
+      path === "/.well-known/oauth-authorization-server" ||
+      path === "/.well-known/openid-configuration"
+    ) {
+      return metadata ? json(res, 200, metadata) : json(res, 404, {})
+    }
+
+    // RFC 7591: a client registers itself and is told its ID.
+    if (path === "/register") {
+      return json(res, 201, {
+        ...(JSON.parse(req.body) as Record<string, unknown>),
+        client_id: "dynamic-client",
+      })
+    }
 
     if (path === "/token") {
       const [status, body] = tokenAnswers.shift() ?? [500, {}]
@@ -316,6 +334,123 @@ describe("an OAuth API endpoint", () => {
     const signIn = await connect(id)
     expect(signIn.searchParams.get("client_id")).toBe("owner-client")
     expect((await getServer(ctx, id)).oauthConnectedAt).not.toBeNull()
+  })
+
+  describe("at a provider that lets apps register themselves", () => {
+    /** What such an authorization server publishes about itself. */
+    function published(overrides: Record<string, unknown> = {}) {
+      return {
+        issuer: api.origin,
+        authorization_endpoint: `${api.origin}/authorize`,
+        token_endpoint: `${api.origin}/token`,
+        registration_endpoint: `${api.origin}/register`,
+        response_types_supported: ["code"],
+        code_challenge_methods_supported: ["S256"],
+        token_endpoint_auth_methods_supported: ["none"],
+        ...overrides,
+      }
+    }
+
+    const asked = (path: string) =>
+      api.requests.filter((req) => req.url.split("?")[0] === path)
+    const noClient = { oauthClientId: null, oauthClientSecretValue: null }
+
+    it("registers PCP itself, signs in with that client, and renews with it", async () => {
+      metadata = published()
+      const { id } = await createEndpoint(ctx, input(noClient))
+
+      const signIn = await connect(id)
+      expect(signIn.origin + signIn.pathname).toBe(`${api.origin}/authorize`)
+      expect(signIn.searchParams.get("client_id")).toBe("dynamic-client")
+
+      // Registered once, with PCP's one redirect address.
+      expect(asked("/register")).toHaveLength(1)
+      expect(JSON.parse(asked("/register")[0]!.body)).toMatchObject({
+        redirect_uris: [oauthRedirectUrl(HTTP.publicUrl)],
+      })
+
+      let server = await getServer(ctx, id)
+      expect(server).toMatchObject({ status: "ok", oauthClientId: null })
+      const first = await callServerTool(ctx, server, "me", {}, HTTP)
+      expect(first.isError ?? false).toBe(false)
+      expect(api.requests.find((req) => req.url === "/api/me")).toBeDefined()
+
+      // The API stops taking the token: renewed as the client PCP registered.
+      valid = new Set(["at-2"])
+      tokenAnswers.push([
+        200,
+        { access_token: "at-2", token_type: "Bearer", expires_in: 3600 },
+      ])
+      server = await getServer(ctx, id)
+      const second = await callServerTool(ctx, server, "me", {}, HTTP)
+      expect(second.isError ?? false).toBe(false)
+      const renewal = asked("/token").at(-1)!
+      expect(
+        Object.fromEntries(new URLSearchParams(renewal.body)),
+      ).toMatchObject({
+        grant_type: "refresh_token",
+        refresh_token: "rt-1",
+        client_id: "dynamic-client",
+      })
+      // Only the first connection registered.
+      expect(asked("/register")).toHaveLength(1)
+    })
+
+    it("asks for a client when what it publishes names other addresses", async () => {
+      metadata = published({
+        authorization_endpoint: "https://elsewhere.example/authorize",
+        token_endpoint: "https://elsewhere.example/token",
+      })
+      const { id } = await createEndpoint(ctx, input(noClient))
+
+      await expect(startOAuth(ctx, id, HTTP)).rejects.toThrow(
+        /https:\/\/elsewhere\.example\/authorize.*not the addresses this endpoint was approved with/,
+      )
+      expect((await getServer(ctx, id)).status).toBe("client_required")
+      // PCP did not register where the owner did not approve.
+      expect(asked("/register")).toHaveLength(0)
+    })
+
+    it("asks for a client when the provider publishes nothing, or no registration endpoint", async () => {
+      const { id } = await createEndpoint(ctx, input(noClient))
+
+      await expect(startOAuth(ctx, id, HTTP)).rejects.toThrow(
+        /needs an OAuth client from you/,
+      )
+
+      metadata = published({ registration_endpoint: undefined })
+      await expect(startOAuth(ctx, id, HTTP)).rejects.toThrow(
+        /needs an OAuth client from you: it does not let apps register/,
+      )
+      expect(asked("/register")).toHaveLength(0)
+    })
+
+    it("does not read the metadata when the owner brought a client", async () => {
+      metadata = published()
+      const { id } = await createEndpoint(ctx, input())
+
+      const signIn = await connect(id)
+      expect(signIn.searchParams.get("client_id")).toBe("owner-client")
+      expect(asked("/register")).toHaveLength(0)
+      expect(
+        api.requests.filter((req) => req.url.includes(".well-known")),
+      ).toHaveLength(0)
+    })
+
+    it("does not reach a private address to find out, for an endpoint that keeps to public ones", async () => {
+      metadata = published()
+      const { id } = await createEndpoint(
+        ctx,
+        input({ ...noClient, publicOnly: true }),
+      )
+
+      await expect(startOAuth(ctx, id, HTTP)).rejects.toThrow(
+        /needs an OAuth client from you/,
+      )
+      expect(
+        api.requests.filter((req) => req.url.includes(".well-known")),
+      ).toHaveLength(0)
+    })
   })
 
   it("keeps the approved addresses when the schema moves them, and drops the tokens when the owner takes new ones", async () => {

@@ -4,7 +4,9 @@
  * PCP uses (Mailbox/get, Email/query, Email/get, Email/set, Thread/get,
  * Identity/get, EmailSubmission/set) well enough to check what PCP sends
  * and what it makes of the answers, and records every request with its
- * Authorization header.
+ * Authorization header. Like a real server (RFC 8621 7.5), an
+ * EmailSubmission/set with onSuccessUpdateEmail is answered twice under its
+ * call id: its own answer, then the Email/set the server ran for it.
  */
 
 type Json = Record<string, unknown>
@@ -13,7 +15,7 @@ export type FakeAttachment = {
   blobId: string
   name: string
   type: string
-  content: string
+  content: string | Buffer
 }
 
 export type FakeEmail = {
@@ -51,12 +53,22 @@ export type FakeJmapOptions = {
   authorize: (authorization: string | undefined) => boolean
   /** Overrides the apiUrl the session names (to test the origin rule). */
   apiUrl?: string
+  /** Overrides the uploadUrl the session names; null leaves it out. */
+  uploadUrl?: string | null
+  /**
+   * What the Email/set a submission's onSuccessUpdateEmail runs does:
+   * "apply" (the default), "refuse" (it answers notUpdated, as a server that
+   * cannot move the sent email does), or "error" (that call fails).
+   */
+  onSuccessUpdate?: "apply" | "refuse" | "error"
 }
 
 export type FakeJmap = {
   base: string
   emails: FakeEmail[]
   sent: Array<{ emailId: string; identityId: string }>
+  /** Blobs uploaded, in order: what an email to send attaches. */
+  uploads: Array<{ blobId: string; type: string; content: Buffer }>
   requests: FakeRequest[]
   /** Answers a request, or null when its path is not the server's. */
   handle: (request: {
@@ -64,7 +76,9 @@ export type FakeJmap = {
     url: string
     headers: Record<string, string | string[] | undefined>
     body: string
-  }) => { status: number; type: string; body: string } | null
+    /** The body as it came, for an upload. */
+    bytes?: Buffer
+  }) => { status: number; type: string; body: string | Buffer } | null
 }
 
 export const FAKE_MAILBOXES = [
@@ -103,7 +117,9 @@ export function fakeEmails(): FakeEmail[] {
           blobId: "blob-png",
           name: "drawing.png",
           type: "image/png",
-          content: "\u0089PNG",
+          content: Buffer.from([
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13,
+          ]),
         },
       ],
     },
@@ -293,8 +309,11 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
   const submission = options.submission ?? true
   const emails = fakeEmails()
   const sent: FakeJmap["sent"] = []
+  const uploads: FakeJmap["uploads"] = []
   const requests: FakeRequest[] = []
   let created = 0
+  /** Answers to calls the server made itself, added after the one that asked. */
+  const pendingImplicit: Array<[string, Json]> = []
 
   function json(status: number, body: unknown) {
     return { status, type: "application/json", body: JSON.stringify(body) }
@@ -402,6 +421,17 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
             inReplyTo: (draft.inReplyTo as string[]) ?? null,
             references: (draft.references as string[]) ?? null,
             text: typeof body === "string" ? body : "",
+            attachments: (Array.isArray(draft.attachments)
+              ? (draft.attachments as Json[])
+              : []
+            ).map((part) => ({
+              blobId: String(part.blobId),
+              name: String(part.name ?? ""),
+              type: String(part.type ?? ""),
+              content:
+                uploads.find((upload) => upload.blobId === part.blobId)
+                  ?.content ?? "",
+            })),
           })
           ids.set(key, id)
           ;(result.created as Json)[key] = { id, threadId: `t-new-${created}` }
@@ -425,6 +455,14 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
         }
 
         const result: Json = { accountId, created: {}, notCreated: {} }
+        const onSuccess = args.onSuccessUpdateEmail as Json | undefined
+        const implicit: Json = {
+          accountId,
+          oldState: "s1",
+          newState: "s2",
+          updated: {},
+          notUpdated: {},
+        }
 
         for (const [key, value] of Object.entries(
           (args.create as Json) ?? {},
@@ -449,10 +487,29 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
             identityId: String(submissionArgs.identityId),
           })
           ;(result.created as Json)[key] = { id: `sub-${sent.length}` }
-          const update = (args.onSuccessUpdateEmail as Json | undefined)?.[
-            `#${key}`
-          ]
-          if (update) applyPatch(email, update as Json)
+          const update = onSuccess?.[`#${key}`]
+
+          if (!update) {
+            continue
+          }
+
+          if ((options.onSuccessUpdate ?? "apply") === "apply") {
+            applyPatch(email, update as Json)
+            ;(implicit.updated as Json)[email.id] = null
+          } else {
+            ;(implicit.notUpdated as Json)[email.id] = {
+              type: "forbidden",
+              description: "The Sent mailbox is read-only.",
+            }
+          }
+        }
+
+        if (onSuccess && Object.keys(result.created as Json).length > 0) {
+          pendingImplicit.push(
+            options.onSuccessUpdate === "error"
+              ? ["error", { type: "serverFail" }]
+              : ["Email/set", implicit],
+          )
         }
 
         return [name, result]
@@ -466,6 +523,7 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
     base,
     emails,
     sent,
+    uploads,
     requests,
     handle(request) {
       const url = new URL(request.url, "http://fake")
@@ -476,12 +534,19 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
 
       const header = request.headers.authorization
       const authorization = Array.isArray(header) ? header[0] : header
+      const contentType = String(request.headers["content-type"] ?? "")
+      const isUpload = url.pathname.startsWith(`${base}/upload/`)
       let body: unknown = null
 
-      try {
-        body = request.body ? JSON.parse(request.body) : null
-      } catch {
-        body = request.body
+      if (isUpload) {
+        // Recorded by size: the bytes are kept in uploads.
+        body = `${(request.bytes ?? Buffer.from(request.body)).length} bytes`
+      } else {
+        try {
+          body = request.body ? JSON.parse(request.body) : null
+        } catch {
+          body = request.body
+        }
       }
 
       requests.push({
@@ -528,7 +593,9 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
           username: "ada@example.com",
           apiUrl: options.apiUrl ?? `${base}/api`,
           downloadUrl: `${origin}${base}/download/{accountId}/{blobId}/{name}?type={type}`,
-          uploadUrl: `${base}/upload/{accountId}`,
+          ...(options.uploadUrl === null
+            ? {}
+            : { uploadUrl: options.uploadUrl ?? `${base}/upload/{accountId}` }),
           eventSourceUrl: `${base}/events`,
           state: "s1",
         })
@@ -545,13 +612,38 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
         const ids = new Map<string, string>()
         const methodResponses = (
           payload.methodCalls as Array<[string, Json, string]>
-        ).map(([name, args, id]) => {
+        ).flatMap(([name, args, id]) => {
           const [answerName, answer] = call(name, args, answers, ids)
           answers.set(id, answer)
-          return [answerName, answer, id]
+          const implicit = pendingImplicit.splice(0)
+
+          return [
+            [answerName, answer, id],
+            ...implicit.map(([implicitName, implicitAnswer]) => [
+              implicitName,
+              implicitAnswer,
+              id,
+            ]),
+          ]
         })
 
         return json(200, { methodResponses, sessionState: "s1" })
+      }
+
+      const upload = new RegExp(`^${base}/upload/([^/]+)$`).exec(url.pathname)
+
+      if (upload && request.method === "POST") {
+        if (decodeURIComponent(upload[1]!) !== accountId) {
+          return json(404, { type: "about:blank", status: 404 })
+        }
+
+        const content = request.bytes ?? Buffer.from(request.body)
+        const blobId = `blob-up-${uploads.length + 1}`
+        const type =
+          contentType.split(";")[0]!.trim() || "application/octet-stream"
+        uploads.push({ blobId, type, content })
+
+        return json(201, { accountId, blobId, type, size: content.length })
       }
 
       const download = new RegExp(`^${base}/download/([^/]+)/([^/]+)/`).exec(

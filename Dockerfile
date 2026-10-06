@@ -48,18 +48,37 @@ FROM base AS runner
 WORKDIR /app
 
 # PCP runs as an unprivileged user, so its own HTTPS listeners use ports
-# above 1024; the compose file maps 80 and 443 onto them.
+# above 1024; the compose file maps 80 and 443 onto them. PCP_CONTAINER lets
+# Settings say how a container is updated (lib/server/install-kind.ts).
 ENV NODE_ENV=production \
+    PCP_CONTAINER=1 \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
     PCP_DATA_DIR=/data \
     PCP_HTTP_PORT=8080 \
     PCP_HTTPS_PORT=8443
 
+# /run/pcp-sandbox is where PCP listens for run_code's sandbox, when
+# docker-compose.sandbox.yaml adds it: a volume there takes this directory's
+# owner and mode, so only PCP and its group reach the socket.
 RUN groupadd --system --gid 1001 nodejs \
   && useradd --system --uid 1001 --gid nodejs pcp \
-  && mkdir -p /data \
-  && chown pcp:nodejs /data
+  && mkdir -p /data /run/pcp-sandbox \
+  && chown pcp:nodejs /data /run/pcp-sandbox \
+  && chmod 0770 /run/pcp-sandbox
+
+# The browser (lib/core/browser/): Playwright's build of Chromium and the
+# libraries it needs, the version the app's playwright-core drives
+# (scripts/docker.test.ts keeps the two the same). It only runs once the
+# owner adds the browser and a page is opened. An unprivileged container
+# has no user namespaces for Chromium's own sandbox, so it runs without
+# one; PCP's proxy and address checks are not that sandbox's job.
+ARG PLAYWRIGHT_VERSION=1.63.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PCP_BROWSER_SANDBOX=off
+RUN npx -y --no-update-notifier playwright-core@${PLAYWRIGHT_VERSION} install --with-deps chromium \
+  && chmod -R a+rX /ms-playwright \
+  && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache
 
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=pcp:nodejs /app/.next/standalone ./

@@ -12,6 +12,10 @@ directories:
 files:
   - main.mjs
   - settings.mjs
+  - touch-id.mjs
+  - touch-id-store.mjs
+  - preload.cjs
+  - updates.mjs
   - package.json
 extraResources:
   - from: server
@@ -21,16 +25,42 @@ extraResources:
   # separately.
   - from: server/node_modules
     to: server/node_modules
+  # The Touch ID keychain module, built by scripts/keychain.mjs (an empty
+  # folder off macOS); touch-id.mjs loads it from resources/native.
+  - from: native-staged
+    to: native
 # The wrapper has no native dependencies of its own; the server's are handled
 # when it is staged.
 npmRebuild: false
-publish: null
+# Where the app finds its updates (electron-updater, main.mjs): the latest
+# GitHub Release, under the stable names the workflow uploads. dist.mjs
+# passes --publish never, so nothing is uploaded from here; the update files
+# (latest-<arch>*.yml, one per channel) are written beside the installers and
+# the workflow attaches them.
+publish:
+  provider: generic
+  url: https://github.com/kaperkunde/pcp/releases/latest/download
+# Flipped in the packaged binary before it is signed. The keychain gives the
+# Touch ID key's encryption key to this app's code (touch-id.mjs); these stop
+# another program from running its own code as this app: as plain Node, with
+# NODE_OPTIONS, or through the inspector. The utility process the server runs
+# in does not need any of them. Cookie encryption puts the window's session
+# cookie under that same keychain key instead of in plain text next to the
+# vault; it is one way (cookies written encrypted cannot be read with it off
+# again), and a cookie from before it is encrypted when it is next written.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableCookieEncryption: true
 
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.png
   target:
     - target: dmg
+    # The updater installs from the zip; the dmg is for a first install.
+    - target: zip
   artifactName: PCP-mac-${arch}.${ext}
   hardenedRuntime: true
   gatekeeperAssess: false

@@ -38,7 +38,7 @@ export default async function LoginPage({
         )
       }
     >
-      <LoginForm username={vault?.name ?? ""} />
+      <LoginForm username={vault?.name ?? ""} restored={restored} />
     </AuthShell>
   )
 }

@@ -1,6 +1,7 @@
 import {
   auth,
   Client,
+  discoverAuthorizationServerMetadata,
   SdkHttpError,
   StreamableHTTPClientTransport,
   UnauthorizedError,
@@ -19,6 +20,8 @@ import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { callBrowserTool } from "./browser/call"
+import { syncBrowserTools } from "./browser/server"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { isPcpError, PcpError } from "./errors"
 import { callMailTool, syncMailTools } from "./mail/accounts"
@@ -44,7 +47,8 @@ import {
   renderAuthValue,
   setServerStatus,
 } from "./servers"
-import type { ResultKeeper } from "./tool-results"
+import { resolveHandles } from "./result-handles"
+import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
 import { PCP_VERSION } from "./version"
 
 /**
@@ -296,18 +300,23 @@ export class PcpOAuthProvider implements OAuthClientProvider {
   }
 
   async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
-    // An endpoint's sign-in is the one its owner approved, never discovered.
+    const saved = this.interactive
+      ? ((await this.readFlowState())?.discovery ?? this.pendingDiscovery)
+      : this.pendingDiscovery
+    // An endpoint's sign-in is the one its owner approved, never discovered:
+    // what an authorization server published is taken only when it names
+    // those same addresses (verifiedEndpointDiscovery), and adds what the
+    // schema cannot say, such as where PCP registers itself.
     const fixed = endpointDiscovery(this.server)
 
     if (fixed) {
-      return fixed
+      return saved &&
+        endpointAddressesMatch(saved.authorizationServerMetadata, this.server)
+        ? saved
+        : fixed
     }
 
-    if (this.interactive) {
-      return (await this.readFlowState())?.discovery ?? this.pendingDiscovery
-    }
-
-    return this.pendingDiscovery
+    return saved
   }
 
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
@@ -480,6 +489,83 @@ export function endpointDiscovery(
 }
 
 /**
+ * Whether metadata an authorization server published names the sign-in and
+ * token addresses an endpoint was approved with, and no others. PCP signs in
+ * only where the owner saw, so this is the test for taking anything else the
+ * metadata says.
+ */
+export function endpointAddressesMatch(
+  metadata:
+    { authorization_endpoint?: string; token_endpoint?: string } | undefined,
+  server: Pick<McpServer, "oauthAuthorizationUrl" | "oauthTokenUrl">,
+): boolean {
+  const same = (given: string | undefined, approved: string | null) => {
+    try {
+      return (
+        given !== undefined &&
+        approved !== null &&
+        new URL(given).href === new URL(approved).href
+      )
+    } catch {
+      return false
+    }
+  }
+
+  return (
+    same(metadata?.authorization_endpoint, server.oauthAuthorizationUrl) &&
+    same(metadata?.token_endpoint, server.oauthTokenUrl)
+  )
+}
+
+/**
+ * An endpoint's sign-in, with what its authorization server publishes about
+ * itself (RFC 8414) when that agrees with the addresses the owner approved:
+ * the registration endpoint, the client authentication methods, the scopes.
+ * That is how PCP finds out a provider lets it register itself, which an
+ * OpenAPI schema has no way to say. Metadata that names other addresses is
+ * not used; `elsewhere` says where it pointed, for the owner. Anything that
+ * goes wrong reading it leaves the approved sign-in as it was. The request
+ * goes under the endpoint's address rule, like its other OAuth requests.
+ */
+export async function verifiedEndpointDiscovery(
+  server: McpServer,
+  fixed: OAuthDiscoveryState,
+): Promise<{
+  discovery: OAuthDiscoveryState
+  elsewhere: { authorization: string; token: string } | null
+}> {
+  let metadata: Awaited<ReturnType<typeof discoverAuthorizationServerMetadata>>
+
+  try {
+    metadata = await discoverAuthorizationServerMetadata(
+      fixed.authorizationServerUrl,
+      { fetchFn: oauthFetch(server) },
+    )
+  } catch {
+    return { discovery: fixed, elsewhere: null }
+  }
+
+  if (!metadata) {
+    return { discovery: fixed, elsewhere: null }
+  }
+
+  if (endpointAddressesMatch(metadata, server)) {
+    return {
+      discovery: { ...fixed, authorizationServerMetadata: metadata },
+      elsewhere: null,
+    }
+  }
+
+  return {
+    discovery: fixed,
+    elsewhere: {
+      authorization: String(metadata.authorization_endpoint),
+      token: String(metadata.token_endpoint),
+    },
+  }
+}
+
+/**
  * How PCP talks to an endpoint's authorization server: under the endpoint's
  * address rule, like its calls, since the token address came from a schema.
  * Undefined means the SDK's own fetch.
@@ -554,6 +640,16 @@ async function endpointToken(
       }
 
       throw new UnauthorizedError(signIn)
+    }
+
+    // A client PCP registered itself renews with the methods its server
+    // published; the owner's client keeps the approved sign-in as it is.
+    const fixed = server.oauthClientId ? undefined : endpointDiscovery(server)
+
+    if (fixed) {
+      await provider.saveDiscoveryState(
+        (await verifiedEndpointDiscovery(server, fixed)).discovery,
+      )
     }
 
     // A refresh token is spent on the way: the SDK saves the new set, or
@@ -921,6 +1017,10 @@ export async function syncServerTools(
     return syncEndpointTools(server, { byOwner })
   }
 
+  if (server.kind === "browser") {
+    return syncBrowserTools(server)
+  }
+
   if (isMailKind(server.kind)) {
     let signIn: MailCredential
 
@@ -986,7 +1086,7 @@ async function callEndpoint(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl }: { publicUrl: string },
+  { publicUrl, open }: { publicUrl: string; open?: ResultOpener },
 ): Promise<CallToolResult> {
   try {
     const { headers, redact } = await credential(ctx, server, { publicUrl })
@@ -994,6 +1094,7 @@ async function callEndpoint(
     return await callEndpointTool(server, toolName, args, {
       authHeaders: headers,
       redact,
+      open,
       ...(server.authType === "oauth"
         ? {
             renew: async () =>
@@ -1019,15 +1120,44 @@ export async function callServerTool(
   args: Record<string, unknown>,
   {
     publicUrl,
+    tokenId,
     keep,
+    keepBytes,
+    open,
   }: {
     publicUrl: string
+    /** The token the call is made for: the browser drives tabs as it. */
+    tokenId?: string
     /** Keeps a long text whole for read_result (mail bodies, attachments). */
     keep?: ResultKeeper
+    /** Keeps a file's bytes for the token (a mail attachment read). */
+    keepBytes?: BytesKeeper
+    /**
+     * Opens a result the token kept, for the handles in the arguments
+     * ({"$result": id}): they are replaced by what they stand for before
+     * anything is sent, and an id the token has no result for is refused.
+     */
+    open?: ResultOpener
   },
 ): Promise<CallToolResult> {
+  if (server.kind === "browser") {
+    if (!tokenId) {
+      throw new PcpError("state", "The browser is used through a token.")
+    }
+
+    return callBrowserTool(
+      ctx,
+      server,
+      toolName,
+      open ? await resolveHandles(args, open) : args,
+      { tokenId, publicUrl },
+    )
+  }
+
+  // The endpoint resolves its own handles: an upload's file fields take
+  // the kept file's bytes, not its base64.
   if (server.kind === "openapi") {
-    return callEndpoint(ctx, server, toolName, args, { publicUrl })
+    return callEndpoint(ctx, server, toolName, args, { publicUrl, open })
   }
 
   if (isMailKind(server.kind)) {
@@ -1051,16 +1181,23 @@ export async function callServerTool(
       )
     }
 
-    return callMailTool(server, toolName, args, { credential: signIn, keep })
+    return callMailTool(server, toolName, args, {
+      credential: signIn,
+      keep,
+      keepBytes,
+      open,
+    })
   }
 
+  // Before a connection is opened: an unknown id never reaches the server.
+  const resolved = open ? await resolveHandles(args, open) : args
   let connection: UpstreamConnection | null = null
 
   try {
     connection = await openUpstream(ctx, server, { publicUrl })
 
     return await connection.client.callTool(
-      { name: toolName, arguments: args },
+      { name: toolName, arguments: resolved },
       { timeout: CALL_TIMEOUT_MS },
     )
   } catch (error) {

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto"
 
+import { asBytes } from "../crypto"
+
 import { describeFetchError, discard, readCapped } from "../openapi/http"
 import { send } from "../openapi/transport"
 import { PCP_VERSION } from "../version"
@@ -13,7 +15,7 @@ import {
   MAX_MAILBOXES,
   MAX_THREAD_EMAILS,
 } from "./limits"
-import { bareType, charsetOf, decodeText, isTextType } from "./text"
+import { bareType, charsetOf } from "../media-types"
 import {
   MAILBOX_ROLES,
   MailAuthError,
@@ -57,6 +59,8 @@ export type JmapSession = {
   apiUrl: string
   /** The download URL template, made absolute; null when none was named. */
   downloadUrl: string | null
+  /** The upload URL template, made absolute; null when none was named. */
+  uploadUrl: string | null
   accountId: string
   /** Whether this account may send. */
   submission: boolean
@@ -88,7 +92,13 @@ function where(url: string): string {
  */
 async function exchange(
   url: string,
-  init: { method: "GET" | "POST"; body?: string; accept?: string },
+  init: {
+    method: "GET" | "POST"
+    /** JSON text, or bytes sent as `contentType` (an upload). */
+    body?: string | Buffer
+    contentType?: string
+    accept?: string
+  },
   credential: MailCredential,
   maxBytes = MAX_JMAP_RESPONSE_BYTES,
 ): Promise<{ status: number; bytes: Buffer; type: string }> {
@@ -102,11 +112,17 @@ async function exchange(
           accept: init.accept ?? "application/json",
           "user-agent": USER_AGENT,
           ...(init.body !== undefined
-            ? { "content-type": "application/json; charset=utf-8" }
+            ? {
+                "content-type":
+                  init.contentType ?? "application/json; charset=utf-8",
+              }
             : {}),
           ...credential.headers,
         },
-        body: init.body,
+        body:
+          init.body === undefined || typeof init.body === "string"
+            ? init.body
+            : asBytes(init.body),
         signal: AbortSignal.timeout(MAIL_CALL_TIMEOUT_MS),
       })
     } catch (error) {
@@ -242,6 +258,10 @@ export async function fetchJmapSession(
       typeof session.downloadUrl === "string"
         ? downloadTemplate(session.downloadUrl, sessionUrl)
         : null,
+    uploadUrl:
+      typeof session.uploadUrl === "string"
+        ? downloadTemplate(session.uploadUrl, sessionUrl)
+        : null,
     accountId,
     submission:
       SUBMISSION in capabilities &&
@@ -250,8 +270,8 @@ export async function fetchJmapSession(
 }
 
 /**
- * The download template made absolute, when it is on the session's origin.
- * Its {variables} are kept as they are; they are filled per download.
+ * A download or upload template made absolute, when it is on the session's
+ * origin. Its {variables} are kept as they are; they are filled per use.
  */
 function downloadTemplate(template: string, sessionUrl: string): string | null {
   const probe = template.replace(/\{[^{}]*\}/g, "x")
@@ -268,7 +288,15 @@ function downloadTemplate(template: string, sessionUrl: string): string | null {
 type MethodCall = [string, Json, string]
 type MethodResponse = [string, Json, string]
 
-/** One JMAP request: its method calls, answered by call id. */
+/**
+ * One JMAP request: its method calls, answered by call id. A server can add
+ * answers of its own under a call's id: for an EmailSubmission/set with
+ * onSuccessUpdateEmail, RFC 8621 (7.5) has it run an Email/set and answer it
+ * after the submission's own answer, with the same id. A call's answer is the
+ * first one under its id named after its method (or an error); any other is
+ * kept apart, under implicitKey, so it never stands in for the call's answer,
+ * and a failure there does not read as the call failing.
+ */
 export async function jmapRequest(
   apiUrl: string,
   credential: MailCredential,
@@ -315,9 +343,20 @@ export async function jmapRequest(
     }
 
     const [name, args, id] = entry as MethodResponse
+    const call = calls.find((candidate) => candidate[2] === id)
+
+    if (
+      typeof id === "string" &&
+      (byId.has(id) || (name !== "error" && name !== call?.[0]))
+    ) {
+      if (isObject(args)) {
+        byId.set(implicitKey(id, name), args)
+      }
+
+      continue
+    }
 
     if (name === "error") {
-      const call = calls.find((candidate) => candidate[2] === id)
       const type = typeof args?.type === "string" ? args.type : "an error"
       const description =
         typeof args?.description === "string" ? `: ${args.description}` : ""
@@ -333,6 +372,11 @@ export async function jmapRequest(
   }
 
   return byId
+}
+
+/** Where jmapRequest keeps an answer the server added under a call's id. */
+export function implicitKey(id: string, method: string): string {
+  return `${id} ${method}`
 }
 
 function answerOf(answers: Map<string, Json>, id: string): Json {
@@ -761,6 +805,18 @@ export function openJmapBackend(
         email: identity.email,
       }
       const onSuccess: Json = { "keywords/$draft": null }
+      // Uploaded first: a failed upload leaves nothing behind to clean up.
+      const attached: Json[] = []
+
+      for (const attachment of input.attachments ?? []) {
+        const blob = await upload(attachment)
+        attached.push({
+          blobId: blob.blobId,
+          type: blob.type ?? attachment.type,
+          name: attachment.name,
+          disposition: "attachment",
+        })
+      }
 
       if (drafts && sent) {
         onSuccess[`mailboxIds/${String(drafts.id)}`] = null
@@ -786,6 +842,7 @@ export function openJmapBackend(
                   ...(inReplyTo.length ? { inReplyTo, references } : {}),
                   bodyValues: { body: { value: input.text } },
                   textBody: [{ partId: "body", type: "text/plain" }],
+                  ...(attached.length ? { attachments: attached } : {}),
                 },
               },
             },
@@ -828,15 +885,43 @@ export function openJmapBackend(
         )
       }
 
+      // The email has gone. Whether it left Drafts for Sent is the server's
+      // own Email/set, answered under the submission's id.
+      const draftId = typeof draft.id === "string" ? draft.id : null
+      const filed = answers.get(implicitKey("s", "Email/set"))
+      const notFiled =
+        answers.has(implicitKey("s", "error")) ||
+        (isObject(filed?.notUpdated) &&
+          draftId !== null &&
+          draftId in filed.notUpdated)
+
+      // A reply marks the email it answers, as mail apps do; the email has
+      // gone whatever happens here, so a refusal is reported, not thrown.
+      let answered: boolean | undefined
+
+      if (input.inReplyTo) {
+        try {
+          await setEmail(input.inReplyTo, { "keywords/$answered": true })
+          answered = true
+        } catch {
+          answered = false
+        }
+      }
+
       return {
-        id: typeof draft.id === "string" ? draft.id : null,
+        id: draftId,
         messageId,
         from,
         to: input.to,
         cc: input.cc,
         bcc: input.bcc,
         subject: input.subject,
-        savedTo: sent ? String(sent.name ?? "Sent") : String(home.name ?? ""),
+        // Left in Drafts when the server would not move it.
+        savedTo:
+          sent && !(drafts && notFiled)
+            ? String(sent.name ?? "Sent")
+            : String(home.name ?? ""),
+        ...(answered !== undefined ? { answered } : {}),
       }
     },
 
@@ -913,12 +998,9 @@ export function openJmapBackend(
       const size = typeof part.size === "number" ? part.size : 0
       const meta = { name, type, size }
 
-      // Only text is passed on, so nothing else is downloaded.
-      if (!isTextType(type)) {
-        return { ...meta, text: null }
-      }
+      const downloaded = await download(part, meta, maxBytes)
 
-      return { ...meta, ...(await download(part, meta, maxBytes)) }
+      return { ...meta, size: downloaded.bytes.length, ...downloaded }
     },
 
     async close() {
@@ -926,12 +1008,60 @@ export function openJmapBackend(
     },
   }
 
-  /** The attachment's bytes as text, when it is small enough and allowed. */
+  /** One attachment to send, uploaded as a blob; its id and type. */
+  async function upload(attachment: {
+    name: string
+    type: string
+    bytes: Buffer
+  }): Promise<{ blobId: string; type: string | null }> {
+    if (!config.uploadUrl) {
+      throw new MailRequestError(
+        "This JMAP server offers no uploads, so PCP cannot send attachments from it.",
+      )
+    }
+
+    const url = config.uploadUrl.replace(/\{(\w+)\}/g, (_, name: string) =>
+      name === "accountId" ? encodeURIComponent(accountId) : "",
+    )
+
+    if (!onSameOrigin(url, apiUrl)) {
+      throw new MailRequestError(
+        "The upload address is not on the mail server.",
+      )
+    }
+
+    const { status, bytes } = await exchange(
+      url,
+      { method: "POST", body: attachment.bytes, contentType: attachment.type },
+      credential,
+    )
+
+    if (status < 200 || status >= 300) {
+      throw new MailRequestError(
+        `The mail server did not take the attachment ${attachment.name} (HTTP ${status}); nothing was sent.`,
+      )
+    }
+
+    const answer = parseJson(bytes, "The upload answer")
+
+    if (typeof answer.blobId !== "string" || answer.blobId === "") {
+      throw new MailRequestError(
+        "The mail server's upload answer names no blob; nothing was sent.",
+      )
+    }
+
+    return {
+      blobId: answer.blobId,
+      type: typeof answer.type === "string" ? answer.type : null,
+    }
+  }
+
+  /** The attachment's bytes, when it is small enough. */
   async function download(
     part: Json,
     meta: { name: string | null; type: string; size: number },
     maxBytes: number,
-  ): Promise<{ text: string }> {
+  ): Promise<{ bytes: Buffer; charset: string | null }> {
     if (!config.downloadUrl) {
       throw new MailRequestError("The JMAP server offers no downloads.")
     }
@@ -979,7 +1109,7 @@ export function openJmapBackend(
       (typeof part.charset === "string" ? part.charset : null) ??
       charsetOf(meta.type)
 
-    return { text: decodeText(bytes, charset) }
+    return { bytes, charset }
   }
 }
 

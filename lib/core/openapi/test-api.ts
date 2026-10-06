@@ -16,6 +16,8 @@ export type Recorded = {
   url: string
   headers: IncomingMessage["headers"]
   body: string
+  /** The body as it came, for bytes that are not UTF-8 text. */
+  bytes: Buffer
 }
 
 export type TestApi = {
@@ -40,6 +42,7 @@ export async function startTestApi(
         url: req.url ?? "",
         headers: req.headers,
         body: Buffer.concat(chunks).toString("utf8"),
+        bytes: Buffer.concat(chunks),
       }
       requests.push(recorded)
       handler(recorded, res)

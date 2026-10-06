@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import { createFakeJmap, type FakeJmap } from "./fake-jmap"
-import { fetchJmapSession, jmapRequest, openJmapBackend } from "./jmap"
+import {
+  fetchJmapSession,
+  implicitKey,
+  jmapRequest,
+  openJmapBackend,
+} from "./jmap"
 import {
   MailAuthError,
   MailRequestError,
@@ -71,6 +76,7 @@ describe("the session", () => {
     expect(session).toEqual({
       apiUrl: `${origin}/jmap/api`,
       downloadUrl: `${origin}/jmap/download/{accountId}/{blobId}/{name}?type={type}`,
+      uploadUrl: `${origin}/jmap/upload/{accountId}`,
       accountId: "acct-1",
       submission: true,
     })
@@ -79,6 +85,18 @@ describe("the session", () => {
       path: "/jmap/session",
       authorization: BASIC,
     })
+  })
+
+  it("takes an upload address only on the session's origin", async () => {
+    const { sessionUrl } = await serve({
+      uploadUrl: "https://elsewhere.example.com/upload/{accountId}",
+    })
+    expect((await fetchJmapSession(sessionUrl, basic())).uploadUrl).toBeNull()
+
+    const none = await serve({ uploadUrl: null })
+    expect(
+      (await fetchJmapSession(none.sessionUrl, basic())).uploadUrl,
+    ).toBeNull()
   })
 
   it("says when the account may not send", async () => {
@@ -224,6 +242,36 @@ describe("requests", () => {
     ).rejects.toBeInstanceOf(MailTransportError)
   })
 
+  it("keeps an answer the server adds under a call's id apart from the call's own", async () => {
+    // RFC 8621 7.5: a submission's onSuccessUpdateEmail is answered by an
+    // Email/set of the server's, under the submission's call id, after it.
+    api = await startTestApi((_, res) => {
+      res.setHeader("content-type", "application/json")
+      res.end(
+        JSON.stringify({
+          methodResponses: [
+            ["EmailSubmission/set", { created: { send: { id: "s1" } } }, "s"],
+            ["Email/set", { updated: { e9: null } }, "s"],
+            ["error", { type: "serverFail" }, "s"],
+          ],
+        }),
+      )
+    })
+
+    const answers = await jmapRequest(`${api.origin}/api`, basic(), [
+      ["EmailSubmission/set", {}, "s"],
+    ])
+
+    expect(answers.get("s")).toEqual({ created: { send: { id: "s1" } } })
+    expect(answers.get(implicitKey("s", "Email/set"))).toEqual({
+      updated: { e9: null },
+    })
+    // A failure of the server's own call is not the submission failing.
+    expect(answers.get(implicitKey("s", "error"))).toEqual({
+      type: "serverFail",
+    })
+  })
+
   it("says when the server cannot be reached", async () => {
     const { sessionUrl } = await serve()
     await api!.close()
@@ -315,7 +363,7 @@ describe("the mail tools' work", () => {
     })
     expect(plain.attachments).toEqual([
       { id: "blob-csv", name: "parts.csv", type: "text/csv", size: 18 },
-      { id: "blob-png", name: "drawing.png", type: "image/png", size: 5 },
+      { id: "blob-png", name: "drawing.png", type: "image/png", size: 12 },
     ])
     expect(plain.messageId).toBe("engine-1@example.com")
 
@@ -371,6 +419,144 @@ describe("the mail tools' work", () => {
       text: "Thursday suits me.",
     })
     expect(stored.keywords.$draft).toBeUndefined()
+    // The email it answers is marked answered, as a mail app would.
+    expect(sent.answered).toBe(true)
+    expect(
+      fake.emails.find((email) => email.id === "e1")!.keywords,
+    ).toMatchObject({ $answered: true })
+  })
+
+  it("sends when the server will not move the email to Sent, and says it is left in Drafts", async () => {
+    for (const onSuccessUpdate of ["refuse", "error"] as const) {
+      const { mail, fake } = await backend({ onSuccessUpdate })
+
+      const sent = await mail.sendEmail!({
+        to: [{ name: null, email: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "The engine",
+        text: "Thursday suits me.",
+      })
+
+      expect(fake.sent).toEqual([{ emailId: sent.id, identityId: "ident-1" }])
+      expect(sent.savedTo).toBe("Drafts")
+      // Not a reply: nothing to mark.
+      expect(sent).not.toHaveProperty("answered")
+      await api!.close()
+      api = null
+    }
+  })
+
+  it("says so when the email it answers cannot be marked, and the email still goes", async () => {
+    const fake = createFakeJmap({ authorize: (header) => header === BASIC })
+    api = await startTestApi((request, res) => {
+      // The server refuses only the change that marks the original.
+      if (request.body.includes("keywords/$answered")) {
+        res.setHeader("content-type", "application/json")
+        res.end(
+          JSON.stringify({
+            methodResponses: [
+              ["Email/set", { notUpdated: { e1: { type: "forbidden" } } }, "s"],
+            ],
+          }),
+        )
+        return
+      }
+
+      const answer = fake.handle(request)
+      res.statusCode = answer?.status ?? 404
+      res.setHeader("content-type", answer?.type ?? "text/plain")
+      res.end(answer?.body ?? "")
+    })
+    const session = await fetchJmapSession(
+      `${api.origin}/jmap/session`,
+      basic(),
+    )
+    const mail = openJmapBackend({ ...session, from: null }, basic())
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: "e1",
+    })
+
+    expect(fake.sent).toHaveLength(1)
+    expect(sent).toMatchObject({ savedTo: "Sent", answered: false })
+  })
+
+  it("uploads each attachment, then sends the email carrying them", async () => {
+    const { mail, fake } = await backend()
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff,
+    ])
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "The drawing",
+      text: "Attached.",
+      attachments: [
+        { name: "drawing.png", type: "image/png", bytes: png },
+        { name: "parts.csv", type: "text/csv", bytes: Buffer.from("a,b\n") },
+      ],
+    })
+
+    const uploads = fake.requests.filter((request) =>
+      request.path.startsWith("/jmap/upload/"),
+    )
+    expect(uploads).toEqual([
+      expect.objectContaining({
+        method: "POST",
+        path: "/jmap/upload/acct-1",
+        authorization: BASIC,
+        body: "9 bytes",
+      }),
+      expect.objectContaining({ body: "4 bytes" }),
+    ])
+    expect(fake.uploads[0]).toMatchObject({ type: "image/png" })
+    expect(fake.uploads[0]!.content.equals(png)).toBe(true)
+
+    const stored = fake.emails.find((email) => email.id === sent.id)!
+    expect(stored.attachments).toEqual([
+      {
+        blobId: "blob-up-1",
+        name: "drawing.png",
+        type: "image/png",
+        content: png,
+      },
+      expect.objectContaining({ name: "parts.csv", type: "text/csv" }),
+    ])
+  })
+
+  it("sends nothing when it cannot upload an attachment", async () => {
+    const { mail, fake } = await backend({ uploadUrl: null })
+
+    await expect(
+      mail.sendEmail!({
+        to: [{ name: null, email: "x@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+        attachments: [
+          {
+            name: "a.bin",
+            type: "application/octet-stream",
+            bytes: Buffer.from([1]),
+          },
+        ],
+      }),
+    ).rejects.toThrow(/offers no uploads/)
+    expect(fake.sent).toEqual([])
+    expect(
+      fake.requests.some((request) =>
+        JSON.stringify(request.body).includes("Email/set"),
+      ),
+    ).toBe(false)
   })
 
   it("will not send from an account that may not", async () => {
@@ -410,7 +596,7 @@ describe("the mail tools' work", () => {
     )
   })
 
-  it("reads a text attachment and leaves other kinds alone", async () => {
+  it("downloads an attachment of any kind, as its bytes", async () => {
     const { mail, fake } = await backend()
 
     expect(
@@ -419,19 +605,26 @@ describe("the mail tools' work", () => {
       name: "parts.csv",
       type: "text/csv",
       size: 18,
-      text: "part,count\ncog,42\n",
+      bytes: Buffer.from("part,count\ncog,42\n"),
+      charset: null,
     })
     expect(fake.requests.at(-1)).toMatchObject({
       path: "/jmap/download/acct-1/blob-csv/parts.csv",
       authorization: BASIC,
     })
 
-    const before = fake.requests.length
-    expect(
-      (await mail.getAttachment("e1", "blob-png", { maxBytes: 1000 })).text,
-    ).toBeNull()
-    // Only the lookup: the image itself was never fetched.
-    expect(fake.requests.length).toBe(before + 1)
+    const png = await mail.getAttachment("e1", "blob-png", { maxBytes: 1000 })
+    expect(png).toMatchObject({
+      name: "drawing.png",
+      type: "image/png",
+      size: 12,
+    })
+    expect(png.bytes.subarray(0, 4)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    )
+    expect(fake.requests.at(-1)).toMatchObject({
+      path: "/jmap/download/acct-1/blob-png/drawing.png",
+    })
 
     await expect(
       mail.getAttachment("e1", "blob-csv", { maxBytes: 5 }),
