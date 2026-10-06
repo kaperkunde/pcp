@@ -288,7 +288,15 @@ function downloadTemplate(template: string, sessionUrl: string): string | null {
 type MethodCall = [string, Json, string]
 type MethodResponse = [string, Json, string]
 
-/** One JMAP request: its method calls, answered by call id. */
+/**
+ * One JMAP request: its method calls, answered by call id. A server can add
+ * answers of its own under a call's id: for an EmailSubmission/set with
+ * onSuccessUpdateEmail, RFC 8621 (7.5) has it run an Email/set and answer it
+ * after the submission's own answer, with the same id. A call's answer is the
+ * first one under its id named after its method (or an error); any other is
+ * kept apart, under implicitKey, so it never stands in for the call's answer,
+ * and a failure there does not read as the call failing.
+ */
 export async function jmapRequest(
   apiUrl: string,
   credential: MailCredential,
@@ -335,9 +343,20 @@ export async function jmapRequest(
     }
 
     const [name, args, id] = entry as MethodResponse
+    const call = calls.find((candidate) => candidate[2] === id)
+
+    if (
+      typeof id === "string" &&
+      (byId.has(id) || (name !== "error" && name !== call?.[0]))
+    ) {
+      if (isObject(args)) {
+        byId.set(implicitKey(id, name), args)
+      }
+
+      continue
+    }
 
     if (name === "error") {
-      const call = calls.find((candidate) => candidate[2] === id)
       const type = typeof args?.type === "string" ? args.type : "an error"
       const description =
         typeof args?.description === "string" ? `: ${args.description}` : ""
@@ -353,6 +372,11 @@ export async function jmapRequest(
   }
 
   return byId
+}
+
+/** Where jmapRequest keeps an answer the server added under a call's id. */
+export function implicitKey(id: string, method: string): string {
+  return `${id} ${method}`
 }
 
 function answerOf(answers: Map<string, Json>, id: string): Json {
@@ -861,15 +885,43 @@ export function openJmapBackend(
         )
       }
 
+      // The email has gone. Whether it left Drafts for Sent is the server's
+      // own Email/set, answered under the submission's id.
+      const draftId = typeof draft.id === "string" ? draft.id : null
+      const filed = answers.get(implicitKey("s", "Email/set"))
+      const notFiled =
+        answers.has(implicitKey("s", "error")) ||
+        (isObject(filed?.notUpdated) &&
+          draftId !== null &&
+          draftId in filed.notUpdated)
+
+      // A reply marks the email it answers, as mail apps do; the email has
+      // gone whatever happens here, so a refusal is reported, not thrown.
+      let answered: boolean | undefined
+
+      if (input.inReplyTo) {
+        try {
+          await setEmail(input.inReplyTo, { "keywords/$answered": true })
+          answered = true
+        } catch {
+          answered = false
+        }
+      }
+
       return {
-        id: typeof draft.id === "string" ? draft.id : null,
+        id: draftId,
         messageId,
         from,
         to: input.to,
         cc: input.cc,
         bcc: input.bcc,
         subject: input.subject,
-        savedTo: sent ? String(sent.name ?? "Sent") : String(home.name ?? ""),
+        // Left in Drafts when the server would not move it.
+        savedTo:
+          sent && !(drafts && notFiled)
+            ? String(sent.name ?? "Sent")
+            : String(home.name ?? ""),
+        ...(answered !== undefined ? { answered } : {}),
       }
     },
 

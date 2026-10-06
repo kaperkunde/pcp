@@ -947,6 +947,21 @@ export function openImapBackend(
         )
       }
 
+      // A reply marks the email it answers, as mail apps do; the email has
+      // gone whatever happens here, so a refusal is reported, not thrown.
+      let answered: boolean | undefined
+
+      if (input.inReplyTo) {
+        try {
+          answered =
+            (await withEmail(input.inReplyTo, false, (imap, uid) =>
+              imap.messageFlagsAdd(uid, ["\\Answered"], { uid: true }),
+            )) !== false
+        } catch {
+          answered = false
+        }
+      }
+
       // The sent copy: best effort, since the email has gone whatever
       // happens here.
       let savedTo: string | null = null
@@ -982,6 +997,7 @@ export function openImapBackend(
         bcc: input.bcc,
         subject: input.subject,
         savedTo,
+        ...(answered !== undefined ? { answered } : {}),
       }
     }
   }

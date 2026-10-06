@@ -472,7 +472,14 @@ the address or sign-in changes. Redirects are never followed: PCP names
 where the server pointed, for the owner to enter instead. A call is one or
 two POSTs of method calls. Sending uploads each attachment to the upload
 address first, then creates the email in Drafts with the blobs attached and
-submits it in the same request, moving it to Sent when it went.
+submits it in the same request, moving it to Sent when it went. That move is
+the server's own Email/set (`onSuccessUpdateEmail`, RFC 8621 7.5), answered
+under the submission's call id after the submission's answer: `jmapRequest`
+takes a call's answer as the first under its id named after its method, and
+keeps any other apart (`implicitKey`), so the move's answer never reads as
+the submission's and a failed move only means the copy stayed in Drafts. A
+reply then marks the email it answers (`$answered`, `\Answered` over IMAP),
+after the send, and says whether it could.
 
 **IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
