@@ -18,8 +18,9 @@ import { browserTools } from "./tools"
 /**
  * The browser's row in the registry: a server of kind "browser", one per
  * vault, added by the owner. Its tools are fixed (tools.ts), so they are
- * written when it is added and whenever it is checked; checking it is
- * finding Chromium on this machine.
+ * written when it is added, when PCP starts (instrumentation.ts: a newer
+ * version may have changed them) and whenever it is checked; checking it
+ * is finding Chromium on this machine.
  */
 
 export const BROWSER_NAME = "Browser"

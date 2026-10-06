@@ -76,6 +76,23 @@ const READS: Annotations = {
   idempotentHint: true,
   openWorldHint: true,
 }
+/**
+ * Opening a page, going back, the tabs and a hand-over move the browser
+ * along without doing anything on a site: a page is opened with GET, and
+ * the owner decides per site. Not destructive, so the owner's permission
+ * page does not warn that they change or delete things for good.
+ */
+const MOVES: Annotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+}
+/**
+ * Clicking, typing, a key, a choice and a dialog's answer act on a site,
+ * signed in as the owner where they signed in: a form sent, an order
+ * placed, something deleted.
+ */
 const ACTS: Annotations = {
   readOnlyHint: false,
   destructiveHint: true,
@@ -105,7 +122,7 @@ const SPECS: readonly BrowserToolSpec[] = [
           (value.action !== "close" && value.action !== "select") || value.tab,
         { message: "close and select need the tab's id." },
       ),
-    annotations: ACTS,
+    annotations: MOVES,
     changes: true,
   },
   {
@@ -113,7 +130,7 @@ const SPECS: readonly BrowserToolSpec[] = [
     title: "Open a page",
     description: `Opens an address in a tab (this token's current one, or a new one if it has none) and answers with the page's snapshot. ${ASKS_FIRST} A link or redirect to a site this token may not open yet stops there and says which; call navigate with that address to ask.`,
     args: z.strictObject({ tab, url }),
-    annotations: ACTS,
+    annotations: MOVES,
     changes: true,
   },
   {
@@ -122,7 +139,7 @@ const SPECS: readonly BrowserToolSpec[] = [
     description:
       "Goes back one page in the tab, and answers with its snapshot.",
     args: z.strictObject({ tab }),
-    annotations: ACTS,
+    annotations: MOVES,
     changes: true,
   },
   {
@@ -265,7 +282,7 @@ const SPECS: readonly BrowserToolSpec[] = [
       tab,
       message: z.string().min(1).max(MAX_HANDOVER_MESSAGE),
     }),
-    annotations: ACTS,
+    annotations: MOVES,
     changes: false,
   },
 ]
