@@ -500,9 +500,9 @@ page (as **Browser sites** for a token without web fetch): a site it has not
 opened before asks you, and **Allow once** lets that tab open the site's pages
 while it is open. When you allow a `navigate` call itself, you have seen the
 address, so it is not asked about again. Private addresses and PCP's own address
-work as for web fetch. Each token sees and drives only the tabs it opened, not
-another token's or yours, and leaves a page alone once its lines no longer let
-it open the site.
+work as for web fetch. Each token sees and drives only its own tabs (the ones
+it opened and the ones you hand it), not another token's or yours, and leaves
+a page alone once its lines no longer let it open the site.
 
 The browser keeps its cookies, local storage and IndexedDB, encrypted in your
 vault, so a sign-in lasts between conversations; an assistant acts as you
@@ -510,9 +510,11 @@ where you signed in, but no tool hands back a cookie or runs a script.
 **Forget all sites** signs it out of everything. Every answer names the tab
 and a link to it in PCP, where you watch it live and **Take over**: your
 mouse and keyboard go to the page, with the timing you made them, and the
-assistant's tools leave the tab alone until you **Hand back** (a tab you
-opened yourself stays yours). `hand_over` asks you the same way any request
-does, with the tab live on the request's page, and **Done** gives it back.
+assistant's tools leave the tab alone until you **Hand back** to the token
+you choose (the one whose tab it was, unless you pick another; a tab you
+opened is no token's until you hand it to one). `hand_over` asks you the same
+way any request does, with the tab live on the request's page, and **Done**
+gives it back.
 
 ## How it is secured
 

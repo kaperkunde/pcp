@@ -59,9 +59,11 @@ export type Tab = {
   /** "owner", or the name of the token that opened it. */
   openedBy: string
   /**
-   * The token whose tab it is: the one that opened it (or the tab a popup
-   * came from), and the only one that sees or drives it. Null for the
-   * owner's own, which no token does.
+   * The token whose tab it is, and the only one that sees or drives it:
+   * the one that opened it (or the tab a popup came from), or the one the
+   * owner last handed it to. It stays while the owner holds the tab, as the
+   * one Hand back offers first. Null for a tab the owner opened and no
+   * token had yet.
    */
   tokenId: string | null
   /** That token's web fetch lines, as last read. */
@@ -782,7 +784,7 @@ export async function tabView(tab: Tab): Promise<TabView> {
     url: tab.page.url(),
     title: await tabTitle(tab),
     openedBy: tab.openedBy,
-    ownersOwn: tab.tokenId === null,
+    tokenId: tab.tokenId,
     control: tab.control,
     handover: tab.handoverSince !== null,
     lastUsedAt: new Date(tab.lastUsedAt).toISOString(),

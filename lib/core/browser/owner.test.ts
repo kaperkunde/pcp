@@ -8,32 +8,41 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { McpServer } from "@/lib/generated/prisma/client"
 
-import { createApiToken, resolveApiToken } from "../api-tokens"
+import { createApiToken, resolveApiToken, revokeApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
-import { setFetchPrivate, setFetchRuleShared, setFetchSite } from "../web-fetch"
+import {
+  listFetchRules,
+  setFetchPrivate,
+  setFetchRuleShared,
+  setFetchSite,
+} from "../web-fetch"
 import { callBrowserTool, performNavigate } from "./call"
 import { chromiumExecutable } from "./executable"
 import {
   browserOverview,
+  browserTokens,
   forgetSites,
   handBackTab,
   openOwnerTab,
   ownerNavigate,
   startChromiumInstall,
   stopBrowser,
+  tabFor,
   takeOverTab,
 } from "./owner"
 import { loadProfile } from "./profile"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
+import { isOwnerNeeded } from "./types"
 
 // What the owner does from PCP's pages, against a real Chromium: a tab of
-// their own that no assistant sees, an assistant's tab taken over and handed
-// back to that assistant alone, and the sign-ins forgotten.
+// their own that no assistant sees until they hand it to a token they
+// choose, an assistant's tab taken over and handed back, and the sign-ins
+// forgotten.
 
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
@@ -89,15 +98,32 @@ function call(name: string, args: Record<string, unknown> = {}) {
   })
 }
 
+/** A second token, which reaches the browser too. */
+async function otherToken() {
+  const { id } = await createApiToken(ctx, {
+    name: "Other",
+    allowAllServers: true,
+  })
+
+  return {
+    tokenId: id,
+    call: (name: string, args: Record<string, unknown> = {}) =>
+      callBrowserTool(ctx, server, name, args, {
+        tokenId: id,
+        publicUrl: PUBLIC_URL,
+      }),
+  }
+}
+
 describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
-  it("opens a tab of their own, which no assistant sees or is handed", async () => {
+  it("opens a tab of their own, which no assistant sees until they hand it to one", async () => {
     const tab = await openOwnerTab(ctx, {
       url: `${api.origin}/login`,
       publicUrl: PUBLIC_URL,
     })
     expect(tab).toMatchObject({
       openedBy: "owner",
-      ownersOwn: true,
+      tokenId: null,
       control: "owner",
       url: `${api.origin}/login`,
     })
@@ -122,16 +148,26 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
       }),
     ).rejects.toThrow(/its own pages/)
 
-    // There is no assistant to hand it back to.
-    await expect(handBackTab(ctx, tab.id)).rejects.toThrow(/stays yours/)
-    expect((await browserOverview(ctx)).tabs[0]).toMatchObject({
-      control: "owner",
+    // Handed to another token, it is that token's: it lists and reads it,
+    // at a site the owner allowed it for this tab by handing it over.
+    const other = await otherToken()
+    await handBackTab(ctx, tab.id, other.tokenId)
+    expect(await tabFor(ctx, tab.id)).toMatchObject({
+      control: "assistant",
+      tokenId: other.tokenId,
     })
+    expect(textOf(await other.call("tabs", { action: "list" }))).toContain(
+      `* ${tab.id}:`,
+    )
+    const read = textOf(await other.call("read_page", {}))
+    expect(read).toContain(`Tab ${tab.id}:`)
+    expect(read).toContain(`Address: ${api.origin}/account`)
+
+    // The first token still has no such tab, and a navigate naming it opens
+    // a tab of its own.
     expect(textOf(await call("snapshot", { tab: tab.id }))).toContain(
       `There is no tab ${tab.id}`,
     )
-
-    // A navigate naming it opens a tab of the assistant's own.
     await setFetchSite(ctx, tokenId, new URL(api.origin).host, "allowed")
     const elsewhere = await call("navigate", {
       tab: tab.id,
@@ -139,13 +175,12 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     })
     expect(textOf(elsewhere)).toContain('heading "/next"')
     expect(textOf(elsewhere)).not.toContain(`Tab ${tab.id}:`)
-    expect((await browserOverview(ctx)).tabs[0]).toMatchObject({
-      id: tab.id,
+    expect(await tabFor(ctx, tab.id)).toMatchObject({
       url: `${api.origin}/account`,
     })
   })
 
-  it("takes over an assistant's tab and hands it back to that assistant alone", async () => {
+  it("takes over an assistant's tab and hands it back to that assistant by default", async () => {
     const port = new URL(api.origin).port
     const opened = await performNavigate(
       { ctx, tokenId, publicUrl: PUBLIC_URL, serverId: server.id },
@@ -156,11 +191,16 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
 
     await takeOverTab(ctx, tabId)
     expect(textOf(await call("snapshot", {}))).toContain("taken over")
+    // The token whose tab it was is the one Hand back offers first.
+    expect(await tabFor(ctx, tabId)).toMatchObject({
+      control: "owner",
+      tokenId,
+    })
     await ownerNavigate(ctx, tabId, {
       url: `http://localhost:${port}/account`,
       publicUrl: PUBLIC_URL,
     })
-    await handBackTab(ctx, tabId)
+    await handBackTab(ctx, tabId, tokenId)
 
     const seen = textOf(await call("snapshot", {}))
     expect(seen).toContain(`Tab ${tabId}:`)
@@ -173,19 +213,129 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     expect(textOf(next)).toContain('heading "/next"')
 
     // Another assistant neither sees it nor is handed it.
-    const { token } = await createApiToken(ctx, {
-      name: "Other",
+    const other = await otherToken()
+    expect(textOf(await other.call("snapshot", { tab: tabId }))).toContain(
+      `There is no tab ${tabId}`,
+    )
+  })
+
+  it("hands a tab to another token without the sites allowed for the one before", async () => {
+    const port = new URL(api.origin).port
+    const host = new URL(api.origin).host
+    const opened = await performNavigate(
+      { ctx, tokenId, publicUrl: PUBLIC_URL, serverId: server.id },
+      { tabId: null, url: `${api.origin}/start` },
+      { allowedByOwner: true },
+    )
+    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+
+    await takeOverTab(ctx, tabId)
+    await ownerNavigate(ctx, tabId, {
+      url: `http://localhost:${port}/account`,
+      publicUrl: PUBLIC_URL,
+    })
+    const other = await otherToken()
+    await handBackTab(ctx, tabId, other.tokenId)
+
+    // Allow once was the first token's: only the site the owner handed the
+    // tab over at is allowed for it now.
+    expect([
+      ...runningBrowser(ctx.vaultId)!.tabs.get(tabId)!.allowedHosts,
+    ]).toEqual([`localhost:${port}`])
+    expect(textOf(await other.call("snapshot", {}))).toContain(
+      `Address: http://localhost:${port}/account`,
+    )
+    await expect(
+      other.call("navigate", { url: `${api.origin}/again` }),
+    ).rejects.toSatisfy(isOwnerNeeded)
+    expect(
+      (await listFetchRules(ctx, other.tokenId)).sites.map((site) => site.host),
+    ).toEqual([host])
+
+    // The first token has lost it, as its current tab too.
+    expect(textOf(await call("snapshot", {}))).toContain(
+      "This token has no tab open",
+    )
+    expect(textOf(await call("tabs", { action: "list" }))).not.toContain(tabId)
+  })
+
+  it("hands a tab only to a live token of the vault that reaches the browser", async () => {
+    const tab = await openOwnerTab(ctx, {
+      url: `${api.origin}/login`,
+      publicUrl: PUBLIC_URL,
+    })
+
+    const revoked = await createApiToken(ctx, {
+      name: "Revoked",
       allowAllServers: true,
     })
-    const other = (await resolveApiToken(token))!.tokenId
-    const theirs = await callBrowserTool(
-      ctx,
-      server,
-      "snapshot",
-      { tab: tabId },
-      { tokenId: other, publicUrl: PUBLIC_URL },
-    )
-    expect(textOf(theirs)).toContain(`There is no tab ${tabId}`)
+    await revokeApiToken(ctx, revoked.id)
+    const expired = await createApiToken(ctx, {
+      name: "Expired",
+      allowAllServers: true,
+    })
+    await db().apiToken.update({
+      where: { id: expired.id },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    })
+    // Scoped to chosen servers, the browser not among them.
+    const elsewhere = await createApiToken(ctx, {
+      name: "No browser",
+      allowAllServers: false,
+      serverIds: [server.id],
+    })
+    await db().apiTokenServer.deleteMany({ where: { tokenId: elsewhere.id } })
+    const chosen = await createApiToken(ctx, {
+      name: "Browser only",
+      allowAllServers: false,
+      serverIds: [server.id],
+    })
+    // A token of another vault, with the same reach.
+    await db().vault.create({ data: { id: "another", name: "Bob" } })
+    await db().keyGrant.create({
+      data: {
+        id: "another-grant",
+        vaultId: "another",
+        kind: "token",
+        kdf: "none",
+        kdfParams: "{}",
+        wrappedDek: Buffer.alloc(0),
+      },
+    })
+    await db().apiToken.create({
+      data: {
+        id: "another-token",
+        vaultId: "another",
+        grantId: "another-grant",
+        name: "Bob's",
+        prefix: "pcp_",
+        allowAllServers: true,
+      },
+    })
+
+    expect((await browserTokens(ctx)).map((token) => token.name)).toEqual([
+      "Browser only",
+      "Claude",
+    ])
+
+    for (const id of [
+      revoked.id,
+      expired.id,
+      elsewhere.id,
+      "another-token",
+      "nosuchtoken",
+    ]) {
+      await expect(handBackTab(ctx, tab.id, id), id).rejects.toThrow(
+        /Choose a token that can use the browser/,
+      )
+    }
+    expect(await tabFor(ctx, tab.id)).toMatchObject({
+      control: "owner",
+      tokenId: null,
+    })
+
+    await handBackTab(ctx, tab.id, chosen.id)
+    expect(await tabFor(ctx, tab.id)).toMatchObject({ tokenId: chosen.id })
   })
 
   it("shows the tabs and the sign-ins, and forgets them all", async () => {

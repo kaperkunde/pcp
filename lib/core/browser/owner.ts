@@ -1,10 +1,11 @@
 import type { VaultContext } from "../context"
 import { dataDir } from "../data-dir"
+import { db } from "../db"
 import { PcpError } from "../errors"
 import { isPcpSite } from "../fetch/fetch"
 import { resolvePrivateAccess } from "../fetch/rules"
 import { loadSharedFetchRules } from "../web-fetch"
-import { pageUrl } from "./call"
+import { giveTab, pageUrl } from "./call"
 import { chromiumExecutable } from "./executable"
 import {
   chromiumInstallState,
@@ -28,6 +29,7 @@ import {
   saveVaultProfile,
   setControl,
   tabView,
+  withVault,
   type BrowserStatus,
   type Tab,
 } from "./runtime"
@@ -36,7 +38,7 @@ import type { TabView } from "./types"
 
 /**
  * What the owner does with the browser from PCP's pages: open a tab of
- * their own, take one over from the assistants and hand it back, move it
+ * their own, take one over and hand it to the token they choose, move it
  * along while they have it, close it, and forget every sign-in. Each saves
  * the profile with the key the owner's session holds.
  */
@@ -93,9 +95,9 @@ async function go(tab: Tab, raw: string, publicUrl: string): Promise<void> {
 }
 
 /**
- * A tab of the owner's own, theirs alone: no assistant sees it or is
- * handed it. It reaches private addresses only where the line for all
- * tokens allows.
+ * A tab of the owner's own: no assistant sees it until the owner hands it
+ * to one (handBackTab). It reaches private addresses only where the line
+ * for all tokens allows.
  */
 export async function openOwnerTab(
   ctx: VaultContext,
@@ -156,24 +158,53 @@ export async function takeOverTab(
   setControl(tabOf(ctx, tabId), "owner")
 }
 
+export type BrowserToken = { id: string; name: string }
+
 /**
- * Back to the assistant whose tab it is, which may go on from the site the
- * owner left it at. A tab handed over by an assistant goes back when the
- * owner answers its request instead, and the owner's own tab is no
- * assistant's to go back to.
+ * The tokens a tab can be handed to: the vault's own, neither revoked nor
+ * expired, that reach the browser (every server, or the browser among
+ * theirs).
+ */
+export async function browserTokens(
+  ctx: VaultContext,
+): Promise<BrowserToken[]> {
+  const server = await findBrowserServer(ctx)
+
+  if (!server) {
+    return []
+  }
+
+  return db().apiToken.findMany({
+    where: {
+      vaultId: ctx.vaultId,
+      revokedAt: null,
+      AND: [
+        { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+        {
+          OR: [
+            { allowAllServers: true },
+            { servers: { some: { serverId: server.id } } },
+          ],
+        },
+      ],
+    },
+    select: { id: true, name: true },
+    orderBy: [{ name: "asc" }, { createdAt: "asc" }],
+  })
+}
+
+/**
+ * Hands a tab the owner holds to the token they chose, which may go on from
+ * the site they left it at: the token it was (the page offers it first), or
+ * another, which then has it alone. A tab handed over by an assistant goes
+ * back when the owner answers its request instead.
  */
 export async function handBackTab(
   ctx: VaultContext,
   tabId: string,
+  tokenId: string,
 ): Promise<void> {
-  const tab = tabOf(ctx, tabId)
-
-  if (tab.tokenId === null) {
-    throw new PcpError(
-      "state",
-      "You opened this tab, so it stays yours: an assistant opens tabs of its own, and your sign-ins go with them.",
-    )
-  }
+  const tab = ownersTab(ctx, tabId)
 
   if (tab.handoverSince !== null) {
     throw new PcpError(
@@ -182,7 +213,17 @@ export async function handBackTab(
     )
   }
 
-  setControl(tab, "assistant")
+  // Whatever the form said: only a live token of this vault that reaches
+  // the browser.
+  if (!(await browserTokens(ctx)).some((token) => token.id === tokenId)) {
+    throw new PcpError(
+      "validation",
+      "Choose a token that can use the browser: one that is not revoked or expired and reaches the browser.",
+    )
+  }
+
+  const vault = runningBrowser(ctx.vaultId)!
+  await withVault(vault, () => giveTab(ctx, vault, tab, tokenId))
   await save(ctx)
 }
 

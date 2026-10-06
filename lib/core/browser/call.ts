@@ -142,7 +142,7 @@ function ownTab(
 async function driveAs(
   vault: VaultBrowser,
   tab: Tab,
-  scope: BrowserScope,
+  scope: Pick<BrowserScope, "ctx" | "tokenId">,
 ): Promise<void> {
   const rules = await loadFetchRules(scope.ctx.vaultId, scope.tokenId)
   tab.rules = rules
@@ -150,6 +150,39 @@ async function driveAs(
   tab.lastUsedAt = Date.now()
   vault.lastTabByToken.set(scope.tokenId, tab.id)
   recomputePrivate(vault)
+}
+
+/**
+ * The owner hands a tab they hold to a token (one they checked may use the
+ * browser): it becomes that token's tab, following its lines, and the site
+ * it is at counts as one the owner allowed for the tab, as Allow once does.
+ * Sites allowed for the token it was before were that token's, and go.
+ */
+export async function giveTab(
+  ctx: VaultContext,
+  vault: VaultBrowser,
+  tab: Tab,
+  tokenId: string,
+): Promise<void> {
+  if (tab.tokenId !== tokenId) {
+    tab.allowedHosts.clear()
+    tab.lastBlocked = null
+
+    if (tab.tokenId && vault.lastTabByToken.get(tab.tokenId) === tab.id) {
+      vault.lastTabByToken.delete(tab.tokenId)
+    }
+
+    tab.tokenId = tokenId
+  }
+
+  try {
+    tab.allowedHosts.add(siteKey(new URL(tab.page.url())))
+  } catch {
+    // about:blank and the like have no site.
+  }
+
+  await driveAs(vault, tab, { ctx, tokenId })
+  setControl(tab, "assistant")
 }
 
 /**

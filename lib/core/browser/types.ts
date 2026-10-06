@@ -15,8 +15,11 @@ export type TabView = {
   title: string
   /** "owner", or the name of the token that opened it. */
   openedBy: string
-  /** The owner opened it: it stays theirs, never an assistant's. */
-  ownersOwn: boolean
+  /**
+   * The token whose tab it is: the last one that had it, which Hand back
+   * offers first. Null for a tab the owner opened and no token had yet.
+   */
+  tokenId: string | null
   control: TabControl
   /** Set while the owner holds the tab for an assistant's hand-over. */
   handover: boolean

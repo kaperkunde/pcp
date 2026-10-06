@@ -840,8 +840,8 @@ downloads a file. A refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
 
 **Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
-`tokenId`; a popup is its opener's), and that token alone sees and drives
-it: `tabs` lists only its own, the current tab a call without one falls on
+`tokenId`; a popup is its opener's) or that the owner last handed it to,
+and that token alone sees and drives it: `tabs` lists only its own, the current tab a call without one falls on
 is its own, and any tool given another token's tab, or the owner's own, is
 answered as for a tab that does not exist, in the same words, so its
 address and title never reach it. `navigate` naming such a tab opens a new
@@ -858,9 +858,16 @@ told the browser is full learns only how many are its own.
 
 **The owner's control.** A tab is driven by its assistant or by the owner.
 Take over on the tab's page makes it the owner's, and every browser tool
-refuses it until Hand back, which gives it back to the token whose tab it
-is. A tab the owner opens is theirs and stays theirs: it has no token to go
-back to, so Hand back is not offered for it. `hand_over` makes the tab the
+refuses it until Hand back. A tab the owner opens is theirs, seen by no
+token, until they hand it to one. Hand back gives the tab to the token the
+owner picks (`handBackTab`, `giveTab`): one of the vault's tokens that is
+neither revoked nor expired and reaches the browser, checked in the core
+whatever the form sent. The page offers the token whose tab it was first;
+a tab no token had yet waits for a choice. The token gets the tab as its
+own (its lines read again, its current tab), and the site the tab is at
+counts as one the owner allowed for that tab, as Allow once does; handed to
+another token than before, the tab first drops the sites allowed for the
+one before, which were that token's. `hand_over` makes the tab the
 owner's and throws `OwnerNeeded` for a `browser_handover` request, which
 shows the assistant's message and the tab live; Done (or Not now) gives it
 back to the token that handed it over, saves the profile, and is what

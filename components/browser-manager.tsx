@@ -125,9 +125,9 @@ export function BrowserManager({
           <CardTitle>Tabs</CardTitle>
           <CardDescription>
             Every tab open in the browser, the assistants&apos; and yours. An
-            assistant sees only the tabs it opened, never yours. Open one to
-            watch it live, or to take it over: while you have a tab, its
-            assistant leaves it alone.
+            assistant sees only its own tabs: the ones it opened and the ones
+            you hand it. Open one to watch it live, or to take it over: while
+            you have a tab, its assistant leaves it alone.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
