@@ -15,6 +15,7 @@ import {
 } from "@/lib/core/oauth-server/tokens"
 import { checkRateLimit } from "@/lib/core/rate-limit"
 import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
+import { loadResourceLimits } from "@/lib/core/resources/state"
 
 /**
  * The gateway endpoint: https://<pcp>/mcp
@@ -45,6 +46,8 @@ const mcpHandler = createMcpHandler(
       scope,
       await loadGatewayServers(scope),
     )
+    // run_code's description names the limits in force.
+    await loadResourceLimits()
 
     return buildGatewayServer(scope, servers, {
       memories: scope.keepMemories

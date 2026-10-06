@@ -176,6 +176,24 @@ export type SendResult = {
   answered?: boolean
 }
 
+export type DraftResult = {
+  /**
+   * The draft's id, for get_email. Null when the server does not say what
+   * it is (IMAP without UIDPLUS).
+   */
+  id: string | null
+  messageId: string | null
+  /** Null when the account names no From address to write in. */
+  from: MailAddress | null
+  to: MailAddress[]
+  cc: MailAddress[]
+  bcc: MailAddress[]
+  subject: string
+  /** The Drafts mailbox: its id (a JMAP id, an IMAP path) and name. */
+  mailboxId: string
+  mailbox: string
+}
+
 export type MoveResult = {
   /**
    * The email's id now; an IMAP message gets a new one when it moves. Null
@@ -207,6 +225,8 @@ export interface MailBackend {
   getThread?(threadId: string): Promise<MailMessageSummary[]>
   listIdentities?(): Promise<MailIdentity[]>
   sendEmail?(input: SendInput): Promise<SendResult>
+  /** Writes the email into Drafts, marked as a draft; sends nothing. */
+  createDraft(input: SendInput): Promise<DraftResult>
   moveEmail(id: string, mailbox: string): Promise<MoveResult>
   markEmail(
     id: string,

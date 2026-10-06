@@ -1,11 +1,11 @@
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
-import { logDir } from "../data-dir"
+import { databaseFile, logDir } from "../data-dir"
 import { db } from "../db"
 import { getHostJson, setHostJson } from "../host-settings"
 import { pruneOAuthStates } from "../oauth"
@@ -15,7 +15,8 @@ import {
 } from "../oauth-server/authorize"
 import { registerClient } from "../oauth-server/clients"
 import { scratchDatabase } from "../test-db"
-import { keepResult, RESULT_TTL_MS } from "../tool-results"
+import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
+import { keepBytes, keepResult, RESULT_TTL_MS } from "../tool-results"
 import { setupVault } from "../vault"
 import { DEFAULT_CLEANUP_CRON, DEFAULT_LOG_DAYS } from "./limits"
 import { runCleanup } from "./run"
@@ -128,6 +129,37 @@ describe("the schedule", () => {
 })
 
 describe("a run", () => {
+  it("gives the disk back what removing large results freed", async () => {
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 16, keptMb: 100 })
+    const made = new Date(Date.now() - RESULT_TTL_MS - 60_000)
+
+    for (let i = 0; i < 3; i++) {
+      await keepBytes(
+        ctx,
+        {
+          tokenId,
+          serverId: null,
+          toolName: "files",
+          bytes: Buffer.alloc(12 * 1024 * 1024, i),
+          mediaType: "application/octet-stream",
+          name: null,
+        },
+        made,
+      )
+    }
+
+    await db().$queryRawUnsafe("PRAGMA wal_checkpoint(TRUNCATE)")
+    const before = statSync(databaseFile()).size
+    const status = await runCleanup("owner")
+
+    expect(status.removed?.results).toBe(3)
+    expect(status.problems).toBeUndefined()
+    expect(status.freedBytes).toBeGreaterThan(30 * 1024 * 1024)
+    expect(statSync(databaseFile()).size).toBeLessThan(
+      before - 30 * 1024 * 1024,
+    )
+  })
+
   it("removes kept results past their day and the days of log not kept, and says so", async () => {
     const now = new Date()
     const made = new Date(now.getTime() - RESULT_TTL_MS - 60_000)

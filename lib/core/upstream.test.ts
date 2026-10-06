@@ -107,7 +107,7 @@ describe("a JMAP account signed in with OAuth", () => {
 
     expect(await syncServerTools(ctx, server, PUBLIC)).toMatchObject({
       status: "ok",
-      toolCount: 10,
+      toolCount: 11,
     })
     expect(fake.requests[0]!.authorization).toBe("Bearer at-1")
     expect(tokenRequests).toHaveLength(0)

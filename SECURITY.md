@@ -67,6 +67,8 @@ unless you made the account read-only (or, over IMAP, gave it no SMTP
 server), send as you, with attachments from its own kept results, move, flag
 and delete into the Trash. Nothing deletes mail for good, and sending cannot
 be undone, so leave `send_email` on Ask you first unless you mean otherwise.
+`create_draft` only writes into Drafts and sends nothing, so you can allow it
+on its own and send what it wrote yourself.
 It never receives the password or token: PCP signs in itself and removes
 both from every answer. It can propose a mail account, naming its password
 or token and never holding it: nothing is added until you agree on PCP's page,

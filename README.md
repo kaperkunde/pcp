@@ -54,8 +54,8 @@ on its own, what it has to ask you about first, and what it cannot touch.
   over for a sign-in or a CAPTCHA; an assistant can hand you a tab and wait.
 - **Mail without an MCP server.** Add a mail account over JMAP (Stalwart,
   Fastmail, Cyrus) or IMAP with SMTP, or let an assistant propose one for you
-  to agree to, and an assistant can search, read, file and send its mail, with
-  the same tools whichever protocol it speaks.
+  to agree to, and an assistant can search, read, file, draft and send its
+  mail, with the same tools whichever protocol it speaks.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
@@ -240,7 +240,23 @@ sign-in tokens, results kept for a day, old permission requests, days of the log
 starts and then every hour. **Settings → Cleanup** changes when it runs (a
 preset, or five cron fields of your own, at least once a day), how many days
 of the log it keeps (90 unless you choose), shows what the last run removed,
-and cleans up at once with **Clean up now**.
+and cleans up at once with **Clean up now**. After each run PCP gives the
+disk back what was freed: once enough of the database is empty space (32 MB,
+or a quarter of it), it rewrites the file without it.
+
+### Resources
+
+How much of the machine PCP may use for what assistants hand it follows the
+machine: its memory (a container's limit, where it has one), its processors
+and the free disk where PCP keeps its data. **Settings → Resources** shows
+what PCP picked and lets you set each yourself: a `run_code` program's memory
+(a sixteenth of the machine's, 128 MB to 1 GB), how many programs run at once
+(no more than the processors, and half the memory together), the largest file
+PCP keeps for an assistant and so what a program reads of one (an eighth of a
+program's memory, 10 to 256 MB), and what one token's kept results may hold
+together (a twentieth of the free disk, 50 MB to 4 GB). PCP refuses settings
+that would let programs together hold more than three quarters of the
+machine's memory, or kept results more than the disk.
 
 ## Use it
 
@@ -286,8 +302,11 @@ and cleans up at once with **Clean up now**.
    you pick, and mail only travels encrypted (TLS, or STARTTLS on `imap://` and
    `smtp://`). Every account offers the same tools: list mailboxes, search, read
    an email or an attachment (a text one as text, any other as a handle), move,
-   flag, delete into the Trash (never for good) and send, plus conversations and
-   identities on JMAP. **Read-only** offers only the tools that read. An
+   flag, delete into the Trash (never for good), write a draft and send, plus
+   conversations and identities on JMAP. A draft (`create_draft`) goes into
+   the account's Drafts and is sent by nobody but you, so you can allow
+   drafting and keep sending on **Ask you first**; it needs no SMTP server.
+   **Read-only** offers only the tools that read. An
    assistant can propose an account too, with `register_server`: you see the
    server, the user name and how PCP signs in, type the app password on that
    page (it never passes through the assistant) or connect it with OAuth, and
@@ -367,12 +386,12 @@ assistant. A file in an answer (an attachment, an image, base64 that decodes
 to a PDF) and any part named in `keep` come back as a handle,
 `{"$result": "<id>", …}`, with its type and size. Put that handle in any later
 call's arguments and PCP puts the value there: a text as text, a file as
-base64. `get_attachment` reads any attachment that way, and `send_email`
-takes handles as attachments, so an attachment from one mail account can be
-sent from another, or handed to an API. The permission page shows what each
-handle is, never its content. A `call_tool` answer also links its handles as
-MCP resources (`pcp://results/<id>`), so a client that reads resources can
-open a kept file itself.
+base64. `get_attachment` reads any attachment that way, and `send_email` and
+`create_draft` take handles as attachments, so an attachment from one mail
+account can be sent from another, or handed to an API. The permission page
+shows what each handle is, never its content. A `call_tool` answer also links
+its handles as MCP resources (`pcp://results/<id>`), so a client that reads
+resources can open a kept file itself.
 
 A tool you have not decided about answers "Not done yet" and asks you: the
 assistant ends its reply with a link to the request in PCP. Answer there,
@@ -500,8 +519,8 @@ asks you first stops the program at that call (the calls before it have run),
 with the usual request for you to answer; for the program to make that call
 itself next time, choose **Always allow**, or **Allow for** while that lasts. Every call is in the request log
 under `run_code`, and on the **Log** page. A program has no network, no files, no timers and none of
-your secrets, and stops after 3 minutes, 15 seconds of computing, 128 MB of
-memory or 100 calls (five of them at a time).
+your secrets, and stops after 3 minutes, 15 seconds of computing, its memory
+(**Settings → Resources**, above) or 100 calls (five of them at a time).
 
 **Shell and Python programs.** Where PCP runs in Docker or Podman from a
 checkout, add the sandbox and an assistant can also send a bash or Python

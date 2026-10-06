@@ -19,13 +19,14 @@ import {
   MAX_ATTACHMENTS_LISTED,
   MAX_MAILBOXES,
 } from "./limits"
-import { findMailbox, mailboxByRole } from "./mailboxes"
+import { draftsMailbox, findMailbox, mailboxByRole } from "./mailboxes"
 import { bareType, isTextType } from "../media-types"
 import {
   MailAuthError,
   MailRequestError,
   MailTransportError,
   type AttachmentContent,
+  type DraftResult,
   type MailAddress,
   type MailBackend,
   type MailboxRole,
@@ -122,7 +123,8 @@ export interface ImapClientLike {
 }
 
 export type OutgoingMail = {
-  from: { name: string; address: string }
+  /** Left out of a draft when the account names no From address. */
+  from?: { name: string; address: string }
   to: Array<{ name: string; address: string }>
   cc: Array<{ name: string; address: string }>
   bcc: Array<{ name: string; address: string }>
@@ -655,8 +657,105 @@ export function openImapBackend(
     })
   }
 
+  /** The From address: the one the owner set, or the user name. */
+  const fromAddress =
+    config.from ?? (login.username.includes("@") ? login.username : null)
+
+  /**
+   * The email send_email and create_draft write, with the reply's headers
+   * when it answers one. From is left out only when there is no address,
+   * which only a draft allows.
+   */
+  async function outgoing(input: SendInput): Promise<OutgoingMail> {
+    let inReplyTo: string | undefined
+    let references: string[] | undefined
+
+    if (input.inReplyTo) {
+      const original = await withEmail(input.inReplyTo, true, (imap, uid) =>
+        headers(imap, uid),
+      )
+
+      if (original.messageId) {
+        inReplyTo = `<${original.messageId}>`
+        references = [...original.references, original.messageId]
+          .slice(-20)
+          .map((value) => `<${value}>`)
+      }
+    }
+
+    const domain = fromAddress?.split("@")[1] ?? "pcp.invalid"
+    const named = (list: MailAddress[]) =>
+      list.map((entry) => ({ name: entry.name ?? "", address: entry.email }))
+
+    return {
+      ...(fromAddress ? { from: { name: "", address: fromAddress } } : {}),
+      to: named(input.to),
+      cc: named(input.cc),
+      bcc: named(input.bcc),
+      subject: input.subject,
+      text: input.text,
+      messageId: `<${randomUUID()}@${domain}>`,
+      ...(inReplyTo ? { inReplyTo, references } : {}),
+      ...(input.attachments?.length
+        ? {
+            attachments: input.attachments.map((attachment) => ({
+              filename: attachment.name,
+              contentType: attachment.type,
+              content: attachment.bytes,
+            })),
+          }
+        : {}),
+    }
+  }
+
+  // A draft needs no SMTP server: it is appended to Drafts over IMAP, with
+  // the Draft flag, and goes nowhere else.
+  async function createDraft(input: SendInput): Promise<DraftResult> {
+    const drafts = draftsMailbox(await mailboxes())
+
+    if (!drafts) {
+      throw new MailRequestError(
+        "This account has no Drafts mailbox to write the draft in.",
+      )
+    }
+
+    const mail = await outgoing(input)
+    const raw = await deps.compose(mail)
+    let appended: Awaited<ReturnType<ImapClientLike["append"]>>
+
+    try {
+      const imap = await client()
+      appended = await imap.append(drafts.id, raw, ["\\Draft", "\\Seen"])
+    } catch (error) {
+      throw describeImapError(error, "IMAP")
+    }
+
+    if (appended === false) {
+      throw new MailRequestError(
+        `The IMAP server did not take the draft into ${drafts.name}.`,
+      )
+    }
+
+    return {
+      // Without UIDPLUS the server does not say where it put it.
+      id:
+        appended.uid !== undefined && appended.uidValidity !== undefined
+          ? encodeImapId(appended.uid, appended.uidValidity, drafts.id)
+          : null,
+      messageId: bare(mail.messageId),
+      from: fromAddress ? { name: null, email: fromAddress } : null,
+      to: input.to,
+      cc: input.cc,
+      bcc: input.bcc,
+      subject: input.subject,
+      mailboxId: drafts.id,
+      mailbox: drafts.name,
+    }
+  }
+
   const backend: MailBackend = {
     listMailboxes: mailboxes,
+    createDraft,
 
     async searchEmails(query: SearchQuery): Promise<SearchResult> {
       const boxes = await mailboxes()
@@ -882,54 +981,13 @@ export function openImapBackend(
     const smtp = config.smtp
 
     backend.sendEmail = async (input: SendInput): Promise<SendResult> => {
-      const fromAddress =
-        config.from ?? (login.username.includes("@") ? login.username : null)
-
       if (!fromAddress) {
         throw new MailRequestError(
           "This account has no From address; the owner sets one in PCP.",
         )
       }
 
-      let inReplyTo: string | undefined
-      let references: string[] | undefined
-
-      if (input.inReplyTo) {
-        const original = await withEmail(input.inReplyTo, true, (imap, uid) =>
-          headers(imap, uid),
-        )
-
-        if (original.messageId) {
-          inReplyTo = `<${original.messageId}>`
-          references = [...original.references, original.messageId]
-            .slice(-20)
-            .map((value) => `<${value}>`)
-        }
-      }
-
-      const domain = fromAddress.split("@")[1] ?? "pcp.invalid"
-      const messageId = `<${randomUUID()}@${domain}>`
-      const named = (list: MailAddress[]) =>
-        list.map((entry) => ({ name: entry.name ?? "", address: entry.email }))
-      const mail: OutgoingMail = {
-        from: { name: "", address: fromAddress },
-        to: named(input.to),
-        cc: named(input.cc),
-        bcc: named(input.bcc),
-        subject: input.subject,
-        text: input.text,
-        messageId,
-        ...(inReplyTo ? { inReplyTo, references } : {}),
-        ...(input.attachments?.length
-          ? {
-              attachments: input.attachments.map((attachment) => ({
-                filename: attachment.name,
-                contentType: attachment.type,
-                content: attachment.bytes,
-              })),
-            }
-          : {}),
-      }
+      const mail = await outgoing(input)
       const transport = await deps.smtp(smtp, login)
       let sent: Awaited<ReturnType<SmtpTransportLike["sendMail"]>>
 
@@ -990,7 +1048,7 @@ export function openImapBackend(
 
       return {
         id,
-        messageId: bare(sent.messageId ?? messageId),
+        messageId: bare(sent.messageId ?? mail.messageId),
         from: { name: null, email: fromAddress },
         to: input.to,
         cc: input.cc,

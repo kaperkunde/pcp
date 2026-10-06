@@ -52,8 +52,15 @@ import {
 } from "./memories"
 import { connectResult, type ServerState } from "./connect"
 import { waitForOwner } from "./owner-wait"
-import { MAX_CODE_ANSWER_CHARS, MAX_CODE_CHARS } from "./code/limits"
+import {
+  MAX_CALLS_PER_RUN,
+  MAX_CODE_CHARS,
+  MAX_PARALLEL_CALLS,
+  RUN_CPU_MS,
+  RUN_TIMEOUT_MS,
+} from "./code/limits"
 import { runCode, type CodeLister } from "./code/run"
+import { resourceLimits } from "./resources/state"
 import {
   sandboxExecutor,
   sandboxLanguages,
@@ -403,7 +410,7 @@ export function buildInstructions(
     ...memoryLead(memories),
     "PCP is a gateway to the owner's MCP servers, APIs and mail accounts. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it; list_tools names every tool on one server. Refer to tools as server/tool.",
     'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, or a mail account (JMAP, or IMAP with SMTP). A mailbox is always a mail account, never an API written around its mail server. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP\'s page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
-    'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email attachment, and PCP puts the value there, so it never has to pass through you.',
+    'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email or create_draft attachment, and PCP puts the value there, so it never has to pass through you.',
     "Servers:",
     ...lines,
     ...(browser ? [BROWSER_INSTRUCTIONS(browser.slug)] : []),
@@ -2038,6 +2045,7 @@ export function buildGatewayServer(
       .describe(
         `javascript (the default), or ${shells.join(" or ")} in PCP's sandbox.`,
       )
+    const limits = resourceLimits()
     /** The token's servers, or one's tools, as list_tools gives them. */
     const list: CodeLister = (slug) => {
       if (slug === null) {
@@ -2082,11 +2090,11 @@ export function buildGatewayServer(
           "Runs a JavaScript program on PCP that calls the owner's tools and works on their answers, so that a large answer is filtered, counted, joined or moved from one tool to another without passing through you. Use it when a task needs many calls, or answers bigger than you need to read.",
           "The program is the body of an async function: await works at the top, and return hands back a value (as JSON). console.log(...) prints. It has the JavaScript language, with atob, btoa, TextEncoder, TextDecoder (UTF-8), crypto.getRandomValues and crypto.randomUUID, and nothing else: no network, no files, no timers, no require or import.",
           "await pcp.call(server, tool, args, { fields, decode, keep }) calls a tool as call_tool does, by the names search_tools and describe_tool give, with the same arguments, and returns its answer as a value: the parsed JSON, or the text. The options are call_tool's, and nothing is cut to a preview: the program gets the whole answer, up to " +
-            MAX_CODE_ANSWER_CHARS.toLocaleString("en") +
+            limits.answerChars.toLocaleString("en") +
             " characters of JSON. A tool's error, a refusal and a blocked tool throw an Error the program may catch. A tool the owner has not allowed yet stops the program at that call (calls before it have run) and answers with the owner's link, handed over as a tool's is.",
           'Files in an answer (attachments, images) come back as handles, {"$result": id, "type", "size", …}: pass a handle as it is where a tool wants the file, and PCP puts the file there (as base64 where the tool wants a string). keep works here as in call_tool: pcp.call(…, { keep: ["password"] }) hands the program a handle in place of that value, so a secret one tool makes (a generated password, an API key) goes into another tool\'s arguments, an API\'s request body included, without the program or you ever reading it. A handle stands for a whole string; to put a file inside a text you build (a MIME message), read its bytes.',
           'await pcp.read(handle) reads a kept text, and pcp.read(handle, { as: "base64" }) a file\'s bytes as base64 ({ as: "bytes" } as a Uint8Array). await pcp.keep(text, { name, type }) keeps a text (a CSV, a report) and returns its handle, to pass to a tool or to return; pcp.keep(base64, { encoding: "base64", name, type }), or a Uint8Array, keeps a file. await pcp.tools() lists the servers, and pcp.tools(server) every tool on one, as list_tools does.',
-          "Limits: 3 minutes in all, 15 seconds of computing, 128 MB of memory, 100 calls, 5 at a time. What it prints and returns comes back in the answer; a long part is kept as a result to read with read_result.",
+          `Limits: ${RUN_TIMEOUT_MS / 60_000} minutes in all, ${RUN_CPU_MS / 1000} seconds of computing, ${Math.round(limits.programMemoryBytes / 1024 / 1024).toLocaleString("en")} MB of memory, ${MAX_CALLS_PER_RUN} calls, ${MAX_PARALLEL_CALLS} at a time; a file read or kept is ${Math.round(limits.fileBytes / 1024 / 1024).toLocaleString("en")} MB at most. The owner sets these in PCP's settings. What it prints and returns comes back in the answer; a long part is kept as a result to read with read_result.`,
           ...(shells.length > 0
             ? [
                 `With language ${shells.map((shell) => `"${shell}"`).join(" or ")}, the program runs instead in PCP's sandbox: a container with no network, where bash has jq, the usual command-line tools and Python 3 with its standard library, and nothing is kept between runs. The pcp command calls tools: pcp call SERVER TOOL '{"arg": 1}' [--fields a,b] [--decode a] [--keep a] prints the answer as JSON (- reads the arguments from stdin); pcp read [--base64 | --bytes] HANDLE prints a kept text, or a file's bytes as base64 or as they are; pcp keep [--name NAME] [--type TYPE] [--bytes] [FILE] keeps a text, or with --bytes a file, and prints its handle; pcp tools [SERVER] lists the servers, or a server's tools. A refusal or a tool's error goes to stderr with status 1. In Python, import pcp, then pcp.call(server, tool, args, fields=…, keep=…), pcp.read(handle) (as_="base64" for a file, as_="bytes" for bytes), pcp.keep(text or bytes, name=…, type=…) and pcp.tools(server=None), which raise pcp.PcpError. What it prints, stdout and stderr together, comes back with how it exited; one program runs at a time.`,
@@ -2165,7 +2173,7 @@ export function buildGatewayServer(
                   {
                     publicUrl: scope.publicUrl,
                     tokenId: scope.tokenId,
-                    max: MAX_CODE_ANSWER_CHARS,
+                    max: resourceLimits().answerChars,
                     executor,
                     ...shape,
                   },

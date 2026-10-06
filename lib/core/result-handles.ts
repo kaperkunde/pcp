@@ -1,4 +1,5 @@
 import { invalid } from "./errors"
+import { resourceLimits } from "./resources/state"
 import type { OpenedResult, ResultOpener } from "./tool-results"
 
 /**
@@ -17,8 +18,10 @@ import type { OpenedResult, ResultOpener } from "./tool-results"
 
 export const MAX_HANDLE_DEPTH = 64
 export const MAX_HANDLE_NODES = 10_000
-/** The most characters all handles of one call may add up to. */
-export const MAX_RESOLVED_CHARS = 16_000_000
+/**
+ * The most characters all handles of one call may add up to is
+ * `resourceLimits().resolvedChars`: twice the largest file, as base64.
+ */
 
 export type Handle = { $result: string; as?: "text" | "base64" }
 
@@ -199,6 +202,7 @@ export async function resolveHandles(
   }
 
   let chars = 0
+  const { resolvedChars } = resourceLimits()
   const walk: Walk = { nodes: 0 }
 
   const replace = (value: unknown, depth: number): unknown => {
@@ -210,9 +214,9 @@ export async function resolveHandles(
       const content = contentOf(opened.get(handle.$result)!, handle.as)
       chars += content.length
 
-      if (chars > MAX_RESOLVED_CHARS) {
+      if (chars > resolvedChars) {
         throw invalid(
-          `The kept results in these arguments add up to more than ${MAX_RESOLVED_CHARS.toLocaleString("en")} characters, more than PCP passes on in one call.`,
+          `The kept results in these arguments add up to more than ${resolvedChars.toLocaleString("en")} characters, more than PCP passes on in one call.`,
         )
       }
 

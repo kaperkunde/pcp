@@ -573,6 +573,125 @@ describe("the mail tools' work", () => {
     ).rejects.toThrow(/cannot send/)
   })
 
+  it("writes a draft into Drafts, marked as a draft, and submits nothing", async () => {
+    const { mail, fake } = await backend()
+    const pdf = Buffer.from("%PDF-1.7 the plan")
+
+    const draft = await mail.createDraft({
+      to: [{ name: "Charles Babbage", email: "charles@example.com" }],
+      cc: [],
+      bcc: [{ name: null, email: "archive@example.com" }],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: "e1",
+      attachments: [{ name: "plan.pdf", type: "application/pdf", bytes: pdf }],
+    })
+
+    expect(draft).toMatchObject({
+      from: { name: "Ada Lovelace", email: "ada@example.com" },
+      to: [{ name: "Charles Babbage", email: "charles@example.com" }],
+      subject: "Re: The engine",
+      mailboxId: "mb-drafts",
+      mailbox: "Drafts",
+    })
+    expect(draft.messageId).toMatch(/@example\.com$/)
+    // Nothing is sent: no submission was asked for at all.
+    expect(fake.sent).toEqual([])
+    expect(JSON.stringify(fake.requests)).not.toContain("EmailSubmission")
+
+    const stored = fake.emails.find((email) => email.id === draft.id)!
+    expect(stored).toMatchObject({
+      mailboxIds: { "mb-drafts": true },
+      keywords: { $draft: true, $seen: true },
+      bcc: [{ name: null, email: "archive@example.com" }],
+      inReplyTo: ["engine-1@example.com"],
+      references: ["engine-1@example.com"],
+      text: "Thursday suits me.",
+      attachments: [
+        { blobId: "blob-up-1", name: "plan.pdf", type: "application/pdf" },
+      ],
+    })
+    expect(fake.uploads[0]!.content.equals(pdf)).toBe(true)
+    // A draft answers nothing yet.
+    expect(fake.emails.find((email) => email.id === "e1")!.keywords).toEqual({})
+
+    // get_email reads it by the id the answer gave.
+    const read = await mail.getEmail(draft.id!, { bodyBytes: 1000 })
+    expect(read).toMatchObject({
+      subject: "Re: The engine",
+      flags: { draft: true, unread: false },
+      body: { text: "Thursday suits me." },
+    })
+  })
+
+  it("writes a draft to nobody yet, on an account that cannot send", async () => {
+    const { mail, fake, session } = await backend({ submission: false })
+
+    const draft = await mail.createDraft({
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: "Notes",
+      text: "To finish later.",
+    })
+
+    expect(draft).toMatchObject({ from: null, to: [], mailboxId: "mb-drafts" })
+    expect(draft.messageId).toMatch(/@pcp\.invalid$/)
+    expect(fake.emails.find((email) => email.id === draft.id)).toMatchObject({
+      to: [],
+      keywords: { $draft: true, $seen: true },
+    })
+    // Identities belong to submission, which this account does not have.
+    expect(JSON.stringify(fake.requests)).not.toContain("Identity/get")
+
+    // The owner's From address, when they gave one.
+    const from = openJmapBackend(
+      { ...session, from: "ada@example.org" },
+      basic(),
+    )
+    expect(
+      await from.createDraft({
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+      }),
+    ).toMatchObject({ from: { name: null, email: "ada@example.org" } })
+    await expect(
+      from.createDraft({
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+        identity: "ident-1",
+      }),
+    ).rejects.toThrow(/leave identity out/)
+  })
+
+  it("writes no draft when it cannot upload an attachment", async () => {
+    const { mail, fake } = await backend({ uploadUrl: null })
+
+    await expect(
+      mail.createDraft({
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+        attachments: [
+          {
+            name: "a.bin",
+            type: "application/octet-stream",
+            bytes: Buffer.from([1]),
+          },
+        ],
+      }),
+    ).rejects.toThrow(/offers no uploads/)
+    expect(JSON.stringify(fake.requests)).not.toContain("Email/set")
+  })
+
   it("moves, marks, and deletes into the Trash", async () => {
     const { mail, fake } = await backend()
 

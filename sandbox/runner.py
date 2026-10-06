@@ -36,8 +36,12 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 LAUNCHER = os.path.join(HERE, "launcher.py")
 PROTOCOL = 1
 LANGUAGES = ["bash", "python"]
+# The least a message from PCP, and a request from a program, may be; PCP
+# names larger ones with each run, from the owner's resource settings, up to
+# the most these take.
 MAX_MESSAGE_BYTES = 24 * 1024 * 1024
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
+LARGEST_MESSAGE_BYTES = 4 * 1024 * 1024 * 1024
 RETRY_SECONDS = 2
 
 
@@ -69,6 +73,7 @@ class Lines:
     def __init__(self, sock):
         self.sock = sock
         self.buffer = b""
+        self.limit = MAX_MESSAGE_BYTES
 
     def __iter__(self):
         while True:
@@ -78,7 +83,7 @@ class Lines:
                 if not chunk:
                     return
                 self.buffer += chunk
-                if len(self.buffer) > MAX_MESSAGE_BYTES:
+                if len(self.buffer) > self.limit:
                     raise ValueError("message too long")
                 at = self.buffer.find(b"\n")
             line, self.buffer = self.buffer[:at], self.buffer[at + 1 :]
@@ -109,6 +114,7 @@ class Job:
         self.code = message["code"]
         self.timeout = max(1.0, min(float(message.get("timeoutMs", 180000)) / 1000, 600))
         self.max_output = int(message.get("maxOutput", 1000000))
+        self.max_request = bounded(message.get("maxRequest"), MAX_REQUEST_BYTES)
         name = secrets.token_hex(8)
         self.dir = os.path.join(WORK, f"job-{name}")
         # The bridge socket is the runner's: the program can connect to it,
@@ -138,7 +144,7 @@ class Job:
     def relay(self, connection):
         with connection:
             try:
-                line = read_line(connection, MAX_REQUEST_BYTES)
+                line = read_line(connection, self.max_request)
                 request = json.loads(line) if line else None
             except (ValueError, OSError):
                 request = None
@@ -297,12 +303,20 @@ class Job:
         self.pcp.send(message)
 
 
+def bounded(value, least):
+    """A size PCP named, no less than the least and no more than the most."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return least
+    return max(least, min(value, LARGEST_MESSAGE_BYTES))
+
+
 def serve(sock):
     pcp = Pcp(sock)
     pcp.send({"type": "hello", "protocol": PROTOCOL, "languages": LANGUAGES})
     current = None
+    lines = Lines(sock)
 
-    for line in Lines(sock):
+    for line in lines:
         try:
             message = json.loads(line)
         except ValueError:
@@ -326,6 +340,7 @@ def serve(sock):
                 continue
             if message.get("language") not in LANGUAGES or not isinstance(message.get("code"), str):
                 continue
+            lines.limit = bounded(message.get("maxMessage"), MAX_MESSAGE_BYTES)
             current = Job(pcp, message)
             threading.Thread(target=current.run, daemon=True).start()
         elif kind == "reply" and current and message.get("job") == current.id:

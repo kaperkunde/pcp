@@ -7,6 +7,7 @@ import { FormNote } from "@/components/form-status"
 import { DdnsCard, HttpsCard, PcpggCard } from "@/components/network-forms"
 import { OutsideAccessCard } from "@/components/outside-access-card"
 import { PageHeader } from "@/components/page-header"
+import { ResourcesCard } from "@/components/resources-card"
 import { UpdatesCard } from "@/components/updates-card"
 import {
   ChangePasswordForm,
@@ -25,6 +26,7 @@ import {
 import { cleanupOverview } from "@/lib/core/cleanup/runtime"
 import { deviceKeyInfo } from "@/lib/core/device-keys"
 import { isLocalAddress } from "@/lib/core/local-address"
+import { resourcesOverview } from "@/lib/core/resources/state"
 import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { updatesOverview } from "@/lib/core/updates/state"
@@ -52,6 +54,7 @@ export default async function SettingsPage({
     updates,
     touchId,
     cleanup,
+    resources,
   ] = await Promise.all([
     getSetting(ctx, SETTING_PUBLIC_URL),
     requestOrigin(),
@@ -61,6 +64,7 @@ export default async function SettingsPage({
     updatesOverview(),
     deviceKeyInfo(ctx.vaultId),
     cleanupOverview(),
+    resourcesOverview(),
   ])
 
   return (
@@ -107,6 +111,7 @@ export default async function SettingsPage({
         autoUpdated={autoUpdated()}
       />
       <CleanupCard overview={cleanup} />
+      <ResourcesCard overview={resources} />
       <ChangePasswordForm username={vault.name} />
       <RecoveryKeyCard username={vault.name} />
       <TouchIdCard username={vault.name} info={touchId} />

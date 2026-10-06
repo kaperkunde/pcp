@@ -19,7 +19,8 @@ import type { PermissionExecutor } from "../permissions"
 import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
-import { keepResult } from "../tool-results"
+import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
+import { keepBytes, keepResult } from "../tool-results"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { MAX_CALLS_PER_RUN } from "./limits"
@@ -390,6 +391,34 @@ describe("a program's calls", () => {
       kind: "bytes",
       toolName: "run_code",
     })
+  })
+
+  it("reads a file as large as the owner allows, and no larger", async () => {
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 6 })
+    const bytes = Buffer.alloc(5 * 1024 * 1024, 0xab)
+    const kept = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "scan_card",
+      bytes,
+      mediaType: "application/pdf",
+      name: "big.pdf",
+    })
+
+    const read = await run(`
+      const bytes = await pcp.read("${kept.id}", { as: "bytes" })
+      return [bytes.length, bytes[0], bytes[bytes.length - 1]]
+    `)
+    // Five megabytes as base64 is past the 4,000,000 characters of before.
+    expect(returned(read.text)).toEqual([bytes.length, 0xab, 0xab])
+
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 2 })
+    const refused = await run(`
+      try { await pcp.read("${kept.id}", { as: "base64" }) } catch (error) { return error.message }
+    `)
+    expect(returned(refused.text)).toContain(
+      "more than a program reads at once",
+    )
   })
 
   it("lists the token's servers and the tools it can see, as list_tools does", async () => {

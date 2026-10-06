@@ -437,11 +437,15 @@ A mail account is a server row of kind `jmap` or `imap` with a fixed set of
 tools (`lib/core/mail/tools.ts`), the same names and answers for both, so an
 assistant learns one set: `list_mailboxes`, `search_emails`, `get_email`,
 `get_attachment`, `move_email`, `mark_email`, `delete_email`, `send_email`,
-and on JMAP `get_thread` and `list_identities`. Which ones an account has
-depends on read-only (the tools that change mail are left out, and refused if
-called anyway), and on whether it can send (JMAP: the session offers
-submission; IMAP: the owner gave an SMTP server). `mcp_tool.operation` is
-null; a call is dispatched by name. An assistant can propose an account
+`create_draft`, and on JMAP `get_thread` and `list_identities`. Which ones an
+account has depends on read-only (the tools that change mail are left out, and
+refused if called anyway), and on whether it can send (JMAP: the session
+offers submission; IMAP: the owner gave an SMTP server). `create_draft` is
+`send_email`'s arguments and email, recipients optional, written into Drafts
+(the drafts role, or a mailbox called Drafts) marked as a draft and seen, and
+sent by nobody: a separate tool so the owner can allow drafting without
+allowing sending. It needs no submission or SMTP server. `mcp_tool.operation`
+is null; a call is dispatched by name. An assistant can propose an account
 through `register_server` (below); only the owner changes one, and the
 endpoint tools do not touch them.
 
@@ -487,7 +491,8 @@ takes a call's answer as the first under its id named after its method, and
 keeps any other apart (`implicitKey`), so the move's answer never reads as
 the submission's and a failed move only means the copy stayed in Drafts. A
 reply then marks the email it answers (`$answered`, `\Answered` over IMAP),
-after the send, and says whether it could.
+after the send, and says whether it could. A draft is the same Email/set
+into Drafts with no EmailSubmission after it, and marks nothing.
 
 **IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
@@ -496,7 +501,9 @@ STARTTLS is required, never optional. Each call connects, signs in, works
 and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
 email. Sending goes over SMTP and a copy (Bcc kept) is appended to Sent,
-attachments in both, written by nodemailer.
+attachments in both, written by nodemailer. A draft is the same message,
+appended to Drafts with `\Draft` and `\Seen` and sent nowhere; its id comes
+from APPENDUID, and is null without UIDPLUS.
 
 **What an assistant gets back** is JSON PCP writes: addresses, dates, flags,
 the text of a body (the HTML one made plain when there is no text one) and
@@ -504,8 +511,8 @@ the list of attachments. `get_attachment` downloads an attachment of any
 kind, up to 10 MiB, and keeps it for the token as a file (below): the answer
 gives its handle, and a text one's first 20,000 characters too, scrubbed of
 the credential. A body longer than 20,000 characters is kept the same way.
-`send_email` takes kept results as attachments, read before anything
-connects (at most 10, 20 MB together), so an attachment read from one
+`send_email` and `create_draft` take kept results as attachments, read before
+anything connects (at most 10, 20 MB together), so an attachment read from one
 account can be sent from another. Delete moves to the
 Trash and nothing deletes for good. Failures: refused credentials mark the
 account `auth_required` (with OAuth, "needs connecting"), an unreachable

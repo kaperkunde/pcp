@@ -15,9 +15,9 @@ import {
   MAX_RANDOM_BYTES,
   MAX_READS_PER_RUN,
   RUN_CPU_MS,
-  RUN_MEMORY_BYTES,
   RUN_STACK_BYTES,
 } from "./limits"
+import { resourceLimits } from "../resources/state"
 import { Output } from "./output"
 import type { BridgeReply, Executor, RunEnd, RunResult } from "./types"
 
@@ -403,13 +403,18 @@ export function describeThrown(value: unknown): string {
 
 /**
  * The executor, with the limits it holds a program to; tests pass smaller
- * ones to reach them quickly.
+ * ones to reach them quickly. Its memory is otherwise the owner's resource
+ * setting (lib/core/resources/), read as each run starts.
  */
 export function javaScriptExecutor({
   cpuMs = RUN_CPU_MS,
-  memoryBytes = RUN_MEMORY_BYTES,
+  memoryBytes,
 }: { cpuMs?: number; memoryBytes?: number } = {}): Executor {
-  return (input) => runInQuickJs(input, { cpuMs, memoryBytes })
+  return (input) =>
+    runInQuickJs(input, {
+      cpuMs,
+      memoryBytes: memoryBytes ?? resourceLimits().programMemoryBytes,
+    })
 }
 
 export const runJavaScript: Executor = javaScriptExecutor()

@@ -6,6 +6,7 @@ import { prunePermissionRequests } from "../permissions"
 import { pruneRequestLog } from "../request-log"
 import { pruneExpiredSessions } from "../sessions"
 import { pruneToolResults } from "../tool-results"
+import { reclaimSpace } from "./space"
 import {
   describeRemoved,
   getCleanupConfig,
@@ -94,11 +95,22 @@ export async function runCleanup(
     }
   }
 
+  // What was removed goes back to the disk, not only to SQLite's free list.
+  let freedBytes = 0
+
+  try {
+    freedBytes = await reclaimSpace()
+  } catch (error) {
+    console.error("[cleanup] could not give back disk space", error)
+    problems.push("Could not give back the disk space it freed.")
+  }
+
   const status: CleanupStatus = {
     lastRunAt: now.toISOString(),
     trigger,
     ms: Date.now() - started,
     removed,
+    ...(freedBytes > 0 ? { freedBytes } : {}),
     ...(problems.length > 0 ? { problems } : {}),
   }
 
@@ -108,6 +120,12 @@ export async function runCleanup(
 
   if (said) {
     console.log(`[cleanup] removed ${said}`)
+  }
+
+  if (freedBytes > 0) {
+    console.log(
+      `[cleanup] gave back ${Math.round(freedBytes / 1024 / 1024)} MB of disk`,
+    )
   }
 
   return status

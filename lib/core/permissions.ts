@@ -89,7 +89,6 @@ import { collectHandleIds } from "./result-handles"
 import {
   describeResults,
   keepWholeAnswer,
-  MAX_KEPT_RESULT_CHARS,
   resultKeepers,
   resultNotices,
   resultOpener,
@@ -101,6 +100,7 @@ import {
   type BrowseAsk,
   type HandoverAsk,
 } from "./browser/types"
+import { resourceLimits } from "./resources/state"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
   describeFetchAsk,
@@ -317,7 +317,7 @@ export async function runCall(
         text: (input) => keepers.text({ ...input, ...context }),
         bytes: (input) => keepers.bytes({ ...input, ...context }),
       },
-      { wholeMax: MAX_KEPT_RESULT_CHARS, links: true },
+      { wholeMax: resourceLimits().textChars, links: true },
     )
 
     return await keepWholeAnswer(

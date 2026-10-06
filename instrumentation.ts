@@ -12,6 +12,13 @@ export async function register() {
       )
     }
 
+    // How much of the machine PCP may use (lib/core/resources/): read once
+    // now, so what reads it synchronously starts from the owner's settings.
+    const { loadResourceLimits } = await import("@/lib/core/resources/state")
+    await loadResourceLimits().catch((error) =>
+      console.error("[resources] could not read the settings", error),
+    )
+
     // What PCP keeps only for a while (ended sign-ins, kept results, old
     // permission requests, old days of the request log): removed once now,
     // then on the owner's schedule (lib/core/cleanup/runtime.ts).

@@ -164,6 +164,15 @@ so in the summary; the bump itself waits for the request.
   socket, and everything of theirs is killed and removed after each run
   (`scripts/sandbox.test.ts` pins the compose file). New limits go in
   `code/limits.ts`, and a new bridge operation gets a test.
+- Limits on the machine's memory, processors and disk (a program's memory,
+  programs at once, the largest file, kept results per token) are not
+  constants: they are `resourceLimits()` (`lib/core/resources/`), picked
+  from the machine unless the owner set them on Settings → Resources, and
+  never past what `checkResourceConfig` lets the machine spare. A new one
+  goes there, with a default from the machine and a bound. What PCP keeps
+  for a while is removed by the cleanup (`lib/core/cleanup/`), which also
+  gives the disk back (`cleanup/space.ts`); anything new PCP keeps on disk
+  is removed there too.
 - The browser (`lib/core/browser/`) runs Chromium for the vault and keeps
   nothing on disk: its sign-ins are the vault's `browser_profile`,
   encrypted, saved only while a request holds the key. Every connection goes
@@ -236,7 +245,8 @@ so in the summary; the bump itself waits for the request.
   migration that adds a column fails `pnpm typecheck` in
   `lib/core/backup-format.ts` until the format carries it, with the column's
   default so older files still restore.
-- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS, pcp.gg)
+- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS, pcp.gg,
+  the cleanup, resources)
   belong to the machine, are read with no credential, and are stored
   unencrypted. Never copy anything from the vault into one, and never add the
   pcp.gg key to an export (`EXPORTED_HOST_KEYS`). `lib/core/network/` starts

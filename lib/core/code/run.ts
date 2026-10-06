@@ -11,21 +11,16 @@ import {
   handleOf,
   keepBytes,
   keepResult,
-  MAX_KEPT_RESULT_BYTES,
-  MAX_KEPT_RESULT_CHARS,
   openResult,
   resultNotice,
 } from "../tool-results"
+import { loadResourceLimits, type ResourceLimits } from "../resources/state"
 import {
-  MAX_CALL_ARGS_CHARS,
   MAX_CALLS_PER_RUN,
-  MAX_CODE_ANSWER_CHARS,
   MAX_CODE_CHARS,
-  MAX_CONCURRENT_RUNS,
   MAX_KEEPS_PER_RUN,
   MAX_PARALLEL_CALLS,
   MAX_READS_PER_RUN,
-  MAX_RETURN_CHARS,
   RUN_TIMEOUT_MS,
 } from "./limits"
 import { runJavaScript } from "./quickjs"
@@ -191,9 +186,11 @@ export async function runCode(
     )
   }
 
-  if (running >= MAX_CONCURRENT_RUNS) {
+  const limits = await loadResourceLimits()
+
+  if (running >= limits.programsAtOnce) {
     return text(
-      `PCP is running ${MAX_CONCURRENT_RUNS} programs already. Try again in a moment.`,
+      `PCP is running ${limits.programsAtOnce} ${limits.programsAtOnce === 1 ? "program" : "programs"} already, as many as the owner's settings allow at once. Try again in a moment.`,
       true,
     )
   }
@@ -264,9 +261,9 @@ export async function runCode(
       return refuse(`The arguments of ${server}/${tool} are an object.`)
     }
 
-    if ((JSON.stringify(args) ?? "").length > MAX_CALL_ARGS_CHARS) {
+    if ((JSON.stringify(args) ?? "").length > limits.answerChars) {
       return refuse(
-        `The arguments of ${server}/${tool} are longer than a call takes (${MAX_CALL_ARGS_CHARS.toLocaleString("en")} characters of JSON). Keep a long value with pcp.keep and pass its handle.`,
+        `The arguments of ${server}/${tool} are longer than a call takes (${limits.answerChars.toLocaleString("en")} characters of JSON). Keep a long value with pcp.keep and pass its handle.`,
       )
     }
 
@@ -375,9 +372,9 @@ export async function runCode(
       const value =
         as === "base64" ? opened.bytes().toString("base64") : opened.text()
 
-      if (value.length > MAX_CODE_ANSWER_CHARS) {
+      if (value.length > limits.answerChars) {
         return refuse(
-          `Result ${id} is ${value.length.toLocaleString("en")} characters, more than a program reads at once (${MAX_CODE_ANSWER_CHARS.toLocaleString("en")}).`,
+          `Result ${id} is ${value.length.toLocaleString("en")} characters${as === "base64" ? " as base64" : ""}, more than a program reads at once (${limits.answerChars.toLocaleString("en")}). The owner can raise the largest file in PCP's settings, under Resources.`,
         )
       }
 
@@ -425,9 +422,9 @@ export async function runCode(
       return keepFile(payload.value, type, name)
     }
 
-    if (payload.value.length > MAX_KEPT_RESULT_CHARS) {
+    if (payload.value.length > limits.textChars) {
       return refuse(
-        `That is ${payload.value.length.toLocaleString("en")} characters; PCP keeps ${MAX_KEPT_RESULT_CHARS.toLocaleString("en")} of one text at most.`,
+        `That is ${payload.value.length.toLocaleString("en")} characters; PCP keeps ${limits.textChars.toLocaleString("en")} of one text at most.`,
       )
     }
 
@@ -455,9 +452,9 @@ export async function runCode(
   ): Promise<BridgeReply> {
     // Base64 is 4 characters for every 3 bytes; anything longer than the
     // largest file is refused before it is decoded.
-    if (base64.length > Math.ceil(MAX_KEPT_RESULT_BYTES / 3) * 4 + 4) {
+    if (base64.length > Math.ceil(limits.fileBytes / 3) * 4 + 4) {
       return refuse(
-        `That is more than PCP keeps of one file (${MAX_KEPT_RESULT_BYTES.toLocaleString("en")} bytes).`,
+        `That is more than PCP keeps of one file (${limits.fileBytes.toLocaleString("en")} bytes). The owner can raise that in PCP's settings, under Resources.`,
       )
     }
 
@@ -558,7 +555,9 @@ export async function runCode(
           `The program finished in ${did}.`,
           ...(output ? [`It printed:\n${output}`] : []),
           ...(result.returned !== null
-            ? [`It returned:\n${await shownReturn(scope, result.returned)}`]
+            ? [
+                `It returned:\n${await shownReturn(scope, result.returned, limits)}`,
+              ]
             : input.returns === false
               ? []
               : ["It returned nothing."]),
@@ -626,13 +625,14 @@ async function shownOutput(
 async function shownReturn(
   scope: PermissionScope,
   returned: string,
+  limits: ResourceLimits,
 ): Promise<string> {
   if (returned.length <= SHOWN_RETURN_CHARS) {
     return returned
   }
 
-  if (returned.length > MAX_RETURN_CHARS) {
-    return `(${returned.length.toLocaleString("en")} characters of JSON, more than run_code passes on: ${MAX_RETURN_CHARS.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
+  if (returned.length > limits.textChars) {
+    return `(${returned.length.toLocaleString("en")} characters of JSON, more than run_code passes on: ${limits.textChars.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
   }
 
   const kept = await keepResult(scope.ctx, {

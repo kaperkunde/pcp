@@ -52,6 +52,8 @@ export type CleanupStatus = {
   trigger?: "start" | "schedule" | "owner"
   ms?: number
   removed?: CleanupCounts
+  /** Bytes of the database file given back to the disk. */
+  freedBytes?: number
   /** The parts that failed, said for the owner (the server log has why). */
   problems?: string[]
 }

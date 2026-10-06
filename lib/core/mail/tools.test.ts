@@ -16,6 +16,7 @@ describe("mailTools", () => {
       "get_thread",
       "list_identities",
       "send_email",
+      "create_draft",
       "move_email",
       "mark_email",
       "delete_email",
@@ -28,6 +29,8 @@ describe("mailTools", () => {
       "search_emails",
       "get_email",
       "get_attachment",
+      // A draft needs no SMTP server.
+      "create_draft",
       "move_email",
       "mark_email",
       "delete_email",
@@ -43,6 +46,30 @@ describe("mailTools", () => {
       "get_thread",
       "list_identities",
     ])
+    expect(
+      names({ kind: "imap", readOnly: true, canSend: true }),
+    ).not.toContain("create_draft")
+  })
+
+  it("takes a draft as send_email takes an email, with recipients optional", () => {
+    const tools = mailTools({ kind: "jmap", readOnly: false, canSend: true })
+    const send = tools.find((tool) => tool.name === "send_email")!
+    const draft = tools.find((tool) => tool.name === "create_draft")!
+    const properties = (schema: unknown) =>
+      Object.keys((schema as { properties: object }).properties)
+
+    expect(properties(draft.inputSchema)).toEqual(properties(send.inputSchema))
+    expect(draft.inputSchema).toMatchObject({
+      type: "object",
+      required: ["subject", "text"],
+      additionalProperties: false,
+    })
+    expect(draft.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+    })
+    expect(mailToolSpec("create_draft")).toMatchObject({ writes: true })
+    expect(mailToolSpec("create_draft")!.sends).toBeUndefined()
   })
 
   it("describes arguments as JSON Schema, and marks what changes mail", () => {
@@ -102,6 +129,35 @@ describe("parseMailArgs", () => {
         text: "y",
         identity: "i1",
       }),
+    ).toThrow(/identity/)
+  })
+
+  it("checks a draft against send_email's limits", () => {
+    const spec = mailToolSpec("create_draft")!
+
+    expect(parseMailArgs(spec, "imap", { subject: "", text: "" })).toEqual({
+      subject: "",
+      text: "",
+    })
+    expect(() =>
+      parseMailArgs(spec, "jmap", {
+        to: Array.from({ length: 51 }, (_, n) => `a${n}@example.com`),
+        subject: "s",
+        text: "t",
+      }),
+    ).toThrow(/create_draft: .*to/)
+    expect(() =>
+      parseMailArgs(spec, "jmap", {
+        subject: "s",
+        text: "t",
+        attachments: [{ $result: "r1", name: "../evil" }],
+      }),
+    ).toThrow(/file name/)
+    expect(() =>
+      parseMailArgs(spec, "imap", { subject: "x".repeat(501), text: "" }),
+    ).toThrow(/create_draft/)
+    expect(() =>
+      parseMailArgs(spec, "imap", { subject: "s", text: "t", identity: "i1" }),
     ).toThrow(/identity/)
   })
 })
