@@ -789,7 +789,7 @@ changed on its own since the last save is lost. Counts (sites, cookies,
 size) are kept in the clear for the page. An export carries the row as
 ciphertext; Forget all sites closes the browser unsaved and deletes it.
 
-**Which pages open** (the gate in `runtime.ts`). A tab's main frame loads
+**Which pages open** (the gate in `runtime.ts`). A page's main frame loads
 nothing the gate has not passed: the DevTools protocol pauses each document
 request (redirects included) before it is sent. It passes when the owner
 drives the tab, when the owner allowed the site for this tab, or when the
@@ -803,13 +803,18 @@ gated per site. `navigate` and `tabs` decide before anything opens, with
 which `runCall` turns into a `browse` request offering Allow once (the site
 for that tab while it is open), Always allow this site and Block this site
 (the token's site line, as for web fetch) and Not now. A popup becomes a tab
-of the tab that opened it. A token whose `navigate` tool is at ask is asked
-once: the call's request shows the address, and when the owner allows the
-call, `runCall` (told so by `executeCall`) opens the site for that tab as
-Allow once would, with no `browse` request after it. Only `navigate` and
-`tabs` ask about a site, and only for the address in their arguments, so
-the site is always one the owner saw. A blocked site stays blocked, and a
-hand-over during such a call is still asked.
+of the tab that opened it. The gate is the browser's, not a tab's (`Fetch`
+on the browser's own DevTools session, on before the first page exists), so
+it holds a popup from its very first request, before Playwright has
+reported the popup: until then the popup opens only what the tab that
+opened it may open, and is closed instead of opening anything else, or when
+the browser has no room for another tab. A token whose `navigate` tool is
+at ask is asked once: the call's request shows the address, and when the
+owner allows the call, `runCall` (told so by `executeCall`) opens the site
+for that tab as Allow once would, with no `browse` request after it. Only
+`navigate` and `tabs` ask about a site, and only for the address in their
+arguments, so the site is always one the owner saw. A blocked site stays
+blocked, and a hand-over during such a call is still asked.
 
 **Which addresses it reaches** (`proxy.ts`). Every connection goes through
 a forward proxy on 127.0.0.1 (`--proxy-server`, with loopback not
