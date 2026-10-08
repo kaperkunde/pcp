@@ -22,7 +22,8 @@
 # turns it off; a pinned PCP_VERSION has no use for it.
 #
 # Settings, by environment variable. The first six are remembered in
-# ~/.config/pcp/install.conf, so a later run without them keeps them:
+# ~/.config/pcp/install.conf, so a later run without them keeps them (run as
+# root, in /etc/pcp/install.conf instead):
 #
 #   PCP_PORT=3000                     the port PCP answers on
 #   PCP_HTTPS=1                       also publish 80 and 443 for PCP's own HTTPS
@@ -35,6 +36,16 @@
 #
 # It never runs sudo and never installs Docker or Podman itself: when neither
 # is usable, it prints what to run. POSIX sh, so it runs under dash too.
+#
+# The copy of this installer for the timers is kept in
+# ~/.local/share/pcp/install.sh, or, when run as root, in
+# /usr/local/lib/pcp/install.sh: root runs that file every day, so it and the
+# settings it reads (/etc/pcp/install.conf) sit where only root writes,
+# whatever HOME is. (An install run as root that finds only the older file in
+# HOME carries its settings over once; the daily update never reads it.) The
+# watcher notes the last request it answered in ~/.local/state/pcp, or as
+# root in /var/lib/pcp. PCP_ROOT_PREFIX puts all of root's paths under another
+# directory; it exists for the tests and nothing else.
 
 set -eu
 
@@ -70,10 +81,9 @@ require_linux() {
 
 # --- Settings ---------------------------------------------------------------
 
-# Reads the remembered settings. An allow-list, not `. file`, so the file
-# cannot run anything.
+# Reads the remembered settings from the file it is given. An allow-list, not
+# `. file`, so the file cannot run anything.
 load_conf() {
-  [ -f "$CONF" ] || return 0
   while IFS='=' read -r key value || [ -n "$key" ]; do
     case "$key" in
       PCP_PORT) conf_port=$value ;;
@@ -83,7 +93,33 @@ load_conf() {
       PCP_AUTO_UPDATE) conf_auto=$value ;;
       PCP_UPDATE_BUTTON) conf_button=$value ;;
     esac
-  done <"$CONF"
+  done <"$1"
+}
+
+# Where a root install before root had a place of its own kept its settings:
+# in the user's config directory, which may be an ordinary user's.
+legacy_conf() {
+  if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    printf '%s\n' "$XDG_CONFIG_HOME/pcp/install.conf"
+  elif [ -n "${HOME:-}" ]; then
+    printf '%s\n' "$HOME/.config/pcp/install.conf"
+  else
+    return 1
+  fi
+}
+
+# Root reads /etc/pcp/install.conf. Only when that is missing, and only in an
+# install run (somebody typing the command, never the unattended update),
+# the older file in HOME is read once through the same allow-list; the values
+# are checked like any others, and save_conf then writes /etc/pcp/install.conf,
+# so the file in HOME is not read again.
+read_conf() {
+  if [ -f "$CONF" ]; then
+    load_conf "$CONF"
+  elif [ "$ROOT" = 1 ] && [ "$MIGRATE" = 1 ] && old=$(legacy_conf) && [ -f "$old" ]; then
+    warn "Note: carrying the settings in $old over to $CONF, which is where this installer keeps them as root from now on. $old is not read again."
+    load_conf "$old"
+  fi
 }
 
 # The environment wins over the file, the file over the default.
@@ -94,7 +130,7 @@ resolve_settings() {
   conf_volume=
   conf_auto=
   conf_button=
-  load_conf
+  read_conf
   PCP_PORT=${PCP_PORT:-${conf_port:-3000}}
   PCP_HTTPS=${PCP_HTTPS:-${conf_https:-0}}
   PCP_RUNTIME=${PCP_RUNTIME:-${conf_runtime:-}}
@@ -141,10 +177,22 @@ usage_error() {
   exit 2
 }
 
+# A directory root reads or runs from is 0755 whatever root's umask, so an
+# unusual umask leaves nothing group- or world-writable, or unreadable.
+make_dir() {
+  mkdir -p "$1"
+  if [ "$ROOT" = 1 ]; then
+    chmod 0755 "$1"
+  fi
+}
+
 save_conf() {
-  mkdir -p "$(dirname "$CONF")"
+  make_dir "$(dirname "$CONF")"
   printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\nPCP_AUTO_UPDATE=%s\nPCP_UPDATE_BUTTON=%s\n' \
     "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" "$PCP_AUTO_UPDATE" "$PCP_UPDATE_BUTTON" >"$CONF"
+  if [ "$ROOT" = 1 ]; then
+    chmod 0644 "$CONF"
+  fi
 }
 
 # --- Which runtime ----------------------------------------------------------
@@ -250,9 +298,21 @@ systemd_ok() {
   unit_ctl show-environment >/dev/null 2>&1
 }
 
+# Where the installer keeps its own files. As root they are in system places
+# that only root writes, never under HOME or XDG_*: root runs the updater
+# every day, and `sudo -E` or a sudo that keeps HOME would otherwise point
+# them into a directory an ordinary user owns.
+set_conf_path() {
+  if [ "$ROOT" = 1 ]; then
+    CONF="${PCP_ROOT_PREFIX:-}/etc/pcp/install.conf"
+  else
+    CONF="${XDG_CONFIG_HOME:-${HOME:?}/.config}/pcp/install.conf"
+  fi
+}
+
 set_paths() {
   if [ "$ROOT" = 1 ]; then
-    UNIT_DIR=/etc/containers/systemd
+    UNIT_DIR="${PCP_ROOT_PREFIX:-}/etc/containers/systemd"
     WANTED_BY=multi-user.target
     JOURNAL="journalctl -u $CONTAINER -f"
   else
@@ -263,12 +323,14 @@ set_paths() {
   UNIT="$UNIT_DIR/$CONTAINER.container"
   LOGS="$RUNTIME logs -f $CONTAINER"
   if [ "$ROOT" = 1 ]; then
-    TIMER_DIR=/etc/systemd/system
+    TIMER_DIR="${PCP_ROOT_PREFIX:-}/etc/systemd/system"
+    UPDATER="${PCP_ROOT_PREFIX:-}/usr/local/lib/pcp/install.sh"
+    STATE_DIR="${PCP_ROOT_PREFIX:-}/var/lib/pcp"
   else
     TIMER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    UPDATER="${XDG_DATA_HOME:-$HOME/.local/share}/pcp/install.sh"
+    STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/pcp"
   fi
-  UPDATER="${XDG_DATA_HOME:-$HOME/.local/share}/pcp/install.sh"
-  STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/pcp"
 }
 
 # --- Checks before anything changes -----------------------------------------
@@ -352,13 +414,17 @@ write_unit() {
       printf 'PublishPort=80:8080\nPublishPort=443:8443\n'
     fi
     printf 'Volume=%s:/data\n' "$PCP_DATA_VOLUME"
+    # The label is what podman-auto-update.timer looks for, so it goes only
+    # on a unit that asked for the daily update: the timer may be on for
+    # other containers.
     if [ "$PCP_AUTO_UPDATE" = 1 ]; then
       printf 'Environment=PCP_AUTO_UPDATE=1\n'
+      printf 'Label=io.containers.autoupdate=registry\n'
     fi
     if [ "$WATCH" = 1 ]; then
       printf 'Environment=PCP_HOST_UPDATER=1\n'
     fi
-    printf 'Label=io.containers.autoupdate=registry\n\n'
+    printf '\n'
     printf '[Service]\nRestart=always\n\n'
     printf '[Install]\nWantedBy=%s\n' "$WANTED_BY"
   } >"$UNIT"
@@ -408,7 +474,7 @@ save_updater() {
   if [ "$UPDATER_SAVED" = 1 ]; then
     return 0
   fi
-  mkdir -p "$(dirname "$UPDATER")"
+  make_dir "$(dirname "$UPDATER")"
   source_file=
   case "$0" in
     */* | *.sh)
@@ -421,12 +487,21 @@ save_updater() {
     cp "$source_file" "$UPDATER.new"
   else
     fetch_to "$SCRIPT_URL" "$UPDATER.new"
-  fi && mv "$UPDATER.new" "$UPDATER" && UPDATER_SAVED=1
+  fi || return 1
+  if [ "$ROOT" = 1 ]; then
+    chmod 0644 "$UPDATER.new"
+  fi
+  mv "$UPDATER.new" "$UPDATER"
+  UPDATER_SAVED=1
 }
 
 # The copy goes when no timer of PCP's runs it any more.
 drop_updater() {
-  [ "$NEEDS_UPDATER" = 1 ] || rm -f "$UPDATER"
+  [ "$NEEDS_UPDATER" = 1 ] && return 0
+  rm -f "$UPDATER"
+  if [ "$ROOT" = 1 ]; then
+    rmdir "$(dirname "$UPDATER")" >/dev/null 2>&1 || true
+  fi
 }
 
 write_update_timer() {
@@ -509,6 +584,8 @@ disable_request_watch() {
   [ -f "$TIMER_DIR/pcp-update-request.timer" ] || return 0
   unit_ctl disable --now pcp-update-request.timer >/dev/null 2>&1 || true
   rm -f "$TIMER_DIR/pcp-update-request.timer" "$TIMER_DIR/pcp-update-request.service"
+  rm -f "$STATE_DIR/install-request"
+  rmdir "$STATE_DIR" >/dev/null 2>&1 || true
   drop_updater
   unit_ctl daemon-reload >/dev/null 2>&1 || true
 }
@@ -568,7 +645,7 @@ watch() {
   esac
   [ "$id" != "$last_id" ] && [ $((now - last_at)) -ge 300 ] || return 0
 
-  mkdir -p "$STATE_DIR"
+  make_dir "$STATE_DIR"
   printf '%s %s\n' "$id" "$now" >"$handled"
   say "PCP asked for an update."
   update
@@ -708,6 +785,9 @@ uninstall() {
   disable_auto_update
   disable_request_watch
   rm -f "$CONF"
+  if [ "$ROOT" = 1 ]; then
+    rmdir "$(dirname "$CONF")" >/dev/null 2>&1 || true
+  fi
   say "PCP is removed. The $PCP_DATA_VOLUME volume, with your vault, is kept. To delete it too:" "" \
     "  $RUNTIME volume rm $PCP_DATA_VOLUME"
 }
@@ -718,12 +798,17 @@ main() {
     *) usage ;;
   esac
   require_linux
-  CONF="${XDG_CONFIG_HOME:-${HOME:?}/.config}/pcp/install.conf"
   if [ "$(id -u)" = 0 ]; then
     ROOT=1
   else
     ROOT=0
   fi
+  set_conf_path
+  # Only an install run may carry settings over from HOME.
+  case "${1:-}" in
+    '') MIGRATE=1 ;;
+    *) MIGRATE=0 ;;
+  esac
   resolve_settings
   pick_runtime
   set_paths

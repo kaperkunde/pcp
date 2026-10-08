@@ -29,6 +29,7 @@ import {
 } from "../servers"
 import { deleteManagedSecret } from "../secrets"
 import { missingResultMessage, resolveHandles } from "../result-handles"
+import { loadResourceLimits } from "../resources/state"
 import {
   handleOf,
   type BytesKeeper,
@@ -54,7 +55,6 @@ import {
 import { fetchJmapSession, openJmapBackend } from "./jmap"
 import {
   DEFAULT_SEARCH_LIMIT,
-  MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_TEXT_CHARS,
   MAX_BODY_CHARS,
   MAX_SEND_ATTACHMENT_BYTES,
@@ -69,6 +69,7 @@ import {
 import {
   MailAuthError,
   MailRequestError,
+  type BulkResult,
   type MailBackend,
   type MailCredential,
   type SearchQuery,
@@ -357,6 +358,7 @@ export async function syncMailTools(
 
   try {
     let canSend: boolean
+    let canVacation = false
 
     if (kind === "jmap") {
       const session = await fetchJmapSession(server.url, credential)
@@ -371,6 +373,7 @@ export async function syncMailTools(
         },
       })
       canSend = session.submission
+      canVacation = session.vacation
     } else {
       await checkImapAccount(
         imapConfig(server),
@@ -382,7 +385,7 @@ export async function syncMailTools(
 
     const toolCount = await storeTools(
       server.id,
-      mailTools({ kind, readOnly: server.readOnly, canSend }),
+      mailTools({ kind, readOnly: server.readOnly, canSend, canVacation }),
     )
     await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
 
@@ -481,7 +484,7 @@ async function runTool(
   }: {
     keep?: ResultKeeper
     keepBytes?: BytesKeeper
-    /** send_email's attachments, read from the token's kept results. */
+    /** The email's attachments, read from the token's kept results. */
     attachments?: SendInput["attachments"]
     scrub: ReturnType<typeof makeRedactor>
   },
@@ -532,7 +535,7 @@ async function runTool(
       const attachment = await backend.getAttachment(
         String(args.id),
         String(args.attachment),
-        { maxBytes: MAX_ATTACHMENT_BYTES },
+        { maxBytes: (await loadResourceLimits()).fileBytes },
       )
 
       const isText = isTextType(attachment.type)
@@ -576,7 +579,7 @@ async function runTool(
         result: handleOf(kept),
         ...(text === null
           ? {
-              note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants it (send_email's attachments, or a field that takes base64).`,
+              note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants it (send_email's or create_draft's attachments, or a field that takes base64).`,
             }
           : {
               text: text.slice(0, MAX_ATTACHMENT_TEXT_CHARS),
@@ -600,33 +603,82 @@ async function runTool(
 
     case "send_email": {
       if (!backend.sendEmail) break
+      return { sent: await backend.sendEmail(composed(args, attachments)) }
+    }
+
+    case "create_draft":
+      return { draft: await backend.createDraft(composed(args, attachments)) }
+
+    case "move_email":
+      return oneOrMany(args, (ids) =>
+        backend.moveEmails(ids, String(args.mailbox)),
+      )
+
+    case "mark_email":
+      return oneOrMany(args, (ids) =>
+        backend.markEmails(ids, {
+          ...(args.read !== undefined ? { read: Boolean(args.read) } : {}),
+          ...(args.flagged !== undefined
+            ? { flagged: Boolean(args.flagged) }
+            : {}),
+          ...(args.answered !== undefined
+            ? { answered: Boolean(args.answered) }
+            : {}),
+          ...(Array.isArray(args.addKeywords)
+            ? { addKeywords: args.addKeywords.map(String) }
+            : {}),
+          ...(Array.isArray(args.removeKeywords)
+            ? { removeKeywords: args.removeKeywords.map(String) }
+            : {}),
+        }),
+      )
+
+    case "delete_email":
+      return oneOrMany(args, (ids) => backend.deleteEmails(ids))
+
+    case "create_mailbox":
       return {
-        sent: await backend.sendEmail({
-          to: parseRecipients(args.to),
-          cc: parseRecipients(args.cc),
-          bcc: parseRecipients(args.bcc),
-          subject: String(args.subject ?? ""),
-          text: String(args.text ?? ""),
-          ...(args.inReplyTo ? { inReplyTo: String(args.inReplyTo) } : {}),
-          ...(args.identity ? { identity: String(args.identity) } : {}),
-          ...(attachments?.length ? { attachments } : {}),
+        mailbox: await backend.createMailbox(
+          String(args.name),
+          args.parent === undefined ? undefined : String(args.parent),
+        ),
+      }
+
+    case "rename_mailbox":
+      return {
+        mailbox: await backend.renameMailbox(String(args.mailbox), {
+          ...(args.name !== undefined ? { name: String(args.name) } : {}),
+          ...(args.parent !== undefined
+            ? { parent: args.parent === null ? null : String(args.parent) }
+            : {}),
+        }),
+      }
+
+    case "delete_mailbox":
+      return { deleted: await backend.deleteMailbox(String(args.mailbox)) }
+
+    case "get_vacation_response": {
+      if (!backend.getVacationResponse) break
+      return { vacationResponse: await backend.getVacationResponse() }
+    }
+
+    case "set_vacation_response": {
+      if (!backend.setVacationResponse) break
+      const text = (key: string) =>
+        args[key] === undefined
+          ? {}
+          : { [key]: args[key] === null ? null : String(args[key]) }
+
+      return {
+        vacationResponse: await backend.setVacationResponse({
+          enabled: Boolean(args.enabled),
+          ...text("from"),
+          ...text("to"),
+          ...text("subject"),
+          ...text("text"),
         }),
       }
     }
-
-    case "move_email":
-      return backend.moveEmail(String(args.id), String(args.mailbox))
-
-    case "mark_email":
-      return backend.markEmail(String(args.id), {
-        ...(args.read !== undefined ? { read: Boolean(args.read) } : {}),
-        ...(args.flagged !== undefined
-          ? { flagged: Boolean(args.flagged) }
-          : {}),
-      })
-
-    case "delete_email":
-      return backend.deleteEmail(String(args.id))
   }
 
   throw new PcpError(
@@ -634,6 +686,47 @@ async function runTool(
     `${server.name} cannot ${toolName.replace(/_/g, " ")}.`,
   )
 }
+
+/**
+ * A change to one email (id) or several (ids): one answers as it always
+ * has, its refusal a refusal; several answer with done and failed.
+ */
+async function oneOrMany<T>(
+  args: Record<string, unknown>,
+  run: (ids: string[]) => Promise<BulkResult<T>>,
+): Promise<unknown> {
+  if (Array.isArray(args.ids)) {
+    return run(args.ids.map(String))
+  }
+
+  const { done, failed } = await run([String(args.id)])
+
+  if (failed[0] || !done[0]) {
+    throw new MailRequestError(failed[0]?.error ?? "No email with that id.")
+  }
+
+  return done[0]
+}
+
+/** The email send_email and create_draft write, from their arguments. */
+function composed(
+  args: Record<string, unknown>,
+  attachments: SendInput["attachments"],
+): SendInput {
+  return {
+    to: parseRecipients(args.to),
+    cc: parseRecipients(args.cc),
+    bcc: parseRecipients(args.bcc),
+    subject: String(args.subject ?? ""),
+    text: String(args.text ?? ""),
+    ...(args.inReplyTo ? { inReplyTo: String(args.inReplyTo) } : {}),
+    ...(args.identity ? { identity: String(args.identity) } : {}),
+    ...(attachments?.length ? { attachments } : {}),
+  }
+}
+
+/** The tools that write an email, and take kept results as attachments. */
+const COMPOSES: ReadonlySet<string> = new Set(["send_email", "create_draft"])
 
 /**
  * A kept result's media type as an attachment carries it: the bare type,
@@ -654,8 +747,12 @@ function sendableType(type: string): string {
     : bare
 }
 
-/** send_email's attachments, read as bytes from the token's kept results. */
+/**
+ * send_email's or create_draft's attachments, read as bytes from the
+ * token's kept results.
+ */
 async function openAttachments(
+  toolName: string,
   list: unknown,
   open: ResultOpener | undefined,
 ): Promise<SendInput["attachments"]> {
@@ -665,7 +762,7 @@ async function openAttachments(
 
   if (!open) {
     throw invalid(
-      "send_email's attachments are results PCP kept for this token, and this call cannot read them.",
+      `${toolName}'s attachments are results PCP kept for this token, and this call cannot read them.`,
     )
   }
 
@@ -751,17 +848,16 @@ export async function callMailTool(
       : rawArgs,
   )
 
-  if (toolName === "send_email") {
+  if (COMPOSES.has(toolName)) {
     for (const key of ["to", "cc", "bcc"] as const) {
       parseRecipients(args[key])
     }
   }
 
-  // Read before anything connects: an unknown id sends nothing.
-  const attachments =
-    toolName === "send_email"
-      ? await openAttachments(args.attachments, open)
-      : undefined
+  // Read before anything connects: an unknown id sends or writes nothing.
+  const attachments = COMPOSES.has(toolName)
+    ? await openAttachments(toolName, args.attachments, open)
+    : undefined
   let backend: MailBackend | null = null
 
   try {

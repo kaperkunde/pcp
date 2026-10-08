@@ -4,14 +4,19 @@ import { useState, useTransition } from "react"
 
 import { FormError } from "@/components/form-status"
 import { Button } from "@/components/ui/button"
-import { Checkbox, Input } from "@/components/ui/input"
+import { Checkbox, Input, Select } from "@/components/ui/input"
 import { Field, Label } from "@/components/ui/label"
 import { decidePermissionAction } from "@/lib/actions/permissions"
-import type { PermissionDecision as Decision } from "@/lib/core/constants"
+import {
+  ALLOW_FOR_MINUTES,
+  DEFAULT_ALLOW_FOR_MINUTES,
+  allowForLabel,
+  type PermissionDecision as Decision,
+} from "@/lib/core/constants"
 import { cn } from "@/lib/utils"
 
 /** The answers that carry out the request, rather than turn it down. */
-const AGREES: Decision[] = ["allow_once", "always"]
+const AGREES: Decision[] = ["allow_once", "allow_for", "always"]
 
 /**
  * The owner's buttons for something an assistant asked for. Answering runs
@@ -26,6 +31,8 @@ const AGREES: Decision[] = ["allow_once", "always"]
  * A memory to share offers a toggle for reading it in every conversation
  * (`every`), ticked when the assistant asked for that; it holds whether the
  * owner shares the memory or keeps it for that assistant.
+ *
+ * "Allow for" comes with how long, chosen beside its button.
  */
 export function PermissionDecision({
   id,
@@ -50,6 +57,7 @@ export function PermissionDecision({
   const [error, setError] = useState<string | null>(null)
   const [secretValue, setSecretValue] = useState("")
   const [always, setAlways] = useState(every?.asked === true)
+  const [minutes, setMinutes] = useState<number>(DEFAULT_ALLOW_FOR_MINUTES)
   const [done, setDone] = useState<{
     message: string
     isError: boolean
@@ -82,6 +90,7 @@ export function PermissionDecision({
         value,
         secret && agrees && secretValue ? secretValue : undefined,
         every ? always : undefined,
+        value === "allow_for" ? minutes : undefined,
       )
 
       if (result.status === "error") {
@@ -164,24 +173,51 @@ export function PermissionDecision({
       ) : null}
       <FormError error={error} />
       <div className="flex flex-wrap gap-2">
-        {decisions.map((decision, index) => (
-          <Button
-            key={decision.value}
-            type="button"
-            size="sm"
-            variant={
-              decision.value === "block" || decision.value === "discard"
-                ? "destructive"
-                : index === 0
-                  ? "default"
-                  : "outline"
-            }
-            disabled={pending}
-            onClick={() => decide(decision.value)}
-          >
-            {pending && chosen === decision.value ? "Working…" : decision.label}
-          </Button>
-        ))}
+        {decisions.map((decision, index) => {
+          const button = (
+            <Button
+              key={decision.value}
+              type="button"
+              size="sm"
+              variant={
+                decision.value === "block" || decision.value === "discard"
+                  ? "destructive"
+                  : index === 0
+                    ? "default"
+                    : "outline"
+              }
+              disabled={pending}
+              onClick={() => decide(decision.value)}
+            >
+              {pending && chosen === decision.value
+                ? "Working…"
+                : decision.value === "allow_for"
+                  ? `${decision.label} ${allowForLabel(minutes)}`
+                  : decision.label}
+            </Button>
+          )
+
+          return decision.value === "allow_for" ? (
+            <div key={decision.value} className="flex items-center gap-1">
+              {button}
+              <Select
+                aria-label="How long"
+                value={String(minutes)}
+                onChange={(event) => setMinutes(Number(event.target.value))}
+                disabled={pending}
+                className="h-7 w-auto py-0 text-[0.8rem]"
+              >
+                {ALLOW_FOR_MINUTES.map((option) => (
+                  <option key={option} value={option}>
+                    {allowForLabel(option)}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          ) : (
+            button
+          )
+        })}
       </div>
     </div>
   )

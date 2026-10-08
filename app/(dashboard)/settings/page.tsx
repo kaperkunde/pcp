@@ -1,11 +1,14 @@
 import type { Metadata } from "next"
 
 import { ExportCard, RestoreCard } from "@/components/backup-cards"
+import { CleanupCard } from "@/components/cleanup-card"
 import { CopyableValue } from "@/components/copyable-value"
+import { DeleteVaultCard } from "@/components/delete-vault-card"
 import { FormNote } from "@/components/form-status"
-import { DdnsCard, HttpsCard } from "@/components/network-forms"
+import { DdnsCard, HttpsCard, PcpggCard } from "@/components/network-forms"
 import { OutsideAccessCard } from "@/components/outside-access-card"
 import { PageHeader } from "@/components/page-header"
+import { ResourcesCard } from "@/components/resources-card"
 import { UpdatesCard } from "@/components/updates-card"
 import {
   ChangePasswordForm,
@@ -21,8 +24,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { cleanupOverview } from "@/lib/core/cleanup/runtime"
 import { deviceKeyInfo } from "@/lib/core/device-keys"
 import { isLocalAddress } from "@/lib/core/local-address"
+import { resourcesOverview } from "@/lib/core/resources/state"
 import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { updatesOverview } from "@/lib/core/updates/state"
@@ -45,16 +50,27 @@ export default async function SettingsPage({
 }) {
   const ctx = await requireContext()
   const query = await searchParams
-  const [pinned, detected, publicUrl, vault, network, updates, touchId] =
-    await Promise.all([
-      getSetting(ctx, SETTING_PUBLIC_URL),
-      requestOrigin(),
-      publicUrlFor(ctx),
-      getVault(ctx.vaultId),
-      networkOverview(),
-      updatesOverview(),
-      deviceKeyInfo(ctx.vaultId),
-    ])
+  const [
+    pinned,
+    detected,
+    publicUrl,
+    vault,
+    network,
+    updates,
+    touchId,
+    cleanup,
+    resources,
+  ] = await Promise.all([
+    getSetting(ctx, SETTING_PUBLIC_URL),
+    requestOrigin(),
+    publicUrlFor(ctx),
+    getVault(ctx.vaultId),
+    networkOverview(),
+    updatesOverview(),
+    deviceKeyInfo(ctx.vaultId),
+    cleanupOverview(),
+    resourcesOverview(),
+  ])
 
   return (
     <>
@@ -79,6 +95,11 @@ export default async function SettingsPage({
       {isLocalAddress(publicUrl) ? (
         <OutsideAccessCard address={publicUrl} desktop={isDesktopApp()} />
       ) : null}
+      <PcpggCard
+        pcpgg={network.pcpgg}
+        ports={network.ports}
+        pinnedPublicUrl={pinned}
+      />
       <DdnsCard ddns={network.ddns} />
       <HttpsCard
         https={network.https}
@@ -86,6 +107,7 @@ export default async function SettingsPage({
         ddnsName={network.ddnsName}
         ports={network.ports}
         pinnedPublicUrl={pinned}
+        pcpggName={network.pcpgg ? network.pcpgg.name : undefined}
       />
       <UpdatesCard
         overview={updates}
@@ -94,12 +116,15 @@ export default async function SettingsPage({
         autoUpdated={autoUpdated()}
         hostUpdater={hostUpdater()}
       />
+      <CleanupCard overview={cleanup} />
+      <ResourcesCard overview={resources} />
       <ChangePasswordForm username={vault.name} />
       <RecoveryKeyCard username={vault.name} />
       <TouchIdCard username={vault.name} info={touchId} />
       <SessionsCard />
       <ExportCard username={vault.name} />
       <RestoreCard username={vault.name} mode="settings" />
+      <DeleteVaultCard username={vault.name} />
     </>
   )
 }

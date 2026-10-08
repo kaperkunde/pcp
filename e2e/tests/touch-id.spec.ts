@@ -7,10 +7,10 @@ import { OWNER_PASSWORD, unlock } from "../lib/auth"
 // app: it keeps the key in the page's localStorage instead of the keychain,
 // and every "Touch ID" it is asked for succeeds and is counted. What is
 // tested is PCP's side: turning Touch ID on takes the password, it unlocks
-// and confirms a new token without typing, a key PCP no longer knows is
-// forgotten and the password still works, and signing out everywhere turns
-// it off. Signs every browser out, so it runs after the projects that start
-// signed in, and signs in on its own.
+// and confirms a new token (and an app's sign-in) without typing, a key PCP
+// no longer knows is forgotten and the password still works, and signing out
+// everywhere turns it off. Signs every browser out, so it runs after the
+// projects that start signed in, and signs in on its own.
 test.describe.configure({ mode: "serial" })
 
 // Signing in is limited per address: one of its own, as backup.spec.ts.
@@ -148,6 +148,53 @@ test("unlocks with Touch ID as the page opens, and confirms a token with it", as
   expect(await prompts(page)).toBe(asked + 1)
 })
 
+test("unlocks on the way to an app's sign-in, and confirms it with Touch ID", async ({
+  page,
+  baseURL,
+}) => {
+  const redirect = "http://127.0.0.1:9/callback"
+  const name = `Touch ID app ${RUN}`
+  const registered = await fetch(`${baseURL}/oauth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      client_name: name,
+      redirect_uris: [redirect],
+      token_endpoint_auth_method: "none",
+    }),
+  })
+  const { client_id } = await registered.json()
+  const callback = new Promise<URLSearchParams>((resolve) => {
+    void page.route("http://127.0.0.1:9/**", async (route) => {
+      resolve(new URL(route.request().url()).searchParams)
+      await route.fulfill({ contentType: "text/plain", body: "Back" })
+    })
+  })
+
+  // Locked: the sign-in page asks for Touch ID and goes on to the app's.
+  await page.goto(
+    `/oauth/authorize?${new URLSearchParams({
+      response_type: "code",
+      client_id,
+      redirect_uri: redirect,
+      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      code_challenge_method: "S256",
+      state: RUN,
+    })}`,
+  )
+  await expect(
+    page.getByRole("heading", { name: `Connect ${name}?` }),
+  ).toBeVisible({
+    timeout: 30_000,
+  })
+
+  // The password step is answered by Touch ID as it appears.
+  await page.getByRole("button", { name: "Allow" }).click()
+  const answer = await callback
+  expect(answer.get("state")).toBe(RUN)
+  expect(answer.get("code")).toMatch(/^pcp_code_/)
+})
+
 test("forgets a key PCP no longer knows, and the password still works", async ({
   page,
 }) => {
@@ -184,6 +231,26 @@ test("turns on at sign-in, and signing out everywhere turns it off", async ({
   // Off, but available: the sign-in page offers it with the password.
   expect(kept).toBeNull()
   await page.goto("/login")
+  await page.getByLabel("Password").fill(OWNER_PASSWORD)
+  await page.getByLabel("Unlock with Touch ID from now on").check()
+  await page.getByRole("button", { name: "Unlock", exact: true }).click()
+  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible({
+    timeout: 30_000,
+  })
+  expect(await savedKey(page)).toMatch(/^pcp_device_/)
+
+  // Turned off in Settings, the app forgets its key too; the sign-in page
+  // offers it again.
+  await page.goto("/settings")
+  await card(page, "Touch ID")
+    .getByRole("button", { name: "Turn off Touch ID" })
+    .click()
+  await expect(
+    card(page, "Touch ID").getByRole("button", { name: "Turn on Touch ID" }),
+  ).toBeVisible()
+  await expect.poll(() => savedKey(page)).toBeNull()
+
+  await lock(page)
   await page.getByLabel("Password").fill(OWNER_PASSWORD)
   await page.getByLabel("Unlock with Touch ID from now on").check()
   await page.getByRole("button", { name: "Unlock", exact: true }).click()

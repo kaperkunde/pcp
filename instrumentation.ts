@@ -12,16 +12,18 @@ export async function register() {
       )
     }
 
-    const { pruneExpiredSessions } = await import("@/lib/core/sessions")
-    const { pruneOAuthStates } = await import("@/lib/core/oauth")
-    const { prunePermissionRequests } = await import("@/lib/core/permissions")
-    const { pruneToolResults } = await import("@/lib/core/tool-results")
-    await Promise.all([
-      pruneExpiredSessions(),
-      pruneOAuthStates(),
-      prunePermissionRequests(),
-      pruneToolResults(),
-    ]).catch((error) => console.error("[db] cleanup failed", error))
+    // How much of the machine PCP may use (lib/core/resources/): read once
+    // now, so what reads it synchronously starts from the owner's settings.
+    const { loadResourceLimits } = await import("@/lib/core/resources/state")
+    await loadResourceLimits().catch((error) =>
+      console.error("[resources] could not read the settings", error),
+    )
+
+    // What PCP keeps only for a while (ended sign-ins, kept results, old
+    // permission requests, old days of the request log): removed once now,
+    // then on the owner's schedule (lib/core/cleanup/runtime.ts).
+    const { startCleanup } = await import("@/lib/core/cleanup/runtime")
+    await startCleanup()
 
     // Not waited for: until it is done, endpoints answer with the tools
     // they had.
@@ -39,6 +41,13 @@ export async function register() {
         }
       })
       .catch((error) => console.error("[endpoints] rebuild failed", error))
+
+    // The browser's tools are fixed in the code, so a new version brings
+    // them up to date; and whether Chromium is here can change with it.
+    const { syncAllBrowserTools } = await import("@/lib/core/browser/server")
+    void syncAllBrowserTools().catch((error) =>
+      console.error("[browser] could not update the browser's tools", error),
+    )
 
     // Dynamic DNS and HTTPS, if the owner turned them on: off by default,
     // so nothing listens or runs here for anyone with a proxy of their own.

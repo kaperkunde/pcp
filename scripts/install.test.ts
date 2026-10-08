@@ -11,11 +11,12 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { delimiter, join } from "node:path"
+import { delimiter, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { afterEach, describe, expect, it } from "vitest"
@@ -28,12 +29,14 @@ const RUN = `run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST
 const TOOLS = [
   "awk",
   "cat",
+  "chmod",
   "cp",
   "date",
   "dirname",
   "mkdir",
   "mv",
   "rm",
+  "rmdir",
   "sleep",
 ]
 
@@ -48,7 +51,6 @@ ContainerName=pcp
 PublishPort=3000:3000
 Volume=pcp-data:/data
 Environment=PCP_HOST_UPDATER=1
-Label=io.containers.autoupdate=registry
 
 [Service]
 Restart=always
@@ -119,6 +121,9 @@ function host({
   const bin = join(root, "bin")
   const tools = join(root, "tools")
   const home = join(root, "home")
+  // Stands for / when the script runs as root (PCP_ROOT_PREFIX), which the
+  // tests may not write to.
+  const sys = join(root, "sys")
   const log = join(root, "log")
   for (const dir of [bin, tools, home]) {
     mkdirSync(dir)
@@ -216,6 +221,23 @@ esac`,
     ),
     updater: join(home, ".local", "share", "pcp", "install.sh"),
     handled: join(home, ".local", "state", "pcp", "install-request"),
+    home,
+    /** Root's files: the same names under PCP_ROOT_PREFIX. */
+    sys: {
+      unit: join(sys, "etc", "containers", "systemd", "pcp.container"),
+      conf: join(sys, "etc", "pcp", "install.conf"),
+      timer: join(sys, "etc", "systemd", "system", "pcp-update.timer"),
+      service: join(sys, "etc", "systemd", "system", "pcp-update.service"),
+      updater: join(sys, "usr", "local", "lib", "pcp", "install.sh"),
+      watchTimer: join(
+        sys,
+        "etc",
+        "systemd",
+        "system",
+        "pcp-update-request.timer",
+      ),
+      handled: join(sys, "var", "lib", "pcp", "install-request"),
+    },
     run(args: string[] = [], env: Record<string, string> = {}) {
       writeFileSync(log, "")
       const result = spawnSync("/bin/sh", [INSTALL_SH, ...args], {
@@ -224,6 +246,7 @@ esac`,
           NODE_ENV: "test",
           PATH: `${bin}${delimiter}${tools}`,
           HOME: home,
+          PCP_ROOT_PREFIX: sys,
           SHIM_LOG: log,
           ...env,
         },
@@ -525,13 +548,26 @@ describe("install.sh updating PCP by itself", () => {
     const result = machine.run([], { PCP_AUTO_UPDATE: "1" })
     expect(result.status).toBe(0)
     expect(readFileSync(machine.unit, "utf8")).toContain(
-      "Environment=PCP_AUTO_UPDATE=1\nEnvironment=PCP_HOST_UPDATER=1\nLabel=io.containers.autoupdate=registry\n",
+      "Environment=PCP_AUTO_UPDATE=1\nLabel=io.containers.autoupdate=registry\n",
     )
     expect(result.calls).toContain(
       "systemctl --user enable --now podman-auto-update.timer",
     )
     expect(existsSync(machine.timer)).toBe(false)
     expect(result.stdout).toContain("by itself, once a day")
+  })
+
+  it("takes Podman's auto-update label away with PCP_AUTO_UPDATE=0", () => {
+    const machine = host({ podman: "5.2.2" })
+    expect(machine.run([], { PCP_AUTO_UPDATE: "1" }).status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toContain(
+      "io.containers.autoupdate",
+    )
+
+    expect(machine.run([], { PCP_AUTO_UPDATE: "0" }).status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).not.toContain(
+      "io.containers.autoupdate",
+    )
   })
 
   it("gives the crontab line when there is no systemd session", () => {
@@ -588,6 +624,202 @@ describe("install.sh update", () => {
     )
     expect(result.stdout).toContain("PCP is updated")
     expect(result.stdout).not.toContain("Open it now")
+  })
+})
+
+describe("install.sh as root", () => {
+  // `sudo -E`, or a sudo that keeps HOME: root runs with an ordinary user's
+  // directories, which that user may write to.
+  const user = (machine: ReturnType<typeof host>) => ({
+    HOME: machine.home,
+    XDG_CONFIG_HOME: join(machine.home, ".config"),
+    XDG_DATA_HOME: join(machine.home, ".local", "share"),
+  })
+  const mode = (path: string) => statSync(path).mode & 0o777
+
+  it("keeps the updater where only root writes, not under HOME", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    const result = machine.run([], { ...user(machine), PCP_AUTO_UPDATE: "1" })
+    expect(result.status).toBe(0)
+    expect(readFileSync(machine.sys.updater, "utf8")).toBe(
+      readFileSync(INSTALL_SH, "utf8"),
+    )
+    expect(mode(machine.sys.updater)).toBe(0o644)
+    expect(mode(dirname(machine.sys.updater))).toBe(0o755)
+    expect(existsSync(join(machine.home, ".local"))).toBe(false)
+    expect(existsSync(machine.updater)).toBe(false)
+  })
+
+  it("points the system timer's service at that copy", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    const result = machine.run([], { ...user(machine), PCP_AUTO_UPDATE: "1" })
+    expect(result.status).toBe(0)
+    expect(readFileSync(machine.sys.service, "utf8")).toContain(
+      `ExecStart=/bin/sh "${machine.sys.updater}" update\n`,
+    )
+    expect(readFileSync(machine.sys.timer, "utf8")).toContain(
+      "OnCalendar=daily",
+    )
+    expect(result.calls).toContain("systemctl enable --now pcp-update.timer")
+    expect(existsSync(join(machine.home, ".config", "systemd"))).toBe(false)
+  })
+
+  it("gives a crontab line for that copy without a systemd session", () => {
+    const machine = host({ podman: "5.2.2", session: false, uid: 0 })
+    const result = machine.run([], { ...user(machine), PCP_AUTO_UPDATE: "1" })
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain(`/bin/sh "${machine.sys.updater}" update`)
+    expect(result.stderr).not.toContain(machine.home)
+    expect(existsSync(machine.sys.updater)).toBe(true)
+  })
+
+  it("keeps and reads its settings in /etc, not in HOME", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    const first = machine.run([], { ...user(machine), PCP_PORT: "8080" })
+    expect(first.status).toBe(0)
+    expect(readFileSync(machine.sys.conf, "utf8")).toContain("PCP_PORT=8080\n")
+    expect(mode(machine.sys.conf)).toBe(0o644)
+    expect(existsSync(machine.conf)).toBe(false)
+
+    const again = machine.run([], user(machine))
+    expect(again.calls).toContain(
+      `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -e PCP_HOST_UPDATER=1 -v pcp-data:/data ${IMAGE}`,
+    )
+  })
+
+  // An install from before root had a place of its own kept its settings in
+  // HOME. They are carried over once, by an install run, and never read again.
+  const oldConf = (machine: ReturnType<typeof host>, text: string) => {
+    mkdirSync(dirname(machine.conf), { recursive: true })
+    writeFileSync(machine.conf, text)
+  }
+  const HTTPS_RUN = `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=1 -v pcp-data:/data ${IMAGE}`
+
+  it("carries the settings of an older install over from HOME, once", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(machine, "PCP_PORT=8080\nPCP_HTTPS=1\n")
+    const first = machine.run([], user(machine))
+    expect(first.status).toBe(0)
+    expect(first.calls).toContain(HTTPS_RUN)
+    expect(first.stderr).toContain(machine.conf)
+    expect(first.stderr).toContain(machine.sys.conf)
+    expect(readFileSync(machine.sys.conf, "utf8")).toBe(
+      "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_RUNTIME=docker\nPCP_DATA_VOLUME=pcp-data\nPCP_AUTO_UPDATE=0\nPCP_UPDATE_BUTTON=1\n",
+    )
+
+    // The file in HOME is not read again, whatever it says now.
+    oldConf(machine, "PCP_PORT=9999\nPCP_HTTPS=0\nPCP_RUNTIME=podman\n")
+    const second = machine.run([], user(machine))
+    expect(second.status).toBe(0)
+    expect(second.calls).toContain(HTTPS_RUN)
+    expect(second.stderr).not.toContain(machine.conf)
+  })
+
+  it("lets the environment win over carried-over settings", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(machine, "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_DATA_VOLUME=vault\n")
+    const result = machine.run([], { ...user(machine), PCP_PORT: "7000" })
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      `docker run -d --name pcp --restart unless-stopped -p 7000:3000 -p 80:8080 -p 443:8443 -e PCP_HOST_UPDATER=1 -v vault:/data ${IMAGE}`,
+    )
+    expect(readFileSync(machine.sys.conf, "utf8")).toContain("PCP_PORT=7000\n")
+  })
+
+  it("checks carried-over settings like any others", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(machine, "PCP_PORT=abc\n")
+    const result = machine.run([], user(machine))
+    expect(result.status).toBe(2)
+    expect(started(result.calls)).toBe(false)
+    expect(existsSync(machine.sys.conf)).toBe(false)
+  })
+
+  it("prefers the file in /etc to the one in HOME", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    expect(machine.run([], { ...user(machine), PCP_PORT: "8080" }).status).toBe(
+      0,
+    )
+    oldConf(machine, "PCP_PORT=9999\n")
+    const result = machine.run([], user(machine))
+    expect(result.calls.some((call) => call.includes("-p 8080:3000"))).toBe(
+      true,
+    )
+    expect(result.stderr).not.toContain(machine.conf)
+  })
+
+  it("never reads HOME's file in the daily update", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(
+      machine,
+      "PCP_PORT=9999\nPCP_HTTPS=1\nPCP_RUNTIME=podman\nPCP_AUTO_UPDATE=1\n",
+    )
+    const result = machine.run(["update"], user(machine))
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(`docker ${RUN}`)
+    expect(result.stderr).not.toContain(machine.conf)
+    expect(existsSync(machine.sys.updater)).toBe(false)
+    expect(readFileSync(machine.sys.conf, "utf8")).toContain("PCP_PORT=3000\n")
+  })
+
+  it("does not carry settings over on uninstall", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    oldConf(machine, "PCP_DATA_VOLUME=vault\n")
+    const result = machine.run(["uninstall"], user(machine))
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("docker volume rm pcp-data")
+    expect(result.stderr).not.toContain(machine.conf)
+  })
+
+  it("needs no HOME, as in a system service", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    const result = machine.run([], { HOME: "", PCP_AUTO_UPDATE: "1" })
+    expect(result.status).toBe(0)
+    expect(existsSync(machine.sys.updater)).toBe(true)
+  })
+
+  it("puts the Quadlet unit in /etc and leaves HOME alone", () => {
+    const machine = host({ podman: "5.2.2", uid: 0 })
+    const result = machine.run([], user(machine))
+    expect(result.status).toBe(0)
+    expect(readFileSync(machine.sys.unit, "utf8")).toContain(
+      "WantedBy=multi-user.target\n",
+    )
+    expect(existsSync(machine.unit)).toBe(false)
+  })
+
+  it("removes the copy, the timer and the settings on uninstall", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    const env = { ...user(machine), PCP_AUTO_UPDATE: "1" }
+    expect(machine.run([], env).status).toBe(0)
+    for (const file of [
+      machine.sys.updater,
+      machine.sys.timer,
+      machine.sys.service,
+      machine.sys.conf,
+    ]) {
+      expect(existsSync(file)).toBe(true)
+    }
+    const result = machine.run(["uninstall"], user(machine))
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain("systemctl disable --now pcp-update.timer")
+    expect(existsSync(machine.sys.updater)).toBe(false)
+    expect(existsSync(dirname(machine.sys.updater))).toBe(false)
+    expect(existsSync(machine.sys.timer)).toBe(false)
+    expect(existsSync(machine.sys.service)).toBe(false)
+    expect(existsSync(machine.sys.conf)).toBe(false)
+    expect(existsSync(dirname(machine.sys.conf))).toBe(false)
+  })
+
+  it("removes the copy when PCP_AUTO_UPDATE=0 takes the timer away", () => {
+    const machine = host({ docker: "works", uid: 0 })
+    expect(machine.run([], { PCP_AUTO_UPDATE: "1" }).status).toBe(0)
+    expect(existsSync(machine.sys.updater)).toBe(true)
+    expect(
+      machine.run([], { PCP_AUTO_UPDATE: "0", PCP_UPDATE_BUTTON: "0" }).status,
+    ).toBe(0)
+    expect(existsSync(machine.sys.updater)).toBe(false)
+    expect(existsSync(machine.sys.timer)).toBe(false)
   })
 })
 
@@ -693,10 +925,28 @@ describe("install.sh installing when PCP asks", () => {
     expect(started(again.calls)).toBe(false)
   })
 
+  it("keeps root's note of the last request where only root writes", () => {
+    const machine = host({
+      docker: "works",
+      uid: 0,
+      signal: `${ID} ${now()}`,
+    })
+    expect(machine.run().status).toBe(0)
+    expect(existsSync(machine.sys.watchTimer)).toBe(true)
+
+    expect(started(machine.run(["watch"]).calls)).toBe(true)
+    expect(readFileSync(machine.sys.handled, "utf8")).toContain(ID)
+    expect(existsSync(machine.handled)).toBe(false)
+
+    expect(machine.run(["uninstall"]).status).toBe(0)
+    expect(existsSync(machine.sys.handled)).toBe(false)
+    expect(existsSync(dirname(machine.sys.handled))).toBe(false)
+  })
+
   it("waits five minutes before answering another request", () => {
     const machine = host({ docker: "works", signal: `${ID} ${now()}` })
     expect(machine.run().status).toBe(0)
-    mkdirSync(join(machine.handled, ".."), { recursive: true })
+    mkdirSync(dirname(machine.handled), { recursive: true })
 
     writeFileSync(machine.handled, `another ${now() - 60}\n`)
     expect(started(machine.run(["watch"]).calls)).toBe(false)

@@ -41,13 +41,18 @@ import { TOUCH_ID_REJECTED } from "@/lib/core/constants"
  *
  * After a restore the vault's Touch ID key is gone with the rest of it, so
  * the app's copy is forgotten rather than offered (`restored`).
+ *
+ * `next` is where to go on to once unlocked (an assistant's sign-in page),
+ * sent along with whichever way the owner unlocks.
  */
 export function LoginForm({
   username,
   restored,
+  next = null,
 }: {
   username: string
   restored: boolean
+  next?: string | null
 }) {
   const [state, action] = useActionState<LoginResult, FormData>(loginAction, {
     status: "idle",
@@ -80,9 +85,10 @@ export function LoginForm({
       const data = new FormData()
       data.set("deviceKey", deviceKey)
       if (!kept) data.set("once", "on")
+      if (next) data.set("next", next)
       startTransition(() => signInWithKey(data))
     })
-  }, [state, signInWithKey])
+  }, [state, signInWithKey, next])
 
   const rejected = useCallback(() => {
     setTouchIdNote(TOUCH_ID_REJECTED)
@@ -93,10 +99,11 @@ export function LoginForm({
     <Card>
       <CardContent>
         {status?.saved && !restored ? (
-          <TouchIdUnlock onRejected={rejected} />
+          <TouchIdUnlock onRejected={rejected} next={next} />
         ) : null}
         <FormNote message={touchIdNote} />
         <form action={action} className="flex flex-col gap-4">
+          {next ? <input type="hidden" name="next" value={next} /> : null}
           <UsernameField id="login-account" value={username} />
           <Field label="Password" htmlFor="login-password">
             <Input
@@ -146,7 +153,13 @@ export function LoginForm({
 }
 
 /** Touch ID, asked for once as the page opens and again from its button. */
-function TouchIdUnlock({ onRejected }: { onRejected: () => void }) {
+function TouchIdUnlock({
+  onRejected,
+  next,
+}: {
+  onRejected: () => void
+  next: string | null
+}) {
   const [state, action, pending] = useActionState<TouchIdLoginResult, FormData>(
     touchIdLoginAction,
     { status: "idle" },
@@ -165,6 +178,7 @@ function TouchIdUnlock({ onRejected }: { onRejected: () => void }) {
 
     const data = new FormData()
     data.set("deviceKey", deviceKey)
+    if (next) data.set("next", next)
     // Not from a <form action>, so React is told it is an action's work.
     startTransition(() => action(data))
   }

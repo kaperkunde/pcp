@@ -10,7 +10,7 @@ import { credentialGrantData, unlockWithCredential } from "./keys"
  * keychain and hands to PCP's page only after Touch ID (desktop/touch-id.mjs).
  * It wraps the data key like an API token does, and stands in for the
  * password where the owner only proves it is them: unlocking, a new API
- * token, an export, a restore.
+ * token, an export, a restore, deleting the vault.
  *
  * It is made only after the password is typed, a vault has at most one, an
  * export never carries it, and a recovery or signing out everywhere removes

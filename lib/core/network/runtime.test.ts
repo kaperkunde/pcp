@@ -15,7 +15,8 @@ import {
 import { clearTlsConfig, saveTlsConfig } from "./tls"
 
 // The background side as the Server Actions drive it: nothing runs while
-// both features are off, turning HTTPS on opens port 80, and a first try
+// both features are off, turning HTTPS on opens ports 80 and 443 (443 for
+// the TLS-ALPN-01 challenge, before there is a certificate), and a first try
 // Let's Encrypt refuses turns it off again, saying why.
 
 const saved = { ...process.env }
@@ -62,10 +63,12 @@ describe("the network runtime", () => {
     expect(await networkOverview()).toMatchObject({ ddns: null, https: null })
   })
 
-  it("opens port 80 for HTTPS, and turns it off again when the first try fails", async () => {
+  it("opens ports 80 and 443 for HTTPS, and turns them off again when the first try fails", async () => {
     let refuse = () => {}
+    const types: string[][] = []
     const asked = new Promise<void>((resolve) => {
-      setNetworkIssuer(async () => {
+      setNetworkIssuer(async ({ challengeTypes }) => {
+        types.push(challengeTypes)
         resolve()
         await new Promise<void>((release) => (refuse = release))
         throw new Error("connect ECONNREFUSED")
@@ -86,6 +89,9 @@ describe("the network runtime", () => {
     const port = edgePorts()?.http
     expect(port).toBeGreaterThan(0)
     expect(await get(port!, "/.well-known/acme-challenge/none")).toBe(404)
+    expect(edgePorts()?.https).toBeGreaterThan(0)
+    // A name of the owner's own: port 80 first, then port 443.
+    expect(types).toEqual([["http-01", "tls-alpn-01"]])
     expect((await networkOverview()).https?.status.state).toBe("issuing")
 
     refuse()

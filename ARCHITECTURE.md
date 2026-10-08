@@ -10,17 +10,26 @@ without changing the single-user product.
 ```
 app/                 Routes and pages (Next.js App Router)
   mcp/route.ts       The gateway endpoint
+  oauth/…            PCP's own authorization server: sign-in page, token, register, revoke
+  .well-known/…      Its discovery documents (protected resource, authorization server)
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
   api/export/…       The export download (a file needs Content-Disposition)
+  api/health/…       The health check; in the desktop app, the version and an install request
+  api/browser/…      A browser tab's live view: its pictures out, the owner's input in
 components/          React components; forms call Server Actions
 lib/actions/         Server Actions: read the session, call lib/core, return a state
 lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
   mail/              Mail accounts: JMAP and IMAP/SMTP behind one set of mail tools
+  fetch/             web_fetch: the request, the page, which level applies
+  code/              run_code: QuickJS, the bridge to the tools, the sandbox's socket
+  browser/           The headless Chromium: runtime and gate, proxy, profile, tools, install
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
   updates/           The daily check for a newer release, and what it found
+  oauth-server/      PCP's own OAuth server, for assistants that sign in to /mcp
+sandbox/             run_code's sandbox container: the runner, the launcher, the pcp command
 prisma/              Schema and migrations (SQLite)
 e2e/                 Playwright suite, with a fake upstream MCP + OAuth server
 desktop/             The Mac and Windows app: Electron around the production build, nothing of PCP in it
@@ -41,21 +50,28 @@ associated data (a ciphertext cannot be moved to another row):
 - OAuth token sets and the clients PCP registered (a `secret` row of kind
   `oauth`, owned by the server that uses it); an OAuth client secret the
   owner gives PCP is one of their own `text` secrets,
-- the PKCE verifier of an authorization in flight (`oauth_state`).
-- a memory's path and text (`memory.ciphertext`, as one JSON value).
+- the PKCE verifier of an authorization in flight (`oauth_state`),
+- a memory's path and text (`memory.ciphertext`, as one JSON value),
 - a tool answer or a file kept for `read_result` and handles
-  (`tool_result.ciphertext`).
+  (`tool_result.ciphertext`),
+- what a request waiting for the owner holds: the call's arguments or the
+  new server's settings, and the outcome (`permission_request`),
+- the private key PCP makes for each SSH server (a `secret` row of kind
+  `ssh_key`, owned by the server),
+- the browser's sign-ins (`browser_profile`, bound to the vault's id, as
+  there is one per vault).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
 
-| Grant kind  | Credential                    | KEK derivation                            | Found by                  |
-| ----------- | ----------------------------- | ----------------------------------------- | ------------------------- |
-| `password`  | the owner's password          | scrypt (N=2^16, r=8, p=1, per-grant salt) | the vault (one per vault) |
-| `recovery`  | `pcp_recovery_…`, shown once  | HKDF-SHA256 with a per-grant salt         | SHA-256 of the credential |
-| `session`   | a random secret in the cookie | HKDF-SHA256                               | SHA-256 of the secret     |
-| `api_token` | `pcp_…`, shown once           | HKDF-SHA256                               | SHA-256 of the token      |
-| `device`    | `pcp_device_…`, the Mac app's | HKDF-SHA256                               | SHA-256 of the key        |
+| Grant kind  | Credential                                                  | KEK derivation                            | Found by                  |
+| ----------- | ----------------------------------------------------------- | ----------------------------------------- | ------------------------- |
+| `password`  | the owner's password                                        | scrypt (N=2^16, r=8, p=1, per-grant salt) | the vault (one per vault) |
+| `recovery`  | `pcp_recovery_…`, shown once                                | HKDF-SHA256 with a per-grant salt         | SHA-256 of the credential |
+| `session`   | a random secret in the cookie                               | HKDF-SHA256                               | SHA-256 of the secret     |
+| `api_token` | `pcp_…`, shown once                                         | HKDF-SHA256                               | SHA-256 of the token      |
+| `device`    | `pcp_device_…`, the Mac app's                               | HKDF-SHA256                               | SHA-256 of the key        |
+| `oauth_*`   | `pcp_code_…`, `pcp_at_…`, `pcp_rt_…`: an app that signed in | HKDF-SHA256                               | SHA-256 of the value      |
 
 scrypt is slow on purpose: a copy of the database can only be attacked one
 password guess at a time. The other credentials have 256 bits of entropy of
@@ -70,7 +86,8 @@ Consequences:
 - **Changing the password** replaces the `password` grant. Every other grant
   wraps the same DEK, so sessions, API tokens and the recovery key keep
   working.
-- **Revoking an API token** blanks its grant; **signing out** deletes the
+- **Revoking an API token** blanks its grant, and deletes the grants of
+  whatever an app that signed in for it holds; **signing out** deletes the
   session's; **recovery** replaces the password grant, deletes every session
   grant and the Touch ID key (`device`) and, when asked, blanks every API
   token grant. **Signing out everywhere** deletes the sessions and the Touch
@@ -79,10 +96,19 @@ Consequences:
   asks for the password again (`lib/server/password-attempts.ts`). A session
   cookie can be copied, so it may use the DEK but not mint a grant that
   survives the session. In the Mac app the Touch ID key stands in for the
-  password before a new API token, an export or a restore (`confirmOwner`),
+  password before a new API token (an app's sign-in included), an export or
+  a restore (`confirmOwner`),
   never before a new recovery key, a new password or another Touch ID key:
   only the password and the recovery key decide who gets in. See "Touch ID
   in the Mac app".
+- **Guesses are counted.** The password, the recovery key and an export
+  password may be tried ten times per address (inside a session, per
+  session) and sixty times for the whole instance in fifteen minutes
+  (`lib/server/password-attempts.ts`). A right password gives its count
+  back, so the owner signing in and confirming all day spends none of the
+  tries a guesser is held to. The Touch ID key has a budget of its own,
+  given back the same way: it is no password guess, and must not spend the
+  owner's tries.
 - **Losing every credential loses the data.** There is no back door because
   there is no key to keep one with.
 - Rotating the DEK itself (re-encrypting every row) is not implemented;
@@ -99,8 +125,9 @@ A request resolves its vault in exactly one of two ways:
 
 - **Browser:** the session cookie → `resolveSession()` → `VaultContext`
   (`lib/server/session.ts`).
-- **MCP client:** the bearer token → `resolveApiToken()` → `VaultContext`
-  plus the servers the token may reach (`app/mcp/route.ts`).
+- **MCP client:** the bearer token → `resolveApiToken()` (an API token) or
+  `resolveAccessToken()` (an app that signed in, `lib/core/oauth-server/`)
+  → `VaultContext` plus the servers the token may reach (`app/mcp/route.ts`).
 
 The gateway is stateless per request: it builds an `McpServer` for the
 resolved token, serves the request and discards it. Upstream connections are
@@ -123,10 +150,11 @@ from one endpoint could be built on it. What that would take:
    `lib/server/session.ts` does. Creating a vault is `setupVault()` with the
    host's own password policy, or a variant that wraps under the host's KEK
    only.
-3. **Keep the gateway.** `/mcp` already serves any vault an API token names.
-   A host that wants OAuth-issued tokens instead of `pcp_…` tokens replaces
-   `resolveApiToken()` with its own resolver returning the same
-   `ResolvedToken` shape (vault, key, allowed servers).
+3. **Keep the gateway.** `/mcp` already serves any vault an API token, or an
+   access token from PCP's own authorization server, names. A host with an
+   authorization server of its own replaces `resolveAccessToken()` with its
+   own resolver returning the same `ResolvedToken` shape (vault, key,
+   allowed servers).
 4. **Move the database.** Prisma's schema is provider-neutral apart from the
    `datasource` block; a Postgres host generates its own migration history
    (`prisma migrate dev` against Postgres) and runs migrations as a deploy
@@ -411,11 +439,41 @@ A mail account is a server row of kind `jmap` or `imap` with a fixed set of
 tools (`lib/core/mail/tools.ts`), the same names and answers for both, so an
 assistant learns one set: `list_mailboxes`, `search_emails`, `get_email`,
 `get_attachment`, `move_email`, `mark_email`, `delete_email`, `send_email`,
-and on JMAP `get_thread` and `list_identities`. Which ones an account has
-depends on read-only (the tools that change mail are left out, and refused if
-called anyway), and on whether it can send (JMAP: the session offers
-submission; IMAP: the owner gave an SMTP server). `mcp_tool.operation` is
-null; a call is dispatched by name. An assistant can propose an account
+`create_draft`, `create_mailbox`, `rename_mailbox`, `delete_mailbox`, and on
+JMAP `get_thread`, `list_identities`, `get_vacation_response` and
+`set_vacation_response`. It is a fixed set on purpose, not the protocol passed
+through: there is no tool that takes a raw JMAP method or IMAP command, so
+every change an assistant makes is one these rules were written for. Which
+ones an account has depends on read-only (the tools that change mail are left
+out, and refused if called anyway), on whether it can send (JMAP: the session
+offers submission; IMAP: the owner gave an SMTP server), and for the automatic
+reply on whether the JMAP session offers `vacationresponse`.
+
+`move_email`, `mark_email` and `delete_email` take `id` or `ids` (up to
+`MAX_BULK_EMAILS`): one email answers as it always has, several answer with
+`done` and `failed`, and one email's refusal stops no other (JMAP: one
+`Email/set`; IMAP: one UID MOVE or STORE per mailbox). `mark_email` also sets
+answered and adds or removes keywords, which every summary lists and
+`search_emails` filters on; the keywords the flags carry (`$seen`,
+`$flagged`, `$answered`, `$draft`) are left to the flags. `search_emails` with
+`allMailboxes` looks in every mailbox but Trash and Junk (JMAP:
+`inMailboxOtherThan`; IMAP: All Mail alone where the server has one, else
+each selectable mailbox but the Flagged and Important views in turn, at most
+`MAX_SEARCH_MAILBOXES`, merged by date and paged only to
+`MAX_SEARCH_ALL_WINDOW`). A JMAP mailbox's `path` is its names from the top
+joined with `/`, so a folder is named by path as on IMAP.
+`delete_mailbox` removes only an empty mailbox with no role and none inside
+it (`checkDeletable` in `mail/mailboxes.ts`); JMAP's `Mailbox/set` destroy
+goes with `onDestroyRemoveEmails: false`, so the server refuses too if mail
+arrived in between, and IMAP's DELETE, which would take mail with it, is sent
+only after the listing's count said empty. `rename_mailbox` renames or moves
+one, never into itself or one inside it, and never the inbox; on IMAP the
+emails inside get new ids, since an id carries its mailbox's path. `create_draft` is
+`send_email`'s arguments and email, recipients optional, written into Drafts
+(the drafts role, or a mailbox called Drafts) marked as a draft and seen, and
+sent by nobody: a separate tool so the owner can allow drafting without
+allowing sending. It needs no submission or SMTP server. `mcp_tool.operation`
+is null; a call is dispatched by name. An assistant can propose an account
 through `register_server` (below); only the owner changes one, and the
 endpoint tools do not touch them.
 
@@ -454,7 +512,15 @@ the address or sign-in changes. Redirects are never followed: PCP names
 where the server pointed, for the owner to enter instead. A call is one or
 two POSTs of method calls. Sending uploads each attachment to the upload
 address first, then creates the email in Drafts with the blobs attached and
-submits it in the same request, moving it to Sent when it went.
+submits it in the same request, moving it to Sent when it went. That move is
+the server's own Email/set (`onSuccessUpdateEmail`, RFC 8621 7.5), answered
+under the submission's call id after the submission's answer: `jmapRequest`
+takes a call's answer as the first under its id named after its method, and
+keeps any other apart (`implicitKey`), so the move's answer never reads as
+the submission's and a failed move only means the copy stayed in Drafts. A
+reply then marks the email it answers (`$answered`, `\Answered` over IMAP),
+after the send, and says whether it could. A draft is the same Email/set
+into Drafts with no EmailSubmission after it, and marks nothing.
 
 **IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
@@ -463,7 +529,9 @@ STARTTLS is required, never optional. Each call connects, signs in, works
 and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
 email. Sending goes over SMTP and a copy (Bcc kept) is appended to Sent,
-attachments in both, written by nodemailer.
+attachments in both, written by nodemailer. A draft is the same message,
+appended to Drafts with `\Draft` and `\Seen` and sent nowhere; its id comes
+from APPENDUID, and is null without UIDPLUS.
 
 **What an assistant gets back** is JSON PCP writes: addresses, dates, flags,
 the text of a body (the HTML one made plain when there is no text one) and
@@ -471,8 +539,8 @@ the list of attachments. `get_attachment` downloads an attachment of any
 kind, up to 10 MiB, and keeps it for the token as a file (below): the answer
 gives its handle, and a text one's first 20,000 characters too, scrubbed of
 the credential. A body longer than 20,000 characters is kept the same way.
-`send_email` takes kept results as attachments, read before anything
-connects (at most 10, 20 MB together), so an attachment read from one
+`send_email` and `create_draft` take kept results as attachments, read before
+anything connects (at most 10, 20 MB together), so an attachment read from one
 account can be sent from another. Delete moves to the
 Trash and nothing deletes for good. Failures: refused credentials mark the
 account `auth_required` (with OAuth, "needs connecting"), an unreachable
@@ -489,13 +557,69 @@ minute before it runs out, and once more when the server refuses it. When that
 fails the account needs connecting, and the gateway answers with the link to
 connect it.
 
+## SSH servers
+
+An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
+`auth_username` the login) whose one tool, `run_command`, runs one command per
+call with `exec`: no shell session kept between calls, no terminal, no
+forwarding, no agent, no file transfer. Only the owner adds one, on the
+Servers page; `register_server` has no kind for it, because a shell on a
+machine is more than an assistant should be able to ask for in a sentence.
+`run_command` asks the owner first by default like every tool, and the
+permission page shows the command in full.
+
+The protocol is `ssh2`'s (`lib/core/ssh/client.ts`), in pure JavaScript: pnpm
+does not build its optional native parts (it is not in `allowBuilds`), so the
+desktop app gains no native code, and Next keeps it out of the bundle
+(`serverExternalPackages`). PCP narrows it to modern algorithms (curve25519 or
+ECDH and SHA-2 group exchange, Ed25519, ECDSA and RSA-SHA2 host keys,
+ChaCha20-Poly1305, AES-GCM and AES-CTR with SHA-2 MACs); `ssh2` adds strict key
+exchange (the Terrapin countermeasure) to any offer.
+
+- **PCP's own key.** Adding a server makes an Ed25519 key for it
+  (`ssh/keys.ts`). The private half is a managed secret of kind `ssh_key`
+  (`ssh/<server id>`, in `auth_secret_id`, auth type `key`), encrypted like
+  every secret and decrypted only in `upstream.ts`, for one connection; the
+  public half is on the row (`ssh_public_key`) and on the server's page, for
+  the owner to put in the login's `authorized_keys`. PCP signs in with that
+  key alone: no password, no keyboard-interactive, no agent. The owner can
+  have PCP make a new key; deleting the server deletes the key.
+- **The host key**, pinned on first use. The first connection that finishes
+  a key exchange stores the key the server proved it holds
+  (`ssh_host_key`), whether or not signing in then works, so it is usually
+  pinned when the owner adds the server, and the page shows its fingerprint
+  to compare with the server's own. `ssh2` asks `hostVerifier` before it
+  checks the server's signature, so the key is kept only after the
+  `handshake` event, never from inside the verifier. From then on any other
+  key is refused before signing in; the owner can forget the pinned key
+  after changing it on purpose, and a new address forgets it too. The pin is
+  written only while the row still has none and the same address.
+
+**A call** (`ssh/hosts.ts callSshTool`) checks its arguments before anything
+connects (`ssh/tools.ts`: the command, at most 16 KB and no NUL; standard
+input as text or base64, at most 1 MB, which a kept result's handle can stand
+for, resolved in `upstream.ts`; a timeout of 1 to 600 seconds), connects,
+signs in and runs it, and answers with the exit code (or the signal), stdout
+and stderr. Output is capped at 1 MB together; past that, or past the
+timeout, PCP sends the session a TERM signal (which OpenSSH honours for every
+login but root), closes the connection and answers with what came so far,
+saying so. A key the server turns down or a host key that is not the pinned
+one is answered with the server's page in PCP, for the owner; a server that
+cannot be reached is an error. Limits are in `ssh/limits.ts`. The test server
+(`ssh/fake-server.ts`) is `ssh2`'s own server. The request log keeps the call
+by name like any other, never the command or its output.
+
 ## Memories
 
 A token made with "keep memories" (`api_token.keep_memories`, off unless the
 owner turns it on) gets one more tool, `memory`, with the commands of Claude's
 memory tool (view, create, str_replace, insert, delete, rename, over files
-under `/memories`) plus search and every, and a paragraph in the instructions saying
-when to use it. The rules are in `lib/core/memories.ts`. Like endpoint
+under `/memories`) plus search and every, a second one, `read_memory`, with
+only every, view and search, and a paragraph in the instructions saying when
+to use them. `read_memory` and `call_read_only_tool` (call_tool for a tool
+whose stored annotations say `readOnlyHint`) are marked read-only, so a
+client that holds back other tools, as Claude Code's plan mode does, lets
+them through; the token's levels apply to them as to the rest. The rules are in `lib/core/memories.ts`. Like endpoint
 management, they are drawn around the fact that what one assistant writes
 another one reads:
 
@@ -581,9 +705,9 @@ marked as the assistant's: that is how every site an assistant tried shows
 on the token's page. Ask goes through `permission_request` like a tool call
 (kind `fetch`, the checked request as its encrypted arguments). The owner's
 **Always allow this site** and **Block this site** write the token's own
-line for the site, as a tool's answer writes the token's own level; when
-they allow a request, `executeFetch` runs it only if the token still has web
-fetch on.
+line for the site, as a tool's answer writes the token's own level, and
+**Allow this site for** an allowance for the site (below); when they allow a
+request, `executeFetch` runs it only if the token still has web fetch on.
 
 **What a request may be** (`fetch/request.ts`). http and https, no user name
 or password in the address, no CONNECT or TRACE, at most twenty headers, and
@@ -630,9 +754,46 @@ at a time (20,000 characters by default, 50,000 at most) after a few lines
 saying the final address, the status, the type, the title and where the
 next part starts. An error status is an error result with the page in it.
 
+**A site that checks its visitors.** Cloudflare can answer with a check
+instead of the page ("Just a moment…", a Turnstile), marked with the response
+header `cf-mitigated: challenge` on any status, usually 403 or 503
+(`fetch/challenge.ts`). A plain request whose answer carries it says so in its
+text: "Cloudflare is asking this site's visitors to prove they are human
+before it shows the page." For a GET, when the vault has the browser added and
+enabled and Chromium is found, PCP then reads the page again through the
+browser (`browser/solve.ts`). The read happens in a second browser context
+of its own, beside the vault's: it starts from none of the vault's sign-ins
+and is never saved, because the sign-ins are never used for a web_fetch. A
+plain request keeps no cookie and reads no secret, and a page read with the
+owner's sign-ins would show an assistant what only the owner can see, under
+a level given for a fetch. What that context keeps (the clearance a check
+leaves, and any other cookie a site sets while read) is shared by every
+token's web_fetch until the browser closes: they are reads signed in to
+nothing, of sites each token was allowed to fetch. The context may open that one site only; a redirect to
+another site is reported as web_fetch reports one, with where it points, so
+that site gets its own decision. The token's own private-address line decides
+private addresses for that site, as for the plain request, and the token's
+decision for the site comes first: the browser only reads again what the
+token was already allowed to fetch. The read waits up to twenty seconds for a
+check that passes on its own and is bounded by 45 seconds in all, with at
+most two such pages per vault at once. They are not tabs: nobody lists,
+watches or drives them. The answer has web_fetch's usual format, with a Type
+line saying the page was read through PCP's browser, after the site's check.
+A site whose check passed is read through the browser first for thirty
+minutes, per vault and in memory only: what passed is a bot check, not a
+sign-in, and a restart forgets it. When the check does not pass, or there is
+no browser, the answer says so and adds one hint: to open the site with
+`navigate` and call `hand_over` (when the token reaches the browser), that
+the owner can let the token use the browser, or that the owner can add the
+browser on PCP's Browser page. Nothing here asks the owner, and there is no
+new kind of permission request. It needs nothing more than the browser: the
+container image and the desktop app run it as they run any page, with no
+second container.
+
 **Bounded** (`fetch/limits.ts`). Thirty seconds per request with its
 redirects, 2 MB of an answer read, a thousand method and site lines per
-vault, and 120 requests per token per ten minutes, asked about or not.
+vault, and 120 requests per token per ten minutes, asked about or not. The
+second read of a page behind a check has limits of its own (see Browser).
 
 The sites a token reached are on its page and in `web_fetch_rule`, in the
 clear like server addresses, and never in the request log: the gateway logs
@@ -680,7 +841,8 @@ three parts:
   result for, as for `call_tool`. An "ask" tool leaves the same permission
   request a `call_tool` would and stops the run, which answers with what ran
   before it and the owner's link last; the owner's Allow once runs that one
-  call for `check_permission`, and Always allow lets the next run make it.
+  call for `check_permission`, and Always allow (or Allow for, while it
+  lasts) lets the next run make it.
   An allowed tool runs through `runCodeCall` (`permissions.ts`), the same
   upstream path as `runCall`, with the answer turned into a value by
   `answerValue` (`answers.ts`): the JSON whole rather than a preview, its
@@ -721,6 +883,96 @@ printed (up to a million characters) and what it returned come back in the
 answer, and a long part is kept as a result of the token's (the returned
 value as JSON, shown by its handle) rather than cut.
 
+## Wrappers
+
+A wrapper is a server of its own (`mcp_server.kind = "wrapper"`, its url the
+fixed `pcp:wrapper`) whose tools are programs over the vault's other tools:
+a cleaner way to use a long-winded server, written by an assistant or the
+owner. A tool takes fewer arguments, fills in the rest, makes several calls
+as one, cuts an answer to what matters, or puts a secret where an API wants
+it in its arguments. `lib/core/wrappers/` holds it:
+
+- **The definition** (`definition.ts`, the `wrapper_spec` row beside the
+  server, like an endpoint's schema) is each tool's name, description,
+  input schema, hints, program, the tools its program `calls`, and the ones
+  it `replaces`; and the wrapper's secret bindings. Other tools are named by
+  server id, never by short name, so a server added later under the same
+  short name inherits nothing. `resolveDefinition` checks a proposed one
+  whole: every tool named exists (for an assistant, is one of its own it is
+  not blocked from), none is a wrapper's (wrappers do not nest), every
+  program compiles (QuickJS with `compileOnly`, `code/quickjs.ts
+checkSyntax`), nothing has a character that does not show on screen
+  (`hiddenCharacter`, as for shared memories), and the sizes in
+  `wrappers/limits.ts` hold (a program is 20,000 characters at most, for the
+  owner to read). The catalogue's rows for the wrapper's tools are built
+  from it (`catalogue.ts`); the row's `operation` carries the calls and
+  replaced tools, so the gateway reads levels without loading programs.
+- **Running a tool** (`run.ts`) is run_code's machinery with less reach:
+  `code/run.ts runProgram` runs the program in a fresh QuickJS instance,
+  with the caller's arguments handed in as text and parsed inside the engine
+  as `args`, and logs each of its calls under `wrapper`. Its `pcp.call`
+  reaches only the tools listed in that tool's `calls`, at the calling
+  token's own levels, through `runCodeCall` like a run_code call; a call to
+  anything else is an error the program sees. The arguments are checked
+  against the tool's schema at the top level first. What it returns is the
+  tool's answer (a string as it is, anything else as JSON), shaped by
+  `runCall` as any tool's is. Gateway calls and the owner's allowed requests
+  run with `withWrappers(executor)`, which sends a wrapper's tool to its
+  program and every other call to the executor underneath, so a program's
+  own calls can never reach a wrapper.
+- **Levels.** A wrapper's tool never reaches what the token could not:
+  `loadGatewayServers` (`gateway-servers.ts`) gives it the strictest of its
+  own level and of every tool it calls, a tool outside the token's servers
+  counting as blocked. It is blocked for a token wherever one of its calls
+  is, and asks wherever one of them asks. When the owner allows such a call
+  (a `call` request like any other; the page names the tools it may call),
+  the program runs with `approved`, so a call that would ask runs once in
+  that run; one that is blocked stays refused, and nothing asks again inside
+  it. A run that was not allowed by the owner never makes a call that asks.
+  Always allow writes only the wrapper tool's own level, which the
+  strictest-level rule keeps asking while a tool it calls asks.
+- **Secrets** go in only as a placeholder, `{"$secret": "<name>"}`, in a
+  call the program makes, and only where a binding the owner approved names
+  that very place: the secret, the tool (by server id), the argument (a JSON
+  Pointer), how it is written (`{{secret}}` in a template) and the server's
+  address as approved. `run.ts` hands the call the tool's bindings as a
+  grant; `upstream.ts callServerTool` matches every placeholder to one
+  (`placeholders.ts`) before anything is read or sent, refuses any other,
+  refuses a server whose address changed since, never puts one into the
+  browser, reads the value (`readSecretValue`) and writes it in. The values
+  are taken out of the answer (`scrubResult`, `openapi/redact.ts`: text,
+  structured content, text resources, and an endpoint's or a mail account's
+  own redaction), out of errors and out of the status the server page shows,
+  before the program or the assistant sees them. A placeholder in an
+  assistant's own call is refused by `resolveCall`. Scrubbing cannot catch a
+  value a tool transforms or stores and answers with later: the owner's
+  review of the place a secret goes is what decides, and the page says so.
+- **Replacing.** A tool listed in `replaces` (it has to be among the
+  tool's `calls`) is left out of `search_tools`, `list_tools`, `pcp.tools`
+  and the instructions' counts (`listedTools`) for a token while the
+  wrapper's tool is not blocked for it; it can still be called and
+  described by name, and `describe_tool` says what replaced it. The owner
+  shows it again from the server's page (`showReplacedTool`, which takes it
+  out of every wrapper's lists).
+- **Changes** (`admin.ts`). A token made with "propose wrappers"
+  (`api_token.manage_wrappers`, off unless the owner turns it on) gets
+  `get_wrapper`, `create_wrapper`, `update_wrapper` and `delete_wrapper`.
+  Each change is a permission request (`wrapper_change`) and nothing else:
+  it is checked as if it were being made, and the owner is shown every
+  tool new, changed (with the program before) or removed, every schema,
+  call and replaced tool, and every place a secret would go with the
+  server's address (`WrapperShown`, worked out when the request is made, as
+  an endpoint change's is). A secret PCP does not hold yet is typed in on
+  the page, as for `register_server`. `applyWrapperChange` writes exactly
+  what was shown, and only to the wrapper as it was when the owner was
+  asked (`basis`: the definition's hash, name and description), else
+  nothing. The request's row names no server, so deleting the wrapper keeps
+  its outcome. A binding the owner approved keeps its secret through later
+  changes, even if the secret is renamed. Requests are limited to 20 per
+  token in ten minutes and a vault to 50 wrappers. The owner adds and edits
+  wrappers directly on the Servers page (`saveWrapperByOwner`, the same
+  checks, with secrets they hold).
+
 ## Browser
 
 The browser is a server of kind `browser`, one per vault, added by the
@@ -731,21 +983,71 @@ like a mail account's, and `upstream.ts` hands its calls to
 proposed for and called like any server, and a long snapshot is kept for
 `read_result` by `runCall` like any long answer.
 
-**What runs** (`runtime.ts`). One headless Chromium per vault, driven by
+**What runs** (`runtime.ts`). One Chromium per vault, driven by
 `playwright-core`, started on the first page opened (by an assistant or the
 owner) and closed after fifteen minutes with no tool call, no input and
-nobody watching. The registry is on `globalThis`, as the network's is,
+nobody watching. It runs headless, or in the container image with windows
+on a virtual display (below). The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
-Chromium runs with one in-memory context: nothing is written to disk. It
-starts without `--enable-automation`, with
+Chromium runs with one in-memory context for the vault (and one more,
+made on the first page read for web_fetch, for all of those, below): no
+profile is written to disk.
+Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
+private temporary folder of its own, removed once it has closed: its crash
+reporter keeps its database there, and without a folder it can write to
+(a system user with no home, as the Docker image runs as) Chromium can abort
+as it starts. It starts without `--enable-automation`, with
 `--disable-blink-features=AutomationControlled`, a desktop user agent without
 "Headless", the host's locale and time zone and a 1280 by 800 viewport, and
 with service workers blocked (one could answer a navigation without the
 network, around the gate). Chromium's own sandbox is used where the machine
 gives one and dropped where it cannot (root, or an unprivileged container;
-the Docker image says so with `PCP_BROWSER_SANDBOX=off`). PCP adds no
-stealth beyond that: the strictest sites may still refuse a headless
-Chromium.
+the Docker image says so with `PCP_BROWSER_SANDBOX=off`).
+
+**The virtual display** (`display.ts`). In the container image
+(`PCP_CONTAINER=1`), or on another Linux machine with
+`PCP_BROWSER_DISPLAY=virtual`, Chromium runs as a desktop's Chrome does, with
+a window around each page, on a screen PCP starts itself: one Xvfb per
+process (1920 by 1080), started with the first browser and stopped when the
+last one closes. A site's check then sees a browser with a window, not one
+whose window is exactly the page. The display takes only clients that show
+its cookie, kept in a private folder and handed to Chromium alone, so
+another program on the machine cannot watch the browser or type into it.
+WebGL there is Chromium's software renderer, as headless uses by itself
+(`--enable-unsafe-swiftshader`; without it a windowed Chromium with no
+graphics card has no WebGL at all). Chromium's RenderDocument is off there:
+with it (Chromium 153) a script that runs while a new document loads often
+reads the window as 0 by 0 at 0,0 until the window's place reaches it, which
+no desktop's Chrome shows. Chromium keeps only the last `--disable-features`
+it is given, so PCP's list carries Playwright's own too, and a test checks it
+against the playwright-core installed. An Xvfb that does not start leaves the
+browser headless; `PCP_BROWSER_DISPLAY=headless` asks for that. The desktop
+app never uses it: it starts no child process, and runs on a real screen.
+
+**Sites that check their visitors.** Every context tells pages of a 1920 by
+1080 screen, since headless would otherwise make the screen the 1280 by 800
+viewport itself. It is the full Chromium, headless or windowed: PCP always
+passes the executable, so Playwright never picks its separate headless
+shell (the Docker image does not download it). `navigate`, and an action that
+can load a page (`back`, a click, typing, a key, a choice, a dialog's
+answer), waits up to twenty seconds for a check that passes on its own
+(Cloudflare's, marked `cf-mitigated: challenge`). One that does not stays on
+the page. The answer leads with the sentence web_fetch uses for it and adds
+that the check did not pass on its own in this tab and that `hand_over` is
+how the owner passes it themselves; so does every later answer about the tab
+(a snapshot, `read_page`, `wait_for`). The assistant decides: nothing asks the
+owner automatically. A clearance cookie a passed check sets lands in the
+vault's profile, as any cookie does. PCP adds no stealth scripts and uses no
+patched Playwright, so some tells remain: WebGL is SwiftShader (software
+rendering), headless the window is exactly the viewport (Playwright sizes it
+so, and Chromium's `--window-size` does not change that; on the virtual
+display it is not), Playwright's automation protocol leaves traces a page can
+look for, and a server's datacenter address is not a person's at home. A
+click sent through the DevTools protocol into a cross-site frame (a
+Turnstile checkbox) carried the frame's own coordinates as its screen
+position up to about Chromium 141, which a check could tell from a mouse;
+the Chromium that PCP's Playwright drives (153) reports a mouse's. The strictest checks may still want a person,
+which is what `hand_over` is for.
 
 **The sign-ins** (`profile.ts`). The context starts from the vault's
 `browser_profile`: Playwright's storage state (cookies, local storage,
@@ -759,12 +1061,15 @@ the browser. The idle close has no key and saves nothing, so what a page
 changed on its own since the last save is lost. Counts (sites, cookies,
 size) are kept in the clear for the page. An export carries the row as
 ciphertext; Forget all sites closes the browser unsaved and deletes it.
+Starting the browser for a page read for web_fetch loads the profile into the
+vault's own context as any start does; the read happens in a context of its
+own, which never touches the profile and is never saved.
 
-**Which pages open** (the gate in `runtime.ts`). A tab's main frame loads
+**Which pages open** (the gate in `runtime.ts`). A page's main frame loads
 nothing the gate has not passed: the DevTools protocol pauses each document
 request (redirects included) before it is sent. It passes when the owner
 drives the tab, when the owner allowed the site for this tab, or when the
-web fetch lines of the token that drives the tab give GET to that site
+web fetch lines of the token whose tab it is give GET to that site
 `allowed`; never PCP's own site. Otherwise it is answered with 204, which
 leaves the tab on the page it was on, and the next answer says which site
 was stopped and puts it on the token's page (a line of its own on first
@@ -772,15 +1077,24 @@ sight, as web fetch does). Frames inside a page and subresources are not
 gated per site. `navigate` and `tabs` decide before anything opens, with
 `decideSite` (web-fetch.ts): blocked is refused; ask throws `OwnerNeeded`,
 which `runCall` turns into a `browse` request offering Allow once (the site
-for that tab while it is open), Always allow this site and Block this site
-(the token's site line, as for web fetch) and Not now. A popup becomes a tab
-of the tab that opened it. A token whose `navigate` tool is at ask is asked
-once: the call's request shows the address, and when the owner allows the
-call, `runCall` (told so by `executeCall`) opens the site for that tab as
-Allow once would, with no `browse` request after it. Only `navigate` and
-`tabs` ask about a site, and only for the address in their arguments, so
-the site is always one the owner saw. A blocked site stays blocked, and a
-hand-over during such a call is still asked.
+for that tab while it is open), Allow this site for (an allowance, as for
+web fetch), Always allow this site and Block this site (the token's site
+line, as for web fetch) and Not now. A popup becomes a tab
+of the tab that opened it. The gate is the browser's, not a tab's (`Fetch`
+on the browser's own DevTools session, on before the first page exists), so
+it holds a popup from its very first request, before Playwright has
+reported the popup: until then the popup opens only what the tab that
+opened it may open, and is closed instead of opening anything else, or when
+the browser has no room for another tab. A token whose `navigate` tool is
+at ask is asked once: the call's request shows the address, and when the
+owner allows the call, `runCall` (told so by `executeCall`) opens the site
+for that tab as Allow once would, with no `browse` request after it. Only
+`navigate` and `tabs` ask about a site, and only for the address in their
+arguments, so the site is always one the owner saw. A blocked site stays
+blocked, and a hand-over during such a call is still asked. A page read for
+web_fetch (see Web fetch) passes the gate for its one site only, the site the
+token was just allowed to fetch. It is not a tab: nobody lists, watches or
+drives it.
 
 **Which addresses it reaches** (`proxy.ts`). Every connection goes through
 a forward proxy on 127.0.0.1 (`--proxy-server`, with loopback not
@@ -788,13 +1102,16 @@ bypassed; QUIC off and WebRTC kept to the proxy, since UDP would go around
 it). PCP resolves each name, checks every address, and dials the one it
 checked, for pages, redirects, scripts and images alike, as web fetch's
 transport does. Public addresses pass; private ones pass while an open tab
-is driven by a token whose `private` line allows them (the proxy cannot tell
+belongs to a token whose `private` line allows them (the proxy cannot tell
 which tab a connection is for, so this is per browser; tabs the owner opens
 follow the line for all tokens); PCP's own address never. Refusals are
 remembered for half a minute so an answer can say why a page did not open.
 Hosts are never logged.
 
-**What an assistant gets.** A snapshot (Playwright's accessibility tree
+**What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
+`snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
+`select_option`, `scroll`, `wait_for`, `screenshot`, `handle_dialog` and
+`hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
 with refs), the page as Markdown (`htmlToMarkdown`, read from the live
 page), a screenshot of the viewport, and the tab's address, title and the
 link to it in PCP. It acts by ref (click, type, select), by key or by
@@ -802,12 +1119,38 @@ scroll. It never gets a cookie or storage, never runs JavaScript, never
 downloads a file. A refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
 
-**The owner's control.** A tab is driven by the assistants or by the owner.
+**Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
+`tokenId`; a popup is its opener's) or that the owner last handed it to,
+and that token alone sees and drives it: `tabs` lists only its own, the current tab a call without one falls on
+is its own, and any tool given another token's tab, or the owner's own, is
+answered as for a tab that does not exist, in the same words, so its
+address and title never reach it. `navigate` naming such a tab opens a new
+one of the token's own, and a `browse` request never names another token's
+tab. So a site the owner allowed once stays with the token whose tab it
+is, and no token reads a page another opened under its own lines. Before a
+tool reads or acts on a page, the page's site is checked against the
+token's lines as they are now (`mayOpen`, as the gate does): a page at a
+site it may no longer open (its line changed since, or the tab's history
+went back to a page the owner opened there) is refused, though the tab can
+still be sent elsewhere or closed. The tabs share one profile, so the
+sign-ins are every token's; the eight tabs are shared too, and a token
+told the browser is full learns only how many are its own.
+
+**The owner's control.** A tab is driven by its assistant or by the owner.
 Take over on the tab's page makes it the owner's, and every browser tool
-refuses it until Hand back; a tab the owner opens starts as theirs.
-`hand_over` makes the tab the owner's and throws `OwnerNeeded` for a
-`browser_handover` request, which shows the assistant's message and the tab
-live; Done (or Not now) gives it back, saves the profile, and is what
+refuses it until Hand back. A tab the owner opens is theirs, seen by no
+token, until they hand it to one. Hand back gives the tab to the token the
+owner picks (`handBackTab`, `giveTab`): one of the vault's tokens that is
+neither revoked nor expired and reaches the browser, checked in the core
+whatever the form sent. The page offers the token whose tab it was first;
+a tab no token had yet waits for a choice. The token gets the tab as its
+own (its lines read again, its current tab), and the site the tab is at
+counts as one the owner allowed for that tab, as Allow once does; handed to
+another token than before, the tab first drops the sites allowed for the
+one before, which were that token's. `hand_over` makes the tab the
+owner's and throws `OwnerNeeded` for a `browser_handover` request, which
+shows the assistant's message and the tab live; Done (or Not now) gives it
+back to the token that handed it over, saves the profile, and is what
 `check_permission` reports. A hand-over nobody answers goes back when its
 request expires.
 
@@ -815,18 +1158,44 @@ request expires.
 `input.ts`, `components/browser-tab-view.tsx`). The tab's page draws
 Chromium's screencast (a JPEG each time the page repaints, shared by
 everyone watching) on a canvas, streamed as server-sent events by a route
-handler. While the owner has the tab, their pointer (with the samples the
+handler. The stream sends on only when its connection has room, keeping
+the newest frame and skipping the rest, and a frame is acknowledged to
+Chromium (which paints the next only then) once a viewer has sent it on:
+the screencast runs at the fastest viewer's pace, and a viewer on a slow
+link (through pcp.gg over a home upload) falls a frame behind, never a
+queue of them. While the owner has the tab, their pointer (with the samples the
 browser coalesced), wheel, keys and pastes go back in batches every 40 ms
 to a second route, each event with the time it happened. They are replayed
 through the DevTools protocol (`Input.dispatchMouseEvent` and
 `dispatchKeyEvent`, which Chromium treats as a device's input: trusted
-events), each at its own time plus a fixed delay and stamped with it, so a
-CAPTCHA reading the movement sees its real cadence; a batch that arrives
-late starts a new clock. Coordinates are mapped with the frame's own
+events), each at its own time plus a delay and stamped with it, so a
+CAPTCHA reading the movement sees its real cadence. Input that arrives late
+(a slow or uneven link) moves the replay further behind, up to 400 ms, so
+what follows plays at its own pace instead of in a burst, and the delay
+closes up by a millisecond an event while input arrives in time; a batch
+more than 600 ms late starts a new clock. Events go out in order without
+waiting for Chromium to acknowledge each: it acknowledges a mouse move only
+with its next frame (about 17 ms), so waiting on every one would replay at
+most sixty moves a second while a mouse reports hundreds, and the replay
+would fall seconds behind. Chromium folds the moves into its frames, as it
+does a real mouse's; should a move still wait a second unacknowledged,
+further moves are dropped until it catches up, never a click or a key. The
+input route answers once a batch is queued, not once it has played, since
+the page sends one batch at a time. Coordinates are mapped with the frame's own
 metadata. Both routes check PCP's origin and the owner's session, as the
 export download does. A WebSocket would answer a little sooner, but needs a
 server of its own around Next; the input's format is the same whatever
 carries it.
+
+**Bounded** (`browser/limits.ts`). Eight tabs per vault, every token's and
+the owner's together; thirty seconds per page load and ten per action; 300
+tool calls per token per ten minutes; four people watching a tab; and the
+owner's input in batches of at most 500 events, 300 batches per session in
+ten seconds, moves dropped while Chromium is a second behind. A check that may pass on its own is waited for twenty seconds
+(`CHALLENGE_WAIT_MS`). A page read for web_fetch takes 45 seconds at most
+(`SOLVE_TIMEOUT_MS`), two such pages per vault at once (`MAX_SOLVES`), and a
+site whose check passed is remembered for thirty minutes
+(`CLEARANCE_MEMORY_MS`).
 
 **Chromium on the machine** (`executable.ts`, `install.ts`).
 `PCP_BROWSER_EXECUTABLE`, then PCP's own install, then Playwright's own
@@ -859,8 +1228,10 @@ Linux):
   bookkeeping (same table, same checksums), so a developer's
   `prisma migrate dev` and a container's boot agree on the history.
 - `logs/mcp-YYYY-MM-DD.jsonl` — one line per gateway call: which token,
-  which tool, which upstream, how long, whether it worked. Never arguments
-  or results.
+  which tool, which upstream, how long, whether it worked, and whether it
+  stopped to ask the owner (with the permission request's id). Never
+  arguments or results. The Log page reads it back; the cleanup deletes the
+  days older than the owner keeps (see "Cleanup and the log").
 - `tls/` — only once HTTPS is turned on: the ACME account key and, per name,
   `key.pem` and `cert.pem`. Directory mode 0700, files 0600 (see "Reaching
   PCP").
@@ -881,7 +1252,8 @@ up, and the key it hands PCP's page after Touch ID.
 ## Touch ID in the Mac app
 
 The owner can unlock with their fingerprint in the Mac app, and confirm a
-new API token, an export or a restore with it instead of typing the
+new API token, an export, a restore or deleting the vault with it instead
+of typing the
 password. It is a credential of its own, not a stored password: a
 `device` grant (`lib/core/device-keys.ts`) whose key, `pcp_device_…`, the
 app keeps and hands over only after Touch ID.
@@ -911,12 +1283,12 @@ app keeps and hands over only after Touch ID.
     ID prompt (`systemPreferences.promptTouchID`). A checkout, a fork, or a
     release built without the profile works this way.
 - **How a page reaches it.** The window's preload (`desktop/preload.cjs`)
-  gives PCP's own pages, and only those (plain http on localhost at the
-  app's port), `window.pcpDesktop.touchId`: `status`, `unlock`, `save`,
-  `forget`. The main process (`desktop/touch-id.mjs`) checks again that the
-  call comes from the window's main frame on that address, shows the system
-  prompt with a reason of its own (never text from the page), and returns
-  the key only after Touch ID. The page sends it in a form field
+  gives PCP's own pages, and only those (plain http on localhost),
+  `window.pcpDesktop.touchId`: `status`, `unlock`, `save`, `forget`. The
+  main process (`desktop/touch-id.mjs`) checks again that the call comes
+  from the window's main frame at the app's own address and port, shows the
+  system prompt with a reason of its own (never text from the page), and
+  returns the key only after Touch ID. The page sends it in a form field
   (`deviceKey`) to `touchIdLoginAction` or `confirmOwner`, rate-limited like
   the password but on a budget of its own (a random key is no password
   guess, and must not spend the owner's tries), and keeps it nowhere. An OAuth provider's page in the same
@@ -969,7 +1341,10 @@ what lets a PCP move to another machine without every assistant being set up
 again, and reading a secret out of the file takes what reading it off the
 disk takes: one of those credentials. Session grants are not in it (a
 session is one browser's), nor is the Touch ID key (one app's), nor are
-OAuth authorizations in flight, the request log or the `tls/` directory.
+OAuth authorizations in flight, the request log or the `tls/` directory. An
+app that signed in to PCP is like a session: its token comes along (with
+its levels and memories), its credentials do not, and after a restore it
+signs in again, where the owner can give it that token back.
 
 Around the rows: gzip, then AES-256-GCM under a key derived from an **export
 password** the owner chooses, with scrypt at the parameters of the password
@@ -995,7 +1370,11 @@ adds a column the format does not carry yet.
 by table (not trusting cascades alone), and writes the file's rows in its
 place, parents before children, in chunks that keep under SQLite's variable
 limit; row ids and timestamps are the file's. On a PCP not set up yet the
-transaction first checks that there is no vault, as `setupVault` does. The
+transaction first checks that there is no vault, as `setupVault` does. Into
+a vault that exists, the vault's browser is closed first (`withBrowserClosed`:
+a call in flight finishes, the profile is saved with the owner's key, and no
+browser starts until the rows are written), since a browser left running
+would save its old sign-ins over the restored profile. The
 host's settings (`ddns.config`, `tls.config` and `update.config`, in plain
 text as they are in the database) are in the file and restored only when the
 owner ticks the box, with this machine's network status rows dropped so
@@ -1008,29 +1387,29 @@ with the vault; the action signs them in again when the password they typed
 opens the restored vault (their own export), and otherwise sends them to sign
 in with the exported PCP's password.
 
-**Who may.** The export asks for the owner's password again, as making a
-token does: a copied session cookie may use the vault but not walk off with
-it. The restore, when signed in, asks for it too, so a copied cookie cannot
-replace the owner's vault with one it holds the password to; on the setup
-page there is no password yet, and whoever reaches that page could set up
-instead. Both are rate-limited like password attempts. The download is a
-route handler (an action cannot send a file), so it checks the request's
-origin itself (`lib/server/same-origin.ts`), which Server Actions get built
-in.
+**Who may.** The export asks for the owner's password again (or Touch ID in
+the Mac app: `confirmOwner`), as making a token does: a copied session
+cookie may use the vault but not walk off with it. The restore, when signed
+in, asks for it too, so a copied cookie cannot replace the owner's vault
+with one it holds the password to; on the setup page there is no password
+yet, and whoever reaches that page could set up instead. Both are
+rate-limited like password attempts. The download is a route handler (an
+action cannot send a file), so it checks the request's origin itself
+(`lib/server/same-origin.ts`), which Server Actions get built in.
 
-## Reaching PCP: dynamic DNS and HTTPS
+## Reaching PCP: pcp.gg, dynamic DNS and HTTPS
 
-Both are optional, off until the owner turns them on (in the step after setup
-or under Settings), and meant for someone running PCP at home without a proxy
-of their own. While both are off, nothing in `lib/core/network/` starts:
-no timer, no listener, no outbound request.
+All three are optional, off until the owner turns them on (in the step after
+setup or under Settings), and meant for someone running PCP at home without a
+proxy of their own. While all three are off, nothing in `lib/core/network/`
+starts: no timer, no listener, no outbound request or connection.
 
 **Host settings, not vault settings.** The configuration lives in the
 `host_setting` table (`lib/core/host-settings.ts`), not in the per-vault
 `setting` table. It belongs to the machine, and the work that uses it runs
 from a timer with no request and no `VaultContext`. So it is **stored
-unencrypted**: a dynamic DNS service's token or password has to be readable
-while nobody is signed in, and reading the vault without a credential is
+unencrypted**: a dynamic DNS service's token or password, and the pcp.gg
+connection key, have to be readable while nobody is signed in, and reading the vault without a credential is
 exactly what PCP refuses to allow. The owner is told so where they type it.
 Such a credential can only move a DNS name. Nothing from the vault (a secret,
 a token) is ever copied into a host setting, and the page never sends a saved
@@ -1055,17 +1434,44 @@ lookup fails, services that see the caller's address themselves still get an
 update, at most hourly.
 
 **HTTPS** (`tls.ts`, `edge.ts`, `proxy.ts`): `acme-client` gets a Let's
-Encrypt certificate (`PCP_ACME_DIRECTORY` overrides the directory) with the
-HTTP-01 challenge, for a typed name or the dynamic DNS one. The key and
-certificate are files under `tls/`: a server presenting a certificate needs
-its key before anyone signs in. While HTTPS is on, PCP opens two listeners of
-its own next to Next's:
+Encrypt certificate (`PCP_ACME_DIRECTORY` overrides the directory) for a
+typed name or the dynamic DNS one. The key and certificate are files under
+`tls/`: a server presenting a certificate needs its key before anyone signs
+in. While HTTPS is on, PCP opens two listeners of its own next to Next's:
 
 - port 80 (`PCP_HTTP_PORT`; 8080 in the Docker image, mapped by
   `docker-compose.https.yaml`) answers `/.well-known/acme-challenge/…`. Once
   a certificate works it redirects everything else to `https://<name>`;
   before that it forwards to the app, so the site is not broken while waiting.
-- port 443 (`PCP_HTTPS_PORT`, 8443 in Docker) serves the certificate.
+- port 443 (`PCP_HTTPS_PORT`, 8443 in Docker) serves the certificate, and
+  opens before there is one, for the TLS-ALPN-01 challenge.
+
+**Which challenge** (`challengeOrder` in `tls.ts`): Let's Encrypt proves the
+name is PCP's either with HTTP-01 (a file on port 80) or with TLS-ALPN-01
+(RFC 8737: a handshake on port 443 asking for the protocol `acme-tls/1`
+alone, answered with a self-signed certificate for the name that carries the
+key authorization's SHA-256 in its acmeIdentifier extension). A name of the
+owner's own tries HTTP-01 first, since a router forwards port 80 as readily
+as 443 and some providers block only 80; a pcp.gg name tries TLS-ALPN-01
+first, because pcp.gg carries port 443 to PCP untouched, while a proxy in
+front of pcp.gg can keep port 80's challenge path for itself (Coolify's
+Traefik, with a Let's Encrypt resolver of its own, answers every
+`/.well-known/acme-challenge/…` with 404, whatever the host). When the
+first fails, the other is tried once, in a new order; when PCP never got as
+far as a challenge (the directory out of reach, an order refused), nothing
+is tried again. The answers wait in the runtime's `ChallengeStore` (tokens
+for port 80, challenge certificates by name for 443) and are removed once
+validated or refused.
+
+Node's TLS server chooses the certificate before it says which protocols the
+client offered, so port 443 reads the ClientHello itself
+(`client-hello.ts`, adapted from pcp.gg's `tunnel/protocol/sni.ts`), and only
+while a TLS-ALPN-01 challenge is out: a connection for that name offering
+`acme-tls/1` and nothing else goes to a second TLS server that never listens
+(the challenge certificate, `acme-tls/1`, closed after the handshake); every
+other connection, Let's Encrypt's included at any other time, goes on to the
+HTTPS server with the bytes put back and gets the normal certificate. With no
+challenge out, nothing is read first.
 
 Both forward to the app on `127.0.0.1:$PORT`, streaming (MCP's server-sent
 events stay open) and passing upgrades through. They are the edge, so they
@@ -1076,14 +1482,54 @@ then work unchanged.
 A certificate is renewed once less than a third of its life is left, which
 keeps working as Let's Encrypt shortens lifetimes. The check runs every 30
 minutes, and the new one is swapped in with `setSecureContext`, without a
-restart. A failed request is retried after 1 hour, doubling to at most a day.
-That keeps PCP well inside Let's Encrypt's limits on failed validations;
-"Try again now" skips the wait. A DNS lookup first warns, without blocking,
-when the name does not point at this network. Port 3000 keeps serving plain
+restart. When the first certificate for a name fails, PCP turns HTTPS off
+again and the card says why: what went wrong is usually the router or the
+name, which no retry fixes. Once a name has had a certificate, a failed
+renewal is retried after 1 hour, doubling to at most a day, and the
+header's bell says so on every page until it works. That keeps PCP well
+inside Let's Encrypt's limits on failed validations (at most two a try, with
+the second challenge); "Try again now" skips
+the wait. A DNS lookup first warns, without blocking, when the name does not
+point at this network. Port 3000 keeps serving plain
 HTTP for the local network. In the desktop app the two ports stay 80 and 443
 (macOS and Windows let an ordinary program use them), and they listen on
 every interface even while the app keeps port 3000 to this computer: a
-router's forward needs exactly that.
+router's forward needs exactly that (with a pcp.gg name they listen on
+127.0.0.1 only, below).
+
+**pcp.gg** (`pcpgg.ts`, `pcpgg/`): the owner pastes a connection key from
+their pcp.gg dashboard, and PCP runs pcp.gg's connector itself
+(`pcpgg/connector.ts`, lifted from kaperkunde/pcp-gg's `tunnel/connector/`).
+It holds one WebSocket to pcp.gg (`PCP_PCPGG_RELAY_URL` overrides the
+address) and answers each connection pcp.gg passes down by dialling the
+edge's own listeners on 127.0.0.1. Connections to the owner's name on port
+443 arrive still encrypted and end in the edge's HTTPS listener, so pcp.gg
+carries bytes it cannot read, Let's Encrypt's TLS-ALPN-01 validation among
+them; on port 80 pcp.gg passes on only Let's Encrypt's HTTP-01 challenge. The wire format (`pcpgg/frames.ts`, `mux.ts`,
+`control.ts`) is a copy of pcp.gg's `tunnel/protocol/`, protocol version 1;
+the tests run against a copy of pcp.gg's relay (`pcpgg/test-relay/`).
+
+`reconcileNetwork()` starts the connector while a key is saved and pcp.gg
+has not refused it, and stops it otherwise. pcp.gg's `ready` message names
+the hostnames; PCP keeps the first and, once online, turns HTTPS on for it
+(`tls.config` with `via: "pcpgg"`), so the TLS-ALPN-01 challenge reaches
+port 443 through pcp.gg on the first try (HTTP-01 through port 80 if that
+fails). A pcp.gg name skips the check that the name
+points at this network, and the edge listens on 127.0.0.1 only: the name
+leads to pcp.gg, never to this network's own address, so nothing else needs
+to reach the listeners (the desktop app's 80 and 443 included). If Let's
+Encrypt refuses the first certificate for the name, HTTPS turns off as usual
+and stays off across reconnects until the owner asks again. A key pcp.gg
+refuses (close codes 4001, 4004) stops the connector and is not tried again,
+across restarts too, until the owner saves a key. Turning pcp.gg off stops
+the connector and turns HTTPS for the name off. The pcp.gg card and the
+header's bell (after two minutes offline, or at once for a refused key) show
+the state. The HTTPS card keeps its hands off while pcp.gg is on.
+
+Every connection through pcp.gg reaches the edge from 127.0.0.1, so the rate
+limiter sees one client address for all of them. Carrying the client's
+address (in the OPEN frame, then PROXY protocol v2 to the edge) is left for
+a later protocol version.
 
 ## Updates
 
@@ -1168,6 +1614,46 @@ install is not retried. The new PCP clears the request and the file at boot.
 The host reads the container; PCP never addresses the host and has no Docker
 socket.
 
+## Cleanup and the log
+
+**The request log** (`lib/core/request-log.ts`) is what assistants did with
+their tokens: one JSON line per gateway call, and one per call a `run_code`
+program made, written after the answer and never waited for. A line names the
+token by id, the tool, the server and upstream tool the arguments named (cut
+to 80 characters, so a caller cannot grow the log by what it sends), how long
+it took and how it ended: done, failed (with PCP's own refusal text, never an
+upstream's), or asked the owner. Code under a call notes an ask in async
+context (`noteOwnerAsked`, from `withPermission` and `connectResult`), so the
+line is right however the result is rewritten on its way out. A write that
+fails pauses the log for five minutes rather than failing the call.
+
+The **Log page** (`/log`, `lib/core/activity.ts`) reads the vault's own lines
+back, newest first, filtered by token, outcome or a tool or server name, and
+fills in from the database what the log does not hold: each token's name, and
+how a request a call made was answered while PCP still keeps it. Paging goes
+by position (`day:line`), which holds while today's file grows; a page stops
+after 50,000 lines read, matching or not, and carries on from there, so a rare
+filter reads a few days at a time. The page shows what the lines hold and
+nothing else: no arguments, no results, no sites.
+
+**The cleanup** (`lib/core/cleanup/`) removes what PCP keeps only for a while:
+ended sign-ins, unfinished OAuth sign-ins, apps' codes and tokens past their
+expiry (with their grants) and registrations no sign-in used within a day
+(PCP's authorization server), permission requests a week past
+their expiry, kept results past their day, and days of the request log older
+than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
+then on a node-cron task, one per process and kept on `globalThis` like the
+update timer, unref'd, with no overlap: runs from the start, the schedule and
+the owner's **Clean up now** go one at a time. Each part runs on its own, so
+one that fails does not stop the others, and the run's status (when, what
+started it, what it removed, what failed) is a host setting the settings page
+shows. The schedule is five cron fields in the machine's time zone, a preset
+or the owner's own; one that would leave more than a day between two runs is
+refused, because a kept result is promised gone a day after it was made. The
+cleanup needs no credential: it deletes rows and files by their dates and
+reads nothing it deletes. Its settings (`cleanup.config`) and status
+(`cleanup.status`) are the machine's and do not travel with an export.
+
 ## Connecting OAuth servers
 
 An OAuth server needs a client ID for PCP before anyone can sign in, and
@@ -1229,14 +1715,100 @@ call on a server that is not connected stops at "needs connecting" without
 contacting the registration endpoint, and a proposal from an assistant
 contacts nothing at that address but the JMAP look above.
 
+## Letting assistants sign in: PCP's authorization server
+
+An API token suits a client that takes a header. Custom connectors in
+claude.ai (web, desktop and phone) and ChatGPT's developer mode take a URL
+and sign in with OAuth, nothing else, so PCP is its own OAuth 2.1
+authorization server for `/mcp`, as the MCP authorization spec describes it
+(`lib/core/oauth-server/`, routes in `app/oauth/` and `app/.well-known/`).
+It has to be PCP's own: a relay in front of PCP (a pcp.gg name, where TLS
+ends at the owner's PCP) that issued the tokens could mint one for itself,
+and the relay's promise is that it cannot read the owner's data.
+
+**Discovery.** A request to `/mcp` without a valid token gets a 401 whose
+`WWW-Authenticate` names `resource_metadata` (RFC 9728) at
+`/.well-known/oauth-protected-resource/mcp`. That document names the
+resource, `<public URL>/mcp`, and PCP as its authorization server; PCP's
+metadata (RFC 8414) is at `/.well-known/oauth-authorization-server`. The
+issuer is PCP's public URL (`publicUrlWithoutSession`: the address pinned in
+Settings, or where the request came in), so the same build is
+`http://localhost:3000` at home and `https://alice.pcp.gg` behind the relay.
+The authorization response carries `iss` (RFC 9207).
+
+**Clients.** Two kinds, and neither gets anything before the owner approves:
+
+- A **client ID metadata document**: the client_id is an https URL (Claude
+  uses `https://claude.ai/oauth/mcp-oauth-client-metadata`). PCP reads it
+  when the signed-in owner opens the sign-in page and again when they
+  approve: public addresses only (the pinned transport API endpoints use),
+  no redirect followed, 5 KB at most, JSON. Its `client_id` must be its own
+  URL, it must list its `redirect_uris`, and it must not claim a secret or a
+  key (`token_endpoint_auth_method` `none`). Nothing about it is stored; no
+  one who has not signed in can make PCP fetch anything.
+- **Dynamic registration** (RFC 7591) at `/oauth/register`, for the others.
+  It is open, so it is rate-limited per address, registrations that no
+  sign-in has used are pruned after a day and capped in number, and they
+  live in `oauth_client`, which belongs to the instance, not a vault. A
+  client that does not ask for `none` gets a secret, kept as its SHA-256.
+
+Redirect URIs are https, http to this computer, or an app's private-use
+scheme, and are matched exactly. Until the client and its redirect URI check
+out, the page tells the owner what is wrong and sends nothing back; after
+that, a bad request goes back to the client as an OAuth error.
+
+**The owner's page** (`/oauth/authorize`) needs the owner signed in: a
+locked PCP sends them to `/login`, which goes on to the sign-in page and
+nowhere else (`lib/server/return-path.ts`). It shows the name the app gives
+and where it really comes from (its document's host, or "registered
+itself"), where PCP sends them back to, and the choices a new API token has:
+its name, its servers, and the options that add tools. Allowing it is
+`confirmOwner` (password or Touch ID), as making a token is, and the request
+is checked again on the server. It makes an API token with
+`oauth_client_id` set and no `pcp_…` value (an empty grant, as a revoked
+token has), so tool levels, permission requests, memories, web fetch sites,
+kept results and the request log, which all hang off the token, work as for
+any other. When this client had a live token before, the owner can give it
+that one instead; its earlier sign-ins end.
+
+**Credentials** (`oauth_credential`, `tokens.ts`). The approval wraps the
+DEK, which the owner's session unwrapped, under a new authorization code: a
+grant of kind `oauth_code`, like an API token's, with only the SHA-256 kept.
+The code lives two minutes and is bound to the client, the redirect URI and
+the PKCE challenge (S256 only, required). The token endpoint unwraps the DEK
+with the code and wraps it again under an access token (`oauth_access`, an
+hour) and a refresh token (`oauth_refresh`, thirty days), and spends the
+code. A refresh does the same with the refresh token, which is replaced at
+every use. So at every moment the DEK is wrapped only under values an
+assistant holds; the database has hashes and ciphertext, and the vault is
+no more readable without a credential than before.
+
+A code or refresh token works once: a second request with it loses the race
+(`claim` marks it used before anything is issued). A spent one keeps its row,
+without a grant, until it would have expired, and presenting it again ends
+every sign-in of its token, as OAuth 2.1 advises for a refresh token that may
+have been stolen. Any mismatch at the code exchange (verifier, redirect URI,
+client, expiry) spends the code too, so it gets one try.
+
+**Revoking.** The owner's Revoke, Delete, "revoke every token" on signing
+out everywhere, and recovery with revoking tokens all go through
+`endOAuthSignIns`, which deletes the credentials' grants (they hang off the
+grant, so deleting the token row alone would leave copies of the key). An app
+can revoke itself at `/oauth/revoke` (RFC 7009): its refresh token stands for
+the sign-in and revokes the token, an access token only itself. `/mcp`
+checks the token on every request, so a revoked one stops at once.
+
 ## The gateway's tools
 
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
 for a token with the right to manage endpoints, `memory` for a token that
-keeps memories, `web_fetch` for a token that fetches web pages, and
-`run_code` for a token that runs code, all above):
+keeps memories, `web_fetch` for a token that fetches web pages, `run_code`
+for a token that runs code, and four for a token that proposes wrappers, all
+above). A request without a valid
+token is answered 401, and a token makes at most 240 requests a minute, one
+message each (`app/mcp/route.ts`). The tools:
 
 - `search_tools(query, server?, limit?)` ranks the catalogue
   (`lib/core/search.ts`: name, title, description and server words, with
@@ -1278,24 +1850,26 @@ gateway finds a server with no tools. It is a cache of the upstream's
 ### Long answers and kept results
 
 `runCall` (`lib/core/permissions.ts`) shapes an upstream's answer for the
-assistant with `shapeAnswer` (above). When that left something out (a JSON
-preview, a text cut at 60,000 characters), the answer shaped the same way but
-not cut is handed to `lib/core/tool-results.ts`: up to 4 million characters
-are kept in `tool_result`, encrypted under the vault's data key with
-`tool_result:<id>` as associated data, for a day, and a notice after the
-shortened answer gives the result's id and length. `read_result` decrypts it
-and returns one slice, for the token whose call produced it only; another
-token's, another vault's or an expired id reads as not found. A token keeps
-at most 100 results and 50 million characters, its oldest going first, and
-expired ones are pruned at boot. A permission request's stored outcome keeps
-the notice when its text is shortened, so `check_permission` names the result
-too. Mail bodies and attachments use the same store from inside the mail
-tools. Kept results are not part of an export, and nothing kept is logged.
+assistant with `shapeAnswerKeeping` (the shaping above, and the handles
+below). When that left something out (a JSON preview, a text cut at 60,000
+characters), the answer shaped the same way but not cut is handed to
+`lib/core/tool-results.ts`: up to 4 million characters are kept in
+`tool_result`, encrypted under the vault's data key with `tool_result:<id>`
+as associated data, for a day, and a notice after the shortened answer gives
+the result's id and length. `read_result` decrypts it and returns one slice,
+for the token whose call produced it only; another token's, another vault's
+or an expired id reads as not found. A token keeps at most 300 results and
+50 million characters and bytes together, its oldest going first, and
+expired ones are removed by the cleanup (see "Cleanup and the
+log"). A permission request's stored outcome keeps
+the notice when its text is shortened, so `check_permission` names the
+result too. Mail bodies and attachments use the same store from inside the
+mail tools. Kept results are not part of an export, and nothing kept is
+logged.
 
 A kept result is a text or a file's bytes (`tool_result.kind`, with `name`
 and any media type), encrypted the same way. A file over 10 MiB is refused
-rather than cut. A token keeps at most 300 results and 50 million
-characters and bytes together.
+rather than cut.
 
 **Handles** move a kept value between tools without the assistant reading it.
 `shapeAnswerKeeping` (`lib/core/answers.ts`) makes them while it shapes an
@@ -1313,10 +1887,12 @@ none.
 
 In arguments, an object of only `$result` (and `as`) is replaced before the
 call is sent (`lib/core/result-handles.ts`, called from `upstream.ts` for MCP
-servers and API endpoints and from `mail/accounts.ts`): a text as its text, a
-file as base64, or the other way with `as`. Only the token's own results
-resolve; an unknown or expired id is refused by name before anything is
-sent, and the gateway checks the ids before it asks the owner. A request
+servers and the browser, from `endpoints.ts` for API endpoints, whose upload
+fields take a file's bytes instead, and from `mail/accounts.ts`, whose
+attachments do too): a text as its text, a file as base64, or the other way
+with `as`. Only the token's own results resolve; an unknown or expired id is
+refused by name before anything is sent, and the gateway checks the ids
+before it asks the owner. A request
 waiting for the owner stores the handle, never the content, and its page
 shows each one's name, type, size and the tool that kept it.
 
@@ -1326,8 +1902,10 @@ Every token has a level per tool (`api_token_tool_access`,
 `lib/core/tool-access.ts`): **allowed**, **blocked**, or, when there is no
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
-instructions, `search_tools` and `describe_tool`, and `call_tool` refuses
-them. The gateway loads the levels by token id.
+instructions, `search_tools`, `list_tools` and `describe_tool`, and
+`call_tool` and `run_code` refuse them. The gateway loads the levels by
+token id. A wrapper's tool comes out at the strictest of its own level and
+those of the tools it calls (Wrappers, above).
 
 A tool can also have a level for **all tokens** (`vault_tool_access`, the
 "All tokens" box on a token's page), and a token's own level wins over it:
@@ -1352,6 +1930,21 @@ request still waiting, `listPendingRequests`, and links to each); `decidePermiss
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
 
+"Allow for" (15 minutes, an hour or eight hours, `ALLOW_FOR_MINUTES`) writes
+no level: it leaves an allowance (`lib/core/allowances.ts`,
+`api_token_tool_allowance` and `api_token_site_allowance`), the token, the
+tool or site, and when it ends. It is read only where the levels come out
+at "ask" (`loadGatewayServers` for tools, which `call_tool` and run_code
+both go through; `resolveFetchAccess` for sites, which web fetch and the
+browser's page gate both go through) and lifts that to "allowed" until it
+ends. It never lifts a block, and when it ends the levels decide as they
+were, so a token's own "ask" over an "allowed" for all tokens asks again.
+The gateway has no sessions and nothing a client sends names a
+conversation, so a time is what "for now" can mean. The token's page lists
+them, and the owner can end one early; copying access removes the target's,
+cleanup removes the ended ones, and an export carries none (like kept
+results, they belong to the tokens a restore replaces).
+
 Nothing can wake an assistant from outside its conversation: an MCP server
 cannot start a turn, and an answer on PCP's page reaches no app. The link
 has to be the last thing in the assistant's reply, with no tool call after
@@ -1364,6 +1957,18 @@ have answered. In case they are still on it, the check holds the call while
 the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
 minute at which clients and proxies give up, checking every second, and
 dropping out when the client goes away) and answers as soon as they have.
+Which app is on the other end decides whether a link may come before a
+tool call, and PCP is only told when a client connects: the gateway writes
+each `initialize` to the server log (`[mcp] initialize`, from
+`lib/core/client-hello.ts`: the client's name, version and capabilities, the
+user agent, and header names, never another header's value), not to the
+request log. Claude's connectors keep calling a stateless server without a
+new `initialize` (none came after PCP restarted), so the first request from
+each token with a new user agent or set of header names is written too
+(`[mcp] client`, with its method). Under protocol revision 2026-07-28 there
+is no `initialize` at all: each request names its client, capabilities and
+protocol version in its `_meta`, which that line carries, with the values of
+`x-anthropic-client` and `mcp-protocol-version`.
 An OAuth server that needs signing in (a call to it, or one the owner just
 agreed to add) answers with a link to its page in PCP, handed over the same
 way, where Connect starts the sign-in; `check_server` then says whether it

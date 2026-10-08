@@ -1,6 +1,7 @@
 import { createMcpHandler } from "@modelcontextprotocol/server"
 
 import { resolveApiToken } from "@/lib/core/api-tokens"
+import { clientHello, clientSeen } from "@/lib/core/client-hello"
 import {
   buildGatewayServer,
   ensureCatalogue,
@@ -8,16 +9,25 @@ import {
   type GatewayScope,
 } from "@/lib/core/gateway"
 import { instructionMemories } from "@/lib/core/memories"
+import { bearerChallenge } from "@/lib/core/oauth-server/metadata"
+import {
+  ACCESS_TOKEN_PREFIX,
+  resolveAccessToken,
+} from "@/lib/core/oauth-server/tokens"
 import { checkRateLimit } from "@/lib/core/rate-limit"
-import { publicUrlFor } from "@/lib/server/public-url"
+import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
+import { loadResourceLimits } from "@/lib/core/resources/state"
 
 /**
  * The gateway endpoint: https://<pcp>/mcp
  *
- * A stateless Streamable HTTP MCP server. Every request carries an API
- * token as a bearer token; the token names the vault and unwraps its key,
- * so this one endpoint can serve any number of vaults without knowing
- * about them in advance. Without a valid token the answer is 401.
+ * A stateless Streamable HTTP MCP server. Every request carries a bearer
+ * token: an API token, or an access token from PCP's own authorization
+ * server (lib/core/oauth-server/) for an assistant that signed in. Either
+ * names the vault and unwraps its key, so this one endpoint can serve any
+ * number of vaults without knowing about them in advance. Without a valid
+ * token the answer is 401, whose challenge points at the resource's
+ * metadata: that is how a client that signs in finds out where.
  */
 
 export const runtime = "nodejs"
@@ -37,6 +47,8 @@ const mcpHandler = createMcpHandler(
       scope,
       await loadGatewayServers(scope),
     )
+    // run_code's description names the limits in force.
+    await loadResourceLimits()
 
     return buildGatewayServer(scope, servers, {
       memories: scope.keepMemories
@@ -99,15 +111,22 @@ function bearerTokenFrom(request: Request): string | null {
 
 async function handle(request: Request): Promise<Response> {
   const token = bearerTokenFrom(request)
-  const resolved = token ? await resolveApiToken(token) : null
+  const resolved = !token
+    ? null
+    : token.startsWith(ACCESS_TOKEN_PREFIX)
+      ? await resolveAccessToken(token)
+      : await resolveApiToken(token)
 
   if (!resolved) {
     return withCors(
       jsonRpcError(
         401,
-        "This endpoint needs a PCP API token as a bearer token.",
+        "This endpoint needs a PCP API token as a bearer token, or an assistant that signs in with OAuth.",
         {
-          "WWW-Authenticate": 'Bearer realm="pcp", error="invalid_token"',
+          "WWW-Authenticate": bearerChallenge(
+            await publicUrlWithoutSession(request),
+            token !== null,
+          ),
         },
       ),
     )
@@ -124,15 +143,35 @@ async function handle(request: Request): Promise<Response> {
   // The rate limit counts requests. A JSON-RPC batch is many calls in one, so
   // it would get around it: the current protocol has no batches either.
   if (request.method === "POST") {
-    const start = (await request.clone().text()).trimStart().slice(0, 1)
+    const body = await request.clone().text()
 
-    if (start === "[") {
+    if (body.trimStart().startsWith("[")) {
       return withCors(
         jsonRpcError(
           400,
           "Send one message per request; batches are not supported.",
         ),
       )
+    }
+
+    // Which app is on the other end, as it says when it connects and as its
+    // requests show: the server log only, never the request log (the Log
+    // page lists calls).
+    const who = {
+      token: resolved.tokenId,
+      tokenName: resolved.tokenName.slice(0, 80),
+      oauth: token?.startsWith(ACCESS_TOKEN_PREFIX) ?? false,
+    }
+    const hello = clientHello(body, request.headers)
+
+    if (hello) {
+      console.info("[mcp] initialize", JSON.stringify({ ...who, ...hello }))
+    }
+
+    const seen = clientSeen(resolved.tokenId, body, request.headers)
+
+    if (seen) {
+      console.info("[mcp] client", JSON.stringify({ ...who, ...seen }))
     }
   }
 

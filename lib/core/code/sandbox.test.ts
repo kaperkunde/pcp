@@ -125,6 +125,80 @@ print(answer["n"], handle["$result"], pcp.read(handle))
     expect(seen).toEqual(["call", "keep", "read"])
   })
 
+  it("reads and keeps a file's bytes, and lists tools, from Python and the shell", async () => {
+    const pdf = Buffer.concat([
+      Buffer.from("%PDF-1.7\n"),
+      Buffer.alloc(64, 0xfe),
+    ])
+    const seen: Array<{ op: string; payload: unknown }> = []
+    const bridge: Bridge = async (op, payload) => {
+      seen.push({ op, payload })
+      return op === "read"
+        ? { ok: true, value: pdf.toString("base64") }
+        : op === "tools"
+          ? { ok: true, value: [{ name: "list", access: "allowed" }] }
+          : { ok: true, value: { $result: "k1" } }
+    }
+
+    const python = await run(
+      "python",
+      `
+import pcp
+data = pcp.read({"$result": "f1"}, as_="bytes")
+pcp.keep(data[:4], name="head.bin")
+pcp.keep("aGk=", encoding="base64", type="text/plain")
+print(len(data), data[:8].decode(), [tool["name"] for tool in pcp.tools("files")])
+`,
+      bridge,
+    )
+    const shell = await run(
+      "bash",
+      `
+      pcp read --bytes f1 > file.pdf
+      head -c 8 file.pdf; echo
+      pcp keep --bytes --type application/pdf file.pdf > /dev/null
+      pcp tools | jq -c .
+      `,
+      bridge,
+    )
+
+    expect(python).toMatchObject({
+      kind: "done",
+      output: `${pdf.length} %PDF-1.7 ['list']\n`,
+    })
+    expect(shell).toMatchObject({
+      kind: "done",
+      output: '%PDF-1.7\n[{"name":"list","access":"allowed"}]\n',
+    })
+    expect(seen).toEqual([
+      { op: "read", payload: { id: "f1", as: "base64" } },
+      {
+        op: "keep",
+        payload: {
+          value: pdf.subarray(0, 4).toString("base64"),
+          encoding: "base64",
+          type: "application/octet-stream",
+          name: "head.bin",
+        },
+      },
+      {
+        op: "keep",
+        payload: { value: "aGk=", encoding: "base64", type: "text/plain" },
+      },
+      { op: "tools", payload: { server: "files" } },
+      { op: "read", payload: { id: "f1", as: "base64" } },
+      {
+        op: "keep",
+        payload: {
+          value: pdf.toString("base64"),
+          encoding: "base64",
+          type: "application/pdf",
+        },
+      },
+      { op: "tools", payload: { server: null } },
+    ])
+  })
+
   it("hands a refusal to the program as an error, and says how it exited", async () => {
     const result = await run(
       "bash",

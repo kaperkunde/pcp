@@ -32,6 +32,8 @@ export async function decidePermissionAction(
   secretValue?: string,
   /** A memory to share: read it in every conversation, the page's toggle. */
   always?: boolean,
+  /** "Allow for": how long, in minutes. */
+  minutes?: number,
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -51,6 +53,7 @@ export async function decidePermissionAction(
         publicUrl,
         secretValue: typeof secretValue === "string" ? secretValue : undefined,
         always: always === true,
+        minutes: typeof minutes === "number" ? minutes : undefined,
       },
     )
     const message = outcome.content

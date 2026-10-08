@@ -15,7 +15,10 @@ const nextConfig: NextConfig = {
   // ever run on the server; playwright-core drives the browser's Chromium
   // (lib/core/browser/) and is never bundled; QuickJS (run_code,
   // lib/core/code/) carries its WebAssembly engine in a large script that
-  // gains nothing from bundling.
+  // gains nothing from bundling; node-cron (the cleanup's schedule,
+  // lib/core/cleanup/) ships a forking mode PCP never uses, whose worker
+  // file a bundle would lose track of; ssh2 (SSH servers, lib/core/ssh/)
+  // looks for optional native parts at runtime and runs without them.
   serverExternalPackages: [
     "better-sqlite3",
     "@prisma/adapter-better-sqlite3",
@@ -25,6 +28,8 @@ const nextConfig: NextConfig = {
     "playwright-core",
     "quickjs-emscripten-core",
     "@jitl/quickjs-singlefile-cjs-release-sync",
+    "node-cron",
+    "ssh2",
   ],
   experimental: {
     // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) and an export

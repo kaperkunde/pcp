@@ -28,6 +28,7 @@ import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
 import { UPDATE_CONFIG_KEY, UPDATE_STATUS_KEY } from "./updates/state"
 import { createSecret, deleteSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
+import { saveWrapperByOwner } from "./wrappers/admin"
 import { createSession, resolveSession } from "./sessions"
 import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
@@ -199,7 +200,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 
@@ -299,7 +300,7 @@ describe("restoring", { timeout: 60_000 }, () => {
 
     await restoreExport(
       read,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 
@@ -346,7 +347,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     await db().browserProfile.delete({ where: { vaultId: ctx.vaultId } })
     await restoreExport(
       read,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
     const after = await db().browserProfile.findUniqueOrThrow({
@@ -374,7 +375,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(oldPreview.counts.browserSites).toBe(0)
     await restoreExport(
       oldRead,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
     expect(await db().browserProfile.count()).toBe(0)
@@ -407,7 +408,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     )
     await restoreExport(
       read,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 
@@ -420,6 +421,67 @@ describe("restoring", { timeout: 60_000 }, () => {
       mailSubmission: false,
       smtpUrl: null,
       mailFrom: null,
+    })
+  })
+
+  it("carries a wrapper and what it was approved as, and restores a file from before wrappers", async () => {
+    const { ctx, serverId } = await populate()
+    const { id: wrapperId } = await saveWrapperByOwner(ctx, null, {
+      name: "Simpler",
+      tools: [
+        {
+          name: "first",
+          description: "The first tool, simpler.",
+          inputSchema: { type: "object" },
+          program: "return 1",
+          calls: [
+            `${(await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })).slug}/${(await db().mcpTool.findFirstOrThrow({ where: { serverId } })).name}`,
+          ],
+        },
+      ],
+    })
+    const before = await db().wrapperSpec.findUniqueOrThrow({
+      where: { serverId: wrapperId },
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const { payload: read, preview } = await readExport(file, EXPORT_PASSWORD)
+    expect(preview.counts.wrappers).toBe(1)
+
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().wrapperSpec.findUniqueOrThrow({
+        where: { serverId: wrapperId },
+      }),
+    ).toEqual(before)
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    delete (older.tables as Record<string, unknown>).wrapperSpecs
+    older.tables.servers = older.tables.servers.filter(
+      (row) => row.id !== wrapperId,
+    )
+    older.tables.tools = older.tables.tools.filter(
+      (row) => row.serverId !== wrapperId,
+    )
+    for (const token of older.tables.apiTokens as Record<string, unknown>[]) {
+      delete token.manageWrappers
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+
+    expect(await db().wrapperSpec.count()).toBe(0)
+    expect(await db().apiToken.findFirstOrThrow()).toMatchObject({
+      manageWrappers: false,
     })
   })
 
@@ -436,7 +498,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: true },
     )
 
@@ -468,7 +530,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     await expect(
       restoreExport(
         payload,
-        { into: "vault", vaultId: ctx.vaultId },
+        { into: "vault", ctx },
         { restoreHostSettings: false },
       ),
     ).rejects.toThrow(/gone/)
@@ -507,7 +569,7 @@ describe("restoring", { timeout: 60_000 }, () => {
 
     await restoreExport(
       payload,
-      { into: "vault", vaultId: second.vaultId },
+      { into: "vault", ctx: second },
       { restoreHostSettings: false },
     )
 
@@ -534,7 +596,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 

@@ -64,7 +64,11 @@ export function ServerList({
               <p className="mt-2 text-xs text-muted-foreground">
                 {server.toolCount} {noun}
                 {server.toolCount === 1 ? "" : "s"} ·{" "}
-                {endpoint ? "schema read" : "last checked"}{" "}
+                {endpoint
+                  ? "schema read"
+                  : server.kind === "wrapper"
+                    ? "changed"
+                    : "last checked"}{" "}
                 <LocalDate value={server.lastSyncedAt} />
                 {server.statusMessage ? ` · ${server.statusMessage}` : ""}
               </p>

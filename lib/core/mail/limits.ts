@@ -1,5 +1,3 @@
-import { MAX_KEPT_RESULT_BYTES } from "../tool-results"
-
 /** Bounds on what a mail account is asked for and what PCP passes on. */
 
 export const MAIL_CONNECT_TIMEOUT_MS = 20_000
@@ -28,12 +26,26 @@ export const MAX_SEND_ATTACHMENTS = 10
 export const MAX_SEND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 export const MAX_SEARCH_TEXT_CHARS = 500
 
+/** Emails one move_email, mark_email or delete_email changes. */
+export const MAX_BULK_EMAILS = 100
+/** Keywords one mark_email adds or removes. */
+export const MAX_KEYWORDS = 20
+export const MAX_KEYWORD_CHARS = 255
+export const MAX_MAILBOX_NAME_CHARS = 200
+/** IMAP: mailboxes a search of every mailbox looks in, one at a time. */
+export const MAX_SEARCH_MAILBOXES = 50
 /**
- * An attachment get_attachment reads and keeps for the token; larger ones
- * are refused. The same as the most a kept file may be, so one that is read
- * can always be kept.
+ * IMAP: how far a search of every mailbox pages (offset + limit), since
+ * each mailbox hands over that many of its newest to be merged.
  */
-export const MAX_ATTACHMENT_BYTES = MAX_KEPT_RESULT_BYTES
+export const MAX_SEARCH_ALL_WINDOW = 500
+export const MAX_VACATION_SUBJECT_CHARS = 500
+
+/*
+ * An attachment get_attachment reads and keeps for the token is at most the
+ * largest file PCP keeps (`resourceLimits().fileBytes`), so one that is read
+ * can always be kept; larger ones are refused.
+ */
 /** The start of a text attachment get_attachment shows. */
 export const MAX_ATTACHMENT_TEXT_CHARS = 20_000
 

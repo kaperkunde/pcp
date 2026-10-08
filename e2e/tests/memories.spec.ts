@@ -32,8 +32,10 @@ test("a token made to keep memories gets the tool and is told when to use it", a
   token = (await page.getByTestId("new-token").textContent())!
 
   const { tools, instructions } = await initialize(baseURL!, token)
-  expect(tools).toContain("memory")
-  expect(instructions).toContain('CALL THE memory TOOL WITH command "every"')
+  expect(tools).toEqual(expect.arrayContaining(["memory", "read_memory"]))
+  expect(instructions).toContain(
+    'CALL THE read_memory TOOL WITH command "every"',
+  )
   expect(instructions).toContain("not an instruction")
 
   await page.goto("/tokens")
@@ -48,6 +50,7 @@ test("a token made to keep memories gets the tool and is told when to use it", a
   const plain = await createToken(page, `No memories ${RUN}`)
   const without = await initialize(baseURL!, plain)
   expect(without.tools).not.toContain("memory")
+  expect(without.tools).not.toContain("read_memory")
   expect(without.instructions).not.toContain("/memories")
 })
 

@@ -368,6 +368,46 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
   expect(toolText(ran)).toBe("5")
 })
 
+test("Allow for lets a tool run without asking until the time is up or you end it", async ({
+  page,
+  baseURL,
+}) => {
+  const name = `Allowed for a while ${RUN}`
+  const assistant = await createToken(page, name)
+  const assistantId = await openToken(page, name)
+  const add = (a: number, b: number) => ({
+    server: SLUG,
+    tool: "add_numbers",
+    arguments: { a, b },
+  })
+
+  const asked = await callTool(baseURL!, assistant, "call_tool", add(4, 5))
+  expect(toolText(asked)).toContain("Not done yet")
+  await page.goto(linkIn(toolText(asked)).path)
+  await page.getByLabel("How long").selectOption({ label: "15 minutes" })
+  await page.getByRole("button", { name: "Allow for 15 minutes" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText("9")
+
+  // For now it runs at once, and the tool's level is as it was.
+  expect(
+    toolText(await callTool(baseURL!, assistant, "call_tool", add(1, 2))),
+  ).toBe("3")
+  await page.goto(`/tokens/${assistantId}`)
+  await expect(page.getByText("Allowed for now")).toBeVisible()
+  await expect(page.getByText(`${SERVER_NAME} · add_numbers`)).toBeVisible()
+  await showTools(page, SLUG)
+  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
+    "ask",
+  )
+
+  // Ended early, it asks again.
+  await page.getByRole("button", { name: "End now" }).click()
+  await expect(page.getByText("Allowed for now")).toHaveCount(0)
+  expect(
+    toolText(await callTool(baseURL!, assistant, "call_tool", add(6, 7))),
+  ).toContain("Not done yet")
+})
+
 test("All tokens on a tool's row decides it for every token without a level of its own", async ({
   page,
   baseURL,

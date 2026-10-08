@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
 
 import { isPcpError } from "./errors"
 import {
@@ -8,9 +8,16 @@ import {
   parseHandle,
   resolveHandles,
 } from "./result-handles"
+import {
+  EMPTY_CONFIG,
+  forgetResourceLimits,
+  useResourceConfig,
+} from "./resources/state"
 import type { OpenedResult, ResultOpener } from "./tool-results"
 
 // Handles in a call's arguments, resolved from a token's kept results.
+
+afterEach(() => forgetResourceLimits())
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
@@ -204,6 +211,8 @@ describe("resolveHandles", () => {
   })
 
   it("refuses handles that add up to more than a call may carry", async () => {
+    // The largest file at 1 MB: a call carries 16 million characters.
+    useResourceConfig({ ...EMPTY_CONFIG, fileMb: 1 })
     const big = file(
       "big",
       Buffer.alloc(8_000_000, 1),
