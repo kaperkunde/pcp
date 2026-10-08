@@ -123,7 +123,7 @@ test("the first page at a site asks the owner, and the assistant then reads and 
   expect(toolText(followed)).toContain(`The page tried to open ${other}`)
   expect(upstream.pageHits).toEqual([])
 
-  await page.goto(`/tokens/${tokenId}`)
+  await openTokenAdvanced(page, tokenId)
   await expect(
     page.getByRole("listitem", { name: other, exact: true }),
   ).toBeVisible()
