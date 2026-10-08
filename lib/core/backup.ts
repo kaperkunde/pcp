@@ -149,6 +149,7 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           ),
           tools: (await tx.mcpTool.findMany(byServer)).map(rowJson),
           openApiSpecs: (await tx.openApiSpec.findMany(byServer)).map(rowJson),
+          wrapperSpecs: (await tx.wrapperSpec.findMany(byServer)).map(rowJson),
           settings: settings.map(rowJson),
           browserProfiles: (await tx.browserProfile.findMany(byVault)).map(
             rowJson,
@@ -378,6 +379,9 @@ async function writeExport(
           (data) => tx.openApiSpec.createMany({ data }),
           RESTORE_SPEC_CHUNK_ROWS,
         )
+        await inChunks(tables.wrapperSpecs, (data) =>
+          tx.wrapperSpec.createMany({ data }),
+        )
         await inChunks(tables.apiTokenServers, (data) =>
           tx.apiTokenServer.createMany({ data }),
         )
@@ -420,8 +424,11 @@ async function writeExport(
   }
 }
 
-/** Everything of one vault, children before parents. */
-async function wipeVault(
+/**
+ * Everything of one vault, children before parents: for a restore, and for
+ * deleting the vault (lib/core/vault-reset.ts).
+ */
+export async function wipeVault(
   tx: Prisma.TransactionClient,
   vaultId: string,
 ): Promise<void> {
@@ -449,6 +456,7 @@ async function wipeVault(
   await tx.oAuthCredential.deleteMany(byVault)
   await tx.oAuthState.deleteMany(byServer)
   await tx.openApiSpec.deleteMany(byServer)
+  await tx.wrapperSpec.deleteMany(byServer)
   await tx.mcpTool.deleteMany(byServer)
   await tx.serverAuthHeader.deleteMany(byServer)
   await tx.mcpServer.deleteMany(byVault)

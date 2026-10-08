@@ -56,6 +56,8 @@ associated data (a ciphertext cannot be moved to another row):
   (`tool_result.ciphertext`),
 - what a request waiting for the owner holds: the call's arguments or the
   new server's settings, and the outcome (`permission_request`),
+- the private key PCP makes for each SSH server (a `secret` row of kind
+  `ssh_key`, owned by the server),
 - the browser's sign-ins (`browser_profile`, bound to the vault's id, as
   there is one per vault).
 
@@ -437,11 +439,41 @@ A mail account is a server row of kind `jmap` or `imap` with a fixed set of
 tools (`lib/core/mail/tools.ts`), the same names and answers for both, so an
 assistant learns one set: `list_mailboxes`, `search_emails`, `get_email`,
 `get_attachment`, `move_email`, `mark_email`, `delete_email`, `send_email`,
-and on JMAP `get_thread` and `list_identities`. Which ones an account has
-depends on read-only (the tools that change mail are left out, and refused if
-called anyway), and on whether it can send (JMAP: the session offers
-submission; IMAP: the owner gave an SMTP server). `mcp_tool.operation` is
-null; a call is dispatched by name. An assistant can propose an account
+`create_draft`, `create_mailbox`, `rename_mailbox`, `delete_mailbox`, and on
+JMAP `get_thread`, `list_identities`, `get_vacation_response` and
+`set_vacation_response`. It is a fixed set on purpose, not the protocol passed
+through: there is no tool that takes a raw JMAP method or IMAP command, so
+every change an assistant makes is one these rules were written for. Which
+ones an account has depends on read-only (the tools that change mail are left
+out, and refused if called anyway), on whether it can send (JMAP: the session
+offers submission; IMAP: the owner gave an SMTP server), and for the automatic
+reply on whether the JMAP session offers `vacationresponse`.
+
+`move_email`, `mark_email` and `delete_email` take `id` or `ids` (up to
+`MAX_BULK_EMAILS`): one email answers as it always has, several answer with
+`done` and `failed`, and one email's refusal stops no other (JMAP: one
+`Email/set`; IMAP: one UID MOVE or STORE per mailbox). `mark_email` also sets
+answered and adds or removes keywords, which every summary lists and
+`search_emails` filters on; the keywords the flags carry (`$seen`,
+`$flagged`, `$answered`, `$draft`) are left to the flags. `search_emails` with
+`allMailboxes` looks in every mailbox but Trash and Junk (JMAP:
+`inMailboxOtherThan`; IMAP: All Mail alone where the server has one, else
+each selectable mailbox but the Flagged and Important views in turn, at most
+`MAX_SEARCH_MAILBOXES`, merged by date and paged only to
+`MAX_SEARCH_ALL_WINDOW`). A JMAP mailbox's `path` is its names from the top
+joined with `/`, so a folder is named by path as on IMAP.
+`delete_mailbox` removes only an empty mailbox with no role and none inside
+it (`checkDeletable` in `mail/mailboxes.ts`); JMAP's `Mailbox/set` destroy
+goes with `onDestroyRemoveEmails: false`, so the server refuses too if mail
+arrived in between, and IMAP's DELETE, which would take mail with it, is sent
+only after the listing's count said empty. `rename_mailbox` renames or moves
+one, never into itself or one inside it, and never the inbox; on IMAP the
+emails inside get new ids, since an id carries its mailbox's path. `create_draft` is
+`send_email`'s arguments and email, recipients optional, written into Drafts
+(the drafts role, or a mailbox called Drafts) marked as a draft and seen, and
+sent by nobody: a separate tool so the owner can allow drafting without
+allowing sending. It needs no submission or SMTP server. `mcp_tool.operation`
+is null; a call is dispatched by name. An assistant can propose an account
 through `register_server` (below); only the owner changes one, and the
 endpoint tools do not touch them.
 
@@ -487,7 +519,8 @@ takes a call's answer as the first under its id named after its method, and
 keeps any other apart (`implicitKey`), so the move's answer never reads as
 the submission's and a failed move only means the copy stayed in Drafts. A
 reply then marks the email it answers (`$answered`, `\Answered` over IMAP),
-after the send, and says whether it could.
+after the send, and says whether it could. A draft is the same Email/set
+into Drafts with no EmailSubmission after it, and marks nothing.
 
 **IMAP** (`mail/imap.ts`, on imapflow and nodemailer): `url` is
 `imaps://host:port`, or `imap://` for STARTTLS; `smtp_url` the same for
@@ -496,7 +529,9 @@ STARTTLS is required, never optional. Each call connects, signs in, works
 and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
 email. Sending goes over SMTP and a copy (Bcc kept) is appended to Sent,
-attachments in both, written by nodemailer.
+attachments in both, written by nodemailer. A draft is the same message,
+appended to Drafts with `\Draft` and `\Seen` and sent nowhere; its id comes
+from APPENDUID, and is null without UIDPLUS.
 
 **What an assistant gets back** is JSON PCP writes: addresses, dates, flags,
 the text of a body (the HTML one made plain when there is no text one) and
@@ -504,8 +539,8 @@ the list of attachments. `get_attachment` downloads an attachment of any
 kind, up to 10 MiB, and keeps it for the token as a file (below): the answer
 gives its handle, and a text one's first 20,000 characters too, scrubbed of
 the credential. A body longer than 20,000 characters is kept the same way.
-`send_email` takes kept results as attachments, read before anything
-connects (at most 10, 20 MB together), so an attachment read from one
+`send_email` and `create_draft` take kept results as attachments, read before
+anything connects (at most 10, 20 MB together), so an attachment read from one
 account can be sent from another. Delete moves to the
 Trash and nothing deletes for good. Failures: refused credentials mark the
 account `auth_required` (with OAuth, "needs connecting"), an unreachable
@@ -522,13 +557,69 @@ minute before it runs out, and once more when the server refuses it. When that
 fails the account needs connecting, and the gateway answers with the link to
 connect it.
 
+## SSH servers
+
+An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
+`auth_username` the login) whose one tool, `run_command`, runs one command per
+call with `exec`: no shell session kept between calls, no terminal, no
+forwarding, no agent, no file transfer. Only the owner adds one, on the
+Servers page; `register_server` has no kind for it, because a shell on a
+machine is more than an assistant should be able to ask for in a sentence.
+`run_command` asks the owner first by default like every tool, and the
+permission page shows the command in full.
+
+The protocol is `ssh2`'s (`lib/core/ssh/client.ts`), in pure JavaScript: pnpm
+does not build its optional native parts (it is not in `allowBuilds`), so the
+desktop app gains no native code, and Next keeps it out of the bundle
+(`serverExternalPackages`). PCP narrows it to modern algorithms (curve25519 or
+ECDH and SHA-2 group exchange, Ed25519, ECDSA and RSA-SHA2 host keys,
+ChaCha20-Poly1305, AES-GCM and AES-CTR with SHA-2 MACs); `ssh2` adds strict key
+exchange (the Terrapin countermeasure) to any offer.
+
+- **PCP's own key.** Adding a server makes an Ed25519 key for it
+  (`ssh/keys.ts`). The private half is a managed secret of kind `ssh_key`
+  (`ssh/<server id>`, in `auth_secret_id`, auth type `key`), encrypted like
+  every secret and decrypted only in `upstream.ts`, for one connection; the
+  public half is on the row (`ssh_public_key`) and on the server's page, for
+  the owner to put in the login's `authorized_keys`. PCP signs in with that
+  key alone: no password, no keyboard-interactive, no agent. The owner can
+  have PCP make a new key; deleting the server deletes the key.
+- **The host key**, pinned on first use. The first connection that finishes
+  a key exchange stores the key the server proved it holds
+  (`ssh_host_key`), whether or not signing in then works, so it is usually
+  pinned when the owner adds the server, and the page shows its fingerprint
+  to compare with the server's own. `ssh2` asks `hostVerifier` before it
+  checks the server's signature, so the key is kept only after the
+  `handshake` event, never from inside the verifier. From then on any other
+  key is refused before signing in; the owner can forget the pinned key
+  after changing it on purpose, and a new address forgets it too. The pin is
+  written only while the row still has none and the same address.
+
+**A call** (`ssh/hosts.ts callSshTool`) checks its arguments before anything
+connects (`ssh/tools.ts`: the command, at most 16 KB and no NUL; standard
+input as text or base64, at most 1 MB, which a kept result's handle can stand
+for, resolved in `upstream.ts`; a timeout of 1 to 600 seconds), connects,
+signs in and runs it, and answers with the exit code (or the signal), stdout
+and stderr. Output is capped at 1 MB together; past that, or past the
+timeout, PCP sends the session a TERM signal (which OpenSSH honours for every
+login but root), closes the connection and answers with what came so far,
+saying so. A key the server turns down or a host key that is not the pinned
+one is answered with the server's page in PCP, for the owner; a server that
+cannot be reached is an error. Limits are in `ssh/limits.ts`. The test server
+(`ssh/fake-server.ts`) is `ssh2`'s own server. The request log keeps the call
+by name like any other, never the command or its output.
+
 ## Memories
 
 A token made with "keep memories" (`api_token.keep_memories`, off unless the
 owner turns it on) gets one more tool, `memory`, with the commands of Claude's
 memory tool (view, create, str_replace, insert, delete, rename, over files
-under `/memories`) plus search and every, and a paragraph in the instructions saying
-when to use it. The rules are in `lib/core/memories.ts`. Like endpoint
+under `/memories`) plus search and every, a second one, `read_memory`, with
+only every, view and search, and a paragraph in the instructions saying when
+to use them. `read_memory` and `call_read_only_tool` (call_tool for a tool
+whose stored annotations say `readOnlyHint`) are marked read-only, so a
+client that holds back other tools, as Claude Code's plan mode does, lets
+them through; the token's levels apply to them as to the rest. The rules are in `lib/core/memories.ts`. Like endpoint
 management, they are drawn around the fact that what one assistant writes
 another one reads:
 
@@ -663,9 +754,46 @@ at a time (20,000 characters by default, 50,000 at most) after a few lines
 saying the final address, the status, the type, the title and where the
 next part starts. An error status is an error result with the page in it.
 
+**A site that checks its visitors.** Cloudflare can answer with a check
+instead of the page ("Just a moment…", a Turnstile), marked with the response
+header `cf-mitigated: challenge` on any status, usually 403 or 503
+(`fetch/challenge.ts`). A plain request whose answer carries it says so in its
+text: "Cloudflare is asking this site's visitors to prove they are human
+before it shows the page." For a GET, when the vault has the browser added and
+enabled and Chromium is found, PCP then reads the page again through the
+browser (`browser/solve.ts`). The read happens in a second browser context
+of its own, beside the vault's: it starts from none of the vault's sign-ins
+and is never saved, because the sign-ins are never used for a web_fetch. A
+plain request keeps no cookie and reads no secret, and a page read with the
+owner's sign-ins would show an assistant what only the owner can see, under
+a level given for a fetch. What that context keeps (the clearance a check
+leaves, and any other cookie a site sets while read) is shared by every
+token's web_fetch until the browser closes: they are reads signed in to
+nothing, of sites each token was allowed to fetch. The context may open that one site only; a redirect to
+another site is reported as web_fetch reports one, with where it points, so
+that site gets its own decision. The token's own private-address line decides
+private addresses for that site, as for the plain request, and the token's
+decision for the site comes first: the browser only reads again what the
+token was already allowed to fetch. The read waits up to twenty seconds for a
+check that passes on its own and is bounded by 45 seconds in all, with at
+most two such pages per vault at once. They are not tabs: nobody lists,
+watches or drives them. The answer has web_fetch's usual format, with a Type
+line saying the page was read through PCP's browser, after the site's check.
+A site whose check passed is read through the browser first for thirty
+minutes, per vault and in memory only: what passed is a bot check, not a
+sign-in, and a restart forgets it. When the check does not pass, or there is
+no browser, the answer says so and adds one hint: to open the site with
+`navigate` and call `hand_over` (when the token reaches the browser), that
+the owner can let the token use the browser, or that the owner can add the
+browser on PCP's Browser page. Nothing here asks the owner, and there is no
+new kind of permission request. It needs nothing more than the browser: the
+container image and the desktop app run it as they run any page, with no
+second container.
+
 **Bounded** (`fetch/limits.ts`). Thirty seconds per request with its
 redirects, 2 MB of an answer read, a thousand method and site lines per
-vault, and 120 requests per token per ten minutes, asked about or not.
+vault, and 120 requests per token per ten minutes, asked about or not. The
+second read of a page behind a check has limits of its own (see Browser).
 
 The sites a token reached are on its page and in `web_fetch_rule`, in the
 clear like server addresses, and never in the request log: the gateway logs
@@ -755,6 +883,96 @@ printed (up to a million characters) and what it returned come back in the
 answer, and a long part is kept as a result of the token's (the returned
 value as JSON, shown by its handle) rather than cut.
 
+## Wrappers
+
+A wrapper is a server of its own (`mcp_server.kind = "wrapper"`, its url the
+fixed `pcp:wrapper`) whose tools are programs over the vault's other tools:
+a cleaner way to use a long-winded server, written by an assistant or the
+owner. A tool takes fewer arguments, fills in the rest, makes several calls
+as one, cuts an answer to what matters, or puts a secret where an API wants
+it in its arguments. `lib/core/wrappers/` holds it:
+
+- **The definition** (`definition.ts`, the `wrapper_spec` row beside the
+  server, like an endpoint's schema) is each tool's name, description,
+  input schema, hints, program, the tools its program `calls`, and the ones
+  it `replaces`; and the wrapper's secret bindings. Other tools are named by
+  server id, never by short name, so a server added later under the same
+  short name inherits nothing. `resolveDefinition` checks a proposed one
+  whole: every tool named exists (for an assistant, is one of its own it is
+  not blocked from), none is a wrapper's (wrappers do not nest), every
+  program compiles (QuickJS with `compileOnly`, `code/quickjs.ts
+checkSyntax`), nothing has a character that does not show on screen
+  (`hiddenCharacter`, as for shared memories), and the sizes in
+  `wrappers/limits.ts` hold (a program is 20,000 characters at most, for the
+  owner to read). The catalogue's rows for the wrapper's tools are built
+  from it (`catalogue.ts`); the row's `operation` carries the calls and
+  replaced tools, so the gateway reads levels without loading programs.
+- **Running a tool** (`run.ts`) is run_code's machinery with less reach:
+  `code/run.ts runProgram` runs the program in a fresh QuickJS instance,
+  with the caller's arguments handed in as text and parsed inside the engine
+  as `args`, and logs each of its calls under `wrapper`. Its `pcp.call`
+  reaches only the tools listed in that tool's `calls`, at the calling
+  token's own levels, through `runCodeCall` like a run_code call; a call to
+  anything else is an error the program sees. The arguments are checked
+  against the tool's schema at the top level first. What it returns is the
+  tool's answer (a string as it is, anything else as JSON), shaped by
+  `runCall` as any tool's is. Gateway calls and the owner's allowed requests
+  run with `withWrappers(executor)`, which sends a wrapper's tool to its
+  program and every other call to the executor underneath, so a program's
+  own calls can never reach a wrapper.
+- **Levels.** A wrapper's tool never reaches what the token could not:
+  `loadGatewayServers` (`gateway-servers.ts`) gives it the strictest of its
+  own level and of every tool it calls, a tool outside the token's servers
+  counting as blocked. It is blocked for a token wherever one of its calls
+  is, and asks wherever one of them asks. When the owner allows such a call
+  (a `call` request like any other; the page names the tools it may call),
+  the program runs with `approved`, so a call that would ask runs once in
+  that run; one that is blocked stays refused, and nothing asks again inside
+  it. A run that was not allowed by the owner never makes a call that asks.
+  Always allow writes only the wrapper tool's own level, which the
+  strictest-level rule keeps asking while a tool it calls asks.
+- **Secrets** go in only as a placeholder, `{"$secret": "<name>"}`, in a
+  call the program makes, and only where a binding the owner approved names
+  that very place: the secret, the tool (by server id), the argument (a JSON
+  Pointer), how it is written (`{{secret}}` in a template) and the server's
+  address as approved. `run.ts` hands the call the tool's bindings as a
+  grant; `upstream.ts callServerTool` matches every placeholder to one
+  (`placeholders.ts`) before anything is read or sent, refuses any other,
+  refuses a server whose address changed since, never puts one into the
+  browser, reads the value (`readSecretValue`) and writes it in. The values
+  are taken out of the answer (`scrubResult`, `openapi/redact.ts`: text,
+  structured content, text resources, and an endpoint's or a mail account's
+  own redaction), out of errors and out of the status the server page shows,
+  before the program or the assistant sees them. A placeholder in an
+  assistant's own call is refused by `resolveCall`. Scrubbing cannot catch a
+  value a tool transforms or stores and answers with later: the owner's
+  review of the place a secret goes is what decides, and the page says so.
+- **Replacing.** A tool listed in `replaces` (it has to be among the
+  tool's `calls`) is left out of `search_tools`, `list_tools`, `pcp.tools`
+  and the instructions' counts (`listedTools`) for a token while the
+  wrapper's tool is not blocked for it; it can still be called and
+  described by name, and `describe_tool` says what replaced it. The owner
+  shows it again from the server's page (`showReplacedTool`, which takes it
+  out of every wrapper's lists).
+- **Changes** (`admin.ts`). A token made with "propose wrappers"
+  (`api_token.manage_wrappers`, off unless the owner turns it on) gets
+  `get_wrapper`, `create_wrapper`, `update_wrapper` and `delete_wrapper`.
+  Each change is a permission request (`wrapper_change`) and nothing else:
+  it is checked as if it were being made, and the owner is shown every
+  tool new, changed (with the program before) or removed, every schema,
+  call and replaced tool, and every place a secret would go with the
+  server's address (`WrapperShown`, worked out when the request is made, as
+  an endpoint change's is). A secret PCP does not hold yet is typed in on
+  the page, as for `register_server`. `applyWrapperChange` writes exactly
+  what was shown, and only to the wrapper as it was when the owner was
+  asked (`basis`: the definition's hash, name and description), else
+  nothing. The request's row names no server, so deleting the wrapper keeps
+  its outcome. A binding the owner approved keeps its secret through later
+  changes, even if the secret is renamed. Requests are limited to 20 per
+  token in ten minutes and a vault to 50 wrappers. The owner adds and edits
+  wrappers directly on the Servers page (`saveWrapperByOwner`, the same
+  checks, with secrets they hold).
+
 ## Browser
 
 The browser is a server of kind `browser`, one per vault, added by the
@@ -765,12 +983,15 @@ like a mail account's, and `upstream.ts` hands its calls to
 proposed for and called like any server, and a long snapshot is kept for
 `read_result` by `runCall` like any long answer.
 
-**What runs** (`runtime.ts`). One headless Chromium per vault, driven by
+**What runs** (`runtime.ts`). One Chromium per vault, driven by
 `playwright-core`, started on the first page opened (by an assistant or the
 owner) and closed after fifteen minutes with no tool call, no input and
-nobody watching. The registry is on `globalThis`, as the network's is,
+nobody watching. It runs headless, or in the container image with windows
+on a virtual display (below). The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
-Chromium runs with one in-memory context: no profile is written to disk.
+Chromium runs with one in-memory context for the vault (and one more,
+made on the first page read for web_fetch, for all of those, below): no
+profile is written to disk.
 Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
 private temporary folder of its own, removed once it has closed: its crash
 reporter keeps its database there, and without a folder it can write to
@@ -781,9 +1002,47 @@ as it starts. It starts without `--enable-automation`, with
 with service workers blocked (one could answer a navigation without the
 network, around the gate). Chromium's own sandbox is used where the machine
 gives one and dropped where it cannot (root, or an unprivileged container;
-the Docker image says so with `PCP_BROWSER_SANDBOX=off`). PCP adds no
-stealth beyond that: the strictest sites may still refuse a headless
-Chromium.
+the Docker image says so with `PCP_BROWSER_SANDBOX=off`).
+
+**The virtual display** (`display.ts`). In the container image
+(`PCP_CONTAINER=1`), or on another Linux machine with
+`PCP_BROWSER_DISPLAY=virtual`, Chromium runs as a desktop's Chrome does, with
+a window around each page, on a screen PCP starts itself: one Xvfb per
+process (1920 by 1080), started with the first browser and stopped when the
+last one closes. A site's check then sees a browser with a window, not one
+whose window is exactly the page. The display takes only clients that show
+its cookie, kept in a private folder and handed to Chromium alone, so
+another program on the machine cannot watch the browser or type into it.
+WebGL there is Chromium's software renderer, as headless uses by itself
+(`--enable-unsafe-swiftshader`; without it a windowed Chromium with no
+graphics card has no WebGL at all). An Xvfb that does not start leaves the
+browser headless; `PCP_BROWSER_DISPLAY=headless` asks for that. The desktop
+app never uses it: it starts no child process, and runs on a real screen.
+
+**Sites that check their visitors.** Every context tells pages of a 1920 by
+1080 screen, since headless would otherwise make the screen the 1280 by 800
+viewport itself. It is the full Chromium, headless or windowed: PCP always
+passes the executable, so Playwright never picks its separate headless
+shell (the Docker image does not download it). `navigate`, and an action that
+can load a page (`back`, a click, typing, a key, a choice, a dialog's
+answer), waits up to twenty seconds for a check that passes on its own
+(Cloudflare's, marked `cf-mitigated: challenge`). One that does not stays on
+the page. The answer leads with the sentence web_fetch uses for it and adds
+that the check did not pass on its own in this tab and that `hand_over` is
+how the owner passes it themselves; so does every later answer about the tab
+(a snapshot, `read_page`, `wait_for`). The assistant decides: nothing asks the
+owner automatically. A clearance cookie a passed check sets lands in the
+vault's profile, as any cookie does. PCP adds no stealth scripts and uses no
+patched Playwright, so some tells remain: WebGL is SwiftShader (software
+rendering), headless the window is exactly the viewport (Playwright sizes it
+so, and Chromium's `--window-size` does not change that; on the virtual
+display it is not), Playwright's automation protocol leaves traces a page can
+look for, and a server's datacenter address is not a person's at home. A
+click sent through the DevTools protocol into a cross-site frame (a
+Turnstile checkbox) carried the frame's own coordinates as its screen
+position up to about Chromium 141, which a check could tell from a mouse;
+the Chromium that PCP's Playwright drives (153) reports a mouse's. The strictest checks may still want a person,
+which is what `hand_over` is for.
 
 **The sign-ins** (`profile.ts`). The context starts from the vault's
 `browser_profile`: Playwright's storage state (cookies, local storage,
@@ -797,6 +1056,9 @@ the browser. The idle close has no key and saves nothing, so what a page
 changed on its own since the last save is lost. Counts (sites, cookies,
 size) are kept in the clear for the page. An export carries the row as
 ciphertext; Forget all sites closes the browser unsaved and deletes it.
+Starting the browser for a page read for web_fetch loads the profile into the
+vault's own context as any start does; the read happens in a context of its
+own, which never touches the profile and is never saved.
 
 **Which pages open** (the gate in `runtime.ts`). A page's main frame loads
 nothing the gate has not passed: the DevTools protocol pauses each document
@@ -824,7 +1086,10 @@ owner allows the call, `runCall` (told so by `executeCall`) opens the site
 for that tab as Allow once would, with no `browse` request after it. Only
 `navigate` and `tabs` ask about a site, and only for the address in their
 arguments, so the site is always one the owner saw. A blocked site stays
-blocked, and a hand-over during such a call is still asked.
+blocked, and a hand-over during such a call is still asked. A page read for
+web_fetch (see Web fetch) passes the gate for its one site only, the site the
+token was just allowed to fetch. It is not a tab: nobody lists, watches or
+drives it.
 
 **Which addresses it reaches** (`proxy.ts`). Every connection goes through
 a forward proxy on 127.0.0.1 (`--proxy-server`, with loopback not
@@ -898,9 +1163,20 @@ browser coalesced), wheel, keys and pastes go back in batches every 40 ms
 to a second route, each event with the time it happened. They are replayed
 through the DevTools protocol (`Input.dispatchMouseEvent` and
 `dispatchKeyEvent`, which Chromium treats as a device's input: trusted
-events), each at its own time plus a fixed delay and stamped with it, so a
-CAPTCHA reading the movement sees its real cadence; a batch that arrives
-late starts a new clock. Coordinates are mapped with the frame's own
+events), each at its own time plus a delay and stamped with it, so a
+CAPTCHA reading the movement sees its real cadence. Input that arrives late
+(a slow or uneven link) moves the replay further behind, up to 400 ms, so
+what follows plays at its own pace instead of in a burst, and the delay
+closes up by a millisecond an event while input arrives in time; a batch
+more than 600 ms late starts a new clock. Events go out in order without
+waiting for Chromium to acknowledge each: it acknowledges a mouse move only
+with its next frame (about 17 ms), so waiting on every one would replay at
+most sixty moves a second while a mouse reports hundreds, and the replay
+would fall seconds behind. Chromium folds the moves into its frames, as it
+does a real mouse's; should a move still wait a second unacknowledged,
+further moves are dropped until it catches up, never a click or a key. The
+input route answers once a batch is queued, not once it has played, since
+the page sends one batch at a time. Coordinates are mapped with the frame's own
 metadata. Both routes check PCP's origin and the owner's session, as the
 export download does. A WebSocket would answer a little sooner, but needs a
 server of its own around Next; the input's format is the same whatever
@@ -909,8 +1185,12 @@ carries it.
 **Bounded** (`browser/limits.ts`). Eight tabs per vault, every token's and
 the owner's together; thirty seconds per page load and ten per action; 300
 tool calls per token per ten minutes; four people watching a tab; and the
-owner's input in batches of at most 500 events, 200 batches per session in
-ten seconds.
+owner's input in batches of at most 500 events, 300 batches per session in
+ten seconds, moves dropped while Chromium is a second behind. A check that may pass on its own is waited for twenty seconds
+(`CHALLENGE_WAIT_MS`). A page read for web_fetch takes 45 seconds at most
+(`SOLVE_TIMEOUT_MS`), two such pages per vault at once (`MAX_SOLVES`), and a
+site whose check passed is remembered for thirty minutes
+(`CLEARANCE_MEMORY_MS`).
 
 **Chromium on the machine** (`executable.ts`, `install.ts`).
 `PCP_BROWSER_EXECUTABLE`, then PCP's own install, then Playwright's own
@@ -967,7 +1247,8 @@ up, and the key it hands PCP's page after Touch ID.
 ## Touch ID in the Mac app
 
 The owner can unlock with their fingerprint in the Mac app, and confirm a
-new API token, an export or a restore with it instead of typing the
+new API token, an export, a restore or deleting the vault with it instead
+of typing the
 password. It is a credential of its own, not a stored password: a
 `device` grant (`lib/core/device-keys.ts`) whose key, `pcp_device_…`, the
 app keeps and hands over only after Touch ID.
@@ -1503,8 +1784,9 @@ An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
 for a token with the right to manage endpoints, `memory` for a token that
-keeps memories, `web_fetch` for a token that fetches web pages, and
-`run_code` for a token that runs code, all above). A request without a valid
+keeps memories, `web_fetch` for a token that fetches web pages, `run_code`
+for a token that runs code, and four for a token that proposes wrappers, all
+above). A request without a valid
 token is answered 401, and a token makes at most 240 requests a minute, one
 message each (`app/mcp/route.ts`). The tools:
 
@@ -1602,7 +1884,8 @@ row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search_tools`, `list_tools` and `describe_tool`, and
 `call_tool` and `run_code` refuse them. The gateway loads the levels by
-token id.
+token id. A wrapper's tool comes out at the strictest of its own level and
+those of the tools it calls (Wrappers, above).
 
 A tool can also have a level for **all tokens** (`vault_tool_access`, the
 "All tokens" box on a token's page), and a token's own level wins over it:
@@ -1654,6 +1937,18 @@ have answered. In case they are still on it, the check holds the call while
 the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
 minute at which clients and proxies give up, checking every second, and
 dropping out when the client goes away) and answers as soon as they have.
+Which app is on the other end decides whether a link may come before a
+tool call, and PCP is only told when a client connects: the gateway writes
+each `initialize` to the server log (`[mcp] initialize`, from
+`lib/core/client-hello.ts`: the client's name, version and capabilities, the
+user agent, and header names, never another header's value), not to the
+request log. Claude's connectors keep calling a stateless server without a
+new `initialize` (none came after PCP restarted), so the first request from
+each token with a new user agent or set of header names is written too
+(`[mcp] client`, with its method). Under protocol revision 2026-07-28 there
+is no `initialize` at all: each request names its client, capabilities and
+protocol version in its `_meta`, which that line carries, with the values of
+`x-anthropic-client` and `mcp-protocol-version`.
 An OAuth server that needs signing in (a call to it, or one the owner just
 agreed to add) answers with a link to its page in PCP, handed over the same
 way, where Connect starts the sign-in; `check_server` then says whether it

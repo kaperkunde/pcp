@@ -45,6 +45,31 @@ export async function createToken(
 }
 
 /**
+ * Creates an API token for every server that may also fetch web pages, and
+ * returns it with its id. Creating one opens its own page.
+ */
+export async function createFetchingToken(
+  page: Page,
+  name: string,
+  password = OWNER_PASSWORD,
+): Promise<{ token: string; id: string }> {
+  await page.goto("/tokens")
+  await page.getByLabel("Name").fill(name)
+  await page
+    .getByLabel("Let an assistant with this token fetch web pages")
+    .check()
+  await page.getByRole("button", { name: "Create token" }).click()
+  await confirmWithPassword(page, password)
+  await expect(page.getByText("Your new token")).toBeVisible()
+  await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
+
+  return {
+    token: (await page.getByTestId("new-token").textContent())!,
+    id: page.url().split("/").pop()!,
+  }
+}
+
+/**
  * Answers the token form's password step. The form that asks holds the
  * account and the password and nothing else a password manager would fill:
  * anything more and Safari takes it for a sign-up and offers to generate a

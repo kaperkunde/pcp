@@ -1,6 +1,7 @@
 "use client"
 
 import { ChevronRight } from "lucide-react"
+import Link from "next/link"
 import {
   useActionState,
   useEffect,
@@ -35,6 +36,7 @@ import {
   setToolDescriptionAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
+import { showReplacedToolAction } from "@/lib/actions/wrappers"
 import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
 import type { OAuthConnection } from "@/lib/core/upstream"
 import { cn } from "@/lib/utils"
@@ -70,10 +72,14 @@ export type ServerDetailProps = {
     descriptionOverride: string | null
     /** An API endpoint's tool: the request it makes. */
     operation: { method: string; path: string } | null
+    /** Wrappers' tools that stand in for this one in search. */
+    replacedBy?: Array<{ id: string; name: string; tool: string }>
   }>
   notice: { kind: "ok" | "error"; message: string } | null
   /** Where OAuth servers send you back: what a provider's client lists. */
   redirectUrl: string
+  /** What the kind needs from you, shown under the status (SSH's keys). */
+  children?: React.ReactNode
 }
 
 export function ServerDetail({
@@ -81,10 +87,13 @@ export function ServerDetail({
   tools,
   notice,
   redirectUrl,
+  children,
 }: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
   const mail = server.kind === "jmap" || server.kind === "imap"
   const browser = server.kind === "browser"
+  const wrapper = server.kind === "wrapper"
+  const ssh = server.kind === "ssh"
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
   // Kept here rather than in the form: saving moves the server on from
@@ -149,7 +158,7 @@ export function ServerDetail({
               ) : null}
               {/* An uploaded schema has nothing to download again; replace
                   it in the settings below. */}
-              {!endpoint || server.specSource === "url" ? (
+              {!wrapper && (!endpoint || server.specSource === "url") ? (
                 <Button
                   variant="outline"
                   size="sm"
@@ -164,9 +173,11 @@ export function ServerDetail({
                       ? "Re-read schema"
                       : mail
                         ? "Check account"
-                        : browser
-                          ? "Check browser"
-                          : "Refresh tools"}
+                        : ssh
+                          ? "Check sign-in"
+                          : browser
+                            ? "Check browser"
+                            : "Refresh tools"}
                 </Button>
               ) : null}
               <Button
@@ -182,9 +193,11 @@ export function ServerDetail({
             </div>
           </div>
           <CardDescription>
-            {endpoint ? "Requests go to " : mail ? "Signs in at " : null}
+            {endpoint ? "Requests go to " : mail || ssh ? "Signs in at " : null}
             {browser ? (
               "A headless browser on the machine PCP runs on"
+            ) : wrapper ? (
+              "Programs over your other tools, run in PCP"
             ) : (
               <code className="text-xs">{server.url}</code>
             )}
@@ -260,12 +273,16 @@ export function ServerDetail({
         </CardContent>
       </Card>
 
+      {children}
+
       <ToolsCard
         serverId={server.id}
         tools={tools}
         endpoint={endpoint}
         mail={mail}
+        ssh={ssh}
         browser={browser}
+        wrapper={wrapper}
       />
 
       <Card>
@@ -276,9 +293,13 @@ export function ServerDetail({
               ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."
               : mail
                 ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your mail stays on the server, and secrets you added stay."
-                : browser
-                  ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
-                  : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
+                : ssh
+                  ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too."
+                  : browser
+                    ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
+                    : wrapper
+                      ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
+                      : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
           </CardDescription>
         </CardHeader>
         <CardContent className="items-start">
@@ -309,13 +330,17 @@ function ToolsCard({
   tools,
   endpoint,
   mail,
+  ssh,
   browser,
+  wrapper,
 }: {
   serverId: string
   tools: ServerDetailProps["tools"]
   endpoint: boolean
   mail: boolean
+  ssh: boolean
   browser: boolean
+  wrapper: boolean
 }) {
   const [open, setOpen] = useState(false)
   const listId = useId()
@@ -350,9 +375,13 @@ function ToolsCard({
             ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
             : mail
               ? "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
-              : browser
-                ? "What an assistant can find with search_tools: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
-                : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
+              : ssh
+                ? "What an assistant can find with search_tools: run_command, one command per call. Leave it at ask, and you see each command before it runs."
+                : browser
+                  ? "What an assistant can find with search_tools: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
+                  : wrapper
+                    ? "What an assistant can find with search_tools: each one runs its program below. For a token, a tool here is blocked wherever a tool it calls is, and asks you wherever one of them asks."
+                    : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
         </CardDescription>
       </CardHeader>
       {tools.length === 0 ? (
@@ -362,9 +391,11 @@ function ToolsCard({
               ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
               : mail
                 ? "No tools yet: PCP offers them once it has signed in. Check the settings below, then check the account again, or connect it."
-                : browser
-                  ? "No tools yet: check the browser again."
-                  : "No tools known yet. Connect the server, or refresh its tools."}
+                : ssh
+                  ? "No tools yet: check the sign-in again."
+                  : browser
+                    ? "No tools yet: check the browser again."
+                    : "No tools known yet. Connect the server, or refresh its tools."}
           </p>
         </CardContent>
       ) : open ? (
@@ -556,6 +587,9 @@ function ToolRow({
           {tool.descriptionOverride ? (
             <span className="text-xs text-primary">edited</span>
           ) : null}
+          {tool.replacedBy && tool.replacedBy.length > 0 ? (
+            <Badge variant="outline">Left out of search</Badge>
+          ) : null}
         </div>
         <Button
           variant="ghost"
@@ -590,6 +624,58 @@ function ToolRow({
           {tool.descriptionOverride ?? tool.description ?? ""}
         </p>
       )}
+      {tool.replacedBy && tool.replacedBy.length > 0 ? (
+        <ReplacedNote
+          serverId={serverId}
+          tool={tool.name}
+          by={tool.replacedBy}
+        />
+      ) : null}
     </li>
+  )
+}
+
+/**
+ * A tool a wrapper stands in for: assistants find the wrapper's instead, and
+ * can still call this one by name. Showing it again takes it out of what
+ * every wrapper replaces.
+ */
+function ReplacedNote({
+  serverId,
+  tool,
+  by,
+}: {
+  serverId: string
+  tool: string
+  by: Array<{ id: string; name: string; tool: string }>
+}) {
+  const [state, action] = useActionState<ServerActionResult, FormData>(
+    showReplacedToolAction,
+    { status: "idle" },
+  )
+
+  return (
+    <form action={action} className="flex flex-col items-start gap-2">
+      <input type="hidden" name="serverId" value={serverId} />
+      <input type="hidden" name="tool" value={tool} />
+      <p className="text-xs text-muted-foreground">
+        Left out of search_tools and list_tools: assistants find{" "}
+        {by.map((entry, index) => (
+          <span key={`${entry.id}/${entry.tool}`}>
+            {index > 0 ? ", " : null}
+            <Link href={`/servers/${entry.id}`} className="underline">
+              {entry.name}
+            </Link>{" "}
+            <code>{entry.tool}</code>
+          </span>
+        ))}{" "}
+        instead. It can still be called by its name.
+      </p>
+      <FormError error={state.status === "error" ? state.error : null} />
+      <FormNote message={state.status === "ok" ? state.message : null} />
+      <SubmitButton size="xs" variant="outline" pendingText="Showing…">
+        Show it in search again
+      </SubmitButton>
+    </form>
   )
 }

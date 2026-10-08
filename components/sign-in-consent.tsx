@@ -8,6 +8,7 @@ import { KeepMemoriesField } from "@/components/keep-memories-field"
 import { LocalDate } from "@/components/local-date"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
+import { ManageWrappersField } from "@/components/manage-wrappers-field"
 import { RunCodeField } from "@/components/run-code-field"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
@@ -170,6 +171,7 @@ export function SignInConsent({
                 <KeepMemoriesField id="consent-memories" />
                 <WebFetchField id="consent-fetch" />
                 <RunCodeField id="consent-code" />
+                <ManageWrappersField id="consent-wrappers" />
                 <p className="text-xs text-muted-foreground">
                   Until you set a tool&apos;s level on the token&apos;s page,
                   the assistant asks you before it runs it.

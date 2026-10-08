@@ -300,9 +300,20 @@ curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh
 ```
 
 It prints the command that deletes the volume too
-(`docker volume rm pcp-data`); after that, the vault is gone. From a
-checkout, `docker compose down` stops PCP and keeps the volume;
-`docker compose down -v` deletes it as well.
+(`docker volume rm pcp-data`); after that, the vault is gone. The image stays
+until you remove it (`docker image rm ghcr.io/kaperkunde/pcp`), and a crontab
+line the installer gave you for daily updates stays until you take it out
+(`crontab -e`). From a checkout, `docker compose down` stops PCP and keeps
+the volume; `docker compose down -v` deletes it as well.
+
+**Starting over.** To keep PCP but not what is in it, **Settings → Delete
+vault** deletes the vault (servers, secrets, API tokens, memories, the
+request log, your password and recovery key) after you confirm with your
+password, and PCP opens on its setup page again. The machine's settings
+(Dynamic DNS with its token, HTTPS and its certificate, updates, cleanup)
+stay; turn them off first if you want them gone. Until you set it up again,
+the first person to open PCP becomes its owner, so do that soon on a PCP
+that is reachable from outside.
 
 ## When something does not work
 

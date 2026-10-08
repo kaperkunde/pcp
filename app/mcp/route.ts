@@ -1,6 +1,7 @@
 import { createMcpHandler } from "@modelcontextprotocol/server"
 
 import { resolveApiToken } from "@/lib/core/api-tokens"
+import { clientHello, clientSeen } from "@/lib/core/client-hello"
 import {
   buildGatewayServer,
   ensureCatalogue,
@@ -15,6 +16,7 @@ import {
 } from "@/lib/core/oauth-server/tokens"
 import { checkRateLimit } from "@/lib/core/rate-limit"
 import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
+import { loadResourceLimits } from "@/lib/core/resources/state"
 
 /**
  * The gateway endpoint: https://<pcp>/mcp
@@ -45,6 +47,8 @@ const mcpHandler = createMcpHandler(
       scope,
       await loadGatewayServers(scope),
     )
+    // run_code's description names the limits in force.
+    await loadResourceLimits()
 
     return buildGatewayServer(scope, servers, {
       memories: scope.keepMemories
@@ -139,15 +143,35 @@ async function handle(request: Request): Promise<Response> {
   // The rate limit counts requests. A JSON-RPC batch is many calls in one, so
   // it would get around it: the current protocol has no batches either.
   if (request.method === "POST") {
-    const start = (await request.clone().text()).trimStart().slice(0, 1)
+    const body = await request.clone().text()
 
-    if (start === "[") {
+    if (body.trimStart().startsWith("[")) {
       return withCors(
         jsonRpcError(
           400,
           "Send one message per request; batches are not supported.",
         ),
       )
+    }
+
+    // Which app is on the other end, as it says when it connects and as its
+    // requests show: the server log only, never the request log (the Log
+    // page lists calls).
+    const who = {
+      token: resolved.tokenId,
+      tokenName: resolved.tokenName.slice(0, 80),
+      oauth: token?.startsWith(ACCESS_TOKEN_PREFIX) ?? false,
+    }
+    const hello = clientHello(body, request.headers)
+
+    if (hello) {
+      console.info("[mcp] initialize", JSON.stringify({ ...who, ...hello }))
+    }
+
+    const seen = clientSeen(resolved.tokenId, body, request.headers)
+
+    if (seen) {
+      console.info("[mcp] client", JSON.stringify({ ...who, ...seen }))
     }
   }
 

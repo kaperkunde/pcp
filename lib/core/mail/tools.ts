@@ -6,6 +6,10 @@ import type { MailKind } from "../servers"
 import { parseRecipient } from "./addresses"
 import {
   DEFAULT_SEARCH_LIMIT,
+  MAX_BULK_EMAILS,
+  MAX_KEYWORD_CHARS,
+  MAX_KEYWORDS,
+  MAX_MAILBOX_NAME_CHARS,
   MAX_RECIPIENTS,
   MAX_SEARCH_LIMIT,
   MAX_SEND_ATTACHMENTS,
@@ -13,13 +17,20 @@ import {
   MAX_SEARCH_TEXT_CHARS,
   MAX_SEND_TEXT_CHARS,
   MAX_SUBJECT_CHARS,
+  MAX_VACATION_SUBJECT_CHARS,
 } from "./limits"
 
 /**
  * The tools a mail account offers, the same for JMAP and IMAP where the
  * protocols allow, so an assistant learns one set. Which ones an account
- * has depends on its kind, on read-only, and on whether it can send.
- * Arguments are checked here, before any connection is opened.
+ * has depends on its kind, on read-only, on whether it can send, and (JMAP)
+ * on whether the server offers an automatic reply. Arguments are checked
+ * here, before any connection is opened.
+ *
+ * It is a fixed set on purpose, not the protocol passed through: each tool
+ * is one the rules can hold to (read-only, nothing deleted for good, files
+ * as handles), so a JMAP method or IMAP command is reached only through a
+ * tool written for it.
  */
 
 export type MailToolName =
@@ -30,9 +41,15 @@ export type MailToolName =
   | "get_thread"
   | "list_identities"
   | "send_email"
+  | "create_draft"
   | "move_email"
   | "mark_email"
   | "delete_email"
+  | "create_mailbox"
+  | "rename_mailbox"
+  | "delete_mailbox"
+  | "get_vacation_response"
+  | "set_vacation_response"
 
 type Annotations = {
   readOnlyHint: boolean
@@ -52,6 +69,8 @@ type MailToolSpec = {
   writes: boolean
   /** Only when the account can send. */
   sends?: boolean
+  /** Only when the server offers an automatic reply (JMAP). */
+  vacation?: boolean
 }
 
 const id = z
@@ -59,13 +78,57 @@ const id = z
   .min(1)
   .max(500)
   .describe("An email id, as search_emails returns it.")
+const ids = z
+  .array(id)
+  .min(1)
+  .max(MAX_BULK_EMAILS)
+  .describe(
+    `Several email ids, up to ${MAX_BULK_EMAILS}, in place of id: one call changes them all.`,
+  )
 const mailbox = z
   .string()
   .min(1)
   .max(500)
   .describe(
-    "A mailbox id from list_mailboxes, or a role: inbox, sent, drafts, trash, junk, archive.",
+    "A mailbox: its id from list_mailboxes, a role (inbox, sent, drafts, trash, junk, archive), or its name or path (Clients/Acme).",
   )
+const mailboxName = z
+  .string()
+  .min(1)
+  .max(MAX_MAILBOX_NAME_CHARS)
+  .regex(/^[^\u0000-\u001f\u007f/]+$/, {
+    message:
+      "A name without / or control characters; parent puts it inside another mailbox.",
+  })
+  .refine((value) => value.trim() === value, {
+    message: "A name without spaces at either end.",
+  })
+/**
+ * A keyword (label) as JMAP (RFC 8621 4.1.1) and IMAP both take one. The
+ * ones read, flagged and answered set are left to those.
+ */
+const keyword = z
+  .string()
+  .min(1)
+  .max(MAX_KEYWORD_CHARS)
+  .regex(/^[!#$&'+,\-./0-9:;<=>?@A-Z[^_`a-z|}~]+$/, {
+    message:
+      'A keyword is printable ASCII without spaces or any of ( ) { ] % * " \\, like "invoices" or "$label1".',
+  })
+  .refine(
+    (value) =>
+      !["$seen", "$flagged", "$answered", "$draft"].includes(
+        value.toLowerCase(),
+      ),
+    { message: "Use read, flagged or answered for that one." },
+  )
+const keywords = z.array(keyword).min(1).max(MAX_KEYWORDS)
+/** One email or several: id or ids, never both. */
+const oneOrMany = (value: { id?: unknown; ids?: unknown }) =>
+  (value.id === undefined) !== (value.ids === undefined)
+const ONE_OR_MANY = {
+  message: "Give id for one email, or ids for several.",
+}
 const date = z
   .string()
   .max(40)
@@ -79,6 +142,69 @@ const recipients = z
     'Addresses, as "ada@example.com" or "Ada Lovelace <ada@example.com>".',
   )
 const noArgs = () => z.strictObject({})
+
+/**
+ * What send_email and create_draft take: the same email, so a draft can be
+ * written as it would be sent. A draft may name nobody yet.
+ */
+function composition(kind: MailKind, { draft }: { draft: boolean }) {
+  return z.strictObject({
+    to: draft ? recipients.optional() : recipients.min(1),
+    cc: recipients.optional(),
+    bcc: recipients.optional(),
+    subject: z.string().max(MAX_SUBJECT_CHARS),
+    text: z.string().max(MAX_SEND_TEXT_CHARS).describe("The body, plain text."),
+    inReplyTo: id
+      .optional()
+      .describe("The id of the email this answers, from search_emails."),
+    attachments: z
+      .array(
+        z.strictObject({
+          $result: z
+            .string()
+            .min(1)
+            .max(64)
+            .describe("A kept result's id, from its handle."),
+          name: z
+            .string()
+            .min(1)
+            .max(255)
+            .regex(/^[^\u0000-\u001f\u007f/\\]+$/, {
+              message: "A file name, without a path or control characters.",
+            })
+            .optional()
+            .describe("The file's name; the kept result's own by default."),
+          type: z
+            .string()
+            .max(200)
+            .regex(/^[\w.+-]+\/[\w.+-]+$/, {
+              message: "A media type, like application/pdf.",
+            })
+            .optional()
+            .describe("Its media type; the kept result's own by default."),
+        }),
+      )
+      .max(MAX_SEND_ATTACHMENTS)
+      .optional()
+      .describe(
+        'Files to attach: kept results, as {"$result": "<id>"} with an optional name and type.',
+      ),
+    ...(kind === "jmap"
+      ? {
+          identity: z
+            .string()
+            .min(1)
+            .max(500)
+            .optional()
+            .describe(
+              draft
+                ? "The identity id the draft is from (list_identities); the account's own by default."
+                : "The identity id to send as (list_identities); the account's own by default.",
+            ),
+        }
+      : {}),
+  })
+}
 
 const READS: Annotations = {
   readOnlyHint: true,
@@ -100,40 +226,56 @@ const SPECS: readonly MailToolSpec[] = [
   {
     name: "search_emails",
     title: "Search emails",
-    description: `Finds emails in one mailbox (the inbox unless you name another), newest first. Every filter is optional; with none, it lists the latest emails. Answers with each email's id, date, sender, recipients, subject, flags and whether it has attachments; get_email reads one. Up to ${MAX_SEARCH_LIMIT} at a time; offset pages further.`,
+    description: `Finds emails in one mailbox (the inbox unless you name another), or with allMailboxes in every mailbox but Trash and Junk, newest first. Every filter is optional; with none, it lists the latest emails. Answers with each email's id, date, sender, recipients, subject, flags, keywords and whether it has attachments; get_email reads one. Up to ${MAX_SEARCH_LIMIT} at a time; offset pages further.`,
     args: () =>
-      z.strictObject({
-        mailbox: mailbox.optional(),
-        text: z
-          .string()
-          .min(1)
-          .max(MAX_SEARCH_TEXT_CHARS)
-          .optional()
-          .describe("Words anywhere in the email: headers or body."),
-        from: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
-        to: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
-        subject: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
-        after: date
-          .optional()
-          .describe("Only emails received on or after this date (ISO 8601)."),
-        before: date
-          .optional()
-          .describe("Only emails received before this date (ISO 8601)."),
-        unread: z
-          .boolean()
-          .optional()
-          .describe("true: only unread; false: only read."),
-        flagged: z.boolean().optional(),
-        hasAttachment: z.boolean().optional(),
-        offset: z.number().int().min(0).max(MAX_SEARCH_OFFSET).optional(),
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(MAX_SEARCH_LIMIT)
-          .optional()
-          .describe(`How many (default ${DEFAULT_SEARCH_LIMIT}).`),
-      }),
+      z
+        .strictObject({
+          mailbox: mailbox.optional(),
+          allMailboxes: z
+            .boolean()
+            .optional()
+            .describe(
+              "true: search every mailbox but Trash and Junk instead of one (name Trash or Junk as mailbox to search those).",
+            ),
+          text: z
+            .string()
+            .min(1)
+            .max(MAX_SEARCH_TEXT_CHARS)
+            .optional()
+            .describe("Words anywhere in the email: headers or body."),
+          from: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
+          to: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
+          subject: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
+          after: date
+            .optional()
+            .describe("Only emails received on or after this date (ISO 8601)."),
+          before: date
+            .optional()
+            .describe("Only emails received before this date (ISO 8601)."),
+          unread: z
+            .boolean()
+            .optional()
+            .describe("true: only unread; false: only read."),
+          flagged: z.boolean().optional(),
+          hasAttachment: z.boolean().optional(),
+          keyword: keyword
+            .optional()
+            .describe("Only emails with this keyword (label)."),
+          notKeyword: keyword
+            .optional()
+            .describe("Only emails without this keyword (label)."),
+          offset: z.number().int().min(0).max(MAX_SEARCH_OFFSET).optional(),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(MAX_SEARCH_LIMIT)
+            .optional()
+            .describe(`How many (default ${DEFAULT_SEARCH_LIMIT}).`),
+        })
+        .refine((value) => !(value.allMailboxes === true && value.mailbox), {
+          message: "Name a mailbox, or say allMailboxes, not both.",
+        }),
     annotations: READS,
     kinds: ["jmap", "imap"],
     writes: false,
@@ -152,7 +294,7 @@ const SPECS: readonly MailToolSpec[] = [
     name: "get_attachment",
     title: "Read an attachment",
     description:
-      "Reads one attachment of an email and keeps it as a handle, to pass to another tool or to send_email as an attachment. Text (plain text, CSV, JSON, XML, HTML, calendar files and the like) comes back as text too; any other file, such as an image or a PDF, only as the handle.",
+      "Reads one attachment of an email and keeps it as a handle, to pass to another tool or to send_email or create_draft as an attachment. Text (plain text, CSV, JSON, XML, HTML, calendar files and the like) comes back as text too; any other file, such as an image or a PDF, only as the handle.",
     args: () =>
       z.strictObject({
         id,
@@ -195,64 +337,7 @@ const SPECS: readonly MailToolSpec[] = [
     title: "Send an email",
     description:
       'Sends a plain-text email from this account, and keeps a copy in Sent. To reply, pass the id of the email you answer as inReplyTo: the reply then joins its conversation, and that email is marked answered (answered in the result says whether it could be). To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]: an attachment get_attachment read (from this account or another), or any file a tool answered with. Sending cannot be undone.',
-    args: (kind) =>
-      z.strictObject({
-        to: recipients.min(1),
-        cc: recipients.optional(),
-        bcc: recipients.optional(),
-        subject: z.string().max(MAX_SUBJECT_CHARS),
-        text: z
-          .string()
-          .max(MAX_SEND_TEXT_CHARS)
-          .describe("The body, plain text."),
-        inReplyTo: id
-          .optional()
-          .describe("The id of the email this answers, from search_emails."),
-        attachments: z
-          .array(
-            z.strictObject({
-              $result: z
-                .string()
-                .min(1)
-                .max(64)
-                .describe("A kept result's id, from its handle."),
-              name: z
-                .string()
-                .min(1)
-                .max(255)
-                .regex(/^[^\u0000-\u001f\u007f/\\]+$/, {
-                  message: "A file name, without a path or control characters.",
-                })
-                .optional()
-                .describe("The file's name; the kept result's own by default."),
-              type: z
-                .string()
-                .max(200)
-                .regex(/^[\w.+-]+\/[\w.+-]+$/, {
-                  message: "A media type, like application/pdf.",
-                })
-                .optional()
-                .describe("Its media type; the kept result's own by default."),
-            }),
-          )
-          .max(MAX_SEND_ATTACHMENTS)
-          .optional()
-          .describe(
-            'Files to attach: kept results, as {"$result": "<id>"} with an optional name and type.',
-          ),
-        ...(kind === "jmap"
-          ? {
-              identity: z
-                .string()
-                .min(1)
-                .max(500)
-                .optional()
-                .describe(
-                  "The identity id to send as (list_identities); the account's own by default.",
-                ),
-            }
-          : {}),
-      }),
+    args: (kind) => composition(kind, { draft: false }),
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
@@ -264,11 +349,28 @@ const SPECS: readonly MailToolSpec[] = [
     sends: true,
   },
   {
-    name: "move_email",
-    title: "Move an email",
+    name: "create_draft",
+    title: "Write a draft",
     description:
-      "Moves an email to another mailbox. An IMAP email gets a new id when it moves: the answer gives it.",
-    args: () => z.strictObject({ id, mailbox }),
+      'Writes a plain-text email into this account\'s Drafts mailbox, marked as a draft, and sends nothing: the owner can read it, change it and send it from their mail app. It takes what send_email takes, with recipients optional. To draft a reply, pass the id of the email it answers as inReplyTo: the draft then joins its conversation. To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]. Answers with the draft\'s id, which get_email reads, and the mailbox it is in.',
+    args: (kind) => composition(kind, { draft: true }),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    kinds: ["jmap", "imap"],
+    writes: true,
+  },
+  {
+    name: "move_email",
+    title: "Move emails",
+    description: `Moves an email, or up to ${MAX_BULK_EMAILS} with ids, to another mailbox. An IMAP email gets a new id when it moves: the answer gives it. With ids, the answer lists the emails moved (done) and the ones that could not be, with why (failed).`,
+    args: () =>
+      z
+        .strictObject({ id: id.optional(), ids: ids.optional(), mailbox })
+        .refine(oneOrMany, ONE_OR_MANY),
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
@@ -280,19 +382,32 @@ const SPECS: readonly MailToolSpec[] = [
   },
   {
     name: "mark_email",
-    title: "Mark an email",
-    description: "Marks an email read or unread, flagged or not.",
+    title: "Mark emails",
+    description: `Marks an email, or up to ${MAX_BULK_EMAILS} with ids: read or unread, flagged or not, answered or not, and adds or removes keywords (labels, as other mail apps show them). What you leave out stays as it is. With ids, the answer lists the emails changed (done) and the ones that could not be, with why (failed).`,
     args: () =>
       z
         .strictObject({
-          id,
+          id: id.optional(),
+          ids: ids.optional(),
           read: z.boolean().optional(),
           flagged: z.boolean().optional(),
+          answered: z.boolean().optional(),
+          addKeywords: keywords
+            .optional()
+            .describe('Keywords to add, like ["invoices"].'),
+          removeKeywords: keywords.optional().describe("Keywords to remove."),
         })
+        .refine(oneOrMany, ONE_OR_MANY)
         .refine(
-          (value) => value.read !== undefined || value.flagged !== undefined,
+          (value) =>
+            value.read !== undefined ||
+            value.flagged !== undefined ||
+            value.answered !== undefined ||
+            value.addKeywords !== undefined ||
+            value.removeKeywords !== undefined,
           {
-            message: "Say read, flagged, or both.",
+            message:
+              "Say what to change: read, flagged, answered, addKeywords or removeKeywords.",
           },
         ),
     annotations: {
@@ -306,10 +421,12 @@ const SPECS: readonly MailToolSpec[] = [
   },
   {
     name: "delete_email",
-    title: "Delete an email",
-    description:
-      "Moves an email to the Trash. It is not deleted for good; the owner can take it back from there.",
-    args: () => z.strictObject({ id }),
+    title: "Delete emails",
+    description: `Moves an email, or up to ${MAX_BULK_EMAILS} with ids, to the Trash. Nothing is deleted for good; the owner can take them back from there. With ids, the answer lists the emails moved (done) and the ones that could not be, with why (failed).`,
+    args: () =>
+      z
+        .strictObject({ id: id.optional(), ids: ids.optional() })
+        .refine(oneOrMany, ONE_OR_MANY),
     annotations: {
       readOnlyHint: false,
       destructiveHint: true,
@@ -318,6 +435,124 @@ const SPECS: readonly MailToolSpec[] = [
     },
     kinds: ["jmap", "imap"],
     writes: true,
+  },
+  {
+    name: "create_mailbox",
+    title: "Create a mailbox",
+    description:
+      "Creates a mailbox (folder), at the top or inside another one (parent). Answers with it as list_mailboxes would.",
+    args: () =>
+      z.strictObject({
+        name: mailboxName.describe("The new mailbox's name."),
+        parent: mailbox
+          .optional()
+          .describe(
+            "The mailbox to put it inside (id, name or path); the top level by default.",
+          ),
+      }),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    kinds: ["jmap", "imap"],
+    writes: true,
+  },
+  {
+    name: "rename_mailbox",
+    title: "Rename or move a mailbox",
+    description:
+      "Gives a mailbox a new name, or moves it inside another one (parent; null for the top level), or both. The inbox stays where it is. On IMAP the emails inside get new ids, since an IMAP email's id says which mailbox it is in: search again for them.",
+    args: () =>
+      z
+        .strictObject({
+          mailbox,
+          name: mailboxName.optional().describe("Its new name."),
+          parent: mailbox
+            .nullable()
+            .optional()
+            .describe(
+              "The mailbox to move it inside (id, name or path), or null for the top level.",
+            ),
+        })
+        .refine(
+          (value) => value.name !== undefined || value.parent !== undefined,
+          { message: "Say a new name, a new parent, or both." },
+        ),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    kinds: ["jmap", "imap"],
+    writes: true,
+  },
+  {
+    name: "delete_mailbox",
+    title: "Delete a mailbox",
+    description:
+      "Deletes an empty mailbox (folder) that has no mailboxes inside it. One that holds mail is refused (move or delete its emails first), and so are the inbox, Trash, Sent, Drafts and the account's other special mailboxes, so no mail is deleted for good.",
+    args: () => z.strictObject({ mailbox }),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    kinds: ["jmap", "imap"],
+    writes: true,
+  },
+  {
+    name: "get_vacation_response",
+    title: "Read the automatic reply",
+    description:
+      "Reads the account's automatic reply (out of office): whether it is on, between which dates, and its subject and text.",
+    args: noArgs,
+    annotations: READS,
+    kinds: ["jmap"],
+    writes: false,
+    vacation: true,
+  },
+  {
+    name: "set_vacation_response",
+    title: "Set the automatic reply",
+    description:
+      "Turns the account's automatic reply (out of office) on or off, and sets what it says and between which dates it answers. What you leave out stays as it is; null clears it. The server answers incoming mail with it while it is on.",
+    args: () =>
+      z.strictObject({
+        enabled: z.boolean().describe("Whether the automatic reply is on."),
+        from: date
+          .nullable()
+          .optional()
+          .describe("When it starts answering (ISO 8601); null for now."),
+        to: date
+          .nullable()
+          .optional()
+          .describe("When it stops answering (ISO 8601); null for never."),
+        subject: z
+          .string()
+          .max(MAX_VACATION_SUBJECT_CHARS)
+          .nullable()
+          .optional()
+          .describe("The reply's subject; null for the server's own."),
+        text: z
+          .string()
+          .max(MAX_SEND_TEXT_CHARS)
+          .nullable()
+          .optional()
+          .describe("The reply's text, plain."),
+      }),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    kinds: ["jmap"],
+    writes: true,
+    vacation: true,
   },
 ]
 
@@ -338,16 +573,20 @@ export function mailTools({
   kind,
   readOnly,
   canSend,
+  canVacation = false,
 }: {
   kind: MailKind
   readOnly: boolean
   canSend: boolean
+  /** JMAP: the session offers VacationResponse. */
+  canVacation?: boolean
 }): CatalogueTool[] {
   return SPECS.filter(
     (spec) =>
       spec.kinds.includes(kind) &&
       !(readOnly && spec.writes) &&
-      !(spec.sends && !canSend),
+      !(spec.sends && !canSend) &&
+      !(spec.vacation && !canVacation),
   ).map((spec) => ({
     name: spec.name,
     title: spec.title,

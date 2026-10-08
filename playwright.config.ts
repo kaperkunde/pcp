@@ -158,6 +158,15 @@ export default defineConfig({
       use: signedIn("mail"),
     },
     {
+      // An SSH server: added in PCP, PCP's key put in authorized_keys, the
+      // host key pinned; a command an assistant asks for, shown to the owner
+      // first; and a server that later shows another host key.
+      name: "ssh",
+      testMatch: /ssh\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("ssh"),
+    },
+    {
       // Per-token tool access and the owner's permission: the link (also for
       // a client that offers prompts and panels), copying access, and servers
       // an assistant proposes.
@@ -229,11 +238,24 @@ export default defineConfig({
       use: signedIn("run-code"),
     },
     {
+      // Wrappers: a token that may propose them gets their tools; a wrapper
+      // over a tool that wants its key as an argument, approved with the key
+      // typed in on the request's page; its tool puts the key in and the
+      // answer shows it redacted; the tool it replaces leaves search until
+      // the owner brings it back.
+      name: "wrappers",
+      testMatch: /wrappers\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("wrappers"),
+    },
+    {
       // The browser: added by the owner, its tools and instructions, a new
       // site asking first, refs to act on a page, a link to another site
       // stopped, the live view with a click on it, hand_over on the
-      // request's page, and the sign-ins kept across a restart and
-      // forgotten.
+      // request's page, a site behind a Cloudflare check (waited for when
+      // it passes on its own, left to hand_over when it does not, and read
+      // through the browser by web_fetch), and the sign-ins kept across a
+      // restart and forgotten.
       name: "browser",
       testMatch: /browser\.spec\.ts/,
       dependencies: ["setup"],
@@ -277,6 +299,15 @@ export default defineConfig({
       // browser out too: after recovery, signing in on its own.
       name: "backup",
       testMatch: /backup\.spec\.ts/,
+      dependencies: ["setup"],
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      // Deletes the vault from Settings and sets it up again with the same
+      // name and password, which ends every session and token: after
+      // backup, signing in on its own.
+      name: "reset",
+      testMatch: /reset\.spec\.ts/,
       dependencies: ["setup"],
       use: { ...devices["Desktop Chrome"] },
     },

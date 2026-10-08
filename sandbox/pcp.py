@@ -6,11 +6,16 @@ command, which is this file:
     issues = pcp.call("github", "list_issues", {"repo": "pcp"})
     handle = pcp.keep("id,title\\n…", name="issues.csv", type="text/csv")
     text = pcp.read(handle)
+    pdf = pcp.read(attachment, as_="bytes")
+    names = [tool["name"] for tool in pcp.tools("github")]
 
     pcp call github list_issues '{"repo": "pcp"}' | jq '.[].number'
     pcp call github list_issues - --fields number,title < args.json
     pcp read '{"$result": "…"}'
     pcp keep --name issues.csv --type text/csv < issues.csv
+    pcp read --bytes '{"$result": "…"}' > file.pdf
+    pcp keep --bytes --name page.png --type image/png page.png
+    pcp tools github | jq -r '.[].name'
 
 Each request goes to the runner over the socket named in PCP_BRIDGE, and
 from there to PCP, which decides it as it would the assistant's own call:
@@ -19,12 +24,13 @@ a PcpError (a message on stderr and status 1 for the command). A call to a
 tool the owner has to allow first ends the program there.
 """
 
+import base64
 import json
 import os
 import socket
 import sys
 
-__all__ = ["PcpError", "call", "keep", "read"]
+__all__ = ["PcpError", "call", "keep", "read", "tools"]
 
 
 class PcpError(Exception):
@@ -77,16 +83,31 @@ def call(server, tool, args=None, *, fields=None, decode=None, keep=None):
     return _ask("call", payload)
 
 
-def read(handle):
-    """The text of a kept result, by its handle or its id."""
+def read(handle, as_="text"):
+    """A kept result, by its handle or its id: its text, or a file's bytes
+    as base64 (as_="base64") or as bytes (as_="bytes")."""
     if isinstance(handle, dict):
         handle = handle.get("$result")
-    return _ask("read", {"id": handle})
+    if as_ == "bytes":
+        return base64.b64decode(_ask("read", {"id": handle, "as": "base64"}))
+    return _ask("read", {"id": handle, "as": as_})
 
 
-def keep(value, *, name=None, type=None):
-    """Keeps a text (or a value, as JSON) as a result; returns its handle."""
-    if isinstance(value, str):
+def keep(value, *, name=None, type=None, encoding=None):
+    """Keeps a text (or a value, as JSON), or bytes as a file, as a result;
+    returns its handle. A text that is base64 is kept as the bytes it
+    encodes with encoding="base64"."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        payload = {
+            "value": base64.b64encode(bytes(value)).decode("ascii"),
+            "encoding": "base64",
+            "type": type or "application/octet-stream",
+        }
+    elif isinstance(value, str) and encoding == "base64":
+        payload = {"value": value, "encoding": "base64"}
+        if type is not None:
+            payload["type"] = type
+    elif isinstance(value, str):
         payload = {"value": value, "type": type or "text/plain"}
     else:
         payload = {"value": json.dumps(value), "type": type or "application/json"}
@@ -95,18 +116,28 @@ def keep(value, *, name=None, type=None):
     return _ask("keep", payload)
 
 
+def tools(server=None):
+    """The servers this program may call, or with a server's name, its tools
+    and whether each runs at once ("allowed") or asks the owner ("ask")."""
+    return _ask("tools", {"server": server})
+
+
 USAGE = """usage:
   pcp call SERVER TOOL [ARGS_JSON | -] [--fields A,B] [--decode A] [--keep A]
-  pcp read HANDLE_OR_ID
-  pcp keep [--name NAME] [--type TYPE] [FILE]"""
+  pcp read [--base64 | --bytes] HANDLE_OR_ID
+  pcp keep [--name NAME] [--type TYPE] [--bytes] [FILE]
+  pcp tools [SERVER]"""
 
 
-def _options(argv, names):
+def _options(argv, names, flags=()):
     rest, options = [], {}
     index = 0
     while index < len(argv):
         word = argv[index]
-        if word.startswith("--") and word[2:] in names:
+        if word.startswith("--") and word[2:] in flags:
+            options[word[2:]] = True
+            index += 1
+        elif word.startswith("--") and word[2:] in names:
             if index + 1 >= len(argv):
                 raise PcpError(f"{word} needs a value.\n{USAGE}")
             options[word[2:]] = argv[index + 1]
@@ -138,23 +169,34 @@ def main(argv=None):
             value = call(rest[0], rest[1], args, **options)
             sys.stdout.write(json.dumps(value, ensure_ascii=False) + "\n")
         elif command == "read":
-            if len(argv) != 1:
+            rest, options = _options(argv, set(), {"base64", "bytes"})
+            if len(rest) != 1 or len(options) > 1:
                 raise PcpError(USAGE)
-            handle = argv[0]
+            handle = rest[0]
             if handle.lstrip().startswith("{"):
                 handle = json.loads(handle)
-            sys.stdout.write(read(handle))
+            if options.get("bytes"):
+                sys.stdout.flush()
+                sys.stdout.buffer.write(read(handle, as_="bytes"))
+            else:
+                sys.stdout.write(read(handle, as_="base64" if options else "text"))
         elif command == "keep":
-            rest, options = _options(argv, {"name", "type"})
+            rest, options = _options(argv, {"name", "type"}, {"bytes"})
             if len(rest) > 1:
                 raise PcpError(USAGE)
+            raw = options.get("bytes", False)
             if rest and rest[0] != "-":
-                with open(rest[0], encoding="utf-8") as source:
-                    text = source.read()
+                with open(rest[0], "rb" if raw else "r", **({} if raw else {"encoding": "utf-8"})) as source:
+                    value = source.read()
             else:
-                text = sys.stdin.read()
-            handle = keep(text, name=options.get("name"), type=options.get("type"))
+                value = sys.stdin.buffer.read() if raw else sys.stdin.read()
+            handle = keep(value, name=options.get("name"), type=options.get("type"))
             sys.stdout.write(json.dumps(handle) + "\n")
+        elif command == "tools":
+            if len(argv) > 1:
+                raise PcpError(USAGE)
+            value = tools(argv[0] if argv else None)
+            sys.stdout.write(json.dumps(value, ensure_ascii=False) + "\n")
         else:
             raise PcpError(USAGE)
     except PcpError as error:

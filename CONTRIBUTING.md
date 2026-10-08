@@ -172,6 +172,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/answers.ts`                | Shaping an answer: fields, decode, handles, preview           |
 | `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
 | `lib/core/mail/`                     | Mail accounts: JMAP and IMAP/SMTP behind one set of tools     |
+| `lib/core/ssh/`                      | SSH servers: PCP's key, the pinned host key, `run_command`    |
 | `lib/core/register-rules.ts`         | What register_server accepts for each kind                    |
 | `lib/core/tool-results.ts`           | Kept answers and files, encrypted; `read_result`, handles     |
 | `lib/core/result-handles.ts`         | Handles in a call's arguments, replaced before sending        |
@@ -179,8 +180,9 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
 | `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits  |
-| `lib/core/browser/`                  | The browser: Chromium, its proxy, profile, tabs, tools        |
+| `lib/core/browser/`                  | Browser: Chromium, proxy, tabs, tools; web_fetch past a check |
 | `lib/core/code/`                     | run_code: QuickJS, the bridge, the sandbox executor, limits   |
+| `lib/core/wrappers/`                 | Wrappers: definition, run, secret placeholders, requests      |
 | `sandbox/`                           | The sandbox container: its runner and the `pcp` command       |
 | `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input     |
 | `components/browser-tab-view.tsx`    | The live view: frames on a canvas, timed input sent back      |

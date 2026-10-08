@@ -14,12 +14,19 @@ import type { McpServer } from "@/lib/generated/prisma/client"
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { startTestApi, type TestApi } from "../openapi/test-api"
+import { CHALLENGE_LINE } from "../fetch/challenge"
+import {
+  answerWalled,
+  startTestApi,
+  WALL_COOKIE,
+  type TestApi,
+} from "../openapi/test-api"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import { listFetchRules, setFetchPrivate, setFetchSite } from "../web-fetch"
 import { callBrowserTool, finishHandover, performNavigate } from "./call"
 import { chromiumExecutable } from "./executable"
+import { CHALLENGE_WAIT_MS } from "./limits"
 import { loadProfile } from "./profile"
 import { closeAllBrowsers, closeBrowser, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
@@ -27,7 +34,14 @@ import { isOwnerNeeded, type OwnerNeeded } from "./types"
 
 // The browser's tools against a real headless Chromium and pages served on
 // this machine. Skipped where no Chromium is installed (`pnpm exec
-// playwright install chromium`, or PCP_BROWSER_EXECUTABLE).
+// playwright install chromium`, or PCP_BROWSER_EXECUTABLE). A site's check
+// is given a few seconds rather than twenty: the fake one passes in a third
+// of a second, or never.
+
+vi.mock("./limits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./limits")>()),
+  CHALLENGE_WAIT_MS: 3_000,
+}))
 
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
@@ -46,6 +60,23 @@ const FORM = `<!doctype html><title>Form</title>
 <button onclick="document.getElementById('greeting').textContent = 'Hello, ' + document.getElementById('name').value; document.cookie = 'seen=1; max-age=3600'">Say hello</button>
 <select aria-label="Pet"><option value="dog">Dog</option><option value="cat">Cat</option></select>
 <a href="__ELSEWHERE__">Elsewhere</a>`
+
+/** Links to pages behind a site's check, one that passes and one that does not. */
+const DOORS = `<!doctype html><title>Doors</title>
+<a href="/walled">Passes</a>
+<a href="/walled-forever">Stays</a>`
+
+/** What a page's own script can tell of the browser that shows it. */
+const FINGERPRINT = `<!doctype html><title>Fingerprint</title>
+<pre><code id="seen"></code></pre>
+<script>
+document.getElementById("seen").textContent = JSON.stringify({
+  webdriver: navigator.webdriver,
+  userAgent: navigator.userAgent,
+  brands: JSON.stringify(navigator.userAgentData?.brands),
+  screenWidth: screen.width,
+})
+</script>`
 
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
@@ -107,6 +138,22 @@ setTimeout(() => window.open("/page"), 300)
       return res.end(
         `<title>Cookie</title><h1>cookie: ${request.headers.cookie ?? "none"}</h1>`,
       )
+    }
+
+    if (request.url.startsWith("/walled-forever")) {
+      return answerWalled(request, res, { clears: false })
+    }
+
+    if (request.url.startsWith("/walled")) {
+      return answerWalled(request, res)
+    }
+
+    if (request.url.startsWith("/fingerprint")) {
+      return res.end(FINGERPRINT)
+    }
+
+    if (request.url.startsWith("/doors")) {
+      return res.end(DOORS)
     }
 
     res.end("<title>Page</title><h1>A page</h1>")
@@ -494,4 +541,110 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     expect(textOf(own)).toContain("PCP's own address")
     expect((await listFetchRules(ctx, tokenId)).sites).toEqual([])
   })
+
+  it("waits for a site's check that passes on its own, and keeps its clearance with the sign-ins", async () => {
+    await allowApi()
+
+    const opened = await call("navigate", { url: `${api.origin}/walled` })
+    const text = textOf(opened)
+    expect(opened.isError, text).toBeUndefined()
+    expect(text).toContain("Behind the wall")
+    expect(text).not.toContain("Just a moment")
+    expect(text).not.toContain(CHALLENGE_LINE)
+    expect(
+      (await loadProfile(ctx))?.cookies.map((cookie) => cookie.name),
+    ).toContain(WALL_COOKIE)
+  })
+
+  it("says plainly when a check does not pass, and leaves the hand-over to the assistant", async () => {
+    await allowApi()
+
+    const started = Date.now()
+    const stuck = await call("navigate", {
+      url: `${api.origin}/walled-forever`,
+    })
+    const text = textOf(stuck)
+    expect(Date.now() - started).toBeGreaterThanOrEqual(CHALLENGE_WAIT_MS)
+    // Not an error, and nobody asked: the call answered rather than
+    // throwing for the owner.
+    expect(stuck.isError, text).toBeUndefined()
+    expect(text.split("\n")[0]).toBe(
+      `${CHALLENGE_LINE} It did not pass on its own in this tab: call hand_over so the owner can pass it themselves, then take a snapshot.`,
+    )
+    expect(text).toContain(`Address: ${api.origin}/walled-forever`)
+
+    // Every look at the tab says so while the check stays.
+    for (const [name, args] of [
+      ["snapshot", {}],
+      ["wait_for", { ms: 1 }],
+      ["read_page", {}],
+    ] as const) {
+      const again = await call(name, args)
+      expect(again.isError, name).toBeUndefined()
+      expect(textOf(again).split("\n")[0], name).toContain(CHALLENGE_LINE)
+      expect(textOf(again), name).toContain("hand_over")
+    }
+
+    // The owner passes it in the hand-over the assistant chose to make.
+    const handed = await owner(
+      call("hand_over", { message: "Please pass the check." }),
+    )
+    expect(handed.ask.kind).toBe("browser_handover")
+  })
+
+  it("gives a check a link leads to its moment too, and says so after a click or back that lands on one", async () => {
+    await allowApi()
+
+    // The fake's clearance opens both of its pages, so the one that stays
+    // comes first.
+    const doors = await call("navigate", { url: `${api.origin}/doors` })
+    const stayed = await call("click", { ref: refOf(doors, /link "Stays"/) })
+    expect(stayed.isError).toBeUndefined()
+    expect(textOf(stayed).split("\n")[0]).toContain(CHALLENGE_LINE)
+    expect(textOf(stayed)).toContain(`Address: ${api.origin}/walled-forever`)
+
+    await call("navigate", { url: `${api.origin}/page` })
+    const back = await call("back", {})
+    expect(back.isError).toBeUndefined()
+    expect(textOf(back).split("\n")[0]).toContain(CHALLENGE_LINE)
+    expect(textOf(back)).toContain(`Address: ${api.origin}/walled-forever`)
+
+    const returned = await call("back", {})
+    expect(textOf(returned)).not.toContain(CHALLENGE_LINE)
+    const passed = await call("click", {
+      ref: refOf(returned, /link "Passes"/),
+    })
+    expect(textOf(passed)).toContain("Behind the wall")
+    expect(textOf(passed)).not.toContain(CHALLENGE_LINE)
+  })
+
+  it("shows sites a browser that says neither that it is headless nor that it is driven", async () => {
+    await allowApi()
+
+    await call("navigate", { url: `${api.origin}/fingerprint` })
+    const read = textOf(await call("read_page", {}))
+    const seen = JSON.parse(read.match(/```\w*\n([\s\S]*?)\n```/)![1]!) as {
+      webdriver: boolean
+      userAgent: string
+      brands: string
+      screenWidth: number
+    }
+    const sent = api.requests.find((request) => request.url === "/fingerprint")!
+
+    expect(seen.webdriver).toBe(false)
+    expect(seen.userAgent).toContain("Chrome/")
+    expect(seen.userAgent).not.toContain("Headless")
+    expect(seen.brands).toContain("Chromium")
+    expect(seen.brands).not.toContain("Headless")
+    expect(seen.screenWidth).toBeGreaterThan(1280)
+    expect(sent.headers["user-agent"]).not.toContain("Headless")
+    expect(sent.headers["sec-ch-ua"]).toContain("Chromium")
+    expect(sent.headers["sec-ch-ua"]).not.toContain("Headless")
+  })
 })
+
+/** The test API's site, and private addresses, for the token. */
+async function allowApi(): Promise<void> {
+  await setFetchSite(ctx, tokenId, new URL(api.origin).host, "allowed")
+  await setFetchPrivate(ctx, tokenId, "allowed")
+}

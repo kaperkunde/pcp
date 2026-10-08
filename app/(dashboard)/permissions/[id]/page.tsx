@@ -9,6 +9,7 @@ import { PermissionDecision } from "@/components/permission-decision"
 import { Badge } from "@/components/ui/badge"
 import { buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { WrapperReview } from "@/components/wrapper-review"
 import type { MemoryShown } from "@/lib/core/memories"
 import { tabFor } from "@/lib/core/browser/owner"
 import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
@@ -107,7 +108,7 @@ export default async function PermissionPage({
         className={
           handedTab
             ? "max-w-6xl"
-            : access && pending
+            : (access && pending) || view.wrapper
               ? "max-w-4xl"
               : "max-w-2xl"
         }
@@ -142,6 +143,7 @@ export default async function PermissionPage({
               {view.warning}
             </p>
           ) : null}
+          {view.wrapper ? <WrapperReview shown={view.wrapper} /> : null}
           {pending && proposal ? (
             <>
               <p className="text-muted-foreground">

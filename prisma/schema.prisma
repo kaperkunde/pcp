@@ -120,6 +120,11 @@ model ApiToken {
   /// the gateway (run_code), each call at the token's own levels. Off
   /// unless the owner turns it on.
   runCode         Boolean   @default(false) @map("run_code")
+  /// Whether the assistant may propose wrappers (create_wrapper and its
+  /// kin, lib/core/wrappers/): servers whose tools are programs over the
+  /// owner's other tools. Every change it proposes is the owner's to make.
+  /// Off unless the owner turns it on.
+  manageWrappers  Boolean   @default(false) @map("manage_wrappers")
   expiresAt       DateTime? @map("expires_at")
   revokedAt       DateTime? @map("revoked_at")
   createdAt       DateTime  @default(now()) @map("created_at")
@@ -268,7 +273,7 @@ model PermissionRequest {
   tokenId          String     @map("token_id")
   token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   /// call | register | memory_share | memory_change | access | endpoint_change
-  /// | fetch | browse | browser_handover
+  /// | fetch | browse | browser_handover | wrapper_change
   kind             String
   serverId         String?    @map("server_id")
   server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
@@ -349,7 +354,7 @@ model Secret {
   vault       Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   name        String
   description String   @default("")
-  /// text | oauth
+  /// text | oauth | ssh_key (PCP's own private key for an SSH server)
   kind        String   @default("text")
   /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
   /// with the secret id as associated data.
@@ -385,12 +390,14 @@ model McpServer {
   description String @default("")
   /// mcp: the Streamable HTTP endpoint. openapi: the API's base URL, which
   /// every operation's path is appended to. jmap: the session URL. imap:
-  /// imaps://host:port, or imap://host:port for STARTTLS. browser: the
-  /// fixed "pcp:browser", which no request is ever sent to.
+  /// imaps://host:port, or imap://host:port for STARTTLS. ssh:
+  /// ssh://host:port. browser: the fixed "pcp:browser", which no request is
+  /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise.
   url         String
   enabled     Boolean @default(true)
 
-  /// none | header | oauth | basic
+  /// none | header | oauth | basic | key (ssh: PCP's own key, in a managed
+  /// secret)
   authType String @default("none") @map("auth_type")
   /// header auth: the header to send and how the secret goes into it.
   authHeaderName    String? @map("auth_header_name")
@@ -398,7 +405,7 @@ model McpServer {
   authSecretId      String? @map("auth_secret_id")
   authSecret        Secret? @relation("ServerAuthSecret", fields: [authSecretId], references: [id], onDelete: SetNull)
   /// basic auth: the user name sent with the secret (a JMAP server's Basic
-  /// authentication, an IMAP and SMTP login).
+  /// authentication, an IMAP and SMTP login). key: the SSH login.
   authUsername      String? @map("auth_username")
 
   /// oauth (an MCP server, or a jmap account that signs in with OAuth): an
@@ -435,11 +442,14 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  /// mcp | openapi | jmap | imap | browser. An openapi server is an HTTP API
-  /// described by an OpenAPI schema; its tools are the schema's operations
-  /// and PCP calls them directly (lib/core/endpoints.ts). jmap and imap are
-  /// mail accounts with a fixed set of mail tools (lib/core/mail/); browser
-  /// is the vault's headless browser, with its own (lib/core/browser/).
+  /// mcp | openapi | jmap | imap | ssh | browser | wrapper. An openapi
+  /// server is an HTTP API described by an OpenAPI schema; its tools are the
+  /// schema's operations and PCP calls them directly (lib/core/endpoints.ts).
+  /// jmap and imap are mail accounts with a fixed set of mail tools
+  /// (lib/core/mail/); ssh is a server PCP runs commands on over SSH
+  /// (lib/core/ssh/); browser is the vault's headless browser, with its own
+  /// (lib/core/browser/). A wrapper's tools are programs the owner approved
+  /// that call the vault's other tools (lib/core/wrappers/).
   kind       String  @default("mcp")
   /// openapi: where the schema came from, url | upload.
   specSource String? @map("spec_source")
@@ -475,6 +485,15 @@ model McpServer {
   /// jmap/imap: the From address when sending, when the user name is not one.
   mailFrom        String? @map("mail_from")
 
+  /// ssh: the public half of PCP's own key for this server, whose private
+  /// half is the managed secret in authSecretId. The owner adds it to the
+  /// login's authorized_keys.
+  sshPublicKey   String? @map("ssh_public_key")
+  /// ssh: the server's host key, "type base64", pinned the first time PCP
+  /// completed a key exchange with it. Another key is refused until the
+  /// owner forgets this one (lib/core/ssh/hosts.ts).
+  sshHostKey     String? @map("ssh_host_key")
+
   tools              McpTool[]
   tokens             ApiTokenServer[]
   oauthStates        OAuthState[]
@@ -483,6 +502,7 @@ model McpServer {
   toolAllowances     ApiTokenToolAllowance[]
   permissionRequests PermissionRequest[]
   spec               OpenApiSpec?
+  wrapperSpec        WrapperSpec?
   authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
 
@@ -557,6 +577,25 @@ model OpenApiSpec {
   builtWith String?   @map("built_with")
 
   @@map("openapi_spec")
+}
+
+/// wrapper: what the owner approved, kept apart from the server row like an
+/// endpoint's schema. Its tools in the catalogue are built from it
+/// (lib/core/wrappers/catalogue.ts), and nothing else changes it but the
+/// owner's own save or their answer to a request (lib/core/wrappers/admin.ts).
+model WrapperSpec {
+  serverId   String    @id @map("server_id")
+  server     McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The definition as JSON: each tool's schema, program, the tools it calls
+  /// and replaces, and where a secret may go (lib/core/wrappers/definition.ts).
+  /// Names a secret by its id, never by its value.
+  definition String
+  /// SHA-256 of the definition's canonical JSON, hex: what a request was
+  /// asked against.
+  hash       String
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@map("wrapper_spec")
 }
 
 /// An OAuth authorization in flight: the state parameter sent to the

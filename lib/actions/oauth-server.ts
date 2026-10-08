@@ -82,6 +82,7 @@ export async function approveSignInAction(
               keepMemories: field(formData, "keepMemories") === "on",
               webFetch: field(formData, "webFetch") === "on",
               runCode: field(formData, "runCode") === "on",
+              manageWrappers: field(formData, "manageWrappers") === "on",
             },
           },
       publicUrl,

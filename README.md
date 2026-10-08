@@ -54,8 +54,13 @@ on its own, what it has to ask you about first, and what it cannot touch.
   over for a sign-in or a CAPTCHA; an assistant can hand you a tab and wait.
 - **Mail without an MCP server.** Add a mail account over JMAP (Stalwart,
   Fastmail, Cyrus) or IMAP with SMTP, or let an assistant propose one for you
-  to agree to, and an assistant can search, read, file and send its mail, with
-  the same tools whichever protocol it speaks.
+  to agree to, and an assistant can search, read, file, draft and send its
+  mail, with the same tools whichever protocol it speaks.
+- **Commands over SSH, with a key.** Add an SSH server, put the key PCP makes
+  for it in the login's `authorized_keys`, and an assistant can run commands
+  there, each one shown to you first unless you allow it. No passwords; PCP
+  pins the server's host key the first time it connects and refuses any
+  other.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
@@ -128,9 +133,10 @@ page links to the download instead; open it, and your vault stays where it is.
 
 On a Mac with Touch ID, **Settings → Touch ID** (or the box on the sign-in
 page) lets you unlock PCP with your fingerprint, and confirm a new API token,
-an export or a restore with it instead of your password. A new password or
-recovery key still takes the password, and recovering with the recovery key,
-signing out everywhere or a restore turns Touch ID off.
+an export, a restore or deleting the vault with it instead of your password.
+A new password or recovery key still takes the password, and recovering with
+the recovery key, signing out everywhere, a restore or deleting the vault
+turns Touch ID off.
 
 **From outside your home.** An assistant that runs elsewhere (Claude on the
 web, a phone) needs an address that reaches your computer from the internet,
@@ -240,7 +246,66 @@ sign-in tokens, results kept for a day, old permission requests, days of the log
 starts and then every hour. **Settings → Cleanup** changes when it runs (a
 preset, or five cron fields of your own, at least once a day), how many days
 of the log it keeps (90 unless you choose), shows what the last run removed,
-and cleans up at once with **Clean up now**.
+and cleans up at once with **Clean up now**. After each run PCP gives the
+disk back what was freed: once enough of the database is empty space (32 MB,
+or a quarter of it), it rewrites the file without it.
+
+### Resources
+
+How much of the machine PCP may use for what assistants hand it follows the
+machine: its memory (a container's limit, where it has one), its processors
+and the free disk where PCP keeps its data. **Settings → Resources** shows
+what PCP picked and lets you set each yourself: a `run_code` program's memory
+(a sixteenth of the machine's, 128 MB to 1 GB), how many programs run at once
+(no more than the processors, and half the memory together), the largest file
+PCP keeps for an assistant and so what a program reads of one (an eighth of a
+program's memory, 10 to 256 MB), and what one token's kept results may hold
+together (a twentieth of the free disk, 50 MB to 4 GB). PCP refuses settings
+that would let programs together hold more than three quarters of the
+machine's memory, or kept results more than the disk.
+
+### Starting over or uninstalling
+
+**Settings → Delete vault** deletes everything PCP holds (servers, API
+endpoints, mail accounts, secrets, API tokens, memories, the browser's
+sign-ins, the request log, your password and recovery key) once you tick the
+box and confirm with your password or Touch ID. PCP is then back at its setup
+page. This machine's settings (pcp.gg, Dynamic DNS, HTTPS, updates, cleanup,
+resources) stay; turn them off first if you want them gone. Export first if
+you may want anything back: there is no undo. Until you set PCP up again, the
+first person to open it becomes its owner.
+
+To remove PCP itself:
+
+- **Mac**: if you use Touch ID, turn it off under **Settings → Touch ID**
+  first, so the app forgets its key. In the PCP menu, turn off starting at
+  sign-in, then quit PCP from the menu (closing the window leaves it
+  running), and drag PCP from Applications to the Trash. Your vault stays in
+  `~/Library/Application Support/PCP`; delete that folder and
+  `~/Library/Logs/PCP` to remove it too, and the **PCP Safe Storage** item in
+  your login keychain (Keychain Access) if you want nothing left.
+- **Windows**: turn off starting at sign-in in the PCP menu and quit PCP from
+  the tray icon, then uninstall it under **Settings → Apps → Installed apps**.
+  The uninstaller keeps your vault in `%APPDATA%\PCP`; delete that folder to
+  remove it too.
+- **Linux, from the installer**: run it with `uninstall`. It removes the
+  container, the systemd unit under Podman, the daily update timer and its
+  settings file, and keeps the `pcp-data` volume, your vault:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh -s -- uninstall
+  docker volume rm pcp-data              # the vault too (podman volume rm pcp-data)
+  docker image rm ghcr.io/kaperkunde/pcp # the image (podman image rm …)
+  ```
+
+  If the installer gave you a crontab line to update PCP (on a machine
+  without a systemd session), remove it with `crontab -e`.
+
+- **From a checkout with `docker compose`**: `docker compose down` stops and
+  removes PCP and keeps the vault; `docker compose down -v` deletes the
+  `pcp_pcp-data` volume with it. Then delete the checkout.
+- **Without Docker**: stop `pnpm start` and delete the checkout. The vault is
+  in `./data`, or wherever `PCP_DATA_DIR` points.
 
 ## Use it
 
@@ -284,15 +349,29 @@ and cleans up at once with **Clean up now**.
    offers it, so it stays signed in). Or add one over **IMAP**, with an SMTP
    server to send through if it should send. Passwords and tokens are secrets
    you pick, and mail only travels encrypted (TLS, or STARTTLS on `imap://` and
-   `smtp://`). Every account offers the same tools: list mailboxes, search, read
-   an email or an attachment (a text one as text, any other as a handle), move,
-   flag, delete into the Trash (never for good) and send, plus conversations and
-   identities on JMAP. **Read-only** offers only the tools that read. An
+   `smtp://`). Every account offers the same tools: list mailboxes, search one
+   mailbox or all of them, read an email or an attachment (a text one as text,
+   any other as a handle), move, flag, label (keywords) and delete into the
+   Trash (never for good), many emails in one call, write a draft and send,
+   create, rename and move folders and delete an empty one, plus conversations,
+   identities and the automatic reply (out of office) on JMAP. A draft (`create_draft`) goes into
+   the account's Drafts and is sent by nobody but you, so you can allow
+   drafting and keep sending on **Ask you first**; it needs no SMTP server.
+   **Read-only** offers only the tools that read. An
    assistant can propose an account too, with `register_server`: you see the
    server, the user name and how PCP signs in, type the app password on that
    page (it never passes through the assistant) or connect it with OAuth, and
    nothing exists until you agree.
-5. **API tokens.** Create a token per assistant or machine; PCP asks for your
+5. **SSH servers.** Add one with its host, port and the login PCP uses. PCP
+   makes a key of its own for the server and shows it on the server's page:
+   put it in that login's `~/.ssh/authorized_keys` and choose **Check
+   sign-in**. PCP never uses a password. It pins the server's host key the
+   first time it connects, shows its fingerprint for you to compare, and
+   refuses any other key until you choose **Forget host key**. Its one tool,
+   `run_command`, runs a command and returns the exit code, standard output
+   and standard error; leave it on **Ask you first** and you see each command
+   before it runs. Only you add SSH servers; an assistant cannot propose one.
+6. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password (or Touch ID in the Mac app) to make one. A token can reach every
    server and endpoint or only the ones you pick, and can expire. Revoking it
    destroys its copy of the vault key. A token's page sets each tool to
@@ -300,7 +379,7 @@ and cleans up at once with **Clean up now**.
    at once, or copies all of it from another token. Tick **All tokens** beside a
    level to make it the one every token follows; a token's own level still wins
    over it.
-6. **Connect an assistant** to `https://<your-pcp>/mcp`, in one of two ways.
+7. **Connect an assistant** to `https://<your-pcp>/mcp`, in one of two ways.
 
    **With a token.** Give it the token as a bearer token. For Claude Code:
 
@@ -335,6 +414,7 @@ and these tools:
 | `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                          |
 | `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                      |
 | `call_tool`           | Runs it, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer (some parts only, base64 decoded, parts as handles).             |
+| `call_read_only_tool` | `call_tool` for a tool its server marks read-only (an API's GET, a mail search, an MCP tool with `readOnlyHint`); anything else is refused.                       |
 | `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                         |
 | `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                   |
 | `read_result`         | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                              |
@@ -349,6 +429,7 @@ described further down:
 | `get_endpoint`    | **read and change API endpoints**               | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.         |
 | `update_endpoint` | **read and change API endpoints**               | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again. |
 | `memory`          | **keep memories**                               | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                               |
+| `read_memory`     | **keep memories**                               | Reads those notes (`every`, `view`, `search`) and nothing else.                                                                            |
 | `web_fetch`       | **fetch web pages**                             | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.              |
 | `run_code`        | **run code that calls its tools**               | Runs a program that calls the token's tools and works on their answers inside PCP.                                                         |
 
@@ -367,12 +448,12 @@ assistant. A file in an answer (an attachment, an image, base64 that decodes
 to a PDF) and any part named in `keep` come back as a handle,
 `{"$result": "<id>", …}`, with its type and size. Put that handle in any later
 call's arguments and PCP puts the value there: a text as text, a file as
-base64. `get_attachment` reads any attachment that way, and `send_email`
-takes handles as attachments, so an attachment from one mail account can be
-sent from another, or handed to an API. The permission page shows what each
-handle is, never its content. A `call_tool` answer also links its handles as
-MCP resources (`pcp://results/<id>`), so a client that reads resources can
-open a kept file itself.
+base64. `get_attachment` reads any attachment that way, and `send_email` and
+`create_draft` take handles as attachments, so an attachment from one mail
+account can be sent from another, or handed to an API. The permission page
+shows what each handle is, never its content. A `call_tool` answer also links
+its handles as MCP resources (`pcp://results/<id>`), so a client that reads
+resources can open a kept file itself.
 
 A tool you have not decided about answers "Not done yet" and asks you: the
 assistant ends its reply with a link to the request in PCP. Answer there,
@@ -422,10 +503,10 @@ A token made with **Let an assistant with this token keep memories** gets a
 `memory` tool: notes that last between conversations and stay with you rather
 than with one app. It works like Claude's own memory tool (files under
 `/memories`: view, create, str_replace, insert, delete, rename, plus search
-and every), and PCP's instructions, modelled on the protocol Claude's own
+and every), with `read_memory` for the reading commands alone, and PCP's instructions, modelled on the protocol Claude's own
 memory tool uses, tell the assistant to look there before anything else and to
 save what you would not want to say twice as it goes. Before its first reply
-it calls `every`, which returns the memories you chose to have read in every
+it calls `every` through `read_memory`, which returns the memories you chose to have read in every
 conversation and lists the rest.
 
 - `/memories/…` is the assistant's own: only the token that wrote a memory
@@ -485,7 +566,14 @@ each answer whole, as a value, so it can pick the ten rows the assistant needs
 out of ten thousand, join two tools' answers, or hand a file from one tool to
 another, and only what it prints and returns goes back to the assistant.
 Files move as handles, as they do between calls (above); `pcp.keep` keeps a
-text it made (a CSV, a report) as a handle to pass on.
+text it made (a CSV, a report), or bytes, as a handle to pass on, and
+`pcp.read(handle, { as: "base64" })` reads a file's bytes when the program
+has to build something from them (a MIME message with an attachment). With
+`keep`, a value one tool makes, such as a password a server generates, goes
+into another tool's arguments as a handle, never read by the program or the
+assistant. `pcp.tools()` lists the token's servers and tools, as `list_tools`
+does. The program also has `atob`, `btoa`, `TextEncoder`, `TextDecoder` and
+`crypto.getRandomValues`, so it can make a strong secret itself.
 
 Each call is decided as if the assistant had made it with `call_tool`: an
 allowed tool runs, a blocked one is an error the program sees, and one that
@@ -493,8 +581,8 @@ asks you first stops the program at that call (the calls before it have run),
 with the usual request for you to answer; for the program to make that call
 itself next time, choose **Always allow**, or **Allow for** while that lasts. Every call is in the request log
 under `run_code`, and on the **Log** page. A program has no network, no files, no timers and none of
-your secrets, and stops after 3 minutes, 15 seconds of computing, 128 MB of
-memory or 100 calls (five of them at a time).
+your secrets, and stops after 3 minutes, 15 seconds of computing, its memory
+(**Settings → Resources**, above) or 100 calls (five of them at a time).
 
 **Shell and Python programs.** Where PCP runs in Docker or Podman from a
 checkout, add the sandbox and an assistant can also send a bash or Python

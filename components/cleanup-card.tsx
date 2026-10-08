@@ -83,7 +83,11 @@ function CleanupStatusLine({ overview }: { overview: CleanupOverview }) {
               : status.trigger === "start"
                 ? " when PCP started"
                 : ""}
-            : {lastRemoved ? `removed ${lastRemoved}.` : "nothing to remove."}
+            : {lastRemoved ? `removed ${lastRemoved}` : "nothing to remove"}
+            {status.freedBytes
+              ? `, and gave ${size(status.freedBytes)} of disk back`
+              : ""}
+            .
           </span>
         ) : null}
       </div>

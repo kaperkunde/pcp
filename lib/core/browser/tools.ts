@@ -128,7 +128,7 @@ const SPECS: readonly BrowserToolSpec[] = [
   {
     name: "navigate",
     title: "Open a page",
-    description: `Opens an address in a tab (this token's current one, or a new one if it has none) and answers with the page's snapshot. ${ASKS_FIRST} A link or redirect to a site this token may not open yet stops there and says which; call navigate with that address to ask.`,
+    description: `Opens an address in a tab (this token's current one, or a new one if it has none) and answers with the page's snapshot. ${ASKS_FIRST} A link or redirect to a site this token may not open yet stops there and says which; call navigate with that address to ask. A site that first checks its visitors are human is given a moment to pass the check; one that does not pass says so, and hand_over lets the owner pass it.`,
     args: z.strictObject({ tab, url }),
     annotations: MOVES,
     changes: true,

@@ -18,6 +18,7 @@ import { handOffNewToken } from "@/components/new-token-handoff"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { SubmitButton } from "@/components/submit-button"
+import { ManageWrappersField } from "@/components/manage-wrappers-field"
 import { RunCodeField } from "@/components/run-code-field"
 import { WebFetchField } from "@/components/web-fetch-field"
 import { Badge } from "@/components/ui/badge"
@@ -154,6 +155,7 @@ function CreateTokenForm({
             <KeepMemoriesField id="token-memories" />
             <WebFetchField id="token-fetch" />
             <RunCodeField id="token-code" />
+            <ManageWrappersField id="token-wrappers" />
             {draft === null ? (
               <div>
                 <Button type="submit">Create token</Button>
@@ -272,6 +274,9 @@ function TokenRow({ token }: { token: ApiTokenSummary }) {
           ) : null}
           {!dead && token.runCode ? (
             <Badge variant="outline">Runs code</Badge>
+          ) : null}
+          {!dead && token.manageWrappers ? (
+            <Badge variant="outline">Proposes wrappers</Badge>
           ) : null}
           {!dead && token.openPermissions > 0 ? (
             <Badge variant="warning">{token.openPermissions} waiting</Badge>

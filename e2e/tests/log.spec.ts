@@ -7,7 +7,8 @@ import { createToken } from "../lib/ui"
 // token, tool and outcome (never what was sent), the filters narrow it, the
 // token's page links to its own lines; Settings → Cleanup takes a schedule
 // and how long the log is kept, refuses one that skips a day, and cleans up
-// on demand.
+// on demand; Settings → Resources refuses limits the machine cannot spare
+// and saves one.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -97,6 +98,35 @@ test("Settings → Cleanup saves a schedule, refuses one that skips a day, and c
   // Back to the default, for whoever runs next.
   await form.getByLabel("When").selectOption("hourly")
   await form.getByLabel("Keep the log for").fill("90")
+  await form.getByRole("button", { name: "Save" }).click()
+  await expect(form.getByRole("status")).toContainText("Saved")
+})
+
+test("Settings → Resources refuses more than the machine can spare, and saves a limit", async ({
+  page,
+}) => {
+  await page.goto("/settings")
+  const form = page.getByRole("form", { name: "Resources" })
+
+  await form.getByLabel("A program's memory (MB)").fill("4000")
+  await form.getByLabel("Programs at once").fill("32")
+  await form.getByRole("button", { name: "Save" }).click()
+  await expect(form.getByRole("alert")).toContainText(
+    "more than this machine can spare",
+  )
+
+  await form.getByLabel("A program's memory (MB)").fill("")
+  await form.getByLabel("Programs at once").fill("")
+  await form.getByLabel("Largest file (MB)").fill("50")
+  await form.getByRole("button", { name: "Save" }).click()
+  await expect(form.getByRole("status")).toContainText("Saved")
+
+  await page.reload()
+  await expect(form.getByLabel("Largest file (MB)")).toHaveValue("50")
+  await expect(form).toContainText("files up to 50 MB")
+
+  // Back to PCP's own picks, for whoever runs next.
+  await form.getByLabel("Largest file (MB)").fill("")
   await form.getByRole("button", { name: "Save" }).click()
   await expect(form.getByRole("status")).toContainText("Saved")
 })

@@ -42,5 +42,13 @@ export const DEFAULT_LOG_DAYS = 90
 export const MIN_LOG_DAYS = 1
 export const MAX_LOG_DAYS = 3650
 
+/**
+ * After a cleanup, the database file is rebuilt without its free pages
+ * (lib/core/cleanup/space.ts) when they come to this much, or this share
+ * of the file: less is not worth rewriting the file for.
+ */
+export const MIN_RECLAIM_BYTES = 32 * 1024 * 1024
+export const MIN_RECLAIM_SHARE = 0.25
+
 /** The owner's "Clean up now", per minute. */
 export const CLEAN_NOW_LIMIT = { max: 5, windowMs: 60_000 }

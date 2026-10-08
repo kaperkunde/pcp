@@ -153,6 +153,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Make the change",
     decline: "Not now",
   },
+  // A wrapper made, changed or deleted, as the owner saw it on the page.
+  wrapper_change: {
+    allow_once: "Make the change",
+    decline: "Not now",
+  },
   // A site's answer, not the method's: the owner decides where it goes.
   fetch: {
     allow_once: "Allow once",

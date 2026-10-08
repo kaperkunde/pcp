@@ -49,7 +49,8 @@ so in the summary; the bump itself waits for the request.
   `lib/core/constants.ts` and `import type`. Anything else drags Prisma into
   the browser bundle and the build fails in webpack, not in the dev server.
 - Secrets are decrypted in `lib/core/secrets.ts` and used in
-  `lib/core/upstream.ts`. Nothing returns a secret value to an assistant;
+  `lib/core/upstream.ts` (headers, and a wrapper's bound placeholders).
+  Nothing returns a secret value to an assistant;
   `revealSecret` is for the owner's own screen. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
   header by `upstream.ts` and never read a secret; `openapi/call.ts` scrubs
@@ -116,6 +117,22 @@ so in the summary; the bump itself waits for the request.
   `mail/tools.ts`, for both protocols where they allow, with its arguments
   checked before anything connects, and is left out of a read-only account
   and refused there if called anyway.
+- SSH servers (`lib/core/ssh/`) sign in with PCP's own key, never a
+  password: an Ed25519 key made in PCP per server, a managed `ssh_key` secret
+  decrypted only in `upstream.ts`, which hands the ssh module an
+  `SshIdentity`; the owner puts its public half in `authorized_keys`. The
+  host key is pinned the first time a key exchange finishes (after `ssh2`'s
+  `handshake` event, never from `hostVerifier`, which runs before the
+  signature is checked), and any other key is refused until the owner
+  forgets it; a new address forgets it too. The protocol is `ssh2`'s, pure
+  JavaScript (its native parts stay out of `allowBuilds`), narrowed to the
+  algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
+  `run_command` (`ssh/tools.ts`), its arguments checked before anything
+  connects: `exec` only, never a terminal, forwarding, an agent or a file
+  transfer. Only the owner adds or changes one; `register_server` has no kind
+  for it. Its limits go in `ssh/limits.ts`, and a change to how a host is
+  trusted or PCP signs in gets a test against the test server
+  (`ssh/client.test.ts`).
 - Long tool answers and files are kept only through
   `lib/core/tool-results.ts`: text or bytes, encrypted with
   `tool_result:<id>`, readable by the token whose call produced them, gone
@@ -144,6 +161,11 @@ so in the summary; the bump itself waits for the request.
   site: that site gets its own decision. A site the token has no line for
   gets one of its own on first sight, so the owner sees every site it tried.
   Its limits go in `fetch/limits.ts`. Sites stay out of the request log.
+  A site that answers `cf-mitigated: challenge` is read again through the
+  vault's browser (`browser/solve.ts`): GET only, in a context of its own that
+  starts from none of the vault's sign-ins and is saved nowhere, the same site
+  only, the token's lines deciding as before. The sign-ins (`browser_profile`)
+  are never used for a web_fetch.
 - run_code (`lib/core/code/`) runs an assistant's program in QuickJS
   compiled to WebAssembly, a fresh instance per run, never in Node itself
   (not `vm`, not Node's permission model, not Pyodide in Node: none of
@@ -151,9 +173,11 @@ so in the summary; the bump itself waits for the request.
   (`code/run.ts`), and the bridge's only way to a tool is the gateway's
   `resolveCall` and `runCodeCall`: the token's own tools at its own levels,
   an "ask" tool stopping the run with the usual permission request, every
-  call in the request log, files as handles. No credential, network, file
+  call in the request log, files as handles (read as base64 only when the
+  program asks). Listing (`pcp.tools`) shows what `list_tools` would. No credential, network, file
   or timer ever reaches the program, and nothing but strings crosses into
-  it. Its memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
+  it (a wrapper's program gets its arguments the same way, as text). Its
+  memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
   own limit counts nothing in these builds). The sandbox container
   (`code/sandbox.ts`, `sandbox/`, `docker-compose.sandbox.yaml`) is a second
   executor behind the same bridge: PCP only listens on its socket, and only
@@ -163,6 +187,31 @@ so in the summary; the bump itself waits for the request.
   socket, and everything of theirs is killed and removed after each run
   (`scripts/sandbox.test.ts` pins the compose file). New limits go in
   `code/limits.ts`, and a new bridge operation gets a test.
+- Limits on the machine's memory, processors and disk (a program's memory,
+  programs at once, the largest file, kept results per token) are not
+  constants: they are `resourceLimits()` (`lib/core/resources/`), picked
+  from the machine unless the owner set them on Settings → Resources, and
+  never past what `checkResourceConfig` lets the machine spare. A new one
+  goes there, with a default from the machine and a bound. What PCP keeps
+  for a while is removed by the cleanup (`lib/core/cleanup/`), which also
+  gives the disk back (`cleanup/space.ts`); anything new PCP keeps on disk
+  is removed there too.
+- Wrappers (`lib/core/wrappers/`) are servers whose tools are programs the
+  owner approved, run as run_code's are (`code/run.ts runProgram`, a fresh
+  QuickJS instance, `args` handed in as text). A program calls only the
+  tools its definition lists for it, never a wrapper's, at the calling
+  token's own levels; a wrapper's tool comes out at the strictest of its
+  own level and those of the tools it calls (`gateway-servers.ts`), and a
+  call that asks runs only in a call the owner allowed (`approved`). A
+  secret goes in only as `{"$secret": name}` where a binding the owner
+  approved names that tool (by server id), argument and address: matched
+  and written in `upstream.ts`, scrubbed from the answer, errors and status
+  there, refused in an assistant's own call and never put into the browser.
+  An assistant's create, change and delete are a permission request
+  (`wrapper_change`) that shows every program, schema, call, replaced tool
+  and secret place in full and writes only that, to the wrapper as it was
+  (`basis`). Add a test for each new field an assistant can set
+  (`wrappers.test.ts`).
 - The browser (`lib/core/browser/`) runs Chromium for the vault and keeps
   nothing on disk: its sign-ins are the vault's `browser_profile`,
   encrypted, saved only while a request holds the key. Every connection goes
@@ -173,12 +222,17 @@ so in the summary; the bump itself waits for the request.
   tool runs JavaScript, reads or sets cookies or storage, or downloads. A
   refusal that names a site is a tool error, never a thrown `PcpError` (the
   request log keeps those). The owner's input enters through the DevTools
-  protocol with each event's own time (`input.ts`), never as page script. A
+  protocol with each event's own time (`input.ts`), never as page script.
+  In the container image Chromium runs with windows on a virtual display PCP
+  starts itself (`display.ts`: Xvfb, its own cookie, stopped with the last
+  browser); never in the desktop app, which starts no child process. A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
   a permission request (`browse`, `browser_handover`); a site is asked
   about only for the address in the call's arguments, so a call the owner
-  allowed opens it without a second ask. Its limits go in
-  `browser/limits.ts`; the Dockerfile's Chromium is the version
+  allowed opens it without a second ask. `navigate` waits for a check that
+  passes on its own; one that does not is the owner's, through `hand_over`,
+  and nothing asks them by itself. Pages read for web_fetch are not tabs. The
+  limits go in `browser/limits.ts`; the Dockerfile's Chromium is the version
   `playwright-core` drives (`scripts/docker.test.ts`). Chromium is installed
   only by the owner's click (`browser/install.ts`), only from the addresses
   Playwright pins for that version, in PCP's process: never with a child
@@ -235,7 +289,13 @@ so in the summary; the bump itself waits for the request.
   migration that adds a column fails `pnpm typecheck` in
   `lib/core/backup-format.ts` until the format carries it, with the column's
   default so older files still restore.
-- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS, pcp.gg)
+- Deleting the vault (`lib/core/vault-reset.ts`, Settings → Delete vault)
+  wipes it as a restore does (`wipeVault`), with the request log, after
+  `confirmOwner`, and leaves PCP not set up. The machine's settings stay. A
+  new table that holds a vault's rows goes in `wipeVault`
+  (`vault-reset.test.ts` counts every table).
+- Host settings (`lib/core/host-settings.ts`: dynamic DNS, HTTPS, pcp.gg,
+  the cleanup, resources)
   belong to the machine, are read with no credential, and are stored
   unencrypted. Never copy anything from the vault into one, and never add the
   pcp.gg key to an export (`EXPORTED_HOST_KEYS`). `lib/core/network/` starts
@@ -250,7 +310,7 @@ so in the summary; the bump itself waits for the request.
   at most one, an export never carries it, and recovery, signing out
   everywhere and a restore remove it. It stands in for the password to
   unlock and in `confirmOwner` (a new API token or an app's sign-in, an
-  export, a restore),
+  export, a restore, deleting the vault),
   never for a new password, a new recovery key or another Touch ID key:
   only the password and the recovery key decide who gets in. A new place
   that accepts it goes through `confirmOwner`, with a test.
@@ -318,7 +378,9 @@ column with `ALTER TABLE … DROP COLUMN` instead.
 The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
 OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
-signs in to is a "mail account"; a note an
+signs in to is a "mail account"; a machine PCP runs commands on is an "SSH
+server" ("SSH servers" in the UI); a server whose tools are programs over the
+others is a "wrapper" ("Wrappers" in the UI); a note an
 assistant keeps between conversations is a "memory", "shared" when every
 assistant reads it; what web_fetch reaches is a "site" (a host), and a level
 every token follows is "for all tokens" ("All tokens" in the UI); unlocking

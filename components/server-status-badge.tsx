@@ -42,6 +42,15 @@ export function ServerStatusBadge({
     }
   }
 
+  // A wrapper's tools are built from what you approved: nothing to reach.
+  if (kind === "wrapper") {
+    return status === "error" ? (
+      <Badge variant="destructive">Broken</Badge>
+    ) : (
+      <Badge>Ready</Badge>
+    )
+  }
+
   // The browser is checked by finding Chromium on this machine.
   if (kind === "browser") {
     switch (status) {
@@ -73,6 +82,23 @@ export function ServerStatusBadge({
         return <Badge variant="warning">Credentials rejected</Badge>
       case "error":
         return <Badge variant="destructive">Unreachable</Badge>
+      default:
+        return <Badge variant="secondary">Not checked yet</Badge>
+    }
+  }
+
+  // An SSH server is checked by signing in with PCP's key: the server can
+  // refuse the key (not added yet), or show another host key than the one
+  // PCP pinned.
+  if (kind === "ssh") {
+    switch (status) {
+      case "ok":
+        return <Badge>Ready</Badge>
+      case "auth_required":
+      case "refused":
+        return <Badge variant="warning">Key not accepted</Badge>
+      case "error":
+        return <Badge variant="destructive">Not connected</Badge>
       default:
         return <Badge variant="secondary">Not checked yet</Badge>
     }

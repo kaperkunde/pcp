@@ -647,6 +647,35 @@ describe("client registration", () => {
     ).toBe("invalid_client_metadata")
   })
 
+  it("registers a client that lists a grant PCP does not give, with only the ones it does", async () => {
+    const registered = await registerClient({
+      redirect_uris: [REDIRECT],
+      token_endpoint_auth_method: "none",
+      grant_types: [
+        "authorization_code",
+        "refresh_token",
+        "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      ],
+    })
+    expect(registered.grant_types).toEqual([
+      "authorization_code",
+      "refresh_token",
+    ])
+
+    const error = await oauthError(
+      tokenRequest(
+        {
+          grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+          client_id: registered.client_id,
+          assertion: "x",
+        },
+        null,
+        PUBLIC_URL,
+      ),
+    )
+    expect(error.error).toBe("unsupported_grant_type")
+  })
+
   it("prunes registrations no sign-in used within a day", async () => {
     await publicClient("Never used")
     const used = await publicClient("Used")
@@ -666,8 +695,15 @@ describe("client metadata documents", () => {
   const document = {
     client_id: DOCUMENT_URL,
     client_name: "Claude",
+    client_uri: "https://claude.ai",
     redirect_uris: ["https://claude.ai/api/mcp/auth_callback"],
-    grant_types: ["authorization_code", "refresh_token"],
+    // Claude's document as it is served: a grant PCP does not give is
+    // listed too, and must not keep the sign-in from going ahead.
+    grant_types: [
+      "authorization_code",
+      "refresh_token",
+      "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    ],
     response_types: ["code"],
     token_endpoint_auth_method: "none",
   }
@@ -752,6 +788,12 @@ describe("client metadata documents", () => {
       [
         serving(JSON.stringify({ ...document, redirect_uris: [] })),
         "redirect_uris",
+      ],
+      [
+        serving(
+          JSON.stringify({ ...document, grant_types: ["refresh_token"] }),
+        ),
+        "authorization_code",
       ],
       [
         serving("", {
