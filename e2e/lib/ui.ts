@@ -201,16 +201,11 @@ export async function addServerFromMenu(page: Page, kind: string) {
   await page.getByRole("menuitem", { name: new RegExp(`^${kind}`) }).click()
 }
 
-/**
- * Chooses one option of a SegmentedControl by its label. Its radio is
- * visually hidden under the label, which takes the click, so a radio's
- * check() never finds it clickable.
- */
+/** Chooses one option of a SegmentedControl by its label. */
 export async function chooseSegment(page: Page, label: string) {
-  await page.locator("label", { hasText: new RegExp(`^${label}$`) }).click()
-  await expect(
-    page.getByRole("radio", { name: label, exact: true }),
-  ).toBeChecked()
+  const radio = page.getByRole("radio", { name: label, exact: true })
+  await radio.check()
+  await expect(radio).toBeChecked()
 }
 
 /** Opens "More options" on an add form. */
