@@ -123,8 +123,11 @@ so in the summary; the bump itself waits for the request.
   `SshIdentity`; the owner puts its public half in `authorized_keys`. The
   host key is pinned the first time a key exchange finishes (after `ssh2`'s
   `handshake` event, never from `hostVerifier`, which runs before the
-  signature is checked), and any other key is refused until the owner
-  forgets it; a new address forgets it too. The protocol is `ssh2`'s, pure
+  signature is checked) in a check the owner started (`byOwner` on
+  `syncServerTools`), and any other key is refused until the owner
+  forgets it; a new address forgets it too. An assistant's call or the
+  gateway's re-read never pins one and never connects to a server with
+  none: it answers with a link to the server's page. The protocol is `ssh2`'s, pure
   JavaScript (its native parts stay out of `allowBuilds`), narrowed to the
   algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
   `run_command` (`ssh/tools.ts`), its arguments checked before anything

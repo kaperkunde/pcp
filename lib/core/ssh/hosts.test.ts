@@ -26,6 +26,8 @@ import { fingerprint } from "./keys"
 // like any server, against an SSH server on 127.0.0.1.
 
 const PUBLIC = { publicUrl: "http://localhost:3000" }
+/** The owner's check: the only connection that pins a host key. */
+const OWNER = { ...PUBLIC, byOwner: true }
 
 let cleanup: () => Promise<void>
 let ctx: VaultContext
@@ -68,6 +70,13 @@ async function addServer() {
 async function readyServer() {
   const id = await addServer()
   authorized = (await getServer(ctx, id)).sshPublicKey
+  return id
+}
+
+/** The owner has checked the server too, which pinned its host key. */
+async function pinnedServer() {
+  const id = await readyServer()
+  await syncServerTools(ctx, await getServer(ctx, id), OWNER)
   return id
 }
 
@@ -128,7 +137,7 @@ describe("adding an SSH server", () => {
 describe("the host key", () => {
   it("is pinned on the first connection, even before PCP's key is added", async () => {
     const id = await addServer()
-    const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
+    const sync = await syncServerTools(ctx, await getServer(ctx, id), OWNER)
 
     expect(sync).toMatchObject({ status: "auth_required", toolCount: 1 })
     expect(sync.message).toMatch(/deploy's ~\/.ssh\/authorized_keys/)
@@ -140,9 +149,60 @@ describe("the host key", () => {
     })
   })
 
+  it("is never pinned by an assistant: its call refuses a server the owner has not checked", async () => {
+    const id = await readyServer()
+
+    const result = await run(id, { command: "uptime" })
+
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toMatch(/only the owner pins/)
+    expect(JSON.stringify(result.content)).toContain(`/servers/${id}`)
+    expect(fake.logins).toEqual([])
+    expect(fake.commands).toEqual([])
+    const row = await getServer(ctx, id)
+    expect(row.sshHostKey).toBeNull()
+    expect(row.status).toBe("unknown")
+  })
+
+  it("is not pinned by the gateway reading the tools again, which does not connect", async () => {
+    const id = await readyServer()
+
+    const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
+
+    expect(sync).toMatchObject({ status: "error", toolCount: 1 })
+    expect(sync.message).toContain(`/servers/${id}`)
+    expect(fake.logins).toEqual([])
+    const row = await getServer(ctx, id)
+    expect(row.sshHostKey).toBeNull()
+    expect(row.status).toBe("unknown")
+
+    // Once the owner has pinned it, a reading for an assistant signs in.
+    await syncServerTools(ctx, row, OWNER)
+    expect(
+      await syncServerTools(ctx, await getServer(ctx, id), PUBLIC),
+    ).toMatchObject({ status: "ok" })
+    expect(fake.logins).toEqual(["deploy", "deploy"])
+  })
+
+  it("is not pinned again by an assistant's call once the owner forgot it", async () => {
+    const id = await pinnedServer()
+    await forgetSshHostKey(ctx, id)
+    const logins = fake.logins.length
+
+    const result = await run(id, { command: "uptime" })
+
+    expect(result.isError).toBe(true)
+    expect(fake.logins.length).toBe(logins)
+    expect((await getServer(ctx, id)).sshHostKey).toBeNull()
+
+    await syncServerTools(ctx, await getServer(ctx, id), OWNER)
+    expect((await getServer(ctx, id)).sshHostKey).toBe(fake.hostKey)
+    expect((await run(id, { command: "uptime" })).isError).toBeFalsy()
+  })
+
   it("refuses a server that shows another key, until the owner forgets it", async () => {
     const id = await readyServer()
-    await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
+    await syncServerTools(ctx, await getServer(ctx, id), OWNER)
     // As if the server had been swapped for another since.
     await db().mcpServer.update({
       where: { id },
@@ -160,15 +220,15 @@ describe("the host key", () => {
     expect(fake.logins.length).toBe(logins)
     expect(fake.commands).toEqual([])
 
+    // The owner forgets it, and their next check pins what the server shows.
     await forgetSshHostKey(ctx, id)
-    const ran = await run(id, { command: "uptime" })
-    expect(ran.isError).toBeFalsy()
+    await syncServerTools(ctx, await getServer(ctx, id), OWNER)
     expect((await getServer(ctx, id)).sshHostKey).toBe(fake.hostKey)
+    expect((await run(id, { command: "uptime" })).isError).toBeFalsy()
   })
 
   it("is pinned afresh when the address changes", async () => {
-    const id = await readyServer()
-    await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
+    const id = await pinnedServer()
     const input = {
       name: "Build box, renamed",
       host: "127.0.0.1",
@@ -189,7 +249,7 @@ describe("the host key", () => {
 describe("running commands", () => {
   it("signs in with PCP's key, runs the command and returns what it wrote", async () => {
     const id = await readyServer()
-    const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
+    const sync = await syncServerTools(ctx, await getServer(ctx, id), OWNER)
 
     expect(sync).toEqual({ status: "ok", message: "", toolCount: 1 })
 
@@ -218,7 +278,7 @@ describe("running commands", () => {
   })
 
   it("feeds a kept result's text to standard input", async () => {
-    const id = await readyServer()
+    const id = await pinnedServer()
     const { id: tokenId } = await createApiToken(ctx, {
       name: "Claude",
       allowAllServers: true,
@@ -267,6 +327,7 @@ describe("running commands", () => {
 
   it("answers with the owner's page when the server turns PCP's key down", async () => {
     const id = await addServer()
+    await syncServerTools(ctx, await getServer(ctx, id), OWNER)
 
     const result = await run(id, { command: "uptime" })
 
@@ -277,7 +338,7 @@ describe("running commands", () => {
   })
 
   it("stops working with the old key once PCP makes a new one", async () => {
-    const id = await readyServer()
+    const id = await pinnedServer()
     const before = await getServer(ctx, id)
 
     await replaceSshKey(ctx, id)
@@ -292,7 +353,7 @@ describe("running commands", () => {
   })
 
   it("reports a server it cannot reach as an error", async () => {
-    const id = await readyServer()
+    const id = await pinnedServer()
     await fake.close()
 
     await expect(run(id, { command: "uptime" })).rejects.toThrow(

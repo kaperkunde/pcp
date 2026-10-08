@@ -1042,7 +1042,10 @@ export async function syncServerTools(
     byOwner = false,
   }: {
     publicUrl: string
-    /** The owner asked for this read (see syncEndpointTools). */
+    /**
+     * The owner asked for this read (see syncEndpointTools). An SSH server's
+     * host key is pinned only by one (see syncSshTools).
+     */
     byOwner?: boolean
   },
 ): Promise<SyncResult> {
@@ -1059,7 +1062,10 @@ export async function syncServerTools(
   }
 
   if (isSshKind(server.kind)) {
-    return syncSshTools(server, await sshIdentity(ctx, server), { publicUrl })
+    return syncSshTools(server, await sshIdentity(ctx, server), {
+      publicUrl,
+      byOwner,
+    })
   }
 
   if (isMailKind(server.kind)) {

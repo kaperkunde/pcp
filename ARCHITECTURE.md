@@ -586,11 +586,15 @@ exchange (the Terrapin countermeasure) to any offer.
   the owner to put in the login's `authorized_keys`. PCP signs in with that
   key alone: no password, no keyboard-interactive, no agent. The owner can
   have PCP make a new key; deleting the server deletes the key.
-- **The host key**, pinned on first use. The first connection that finishes
-  a key exchange stores the key the server proved it holds
-  (`ssh_host_key`), whether or not signing in then works, so it is usually
-  pinned when the owner adds the server, and the page shows its fingerprint
-  to compare with the server's own. `ssh2` asks `hostVerifier` before it
+- **The host key**, pinned on first use, by the owner. The first connection
+  the owner started (adding the server, **Check sign-in**, forgetting the
+  key) that finishes a key exchange stores the key the server proved it
+  holds (`ssh_host_key`), whether or not signing in then works, so it is
+  usually pinned when the owner adds the server, and the page shows its
+  fingerprint to compare with the server's own. A call an assistant makes,
+  or the gateway reading the tools again, never pins a key and does not
+  connect while there is none: whoever answered first would otherwise be
+  the key every later call trusts. It answers with the server's page. `ssh2` asks `hostVerifier` before it
   checks the server's signature, so the key is kept only after the
   `handshake` event, never from inside the verifier. From then on any other
   key is refused before signing in; the owner can forget the pinned key
