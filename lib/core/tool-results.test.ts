@@ -172,12 +172,18 @@ describe("keeping and reading", () => {
     expect(await pruneToolResults(later)).toBe(1)
   })
 
-  it("keeps at most so much of one answer, and says what was dropped", async () => {
-    const { textChars } = resourceLimits()
-    const kept = await keep("z".repeat(textChars + 5))
+  // The limit follows the machine, so the text is as large as it lets one
+  // be: encrypting and storing it can outlast the default 5 s under load.
+  it(
+    "keeps at most so much of one answer, and says what was dropped",
+    { timeout: 30_000 },
+    async () => {
+      const { textChars } = resourceLimits()
+      const kept = await keep("z".repeat(textChars + 5))
 
-    expect(kept).toMatchObject({ length: textChars, dropped: 5 })
-  })
+      expect(kept).toMatchObject({ length: textChars, dropped: 5 })
+    },
+  )
 
   it("lets go of a token's oldest results past what the owner lets it keep", async () => {
     await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 4, keptMb: 10 })

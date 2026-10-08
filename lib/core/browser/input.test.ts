@@ -28,6 +28,37 @@ function fakeTab(): { tab: Tab; sent: Sent[] } {
 
 const parse = (batch: InputBatch) => InputBatchSchema.parse(batch)
 
+/**
+ * A tab whose DevTools session acknowledges a mouse move only after
+ * `ackMs`, as Chromium does with its next frame (about 17 ms at 60 Hz);
+ * `ackMs` Infinity never acknowledges one.
+ */
+function slowTab(ackMs: number): { tab: Tab; sent: Sent[] } {
+  const sent: Sent[] = []
+  const tab = {
+    extra: new Map(),
+    cdp: {
+      send: (method: string, params: Record<string, unknown>) => {
+        sent.push({ method, params, at: Date.now() })
+
+        if (params.type !== "mouseMoved") return Promise.resolve({})
+        if (!Number.isFinite(ackMs)) return new Promise(() => {})
+        return new Promise((resolve) => setTimeout(() => resolve({}), ackMs))
+      },
+    },
+  } as unknown as Tab
+
+  return { tab, sent }
+}
+
+const moves = (from: number, count: number, every = 1) =>
+  Array.from({ length: count }, (_, i) => ({
+    type: "move" as const,
+    t: from + i * every,
+    x: 10 + i,
+    y: 20,
+  }))
+
 describe("replaying the owner's input", () => {
   it("keeps the order, the gaps between events and their timestamps", async () => {
     const { tab, sent } = fakeTab()
@@ -122,6 +153,48 @@ describe("replaying the owner's input", () => {
     const stamps = late.map((call) => (call.params.timestamp as number) * 1000)
     expect(stamps[2]! - stamps[0]!).toBeGreaterThanOrEqual(76)
     expect(stamps[2]! - stamps[0]!).toBeLessThanOrEqual(80)
+  })
+
+  it("keeps up with a fast mouse though Chromium acknowledges a move only with its next frame", async () => {
+    const { tab, sent } = slowTab(17)
+    const started = Date.now()
+
+    // 200 samples over 200 ms, as a 1,000 Hz mouse sends them.
+    await dispatchInput(tab, parse({ seq: 0, events: moves(0, 200) }))
+
+    // At its own pace, not 200 acknowledgements one after another
+    // (3.4 s, during which everything after it waits).
+    expect(Date.now() - started).toBeLessThan(200 + INPUT_REPLAY_DELAY_MS + 250)
+    expect(sent).toHaveLength(200)
+    expect(sent.map((call) => call.params.x)).toEqual(
+      moves(0, 200).map((event) => event.x),
+    )
+    const stamps = sent.map((call) => (call.params.timestamp as number) * 1000)
+    expect(stamps.at(-1)! - stamps[0]!).toBeGreaterThanOrEqual(190)
+  })
+
+  it("drops moves, never a click, while Chromium is far behind", async () => {
+    const { tab, sent } = slowTab(Infinity)
+
+    await dispatchInput(
+      tab,
+      parse({
+        seq: 0,
+        events: [
+          ...moves(0, 15, 100),
+          { type: "down", t: 1500, x: 5, y: 5, button: "left", buttons: 1 },
+          { type: "up", t: 1550, x: 5, y: 5, button: "left" },
+        ],
+      }),
+    )
+
+    const kinds = sent.map((call) => call.params.type)
+    // Moves stop once the oldest one Chromium has not taken has waited
+    // a second; the click still goes.
+    expect(kinds.filter((kind) => kind === "mouseMoved").length).toBeLessThan(
+      15,
+    )
+    expect(kinds.slice(-2)).toEqual(["mousePressed", "mouseReleased"])
   })
 
   it("types printable keys as text and leaves shortcuts as keys", async () => {

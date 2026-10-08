@@ -20,6 +20,10 @@ export const runtime = "nodejs"
  * it was made (lib/core/browser/input.ts). A route handler for the same
  * reason as the stream next to it, with the same checks: PCP's own page,
  * the owner's session, and a tab of their vault that they have taken over.
+ *
+ * It answers once the batch is queued, not once it has played: the page
+ * sends one batch at a time, and holding each answer for its replay would
+ * hold the next batch behind it, so input would arrive later and later.
  */
 export async function POST(
   request: Request,
@@ -78,15 +82,20 @@ export async function POST(
   }
 
   touch(ctx.vaultId)
-  await dispatchInput(tab, batch.data).catch(() => {})
+  // Played in order behind the batches before it; the profile is saved
+  // (at most every few seconds) once this one has gone out.
+  void dispatchInput(tab, batch.data)
+    .catch(() => {})
+    .then(async () => {
+      const vault = runningBrowser(ctx.vaultId)
 
-  const vault = runningBrowser(ctx.vaultId)
-
-  if (vault) {
-    await saveVaultProfile(ctx, vault).catch((error) =>
+      if (vault) {
+        await saveVaultProfile(ctx, vault)
+      }
+    })
+    .catch((error) =>
       console.error("[browser] saving the profile failed", error),
     )
-  }
 
   return new Response(null, {
     status: 204,

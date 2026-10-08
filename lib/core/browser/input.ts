@@ -1,6 +1,7 @@
 import {
   INPUT_REPLAY_DELAY_MS,
   INPUT_RESYNC_MS,
+  MAX_INPUT_BACKLOG_MS,
   MAX_INPUT_REPLAY_DELAY_MS,
   VIEWPORT,
 } from "./limits"
@@ -20,6 +21,15 @@ import type { Tab } from "./runtime"
  * pace rather than in a burst, and the delay shrinks back slowly while
  * input arrives in time. A batch that arrives far too late starts a new
  * clock rather than racing to catch up.
+ *
+ * Events are sent in order without waiting for Chromium to acknowledge
+ * each: it acknowledges a mouse move only with its next frame (about
+ * 17 ms), and waiting on every one would replay at most sixty moves a
+ * second while a mouse makes hundreds, so the replay would fall seconds
+ * behind. Chromium folds the moves into its frames as it does a real
+ * mouse's. Should it still fall behind (a move waiting unacknowledged for
+ * MAX_INPUT_BACKLOG_MS), moves are dropped until it catches up; presses,
+ * releases, the wheel and keys never are.
  */
 
 type Clock = {
@@ -29,6 +39,9 @@ type Clock = {
   last: number
   /** How far behind the owner's time the replay runs now. */
   delay: number
+  /** Moves sent and not yet acknowledged: when each was sent (epoch ms). */
+  unacked: Map<number, number>
+  sent: number
   chain: Promise<unknown>
 }
 
@@ -43,6 +56,8 @@ function clockOf(tab: Tab): Clock {
       server: 0,
       last: 0,
       delay: INPUT_REPLAY_DELAY_MS,
+      unacked: new Map(),
+      sent: 0,
       chain: Promise.resolve(),
     }
     tab.extra.set(CLOCK, clock)
@@ -188,11 +203,31 @@ async function replay(tab: Tab, batch: ParsedInputBatch): Promise<void> {
     }
 
     clock.last = due
-    await dispatch(tab, event, due / 1000)
+
+    if (event.type !== "move") {
+      void dispatch(tab, event, due / 1000).catch(() => {})
+      continue
+    }
+
+    // Map keeps the order moves were sent in: the first is the oldest.
+    const oldest = clock.unacked.values().next().value
+
+    if (oldest !== undefined && Date.now() - oldest > MAX_INPUT_BACKLOG_MS) {
+      continue
+    }
+
+    const id = clock.sent++
+    clock.unacked.set(id, Date.now())
+    void dispatch(tab, event, due / 1000)
+      .catch(() => {})
+      .finally(() => clock.unacked.delete(id))
   }
 }
 
-/** Queues a batch behind the ones before it, and waits for it to play. */
+/**
+ * Queues a batch behind the ones before it, and waits until its last event
+ * has been sent (not acknowledged).
+ */
 export function dispatchInput(
   tab: Tab,
   batch: ParsedInputBatch,
