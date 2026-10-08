@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test"
 import { OWNER_PASSWORD, unlock } from "../lib/auth"
 import { mcpRequest } from "../lib/mcp"
 import { loadState, saveState, type SetupState } from "../lib/state"
-import { createToken } from "../lib/ui"
+import { addSecret, createToken } from "../lib/ui"
 
 // Losing the password: the recovery key from setup sets a new one, every
 // browser is signed out (and, when asked, every API token revoked), and the
@@ -18,11 +18,14 @@ const TEMPORARY_PASSWORD = "e2e-temporary-password-2!"
 
 test("resets the password with the recovery key", async ({ page, baseURL }) => {
   const { recoveryKey } = loadState<SetupState>("setup")
+  const secret = `recovery-${RUN}`
 
-  // A token made before recovery, to see it revoked.
+  // A token and a secret made before recovery: the token is to see revoked,
+  // the secret to see survive.
   await unlock(page)
   const token = await createToken(page, `Before recovery ${RUN}`)
   expect((await mcpRequest(baseURL!, token, "tools/list")).status).toBe(200)
+  await addSecret(page, { name: secret, value: "kept through recovery" })
 
   await page.goto("/recover")
   await page.getByLabel("Recovery key").fill("pcp_recovery_wrong")
@@ -52,13 +55,11 @@ test("resets the password with the recovery key", async ({ page, baseURL }) => {
   // Everything is still there: the key never changed, only its wrapping.
   await page.goto("/secrets")
   await expect(
-    page.getByRole("heading", { name: "Secrets", exact: true }),
+    page.getByRole("listitem").filter({ hasText: secret }).first(),
   ).toBeVisible()
-})
 
-test("the old password no longer works and the new one does", async ({
-  page,
-}) => {
+  // The old password no longer works and the new one does.
+  await page.context().clearCookies()
   await page.goto("/login")
   await page.getByLabel("Password").fill(OWNER_PASSWORD)
   await page.getByRole("button", { name: "Unlock" }).click()
