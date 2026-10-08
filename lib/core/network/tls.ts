@@ -626,7 +626,10 @@ export async function saveTlsForPcpgg(
   agreedAt: string,
   email: string | null,
 ): Promise<TlsConfig> {
-  const config: TlsConfig = { domain: name, email, agreedAt, via: "pcpgg" }
+  // The name came from the relay (runtime.ts takes only its own); it
+  // becomes a folder here and the address port 80 redirects to.
+  const domain = normalizeHostname(name)
+  const config: TlsConfig = { domain, email, agreedAt, via: "pcpgg" }
   await setHostJson(TLS_CONFIG_KEY, config)
   await setHostJson(TLS_STATUS_KEY, null)
   return config
