@@ -437,10 +437,36 @@ A mail account is a server row of kind `jmap` or `imap` with a fixed set of
 tools (`lib/core/mail/tools.ts`), the same names and answers for both, so an
 assistant learns one set: `list_mailboxes`, `search_emails`, `get_email`,
 `get_attachment`, `move_email`, `mark_email`, `delete_email`, `send_email`,
-`create_draft`, and on JMAP `get_thread` and `list_identities`. Which ones an
-account has depends on read-only (the tools that change mail are left out, and
-refused if called anyway), and on whether it can send (JMAP: the session
-offers submission; IMAP: the owner gave an SMTP server). `create_draft` is
+`create_draft`, `create_mailbox`, `rename_mailbox`, `delete_mailbox`, and on
+JMAP `get_thread`, `list_identities`, `get_vacation_response` and
+`set_vacation_response`. It is a fixed set on purpose, not the protocol passed
+through: there is no tool that takes a raw JMAP method or IMAP command, so
+every change an assistant makes is one these rules were written for. Which
+ones an account has depends on read-only (the tools that change mail are left
+out, and refused if called anyway), on whether it can send (JMAP: the session
+offers submission; IMAP: the owner gave an SMTP server), and for the automatic
+reply on whether the JMAP session offers `vacationresponse`.
+
+`move_email`, `mark_email` and `delete_email` take `id` or `ids` (up to
+`MAX_BULK_EMAILS`): one email answers as it always has, several answer with
+`done` and `failed`, and one email's refusal stops no other (JMAP: one
+`Email/set`; IMAP: one UID MOVE or STORE per mailbox). `mark_email` also sets
+answered and adds or removes keywords, which every summary lists and
+`search_emails` filters on; the keywords the flags carry (`$seen`,
+`$flagged`, `$answered`, `$draft`) are left to the flags. `search_emails` with
+`allMailboxes` looks in every mailbox but Trash and Junk (JMAP:
+`inMailboxOtherThan`; IMAP: All Mail alone where the server has one, else
+each selectable mailbox but the Flagged and Important views in turn, at most
+`MAX_SEARCH_MAILBOXES`, merged by date and paged only to
+`MAX_SEARCH_ALL_WINDOW`). A JMAP mailbox's `path` is its names from the top
+joined with `/`, so a folder is named by path as on IMAP.
+`delete_mailbox` removes only an empty mailbox with no role and none inside
+it (`checkDeletable` in `mail/mailboxes.ts`); JMAP's `Mailbox/set` destroy
+goes with `onDestroyRemoveEmails: false`, so the server refuses too if mail
+arrived in between, and IMAP's DELETE, which would take mail with it, is sent
+only after the listing's count said empty. `rename_mailbox` renames or moves
+one, never into itself or one inside it, and never the inbox; on IMAP the
+emails inside get new ids, since an id carries its mailbox's path. `create_draft` is
 `send_email`'s arguments and email, recipients optional, written into Drafts
 (the drafts role, or a mailbox called Drafts) marked as a draft and seen, and
 sent by nobody: a separate tool so the owner can allow drafting without

@@ -64,9 +64,11 @@ it.
 account's tools do, as far as you allowed them: list and search its mail,
 read emails and their attachments (a file comes back as a handle), and,
 unless you made the account read-only (or, over IMAP, gave it no SMTP
-server), send as you, with attachments from its own kept results, move, flag
-and delete into the Trash. Nothing deletes mail for good, and sending cannot
-be undone, so leave `send_email` on Ask you first unless you mean otherwise.
+server), send as you, with attachments from its own kept results, move, flag,
+label and delete into the Trash, create, rename and move folders, delete an
+empty one, and (JMAP) turn the automatic reply on or off. Nothing deletes mail
+for good (a folder that holds mail, or the inbox, Trash and the other special
+ones, is never deleted), and sending cannot be undone, so leave `send_email` on Ask you first unless you mean otherwise.
 `create_draft` only writes into Drafts and sends nothing, so you can allow it
 on its own and send what it wrote yourself.
 It never receives the password or token: PCP signs in itself and removes
