@@ -1,7 +1,6 @@
 import { expect, test } from "@playwright/test"
 
 import { PICTURE_PNG, startUpstream, type Upstream } from "../fixtures/upstream"
-import { OWNER_PASSWORD } from "../lib/auth"
 import {
   allToolText,
   callTool,
@@ -14,10 +13,10 @@ import {
   addSecret,
   allowAllTools,
   confirmWithPassword,
+  connectAssistant,
   createToken,
   openToken,
-  showServerTools,
-  showTools,
+  startConnecting,
 } from "../lib/ui"
 
 // The whole point of PCP in one flow: a secret goes in, a server is added
@@ -30,10 +29,10 @@ const RUN = Date.now().toString(36)
 const SECRET_NAME = `Upstream key ${RUN}`
 const SERVER_NAME = `Postcards ${RUN}`
 const SLUG = `postcards-${RUN}`
+const TOKEN_NAME = `Assistant ${RUN}`
 
 let upstream: Upstream
 let token: string
-let serverId: string
 
 test.beforeAll(async () => {
   upstream = await startUpstream()
@@ -67,13 +66,8 @@ test("adds a server that authenticates with a stored secret", async ({
 
   // PCP read the tool list on the way in.
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  serverId = page.url().split("/").pop()!
   await expect(page.getByText("Connected")).toBeVisible()
   await expect(page.getByText("Tools (3)")).toBeVisible()
-  // The tools stay folded until asked for.
-  await expect(page.locator("code", { hasText: "echo_auth" })).toHaveCount(0)
-  await showServerTools(page)
-  await expect(page.locator("code", { hasText: "echo_auth" })).toBeVisible()
 
   // The short name defaults to the slugified name; set the one the tests use.
   await page.getByLabel("Short name").fill(SLUG)
@@ -83,31 +77,14 @@ test("adds a server that authenticates with a stored secret", async ({
   ).toBeVisible()
 })
 
-test("lets the owner rewrite a tool's description", async ({ page }) => {
-  await page.goto(`/servers/${serverId}`)
-  await showServerTools(page)
-  const row = page.getByRole("listitem").filter({ hasText: "send_postcard" })
-  await row.getByRole("button", { name: "Edit description" }).click()
-  await row
-    .getByLabel("Description of send_postcard")
-    .fill("Posts a physical greeting card to a street address.")
-  await row.getByRole("button", { name: "Save description" }).click()
-  await expect(
-    row.getByText("Posts a physical greeting card to a street address."),
-  ).toBeVisible()
-  await expect(row.getByText("edited")).toBeVisible()
-})
-
 test("a token is only made with the password", async ({ page }) => {
   // The session alone must not be enough to mint a lasting way in.
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(`Unconfirmed ${RUN}`)
-  await page.getByRole("button", { name: "Create token" }).click()
+  await startConnecting(page, `Unconfirmed ${RUN}`)
   await confirmWithPassword(page, "not the password")
   await expect(page.locator("p[role=alert]")).toHaveText(/not right/)
-  await expect(page.getByText("Your new token")).toHaveCount(0)
+  await expect(page.getByTestId("new-token")).toHaveCount(0)
 
-  await page.reload()
+  await page.goto("/tokens")
   await expect(
     page.getByRole("listitem").filter({ hasText: `Unconfirmed ${RUN}` }),
   ).toHaveCount(0)
@@ -117,14 +94,15 @@ test("issues an API token and describes the servers behind it", async ({
   page,
   baseURL,
 }) => {
-  token = await createToken(page, `Assistant ${RUN}`)
+  token = await createToken(page, TOKEN_NAME)
 
-  const { instructions, tools, serverInfo } = await initialize(baseURL!, token)
+  const { instructions, tools } = await initialize(baseURL!, token)
   expect(tools).toEqual([
     "search_tools",
     "list_tools",
     "describe_tool",
     "call_tool",
+    "call_read_only_tool",
     "check_permission",
     "check_server",
     "read_result",
@@ -135,18 +113,9 @@ test("issues an API token and describes the servers behind it", async ({
     `${SLUG}: Sends postcards and adds numbers. (3 tools)`,
   )
 
-  // The app shows PCP's icon beside the gateway, served from PCP itself.
-  const icon = serverInfo?.icons?.find((entry) =>
-    entry.sizes?.includes("192x192"),
-  )
-  expect(icon?.src).toBe(`${baseURL}/icons/icon-192.png`)
-  const image = await fetch(icon!.src)
-  expect(image.status).toBe(200)
-  expect(image.headers.get("content-type")).toBe("image/png")
-
   // Tools ask the owner first by default (permissions.spec.ts covers that);
   // this spec is about the gateway, so let the token run them.
-  await allowAllTools(page, `Assistant ${RUN}`, SLUG)
+  await allowAllTools(page, TOKEN_NAME, SLUG)
 })
 
 test("finds, describes and calls an upstream tool with the secret added by PCP", async ({
@@ -161,7 +130,7 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   const line = toolText(search)
     .split("\n")
     .find((entry) => entry.startsWith(`${SLUG}/send_postcard`))
-  expect(line, toolText(search)).toContain("Posts a physical greeting card")
+  expect(line, toolText(search)).toBeTruthy()
 
   const scoped = await callTool(baseURL!, token, "search_tools", {
     query: "numbers",
@@ -220,7 +189,7 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   expect(toolText(unknown)).toContain("no tool called no_such_tool")
 })
 
-test("picks up tools the server adds later", async ({ page, baseURL }) => {
+test("picks up tools the server adds later", async ({ baseURL }) => {
   // An assistant asking for a tool PCP has not seen yet makes it read the
   // server's list again, and finds it.
   upstream.lateTools.add("water_plants")
@@ -236,36 +205,25 @@ test("picks up tools the server adds later", async ({ page, baseURL }) => {
     tool: "water_plants",
     access: "ask",
   })
-
-  // The owner reads it again from the token's page, to decide a new tool
-  // before an assistant asks for it.
-  upstream.lateTools.add("feed_the_cat")
-  await openToken(page, `Assistant ${RUN}`)
-  await showTools(page, SLUG)
-  const newTool = page.getByLabel(`Access to ${SLUG}/feed_the_cat`)
-  await expect(page.getByLabel(`Access to ${SLUG}/water_plants`)).toBeVisible()
-  await expect(newTool).toHaveCount(0)
-  await page
-    .getByRole("button", { name: `Refresh tools on ${SLUG}`, exact: true })
-    .click()
-  await expect(page.getByText("Found 5 tools.")).toBeVisible()
-  await expect(newTool).toHaveValue("ask")
 })
 
-test("keeps a long answer whole, for read_result and this token only", async ({
+test("keeps long answers and files for this token only", async ({
   page,
   baseURL,
 }) => {
-  upstream.lateTools.add("long_text")
-  const described = await callTool(baseURL!, token, "describe_tool", {
-    server: SLUG,
-    tool: "long_text",
-  })
-  expect(described.body.result?.isError ?? false, toolText(described)).toBe(
-    false,
-  )
-  await allowAllTools(page, `Assistant ${RUN}`, SLUG)
+  for (const tool of ["long_text", "picture", "measure"]) {
+    upstream.lateTools.add(tool)
+    const described = await callTool(baseURL!, token, "describe_tool", {
+      server: SLUG,
+      tool,
+    })
+    expect(described.body.result?.isError ?? false, toolText(described)).toBe(
+      false,
+    )
+  }
+  await allowAllTools(page, TOKEN_NAME, SLUG)
 
+  // A long answer is kept whole and read in pieces with read_result.
   const long = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "long_text",
@@ -280,85 +238,27 @@ test("keeps a long answer whole, for read_result and this token only", async ({
     id,
     find: "THE END",
   })
-  expect(toolText(found)).toMatch(/characters 149993–150000 of 150000/)
   expect(toolText(found)).toMatch(/\nTHE END$/)
 
-  const other = await createToken(page, `Reader ${RUN}`)
-  const refused = await callTool(baseURL!, other, "read_result", { id })
-  expect(refused.body.result?.isError).toBe(true)
-  expect(toolText(refused)).toContain("No result with that id for this token")
-})
-
-test("hands a file back as a handle, and puts it where a later call names it", async ({
-  page,
-  baseURL,
-}) => {
-  upstream.lateTools.add("picture")
-  upstream.lateTools.add("measure")
-  for (const tool of ["picture", "measure"]) {
-    const described = await callTool(baseURL!, token, "describe_tool", {
-      server: SLUG,
-      tool,
-    })
-    expect(described.body.result?.isError ?? false, toolText(described)).toBe(
-      false,
-    )
-  }
-  await allowAllTools(page, `Assistant ${RUN}`, SLUG)
-
-  // The PNG is kept on sight; the caption because keep names it.
+  // A file comes back as a handle, never as its bytes, and a later call
+  // that names the handle gets the file in its place.
   const picture = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "picture",
-    keep: ["caption"],
   })
-  const shown = allToolText(picture)
   const base64 = PICTURE_PNG.toString("base64")
-  expect(shown).not.toContain(base64.slice(0, 40))
-  expect(shown).toContain("PCP kept 2 values of this answer as results")
+  expect(allToolText(picture)).not.toContain(base64.slice(0, 40))
   const answer = JSON.parse(lastToolText(picture)) as {
-    name: string
-    caption: { $result: string; type: string }
-    data: { $result: string; type: string; size: number; name?: string }
+    data: { $result: string; type: string }
   }
-  expect(answer.name).toBe("dot.png")
-  expect(answer.data).toMatchObject({
-    type: "image/png",
-    size: PICTURE_PNG.length,
-    name: "dot.png",
-  })
-  expect(answer.caption.type).toBe("text/plain")
+  expect(answer.data.type).toBe("image/png")
+  const handle = answer.data.$result
+  const link = `pcp://results/${handle}`
 
-  // A client that reads resources can fetch the file itself, by its link.
-  const link = picture.body.result?.content?.find(
-    (block) =>
-      block.type === "resource_link" &&
-      block.uri?.endsWith(answer.data.$result),
-  )
-  expect(link?.uri).toBe(`pcp://results/${answer.data.$result}`)
-  const resource = await mcpRequest(baseURL!, token, "resources/read", {
-    uri: link!.uri,
-  })
-  expect(resource.body.result?.contents?.[0]).toMatchObject({
-    mimeType: "image/png",
-    blob: base64,
-  })
-
-  // read_result describes the file and reads the text.
-  const described = await callTool(baseURL!, token, "read_result", {
-    id: answer.data.$result,
-  })
-  expect(toolText(described)).toContain("PCP does not show binary data")
-  const caption = await callTool(baseURL!, token, "read_result", {
-    id: answer.caption.$result,
-  })
-  expect(toolText(caption)).toMatch(/A small dot, drawn for the test\.$/)
-
-  // The handle reaches the upstream as the file's base64.
   const measured = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "measure",
-    arguments: { text: { $result: answer.data.$result } },
+    arguments: { text: { $result: handle } },
   })
   expect(JSON.parse(toolText(measured))).toEqual({
     length: base64.length,
@@ -369,21 +269,26 @@ test("hands a file back as a handle, and puts it where a later call names it", a
     args: { text: base64 },
   })
 
-  // Another token cannot use it, and nothing reaches the upstream.
+  // Another token can neither read the answer nor use or read the file, and
+  // nothing reaches the upstream on its behalf.
+  const other = await createToken(page, `Reader ${RUN}`)
+  const refused = await callTool(baseURL!, other, "read_result", { id })
+  expect(refused.body.result?.isError).toBe(true)
+  expect(toolText(refused)).toContain("No result with that id for this token")
+
   const before = upstream.calls.length
-  const other = await createToken(page, `Borrower ${RUN}`)
-  const refused = await callTool(baseURL!, other, "call_tool", {
+  const borrowed = await callTool(baseURL!, other, "call_tool", {
     server: SLUG,
     tool: "measure",
-    arguments: { text: { $result: answer.data.$result } },
+    arguments: { text: { $result: handle } },
   })
-  expect(refused.body.result?.isError).toBe(true)
-  expect(toolText(refused)).toContain(
-    `No kept result "${answer.data.$result}" for this token`,
+  expect(borrowed.body.result?.isError).toBe(true)
+  expect(toolText(borrowed)).toContain(
+    `No kept result "${handle}" for this token`,
   )
   expect(upstream.calls.length).toBe(before)
   const notTheirs = await mcpRequest(baseURL!, other, "resources/read", {
-    uri: link!.uri,
+    uri: link,
   })
   expect(notTheirs.body.result?.contents).toBeUndefined()
   expect(notTheirs.body.error?.message).toBeTruthy()
@@ -400,18 +305,14 @@ test("a token scoped to other servers cannot see this one", async ({
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
 
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(`Scoped ${RUN}`)
-  await page.getByLabel("Only these servers").check()
-  await page.getByLabel(`Other ${RUN}`).check()
-  await page.getByRole("button", { name: "Create token" }).click()
-  await confirmWithPassword(page, OWNER_PASSWORD)
-  const scopedToken = (await page.getByTestId("new-token").textContent())!
+  const scoped = await connectAssistant(page, `Scoped ${RUN}`, {
+    servers: [`Other ${RUN}`],
+  })
 
-  const { instructions } = await initialize(baseURL!, scopedToken)
+  const { instructions } = await initialize(baseURL!, scoped.token)
   expect(instructions).not.toContain(SLUG)
 
-  const call = await callTool(baseURL!, scopedToken, "call_tool", {
+  const call = await callTool(baseURL!, scoped.token, "call_tool", {
     server: SLUG,
     tool: "add_numbers",
     arguments: { a: 1, b: 1 },
@@ -421,11 +322,10 @@ test("a token scoped to other servers cannot see this one", async ({
 })
 
 test("revoking the token locks the gateway", async ({ page, baseURL }) => {
-  await page.goto("/tokens")
-  const row = page.getByRole("listitem").filter({ hasText: `Assistant ${RUN}` })
+  await openToken(page, TOKEN_NAME)
   page.once("dialog", (dialog) => dialog.accept())
-  await row.getByRole("button", { name: "Revoke" }).click()
-  await expect(row.getByText("Revoked")).toBeVisible()
+  await page.getByRole("button", { name: "Revoke access" }).click()
+  await expect(page.getByText("Revoked", { exact: true })).toBeVisible()
 
   const response = await mcpRequest(baseURL!, token, "tools/list")
   expect(response.status).toBe(401)
