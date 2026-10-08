@@ -22,6 +22,14 @@ describe("the Docker image's Chromium", () => {
     expect(installed).toBe(pkg.dependencies["playwright-core"])
     expect(pkg.devDependencies["@playwright/test"]).toContain(installed)
   })
+
+  it("is the full Chromium only: PCP never launches the headless shell", () => {
+    const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
+
+    expect(dockerfile).toMatch(
+      /playwright-core@\$\{PLAYWRIGHT_VERSION\} install --with-deps --no-shell chromium/,
+    )
+  })
 })
 
 // Next.js listens on :: in the image, IPv6 and IPv4 at once: rootless

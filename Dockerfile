@@ -74,11 +74,13 @@ RUN groupadd --system --gid 1001 nodejs \
 # (scripts/docker.test.ts keeps the two the same). It only runs once the
 # owner adds the browser and a page is opened. An unprivileged container
 # has no user namespaces for Chromium's own sandbox, so it runs without
-# one; PCP's proxy and address checks are not that sandbox's job.
+# one; PCP's proxy and address checks are not that sandbox's job. PCP
+# runs the full Chromium in its new headless mode, never Playwright's
+# separate headless shell, so the shell is not downloaded.
 ARG PLAYWRIGHT_VERSION=1.63.0
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PCP_BROWSER_SANDBOX=off
-RUN npx -y --no-update-notifier playwright-core@${PLAYWRIGHT_VERSION} install --with-deps chromium \
+RUN npx -y --no-update-notifier playwright-core@${PLAYWRIGHT_VERSION} install --with-deps --no-shell chromium \
   && chmod -R a+rX /ms-playwright \
   && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache
 
