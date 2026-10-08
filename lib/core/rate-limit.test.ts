@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest"
 
-import { checkRateLimit, refundRateLimit, resetRateLimits } from "./rate-limit"
+import {
+  checkRateLimit,
+  rateLimitSize,
+  refundRateLimit,
+  resetRateLimits,
+} from "./rate-limit"
 
 afterEach(() => {
   resetRateLimits()
@@ -41,5 +46,34 @@ describe("checkRateLimit", () => {
     // Nothing to give back for a key never counted.
     refundRateLimit("never")
     expect(checkRateLimit("never", LIMIT)).toBe(true)
+  })
+})
+
+describe("the store's size", () => {
+  it("holds a bounded number of windows, dropping the least recently used", () => {
+    const one = { max: 1, windowMs: 60_000 }
+
+    checkRateLimit("first", one)
+    for (let i = 0; i < 12_000; i++) checkRateLimit(`flood:${i}`, one)
+
+    expect(rateLimitSize()).toBeLessThanOrEqual(10_000)
+    // The oldest window is gone, so that source starts over.
+    expect(checkRateLimit("first", one)).toBe(true)
+    // A recent one is still counted.
+    expect(checkRateLimit("flood:11999", one)).toBe(false)
+  })
+
+  it("keeps a window in use and never drops an instance-wide counter", () => {
+    const one = { max: 1, windowMs: 60_000 }
+
+    expect(checkRateLimit("password:*", one)).toBe(true)
+    checkRateLimit("busy", one)
+    for (let i = 0; i < 12_000; i++) {
+      checkRateLimit(`flood:${i}`, one)
+      checkRateLimit("busy", one)
+    }
+
+    expect(checkRateLimit("password:*", one)).toBe(false)
+    expect(checkRateLimit("busy", one)).toBe(false)
   })
 })

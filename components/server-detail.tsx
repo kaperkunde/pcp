@@ -161,6 +161,10 @@ export function ServerDetail({
             {(endpoint || mail) && server.readOnly ? (
               <Badge variant="secondary">Read-only</Badge>
             ) : null}
+            {/* An endpoint says so under Advanced, with its other facts. */}
+            {server.kind === "mcp" && server.publicOnly ? (
+              <Badge variant="secondary">Public addresses only</Badge>
+            ) : null}
           </span>
         }
         action={
@@ -350,7 +354,7 @@ function advancedSummary(kind: ServerKind): string {
     case "browser":
       return "Name and description"
     default:
-      return "Address, sign-in, headers, sign-in app, short name"
+      return "Address, public addresses, sign-in, headers, sign-in app, short name"
   }
 }
 

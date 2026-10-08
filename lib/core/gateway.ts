@@ -89,8 +89,15 @@ import {
   parseImapAddress,
   parseRecipient,
   parseSmtpAddress,
+  requireEncryptedOrPrivate,
 } from "./mail/addresses"
 import { probeJmapSession, type JmapProbe } from "./mail/probe"
+import {
+  bareHostname,
+  lookupAll,
+  privateHostsNote,
+  type HostLookup,
+} from "./openapi/address"
 import {
   checkRegisterShape,
   isMailRegistrationKind,
@@ -527,6 +534,7 @@ export function buildGatewayServer(
   {
     memories = null,
     probeJmap = probeJmapSession,
+    lookupHost = lookupAll,
     executor,
     codeExecutor,
   }: {
@@ -534,6 +542,11 @@ export function buildGatewayServer(
     memories?: InstructionMemories | null
     /** How a proposed JMAP address is looked at; replaced in tests. */
     probeJmap?: typeof probeJmapSession
+    /**
+     * How a proposed MCP, IMAP or SMTP server's name is resolved, to flag a
+     * private one to the owner; replaced in tests.
+     */
+    lookupHost?: HostLookup
     /** What runs a call upstream; replaced in tests. */
     executor?: PermissionExecutor
     /** What runs run_code's programs; replaced in tests. */
@@ -649,7 +662,7 @@ export function buildGatewayServer(
     )
     const missing = handles.find((handle) => !handle.found)
 
-    return missing ? { refused: missingResultMessage(missing.id) } : found
+    return missing ? { refused: missingResultMessage() } : found
   }
 
   const logged =
@@ -1663,25 +1676,33 @@ export function buildGatewayServer(
           }
 
           const mailFrom = args.mail_from?.trim()
-            ? parseRecipient(args.mail_from).email
+            ? parseRecipient(args.mail_from, "The mail_from address").email
             : null
           let url: string
           let smtpUrl: string | null = null
           let probe: JmapProbe | null = null
+          let privateHosts: string | null = null
 
           if (kind === "jmap") {
             url = completeSessionUrl(args.url!)
+            // http:// only for a server on the owner's own network.
+            await requireEncryptedOrPrivate(url)
             // A wrong address is refused here, before the owner is asked.
             probe = await probeJmap(url)
           } else {
-            url = formatMailServer("imap", parseImapAddress(args.url!))
+            const imap = parseImapAddress(args.url!)
+            const hosts = [imap.host]
+            url = formatMailServer("imap", imap)
 
             if (args.smtp_url?.trim()) {
-              smtpUrl = formatMailServer(
-                "smtp",
-                parseSmtpAddress(args.smtp_url),
-              )
+              const smtp = parseSmtpAddress(args.smtp_url)
+              smtpUrl = formatMailServer("smtp", smtp)
+              hosts.push(smtp.host)
             }
+
+            // Nothing connects before the owner agrees; they are told when
+            // either server is on a private network.
+            privateHosts = await privateHostsNote(hosts, lookupHost)
           }
 
           if (smtpUrl && !mailFrom && !(authUsername ?? "").includes("@")) {
@@ -1701,15 +1722,23 @@ export function buildGatewayServer(
               readOnly: args.read_only === true,
               mailFrom,
               checked: probe?.checked ?? null,
-              privateAddress: probe?.privateAddress ?? null,
+              privateAddress: probe?.privateAddress ?? privateHosts,
             },
           }
         } else {
+          const url = validateServerUrl(args.url!)
+
           input = {
             ...common,
             name: args.name.trim(),
-            url: validateServerUrl(args.url!),
+            url,
             oauthScope,
+            // For the owner's page only: the assistant is told the same
+            // either way, so it cannot map the owner's network with it.
+            privateAddress: await privateHostsNote(
+              [bareHostname(new URL(url))],
+              lookupHost,
+            ),
           }
         }
 

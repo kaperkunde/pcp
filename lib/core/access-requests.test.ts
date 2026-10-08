@@ -112,6 +112,38 @@ describe("resolveAccessChanges", () => {
       ]),
     ).toThrow()
   })
+
+  it("matches stars in order, with prefix and suffix anchored", () => {
+    const tools = (patterns: string[]) =>
+      resolveAccessChanges(servers, [
+        { server: "billing", tools: patterns, access: "blocked" },
+      ]).map((level) => level.tool)
+
+    expect(tools(["*_invoice*"])).toEqual(["delete_invoice", "list_invoices"])
+    expect(tools(["l*i*o*s"])).toEqual(["list_invoices"])
+    expect(tools(["*e*e*_*"])).toEqual(["delete_invoice"])
+    expect(() => tools(["list_*s_*"])).toThrow(/no tool matching/)
+    expect(() => tools(["list_clients*s"])).toThrow(/no tool matching/)
+  })
+
+  it("answers a pattern of many stars at once", () => {
+    // As a RegExp this backtracks for seconds and blocks every request.
+    const long = [
+      {
+        id: "s3",
+        slug: "long",
+        tools: [{ name: "a".repeat(33), access: "ask" as const }],
+      },
+    ]
+    const started = performance.now()
+
+    expect(() =>
+      resolveAccessChanges(long, [
+        { server: "long", tools: [`${"*".repeat(199)}#`], access: "allowed" },
+      ]),
+    ).toThrow(/no tool matching/)
+    expect(performance.now() - started).toBeLessThan(100)
+  })
 })
 
 describe("listAccessLevels", () => {

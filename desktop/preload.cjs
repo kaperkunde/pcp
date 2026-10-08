@@ -4,11 +4,11 @@
 // the page asking is PCP's own.
 //
 // Every page the window shows runs this, an OAuth provider's sign-in
-// included. Only PCP's own pages (plain http on localhost) get the bridge.
+// included. Only PCP's own pages (plain http on 127.0.0.1) get the bridge.
 
 const { contextBridge, ipcRenderer } = require("electron")
 
-if (location.protocol === "http:" && location.hostname === "localhost") {
+if (location.protocol === "http:" && location.hostname === "127.0.0.1") {
   contextBridge.exposeInMainWorld("pcpDesktop", {
     touchId: {
       status: () => ipcRenderer.invoke("touch-id:status"),

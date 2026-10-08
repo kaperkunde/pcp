@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import { MAX_SPEC_BYTES } from "./constants"
@@ -15,6 +15,7 @@ import {
 import {
   changeEndpoint,
   createEndpoint,
+  downloadSpec,
   updateEndpoint,
   type EndpointInput,
 } from "./endpoints"
@@ -25,6 +26,12 @@ import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { callServerTool } from "./upstream"
 import { setupVault } from "./vault"
+
+// The download a refresh waits on, so a test can act while it is under way.
+vi.mock("./endpoints", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./endpoints")>()
+  return { ...actual, downloadSpec: vi.fn(actual.downloadSpec) }
+})
 
 /** A change made at once; one put to the owner fails the test. */
 async function updateEndpointDetails(
@@ -1114,6 +1121,64 @@ describe("the writer behind an assistant's changes", () => {
       publicOnly: false,
       specSource: "upload",
       url: `${api.origin}/api`,
+    })
+  })
+
+  it("makes an assistant's change only to the endpoint as it read it", async () => {
+    const { id } = await createEndpoint(ctx, {
+      name: "Remote",
+      specSource: "url",
+      specUrl: "https://docs.example.com/openapi.json",
+      fetched: {
+        text: spec(api.origin),
+        url: "https://docs.example.com/openapi.json",
+      },
+      baseUrl: `${api.origin}/api`,
+      readOnly: false,
+      authType: "none",
+    })
+    await db().mcpServer.update({
+      where: { id },
+      data: { publicOnly: true, enabled: false },
+    })
+    const slug = (await getServer(ctx, id)).slug
+    const { id: secretId } = await createSecret(ctx, {
+      name: "Pets billing credential",
+      value: KEY,
+    })
+
+    // While the schema's address keeps the download waiting, the owner
+    // attaches their secret and turns the endpoint on.
+    let release!: () => void
+    const released = new Promise<void>((resolve) => (release = resolve))
+    vi.mocked(downloadSpec)
+      .mockClear()
+      .mockImplementationOnce(async () => {
+        await released
+        return { text: spec(api.origin), url: "https://docs.example.com/x" }
+      })
+    const change = updateOrAsk(scope, slug, {
+      refreshSpec: true,
+      baseUrl: "https://attacker.example.com/api",
+    })
+    await vi.waitFor(() => expect(downloadSpec).toHaveBeenCalled())
+    await db().mcpServer.update({
+      where: { id },
+      data: {
+        authType: "header",
+        authSecretId: secretId,
+        authHeaderName: "X-API-Key",
+        authValueTemplate: "{{secret}}",
+        enabled: true,
+      },
+    })
+    release()
+
+    await expect(change).rejects.toThrow(/changed while this change/)
+    expect(await getServer(ctx, id)).toMatchObject({
+      url: `${api.origin}/api`,
+      enabled: true,
+      authSecretId: secretId,
     })
   })
 

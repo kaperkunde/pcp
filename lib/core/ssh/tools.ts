@@ -149,3 +149,24 @@ export function parseRunCommand(args: Record<string, unknown>): RunCommandArgs {
 
   return { command, stdin: input, timeoutMs }
 }
+
+/**
+ * stdin_base64 as text, for the owner to read before the command runs: only
+ * when it is base64 of valid UTF-8. A kept result's handle stays a handle,
+ * described by what it is, never by its content.
+ */
+export function stdinAsText(args: Record<string, unknown>): string | null {
+  const value = args.stdin_base64
+
+  if (typeof value !== "string" || value === "" || !BASE64.test(value)) {
+    return null
+  }
+
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      Buffer.from(value, "base64"),
+    )
+  } catch {
+    return null
+  }
+}

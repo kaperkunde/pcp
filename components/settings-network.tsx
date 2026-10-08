@@ -32,6 +32,7 @@ export function NetworkSection({
   outside,
   desktop,
   notice,
+  username,
 }: {
   network: NetworkOverview
   /** The address assistants are told, from the public address or the request. */
@@ -45,6 +46,8 @@ export function NetworkSection({
   desktop: boolean
   /** The bell has something about the network. */
   notice: boolean
+  /** The vault's name, for confirming a change of the public address. */
+  username: string
 }) {
   return (
     <ListSection title="Network">
@@ -66,12 +69,17 @@ export function NetworkSection({
             <OutsideAccessCard address={publicUrl} desktop={desktop} />
           ) : null}
           <List className="border border-separator bg-transparent">
-            <PublicUrlForm pinned={pinned ?? ""} detected={detected} />
+            <PublicUrlForm
+              pinned={pinned ?? ""}
+              detected={detected}
+              username={username}
+            />
             <PcpggCard
               variant="row"
               pcpgg={network.pcpgg}
               ports={network.ports}
               pinnedPublicUrl={pinned}
+              username={username}
             />
             <DdnsCard variant="row" ddns={network.ddns} />
             <HttpsCard
@@ -81,6 +89,7 @@ export function NetworkSection({
               ddnsName={network.ddnsName}
               ports={network.ports}
               pinnedPublicUrl={pinned}
+              username={username}
               pcpggName={network.pcpgg ? network.pcpgg.name : undefined}
             />
           </List>

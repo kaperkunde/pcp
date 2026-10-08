@@ -27,6 +27,7 @@
 #
 #   PCP_PORT=3000                     the port PCP answers on
 #   PCP_HTTPS=1                       also publish 80 and 443 for PCP's own HTTPS
+#                                     (and then the port above on this computer only)
 #   PCP_RUNTIME=docker|podman         skip the discovery
 #   PCP_DATA_VOLUME=pcp-data          the volume that holds the vault
 #   PCP_AUTO_UPDATE=1                 update PCP by itself, once a day
@@ -382,11 +383,22 @@ start_failed() {
     "  $1"
 }
 
+# Where PCP's plain-HTTP port is published. With PCP's own HTTPS on, people
+# come in over 443, so the port stays on this computer: a published port
+# skips the host's firewall (Docker's rules come before ufw's), and the
+# session cookie is not Secure over plain HTTP. Without it, every interface,
+# for the home network.
+http_bind() {
+  if [ "$PCP_HTTPS" = 1 ]; then
+    printf '127.0.0.1:'
+  fi
+}
+
 # Docker, or Podman without Quadlet: one container the runtime restarts.
 install_container() {
   pull_image
   "$RUNTIME" rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  set -- -d --name "$CONTAINER" --restart unless-stopped -p "$PCP_PORT:3000"
+  set -- -d --name "$CONTAINER" --restart unless-stopped -p "$(http_bind)$PCP_PORT:3000"
   if [ "$PCP_HTTPS" = 1 ]; then
     set -- "$@" -p 80:8080 -p 443:8443
   fi
@@ -409,7 +421,7 @@ write_unit() {
     printf '# Logs: %s\n' "$JOURNAL"
     printf '[Unit]\nDescription=PCP\n\n'
     printf '[Container]\nImage=%s\nContainerName=%s\n' "$IMAGE" "$CONTAINER"
-    printf 'PublishPort=%s:3000\n' "$PCP_PORT"
+    printf 'PublishPort=%s%s:3000\n' "$(http_bind)" "$PCP_PORT"
     if [ "$PCP_HTTPS" = 1 ]; then
       printf 'PublishPort=80:8080\nPublishPort=443:8443\n'
     fi
@@ -714,7 +726,10 @@ summary() {
   lan=$(lan_address)
   say "" "PCP is running." "" \
     "  On this computer:     http://localhost:$PCP_PORT"
-  if [ -n "$lan" ]; then
+  if [ "$PCP_HTTPS" = 1 ]; then
+    say "  From another device:  not on port $PCP_PORT, which answers on this computer only" \
+      "                        while PCP's HTTPS is on: $GUIDE_URL"
+  elif [ -n "$lan" ]; then
     say "  From another device:  http://$lan:$PCP_PORT"
   fi
   case "$AUTO" in

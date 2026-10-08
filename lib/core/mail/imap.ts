@@ -71,6 +71,10 @@ export type Login = { username: string; password: string }
 export interface ImapClientLike {
   readonly secureConnection: boolean
   readonly mailbox: { path: string; uidValidity: bigint } | false
+  /** What the server offers (CAPABILITY), by name. */
+  readonly capabilities: ReadonlyMap<string, unknown>
+  /** Extensions turned on for the session: IMAP4rev2 is one. */
+  readonly enabled?: ReadonlySet<string>
   logout(): Promise<void>
   close(): void
   list(options?: {
@@ -139,6 +143,21 @@ export interface ImapClientLike {
     newPath: string,
   ): Promise<{ path: string; newPath: string }>
   mailboxDelete(path: string): Promise<{ path: string }>
+}
+
+/**
+ * Whether a move leaves other mail alone. Without MOVE, imapflow copies,
+ * flags the original \Deleted and expunges; without UIDPLUS that is a plain
+ * EXPUNGE, which erases every email in the folder already flagged \Deleted,
+ * the owner's included. IMAP4rev2 has both built in.
+ */
+function movesSafely(imap: ImapClientLike): boolean {
+  const has = (name: string) => imap.capabilities.has(name)
+  const rev2 =
+    imap.enabled?.has("IMAP4REV2") === true ||
+    (has("IMAP4rev2") && !has("IMAP4rev1"))
+
+  return rev2 || has("MOVE") || has("UIDPLUS")
 }
 
 export type OutgoingMail = {
@@ -802,6 +821,12 @@ export function openImapBackend(
               })),
               failed: [],
             }
+      }
+
+      if (!movesSafely(imap)) {
+        throw new MailRequestError(
+          "This account's IMAP server can neither move mail (MOVE) nor remove one email alone (UIDPLUS), so moving or deleting would also erase every other email in the folder that is marked deleted. PCP does not do that.",
+        )
       }
 
       const moved = await imap.messageMove(

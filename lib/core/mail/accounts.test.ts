@@ -107,6 +107,29 @@ describe("adding an account", () => {
     await expect(deleteSecret(ctx, secretId)).rejects.toThrow()
   })
 
+  it("refuses a session URL over http:// to a public address, on adding and on changing", async () => {
+    await expect(
+      account({ url: "http://8.8.8.8/jmap/session" }),
+    ).rejects.toThrow(/unencrypted/)
+    // A name that does not resolve to a private address is no better.
+    await expect(
+      account({ url: "http://mail.example.invalid/jmap/session" }),
+    ).rejects.toThrow(/unencrypted/)
+
+    const id = await account()
+    await expect(
+      updateMailAccount(ctx, id, {
+        name: "Mail",
+        url: "http://8.8.8.8/jmap/session",
+        readOnly: false,
+        authType: "basic",
+        authUsername: "ada@example.com",
+        authSecretId: secretId,
+      }),
+    ).rejects.toThrow(/unencrypted/)
+    expect((await getServer(ctx, id)).url).toBe(`${api.origin}/jmap/session`)
+  })
+
   it("offers a read-only account the reading tools only", async () => {
     const id = await account({ readOnly: true })
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
@@ -440,7 +463,9 @@ describe("calling its tools", () => {
         { to: ["charles@example.com"], subject: "x", text: { $result: "no" } },
         { ...PUBLIC, open },
       ),
-    ).rejects.toThrow(/No kept result "no" for this token/)
+    ).rejects.toThrow(
+      /A kept result named in the arguments is not there for this token/,
+    )
     expect(fake.requests.length).toBe(before)
   })
 
@@ -519,7 +544,7 @@ describe("calling its tools", () => {
     const before = fake.requests.length
 
     await expect(send([{ $result: "gone" }])).rejects.toThrow(
-      /No kept result "gone" for this token/,
+      /A kept result named in the arguments is not there for this token/,
     )
     await expect(
       send(Array.from({ length: 11 }, () => ({ $result: kept.id }))),
@@ -630,7 +655,9 @@ describe("calling its tools", () => {
     ).rejects.toMatchObject({ code: "validation" })
     await expect(
       draft({ subject: "s", text: "t", attachments: [{ $result: "gone" }] }),
-    ).rejects.toThrow(/No kept result "gone" for this token/)
+    ).rejects.toThrow(
+      /A kept result named in the arguments is not there for this token/,
+    )
     await expect(
       draft(
         { subject: "s", text: "t", attachments: [{ $result: "gone" }] },

@@ -46,6 +46,7 @@ function inputFrom(formData: FormData): ServerInput {
     oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,
     oauthScope: field(formData, "oauthScope") || null,
     oauthAuthorizeParams: field(formData, "oauthAuthorizeParams") || null,
+    publicOnly: field(formData, "publicOnly") === "on",
   }
 }
 

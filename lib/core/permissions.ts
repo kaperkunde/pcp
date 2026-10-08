@@ -34,6 +34,7 @@ import {
   type EndpointChangeAsk,
   type EndpointRegistration,
 } from "./endpoint-admin"
+import { MAX_CALLS_PER_RUN } from "./code/limits"
 import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
@@ -57,6 +58,7 @@ import {
 } from "./connect"
 import { waitForOwner } from "./owner-wait"
 import {
+  argsInFull,
   canonicalJson,
   decisionsFor,
   isOpen,
@@ -66,7 +68,9 @@ import {
   requestHash,
   storedResultText,
   summaryText,
+  visible,
   type PermissionStatus,
+  type ShownText,
 } from "./permission-rules"
 import type { MailRegistration } from "./register-rules"
 import { summarize } from "./search"
@@ -94,6 +98,7 @@ import {
   resultOpener,
 } from "./tool-results"
 import { finishHandover, performNavigate } from "./browser/call"
+import { RUN_COMMAND, stdinAsText } from "./ssh/tools"
 import { describeBrowseAsk, describeHandoverAsk } from "./browser/describe"
 import type { fetchThroughBrowser } from "./browser/solve"
 import {
@@ -171,6 +176,11 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   endpoint?: EndpointRegistration
   /** A mail account (JMAP or IMAP) rather than an MCP server or an API. */
   mail?: MailRegistration
+  /**
+   * An MCP server: set when its host is, or resolves to, a private or local
+   * address, for the owner. Missing on requests from before it was looked up.
+   */
+  privateAddress?: string | null
 }
 
 export type PermissionAsk =
@@ -220,7 +230,19 @@ export type PermissionView = {
   tool: string
   title: string
   lines: string[]
+  /**
+   * The lines the owner reads and the assistant is not told: whether a
+   * server's name resolves to an address on their network, which would
+   * otherwise let a proposal map it.
+   */
+  ownerOnly: string[]
   warning: string | null
+  /**
+   * Everything the request carries, for the page to fold under the lines
+   * when they cut it short or wrote out what is in it; null when they say
+   * it all.
+   */
+  full: ShownText[] | null
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
   /** A wrapper request's tools and secrets, for the page to show in full. */
@@ -638,8 +660,10 @@ async function summarizeRow(
   title: string
   lines: string[]
   warning: string | null
+  full?: ShownText[] | null
   memory?: MemoryShown
   wrapper?: WrapperShown
+  ownerOnly?: string[]
 }> {
   const args = readArgs(ctx, row)
   const asker = `Asked by the token "${row.token.name}"`
@@ -760,6 +784,9 @@ async function summarizeRow(
       const { protocol, smtpUrl, readOnly, mailFrom, checked, privateAddress } =
         input.mail
       const jmap = protocol === "jmap"
+      const flagged = privateAddress
+        ? `${privateAddress} If you agree, PCP signs in there from your own network.`
+        : null
 
       return {
         title: `Add the mail account ${input.name}?`,
@@ -770,13 +797,14 @@ async function summarizeRow(
               ? "Protocol: IMAP, sending through SMTP"
               : "Protocol: IMAP (it cannot send: no SMTP server was named)",
           jmap ? `Session URL: ${input.url}` : `IMAP server: ${input.url}`,
-          ...(smtpUrl ? [`SMTP server: ${smtpUrl}`] : []),
-          ...(checked ? [`Checked: ${checked}`] : []),
-          ...(privateAddress
+          ...(jmap && input.url.startsWith("http:")
             ? [
-                `${privateAddress} If you agree, PCP signs in there from your own network.`,
+                "Not encrypted: the session URL starts with http://, so your sign-in travels unprotected across your network. Only agree if you trust every device on it.",
               ]
             : []),
+          ...(smtpUrl ? [`SMTP server: ${smtpUrl}`] : []),
+          ...(checked ? [`Checked: ${checked}`] : []),
+          ...(flagged ? [flagged] : []),
           ...(input.authType === "basic" ? [`User name: ${login}`] : []),
           auth,
           ...oauthLines.slice(1),
@@ -788,6 +816,7 @@ async function summarizeRow(
           asker,
         ],
         warning,
+        ownerOnly: flagged ? [flagged] : [],
       }
     }
 
@@ -823,16 +852,22 @@ async function summarizeRow(
       }
     }
 
+    const flagged = input.privateAddress
+      ? `${input.privateAddress} A server an assistant proposes reaches public addresses only: if you agree, it connects once you allow private addresses on its page.`
+      : null
+
     return {
       title: `Add the server ${input.name}?`,
       lines: [
         `Address: ${input.url}`,
+        ...(flagged ? [flagged] : []),
         auth,
         ...oauthLines.slice(1),
         ...(input.description ? [`Description: ${input.description}`] : []),
         asker,
       ],
       warning,
+      ownerOnly: flagged ? [flagged] : [],
     }
   }
 
@@ -856,6 +891,11 @@ async function summarizeRow(
   const about = tool
     ? summarize(tool.descriptionOverride ?? tool.description)
     : ""
+  // Standard input sent as base64 is read as the text it is, when it is.
+  const stdin =
+    row.server?.kind === "ssh" && row.toolName === RUN_COMMAND
+      ? stdinAsText(args)
+      : null
 
   return {
     title: `Allow ${toolLabel(row)}?`,
@@ -874,12 +914,20 @@ async function summarizeRow(
     warning: destructive
       ? "The server marks this tool as destructive: it can change or delete things for good."
       : null,
+    full: argsInFull(
+      args,
+      stdin === null
+        ? []
+        : [{ label: "stdin_base64, decoded as text", text: visible(stdin) }],
+    ),
   }
 }
 
 /**
  * What a call to a wrapper's tool does: the program the owner approved runs,
- * and may call these tools; any of them that would ask runs in this call.
+ * and may call these tools. One that would ask is not asked about again in
+ * this run: the program calls it as often as it does, with the arguments it
+ * works out, up to run_code's limit on calls in one run.
  */
 async function wrapperCallLines(
   ctx: VaultContext,
@@ -898,7 +946,7 @@ async function wrapperCallLines(
 
   return [
     `Runs the program you approved for the wrapper ${server.name}, which may call: ${calls.map((call) => `${slugs.get(call.serverId) ?? "(removed server)"}/${call.tool}`).join(", ")}`,
-    "Allowing this call lets those calls run in it, as the token's levels allow; any of them that would ask you first runs this once, with what the program sends.",
+    `Allowing this call lets those calls run in it, as the token's levels allow. Any of them that would ask you first is not asked about again in this run: the program may call it as often as it does (at most ${MAX_CALLS_PER_RUN} calls in all), with whatever arguments it works out.`,
   ]
 }
 
@@ -960,6 +1008,8 @@ async function toView(
   const {
     memory = null,
     wrapper = null,
+    full = null,
+    ownerOnly = [],
     ...summary
   } = await summarizeRow(ctx, row, publicUrl)
   const kind = row.kind as PermissionKind
@@ -980,6 +1030,11 @@ async function toView(
     serverKind: row.server?.kind ?? null,
     tool: row.toolName,
     ...summary,
+    // Whatever made the lines, nothing in them hides from the owner.
+    title: visible(summary.title),
+    lines: summary.lines.map((line) => visible(line)),
+    ownerOnly: ownerOnly.map((line) => visible(line)),
+    full,
     memory,
     wrapper,
     browserTabId: browserTabOf(ctx, row),
@@ -1119,7 +1174,12 @@ function pendingText(view: PermissionView, detail?: string): string {
         : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
     : ""
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
+  const told = {
+    ...view,
+    lines: view.lines.filter((line) => !view.ownerOnly.includes(line)),
+  }
+
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
 }
 
 /**
@@ -1674,6 +1734,9 @@ async function executeRegister(
             authValueTemplate: asked.authValueTemplate,
             authExtraHeaders: asked.authExtraHeaders,
             ...secretFields(asked, secret.id),
+            // The address is the assistant's: public ones only, until the
+            // owner allows private addresses on the server's page.
+            publicOnly: true,
           })
   } catch (error) {
     // The secret was typed in for this server alone.
@@ -1899,7 +1962,7 @@ export async function listPendingRequests(
 
       return {
         id: row.id,
-        title,
+        title: visible(title),
         tokenName: row.token.name,
         createdAt: row.createdAt,
       }

@@ -87,25 +87,128 @@ export function isOpen(
   return row.status === "pending" && row.expiresAt.getTime() > now.getTime()
 }
 
-/** One line per top-level argument, for the owner to read. */
+/**
+ * Characters a person does not see on screen, as `hiddenCharacter` in
+ * memories.ts counts them (its tests hold this to that): controls, format
+ * characters (zero-width, direction overrides, tag characters), private-use
+ * and lone surrogates, and every code point Unicode says draws nothing
+ * (Default_Ignorable: blank fillers, the variation selectors that can carry
+ * hidden bytes). The emoji presentation selectors stay as they are (see
+ * `PRESENT`).
+ */
+const UNSEEN =
+  /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Default_Ignorable_Code_Point}\u2028\u2029\u2800]/gu
+
+/**
+ * U+FE0E and U+FE0F only pick how the emoji before them is drawn, so a
+ * value's emoji reads as an emoji. Text a person reads before another
+ * assistant does has lost them before it is shown (`withoutPresentation`).
+ */
+const PRESENT = new Set(["\uFE0E", "\uFE0F"])
+
+const WRITTEN: Record<string, string> = {
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+}
+
+/**
+ * Text as the owner reads it before they allow something: every character
+ * that does not show on screen written out (`\u202E`), so nothing in it can
+ * turn it around or hide in it. Newlines and tabs stay, unless `oneLine`,
+ * where a value's newline could pass for a line of the page's own.
+ */
+export function visible(text: string, { oneLine = false } = {}): string {
+  return text.replace(UNSEEN, (char) => {
+    if (PRESENT.has(char) || (!oneLine && (char === "\n" || char === "\t"))) {
+      return char
+    }
+
+    if (WRITTEN[char]) {
+      return WRITTEN[char]
+    }
+
+    const code = char.codePointAt(0)!.toString(16).toUpperCase()
+
+    return code.length > 4 ? `\\u{${code}}` : `\\u${code.padStart(4, "0")}`
+  })
+}
+
+/**
+ * A part of a request shown whole, under the lines: what the owner allows
+ * when the lines had to cut it short or write out what is in it.
+ */
+export type ShownText = { label: string; text: string }
+
+function argEntries(args: Record<string, unknown>): Array<[string, unknown]> {
+  return Object.entries(args).filter(([, value]) => value !== undefined)
+}
+
+function argText(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value)
+}
+
+/**
+ * One line per top-level argument, for the owner to read. A long value is
+ * cut, saying how long it is; `argsInFull` has the rest.
+ */
 export function previewArgs(
   args: Record<string, unknown>,
   max = 800,
 ): string[] {
-  const entries = Object.entries(args).filter(
-    ([, value]) => value !== undefined,
-  )
+  const entries = argEntries(args)
 
   if (entries.length === 0) {
     return ["(no arguments)"]
   }
 
   return entries.map(([key, value]) => {
-    const text = typeof value === "string" ? value : JSON.stringify(value)
-    const clipped = text.length > max ? `${text.slice(0, max - 1)}…` : text
+    const name = visible(key, { oneLine: true })
+    const text = argText(value)
 
-    return `${key}: ${clipped}`
+    if (text.length > max) {
+      return `${name} (the first ${(max - 1).toLocaleString("en")} of ${text.length.toLocaleString("en")} characters): ${visible(text.slice(0, max - 1), { oneLine: true })}…`
+    }
+
+    return `${name}: ${visible(text, { oneLine: true })}`
   })
+}
+
+/**
+ * The arguments whole, one part each (text as text, with its newlines;
+ * anything else as indented JSON), when `previewArgs` cut a value or wrote
+ * something in one out, or when `extra` (what a tool adds about its own
+ * arguments) has something to show. Null when the lines say it all.
+ */
+export function argsInFull(
+  args: Record<string, unknown>,
+  extra: ShownText[] = [],
+  max = 800,
+): ShownText[] | null {
+  const entries = argEntries(args)
+  const whole = entries.every(([key, value]) => {
+    const text = argText(value)
+
+    return (
+      text.length <= max &&
+      visible(text, { oneLine: true }) === text &&
+      visible(key, { oneLine: true }) === key
+    )
+  })
+
+  if (whole && extra.length === 0) {
+    return null
+  }
+
+  return [
+    ...entries.map(([key, value]) => ({
+      label: visible(key, { oneLine: true }),
+      text: visible(
+        typeof value === "string" ? value : JSON.stringify(value, null, 2),
+      ),
+    })),
+    ...extra,
+  ]
 }
 
 /** The summary as plain text, for a tool result. */

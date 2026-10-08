@@ -201,6 +201,7 @@ export default async function ServerPage({
         oauthClientSecretId: server.oauthClientSecretId ?? "",
         oauthScope: server.oauthScope ?? "",
         oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+        publicOnly: server.publicOnly,
       }}
       secrets={secrets}
       redirectUrl={redirectUrl}

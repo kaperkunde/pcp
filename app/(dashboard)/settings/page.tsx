@@ -128,6 +128,7 @@ export default async function SettingsPage({
         outside={isLocalAddress(publicUrl)}
         desktop={isDesktopApp()}
         notice={notices.length > 0}
+        username={vault.name}
       />
 
       <ListSection title="Upkeep">

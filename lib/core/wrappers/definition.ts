@@ -7,7 +7,7 @@ import type { VaultContext } from "../context"
 import { SECRET_PLACEHOLDER } from "../constants"
 import { db } from "../db"
 import { invalid } from "../errors"
-import { hiddenCharacter } from "../memories"
+import { hiddenCharacter, withoutPresentation } from "../memories"
 import { parsePointer } from "../openapi/patch"
 import { canonicalJson } from "../permission-rules"
 import { findTextSecretByName, validateSecretName } from "../secrets"
@@ -212,12 +212,18 @@ type KnownServer = {
   url: string
 }
 
-function visible(text: string, what: string): void {
+/**
+ * Refuses a character that does not show on screen. Prose (names,
+ * descriptions, titles) has lost its emoji presentation selectors before it
+ * gets here; anything else that names or runs something (a program, a
+ * pointer, a template, a schema) keeps them, and so is refused for them too.
+ */
+function visible(text: string, what: string, hint = "take it out"): void {
   const hidden = hiddenCharacter(text)
 
   if (hidden) {
     throw invalid(
-      `${what} has a character that does not show on screen (${hidden}); the owner reads it as it is, so take it out.`,
+      `${what} has a character that does not show on screen (${hidden}); the owner reads it as it is, so ${hint}.`,
     )
   }
 }
@@ -252,9 +258,10 @@ export async function resolveDefinition(
   newSecret: string | null
 }> {
   const { name, description } = normalizeNameAndDescription({
-    name: String(input.name ?? ""),
-    description: String(input.description ?? ""),
+    name: withoutPresentation(String(input.name ?? "")),
+    description: withoutPresentation(String(input.description ?? "")),
   })
+  visible(name, "The name")
   visible(description, "The description")
 
   if (!Array.isArray(input.tools) || input.tools.length === 0) {
@@ -362,8 +369,10 @@ export async function resolveDefinition(
     const title =
       tool.title === undefined || tool.title === null
         ? null
-        : String(tool.title).trim().slice(0, 200) || null
-    const toolDescription = String(tool.description ?? "").trim()
+        : withoutPresentation(String(tool.title)).trim().slice(0, 200) || null
+    const toolDescription = withoutPresentation(
+      String(tool.description ?? ""),
+    ).trim()
 
     if (!toolDescription) {
       throw invalid(`${what} needs a description, for assistants to find it.`)
@@ -439,7 +448,11 @@ export async function resolveDefinition(
       )
     }
 
-    visible(program, `${what}'s program`)
+    visible(
+      program,
+      `${what}'s program`,
+      "take it out, or write it in a string as an escape (\\u200D)",
+    )
 
     const problem = await checkSyntax(program)
 
@@ -539,6 +552,8 @@ export async function resolveDefinition(
         `The secret "${secretName}" goes into one argument, named by a JSON Pointer like "/api_key" or "/auth/token".`,
       )
     }
+
+    visible(argument, `Where the secret "${secretName}" goes`)
 
     const tokens = parsePointer(argument)
     checkArgumentInSchema(schemas.get(toolKey(serverId, tool)), tokens, {

@@ -191,7 +191,7 @@ export function MailAccountForm({
     <Field
       label="Session URL"
       htmlFor={`${prefix}-url`}
-      hint="Usually https://mail.example.com/.well-known/jmap. PCP reads it to find the account's mail, and only sends your credentials to that address's host."
+      hint="Usually https://mail.example.com/.well-known/jmap. PCP reads it to find the account's mail, and only sends your credentials to that address's host. It must be https://, except for a server on your own network."
     >
       <Input
         id={`${prefix}-url`}

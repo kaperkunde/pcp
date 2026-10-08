@@ -6,10 +6,11 @@ import { type FormEvent, useActionState, useEffect, useState } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
+import { PublicUrlConfirm } from "@/components/settings-forms"
 import { SettingsItem } from "@/components/settings-item"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
-import { ButtonLink } from "@/components/ui/button"
+import { Button, ButtonLink } from "@/components/ui/button"
 import { Checkbox, Input, Select } from "@/components/ui/input"
 import { Field, Label } from "@/components/ui/label"
 import {
@@ -24,7 +25,6 @@ import {
   savePcpggAction,
   updateDdnsNowAction,
 } from "@/lib/actions/network"
-import { type SettingsResult, setPublicUrlAction } from "@/lib/actions/settings"
 import {
   DDNS_PROVIDER_LABELS,
   DDNS_PROVIDERS,
@@ -98,11 +98,14 @@ export function PcpggCard({
   pcpgg,
   ports,
   pinnedPublicUrl,
+  username,
   variant = "card",
 }: {
   pcpgg: NetworkOverview["pcpgg"]
   ports: NetworkOverview["ports"]
   pinnedPublicUrl: string | null
+  /** For the password asked before PCP's public address changes. */
+  username: string
   variant?: Variant
 }) {
   const buttonVariant = variant === "row" ? "secondary" : "default"
@@ -130,6 +133,7 @@ export function PcpggCard({
           pcpgg={pcpgg}
           ports={ports}
           pinnedPublicUrl={pinnedPublicUrl}
+          username={username}
         />
       ) : null}
       <form action={action} className="flex flex-col gap-4" aria-label="pcp.gg">
@@ -209,10 +213,12 @@ function PcpggStatus({
   pcpgg,
   ports,
   pinnedPublicUrl,
+  username,
 }: {
   pcpgg: NonNullable<NetworkOverview["pcpgg"]>
   ports: NetworkOverview["ports"]
   pinnedPublicUrl: string | null
+  username: string
 }) {
   const router = useRouter()
   const { state, name, error, retryAt, https, httpsTurnedOff } = pcpgg
@@ -271,6 +277,7 @@ function PcpggStatus({
           https={https}
           ports={ports}
           pinnedPublicUrl={pinnedPublicUrl}
+          username={username}
         />
       ) : httpsTurnedOff ? (
         <div
@@ -769,6 +776,7 @@ export function HttpsCard({
   ddnsName,
   ports,
   pinnedPublicUrl,
+  username,
   pcpggName,
   variant = "card",
 }: {
@@ -777,6 +785,8 @@ export function HttpsCard({
   ddnsName: string | null
   ports: NetworkOverview["ports"]
   pinnedPublicUrl: string | null
+  /** For the password asked before PCP's public address changes. */
+  username: string
   /** Set while PCP is connected to pcp.gg, which looks after HTTPS. */
   pcpggName?: string | null
   variant?: Variant
@@ -842,6 +852,7 @@ export function HttpsCard({
               https={https}
               ports={ports}
               pinnedPublicUrl={pinnedPublicUrl}
+              username={username}
             />
           ) : turnedOff ? (
             <div
@@ -936,10 +947,12 @@ function HttpsStatus({
   https,
   ports,
   pinnedPublicUrl,
+  username,
 }: {
   https: NonNullable<NetworkOverview["https"]>
   ports: NetworkOverview["ports"]
   pinnedPublicUrl: string | null
+  username: string
 }) {
   const router = useRouter()
   const { status, edge, domain } = https
@@ -999,7 +1012,7 @@ function HttpsStatus({
         </p>
       ) : null}
       {status.state === "active" && address && pinnedPublicUrl !== address ? (
-        <UsePublicAddress address={address} />
+        <UsePublicAddress address={address} username={username} />
       ) : null}
     </div>
   )
@@ -1020,29 +1033,45 @@ function RetryButton() {
   )
 }
 
-function UsePublicAddress({ address }: { address: string }) {
-  const [state, action] = useActionState<SettingsResult, FormData>(
-    setPublicUrlAction,
-    { status: "idle" },
-  )
+function UsePublicAddress({
+  address,
+  username,
+}: {
+  address: string
+  username: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [saved, setSaved] = useState<string | null>(null)
 
-  if (state.status === "ok") {
-    return <FormNote message={state.message} />
+  if (saved) {
+    return <FormNote message={saved} />
   }
 
   return (
-    <form action={action} className="flex flex-col gap-2">
-      <input type="hidden" name="publicUrl" value={address} />
+    <div className="flex flex-col gap-2">
       <p className="text-muted-foreground">
         Sign-ins with other services and the address you give assistants use
         PCP&apos;s public address.
       </p>
-      <div>
-        <SubmitButton variant="secondary" pendingText="Saving…">
-          Use {address} as PCP&apos;s public address
-        </SubmitButton>
-      </div>
-      <FormError error={state.status === "error" ? state.error : null} />
-    </form>
+      {open ? (
+        <PublicUrlConfirm
+          address={address}
+          username={username}
+          idPrefix="use-public-url"
+          onBack={() => setOpen(false)}
+          onSaved={setSaved}
+        />
+      ) : (
+        <div>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setOpen(true)}
+          >
+            Use {address} as PCP&apos;s public address
+          </Button>
+        </div>
+      )}
+    </div>
   )
 }

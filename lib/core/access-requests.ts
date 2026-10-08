@@ -55,18 +55,46 @@ export const MAX_ACCESS_PATTERNS = 500
 /** The most levels one save may write. */
 export const MAX_ACCESS_LEVELS = 20_000
 
+/**
+ * A glob where `*` stands for any run of characters, matched in linear time.
+ * Not a RegExp: a pattern of many stars backtracks exponentially there, and
+ * any token may send one, which would hold the whole process up.
+ */
 function matcher(pattern: string): (name: string) => boolean {
   if (!pattern.includes("*")) {
     return (name) => name === pattern
   }
 
-  const source = pattern
-    .split("*")
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*")
-  const regex = new RegExp(`^${source}$`)
+  const parts = pattern.split("*")
+  const prefix = parts[0]
+  const suffix = parts[parts.length - 1]
+  const middle = parts.slice(1, -1).filter((part) => part !== "")
 
-  return (name) => regex.test(name)
+  return (name) => {
+    if (
+      name.length < prefix.length + suffix.length ||
+      !name.startsWith(prefix) ||
+      !name.endsWith(suffix)
+    ) {
+      return false
+    }
+
+    // Each middle part as early as it fits leaves the most room for the rest.
+    const end = name.length - suffix.length
+    let at = prefix.length
+
+    for (const part of middle) {
+      const found = name.indexOf(part, at)
+
+      if (found === -1 || found + part.length > end) {
+        return false
+      }
+
+      at = found + part.length
+    }
+
+    return true
+  }
 }
 
 /**

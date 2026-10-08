@@ -89,6 +89,7 @@ export async function restoreAction(
     const { payload, preview } = await readExport(
       await uploadFrom(formData),
       field(formData, "exportPassword"),
+      { into: "vault", ctx: session.ctx },
     )
 
     if (!confirm) {

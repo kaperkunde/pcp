@@ -5,6 +5,8 @@ import {
   type OAuthDiscoveryState,
 } from "@modelcontextprotocol/client"
 
+import type { McpServer } from "@/lib/generated/prisma/client"
+
 import type { VaultContext } from "./context"
 import { randomSecret } from "./crypto"
 import { db } from "./db"
@@ -20,7 +22,7 @@ import { syncEndpointTools } from "./endpoints"
 import {
   endpointDiscovery,
   forgetOAuthTokens,
-  oauthFetch,
+  serverFetch,
   PcpOAuthProvider,
   syncServerTools,
   verifiedEndpointDiscovery,
@@ -118,7 +120,7 @@ export async function startOAuth(
     result = await auth(provider, {
       serverUrl: server.url,
       scope: server.oauthScope ?? undefined,
-      fetchFn: oauthFetch(server),
+      fetchFn: serverFetch(server),
     })
   } catch (error) {
     // A registration endpoint that refuses PCP (an allow-list of clients,
@@ -143,11 +145,14 @@ export async function startOAuth(
   return { connected: true }
 }
 
-async function discover(server: {
-  url: string
-}): Promise<OAuthDiscoveryState | undefined> {
+async function discover(
+  server: Pick<McpServer, "url" | "kind" | "publicOnly">,
+): Promise<OAuthDiscoveryState | undefined> {
   try {
-    const info = await discoverOAuthServerInfo(server.url)
+    // Under the server's address rule, like everything else it reaches.
+    const info = await discoverOAuthServerInfo(server.url, {
+      fetchFn: serverFetch(server),
+    })
 
     return {
       authorizationServerUrl: String(info.authorizationServerUrl),
@@ -281,7 +286,7 @@ export async function finishOAuth(
       authorizationCode: code,
       iss: reconcileIssuer(params.get("iss") ?? undefined, recordedIssuer),
       scope: server.oauthScope ?? undefined,
-      fetchFn: oauthFetch(server),
+      fetchFn: serverFetch(server),
     })
 
     if (result !== "AUTHORIZED") {

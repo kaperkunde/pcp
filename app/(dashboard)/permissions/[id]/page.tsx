@@ -6,6 +6,7 @@ import { BrowserTabView } from "@/components/browser-tab-view"
 import { LocalDate } from "@/components/local-date"
 import { PageHeader } from "@/components/page-header"
 import { PermissionDecision } from "@/components/permission-decision"
+import { ShownInFull } from "@/components/shown-in-full"
 import { Badge } from "@/components/ui/badge"
 import { buttonVariants } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -126,6 +127,7 @@ export default async function PermissionPage({
               ))}
             </ul>
           )}
+          {view.full ? <ShownInFull parts={view.full} /> : null}
           {view.warning && view.memory ? (
             // The text is what to check; the warning says what to look for,
             // under it, without drawing the eye away from it.

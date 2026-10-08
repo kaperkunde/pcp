@@ -31,6 +31,17 @@ it.
   `PCP_HTTPS_PORT` at 80 and 443: macOS and Windows let an ordinary program
   use them, and a router forwards to them as they are. Settings explains
   both ways while PCP's address is a home one.
+- **The window loads 127.0.0.1, not localhost.** The server binds
+  `127.0.0.1` (or every interface), and the window opens
+  `http://127.0.0.1:3000` in both cases. "localhost" may resolve to `::1`
+  first, where another program could be listening on the same port: it would
+  be shown as PCP and receive the sign-in cookie, and could pass the Touch ID
+  origin check. `preload.cjs`, `touch-id-store.mjs` (`pcpOrigin`) and
+  `window-policy.mjs` trust exactly that origin and no other. An assistant on
+  the same computer can keep using `http://localhost:3000/mcp`. A window from
+  before this change had its sign-in under localhost, which Chromium does not
+  send to 127.0.0.1; `cookie-migration.mjs` copies the sign-in across once and
+  removes the old one. The Touch ID key does not depend on the address.
 - **Keeps running.** On Windows and Linux, closing the window hides it; the
   tray icon opens or quits PCP. On macOS the Dock does the same. Assistants
   keep reaching the gateway while the window is closed. **Start PCP when
@@ -65,6 +76,13 @@ it.
   vault. Cookie encryption is one way, so the fuse stays on. A sign-in from
   before it is encrypted the next time PCP writes it: lock and unlock once
   to do that at once.
+- **The window stays on the web.** It goes to http and https addresses
+  only, and a link that opens a new window goes to the system's browser
+  only when it is one (`window-policy.mjs`): no other scheme reaches a
+  program on the machine. A page gets no permission (camera, notifications,
+  reading the clipboard…) except PCP's own, and it only what it uses:
+  writing to the clipboard, for the copy buttons. An OAuth provider's
+  sign-in page, which the window shows on the way back to PCP, gets none.
 - **Updates from Settings.** See "Updating" below.
 - **No Chromium inside.** The Docker image carries one for the browser; the
   app does not. It uses one on the machine (`PCP_BROWSER_EXECUTABLE`, or

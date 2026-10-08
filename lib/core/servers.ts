@@ -162,6 +162,12 @@ export type ServerInput = {
   oauthClientSecretValue?: string | null
   oauthScope?: string | null
   oauthAuthorizeParams?: string | null
+  /**
+   * Refuse private, loopback and link-local addresses, and PCP's own, for
+   * every request PCP makes to the server, its OAuth requests included. Set
+   * on a server an assistant proposed; the owner's form sets or clears it.
+   */
+  publicOnly?: boolean
 }
 
 export type ServerSummary = {
@@ -724,6 +730,7 @@ async function normalizeInput(ctx: VaultContext, input: ServerInput) {
     oauthClientSecretId: null as string | null,
     oauthScope: null as string | null,
     oauthAuthorizeParams: null as string | null,
+    publicOnly: input.publicOnly === true,
   }
   let authExtraHeaders: ExtraAuthHeader[] = []
   let newSecret: NewSecret | null = null
@@ -896,6 +903,7 @@ const CONNECTION_FIELDS = [
   "oauthClientId",
   "oauthClientSecretId",
   "oauthScope",
+  "publicOnly",
 ] as const
 
 /**

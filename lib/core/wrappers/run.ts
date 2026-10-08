@@ -47,7 +47,8 @@ export type WrapperEnv = {
   serverIds: string[] | null
   /**
    * The owner allowed this very call to the wrapper's tool on PCP's page:
-   * the tools it calls that would ask run once, in this run.
+   * the tools it calls that would ask run in this run, as often as the
+   * program calls them (up to MAX_CALLS_PER_RUN in all), never asked again.
    */
   approved: boolean
   /** The token's servers and levels, when the caller has them already. */

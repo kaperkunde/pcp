@@ -7,6 +7,7 @@ import { ButtonLink } from "@/components/ui/button"
 import { networkOverview } from "@/lib/core/network/runtime"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { getUpdateConfig } from "@/lib/core/updates/state"
+import { getVault } from "@/lib/core/vault"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Reach PCP from anywhere" }
@@ -18,10 +19,11 @@ export const dynamic = "force-dynamic"
  */
 export default async function SetupNetworkPage() {
   const ctx = await requireContext()
-  const [network, pinned, updates] = await Promise.all([
+  const [network, pinned, updates, vault] = await Promise.all([
     networkOverview(),
     getSetting(ctx, SETTING_PUBLIC_URL),
     getUpdateConfig(),
+    getVault(ctx.vaultId),
   ])
 
   return (
@@ -44,6 +46,7 @@ export default async function SetupNetworkPage() {
         pcpgg={network.pcpgg}
         ports={network.ports}
         pinnedPublicUrl={pinned}
+        username={vault.name}
       />
       <DdnsCard ddns={network.ddns} />
       <HttpsCard
@@ -52,6 +55,7 @@ export default async function SetupNetworkPage() {
         ddnsName={network.ddnsName}
         ports={network.ports}
         pinnedPublicUrl={pinned}
+        username={vault.name}
         pcpggName={network.pcpgg ? network.pcpgg.name : undefined}
       />
       <UpdateCheckCard check={updates.check} />

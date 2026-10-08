@@ -379,7 +379,7 @@ test("hands a file back as a handle, and puts it where a later call names it", a
   })
   expect(refused.body.result?.isError).toBe(true)
   expect(toolText(refused)).toContain(
-    `No kept result "${answer.data.$result}" for this token`,
+    "A kept result named in the arguments is not there for this token",
   )
   expect(upstream.calls.length).toBe(before)
   const notTheirs = await mcpRequest(baseURL!, other, "resources/read", {
