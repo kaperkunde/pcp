@@ -224,10 +224,13 @@ permissions.
 **Updating.** PCP tells you when a new release is out: a note in its header,
 and **Settings → Updates** with the release notes and the command for your
 install. (It asks GitHub once a day, which sees your address and PCP's
-version; you can turn that off there.) Run the install line again: it
-fetches the new release and restarts PCP with the settings it remembered.
-From a checkout, in the `pcp` folder, with the same `-f` files you started
-it with:
+version; you can turn that off there.) If you used the install line, choose
+**Install and restart** there: within half a minute the installer on this
+computer fetches the new release and starts PCP again with the settings it
+remembered, and the page is back a minute or two later. Running the install
+line again does the same. (An install from before this button existed gets it
+after one more run of the install line.) From a checkout, in the `pcp`
+folder, with the same `-f` files you started it with:
 
 ```bash
 git pull
@@ -256,6 +259,14 @@ of the installer, kept in `~/.local/share/pcp/install.sh`; as root, in
 change what root runs. `PCP_AUTO_UPDATE=0` takes it away again:
 `pcp-update.timer` and the copy, or under Podman the auto-update label on
 PCP's unit (Podman's timer stays on, since other containers may use it).
+
+**Install and restart** works through a second timer, `pcp-update-request.timer`,
+which runs a copy of the installer every 30 seconds. It looks into the
+container for a request PCP leaves in its data folder when you press the
+button, and if there is a fresh one, it updates PCP as the line above would.
+PCP itself never talks to Docker or Podman. Without a systemd session the
+installer prints its crontab line too. `PCP_UPDATE_BUTTON=0` takes the timer
+and the button away; a pinned `PCP_VERSION` has no button.
 
 **Backing up.** **Settings → Export** writes everything PCP holds to one
 file, locked with an export password you choose. **Settings → Restore** (or

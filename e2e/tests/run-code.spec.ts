@@ -8,6 +8,7 @@ import {
   createToken,
   expectLevel,
   setToolLevel,
+  showServerSettings,
   showTools,
 } from "../lib/ui"
 
@@ -66,6 +67,7 @@ test("a token made to run code gets run_code and is told how, and no other", asy
   await page.getByLabel("Save it as (optional)").fill(`Code key ${RUN}`)
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page.getByText("Tools (5)")).toBeVisible()
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(

@@ -16,6 +16,7 @@ import {
   connectAssistant,
   createToken,
   openToken,
+  showServerSettings,
   startConnecting,
 } from "../lib/ui"
 
@@ -70,6 +71,7 @@ test("adds a server that authenticates with a stored secret", async ({
   await expect(page.getByText("Tools (3)")).toBeVisible()
 
   // The short name defaults to the slugified name; set the one the tests use.
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(

@@ -34,11 +34,7 @@ function Disclosure({
     <details
       data-slot="disclosure"
       open={defaultOpen}
-      className={cn(
-        "group/disclosure",
-        !inList && "overflow-hidden rounded-xl bg-card",
-        className,
-      )}
+      className={cn(!inList && "overflow-hidden rounded-xl bg-card", className)}
       {...props}
     >
       <summary className="flex min-h-14 cursor-pointer items-center gap-3.5 px-4 py-2.5 text-sm outline-none select-none hover:bg-row-hover focus-visible:bg-row-hover">
@@ -55,7 +51,7 @@ function Disclosure({
         </span>
         <ChevronDown
           aria-hidden
-          className="size-4 shrink-0 text-muted-foreground transition-transform group-open/disclosure:rotate-180"
+          className="size-4 shrink-0 text-muted-foreground transition-transform [details[open]>summary>&]:rotate-180"
         />
       </summary>
       <div

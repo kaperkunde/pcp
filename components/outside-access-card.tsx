@@ -7,6 +7,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { Disclosure } from "@/components/ui/disclosure"
 import { REPOSITORY_URL } from "@/lib/operator-identity"
 
 const SELF_HOSTING_GUIDE = `${REPOSITORY_URL}/blob/main/docs/self-hosting.md#4-reach-pcp-from-outside-your-home-optional`
@@ -16,8 +17,8 @@ const SELF_HOSTING_GUIDE = `${REPOSITORY_URL}/blob/main/docs/self-hosting.md#4-r
  * Settings page while PCP's address is one only the owner's own network can
  * reach (lib/core/local-address.ts): the usual case for the desktop app and
  * for Docker on a machine behind a home router. It sits above the pcp.gg,
- * Dynamic DNS and HTTPS cards and leads to them; the other tunnels and the
- * troubleshooting are what those cards do not cover.
+ * Dynamic DNS and HTTPS rows and leads to them; the other tunnels and the
+ * troubleshooting are what those rows do not cover.
  */
 export function OutsideAccessCard({
   address,
@@ -31,7 +32,7 @@ export function OutsideAccessCard({
   const port = portOf(address)
 
   return (
-    <Card>
+    <Card className="bg-transparent ring-1 ring-separator">
       <CardHeader>
         <CardTitle>Reaching PCP from outside your home</CardTitle>
         <CardDescription>
@@ -83,7 +84,7 @@ export function OutsideAccessCard({
           </ul>
           <p>
             Enter the address it gives you under <strong>Public address</strong>{" "}
-            above, so the endpoint address and OAuth redirects use it, and leave{" "}
+            below, so the endpoint address and OAuth redirects use it, and leave{" "}
             <strong>Dynamic DNS</strong> and <strong>HTTPS</strong> below off.
           </p>
         </Section>
@@ -128,7 +129,7 @@ export function OutsideAccessCard({
               gets a certificate from Let&apos;s Encrypt and renews it.
             </li>
             <li>
-              When the HTTPS card offers it, make the <code>https</code> address
+              When the HTTPS row offers it, make the <code>https</code> address
               PCP&apos;s public address.
             </li>
           </ol>
@@ -152,7 +153,7 @@ export function OutsideAccessCard({
               <strong>Accept connections from other devices</strong> in the PCP
               app&apos;s menu. Then a laptop or phone on the same network
               reaches PCP at this computer&apos;s address, port {port}. The
-              tunnel and HTTPS above do not need it.
+              tunnel and HTTPS do not need it.
             </p>
           </Section>
         ) : null}
@@ -219,18 +220,9 @@ function Section({
   }
 
   return (
-    <details className="group">
-      <summary className="cursor-pointer list-none font-medium marker:hidden">
-        <span
-          aria-hidden
-          className="mr-2 inline-block transition-transform group-open:rotate-90"
-        >
-          ›
-        </span>
-        {title}
-      </summary>
-      <div className="mt-3">{body}</div>
-    </details>
+    <Disclosure title={title} className="bg-field">
+      {body}
+    </Disclosure>
   )
 }
 

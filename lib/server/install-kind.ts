@@ -25,3 +25,14 @@ export function installKind(): InstallKind {
 export function autoUpdated(): boolean {
   return process.env.PCP_AUTO_UPDATE === "1"
 }
+
+/**
+ * Whether the Linux installer watches for the owner's "Install and restart"
+ * (`PCP_HOST_UPDATER=1`, which install.sh passes into the container unless
+ * PCP_UPDATE_BUTTON=0). The request goes in a file in the data folder that
+ * the installer reads (lib/core/updates/host-signal.ts); PCP pulls and
+ * restarts nothing itself.
+ */
+export function hostUpdater(): boolean {
+  return process.env.PCP_HOST_UPDATER === "1"
+}

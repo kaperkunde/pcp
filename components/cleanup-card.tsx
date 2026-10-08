@@ -1,19 +1,14 @@
 "use client"
 
+import { Eraser } from "lucide-react"
 import Link from "next/link"
 import { useActionState, useState } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
+import { SettingsItem } from "@/components/settings-item"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { Input, Select } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import {
@@ -35,11 +30,20 @@ function size(bytes: number): string {
  * "Clean up now".
  */
 export function CleanupCard({ overview }: { overview: CleanupOverview }) {
+  const schedule =
+    overview.schedules.find((option) => option.id === overview.scheduleId)
+      ?.label ?? "On a schedule of your own"
+
   return (
-    <Card id="cleanup" className="scroll-mt-6">
-      <CardHeader>
-        <CardTitle>Cleanup</CardTitle>
-        <CardDescription>
+    <SettingsItem
+      id="cleanup"
+      title="Cleanup"
+      icon={Eraser}
+      state={`${schedule} · the log keeps ${overview.logDays} ${
+        overview.logDays === 1 ? "day" : "days"
+      }`}
+      about={
+        <>
           PCP removes what it keeps only for a while: sign-ins that ended (yours
           and apps&apos;), results kept for a day, permission requests a week
           after they expired, and days of the{" "}
@@ -51,14 +55,13 @@ export function CleanupCard({ overview }: { overview: CleanupOverview }) {
           </Link>{" "}
           older than you keep. It does this when it starts and then on the
           schedule below.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <CleanupStatusLine overview={overview} />
-        <CleanNowButton />
-        <CleanupForm overview={overview} />
-      </CardContent>
-    </Card>
+        </>
+      }
+    >
+      <CleanupStatusLine overview={overview} />
+      <CleanNowButton />
+      <CleanupForm overview={overview} />
+    </SettingsItem>
   )
 }
 
@@ -121,7 +124,7 @@ function CleanNowButton() {
       className="flex flex-wrap items-center gap-2"
       aria-label="Clean up now"
     >
-      <SubmitButton variant="outline" pendingText="Cleaning up…">
+      <SubmitButton variant="secondary" pendingText="Cleaning up…">
         Clean up now
       </SubmitButton>
       <FormError error={state.status === "error" ? state.error : null} />
@@ -199,7 +202,9 @@ function CleanupForm({ overview }: { overview: CleanupOverview }) {
         </Field>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
-        <SubmitButton pendingText="Saving…">Save</SubmitButton>
+        <SubmitButton variant="secondary" pendingText="Saving…">
+          Save
+        </SubmitButton>
         <FormError error={state.status === "error" ? state.error : null} />
         <FormNote message={state.status === "ok" ? state.message : null} />
       </div>

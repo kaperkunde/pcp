@@ -1,16 +1,11 @@
 "use client"
 
+import { Gauge } from "lucide-react"
 import { useActionState } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
+import { SettingsItem } from "@/components/settings-item"
 import { SubmitButton } from "@/components/submit-button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import {
@@ -76,11 +71,16 @@ export function ResourcesCard({ overview }: { overview: ResourcesOverview }) {
   )
   const { machine } = overview
 
+  const custom = ROWS.some((row) => overview.config[row.field] != null)
+
   return (
-    <Card id="resources" className="scroll-mt-6">
-      <CardHeader>
-        <CardTitle>Resources</CardTitle>
-        <CardDescription>
+    <SettingsItem
+      id="resources"
+      title="Resources"
+      icon={Gauge}
+      state={custom ? "Limits you set" : "PCP's pick for this machine"}
+      about={
+        <>
           How much of this machine PCP may use for what assistants hand it. Left
           empty, PCP picks from what the machine has:{" "}
           {size(machine.memoryBytes)} of memory, {machine.processors}{" "}
@@ -89,57 +89,58 @@ export function ResourcesCard({ overview }: { overview: ResourcesOverview }) {
             ? `, and ${size(machine.disk.freeBytes)} free where it keeps its data`
             : ""}
           .
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form
-          action={action}
-          className="flex flex-col gap-4"
-          aria-label="Resources"
-        >
-          <div className="grid gap-4 sm:grid-cols-2">
-            {ROWS.map((row) => {
-              const id = `resources-${row.field}`
-              const automatic = overview.automatic[row.field]
+        </>
+      }
+    >
+      <form
+        action={action}
+        className="flex flex-col gap-4"
+        aria-label="Resources"
+      >
+        <div className="grid gap-4 sm:grid-cols-2">
+          {ROWS.map((row) => {
+            const id = `resources-${row.field}`
+            const automatic = overview.automatic[row.field]
 
-              return (
-                <Field
-                  key={row.field}
-                  label={row.label}
-                  htmlFor={id}
-                  hint={`${row.hint} Empty for PCP's pick: ${row.unit ? megabytes(automatic) : automatic}.`}
-                >
-                  <Input
-                    id={id}
-                    name={row.field}
-                    type="number"
-                    inputMode="numeric"
-                    min={overview.bounds[row.field].min}
-                    max={overview.bounds[row.field].max}
-                    defaultValue={overview.config[row.field] ?? ""}
-                    placeholder={String(automatic)}
-                  />
-                </Field>
-              )
-            })}
-          </div>
-          <p className="text-sm text-muted-foreground">
-            In use: {overview.chosen.programsAtOnce}{" "}
-            {overview.chosen.programsAtOnce === 1 ? "program" : "programs"} of{" "}
-            {megabytes(overview.chosen.programMemoryMb)} at once, files up to{" "}
-            {megabytes(overview.chosen.fileMb)}, and{" "}
-            {megabytes(overview.chosen.keptMb)} of kept results per token.
-            Programs together may hold at most{" "}
-            {megabytes(overview.maxProgramsMemoryMb)}, three quarters of this
-            machine&apos;s memory.
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <SubmitButton pendingText="Saving…">Save</SubmitButton>
-            <FormError error={state.status === "error" ? state.error : null} />
-            <FormNote message={state.status === "ok" ? state.message : null} />
-          </div>
-        </form>
-      </CardContent>
-    </Card>
+            return (
+              <Field
+                key={row.field}
+                label={row.label}
+                htmlFor={id}
+                hint={`${row.hint} Empty for PCP's pick: ${row.unit ? megabytes(automatic) : automatic}.`}
+              >
+                <Input
+                  id={id}
+                  name={row.field}
+                  type="number"
+                  inputMode="numeric"
+                  min={overview.bounds[row.field].min}
+                  max={overview.bounds[row.field].max}
+                  defaultValue={overview.config[row.field] ?? ""}
+                  placeholder={String(automatic)}
+                />
+              </Field>
+            )
+          })}
+        </div>
+        <p className="text-sm text-muted-foreground">
+          In use: {overview.chosen.programsAtOnce}{" "}
+          {overview.chosen.programsAtOnce === 1 ? "program" : "programs"} of{" "}
+          {megabytes(overview.chosen.programMemoryMb)} at once, files up to{" "}
+          {megabytes(overview.chosen.fileMb)}, and{" "}
+          {megabytes(overview.chosen.keptMb)} of kept results per token.
+          Programs together may hold at most{" "}
+          {megabytes(overview.maxProgramsMemoryMb)}, three quarters of this
+          machine&apos;s memory.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <SubmitButton variant="secondary" pendingText="Saving…">
+            Save
+          </SubmitButton>
+          <FormError error={state.status === "error" ? state.error : null} />
+          <FormNote message={state.status === "ok" ? state.message : null} />
+        </div>
+      </form>
+    </SettingsItem>
   )
 }
