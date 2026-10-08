@@ -15,6 +15,7 @@ import {
   expectLevel,
   openRequestFromBell,
   openToken,
+  openTokenAdvanced,
   permissionFrom,
   proposedLevel,
   showServerSettings,
@@ -256,6 +257,7 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
   // included.
   const second = await createToken(page, SECOND_TOKEN_NAME)
   await openToken(page, SECOND_TOKEN_NAME)
+  await openTokenAdvanced(page, page.url().split("/").pop()!)
   await page
     .getByLabel("Token to copy from")
     .selectOption({ label: TOKEN_NAME })

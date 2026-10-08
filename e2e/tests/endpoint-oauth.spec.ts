@@ -62,8 +62,11 @@ test("an assistant proposes it with the owner's client, and the owner enters the
       `Tokens from: ${upstream.origin}/closed/token; your client secret goes there`,
     ),
   ).toBeVisible()
+  // The request's line, whole: its name and its value.
   const shown = await page
-    .getByText(/^Redirect URI your client needs: /)
+    .getByTestId("permission-lines")
+    .getByRole("listitem")
+    .filter({ hasText: /^Redirect URI your client needs: / })
     .textContent()
   redirectUri = shown!.replace("Redirect URI your client needs: ", "").trim()
   expect(redirectUri).toMatch(/^https?:\/\/[^/]+\/api\/oauth\/callback$/)
