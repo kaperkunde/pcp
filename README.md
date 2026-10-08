@@ -357,6 +357,8 @@ To remove PCP itself:
    identities and the automatic reply (out of office) on JMAP. A draft (`create_draft`) goes into
    the account's Drafts and is sent by nobody but you, so you can allow
    drafting and keep sending on **Ask you first**; it needs no SMTP server.
+   The automatic reply counts as sending (the server sends the text to whoever
+   writes in), so an account that cannot send has no tool to set it.
    **Read-only** offers only the tools that read. An
    assistant can propose an account too, with `register_server`: you see the
    server, the user name and how PCP signs in, type the app password on that

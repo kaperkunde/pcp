@@ -68,7 +68,10 @@ server), send as you, with attachments from its own kept results, move, flag,
 label and delete into the Trash, create, rename and move folders, delete an
 empty one, and (JMAP) turn the automatic reply on or off. Nothing deletes mail
 for good (a folder that holds mail, or the inbox, Trash and the other special
-ones, is never deleted), and sending cannot be undone, so leave `send_email` on Ask you first unless you mean otherwise.
+ones, is never deleted), and sending cannot be undone, so leave `send_email`
+and `set_vacation_response` (the automatic reply, which makes the server send
+text an assistant wrote to anyone who writes in) on Ask you first unless you
+mean otherwise. An account that cannot send has neither.
 `create_draft` only writes into Drafts and sends nothing, so you can allow it
 on its own and send what it wrote yourself.
 It never receives the password or token: PCP signs in itself and removes
@@ -261,9 +264,9 @@ Not defended against:
   check off; the proxy's own egress rules are what protect it then.
 - **What is in your mail.** An email is someone else's text: one an
   assistant reads can carry instructions meant for it (prompt injection),
-  and could ask it to send or forward mail. Keep sending on Ask you first,
-  or make the account read-only, for an assistant that reads mail from
-  strangers.
+  and could ask it to send or forward mail. Keep sending (and the automatic
+  reply) on Ask you first, or make the account read-only, for an assistant
+  that reads mail from strangers.
 - **Mail servers with certificates your system does not trust.** PCP checks
   the certificate of every JMAP, IMAP and SMTP server and refuses one it
   cannot verify, a self-signed one included.

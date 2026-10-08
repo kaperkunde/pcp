@@ -446,8 +446,10 @@ through: there is no tool that takes a raw JMAP method or IMAP command, so
 every change an assistant makes is one these rules were written for. Which
 ones an account has depends on read-only (the tools that change mail are left
 out, and refused if called anyway), on whether it can send (JMAP: the session
-offers submission; IMAP: the owner gave an SMTP server), and for the automatic
-reply on whether the JMAP session offers `vacationresponse`.
+offers submission; IMAP: the owner gave an SMTP server; `set_vacation_response`
+counts as sending, since the server sends its text to whoever writes in, and
+goes with `send_email`), and for the automatic reply on whether the JMAP
+session offers `vacationresponse`.
 
 `move_email`, `mark_email` and `delete_email` take `id` or `ids` (up to
 `MAX_BULK_EMAILS`): one email answers as it always has, several answer with
