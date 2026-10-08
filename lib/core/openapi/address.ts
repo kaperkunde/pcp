@@ -89,13 +89,39 @@ export function pcpPorts(): number[] {
   ]
 }
 
+/**
+ * One spelling per address, so a set lookup cannot be dodged: an IPv6
+ * address in its shortest form, and an IPv4-mapped one ("::ffff:192.0.2.2",
+ * "::ffff:c000:202") as the IPv4 address it reaches.
+ */
+function canonicalAddress(bare: string): string {
+  if (isIP(bare) !== 6) {
+    return bare
+  }
+
+  // The URL parser writes IPv6 in its shortest form, the mapped tail in hex.
+  const short = new URL(`http://[${bare}]`).hostname.slice(1, -1)
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(short)
+
+  if (!mapped) {
+    return short
+  }
+
+  const high = parseInt(mapped[1]!, 16)
+  const low = parseInt(mapped[2]!, 16)
+
+  return [high >> 8, high & 255, low >> 8, low & 255].join(".")
+}
+
 /** The addresses of this machine's own network interfaces. */
 function interfaceAddresses(): Set<string> {
   const found = new Set<string>()
 
   for (const entries of Object.values(os.networkInterfaces())) {
     for (const entry of entries ?? []) {
-      found.add(entry.address.replace(/%.*$/, "").toLowerCase())
+      found.add(
+        canonicalAddress(entry.address.replace(/%.*$/, "").toLowerCase()),
+      )
     }
   }
 
@@ -130,7 +156,7 @@ export function isOwnAddress(
 
   return (
     loopback.check(bare, family === 4 ? "ipv4" : "ipv6") ||
-    interfaceAddresses().has(bare)
+    interfaceAddresses().has(canonicalAddress(bare))
   )
 }
 
