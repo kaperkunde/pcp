@@ -19,6 +19,7 @@ import {
   checkAuthorizationRequest,
   consentQuery,
   denyAuthorization,
+  errorGoesBack,
   recheckAuthorization,
   tokensForClient,
   type AuthorizationParams,
@@ -352,6 +353,41 @@ describe("the authorization request", () => {
     expect(check.kind === "redirect" && check.url).toContain(
       "error=unsupported_response_type",
     )
+  })
+
+  it("sends an error back on its own only to an app the owner let in before", async () => {
+    const clientId = await publicClient("Anyone at all")
+    const { challenge } = pkce()
+    const check = await checkAuthorizationRequest(
+      params(clientId, challenge, { code_challenge_method: "plain" }),
+      PUBLIC_URL,
+    )
+
+    // What the page shows instead: who asked, where the link goes, and why.
+    expect(check).toMatchObject({
+      kind: "redirect",
+      client: {
+        id: clientId,
+        name: "Anyone at all",
+        host: "assistant.example",
+      },
+      returnHost: "assistant.example",
+      description: expect.stringContaining("PKCE is required"),
+    })
+
+    // Anyone can register, so a client nobody let in is not sent to.
+    expect(await errorGoesBack(ctx, clientId)).toBe(false)
+    expect(
+      await errorGoesBack(ctx, "https://assistant.example/client.json"),
+    ).toBe(false)
+
+    // Let in once, with a token that is still live, it is.
+    const { tokenId } = await approve(clientId, challenge)
+    expect(await errorGoesBack(ctx, clientId)).toBe(true)
+
+    // Revoked, the owner no longer stands behind it.
+    await revokeApiToken(ctx, tokenId)
+    expect(await errorGoesBack(ctx, clientId)).toBe(false)
   })
 })
 

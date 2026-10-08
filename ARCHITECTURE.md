@@ -1753,7 +1753,13 @@ The authorization response carries `iss` (RFC 9207).
 Redirect URIs are https, http to this computer, or an app's private-use
 scheme, and are matched exactly. Until the client and its redirect URI check
 out, the page tells the owner what is wrong and sends nothing back; after
-that, a bad request goes back to the client as an OAuth error.
+that, a bad request goes back to the client as an OAuth error. It goes back
+on its own only to a client the owner let in before and that still has a
+live token from it (`errorGoesBack`): anyone can register a client or
+publish a document with any redirect URI, so for any other one PCP would be
+an open redirector (RFC 9700 §4.11.2). The page shows that error instead,
+with the app's name and host and a plain "Return to …" link to the URI with
+the error, which the owner follows or not.
 
 **The owner's page** (`/oauth/authorize`) needs the owner signed in: a
 locked PCP sends them to `/login`, which goes on to the sign-in page and

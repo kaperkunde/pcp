@@ -27,7 +27,9 @@ import { issueCode } from "./tokens"
  *
  * Until the client and its redirect URI check out, nothing goes back to the
  * client: the owner is shown what is wrong instead, so PCP never sends
- * anyone to an address the client did not register.
+ * anyone to an address the client did not register. Past that, an error
+ * goes back on its own only to an app the owner let in before
+ * (`errorGoesBack`).
  */
 
 export type AuthorizationRequest = {
@@ -43,8 +45,17 @@ export type AuthorizationCheck =
   | { kind: "ok"; request: AuthorizationRequest }
   /** Shown to the owner; nothing goes back to the client. */
   | { kind: "show"; message: string }
-  /** An error the client is sent back with. */
-  | { kind: "redirect"; url: string }
+  /**
+   * An error the client is sent back with, at `url`; `description` says
+   * what it is, for PCP's page when the owner is not sent there at once.
+   */
+  | {
+      kind: "redirect"
+      url: string
+      client: OAuthClientInfo
+      returnHost: string
+      description: string
+    }
 
 export type AuthorizationParams = Record<string, string | undefined>
 
@@ -120,6 +131,9 @@ export async function checkAuthorizationRequest(
       state: state && state.length <= MAX_PARAM_LENGTH ? state : null,
       iss: issuer,
     }),
+    client,
+    returnHost: returnHostOf(redirectUri),
+    description,
   })
 
   if (params.response_type !== "code") {
@@ -337,6 +351,22 @@ export function denyAuthorization(
     state: request.state,
     iss: oauthUrls(publicUrl).issuer,
   })
+}
+
+/**
+ * Whether an error in a sign-in sends the owner straight back to the app
+ * (RFC 9700 §4.11.2). Anyone can register a client or publish a metadata
+ * document naming any return address, so doing that for every app would
+ * let a link to PCP bounce the owner anywhere, before they see a thing or
+ * right after they sign in. Only an app the owner let in before, and whose
+ * token from that is still live, gets its error at once; for any other the
+ * page shows it, with a link back the owner can choose to follow.
+ */
+export async function errorGoesBack(
+  ctx: VaultContext,
+  clientId: string,
+): Promise<boolean> {
+  return (await tokensForClient(ctx, clientId)).length > 0
 }
 
 /** Live tokens this client was given before, to sign in to again. */
