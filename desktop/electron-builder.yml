@@ -16,6 +16,7 @@ files:
   - touch-id-store.mjs
   - preload.cjs
   - updates.mjs
+  - window-policy.mjs
   - package.json
 extraResources:
   - from: server
