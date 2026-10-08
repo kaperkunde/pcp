@@ -168,16 +168,16 @@ export default defineConfig({
     },
     {
       // Per-token tool access and the owner's permission: the link (also for
-      // a client that offers prompts and panels), copying access, and servers
-      // an assistant proposes.
+      // a client that offers prompts and panels), Block, copying access,
+      // tool levels and servers an assistant proposes.
       name: "permissions",
       testMatch: /permissions\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("permissions"),
     },
     {
-      // A token that keeps memories: its own notes, sharing one through the
-      // owner's permission, and the Memories tab.
+      // A token that keeps memories: sharing one through the owner's
+      // permission, and what is read in every conversation.
       name: "memories",
       testMatch: /memories\.spec\.ts/,
       dependencies: ["setup"],
@@ -271,8 +271,8 @@ export default defineConfig({
       use: signedIn("updates"),
     },
     {
-      // The Log page (a token's calls by tool and outcome, the filters, the
-      // token's own link) and Settings → Cleanup.
+      // The Log page: a token's calls by tool and outcome, never what they
+      // sent.
       name: "log",
       testMatch: /log\.spec\.ts/,
       dependencies: ["setup"],

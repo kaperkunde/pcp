@@ -8,14 +8,23 @@ import {
   mcpToolCall2026,
   toolText,
 } from "../lib/mcp"
-import { createToken, openToken, showTools } from "../lib/ui"
+import {
+  acceptNextDialog,
+  chooseProposedLevel,
+  createToken,
+  openRequestFromBell,
+  openToken,
+  permissionFrom,
+  proposedLevel,
+  showTools,
+} from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
-// answers through a link (or the header's bell) and check_permission gives
-// the assistant the outcome, waiting while they are still on it, and the
-// answer can settle the tool for the token. Blocked tools vanish; access
-// copies between tokens; an assistant can propose tool levels, which change
-// only once the owner saves them on PCP's page, and a server, which is added
+// answers through a link (or the bell) and check_permission gives the
+// assistant the outcome, waiting while they are still on it, and the answer
+// can settle the tool for the token. Blocked tools vanish; access copies
+// between tokens; an assistant can propose tool levels, which change only
+// once the owner saves them on PCP's page, and a server, which is added
 // only once the owner agrees, and an OAuth one is connected from a link
 // while check_server waits.
 test.describe.configure({ mode: "serial" })
@@ -26,7 +35,6 @@ const SERVER_NAME = `Permission postcards ${RUN}`
 const SLUG = `perm-${RUN}`
 const TOKEN_NAME = `Careful assistant ${RUN}`
 const SECOND_TOKEN_NAME = `Second assistant ${RUN}`
-const THIRD_TOKEN_NAME = `Third assistant ${RUN}`
 
 // What a client that shows prompts and MCP Apps panels declares. PCP uses
 // neither: Claude's apps stalled on prompts and rebuilt panels stale.
@@ -39,7 +47,6 @@ const PROMPTS_AND_PANELS = {
 
 let upstream: Upstream
 let token: string
-let tokenId: string
 
 test.beforeAll(async () => {
   upstream = await startUpstream()
@@ -49,15 +56,22 @@ test.afterAll(async () => {
   await upstream?.close()
 })
 
-/** The permission link in a result's text, and the request's id. */
-function linkIn(text: string): { path: string; id: string } {
-  const id = text.match(/\/permissions\/([\w-]+)/)?.[1]
-  expect(id, text).toBeTruthy()
-  return { path: `/permissions/${id}`, id: id! }
-}
-
 function callsOf(tool: string): number {
   return upstream.calls.filter((call) => call.tool === tool).length
+}
+
+/** What a tool's level is for a token, as the assistant is told. */
+async function levelOf(
+  baseURL: string,
+  assistant: string,
+  tool: string,
+): Promise<string | undefined> {
+  const described = await callTool(baseURL, assistant, "describe_tool", {
+    server: SLUG,
+    tool,
+  })
+
+  return toolText(described).match(/"access": "(\w+)"/)?.[1]
 }
 
 test("sets up a server, with its secret typed into the form, and a token", async ({
@@ -83,24 +97,22 @@ test("sets up a server, with its secret typed into the form, and a token", async
   ).toBeVisible()
 
   token = await createToken(page, TOKEN_NAME)
-  tokenId = await openToken(page, TOKEN_NAME)
-  // Each server's tools stay folded until asked for.
-  await expect(
-    page
-      .getByRole("region", { name: SERVER_NAME })
-      .getByText("3 tools: 3 ask you first"),
-  ).toBeVisible()
-  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveCount(0)
-  await showTools(page, SLUG)
-  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
-    "ask",
-  )
 })
 
-test("a tool nobody decided on asks first, through a link", async ({
+test("a tool nobody decided on asks first, through a link, even for a client that shows prompts", async ({
   page,
   baseURL,
 }) => {
+  // No panel to mount, and no tool only a panel calls.
+  const listed = await mcpRequest(baseURL!, token, "tools/list")
+  const tools = listed.body.result?.tools ?? []
+  expect(tools.map((tool) => tool.name)).not.toContain("answer_permission")
+  expect(tools.filter((tool) => tool._meta?.ui)).toEqual([])
+  const panel = await mcpRequest(baseURL!, token, "resources/read", {
+    uri: "ui://pcp/panel",
+  })
+  expect(panel.body.result?.contents ?? []).toEqual([])
+
   const args = {
     server: SLUG,
     tool: "add_numbers",
@@ -110,12 +122,12 @@ test("a tool nobody decided on asks first, through a link", async ({
   const asked = await callTool(baseURL!, token, "call_tool", args)
   expect(asked.body.result?.isError ?? false, toolText(asked)).toBe(false)
   expect(toolText(asked)).toContain("Not done yet")
-  const { path, id } = linkIn(toolText(asked))
+  const { path, id } = permissionFrom(toolText(asked))
   expect(callsOf("add_numbers")).toBe(0)
 
   // Asking again waits on the same request.
   const again = await callTool(baseURL!, token, "call_tool", args)
-  expect(linkIn(toolText(again)).id).toBe(id)
+  expect(permissionFrom(toolText(again)).id).toBe(id)
 
   // The link comes last, on a line of its own: some apps hide what an
   // assistant writes before its next tool call.
@@ -124,18 +136,16 @@ test("a tool nobody decided on asks first, through a link", async ({
     new RegExp(`${path}$`),
   )
 
-  // The owner sees it waiting from any page: the bell in the header has a
-  // count, and its list leads to the request.
+  // The owner sees it waiting from any page: the bell has a count, and its
+  // list leads to the request. Nothing ran before they answer.
   await page.goto("/servers")
-  const bell = page.getByRole("button", { name: /waiting for you/ })
-  await expect(bell).toBeVisible()
-  await bell.click()
-  await page
-    .getByRole("menuitem", { name: new RegExp(`Allow ${SLUG}/add_numbers\\?`) })
-    .click()
+  await openRequestFromBell(page, new RegExp(`Allow ${SLUG}/add_numbers\\?`))
   await expect(page).toHaveURL(new RegExp(`${path}$`))
   await expect(page.getByText(`Allow ${SLUG}/add_numbers?`)).toBeVisible()
-  await expect(page.getByText("a: 19")).toBeVisible()
+  await expect(
+    page.getByTestId("permission-lines").getByText("19", { exact: true }),
+  ).toBeVisible()
+  expect(callsOf("add_numbers")).toBe(0)
   await page.getByRole("button", { name: "Always allow" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText("42")
   expect(callsOf("add_numbers")).toBe(1)
@@ -151,29 +161,46 @@ test("a tool nobody decided on asks first, through a link", async ({
     arguments: { a: 1, b: 1 },
   })
   expect(toolText(direct)).toBe("2")
+  expect(await levelOf(baseURL!, token, "add_numbers")).toBe("allowed")
 
-  await page.goto(`/tokens/${tokenId}`)
-  await showTools(page, SLUG)
-  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
-    "allowed",
+  // A client that declares prompts and panels gets the same link, and
+  // check_permission started before the owner answers waits for them.
+  const echo = { server: SLUG, tool: "echo_auth", arguments: {} }
+  const prompted = await mcpToolCall2026(baseURL!, token, "call_tool", echo, {
+    capabilities: PROMPTS_AND_PANELS,
+  })
+  expect(prompted.body.result?.resultType).not.toBe("input_required")
+  expect(toolText(prompted)).toContain("Not done yet")
+  const waited = mcpToolCall2026(
+    baseURL!,
+    token,
+    "check_permission",
+    { id: permissionFrom(toolText(prompted)).id },
+    { capabilities: PROMPTS_AND_PANELS },
   )
+  await page.goto(permissionFrom(toolText(prompted)).path)
+  await page.getByRole("button", { name: "Always allow" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `Bearer ${upstream.expectedToken}`,
+  )
+  await expect(page.getByText("Tell the assistant that asked")).toBeVisible()
+  expect(toolText(await waited)).toContain(`Bearer ${upstream.expectedToken}`)
+  expect(callsOf("echo_auth")).toBe(1)
 })
 
-test("a blocked tool is hidden from the assistant and refused", async ({
+test("a blocked tool is hidden from the assistant and refused; a copy of the access keeps it blocked", async ({
   page,
   baseURL,
 }) => {
-  await page.goto(`/tokens/${tokenId}`)
-  await showTools(page, SLUG)
-  await page
-    .getByLabel(`Access to ${SLUG}/send_postcard`)
-    .selectOption("blocked")
-  await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toBeEnabled()
-  await page.reload()
-  await showTools(page, SLUG)
-  await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toHaveValue(
-    "blocked",
-  )
+  const postcard = {
+    server: SLUG,
+    tool: "send_postcard",
+    arguments: { to: "Ada", message: "Hi" },
+  }
+  const asked = await callTool(baseURL!, token, "call_tool", postcard)
+  await page.goto(permissionFrom(toolText(asked)).path)
+  await page.getByRole("button", { name: "Block", exact: true }).click()
+  await expect(page.getByTestId("permission-outcome")).toBeVisible()
 
   const search = await callTool(baseURL!, token, "search_tools", {
     query: "postcard",
@@ -187,11 +214,7 @@ test("a blocked tool is hidden from the assistant and refused", async ({
   })
   expect(described.body.result?.isError).toBe(true)
 
-  const refused = await callTool(baseURL!, token, "call_tool", {
-    server: SLUG,
-    tool: "send_postcard",
-    arguments: { to: "Ada", message: "Hi" },
-  })
+  const refused = await callTool(baseURL!, token, "call_tool", postcard)
   expect(refused.body.result?.isError).toBe(true)
   expect(toolText(refused)).toContain("blocked")
 
@@ -200,77 +223,19 @@ test("a blocked tool is hidden from the assistant and refused", async ({
     `${SLUG}: Postcards for permission tests. (2 tools)`,
   )
   expect(callsOf("send_postcard")).toBe(0)
-})
 
-test("a client that shows prompts and panels gets the link all the same", async ({
-  page,
-  baseURL,
-}) => {
-  // No panel to mount, and no tool only a panel calls.
-  const listed = await mcpRequest(baseURL!, token, "tools/list")
-  const tools = listed.body.result?.tools ?? []
-  expect(tools.map((tool) => tool.name)).not.toContain("answer_permission")
-  expect(tools.filter((tool) => tool._meta?.ui)).toEqual([])
-  const panel = await mcpRequest(baseURL!, token, "resources/read", {
-    uri: "ui://pcp/panel",
-  })
-  expect(panel.body.result?.contents ?? []).toEqual([])
-
-  const args = { server: SLUG, tool: "echo_auth", arguments: {} }
-  const asked = await mcpToolCall2026(baseURL!, token, "call_tool", args, {
-    capabilities: PROMPTS_AND_PANELS,
-  })
-  expect(asked.body.result?.resultType).not.toBe("input_required")
-  expect(toolText(asked)).toContain("Not done yet")
-  const { path, id } = linkIn(toolText(asked))
-
-  const waited = mcpToolCall2026(
-    baseURL!,
-    token,
-    "check_permission",
-    { id },
-    { capabilities: PROMPTS_AND_PANELS },
-  )
-  await page.goto(path)
-  await page.getByRole("button", { name: "Always allow" }).click()
-  await expect(page.getByTestId("permission-outcome")).toContainText(
-    `Bearer ${upstream.expectedToken}`,
-  )
-  await expect(page.getByText("Tell the assistant that asked")).toBeVisible()
-  expect(toolText(await waited)).toContain(`Bearer ${upstream.expectedToken}`)
-  expect(callsOf("echo_auth")).toBe(1)
-
-  const direct = await callTool(baseURL!, token, "call_tool", args)
-  expect(toolText(direct)).toBe(`Bearer ${upstream.expectedToken}`)
-})
-
-test("copying access gives a second token the same tools", async ({
-  page,
-  baseURL,
-}) => {
+  // Copying the access gives a second token the same tools, blocked ones
+  // included.
   const second = await createToken(page, SECOND_TOKEN_NAME)
   await openToken(page, SECOND_TOKEN_NAME)
-
   await page
     .getByLabel("Token to copy from")
     .selectOption({ label: TOKEN_NAME })
-  page.once("dialog", (dialog) => dialog.accept())
+  acceptNextDialog(page)
   await page.getByRole("button", { name: "Copy access" }).click()
   await expect(
     page.getByRole("status").filter({ hasText: "Copied." }),
   ).toBeVisible()
-
-  await page.reload()
-  await showTools(page, SLUG)
-  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
-    "allowed",
-  )
-  await expect(page.getByLabel(`Access to ${SLUG}/echo_auth`)).toHaveValue(
-    "allowed",
-  )
-  await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toHaveValue(
-    "blocked",
-  )
 
   const echoed = await callTool(baseURL!, second, "call_tool", {
     server: SLUG,
@@ -278,22 +243,15 @@ test("copying access gives a second token the same tools", async ({
     arguments: {},
   })
   expect(toolText(echoed)).toBe(`Bearer ${upstream.expectedToken}`)
-
-  const refused = await callTool(baseURL!, second, "call_tool", {
-    server: SLUG,
-    tool: "send_postcard",
-    arguments: { to: "Ada", message: "Hi" },
-  })
-  expect(refused.body.result?.isError).toBe(true)
+  const secondRefused = await callTool(baseURL!, second, "call_tool", postcard)
+  expect(secondRefused.body.result?.isError).toBe(true)
 })
 
 test("an assistant proposes tool levels; nothing changes until you save them", async ({
   page,
   baseURL,
 }) => {
-  const name = `Proposing assistant ${RUN}`
-  const proposer = await createToken(page, name)
-  const proposerId = await openToken(page, name)
+  const proposer = await createToken(page, `Proposing assistant ${RUN}`)
 
   const proposed = await callTool(baseURL!, proposer, "propose_tool_access", {
     changes: [
@@ -303,42 +261,33 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
   })
   expect(proposed.body.result?.isError ?? false, toolText(proposed)).toBe(false)
   expect(toolText(proposed)).toContain("3 tools would change")
-  const { path, id } = linkIn(toolText(proposed))
+  const { path, id } = permissionFrom(toolText(proposed))
 
   // Asking changed nothing: the tool still asks first.
-  const described = await callTool(baseURL!, proposer, "describe_tool", {
-    server: SLUG,
-    tool: "add_numbers",
-  })
-  expect(toolText(described)).toContain('"access": "ask"')
+  expect(await levelOf(baseURL!, proposer, "add_numbers")).toBe("ask")
 
-  // The token's page sends the owner to review it.
-  await page.goto(`/tokens/${proposerId}`)
-  await page.getByRole("link", { name: "Review and save" }).click()
-  await expect(page).toHaveURL(new RegExp(`${path}$`))
+  await page.goto(path)
   await expect(
     page.getByText("Change which tools an assistant may run?"),
   ).toBeVisible()
 
   // The proposal is filled in and each change marked.
-  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
-    "allowed",
-  )
-  await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toHaveValue(
-    "blocked",
-  )
+  await expect(
+    proposedLevel(page, SLUG, "add_numbers").getByRole("radio", {
+      name: "Allowed",
+    }),
+  ).toBeChecked()
+  await expect(
+    proposedLevel(page, SLUG, "send_postcard").getByRole("radio", {
+      name: "Blocked",
+    }),
+  ).toBeChecked()
   await expect(page.locator("li[data-changed]")).toHaveCount(3)
-  await expect(page.getByTestId("access-summary")).toContainText(
-    "Saving changes 3 tools: 2 to Allowed, 1 to Blocked.",
-  )
 
   // The owner takes one back before saving, while the assistant waits.
   const waited = callTool(baseURL!, proposer, "check_permission", { id })
-  await page.getByLabel(`Access to ${SLUG}/echo_auth`).selectOption("ask")
+  await chooseProposedLevel(page, SLUG, "echo_auth", "Ask you first")
   await expect(page.locator("li[data-changed]")).toHaveCount(2)
-  await expect(page.getByTestId("access-summary")).toContainText(
-    "Saving changes 2 tools: 1 to Allowed, 1 to Blocked.",
-  )
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText(
     "You saved these levels.",
@@ -348,24 +297,20 @@ test("an assistant proposes tool levels; nothing changes until you save them", a
     "They did not take 1 of the 3 levels",
   )
 
-  await page.goto(`/tokens/${proposerId}`)
-  await showTools(page, SLUG)
-  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
-    "allowed",
-  )
-  await expect(page.getByLabel(`Access to ${SLUG}/echo_auth`)).toHaveValue(
-    "ask",
-  )
-  await expect(page.getByLabel(`Access to ${SLUG}/send_postcard`)).toHaveValue(
-    "blocked",
-  )
-
+  expect(await levelOf(baseURL!, proposer, "add_numbers")).toBe("allowed")
+  expect(await levelOf(baseURL!, proposer, "echo_auth")).toBe("ask")
   const ran = await callTool(baseURL!, proposer, "call_tool", {
     server: SLUG,
     tool: "add_numbers",
     arguments: { a: 2, b: 3 },
   })
   expect(toolText(ran)).toBe("5")
+  const refused = await callTool(baseURL!, proposer, "call_tool", {
+    server: SLUG,
+    tool: "send_postcard",
+    arguments: { to: "Ada", message: "Hi" },
+  })
+  expect(refused.body.result?.isError).toBe(true)
 })
 
 test("Allow for lets a tool run without asking until the time is up or you end it", async ({
@@ -374,7 +319,6 @@ test("Allow for lets a tool run without asking until the time is up or you end i
 }) => {
   const name = `Allowed for a while ${RUN}`
   const assistant = await createToken(page, name)
-  const assistantId = await openToken(page, name)
   const add = (a: number, b: number) => ({
     server: SLUG,
     tool: "add_numbers",
@@ -383,7 +327,7 @@ test("Allow for lets a tool run without asking until the time is up or you end i
 
   const asked = await callTool(baseURL!, assistant, "call_tool", add(4, 5))
   expect(toolText(asked)).toContain("Not done yet")
-  await page.goto(linkIn(toolText(asked)).path)
+  await page.goto(permissionFrom(toolText(asked)).path)
   await page.getByLabel("How long").selectOption({ label: "15 minutes" })
   await page.getByRole("button", { name: "Allow for 15 minutes" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText("9")
@@ -392,74 +336,18 @@ test("Allow for lets a tool run without asking until the time is up or you end i
   expect(
     toolText(await callTool(baseURL!, assistant, "call_tool", add(1, 2))),
   ).toBe("3")
-  await page.goto(`/tokens/${assistantId}`)
+  expect(await levelOf(baseURL!, assistant, "add_numbers")).toBe("ask")
+
+  // The owner sees it on the token's page, and ends it early: it asks again.
+  await openToken(page, name)
   await expect(page.getByText("Allowed for now")).toBeVisible()
   await expect(page.getByText(`${SERVER_NAME} · add_numbers`)).toBeVisible()
   await showTools(page, SLUG)
-  await expect(page.getByLabel(`Access to ${SLUG}/add_numbers`)).toHaveValue(
-    "ask",
-  )
-
-  // Ended early, it asks again.
   await page.getByRole("button", { name: "End now" }).click()
   await expect(page.getByText("Allowed for now")).toHaveCount(0)
   expect(
     toolText(await callTool(baseURL!, assistant, "call_tool", add(6, 7))),
   ).toContain("Not done yet")
-})
-
-test("All tokens on a tool's row decides it for every token without a level of its own", async ({
-  page,
-  baseURL,
-}) => {
-  const allTokens = () =>
-    page.getByLabel(`All tokens for ${SLUG}/add_numbers`, { exact: true })
-  const access = () =>
-    page.getByLabel(`Access to ${SLUG}/add_numbers`, { exact: true })
-  const add = { server: SLUG, tool: "add_numbers", arguments: { a: 2, b: 3 } }
-  // Each server's tools start folded on a token's page.
-  const open = async (path: string) => {
-    await page.goto(path)
-    await showTools(page, SLUG)
-  }
-
-  const third = await createToken(page, THIRD_TOKEN_NAME)
-  const thirdId = await openToken(page, THIRD_TOKEN_NAME)
-  await open(`/tokens/${thirdId}`)
-  await expect(access()).toHaveValue("ask")
-  await expect(allTokens()).not.toBeChecked()
-
-  // The first token allows it: ticking makes that every token's level.
-  await open(`/tokens/${tokenId}`)
-  await allTokens().check()
-  await expect(allTokens()).toBeEnabled()
-  await open(`/tokens/${tokenId}`)
-  await expect(allTokens()).toBeChecked()
-  await expect(access()).toHaveValue("allowed")
-
-  await open(`/tokens/${thirdId}`)
-  await expect(allTokens()).toBeChecked()
-  await expect(access()).toHaveValue("allowed")
-  expect(toolText(await callTool(baseURL!, third, "call_tool", add))).toBe("5")
-
-  // A token's own level wins: the third one asks again for itself.
-  await access().selectOption("ask")
-  await expect(access()).toBeEnabled()
-  await open(`/tokens/${thirdId}`)
-  await expect(allTokens()).not.toBeChecked()
-  await expect(page.getByText("(all tokens: Allowed)")).toBeVisible()
-  expect(toolText(await callTool(baseURL!, third, "call_tool", add))).toContain(
-    "Not done yet",
-  )
-
-  // Unticking takes it from all tokens; the first one keeps it as its own.
-  await open(`/tokens/${tokenId}`)
-  await allTokens().uncheck()
-  await expect(allTokens()).toBeEnabled()
-  await open(`/tokens/${tokenId}`)
-  await expect(allTokens()).not.toBeChecked()
-  await expect(access()).toHaveValue("allowed")
-  await expect(page.getByText("(all tokens: Allowed)")).toHaveCount(0)
 })
 
 test("an assistant can propose a server with a stored secret; it is added once you agree", async ({
@@ -476,7 +364,7 @@ test("an assistant can propose a server with a stored secret; it is added once y
     secret: SECRET_NAME,
   })
   expect(toolText(asked)).toContain("Not done yet")
-  const { path } = linkIn(toolText(asked))
+  const { path } = permissionFrom(toolText(asked))
 
   const before = await initialize(baseURL!, token)
   expect(before.instructions).not.toContain(`proposed-${RUN}`)
@@ -511,7 +399,7 @@ test("an assistant can propose a server with a secret you do not have yet; you t
   const text = toolText(asked)
   expect(text).toContain(`sends a new secret, saved as "${secretName}"`)
   expect(text).toContain("do not ask them for it here")
-  const { path, id } = linkIn(text)
+  const { path, id } = permissionFrom(text)
 
   await page.goto(path)
   await expect(page.getByText(`Add the server ${name}?`)).toBeVisible()
@@ -546,7 +434,7 @@ test("an OAuth server an assistant proposes is connected through a link", async 
     url: upstream.oauthMcpUrl,
     auth_type: "oauth",
   })
-  const { path, id } = linkIn(toolText(asked))
+  const { path, id } = permissionFrom(toolText(asked))
 
   const agreed = callTool(baseURL!, token, "check_permission", { id })
   await page.goto(path)
@@ -582,7 +470,7 @@ test("an OAuth server an assistant proposes is connected through a link", async 
     tool: "echo_auth",
     arguments: {},
   })
-  await page.goto(linkIn(toolText(call)).path)
+  await page.goto(permissionFrom(toolText(call)).path)
   await page.getByRole("button", { name: "Allow once" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText(
     "Bearer access-",

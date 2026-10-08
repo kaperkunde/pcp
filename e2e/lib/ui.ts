@@ -2,7 +2,10 @@ import { expect, type Page } from "@playwright/test"
 
 import { OWNER_PASSWORD } from "./auth"
 
-/** Adds a text secret through the Secrets page. */
+/**
+ * Adds a text secret through the Secrets page: "Add a secret" opens a sheet
+ * with the form, which closes once the secret is saved.
+ */
 export async function addSecret(
   page: Page,
   {
@@ -12,12 +15,15 @@ export async function addSecret(
   }: { name: string; value: string; description?: string },
 ) {
   await page.goto("/secrets")
-  await page.getByLabel("Name", { exact: true }).fill(name)
+  await page.getByRole("button", { name: "Add a secret" }).click()
+  const dialog = page.getByRole("dialog", { name: "Add a secret" })
+  await dialog.getByLabel("Name", { exact: true }).fill(name)
   if (description) {
-    await page.getByLabel("Description (optional)").fill(description)
+    await dialog.getByLabel("Description (optional)").fill(description)
   }
-  await page.getByLabel("Value").fill(value)
-  await page.getByRole("button", { name: "Save secret" }).click()
+  await dialog.getByLabel("Value").fill(value)
+  await dialog.getByRole("button", { name: "Save secret" }).click()
+  await expect(dialog).toBeHidden()
   await expect(
     page.getByRole("listitem").filter({ hasText: name }).first(),
   ).toBeVisible()
@@ -156,4 +162,55 @@ export async function allowAllTools(
     expect(values.length).toBeGreaterThan(0)
     expect(values.every((value) => value === "allowed")).toBe(true)
   }).toPass()
+}
+
+// ---- The owner's answers to requests (permissions, memories) ----------------
+
+/** The permission link in an assistant's result text, and the request's id. */
+export function permissionFrom(text: string): { path: string; id: string } {
+  const id = text.match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(id, text).toBeTruthy()
+  return { path: `/permissions/${id}`, id: id! }
+}
+
+/** Accepts the next confirm() the page shows (Delete, Copy access…). */
+export function acceptNextDialog(page: Page) {
+  page.once("dialog", (dialog) => void dialog.accept())
+}
+
+/** The bell in the sidebar that lists what waits for the owner. */
+export function bell(page: Page) {
+  return page.getByRole("button", { name: /waiting for you/ })
+}
+
+/** Opens the bell and follows the request whose title matches. */
+export async function openRequestFromBell(page: Page, title: RegExp | string) {
+  await expect(bell(page)).toBeVisible()
+  await bell(page).click()
+  await page.getByRole("menuitem", { name: title }).click()
+}
+
+/** The group of levels for one tool on an assistant's proposal. */
+export function proposedLevel(page: Page, slug: string, tool: string) {
+  return page.getByRole("group", { name: `Access to ${slug}/${tool}` })
+}
+
+/**
+ * Picks a level on an assistant's proposal for its token's tools: each
+ * tool's choice is a group named "Access to <slug>/<tool>" of radio buttons.
+ */
+export async function chooseProposedLevel(
+  page: Page,
+  slug: string,
+  tool: string,
+  level: "Allowed" | "Ask you first" | "Blocked",
+) {
+  await proposedLevel(page, slug, tool)
+    .getByText(level, { exact: true })
+    .click()
+}
+
+/** A tool's level on its token's page, which the owner reaches from Assistants. */
+export function toolLevel(page: Page, slug: string, tool: string) {
+  return page.getByLabel(`Access to ${slug}/${tool}`, { exact: true })
 }
