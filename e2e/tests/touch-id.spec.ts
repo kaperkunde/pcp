@@ -89,7 +89,11 @@ function prompts(page: Page) {
 /** With a key kept, the sign-in page asks for Touch ID as it opens. */
 async function unlockWithTouchId(page: Page) {
   await page.goto("/login")
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible({
+  await expect(
+    page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Servers" }),
+  ).toBeVisible({
     timeout: 30_000,
   })
 }
@@ -133,7 +137,11 @@ test("unlocks with Touch ID as the page opens, and confirms a token with it", as
 
   // Asked for once, at once; no password typed.
   await page.waitForURL(/\/servers/, { timeout: 30_000 })
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
+  await expect(
+    page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Servers" }),
+  ).toBeVisible()
   expect(await prompts(page)).toBe(before + 1)
 
   // The token's password step is answered by Touch ID as it appears.
@@ -234,7 +242,11 @@ test("turns on at sign-in, and signing out everywhere turns it off", async ({
   await page.getByLabel("Password").fill(OWNER_PASSWORD)
   await page.getByLabel("Unlock with Touch ID from now on").check()
   await page.getByRole("button", { name: "Unlock", exact: true }).click()
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible({
+  await expect(
+    page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Servers" }),
+  ).toBeVisible({
     timeout: 30_000,
   })
   expect(await savedKey(page)).toMatch(/^pcp_device_/)
@@ -254,7 +266,11 @@ test("turns on at sign-in, and signing out everywhere turns it off", async ({
   await page.getByLabel("Password").fill(OWNER_PASSWORD)
   await page.getByLabel("Unlock with Touch ID from now on").check()
   await page.getByRole("button", { name: "Unlock", exact: true }).click()
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible({
+  await expect(
+    page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Servers" }),
+  ).toBeVisible({
     timeout: 30_000,
   })
   expect(await savedKey(page)).toMatch(/^pcp_device_/)

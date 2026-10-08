@@ -37,7 +37,7 @@ export default async function SetupNetworkPage() {
         </p>
       }
     >
-      <ButtonLink href="/servers" variant="outline" size="lg">
+      <ButtonLink href="/home" variant="outline" size="lg">
         Skip for now — open PCP
       </ButtonLink>
       <PcpggCard
@@ -55,7 +55,7 @@ export default async function SetupNetworkPage() {
         pcpggName={network.pcpgg ? network.pcpgg.name : undefined}
       />
       <UpdateCheckCard check={updates.check} />
-      <ButtonLink href="/servers" size="lg">
+      <ButtonLink href="/home" size="lg">
         Done — open PCP
       </ButtonLink>
     </AuthShell>

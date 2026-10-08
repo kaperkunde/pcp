@@ -2,7 +2,8 @@
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the key-files
 table, and [ARCHITECTURE.md](ARCHITECTURE.md) for the encryption and tenancy
-model. This file is the conventions that are easy to get wrong.
+model, and [DESIGN.md](DESIGN.md) for how the owner's pages look and where
+things go on them. This file is the conventions that are easy to get wrong.
 
 ## Before pushing
 
