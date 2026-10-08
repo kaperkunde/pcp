@@ -1,19 +1,16 @@
 "use client"
 
-import { useActionState } from "react"
+import { Download } from "lucide-react"
+import { useActionState, useRef } from "react"
 
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { SubmitButton } from "@/components/submit-button"
+import { SettingsItem } from "@/components/settings-item"
 import { Badge } from "@/components/ui/badge"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { List } from "@/components/ui/list"
+import { SwitchRow } from "@/components/ui/switch"
 import {
   checkForUpdatesAction,
   requestInstallAction,
@@ -64,16 +61,34 @@ function ExternalLink({
   )
 }
 
+/** The grey line under "Updates": which release this is, or that one is out. */
+function updatesState(overview: UpdatesOverview) {
+  const { current, latest, available, check } = overview
+
+  if (available && latest) {
+    return (
+      <span className="font-medium text-warning">
+        v{latest.version} is out. This PCP is v{current}.
+      </span>
+    )
+  }
+
+  return `v${current}${
+    latest ? ", the latest release" : check ? "" : ", checking is off"
+  }`
+}
+
 /**
  * Settings → Updates: which version this is, what the last check found,
  * the daily check on or off, "Check now", and how to update this PCP for
- * the way it was installed.
+ * the way it was installed. Open when a newer release is out.
  */
 export function UpdatesCard({
   overview,
   host,
   desktopInstall,
   autoUpdated = false,
+  hostUpdater = false,
 }: {
   overview: UpdatesOverview
   host: InstallKind
@@ -81,46 +96,47 @@ export function UpdatesCard({
   desktopInstall: "auto" | "manual" | null
   /** The Linux installer set this container up to update itself daily. */
   autoUpdated?: boolean
+  /** The Linux installer installs an update when the owner asks here. */
+  hostUpdater?: boolean
 }) {
   return (
-    <Card id="updates" className="scroll-mt-6">
-      <CardHeader>
-        <CardTitle>Updates</CardTitle>
-        <CardDescription>
-          PCP tells you when a new release is out, here and in its header.
-          Updating is up to you.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <UpdateStatusLine overview={overview} />
-        <CheckNowButton />
+    <SettingsItem
+      id="updates"
+      title="Updates"
+      icon={Download}
+      tint="bg-tile-mcp text-tile-mcp-foreground"
+      state={updatesState(overview)}
+      about="PCP tells you when a new release is out, here and in its header. Updating is up to you."
+      defaultOpen={overview.available}
+    >
+      <UpdateStatusLine overview={overview} />
+      <CheckNowButton />
+      <List className="bg-field">
         <UpdateCheckSwitch check={overview.check} />
-        <HowToUpdate
-          host={host}
-          desktopInstall={desktopInstall}
-          autoUpdated={autoUpdated}
-          overview={overview}
-        />
-      </CardContent>
-    </Card>
+      </List>
+      <HowToUpdate
+        host={host}
+        desktopInstall={desktopInstall}
+        autoUpdated={autoUpdated}
+        hostUpdater={hostUpdater}
+        overview={overview}
+      />
+    </SettingsItem>
   )
 }
 
 /** The setup step's card: only the daily check, and what it sends. */
 export function UpdateCheckCard({ check }: { check: boolean }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>New releases</CardTitle>
-        <CardDescription>
-          PCP can tell you when a new release is out, in its header and under
-          Settings. Updating stays up to you.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
+    <SettingsItem
+      variant="card"
+      title="New releases"
+      about="PCP can tell you when a new release is out, in its header and under Settings. Updating stays up to you."
+    >
+      <List className="bg-field">
         <UpdateCheckSwitch check={check} />
-      </CardContent>
-    </Card>
+      </List>
+    </SettingsItem>
   )
 }
 
@@ -206,7 +222,7 @@ function CheckNowButton() {
       className="flex flex-wrap items-center gap-2"
       aria-label="Check for updates"
     >
-      <SubmitButton variant="outline" pendingText="Checking…">
+      <SubmitButton variant="secondary" pendingText="Checking…">
         Check now
       </SubmitButton>
       <FormError error={state.status === "error" ? state.error : null} />
@@ -216,39 +232,37 @@ function CheckNowButton() {
 }
 
 function UpdateCheckSwitch({ check }: { check: boolean }) {
-  const [state, action] = useActionState<UpdatesResult, FormData>(
+  const [state, action, pending] = useActionState<UpdatesResult, FormData>(
     setUpdateCheckAction,
     { status: "idle" },
   )
+  const form = useRef<HTMLFormElement>(null)
 
+  // The switch shows what PCP holds: it moves when the page has the new
+  // value, not before, so a refused change leaves it where it was.
   return (
     <form
+      ref={form}
       action={action}
-      className="flex flex-col gap-2"
       aria-label="Daily check for new releases"
+      className="flex flex-col"
     >
       <input type="hidden" name="check" value={check ? "off" : "on"} />
-      <p>
-        {check
-          ? "PCP checks for new releases once a day."
-          : "PCP does not check for new releases by itself."}
-      </p>
-      <p className="text-xs text-muted-foreground">
-        {DISCLOSURE}
-        {check
-          ? ""
-          : " While this is off, nothing is sent unless you choose Check now."}
-      </p>
-      <div className="flex flex-wrap items-center gap-2">
-        <SubmitButton
-          variant="outline"
-          size="sm"
-          pendingText={check ? "Turning off…" : "Turning on…"}
-        >
-          {check ? "Turn off the daily check" : "Turn on the daily check"}
-        </SubmitButton>
-        <FormError error={state.status === "error" ? state.error : null} />
-      </div>
+      <SwitchRow
+        id="update-check"
+        label="Check for new releases once a day"
+        description={`${DISCLOSURE}${
+          check
+            ? ""
+            : " While this is off, nothing is sent unless you choose Check now."
+        }`}
+        checked={check}
+        disabled={pending}
+        onChange={() => form.current?.requestSubmit()}
+      />
+      {state.status === "error" ? (
+        <FormError error={state.error} className="px-4 pb-3" />
+      ) : null}
     </form>
   )
 }
@@ -264,7 +278,7 @@ function InstallButton({ version }: { version: string }) {
       className="flex flex-wrap items-center gap-2"
       aria-label="Install the update"
     >
-      <SubmitButton pendingText="Asking the app…">
+      <SubmitButton pendingText="Asking…">
         Install v{version} and restart
       </SubmitButton>
       <FormError error={state.status === "error" ? state.error : null} />
@@ -341,21 +355,73 @@ function DesktopUpdate({
   )
 }
 
+/** A container the Linux installer runs and watches for the owner's request. */
+function InstallerUpdate({
+  autoUpdated,
+  overview,
+}: {
+  autoUpdated: boolean
+  overview: UpdatesOverview
+}) {
+  const { available, latest, installRequest } = overview
+
+  return (
+    <>
+      {installRequest ? (
+        <p role="status">
+          PCP is installing v{installRequest.version}. The installer on this
+          computer fetches the new image and starts PCP again from it, which
+          takes a minute or two; reload this page then. Your vault stays in its
+          volume.
+        </p>
+      ) : available && latest ? (
+        <>
+          <p className="text-muted-foreground">
+            The installer on this computer can install v{latest.version}: it
+            fetches the new image and starts PCP again from it. Your vault stays
+            in its volume.
+          </p>
+          <InstallButton version={latest.version} />
+        </>
+      ) : (
+        <p className="text-muted-foreground">
+          This PCP runs in a container the installer set up. When a new version
+          is out, you can install it from here.
+        </p>
+      )}
+      {autoUpdated ? (
+        <p className="text-muted-foreground">
+          The installer also updates it by itself once a day. To turn that off:
+        </p>
+      ) : null}
+      {autoUpdated ? <CopyableValue value={INSTALL_MANUAL_LINE} /> : null}
+      <p className="text-xs text-muted-foreground">
+        If installing does not work, run the install line again:
+      </p>
+      <CopyableValue value={INSTALL_LINE} />
+    </>
+  )
+}
+
 function HowToUpdate({
   host,
   desktopInstall,
   autoUpdated,
+  hostUpdater,
   overview,
 }: {
   host: InstallKind
   desktopInstall: "auto" | "manual" | null
   autoUpdated: boolean
+  hostUpdater: boolean
   overview: UpdatesOverview
 }) {
   return (
-    <div className="flex flex-col gap-3 border-t border-border pt-4">
+    <div className="flex flex-col gap-3 border-t border-separator pt-4 text-sm">
       <h3 className="font-medium">How to update this PCP</h3>
-      {host === "container" && autoUpdated ? (
+      {host === "container" && hostUpdater ? (
+        <InstallerUpdate autoUpdated={autoUpdated} overview={overview} />
+      ) : host === "container" && autoUpdated ? (
         <>
           <p>
             This PCP updates itself: the installer set up a daily update that

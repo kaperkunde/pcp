@@ -214,3 +214,46 @@ export async function chooseProposedLevel(
 export function toolLevel(page: Page, slug: string, tool: string) {
   return page.getByLabel(`Access to ${slug}/${tool}`, { exact: true })
 }
+
+/**
+ * A folded row of the Settings page ("Password", "Touch ID", "Export"),
+ * opened: the row is a disclosure, and its form is not on screen until it
+ * is. Returns the row to look for the form's fields and buttons in.
+ */
+export async function openSettingsRow(page: Page, title: string) {
+  const row = page.locator("details[data-slot=disclosure]").filter({
+    has: page.locator("summary").getByText(title, { exact: true }),
+  })
+
+  if ((await row.getAttribute("open")) === null) {
+    await row.locator("summary").first().click()
+  }
+
+  await expect(row).toHaveAttribute("open", "")
+  return row
+}
+
+/**
+ * Unfolds Advanced on a server's page: its settings form (name, short name,
+ * address, sign-in) lives there, folded until asked for.
+ */
+export async function showServerSettings(page: Page) {
+  const advanced = page
+    .locator("details")
+    .filter({ has: page.locator("summary", { hasText: /^Advanced/ }) })
+    .first()
+  if (!(await advanced.evaluate((element) => element.hasAttribute("open")))) {
+    await advanced.locator("summary").first().click()
+  }
+  await expect(advanced).toHaveAttribute("open", "")
+}
+
+/**
+ * Goes to a kind's add page through the Servers page's Add menu: "MCP
+ * server", "API endpoint", "Mail account", "SSH server", "Wrapper".
+ */
+export async function addServerFromMenu(page: Page, kind: string) {
+  await page.goto("/servers")
+  await page.getByRole("button", { name: "Add", exact: true }).click()
+  await page.getByRole("menuitem", { name: new RegExp(`^${kind}`) }).click()
+}

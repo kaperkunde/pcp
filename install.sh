@@ -15,7 +15,13 @@
 # that runs a copy of this installer with `update`, which fetches the image
 # and starts PCP again only when there is a new one.
 #
-# Settings, by environment variable. The first five are remembered in
+# "Install and restart" on PCP's Settings page works through the same copy:
+# a timer runs it with `watch` every 30 seconds, which looks for the request
+# PCP leaves in its data folder (through `docker exec`) and then runs
+# `update`. PCP itself still pulls and restarts nothing. PCP_UPDATE_BUTTON=0
+# turns it off; a pinned PCP_VERSION has no use for it.
+#
+# Settings, by environment variable. The first six are remembered in
 # ~/.config/pcp/install.conf, so a later run without them keeps them (run as
 # root, in /etc/pcp/install.conf instead):
 #
@@ -24,18 +30,21 @@
 #   PCP_RUNTIME=docker|podman         skip the discovery
 #   PCP_DATA_VOLUME=pcp-data          the volume that holds the vault
 #   PCP_AUTO_UPDATE=1                 update PCP by itself, once a day
+#   PCP_UPDATE_BUTTON=0               no "Install and restart" in PCP's Settings
 #   PCP_VERSION=latest                the image tag
 #   PCP_IMAGE=ghcr.io/kaperkunde/pcp  the image
 #
 # It never runs sudo and never installs Docker or Podman itself: when neither
 # is usable, it prints what to run. POSIX sh, so it runs under dash too.
 #
-# The copy of this installer for the daily update is kept in
+# The copy of this installer for the timers is kept in
 # ~/.local/share/pcp/install.sh, or, when run as root, in
 # /usr/local/lib/pcp/install.sh: root runs that file every day, so it and the
 # settings it reads (/etc/pcp/install.conf) sit where only root writes,
 # whatever HOME is. (An install run as root that finds only the older file in
-# HOME carries its settings over once; the daily update never reads it.) PCP_ROOT_PREFIX puts all of root's paths under another
+# HOME carries its settings over once; the daily update never reads it.) The
+# watcher notes the last request it answered in ~/.local/state/pcp, or as
+# root in /var/lib/pcp. PCP_ROOT_PREFIX puts all of root's paths under another
 # directory; it exists for the tests and nothing else.
 
 set -eu
@@ -56,10 +65,10 @@ die() {
 }
 
 usage() {
-  warn "Usage: install.sh [uninstall|update]" "" \
+  warn "Usage: install.sh [uninstall|update|watch]" "" \
     "Settings go in the environment: PCP_PORT, PCP_HTTPS, PCP_RUNTIME," \
-    "PCP_DATA_VOLUME, PCP_AUTO_UPDATE, PCP_VERSION, PCP_IMAGE. The top of the" \
-    "script explains them."
+    "PCP_DATA_VOLUME, PCP_AUTO_UPDATE, PCP_UPDATE_BUTTON, PCP_VERSION," \
+    "PCP_IMAGE. The top of the script explains them."
   exit 2
 }
 
@@ -82,6 +91,7 @@ load_conf() {
       PCP_RUNTIME) conf_runtime=$value ;;
       PCP_DATA_VOLUME) conf_volume=$value ;;
       PCP_AUTO_UPDATE) conf_auto=$value ;;
+      PCP_UPDATE_BUTTON) conf_button=$value ;;
     esac
   done <"$1"
 }
@@ -119,12 +129,14 @@ resolve_settings() {
   conf_runtime=
   conf_volume=
   conf_auto=
+  conf_button=
   read_conf
   PCP_PORT=${PCP_PORT:-${conf_port:-3000}}
   PCP_HTTPS=${PCP_HTTPS:-${conf_https:-0}}
   PCP_RUNTIME=${PCP_RUNTIME:-${conf_runtime:-}}
   PCP_DATA_VOLUME=${PCP_DATA_VOLUME:-${conf_volume:-pcp-data}}
   PCP_AUTO_UPDATE=${PCP_AUTO_UPDATE:-${conf_auto:-0}}
+  PCP_UPDATE_BUTTON=${PCP_UPDATE_BUTTON:-${conf_button:-1}}
   PCP_VERSION=${PCP_VERSION:-latest}
   PCP_VERSION=${PCP_VERSION#v}
   PCP_IMAGE=${PCP_IMAGE:-$DEFAULT_IMAGE}
@@ -141,6 +153,10 @@ resolve_settings() {
     0 | 1) ;;
     *) usage_error "PCP_AUTO_UPDATE must be 0 or 1, not '$PCP_AUTO_UPDATE'." ;;
   esac
+  case "$PCP_UPDATE_BUTTON" in
+    0 | 1) ;;
+    *) usage_error "PCP_UPDATE_BUTTON must be 0 or 1, not '$PCP_UPDATE_BUTTON'." ;;
+  esac
   case "$PCP_RUNTIME" in
     '' | docker | podman) ;;
     *) usage_error "PCP_RUNTIME must be docker or podman, not '$PCP_RUNTIME'." ;;
@@ -148,6 +164,12 @@ resolve_settings() {
   case "$PCP_DATA_VOLUME" in
     '' | *[!A-Za-z0-9_.-]*) usage_error "PCP_DATA_VOLUME must be a volume name (letters, digits, '_', '.', '-'), not '$PCP_DATA_VOLUME'." ;;
   esac
+  # A pinned version never changes, so there is nothing to install from PCP.
+  if [ "$PCP_UPDATE_BUTTON" = 1 ] && [ "$PCP_VERSION" = latest ]; then
+    WATCH=1
+  else
+    WATCH=0
+  fi
 }
 
 usage_error() {
@@ -166,8 +188,8 @@ make_dir() {
 
 save_conf() {
   make_dir "$(dirname "$CONF")"
-  printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\nPCP_AUTO_UPDATE=%s\n' \
-    "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" "$PCP_AUTO_UPDATE" >"$CONF"
+  printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\nPCP_AUTO_UPDATE=%s\nPCP_UPDATE_BUTTON=%s\n' \
+    "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" "$PCP_AUTO_UPDATE" "$PCP_UPDATE_BUTTON" >"$CONF"
   if [ "$ROOT" = 1 ]; then
     chmod 0644 "$CONF"
   fi
@@ -303,9 +325,11 @@ set_paths() {
   if [ "$ROOT" = 1 ]; then
     TIMER_DIR="${PCP_ROOT_PREFIX:-}/etc/systemd/system"
     UPDATER="${PCP_ROOT_PREFIX:-}/usr/local/lib/pcp/install.sh"
+    STATE_DIR="${PCP_ROOT_PREFIX:-}/var/lib/pcp"
   else
     TIMER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
     UPDATER="${XDG_DATA_HOME:-$HOME/.local/share}/pcp/install.sh"
+    STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/pcp"
   fi
 }
 
@@ -370,6 +394,10 @@ install_container() {
   if [ "$PCP_AUTO_UPDATE" = 1 ]; then
     set -- "$@" -e PCP_AUTO_UPDATE=1
   fi
+  # Tells it that "Install and restart" on its Settings page is watched for.
+  if [ "$WATCH" = 1 ]; then
+    set -- "$@" -e PCP_HOST_UPDATER=1
+  fi
   "$RUNTIME" run "$@" -v "$PCP_DATA_VOLUME:/data" "$IMAGE" >/dev/null || start_failed "$LOGS"
   MODE=container
 }
@@ -392,6 +420,9 @@ write_unit() {
     if [ "$PCP_AUTO_UPDATE" = 1 ]; then
       printf 'Environment=PCP_AUTO_UPDATE=1\n'
       printf 'Label=io.containers.autoupdate=registry\n'
+    fi
+    if [ "$WATCH" = 1 ]; then
+      printf 'Environment=PCP_HOST_UPDATER=1\n'
     fi
     printf '\n'
     printf '[Service]\nRestart=always\n\n'
@@ -437,9 +468,12 @@ fetch_to() {
   fi
 }
 
-# A copy of this installer for the timer to run: the file this run came
-# from, or, through a pipe, the address it is published at.
+# A copy of this installer for the timers to run: the file this run came
+# from, or, through a pipe, the address it is published at. Once per run.
 save_updater() {
+  if [ "$UPDATER_SAVED" = 1 ]; then
+    return 0
+  fi
   make_dir "$(dirname "$UPDATER")"
   source_file=
   case "$0" in
@@ -458,6 +492,16 @@ save_updater() {
     chmod 0644 "$UPDATER.new"
   fi
   mv "$UPDATER.new" "$UPDATER"
+  UPDATER_SAVED=1
+}
+
+# The copy goes when no timer of PCP's runs it any more.
+drop_updater() {
+  [ "$NEEDS_UPDATER" = 1 ] && return 0
+  rm -f "$UPDATER"
+  if [ "$ROOT" = 1 ]; then
+    rmdir "$(dirname "$UPDATER")" >/dev/null 2>&1 || true
+  fi
 }
 
 write_update_timer() {
@@ -480,10 +524,8 @@ write_update_timer() {
 disable_auto_update() {
   [ -f "$TIMER_DIR/pcp-update.timer" ] || return 0
   unit_ctl disable --now pcp-update.timer >/dev/null 2>&1 || true
-  rm -f "$TIMER_DIR/pcp-update.timer" "$TIMER_DIR/pcp-update.service" "$UPDATER"
-  if [ "$ROOT" = 1 ]; then
-    rmdir "$(dirname "$UPDATER")" >/dev/null 2>&1 || true
-  fi
+  rm -f "$TIMER_DIR/pcp-update.timer" "$TIMER_DIR/pcp-update.service"
+  drop_updater
   unit_ctl daemon-reload >/dev/null 2>&1 || true
 }
 
@@ -517,6 +559,96 @@ enable_auto_update() {
     warn "" "There is no systemd session for this user, so the daily update needs a line in your crontab (crontab -e):" "" \
       "  0 4 * * * /bin/sh \"$UPDATER\" update"
   fi
+}
+
+# --- Installing when PCP asks -----------------------------------------------
+
+write_request_watch() {
+  mkdir -p "$TIMER_DIR"
+  {
+    printf '# Installs an update when you ask on PCP'"'"'s Settings page. Written by\n'
+    printf '# install.sh; running it with PCP_UPDATE_BUTTON=0 removes it.\n'
+    printf '[Unit]\nDescription=Install a PCP update when PCP asks\n\n'
+    printf '[Service]\nType=oneshot\nExecStart=/bin/sh "%s" watch\n' "$UPDATER"
+  } >"$TIMER_DIR/pcp-update-request.service"
+  {
+    printf '# Starts pcp-update-request.service every 30 seconds. Written by install.sh.\n'
+    printf '[Unit]\nDescription=Look for a PCP update request\n\n'
+    printf '[Timer]\nOnBootSec=1min\nOnUnitActiveSec=30s\nAccuracySec=5s\n\n'
+    printf '[Install]\nWantedBy=timers.target\n'
+  } >"$TIMER_DIR/pcp-update-request.timer"
+}
+
+# Removes the request watcher, if this installer set one up.
+disable_request_watch() {
+  [ -f "$TIMER_DIR/pcp-update-request.timer" ] || return 0
+  unit_ctl disable --now pcp-update-request.timer >/dev/null 2>&1 || true
+  rm -f "$TIMER_DIR/pcp-update-request.timer" "$TIMER_DIR/pcp-update-request.service"
+  rm -f "$STATE_DIR/install-request"
+  rmdir "$STATE_DIR" >/dev/null 2>&1 || true
+  drop_updater
+  unit_ctl daemon-reload >/dev/null 2>&1 || true
+}
+
+# PCP_UPDATE_BUTTON=1 (the default): a timer runs `install.sh watch` every
+# 30 seconds; without a systemd session the owner is given the cron line.
+enable_request_watch() {
+  if ! save_updater; then
+    warn "" "Could not keep a copy of this installer, so \"Install and restart\" in PCP will not work; run the installer again to update PCP."
+    return 0
+  fi
+  if systemd_ok; then
+    write_request_watch
+    unit_ctl daemon-reload
+    unit_ctl enable --now pcp-update-request.timer
+    if [ "$ROOT" = 0 ]; then
+      loginctl enable-linger >/dev/null 2>&1 || true
+    fi
+    BUTTON=timer
+  else
+    BUTTON=cron
+    warn "" "There is no systemd session for this user, so \"Install and restart\" in PCP needs a line in your crontab (crontab -e):" "" \
+      "  * * * * * /bin/sh \"$UPDATER\" watch"
+  fi
+}
+
+# What the watcher runs: when the owner asked for an update on PCP's Settings
+# page, PCP has left `<id> <seconds since 1970>` in /data/install-request
+# (lib/core/updates/host-signal.ts). PCP wrote it, so it is checked like any
+# input: a request that is not exactly that, is older than 15 minutes, was
+# already answered, or comes within 5 minutes of the last one does nothing.
+# The id is noted before `update` runs, so a failed one is not retried.
+watch() {
+  [ "$WATCH" = 1 ] || return 0
+  container_running || return 0
+  signal=$("$RUNTIME" exec "$CONTAINER" cat /data/install-request 2>/dev/null) || return 0
+  id=${signal%% *}
+  at=${signal#* }
+  case "$id" in
+    '' | *[!0-9a-f-]*) return 0 ;;
+  esac
+  case "$at" in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  [ "${#id}" -eq 36 ] && [ "${#at}" -le 12 ] || return 0
+  now=$(date +%s)
+  [ "$at" -le $((now + 60)) ] && [ $((now - at)) -le 900 ] || return 0
+
+  handled="$STATE_DIR/install-request"
+  last_id=
+  last_at=0
+  if [ -f "$handled" ]; then
+    read -r last_id last_at <"$handled" || true
+  fi
+  case "$last_at" in
+    '' | *[!0-9]*) last_at=0 ;;
+  esac
+  [ "$id" != "$last_id" ] && [ $((now - last_at)) -ge 300 ] || return 0
+
+  make_dir "$STATE_DIR"
+  printf '%s %s\n' "$id" "$now" >"$handled"
+  say "PCP asked for an update."
+  update
 }
 
 image_id() {
@@ -590,6 +722,12 @@ summary() {
     cron) updates="  Update PCP   with the crontab line above, or run this installer again" ;;
     *) updates="  Update PCP   run this installer again (PCP_AUTO_UPDATE=1 does it daily)" ;;
   esac
+  case "$BUTTON" in
+    timer) updates="$updates
+               or \"Install and restart\" under Settings in PCP" ;;
+    cron) updates="$updates
+               or \"Install and restart\" in PCP, with its crontab line above" ;;
+  esac
   say "" \
     "Open it now and set up your vault: the first person to open it becomes" \
     "its owner." "" \
@@ -619,10 +757,20 @@ install() {
     say "PCP is updated: $IMAGE."
     return 0
   fi
+  # The copy of this installer stays while a timer of PCP's runs it.
+  NEEDS_UPDATER=$WATCH
+  if [ "$PCP_AUTO_UPDATE" = 1 ] && [ "$MODE" != quadlet ]; then
+    NEEDS_UPDATER=1
+  fi
   if [ "$PCP_AUTO_UPDATE" = 1 ]; then
     enable_auto_update
   else
     disable_auto_update
+  fi
+  if [ "$WATCH" = 1 ]; then
+    enable_request_watch
+  else
+    disable_request_watch
   fi
   summary
 }
@@ -635,6 +783,7 @@ uninstall() {
   fi
   "$RUNTIME" rm -f "$CONTAINER" >/dev/null 2>&1 || true
   disable_auto_update
+  disable_request_watch
   rm -f "$CONF"
   if [ "$ROOT" = 1 ]; then
     rmdir "$(dirname "$CONF")" >/dev/null 2>&1 || true
@@ -645,7 +794,7 @@ uninstall() {
 
 main() {
   case "${1:-}" in
-    '' | uninstall | update) ;;
+    '' | uninstall | update | watch) ;;
     *) usage ;;
   esac
   require_linux
@@ -665,10 +814,14 @@ main() {
   set_paths
   MODE=
   AUTO=
+  BUTTON=
   UPDATING=0
+  UPDATER_SAVED=0
+  NEEDS_UPDATER=0
   case "${1:-}" in
     uninstall) uninstall ;;
     update) update ;;
+    watch) watch ;;
     *) install ;;
   esac
 }

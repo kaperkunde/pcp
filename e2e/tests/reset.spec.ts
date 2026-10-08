@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test"
+import { expect, test } from "@playwright/test"
 
 import { OWNER_NAME, OWNER_PASSWORD, unlock } from "../lib/auth"
 import { mcpRequest } from "../lib/mcp"
@@ -19,12 +19,6 @@ test.use({ extraHTTPHeaders: { "x-forwarded-for": "198.51.100.202" } })
 
 const RUN = Date.now().toString(36)
 
-function card(page: Page, title: string) {
-  return page.locator("[data-slot=card]").filter({
-    has: page.getByRole("heading", { name: title, exact: true }),
-  })
-}
-
 test("deletes the vault after the box and the password, and starts over", async ({
   page,
   baseURL,
@@ -35,12 +29,8 @@ test("deletes the vault after the box and the password, and starts over", async 
   expect((await mcpRequest(baseURL!, token, "tools/list")).status).toBe(200)
 
   await page.goto("/settings")
-  const deleteCard = card(page, "Delete vault")
-  await deleteCard.getByRole("button", { name: "Delete vault…" }).click()
-  await expect(deleteCard.getByText(/There is no undo/)).toBeVisible()
-  await expect(
-    deleteCard.getByText(/This machine's settings stay/),
-  ).toBeVisible()
+  await page.getByRole("button", { name: "Delete vault…" }).click()
+  const deleteCard = page.getByRole("form", { name: "Delete vault" })
 
   await deleteCard.getByLabel("Delete everything in this PCP").check()
   await deleteCard.getByLabel("Your password").fill("not the password")

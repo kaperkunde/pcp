@@ -1,7 +1,7 @@
 import type { Metadata } from "next"
-import Link from "next/link"
 import { redirect } from "next/navigation"
 
+import { AuthLink } from "@/components/auth-link"
 import { AuthShell } from "@/components/auth-shell"
 import { RestoreCard } from "@/components/backup-cards"
 import { isSetUp } from "@/lib/core/vault"
@@ -32,12 +32,9 @@ export default async function SetupRestorePage() {
       }
     >
       <RestoreCard mode="setup" username="" />
-      <p className="text-center text-sm text-muted-foreground">
-        Starting fresh?{" "}
-        <Link href="/setup" className="text-primary hover:underline">
-          Set up a new PCP
-        </Link>
-      </p>
+      <AuthLink href="/setup" prompt="Starting fresh?">
+        Set up a new PCP
+      </AuthLink>
     </AuthShell>
   )
 }
