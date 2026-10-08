@@ -86,7 +86,7 @@ on its own, what it has to ask you about first, and what it cannot touch.
      `curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh`
    - **From a checkout**, run
      `git clone https://github.com/kaperkunde/pcp.git && cd pcp && docker compose up -d`
-2. **Open http://localhost:3000** (the app opens its own window on it; on a
+2. **Open http://localhost:3000** (the app opens its own window, at 127.0.0.1; on a
    server, use the address the installer prints). Pick your name and a
    password, and store the **recovery key** you are shown in a password
    manager: it is shown once, and nothing else resets a password.
@@ -184,7 +184,8 @@ docker compose up -d
 ```
 
 Open http://localhost:3000 (the installer also prints the address other
-devices on your network use). The first visit shows the setup page, and the
+devices on your network use, unless it was run with `PCP_HTTPS=1`, which
+keeps port 3000 on that computer only). The first visit shows the setup page, and the
 first person to open it becomes the owner: pick your name and a password.
 You will be shown a **recovery key** once — store it in a password manager.
 There is no password reset without it, because there is nothing on the
@@ -205,6 +206,12 @@ require an `https` redirect URL, and the session cookie is only marked
   # or, from a checkout:
   docker compose -f docker-compose.yaml -f docker-compose.https.yaml up -d
   ```
+
+  With HTTPS on, port 3000 (plain HTTP) is published on `127.0.0.1` only,
+  so the host's firewall cannot be bypassed by it; set PCP up from that
+  computer, or through an SSH tunnel (`ssh -L 3000:127.0.0.1:3000 you@server`
+  and http://localhost:3000). Without HTTPS it stays on every interface,
+  for your home network.
 
 - **Your own proxy** (Caddy, Traefik, nginx, Coolify) in front of port 3000,
   passing `X-Forwarded-Proto`. Leave both settings off; they are off until

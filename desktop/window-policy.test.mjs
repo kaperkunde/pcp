@@ -7,8 +7,8 @@ describe("webUrl", () => {
     expect(webUrl("https://github.com/kaperkunde/pcp#readme")).toBe(
       "https://github.com/kaperkunde/pcp#readme",
     )
-    expect(webUrl("http://localhost:3000/settings")).toBe(
-      "http://localhost:3000/settings",
+    expect(webUrl("http://127.0.0.1:3000/settings")).toBe(
+      "http://127.0.0.1:3000/settings",
     )
     expect(webUrl("HTTPS://Accounts.Google.com/o/oauth2/auth?x=1")).toBe(
       "https://accounts.google.com/o/oauth2/auth?x=1",
@@ -27,7 +27,7 @@ describe("webUrl", () => {
       "mailto:someone@example.com",
       "javascript:alert(1)",
       "data:text/html,<script>alert(1)</script>",
-      "blob:http://localhost:3000/0b6e7a1c",
+      "blob:http://127.0.0.1:3000/0b6e7a1c",
       "vscode://file/etc/passwd",
       "about:blank",
       "chrome://settings",
@@ -46,18 +46,18 @@ describe("webUrl", () => {
 
 describe("permissionAllowed", () => {
   const PORT = 3000
-  const pcp = (permission, url = "http://localhost:3000/secrets", more = {}) =>
+  const pcp = (permission, url = "http://127.0.0.1:3000/secrets", more = {}) =>
     permissionAllowed({ permission, url, ...more }, PORT)
 
   it("grants PCP's own page what it uses", () => {
     expect(pcp("clipboard-sanitized-write")).toBe(true)
     // The check handler is given the origin, not the page.
-    expect(pcp("clipboard-sanitized-write", "http://localhost:3000")).toBe(true)
+    expect(pcp("clipboard-sanitized-write", "http://127.0.0.1:3000")).toBe(true)
     expect(
       permissionAllowed({ permission: "clipboard-sanitized-write" }, PORT),
     ).toBe(false)
     expect(
-      pcp("clipboard-sanitized-write", "http://localhost:3000/", {
+      pcp("clipboard-sanitized-write", "http://127.0.0.1:3000/", {
         isMainFrame: true,
       }),
     ).toBe(true)
@@ -92,10 +92,11 @@ describe("permissionAllowed", () => {
     for (const url of [
       "https://accounts.google.com/signin",
       "https://github.com/login/oauth/authorize",
-      "https://localhost:3000/",
-      "http://localhost:3001/",
-      "http://127.0.0.1:3000/",
-      "http://localhost.example.com:3000/",
+      "https://127.0.0.1:3000/",
+      "http://127.0.0.1:3001/",
+      "http://localhost:3000/",
+      "http://[::1]:3000/",
+      "http://127.0.0.1.example.com:3000/",
       "about:blank",
       "null",
     ]) {
@@ -109,7 +110,7 @@ describe("permissionAllowed", () => {
 
   it("grants nothing to a frame inside PCP's page", () => {
     expect(
-      pcp("clipboard-sanitized-write", "http://localhost:3000/", {
+      pcp("clipboard-sanitized-write", "http://127.0.0.1:3000/", {
         isMainFrame: false,
       }),
     ).toBe(false)

@@ -1006,7 +1006,10 @@ as it starts. It starts without `--enable-automation`, with
 with service workers blocked (one could answer a navigation without the
 network, around the gate). Chromium's own sandbox is used where the machine
 gives one and dropped where it cannot (root, or an unprivileged container;
-the Docker image says so with `PCP_BROWSER_SANDBOX=off`).
+the Docker image says so with `PCP_BROWSER_SANDBOX=off`). Without it a
+renderer exploit runs as PCP's user with the data directory in reach, and the
+automatic fallback tells no one; SECURITY.md lists that as not defended
+against.
 
 **The virtual display** (`display.ts`). In the container image
 (`PCP_CONTAINER=1`), or on another Linux machine with
@@ -1287,7 +1290,7 @@ app keeps and hands over only after Touch ID.
     ID prompt (`systemPreferences.promptTouchID`). A checkout, a fork, or a
     release built without the profile works this way.
 - **How a page reaches it.** The window's preload (`desktop/preload.cjs`)
-  gives PCP's own pages, and only those (plain http on localhost),
+  gives PCP's own pages, and only those (plain http on 127.0.0.1),
   `window.pcpDesktop.touchId`: `status`, `unlock`, `save`, `forget`. The
   main process (`desktop/touch-id.mjs`) checks again that the call comes
   from the window's main frame at the app's own address and port, shows the
@@ -1495,7 +1498,10 @@ inside Let's Encrypt's limits on failed validations (at most two a try, with
 the second challenge); "Try again now" skips
 the wait. A DNS lookup first warns, without blocking, when the name does not
 point at this network. Port 3000 keeps serving plain
-HTTP for the local network. In the desktop app the two ports stay 80 and 443
+HTTP for the local network; in a container started with HTTPS on
+(`PCP_HTTPS=1`, `docker-compose.https.yaml`) it is published on 127.0.0.1
+only, since a published port skips the host's firewall. In the desktop app
+the two ports stay 80 and 443
 (macOS and Windows let an ordinary program use them), and they listen on
 every interface even while the app keeps port 3000 to this computer: a
 router's forward needs exactly that (with a pcp.gg name they listen on

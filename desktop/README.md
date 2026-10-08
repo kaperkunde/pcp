@@ -31,6 +31,17 @@ it.
   `PCP_HTTPS_PORT` at 80 and 443: macOS and Windows let an ordinary program
   use them, and a router forwards to them as they are. Settings explains
   both ways while PCP's address is a home one.
+- **The window loads 127.0.0.1, not localhost.** The server binds
+  `127.0.0.1` (or every interface), and the window opens
+  `http://127.0.0.1:3000` in both cases. "localhost" may resolve to `::1`
+  first, where another program could be listening on the same port: it would
+  be shown as PCP and receive the sign-in cookie, and could pass the Touch ID
+  origin check. `preload.cjs`, `touch-id-store.mjs` (`pcpOrigin`) and
+  `window-policy.mjs` trust exactly that origin and no other. An assistant on
+  the same computer can keep using `http://localhost:3000/mcp`. A window from
+  before this change had its sign-in under localhost, which Chromium does not
+  send to 127.0.0.1; `cookie-migration.mjs` copies the sign-in across once and
+  removes the old one. The Touch ID key does not depend on the address.
 - **Keeps running.** On Windows and Linux, closing the window hides it; the
   tray icon opens or quits PCP. On macOS the Dock does the same. Assistants
   keep reaching the gateway while the window is closed. **Start PCP when
