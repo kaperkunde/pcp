@@ -340,7 +340,10 @@ describe("a program's calls", () => {
     }
     expect(value.handle).toMatchObject({ type: "text/csv", name: "grace.csv" })
     expect(value.back).toBe("id,to\n0,Grace")
-    expect(value.refused).toContain(`No kept result "${theirs.id}"`)
+    expect(value.refused).toContain(
+      "A kept result named in the arguments is not there for this token",
+    )
+    expect(value.refused).not.toContain(theirs.id)
 
     const row = await db().toolResult.findUniqueOrThrow({
       where: { id: value.handle.$result },
@@ -487,7 +490,9 @@ describe("a program's calls", () => {
       try { await pcp.call("postcards", "archive", { file: { $result: "gone" } }) } catch (error) { return error.message }
     `)
 
-    expect(returned(text)).toContain('No kept result "gone"')
+    expect(returned(text)).toContain(
+      "A kept result named in the arguments is not there for this token",
+    )
     expect(ran).toEqual([])
   })
 

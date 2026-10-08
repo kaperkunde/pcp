@@ -1116,7 +1116,7 @@ async function openUploads(
     const opened = await open(handle.$result)
 
     if (!opened) {
-      throw invalid(missingResultMessage(handle.$result))
+      throw invalid(missingResultMessage())
     }
 
     return {

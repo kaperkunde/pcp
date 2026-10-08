@@ -157,8 +157,13 @@ export function collectHandleIds(
   return [...found]
 }
 
-export function missingResultMessage(id: string): string {
-  return `No kept result "${id}" for this token: it has expired, was kept for another token, or the id is wrong. Call the tool that produced it again.`
+/**
+ * Never quotes the id: the message is logged in the clear, and an id the
+ * assistant made up or took from another token is its argument, not the
+ * log's. The assistant knows which handle it sent.
+ */
+export function missingResultMessage(): string {
+  return "A kept result named in the arguments is not there for this token: it has expired, was kept for another token, or the id is wrong. Call the tool that produced it again."
 }
 
 function contentOf(opened: OpenedResult, as: Handle["as"]): string {
@@ -195,7 +200,7 @@ export async function resolveHandles(
     const result = await open(id)
 
     if (!result) {
-      throw invalid(missingResultMessage(id))
+      throw invalid(missingResultMessage())
     }
 
     opened.set(id, result)

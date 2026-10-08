@@ -463,7 +463,9 @@ describe("calling its tools", () => {
         { to: ["charles@example.com"], subject: "x", text: { $result: "no" } },
         { ...PUBLIC, open },
       ),
-    ).rejects.toThrow(/No kept result "no" for this token/)
+    ).rejects.toThrow(
+      /A kept result named in the arguments is not there for this token/,
+    )
     expect(fake.requests.length).toBe(before)
   })
 
@@ -542,7 +544,7 @@ describe("calling its tools", () => {
     const before = fake.requests.length
 
     await expect(send([{ $result: "gone" }])).rejects.toThrow(
-      /No kept result "gone" for this token/,
+      /A kept result named in the arguments is not there for this token/,
     )
     await expect(
       send(Array.from({ length: 11 }, () => ({ $result: kept.id }))),
@@ -653,7 +655,9 @@ describe("calling its tools", () => {
     ).rejects.toMatchObject({ code: "validation" })
     await expect(
       draft({ subject: "s", text: "t", attachments: [{ $result: "gone" }] }),
-    ).rejects.toThrow(/No kept result "gone" for this token/)
+    ).rejects.toThrow(
+      /A kept result named in the arguments is not there for this token/,
+    )
     await expect(
       draft(
         { subject: "s", text: "t", attachments: [{ $result: "gone" }] },

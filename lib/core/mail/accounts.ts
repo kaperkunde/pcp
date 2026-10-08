@@ -783,7 +783,7 @@ async function openAttachments(
     const opened = await open(entry.$result)
 
     if (!opened) {
-      throw invalid(missingResultMessage(entry.$result))
+      throw invalid(missingResultMessage())
     }
 
     const bytes = opened.bytes()

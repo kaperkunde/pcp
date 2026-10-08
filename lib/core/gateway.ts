@@ -650,7 +650,7 @@ export function buildGatewayServer(
     )
     const missing = handles.find((handle) => !handle.found)
 
-    return missing ? { refused: missingResultMessage(missing.id) } : found
+    return missing ? { refused: missingResultMessage() } : found
   }
 
   const logged =
