@@ -15,7 +15,9 @@ import {
   getPcpggConfig,
   getPcpggSaved,
   type PcpggConfig,
+  pcpggDomain,
   pcpggKeyHint,
+  pcpggNames,
   pcpggRelayUrl,
   savePcpggSaved,
 } from "./pcpgg"
@@ -257,13 +259,26 @@ async function syncConnector(config: PcpggConfig | null): Promise<void> {
     following: Promise.resolve(),
   }
   state.pcpgg = link
+  const relayUrl = pcpggRelayUrl()
   link.connector = startConnector({
     key: config.key,
-    relayUrl: pcpggRelayUrl(),
+    relayUrl,
     https: () => edgeTarget("https"),
     http: () => edgeTarget("http"),
     client: `pcp/${PCP_VERSION}`,
-    onStatus: (status) => {
+    onStatus: (reported) => {
+      // Only the relay's own names, well formed, go any further.
+      const status = {
+        ...reported,
+        hostnames: pcpggNames(reported.hostnames, relayUrl),
+      }
+
+      if (status.hostnames.length < reported.hostnames.length) {
+        console.error(
+          `[pcp.gg] left out names from the relay that are not names under ${pcpggDomain(relayUrl) ?? "its domain"}`,
+        )
+      }
+
       const wasOnline = link.status.state === "online"
       link.status = status
 

@@ -1,5 +1,8 @@
+import { isIP } from "node:net"
+
 import { invalid } from "../errors"
 import { getHostJson, setHostJson } from "../host-settings"
+import { normalizeHostname } from "./ddns"
 import { DEFAULT_RELAY_URL } from "./pcpgg/control"
 import { clearTlsConfig, getTlsConfig, getTlsStatus } from "./tls"
 
@@ -39,6 +42,55 @@ export type PcpggSaved = {
 /** The pcp.gg address PCP connects to (PCP_PCPGG_RELAY_URL in tests). */
 export function pcpggRelayUrl(): string {
   return process.env.PCP_PCPGG_RELAY_URL?.trim() || DEFAULT_RELAY_URL
+}
+
+/**
+ * The domain pcp.gg hands out names under: the parent of the relay's own
+ * host (pcp.gg for tunnel.pcp.gg). A test relay on this computer names hosts
+ * under pcp.test, which never exists on the internet. Null when the address
+ * tells no domain; then no name is taken.
+ */
+export function pcpggDomain(relayUrl = pcpggRelayUrl()): string | null {
+  let host: string
+
+  try {
+    host = new URL(relayUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "")
+  } catch {
+    return null
+  }
+
+  if (isIP(host)) {
+    return host === "::1" || host.startsWith("127.") ? "pcp.test" : null
+  }
+
+  const labels = host.replace(/\.$/, "").split(".")
+  return labels.length > 2 ? labels.slice(1).join(".") : labels.join(".")
+}
+
+/**
+ * The names in the relay's `ready` that PCP takes: well-formed names under
+ * the relay's own domain. A name becomes a folder in the TLS directory, the
+ * name a certificate is asked for and the address port 80 redirects to, so
+ * anything else the relay says is left out.
+ */
+export function pcpggNames(
+  hostnames: string[],
+  relayUrl = pcpggRelayUrl(),
+): string[] {
+  const domain = pcpggDomain(relayUrl)
+
+  if (!domain) {
+    return []
+  }
+
+  return hostnames.flatMap((hostname) => {
+    try {
+      const name = normalizeHostname(hostname)
+      return name.endsWith(`.${domain}`) ? [name] : []
+    } catch {
+      return []
+    }
+  })
 }
 
 /**

@@ -59,13 +59,28 @@ export function proxyRequest(
   target: ProxyTarget,
   proto: "http" | "https",
 ): void {
+  const headers = forwardedHeaders(req, proto)
+
+  // A chunked body arrives here de-chunked, and its transfer-encoding went
+  // with the hop-by-hop headers. It leaves chunked again: otherwise Node
+  // writes a GET's body bare, and the app reads those bytes as a request of
+  // their own, with whatever X-Forwarded-* headers the client wrote.
+  if (req.headers["transfer-encoding"] !== undefined) {
+    delete headers["content-length"]
+    headers["transfer-encoding"] = "chunked"
+  }
+
   const upstream = http.request(
     {
       host: target.host,
       port: target.port,
       method: req.method,
       path: req.url,
-      headers: forwardedHeaders(req, proto),
+      headers,
+      // A connection to the app of its own, never one another client's
+      // request used: if the two ever fell out of step, one client would
+      // get the answer meant for another.
+      agent: false,
     },
     (answer) => {
       const headers = { ...answer.headers }
@@ -111,6 +126,9 @@ export function proxyUpgrade(
   const headers = forwardedHeaders(req, proto)
   headers.connection = "Upgrade"
   headers.upgrade = req.headers.upgrade
+  // Node passes an upgrade on with no body (whatever follows the headers is
+  // `head`, sent once the sockets are joined), so none is announced.
+  delete headers["content-length"]
 
   const upstream = http.request({
     host: target.host,
@@ -118,6 +136,7 @@ export function proxyUpgrade(
     method: req.method,
     path: req.url,
     headers,
+    agent: false,
   })
 
   upstream.on("upgrade", (answer, upstreamSocket, upstreamHead) => {

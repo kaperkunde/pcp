@@ -370,6 +370,24 @@ describe("PCP connected to pcp.gg", () => {
     expect(await getHostSetting(PCPGG_CONFIG_KEY)).toContain(KEY)
   })
 
+  it("takes no name from pcp.gg that is not under its own domain", async () => {
+    setNetworkIssuer(issuer)
+    directory.keys.set(KEY, {
+      deviceId: "dev_alice",
+      hostnames: ["../../tls", "evil.example.com"],
+      generation: 1,
+    })
+    await connect()
+    await networkIdle()
+
+    expect((await networkOverview()).pcpgg).toMatchObject({
+      state: "online",
+      name: null,
+    })
+    expect(await getTlsConfig()).toBeNull()
+    expect(edgePorts()).toBeNull()
+  })
+
   it("stops when pcp.gg revokes the key while connected", async () => {
     await connect()
     directory.revoked.add("dev_alice")

@@ -113,7 +113,10 @@ export type DdnsInput = {
 
 /**
  * The settings to save from the form. A credential left blank keeps the
- * one saved before for the same service, since the page never shows it.
+ * one saved before for the same service, since the page never shows it,
+ * but only where it would go to the same place: a dyndns2 password for the
+ * same service address and username (the other services' addresses are
+ * fixed, and a custom update address is itself the credential).
  */
 export function parseDdnsInput(
   input: DdnsInput,
@@ -178,6 +181,20 @@ export function parseDdnsInput(
       )
       const hostname = normalizeHostname(input.hostname ?? "", "host name")
       const username = input.username?.trim() ?? ""
+      const saved = previous?.provider === "dyndns2" ? previous : null
+
+      // The saved password goes only to the service and login it was typed
+      // for: a save that sends it on at once must not send it to a new one.
+      if (
+        !input.password?.trim() &&
+        saved?.password &&
+        (saved.server !== server || saved.username !== username)
+      ) {
+        throw invalid(
+          "Enter the password again: the saved one is sent only to the service address and username it was saved with.",
+        )
+      }
+
       const password = kept(input.password, "password")
 
       if (!username || !password) {

@@ -170,6 +170,40 @@ describe("reading the form", () => {
     ).toThrow(/API token/)
   })
 
+  it("keeps a saved dyndns2 password only for the same address and username", () => {
+    const saved: DdnsConfig = {
+      provider: "dyndns2",
+      server: "members.example.com",
+      hostname: "pcp.example.com",
+      username: "u",
+      password: "saved-password",
+    }
+    const input = {
+      provider: "dyndns2",
+      server: "members.example.com",
+      hostname: "other.example.com",
+      username: "u",
+      password: "",
+    }
+
+    expect(parseDdnsInput(input, saved)).toEqual({
+      ...saved,
+      hostname: "other.example.com",
+    })
+
+    for (const changed of [
+      { server: "attacker.example.net" },
+      { username: "someone-else" },
+    ]) {
+      expect(() => parseDdnsInput({ ...input, ...changed }, saved)).toThrow(
+        /Enter the password again/,
+      )
+      expect(
+        parseDdnsInput({ ...input, ...changed, password: "typed" }, saved),
+      ).toMatchObject({ ...changed, password: "typed" })
+    }
+  })
+
   it("makes a Cloudflare name full", () => {
     const input = {
       provider: "cloudflare",
