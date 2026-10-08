@@ -65,6 +65,13 @@ it.
   vault. Cookie encryption is one way, so the fuse stays on. A sign-in from
   before it is encrypted the next time PCP writes it: lock and unlock once
   to do that at once.
+- **The window stays on the web.** It goes to http and https addresses
+  only, and a link that opens a new window goes to the system's browser
+  only when it is one (`window-policy.mjs`): no other scheme reaches a
+  program on the machine. A page gets no permission (camera, notifications,
+  reading the clipboard…) except PCP's own, and it only what it uses:
+  writing to the clipboard, for the copy buttons. An OAuth provider's
+  sign-in page, which the window shows on the way back to PCP, gets none.
 - **Updates from Settings.** See "Updating" below.
 - **No Chromium inside.** The Docker image carries one for the browser; the
   app does not. It uses one on the machine (`PCP_BROWSER_EXECUTABLE`, or
