@@ -377,7 +377,18 @@ off the internet: PCP believes those headers from whoever sends them. If PCP
 guesses its public address wrong, pin it under **Settings → Public
 address**.
 
+PCP counts the left-most `X-Forwarded-For` address. A proxy that replaces
+the header puts the client's address there; most append to it instead
+(nginx's `$proxy_add_x_forwarded_for`, Caddy, Traefik), and then the
+left-most is whatever the client sent. For those, set `PCP_TRUSTED_PROXIES`
+to your proxies' addresses (IP addresses and CIDR ranges, comma-separated,
+such as `PCP_TRUSTED_PROXIES=172.16.0.0/12` for proxies on a Docker
+network): PCP then reads the header from the right, past those addresses
+and loopback, and counts the first one that is not yours. It is off unless
+you set it, and it still needs port 3000 to be reachable from your proxies
+alone.
+
 PCP needs no environment variables. The optional ones (`PCP_DATA_DIR`,
 `PORT`, `PCP_HTTP_PORT`, `PCP_HTTPS_PORT`, `PCP_ACME_DIRECTORY`,
-`PCP_PUBLIC_IP_URL`, `PCP_PCPGG_RELAY_URL`) are listed in [`.env.example`](../.env.example), for a
+`PCP_PUBLIC_IP_URL`, `PCP_PCPGG_RELAY_URL`, `PCP_TRUSTED_PROXIES`) are listed in [`.env.example`](../.env.example), for a
 checkout or a deployment of your own; the installer does not pass them on.

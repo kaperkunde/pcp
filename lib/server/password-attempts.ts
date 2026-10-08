@@ -21,9 +21,11 @@ import { clientIp } from "@/lib/server/client-ip"
 
 const WINDOW_MS = 15 * 60 * 1000
 const PER_SOURCE = { max: 10, windowMs: WINDOW_MS }
-// Per-address limits trust X-Forwarded-For, which a client reaching PCP
-// without a proxy can set to anything. This one does not: it caps how many
-// guesses the instance takes at all.
+// Per-address limits trust X-Forwarded-For (lib/server/client-ip.ts), which
+// a client reaching PCP without a proxy can set to anything, and so can one
+// behind a proxy that appends to it unless PCP_TRUSTED_PROXIES names that
+// proxy. This one does not: it caps how many guesses the instance takes at
+// all.
 const GLOBAL = { max: 60, windowMs: WINDOW_MS }
 
 export const TOO_MANY_ATTEMPTS =
