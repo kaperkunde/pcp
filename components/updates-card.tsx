@@ -74,6 +74,7 @@ export function UpdatesCard({
   host,
   desktopInstall,
   autoUpdated = false,
+  hostUpdater = false,
 }: {
   overview: UpdatesOverview
   host: InstallKind
@@ -81,6 +82,8 @@ export function UpdatesCard({
   desktopInstall: "auto" | "manual" | null
   /** The Linux installer set this container up to update itself daily. */
   autoUpdated?: boolean
+  /** The Linux installer installs an update when the owner asks here. */
+  hostUpdater?: boolean
 }) {
   return (
     <Card id="updates" className="scroll-mt-6">
@@ -99,6 +102,7 @@ export function UpdatesCard({
           host={host}
           desktopInstall={desktopInstall}
           autoUpdated={autoUpdated}
+          hostUpdater={hostUpdater}
           overview={overview}
         />
       </CardContent>
@@ -264,7 +268,7 @@ function InstallButton({ version }: { version: string }) {
       className="flex flex-wrap items-center gap-2"
       aria-label="Install the update"
     >
-      <SubmitButton pendingText="Asking the app…">
+      <SubmitButton pendingText="Asking…">
         Install v{version} and restart
       </SubmitButton>
       <FormError error={state.status === "error" ? state.error : null} />
@@ -341,21 +345,73 @@ function DesktopUpdate({
   )
 }
 
+/** A container the Linux installer runs and watches for the owner's request. */
+function InstallerUpdate({
+  autoUpdated,
+  overview,
+}: {
+  autoUpdated: boolean
+  overview: UpdatesOverview
+}) {
+  const { available, latest, installRequest } = overview
+
+  return (
+    <>
+      {installRequest ? (
+        <p role="status">
+          PCP is installing v{installRequest.version}. The installer on this
+          computer fetches the new image and starts PCP again from it, which
+          takes a minute or two; reload this page then. Your vault stays in its
+          volume.
+        </p>
+      ) : available && latest ? (
+        <>
+          <p className="text-muted-foreground">
+            The installer on this computer can install v{latest.version}: it
+            fetches the new image and starts PCP again from it. Your vault stays
+            in its volume.
+          </p>
+          <InstallButton version={latest.version} />
+        </>
+      ) : (
+        <p className="text-muted-foreground">
+          This PCP runs in a container the installer set up. When a new version
+          is out, you can install it from here.
+        </p>
+      )}
+      {autoUpdated ? (
+        <p className="text-muted-foreground">
+          The installer also updates it by itself once a day. To turn that off:
+        </p>
+      ) : null}
+      {autoUpdated ? <CopyableValue value={INSTALL_MANUAL_LINE} /> : null}
+      <p className="text-xs text-muted-foreground">
+        If installing does not work, run the install line again:
+      </p>
+      <CopyableValue value={INSTALL_LINE} />
+    </>
+  )
+}
+
 function HowToUpdate({
   host,
   desktopInstall,
   autoUpdated,
+  hostUpdater,
   overview,
 }: {
   host: InstallKind
   desktopInstall: "auto" | "manual" | null
   autoUpdated: boolean
+  hostUpdater: boolean
   overview: UpdatesOverview
 }) {
   return (
     <div className="flex flex-col gap-3 border-t border-border pt-4">
       <h3 className="font-medium">How to update this PCP</h3>
-      {host === "container" && autoUpdated ? (
+      {host === "container" && hostUpdater ? (
+        <InstallerUpdate autoUpdated={autoUpdated} overview={overview} />
+      ) : host === "container" && autoUpdated ? (
         <>
           <p>
             This PCP updates itself: the installer set up a daily update that

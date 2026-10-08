@@ -33,7 +33,11 @@ import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { updatesOverview } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
 import { desktopUpdater, isDesktopApp } from "@/lib/server/desktop"
-import { autoUpdated, installKind } from "@/lib/server/install-kind"
+import {
+  autoUpdated,
+  hostUpdater,
+  installKind,
+} from "@/lib/server/install-kind"
 import { publicUrlFor, requestOrigin } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -110,6 +114,7 @@ export default async function SettingsPage({
         host={installKind()}
         desktopInstall={isDesktopApp() ? desktopUpdater() : null}
         autoUpdated={autoUpdated()}
+        hostUpdater={hostUpdater()}
       />
       <CleanupCard overview={cleanup} />
       <ResourcesCard overview={resources} />
