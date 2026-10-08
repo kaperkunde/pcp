@@ -17,7 +17,7 @@ import { TOUCH_ID_REJECTED } from "@/lib/core/constants"
 
 /**
  * The owner's password again, inside a form that asks for it before a new
- * API token, an export or a restore (confirmOwner in
+ * API token, an export, a restore or deleting the vault (confirmOwner in
  * lib/server/password-attempts.ts). In the Mac app with Touch ID on, Touch
  * ID answers instead: it is asked for as the step appears (`autoPrompt`) or
  * from its button, and the form is sent with the key the app hands over, in

@@ -158,7 +158,11 @@ function SecretRow({ secret }: { secret: SecretSummary }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{secret.name}</span>
-          {managed ? <Badge variant="secondary">OAuth tokens</Badge> : null}
+          {managed ? (
+            <Badge variant="secondary">
+              {secret.kind === "ssh_key" ? "SSH key" : "OAuth tokens"}
+            </Badge>
+          ) : null}
           {secret.usedBy.map((server) => (
             <Badge key={server.id} variant="outline">
               {server.name}

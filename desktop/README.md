@@ -2,8 +2,9 @@
 
 The desktop app is the production server in a window. It runs the same
 `next build --output standalone` the Docker image runs (staged into the app
-by `scripts/stage.mjs`, copying exactly what the Dockerfile copies), opens a
-window on it, and keeps the data in the system's application data folder:
+by `scripts/stage.mjs`, copying exactly what the Dockerfile copies) in an
+Electron utility process, opens a window on it, and keeps the data in the
+system's application data folder:
 
 | System  | Data (`PCP_DATA_DIR`)                    | Wrapper settings and log                                      |
 | ------- | ---------------------------------------- | ------------------------------------------------------------- |
@@ -33,7 +34,7 @@ it.
 - **Keeps running.** On Windows and Linux, closing the window hides it; the
   tray icon opens or quits PCP. On macOS the Dock does the same. Assistants
   keep reaching the gateway while the window is closed. **Start PCP when
-  you sign in** registers it as a login item.
+  you sign in** (macOS and Windows) registers it as a login item.
 - **One instance.** A second start brings the first one's window up.
 - **Port.** 3000, like everywhere else. **Change the port…** in the menu
   explains how: `{"port": 3001}` in `desktop.json`, then open PCP again. A
@@ -65,6 +66,10 @@ it.
   before it is encrypted the next time PCP writes it: lock and unlock once
   to do that at once.
 - **Updates from Settings.** See "Updating" below.
+- **No Chromium inside.** The Docker image carries one for the browser; the
+  app does not. It uses one on the machine (`PCP_BROWSER_EXECUTABLE`, or
+  where Playwright installs it), or the one **Install Chromium** on the
+  Browser page downloads into the data folder (`browsers/`).
 
 ## Building it
 
@@ -117,8 +122,9 @@ Updates**. In the app that page offers **Install and restart**; the menu's
 **Check for updates…** opens it.
 
 The update does not go through the window's bridge (`preload.cjs`, which is
-for Touch ID alone): the button only records the owner's request, and the server repeats it in `/api/health` (only in the app, and
-only for a quarter of an hour). `main.mjs` reads that every 15 seconds; a
+for Touch ID alone): the button only records the owner's request, and the
+server repeats it in `/api/health` (only in the app, and only for a quarter
+of an hour). `main.mjs` reads that every 15 seconds; a
 request made after the app started, for a version later than its own, has
 electron-updater download the release and restart into it
 (`updates.mjs` holds the parts that decide, with their tests). A request is
@@ -204,3 +210,11 @@ for 18): macOS will not start an app whose profile does not cover its
 entitlements. Only the app is signed with the keychain group; its helpers
 keep `build/entitlements.mac.plist`, for the same reason. Without the
 secret, releases build as before and Touch ID uses the file.
+
+## Uninstalling
+
+The app leaves the vault behind on purpose: the Windows uninstaller keeps
+`%APPDATA%\PCP` (`deleteAppDataOnUninstall: false`), and dragging the Mac
+app to the Trash keeps `~/Library/Application Support/PCP`. The owner's steps
+are in the main README, under "Starting over or uninstalling"; **Settings →
+Delete vault** empties the data folder's vault without removing the app.

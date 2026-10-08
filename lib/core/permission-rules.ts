@@ -124,6 +124,7 @@ export function summaryText(summary: {
 const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
   call: {
     allow_once: "Allow once",
+    allow_for: "Allow for",
     always: "Always allow",
     block: "Block",
     decline: "Not now",
@@ -152,17 +153,25 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Make the change",
     decline: "Not now",
   },
+  // A wrapper made, changed or deleted, as the owner saw it on the page.
+  wrapper_change: {
+    allow_once: "Make the change",
+    decline: "Not now",
+  },
   // A site's answer, not the method's: the owner decides where it goes.
   fetch: {
     allow_once: "Allow once",
+    allow_for: "Allow this site for",
     always: "Always allow this site",
     block: "Block this site",
     decline: "Not now",
   },
   // The browser opening a site: the same lines as web fetch decide it.
-  // Allow once lets that tab open the site's pages while it is open.
+  // Allow once lets that tab open the site's pages while it is open; Allow
+  // this site for lets every tab of the token open them, for that long.
   browse: {
     allow_once: "Allow once",
+    allow_for: "Allow this site for",
     always: "Always allow this site",
     block: "Block this site",
     decline: "Not now",

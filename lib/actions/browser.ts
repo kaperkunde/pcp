@@ -103,9 +103,13 @@ export async function takeOverTabAction(tabId: string): Promise<ActionState> {
   return onTab(() => takeOverTab(ctx, tabId))
 }
 
-export async function handBackTabAction(tabId: string): Promise<ActionState> {
+/** Hands the tab to the token chosen; lib/core checks the token itself. */
+export async function handBackTabAction(
+  tabId: string,
+  tokenId: string,
+): Promise<ActionState> {
   const ctx = await requireContext()
-  return onTab(() => handBackTab(ctx, tabId))
+  return onTab(() => handBackTab(ctx, tabId, String(tokenId)))
 }
 
 export async function closeTabAction(tabId: string): Promise<ActionState> {

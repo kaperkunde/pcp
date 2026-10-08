@@ -6,10 +6,10 @@ import path from "node:path"
 import {
   MAX_ERROR_CHARS,
   MAX_OUTPUT_CHARS,
-  MAX_SANDBOX_MESSAGE_BYTES,
   RUN_TIMEOUT_MS,
   SANDBOX_STOP_GRACE_MS,
 } from "./limits"
+import { resourceLimits } from "../resources/state"
 import type { Bridge, Executor, RunResult } from "./types"
 
 /**
@@ -24,7 +24,7 @@ import type { Bridge, Executor, RunResult } from "./types"
  * Over the socket go lines of JSON:
  *
  *   runner → PCP  {"type":"hello","protocol":1,"languages":["bash","python"]}
- *   PCP → runner  {"type":"run","job","language","code","timeoutMs","maxOutput"}
+ *   PCP → runner  {"type":"run","job","language","code","timeoutMs","maxOutput","maxMessage","maxRequest"}
  *   runner → PCP  {"type":"request","job","seq","op","payload"}   (a bridge request)
  *   PCP → runner  {"type":"reply","job","seq","reply"}
  *   PCP → runner  {"type":"stop","job"}                          (stop it now)
@@ -130,7 +130,7 @@ function lines(socket: Socket, onLine: (line: string) => void): void {
     const rest = chunk.subarray(start)
     size += rest.length
 
-    if (size > MAX_SANDBOX_MESSAGE_BYTES) {
+    if (size > resourceLimits().sandboxMessageBytes) {
       socket.destroy()
       return
     }
@@ -340,6 +340,7 @@ async function runInSandbox(
   language: SandboxLanguage,
   { code, bridge, signal }: Parameters<Executor>[0],
 ): Promise<RunResult> {
+  const limits = resourceLimits()
   const failed = (message: string): RunResult => ({
     kind: "error",
     message,
@@ -425,6 +426,10 @@ async function runInSandbox(
       code,
       timeoutMs: RUN_TIMEOUT_MS,
       maxOutput: MAX_OUTPUT_CHARS,
+      // What PCP's replies and the program's requests may be, from the
+      // owner's resource settings; the runner takes no less than its own.
+      maxMessage: limits.sandboxMessageBytes,
+      maxRequest: limits.sandboxRequestBytes,
     })
   })
 }

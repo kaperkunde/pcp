@@ -20,7 +20,15 @@ import { newId } from "./ids"
  */
 
 export type GrantKind =
-  "password" | "recovery" | "session" | "api_token" | "device"
+  | "password"
+  | "recovery"
+  | "session"
+  | "api_token"
+  | "device"
+  // What PCP's authorization server hands an assistant (oauth-server/).
+  | "oauth_code"
+  | "oauth_access"
+  | "oauth_refresh"
 
 type GrantData = {
   id: string

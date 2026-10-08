@@ -38,6 +38,7 @@ model Vault {
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
   browserProfile     BrowserProfile?
+  oauthCredentials   OAuthCredential[]
 
   @@map("vault")
 }
@@ -45,12 +46,15 @@ model Vault {
 /// A copy of the vault's data encryption key, wrapped under a key derived
 /// from one credential. `password` and `recovery` grants are the ones a
 /// person types; `session` and `api_token` grants are minted for a browser
-/// cookie or a bearer token. Deleting a grant revokes that credential.
+/// cookie or a bearer token, and a `device` grant for the Mac app's Touch ID
+/// key. Deleting a grant revokes that credential.
 model KeyGrant {
   id      String @id
   vaultId String @map("vault_id")
   vault   Vault  @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  /// password | recovery | session | api_token
+  /// password | recovery | session | api_token | device, and what PCP's
+  /// authorization server hands an assistant: oauth_code | oauth_access |
+  /// oauth_refresh
   kind    String
   /// SHA-256 of the credential, for grants looked up by it (everything but
   /// password, of which a vault has exactly one).
@@ -64,8 +68,9 @@ model KeyGrant {
   createdAt  DateTime @default(now()) @map("created_at")
   lastUsedAt DateTime? @map("last_used_at")
 
-  session Session?
-  token   ApiToken?
+  session         Session?
+  token           ApiToken?
+  oauthCredential OAuthCredential?
 
   @@index([vaultId, kind])
   @@map("key_grant")
@@ -115,10 +120,22 @@ model ApiToken {
   /// the gateway (run_code), each call at the token's own levels. Off
   /// unless the owner turns it on.
   runCode         Boolean   @default(false) @map("run_code")
+  /// Whether the assistant may propose wrappers (create_wrapper and its
+  /// kin, lib/core/wrappers/): servers whose tools are programs over the
+  /// owner's other tools. Every change it proposes is the owner's to make.
+  /// Off unless the owner turns it on.
+  manageWrappers  Boolean   @default(false) @map("manage_wrappers")
   expiresAt       DateTime? @map("expires_at")
   revokedAt       DateTime? @map("revoked_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   lastUsedAt      DateTime? @map("last_used_at")
+  /// Set when the token was made by an assistant signing in with OAuth at
+  /// PCP's own authorization server: the client_id it was issued to (a
+  /// registered client's id, or the URL of its metadata document) and the
+  /// name the client gave. Such a token has no pcp_ value: its grant is
+  /// empty, and the key travels in its OAuth credentials.
+  oauthClientId   String?   @map("oauth_client_id")
+  oauthClientName String?   @map("oauth_client_name")
 
   servers            ApiTokenServer[]
   toolAccess         ApiTokenToolAccess[]
@@ -126,6 +143,9 @@ model ApiToken {
   memories           Memory[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
+  oauthCredentials   OAuthCredential[]
+  toolAllowances     ApiTokenToolAllowance[]
+  siteAllowances     ApiTokenSiteAllowance[]
 
   @@index([vaultId])
   @@map("api_token")
@@ -158,6 +178,40 @@ model ApiTokenToolAccess {
 
   @@id([tokenId, serverId, toolName])
   @@map("api_token_tool_access")
+}
+
+/// A tool the owner allowed one token for a while ("Allow for" on a
+/// request, lib/core/allowances.ts): until `until`, a call that its level
+/// would ask about runs without asking. It changes no level, never lifts
+/// a blocked tool, and is not exported.
+model ApiTokenToolAllowance {
+  tokenId   String    @map("token_id")
+  token     ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  serverId  String    @map("server_id")
+  server    McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  toolName  String    @map("tool_name")
+  until     DateTime
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@id([tokenId, serverId, toolName])
+  @@index([until])
+  @@map("api_token_tool_allowance")
+}
+
+/// A site the owner allowed one token for a while, for web fetch and the
+/// browser alike: until `until`, a request its levels would ask about goes
+/// ahead. Like a tool's, it changes no level and never lifts a block.
+model ApiTokenSiteAllowance {
+  tokenId   String   @map("token_id")
+  token     ApiToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  /// The site's host, as WebFetchRule keys it.
+  host      String
+  until     DateTime
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@id([tokenId, host])
+  @@index([until])
+  @@map("api_token_site_allowance")
 }
 
 /// A tool's level for every token of the vault ("All tokens" on a token's
@@ -219,7 +273,7 @@ model PermissionRequest {
   tokenId          String     @map("token_id")
   token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   /// call | register | memory_share | memory_change | access | endpoint_change
-  /// | fetch | browse | browser_handover
+  /// | fetch | browse | browser_handover | wrapper_change
   kind             String
   serverId         String?    @map("server_id")
   server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
@@ -300,7 +354,7 @@ model Secret {
   vault       Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   name        String
   description String   @default("")
-  /// text | oauth
+  /// text | oauth | ssh_key (PCP's own private key for an SSH server)
   kind        String   @default("text")
   /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
   /// with the secret id as associated data.
@@ -336,12 +390,14 @@ model McpServer {
   description String @default("")
   /// mcp: the Streamable HTTP endpoint. openapi: the API's base URL, which
   /// every operation's path is appended to. jmap: the session URL. imap:
-  /// imaps://host:port, or imap://host:port for STARTTLS. browser: the
-  /// fixed "pcp:browser", which no request is ever sent to.
+  /// imaps://host:port, or imap://host:port for STARTTLS. ssh:
+  /// ssh://host:port. browser: the fixed "pcp:browser", which no request is
+  /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise.
   url         String
   enabled     Boolean @default(true)
 
-  /// none | header | oauth | basic
+  /// none | header | oauth | basic | key (ssh: PCP's own key, in a managed
+  /// secret)
   authType String @default("none") @map("auth_type")
   /// header auth: the header to send and how the secret goes into it.
   authHeaderName    String? @map("auth_header_name")
@@ -349,7 +405,7 @@ model McpServer {
   authSecretId      String? @map("auth_secret_id")
   authSecret        Secret? @relation("ServerAuthSecret", fields: [authSecretId], references: [id], onDelete: SetNull)
   /// basic auth: the user name sent with the secret (a JMAP server's Basic
-  /// authentication, an IMAP and SMTP login).
+  /// authentication, an IMAP and SMTP login). key: the SSH login.
   authUsername      String? @map("auth_username")
 
   /// oauth (an MCP server, or a jmap account that signs in with OAuth): an
@@ -386,11 +442,14 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  /// mcp | openapi | jmap | imap | browser. An openapi server is an HTTP API
-  /// described by an OpenAPI schema; its tools are the schema's operations
-  /// and PCP calls them directly (lib/core/endpoints.ts). jmap and imap are
-  /// mail accounts with a fixed set of mail tools (lib/core/mail/); browser
-  /// is the vault's headless browser, with its own (lib/core/browser/).
+  /// mcp | openapi | jmap | imap | ssh | browser | wrapper. An openapi
+  /// server is an HTTP API described by an OpenAPI schema; its tools are the
+  /// schema's operations and PCP calls them directly (lib/core/endpoints.ts).
+  /// jmap and imap are mail accounts with a fixed set of mail tools
+  /// (lib/core/mail/); ssh is a server PCP runs commands on over SSH
+  /// (lib/core/ssh/); browser is the vault's headless browser, with its own
+  /// (lib/core/browser/). A wrapper's tools are programs the owner approved
+  /// that call the vault's other tools (lib/core/wrappers/).
   kind       String  @default("mcp")
   /// openapi: where the schema came from, url | upload.
   specSource String? @map("spec_source")
@@ -426,13 +485,24 @@ model McpServer {
   /// jmap/imap: the From address when sending, when the user name is not one.
   mailFrom        String? @map("mail_from")
 
+  /// ssh: the public half of PCP's own key for this server, whose private
+  /// half is the managed secret in authSecretId. The owner adds it to the
+  /// login's authorized_keys.
+  sshPublicKey   String? @map("ssh_public_key")
+  /// ssh: the server's host key, "type base64", pinned the first time PCP
+  /// completed a key exchange with it. Another key is refused until the
+  /// owner forgets this one (lib/core/ssh/hosts.ts).
+  sshHostKey     String? @map("ssh_host_key")
+
   tools              McpTool[]
   tokens             ApiTokenServer[]
   oauthStates        OAuthState[]
   toolAccess         ApiTokenToolAccess[]
   sharedToolAccess   VaultToolAccess[]
+  toolAllowances     ApiTokenToolAllowance[]
   permissionRequests PermissionRequest[]
   spec               OpenApiSpec?
+  wrapperSpec        WrapperSpec?
   authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
 
@@ -507,6 +577,25 @@ model OpenApiSpec {
   builtWith String?   @map("built_with")
 
   @@map("openapi_spec")
+}
+
+/// wrapper: what the owner approved, kept apart from the server row like an
+/// endpoint's schema. Its tools in the catalogue are built from it
+/// (lib/core/wrappers/catalogue.ts), and nothing else changes it but the
+/// owner's own save or their answer to a request (lib/core/wrappers/admin.ts).
+model WrapperSpec {
+  serverId   String    @id @map("server_id")
+  server     McpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// The definition as JSON: each tool's schema, program, the tools it calls
+  /// and replaces, and where a secret may go (lib/core/wrappers/definition.ts).
+  /// Names a secret by its id, never by its value.
+  definition String
+  /// SHA-256 of the definition's canonical JSON, hex: what a request was
+  /// asked against.
+  hash       String
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@map("wrapper_spec")
 }
 
 /// An OAuth authorization in flight: the state parameter sent to the
@@ -604,4 +693,64 @@ model BrowserProfile {
   savedAt    DateTime @map("saved_at")
 
   @@map("browser_profile")
+}
+
+/// What PCP's authorization server (lib/core/oauth-server/) hands an
+/// assistant for an API token made by OAuth sign-in: an authorization code,
+/// access tokens and refresh tokens. Each live one wraps the vault's data
+/// key in a grant of its own (oauth_code, oauth_access, oauth_refresh), the
+/// way an API token does; the database keeps only the SHA-256 of the value.
+/// A spent code or refresh token keeps its row, without a grant, until it
+/// would have expired: presented again, it ends the token's sign-in.
+model OAuthCredential {
+  id            String    @id
+  vaultId       String    @map("vault_id")
+  vault         Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId       String    @map("token_id")
+  token         ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  /// The grant that unwraps the data key; null once spent.
+  grantId       String?   @unique @map("grant_id")
+  grant         KeyGrant? @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  /// code | access | refresh
+  kind          String
+  /// SHA-256 of the value, kept after it is spent.
+  lookupHash    String    @unique @map("lookup_hash")
+  clientId      String    @map("client_id")
+  /// A code's redirect URI and PKCE challenge (S256), which the exchange
+  /// must match.
+  redirectUri   String?   @map("redirect_uri")
+  codeChallenge String?   @map("code_challenge")
+  /// The resource (PCP's /mcp) and scope the sign-in asked for.
+  resource      String?
+  scope         String?
+  expiresAt     DateTime  @map("expires_at")
+  usedAt        DateTime? @map("used_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([tokenId])
+  @@index([expiresAt])
+  @@map("oauth_credential")
+}
+
+/// A client that registered itself with PCP's authorization server
+/// (dynamic client registration, RFC 7591). It belongs to the instance, not
+/// to a vault: anyone may register, and a registration opens nothing until
+/// the owner approves a sign-in on PCP's page. A client secret is kept only
+/// as its SHA-256. Clients that identify themselves with a metadata document
+/// (a URL as client_id) have no row: the document is read at each sign-in.
+model OAuthClient {
+  id           String    @id
+  name         String
+  /// JSON array of the exact redirect URIs it registered.
+  redirectUris String    @map("redirect_uris")
+  clientUri    String?   @map("client_uri")
+  /// none | client_secret_basic | client_secret_post
+  authMethod   String    @map("auth_method")
+  secretHash   String?   @map("secret_hash")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  /// The last sign-in approved for it; registrations never used are pruned.
+  lastUsedAt   DateTime? @map("last_used_at")
+
+  @@index([createdAt])
+  @@map("oauth_client")
 }

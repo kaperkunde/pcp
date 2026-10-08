@@ -65,6 +65,8 @@ export function ServerScopeFields({
                   <Badge variant="outline">API</Badge>
                 ) : server.kind === "jmap" || server.kind === "imap" ? (
                   <Badge variant="outline">Mail</Badge>
+                ) : server.kind === "ssh" ? (
+                  <Badge variant="outline">SSH</Badge>
                 ) : server.kind === "browser" ? (
                   <Badge variant="outline">Browser</Badge>
                 ) : null}

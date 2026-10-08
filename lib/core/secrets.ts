@@ -9,12 +9,13 @@ import { newId } from "./ids"
  * (lib/core/crypto.ts); this module is the only place they are decrypted.
  *
  * `text` secrets are the owner's: API keys, passwords, whatever an MCP
- * server needs to be sent. `oauth` secrets are managed: the token set PCP
- * obtained for a server through OAuth, kept here so it is encrypted like
- * everything else and shows up in the same list.
+ * server needs to be sent. `oauth` and `ssh_key` secrets are managed: the
+ * token set PCP obtained for a server through OAuth, or the private key PCP
+ * made for an SSH server (lib/core/ssh/), kept here so they are encrypted
+ * like everything else and show up in the same list.
  */
 
-export type SecretKind = "text" | "oauth"
+export type SecretKind = "text" | "oauth" | "ssh_key"
 
 export type SecretSummary = {
   id: string
@@ -350,20 +351,27 @@ export async function readSecretValue(
 }
 
 /**
- * Creates or replaces a managed secret (OAuth tokens for a server). Named
- * after the owning server so it cannot collide with the owner's names.
+ * Creates or replaces a managed secret (OAuth tokens for a server, or an
+ * SSH server's key). Named after the owning server so it cannot collide
+ * with the owner's names.
  */
 export async function writeManagedSecret(
   ctx: VaultContext,
-  input: { name: string; description: string; value: string },
+  input: {
+    name: string
+    description: string
+    value: string
+    kind?: Exclude<SecretKind, "text">
+  },
 ): Promise<{ id: string }> {
+  const kind = input.kind ?? "oauth"
   const existing = await db().secret.findUnique({
     where: { vaultId_name: { vaultId: ctx.vaultId, name: input.name } },
     select: { id: true, kind: true },
   })
 
   if (existing) {
-    if (existing.kind !== "oauth") {
+    if (existing.kind !== kind) {
       throw new PcpError(
         "conflict",
         `A secret named "${input.name}" already exists.`,
@@ -391,7 +399,7 @@ export async function writeManagedSecret(
       vaultId: ctx.vaultId,
       name: input.name,
       description: input.description,
-      kind: "oauth",
+      kind,
       ciphertext: asBytes(encryptString(ctx.dek, input.value, aad(id))),
     },
   })
@@ -404,6 +412,6 @@ export async function deleteManagedSecret(
   id: string,
 ): Promise<void> {
   await db().secret.deleteMany({
-    where: { id, vaultId: ctx.vaultId, kind: "oauth" },
+    where: { id, vaultId: ctx.vaultId, kind: { in: ["oauth", "ssh_key"] } },
   })
 }

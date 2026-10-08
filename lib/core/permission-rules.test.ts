@@ -118,9 +118,10 @@ describe("isOpen", () => {
 })
 
 describe("decisions", () => {
-  it("offers four answers for a call and two for a new server", () => {
+  it("offers five answers for a call and two for a new server", () => {
     expect(decisionsFor("call").map((decision) => decision.label)).toEqual([
       "Allow once",
+      "Allow for",
       "Always allow",
       "Block",
       "Not now",

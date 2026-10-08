@@ -24,14 +24,22 @@ import {
 /**
  * The registry of servers a vault can reach, and how each one is
  * authenticated to. A server is an MCP server, an API endpoint (kind
- * "openapi", lib/core/endpoints.ts) or a mail account (kinds "jmap" and
- * "imap", lib/core/mail/). Talking to them is lib/core/upstream.ts.
+ * "openapi", lib/core/endpoints.ts), a mail account (kinds "jmap" and
+ * "imap", lib/core/mail/) or an SSH server (kind "ssh", lib/core/ssh/).
+ * Talking to them is lib/core/upstream.ts.
  */
 
 /** basic: a user name and a secret (an API's or a mail account's login). */
 export type AuthType = "none" | "header" | "oauth" | "basic"
 
-export type ServerKind = "mcp" | "openapi" | "jmap" | "imap" | "browser"
+/**
+ * What a stored server signs in with: an AuthType, or an SSH server's key
+ * (PCP's own, in a managed secret), which only the SSH server's page sets.
+ */
+export type StoredAuthType = AuthType | "key"
+
+export type ServerKind =
+  "mcp" | "openapi" | "jmap" | "imap" | "ssh" | "browser" | "wrapper"
 
 export type MailKind = Extract<ServerKind, "jmap" | "imap">
 
@@ -40,7 +48,9 @@ const SERVER_KINDS: readonly ServerKind[] = [
   "openapi",
   "jmap",
   "imap",
+  "ssh",
   "browser",
+  "wrapper",
 ]
 
 /**
@@ -48,6 +58,17 @@ const SERVER_KINDS: readonly ServerKind[] = [
  * not something reached at an address, so its row names none.
  */
 export const BROWSER_URL = "pcp:browser"
+
+/**
+ * A wrapper's url: its tools are programs over the vault's other tools
+ * (lib/core/wrappers/), run in PCP, so nothing is reached at an address.
+ */
+export const WRAPPER_URL = "pcp:wrapper"
+
+/** Programs over the vault's other tools, rather than something PCP reaches. */
+export function isWrapperKind(kind: string): kind is "wrapper" {
+  return kind === "wrapper"
+}
 
 /** The vault's own headless browser, rather than something PCP reaches. */
 export function isBrowserKind(kind: string): kind is "browser" {
@@ -59,6 +80,11 @@ export function isMailKind(kind: string): kind is MailKind {
   return kind === "jmap" || kind === "imap"
 }
 
+/** A server PCP runs commands on over SSH. */
+export function isSshKind(kind: string): kind is "ssh" {
+  return kind === "ssh"
+}
+
 /** What a kind is called in a sentence: "an API endpoint". */
 export function kindNoun(kind: string): string {
   switch (asServerKind(kind)) {
@@ -67,8 +93,12 @@ export function kindNoun(kind: string): string {
     case "jmap":
     case "imap":
       return "a mail account"
+    case "ssh":
+      return "an SSH server"
     case "browser":
       return "the browser"
+    case "wrapper":
+      return "a wrapper"
     default:
       return "an MCP server"
   }
@@ -145,7 +175,7 @@ export type ServerSummary = {
   readOnly: boolean
   specSource: "url" | "upload" | null
   specUrl: string | null
-  authType: AuthType
+  authType: StoredAuthType
   status: ServerStatus
   statusMessage: string
   lastSyncedAt: Date | null
@@ -790,7 +820,7 @@ function summarize(row: {
         ? row.specSource
         : null,
     specUrl: row.specUrl,
-    authType: row.authType as AuthType,
+    authType: row.authType as StoredAuthType,
     status: row.status as ServerStatus,
     statusMessage: row.statusMessage,
     lastSyncedAt: row.lastSyncedAt,
@@ -1059,6 +1089,11 @@ export async function deleteServer(ctx: VaultContext, id: string) {
 
   if (existing.oauthTokensId) {
     await deleteManagedSecret(ctx, existing.oauthTokensId)
+  }
+
+  // An SSH server's key is its own: nothing else can use it.
+  if (existing.kind === "ssh" && existing.authSecretId) {
+    await deleteManagedSecret(ctx, existing.authSecretId)
   }
 }
 

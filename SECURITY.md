@@ -2,9 +2,16 @@
 
 ## Reporting a vulnerability
 
-Email security@kaperkun.de with what you found and how to reproduce it. You
-will get an answer within a few days. Please do not open a public issue for
-something exploitable until it is fixed.
+Email security@kaperkun.de with what you found, how to reproduce it, and the
+version you saw it in (the header of every page shows it). You will get an
+answer within a few days. Please do not open a public issue for something
+exploitable until it is fixed.
+
+## Supported versions
+
+Only the latest release gets fixes. Every release counts the version up, and
+there are no older lines kept alive beside it, so a fix ships as a new
+release: update to it (Settings → Updates says how for your install).
 
 ## What PCP protects
 
@@ -14,45 +21,56 @@ things it defends against, and the things it does not:
 **Someone with a copy of the disk or the database** sees AES-256-GCM
 ciphertext and SHA-256 hashes. The vault's data key is stored only wrapped
 under keys derived from your password (scrypt, 64 MiB), the recovery key, a
-session cookie or an API token — none of which are on the disk. See
+session cookie, an API token or what an app that signed in holds (its access
+and refresh tokens) — none of which are on the disk. The browser's
+sign-ins and kept results are in the vault too, encrypted the same way. See
 [ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
-session cookie and the Touch ID key do sit in the app's folder, but
-encrypted under a key in your login keychain, which a copy of the disk does
-not open.
+session cookie and the Touch ID key do sit in the app's folder, but encrypted
+under a key in your login keychain, which a copy of the disk does not open.
 
 **Someone with a running server but no credential** cannot read the vault
 either: the key exists in memory only for the duration of a request that
-presented one.
+presented one. The one thing kept decrypted longer is the browser's: while
+it runs (until fifteen idle minutes have passed), Chromium holds its
+sign-ins in memory.
 
 **An assistant with an API token** can call the tools of the servers that
 token reaches, as far as you allowed them: tools ask you first until you
 decide, and blocked tools are refused. It cannot answer a permission request
 for you: you answer on PCP's own page, signed in. It can only propose a new
-server or API (as OpenAPI text or a schema URL), naming a secret rather than
-seeing it; nothing is added until you agree, you are shown the address, the
-tools and the secret first, and a secret PCP does not hold yet is typed in by
-you on that page. It can propose levels for its own tools, but only your save
-on PCP's page changes them. It never receives a stored secret, an OAuth
-token, or another vault's data. Revoking the token ends its access at once.
+server, API (as OpenAPI text or a schema URL) or mail account, naming a secret
+rather than seeing it; nothing is added until you agree, you are shown the
+address, the tools and the secret first, and a secret PCP does not hold yet is
+typed in by you on that page. It can propose levels for its own tools, but
+only your save on PCP's page changes them. It never receives a stored secret,
+an OAuth token, or another vault's data. Revoking the token ends its access at
+once.
 
 **An assistant with an API token and an API endpoint** can call the operations
-the schema lists, with your secret or OAuth token in the header, and nothing
-else. It cannot
+the schema lists, with your secret (a header, or a user name and password)
+or OAuth token added by PCP, and nothing else. It cannot
 choose the address (PCP sends to the base URL saved on the endpoint and never
 follows a redirect), cannot add a header PCP owns, cannot leave the path of
 the operation, and never receives the secret: PCP removes it from the API's
 answer before reading it, in case the API echoes it back. An OAuth sign-in
 goes only to the addresses you saw when you saved or approved the endpoint;
-a later schema that moves them is reported, never followed. Read-only keeps an
+a later schema that moves them is reported, never followed, and so is the
+provider's own metadata when it names other addresses (PCP reads it only to
+learn whether it may register itself there). Read-only keeps an
 endpoint to GET operations, and a token scoped to other servers does not see
 it.
 
 **An assistant with an API token and a mail account** can do what the
 account's tools do, as far as you allowed them: list and search its mail,
-read emails and text attachments, and, unless you made the account
-read-only (or, over IMAP, gave it no SMTP server), send as you, move, flag
-and delete into the Trash. Nothing deletes mail for good, and sending cannot
-be undone, so leave `send_email` on Ask you first unless you mean otherwise.
+read emails and their attachments (a file comes back as a handle), and,
+unless you made the account read-only (or, over IMAP, gave it no SMTP
+server), send as you, with attachments from its own kept results, move, flag,
+label and delete into the Trash, create, rename and move folders, delete an
+empty one, and (JMAP) turn the automatic reply on or off. Nothing deletes mail
+for good (a folder that holds mail, or the inbox, Trash and the other special
+ones, is never deleted), and sending cannot be undone, so leave `send_email` on Ask you first unless you mean otherwise.
+`create_draft` only writes into Drafts and sends nothing, so you can allow it
+on its own and send what it wrote yourself.
 It never receives the password or token: PCP signs in itself and removes
 both from every answer. It can propose a mail account, naming its password
 or token and never holding it: nothing is added until you agree on PCP's page,
@@ -90,36 +108,74 @@ public addresses, as far as the token's method and site levels allow: a site
 it has not reached before asks you first unless you allow that method
 everywhere, and every site it tried is listed on the token's page. It cannot
 reach a private, loopback or link-local address (checked at the moment of
-connecting, as for an API an assistant proposes), cannot send one of your
-secrets or any Authorization or Cookie header, and a redirect to another site
-is reported to it rather than followed. The right is off unless you tick it
-when you make the token or on its page.
+connecting, as for an API an assistant proposes) unless you set **Private
+addresses** to Allowed for that token or for all tokens, which an assistant
+cannot ask for, and it never reaches PCP's own address. It cannot send one of
+your secrets or any Authorization or Cookie header, and a redirect to another
+site is reported to it rather than followed. The right is off unless you
+tick it when you make the token or on its page.
 
-**Someone with your session cookie but not your password** can use PCP as
-you while the session lasts. They cannot make an API token or a new recovery
-key, because both ask for the password again, so they cannot keep a way in
-once the session ends. **Sign out everywhere** (Settings) ends every session
-and can revoke every API token with it; recovery can do the same. Rotate any
-secret they could have seen.
+**An assistant with a token that reaches the browser** (a server you add on
+the Browser page, whose tools ask you first like any other's) drives a
+Chromium on PCP's machine, and acts as you on every site you signed in to
+there. It opens only the sites the token's web fetch lines allow (Browser
+sites, for a token without web fetch), sites you allowed for that tab, and
+private addresses only as for web fetch; never PCP's own site. It sees and
+drives only its own tabs, the ones it opened and the ones you hand it:
+another token's tabs and yours are not there for it, so it cannot read a
+page another token or you opened, nor use a site you allowed for another
+token's tab (a tab you hand to another token drops those), and it leaves a
+page alone once its lines no longer let it open the site. A tab you hand
+over goes only to a token you pick that is live and reaches the browser,
+and the site it is at counts as allowed for that tab. Every connection goes
+through PCP's proxy, which checks the address it dials, so a page, a
+redirect or a script on it cannot reach your network either. No tool runs a
+script, reads cookies or storage, or downloads a file. The sign-ins are kept
+in your vault, encrypted, and shared by every token that reaches the
+browser; **Forget all sites** signs it out of everything.
 
-**Touch ID in the Mac app** unlocks PCP, and confirms a new API token, an
-export or a restore, with your fingerprint. It is a key of its own that PCP
+**Someone with your session cookie but not your password** can use PCP as you
+while the session lasts (30 days from sign-in). They cannot make an API token
+(nor let an app sign in, which makes one), a new recovery key, a Touch ID key
+or an export, because each asks for the password again, so they cannot keep a way in once the session ends. **Sign out
+everywhere** (Settings) ends every session and can revoke every API token with
+it; recovery can do the same. Rotate any secret they could have seen.
+
+**Touch ID in the Mac app** unlocks PCP, and confirms a new API token (an
+app's sign-in included), an export, a restore or deleting the vault, with
+your fingerprint. It is a key of its own that PCP
 makes once you have typed your password, not your password. A release built
 with PCP's provisioning profile keeps it in a keychain item that macOS itself
 opens only for your fingerprint, on this Mac only; otherwise the app keeps it
 encrypted under a key in your login keychain and checks the fingerprint
 itself. Either way it reaches PCP's own pages only, and only after Touch
-ID. Adding or removing a fingerprint turns it off until you set it up again. It cannot change your password,
+ID. In the keychain item, adding or removing a fingerprint turns it off
+until you set it up again. It cannot change your password,
 make a recovery key or set Touch ID up again; those take the password, so
 someone with your finger and not your password cannot lock you out.
-Recovering with the recovery key, signing out everywhere and a restore turn
-it off.
+Recovering with the recovery key, signing out everywhere, a restore and
+deleting the vault turn it off.
+
+**An app that signs in with OAuth** (a claude.ai connector, ChatGPT) gets an
+API token like any other, and only after you approve it on PCP's own page
+with your password or Touch ID; PCP is its own authorization server, so no
+relay in front of it can issue one. The page shows where the app really
+comes from and where PCP sends you back to; anyone can register an app and
+call it "Claude", so allow a sign-in only when you just started one. A
+stolen access token works for at most an hour. A refresh token works once;
+if a copy is used after the app has used it, PCP ends that app's sign-ins.
+Revoking the token under API tokens signs the app out.
 
 **Password guessing** is rate-limited: 10 wrong passwords per 15 minutes per
 address on the sign-in page and per session inside PCP, 60 in all. A right
 password gives its try back, since it is no guess and only someone who knows
-it can type it, so you never lock yourself out by signing in. scrypt makes
-each guess expensive.
+it can type it, so you never lock yourself out by signing in. Recovery keys
+and export passwords are counted the same way, each on its own, and Touch ID
+has a budget of its own rather than spending the password's. scrypt makes
+each guess expensive. The address is the one the proxy in front of PCP
+reports (`X-Forwarded-For`), which a client reaching port 3000 directly can
+set to anything; the 60 for the whole instance holds either way. The counts
+are kept in memory, so a restart starts them again.
 
 Not defended against:
 
@@ -167,7 +223,18 @@ Not defended against:
   Allow GET only where you can, keep POST and the other methods at Ask you
   first or Blocked, and read the address and the body before you allow a
   request. PCP's own address is the one the site sees, so a site that trusts
-  PCP's network more than the assistant's trusts this too.
+  PCP's network more than the assistant's trusts this too, and where you
+  allowed private addresses, the devices on your network are in reach.
+- **Pages the browser opens.** A page is someone else's text, and an
+  assistant reading it can be steered by it, while it acts as you where the
+  browser is signed in. Keep its tools at Ask you first where a click could
+  cost something. In the Docker image Chromium runs without its own sandbox
+  (an unprivileged container gives it none to use), so a flaw in Chromium
+  that a page exploits runs as PCP's user in the container, with PCP's data
+  directory and a network without PCP's proxy in reach; keep the image
+  current. Chromium installed from the Browser page (the desktop app, a
+  checkout) comes from the addresses Playwright pins for it, over HTTPS,
+  with no checksum of PCP's own.
 - **Programs an assistant runs.** A token you let run code can call every
   tool it may call, many times over, from one program, and a prompt
   injected into the assistant can write that program. Each call still
@@ -185,9 +252,9 @@ Not defended against:
   unencrypted, like server addresses, so the token's page can list them. A
   copy of the disk shows them.
 - **Schema text on disk.** An endpoint's OpenAPI document, and the call plans
-  built from it, are stored unencrypted, like server addresses and names. A
-  copy of the disk shows them. Do not put a key or a hostname you would not
-  want seen into a schema you upload.
+  built from it, are stored unencrypted, like server addresses, names and the
+  user name of a login. A copy of the disk shows them. Do not put a key or a
+  hostname you would not want seen into a schema you upload.
 - **Endpoints behind an outbound proxy.** Public-only endpoints connect
   directly so PCP can check the address it connects to. A host that must use
   a proxy has to allow private addresses on those endpoints, which turns that
@@ -202,6 +269,10 @@ Not defended against:
   cannot verify, a self-signed one included.
 - **A key an API alters before echoing it.** PCP removes the secret as sent;
   an API that hashes or truncates it first is not caught.
+- **Being locked out by someone else's guesses.** Anyone who reaches the
+  sign-in page can spend the instance's 60 password tries and keep you from
+  signing in, or confirming with your password, until the 15 minutes are
+  up. A session you already have keeps working.
 
 ## Operational notes
 
@@ -229,6 +300,19 @@ Not defended against:
   signed ad hoc and tied to the exact build: after a rebuild macOS asks once
   for your Mac's password before PCP may use it. Choose **Always Allow**;
   denying it signs the app out and turns its Touch ID off.
+- The update check asks GitHub for PCP's latest release once a day, once you
+  have set PCP up and until you turn it off (Settings → Updates); GitHub sees
+  your address and PCP's version, which is all it sends. The answer is read as
+  untrusted text: the version, date, notes and file names, never a link. In a
+  container or a checkout PCP never updates itself. The Linux installer's
+  daily update (`PCP_AUTO_UPDATE=1`, by its own timer or Podman's) starts PCP
+  again from whatever image is published as `ghcr.io/kaperkunde/pcp:latest`,
+  with no step for you to look first.
+- The desktop app installs an update only when you choose **Install and
+  restart**, downloading it from PCP's GitHub releases over HTTPS. On a Mac,
+  the updater takes only an app signed with the same Developer ID; the
+  Windows app is not signed yet, so there the download is checked against
+  the checksum published beside it, and no more.
 - Back up the data volume, or export from Settings. Losing both loses the
   vault.
 - An export file (Settings → Export) holds the vault's rows as they are: the
@@ -236,16 +320,21 @@ Not defended against:
   and each API token, all encrypted again under the export password you chose
   (scrypt, as for the password). Reading a secret out of it takes the export
   password and one of those credentials. With dynamic DNS on, its token or
-  password is in the file in plain text, as it is in the database; the
-  certificate's key is not in it.
+  password is in the file unencrypted under the vault's key, as it is in the
+  database, so the export password alone opens it; the certificate's key is
+  not in it, and neither are sessions or the Touch ID key.
 - Keep the recovery key somewhere safe. Losing it and the password loses the
   data; that is the design.
 - The request log (`logs/*.jsonl` in the data directory) records which tools
-  were called, never their arguments or results.
+  were called, by which token, and whether they worked, never their
+  arguments or results. The Log page shows it to the signed-in owner, and the
+  cleanup deletes the days older than the owner keeps (Settings → Cleanup, 90
+  by default).
 - An answer too long to pass on in one piece (a large API response, a long
   email), and a file or value handed back as a handle (an attachment, an
   image), is kept for a day: encrypted under the vault's key, readable and
-  usable only by the token that asked, and pruned at the next start after it
-  expires. A handle in a later call's arguments is replaced only with that
-  token's own results; the permission page shows what each handle is (name,
-  type, size), never its content, and the request log records neither.
+  usable only by the token that asked, and deleted once it has expired (by the
+  cleanup, which runs at least once a day, or when that token keeps another). A handle in a later call's
+  arguments is replaced only with that token's own results; the permission
+  page shows what each handle is (name, type, size), never its content, and
+  the request log records neither.

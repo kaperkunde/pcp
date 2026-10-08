@@ -5,6 +5,7 @@ import { redirect } from "next/navigation"
 
 import { revokeAllApiTokens } from "@/lib/core/api-tokens"
 import { createDeviceKey, removeDeviceKeys } from "@/lib/core/device-keys"
+import { invalid } from "@/lib/core/errors"
 import { destroyAllSessions } from "@/lib/core/sessions"
 import {
   normalizePublicUrl,
@@ -16,8 +17,10 @@ import {
   rotateRecoveryKey,
   validatePassword,
 } from "@/lib/core/vault"
+import { deleteVault } from "@/lib/core/vault-reset"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import {
+  confirmOwner,
   confirmPassword,
   forgiveSessionTry,
   TOO_MANY_ATTEMPTS,
@@ -150,4 +153,32 @@ export async function signOutEverywhereAction(
   await destroyAllSessions(ctx.vaultId)
   await clearSessionCookie()
   redirect("/login")
+}
+
+/**
+ * Deletes the vault (lib/core/vault-reset.ts) once the box is ticked and the
+ * owner has confirmed it is them, with the password or Touch ID: the session
+ * alone is not enough, since a session cookie can be copied. Afterwards PCP
+ * is not set up; the page has the Mac app forget its Touch ID key and goes
+ * to the setup page, which makes the next vault.
+ */
+export async function deleteVaultAction(
+  _previous: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const session = await requireSession()
+
+  // The session row goes with the vault, so the cookie opens nothing after.
+  // It is left as it is: changing a cookie re-renders this page, which would
+  // send the owner away before the page has had the app forget Touch ID.
+  return guarded(async () => {
+    if (field(formData, "deleteVault") !== "on") {
+      throw invalid("Tick the box to confirm that everything is deleted.")
+    }
+
+    await confirmOwner(session, formData)
+    await deleteVault(session.ctx)
+
+    return {}
+  })
 }

@@ -3,7 +3,7 @@ import Link from "next/link"
 
 import { BrowserTabView } from "@/components/browser-tab-view"
 import { PageHeader } from "@/components/page-header"
-import { tabFor } from "@/lib/core/browser/owner"
+import { browserTokens, tabFor } from "@/lib/core/browser/owner"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = {
@@ -24,7 +24,7 @@ export default async function BrowserTabPage({
 }) {
   const ctx = await requireContext()
   const { id } = await params
-  const tab = await tabFor(ctx, id)
+  const [tab, tokens] = await Promise.all([tabFor(ctx, id), browserTokens(ctx)])
 
   if (!tab) {
     return (
@@ -55,7 +55,7 @@ export default async function BrowserTabPage({
           </>
         }
       />
-      <BrowserTabView tabId={tab.id} initial={tab} />
+      <BrowserTabView tabId={tab.id} initial={tab} tokens={tokens} />
     </>
   )
 }

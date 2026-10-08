@@ -6,7 +6,7 @@
  */
 
 /** The operations a program can ask the bridge for. */
-export type BridgeOp = "call" | "read" | "keep"
+export type BridgeOp = "call" | "read" | "keep" | "tools"
 
 /**
  * The bridge's answer to one request. `ok: false` is an error the program
@@ -36,6 +36,11 @@ export type RunResult = RunEnd & {
 
 export type Executor = (input: {
   code: string
+  /**
+   * A wrapper tool's arguments as JSON text (lib/core/wrappers/run.ts): the
+   * program sees them parsed, as `args`. Only text crosses into the engine.
+   */
+  input?: string
   bridge: Bridge
   /** Aborted when the run is out of time or the request went away. */
   signal: AbortSignal

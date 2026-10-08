@@ -12,6 +12,7 @@ import { db } from "./db"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
 import { bareType, charsetOf, decodeText, isTextType } from "./media-types"
+import { loadResourceLimits, resourceLimits } from "./resources/state"
 
 /**
  * Answers too long to hand to an assistant in one piece, and files that move
@@ -29,17 +30,18 @@ import { bareType, charsetOf, decodeText, isTextType } from "./media-types"
 
 /** The most an answer, or one read_result slice, carries. */
 export const RESULT_PAGE_CHARS = 60_000
-/** The most kept of one answer; past it the rest is dropped and said so. */
-export const MAX_KEPT_RESULT_CHARS = 4_000_000
-/** The most bytes kept of one file; a larger one is refused, not cut. */
-export const MAX_KEPT_RESULT_BYTES = 10 * 1024 * 1024
+/*
+ * The most kept of one text (past it the rest is dropped and said so) and
+ * of one file (a larger one is refused, not cut), and what one token's
+ * results hold together, follow the machine and the owner's settings
+ * (lib/core/resources/): `resourceLimits()`.
+ */
 /**
- * Per token: the oldest results go first once either is passed. Texts count
- * their characters and files their bytes. The row cap allows for an answer
- * that makes a handle of each of many fields.
+ * Per token: the oldest results go first once this or the size limit is
+ * passed. Texts count their characters and files their bytes. The row cap
+ * allows for an answer that makes a handle of each of many fields.
  */
 export const MAX_KEPT_RESULTS_PER_TOKEN = 300
-export const MAX_KEPT_CHARS_PER_TOKEN = 50_000_000
 export const RESULT_TTL_MS = 24 * 60 * 60_000
 const MAX_NAME_CHARS = 255
 const MAX_MEDIA_TYPE_CHARS = 200
@@ -56,7 +58,7 @@ export type KeptResult = {
   /** What was kept: characters of a text, bytes of a file. */
   length: number
   expiresAt: Date
-  /** Characters past MAX_KEPT_RESULT_CHARS that were not kept. */
+  /** Characters past the most kept of one text that were not kept. */
   dropped: number
 }
 
@@ -157,7 +159,8 @@ export async function keepResult(
   },
   now = new Date(),
 ): Promise<KeptResult> {
-  const end = safeCut(input.text, MAX_KEPT_RESULT_CHARS)
+  const { textChars } = await loadResourceLimits()
+  const end = safeCut(input.text, textChars)
   const text = input.text.slice(0, end)
   const name = cleanName(input.name)
   const mediaType = input.mediaType.slice(0, MAX_MEDIA_TYPE_CHARS)
@@ -188,8 +191,8 @@ export async function keepResult(
 }
 
 /**
- * Keeps a file's bytes. One over MAX_KEPT_RESULT_BYTES is refused, not cut:
- * half a PDF is no use to anyone.
+ * Keeps a file's bytes. One over the largest file (resourceLimits()) is
+ * refused, not cut: half a PDF is no use to anyone.
  */
 export async function keepBytes(
   ctx: VaultContext,
@@ -203,9 +206,11 @@ export async function keepBytes(
   },
   now = new Date(),
 ): Promise<KeptResult> {
-  if (input.bytes.length > MAX_KEPT_RESULT_BYTES) {
+  const { fileBytes } = await loadResourceLimits()
+
+  if (input.bytes.length > fileBytes) {
     throw invalid(
-      `That is ${NUMBER.format(input.bytes.length)} bytes, more than PCP keeps of one file (${NUMBER.format(MAX_KEPT_RESULT_BYTES)}).`,
+      `That is ${NUMBER.format(input.bytes.length)} bytes, more than PCP keeps of one file (${NUMBER.format(fileBytes)}). The owner can raise that in PCP's settings, under Resources.`,
     )
   }
 
@@ -248,6 +253,7 @@ async function enforceTokenLimits(tokenId: string, now: Date): Promise<void> {
     select: { id: true, length: true },
     orderBy: [{ createdAt: "desc" }, { id: "asc" }],
   })
+  const { keptBytesPerToken } = resourceLimits()
   const over: string[] = []
   let total = 0
 
@@ -256,7 +262,7 @@ async function enforceTokenLimits(tokenId: string, now: Date): Promise<void> {
 
     if (
       index >= MAX_KEPT_RESULTS_PER_TOKEN ||
-      (index > 0 && total > MAX_KEPT_CHARS_PER_TOKEN)
+      (index > 0 && total > keptBytesPerToken)
     ) {
       over.push(row.id)
     }
