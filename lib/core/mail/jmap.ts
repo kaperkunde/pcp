@@ -5,7 +5,7 @@ import { asBytes } from "../crypto"
 import { describeFetchError, discard, readCapped } from "../openapi/http"
 import { send } from "../openapi/transport"
 import { PCP_VERSION } from "../version"
-import { onSameOrigin } from "./addresses"
+import { onSameOrigin, onSameOriginAbsolute } from "./addresses"
 import {
   checkDeletable,
   checkNewParent,
@@ -293,6 +293,15 @@ export async function fetchJmapSession(
  */
 function downloadTemplate(template: string, sessionUrl: string): string | null {
   const probe = template.replace(/\{[^{}]*\}/g, "x")
+
+  // A scheme without its // ("https:host/x") is a path on the session URL
+  // here and another host to fetch, so it is not taken.
+  if (
+    /^[a-z][a-z0-9+.-]*:/i.test(template) &&
+    !/^[a-z][a-z0-9+.-]*:\/\//i.test(template)
+  ) {
+    return null
+  }
 
   if (!onSameOrigin(probe, sessionUrl)) {
     return null
@@ -1440,11 +1449,12 @@ export function openJmapBackend(
       )
     }
 
-    const url = config.uploadUrl.replace(/\{(\w+)\}/g, (_, name: string) =>
+    const filled = config.uploadUrl.replace(/\{(\w+)\}/g, (_, name: string) =>
       name === "accountId" ? encodeURIComponent(accountId) : "",
     )
+    const url = onSameOriginAbsolute(filled, apiUrl)
 
-    if (!onSameOrigin(url, apiUrl)) {
+    if (!url) {
       throw new MailRequestError(
         "The upload address is not on the mail server.",
       )
@@ -1492,21 +1502,26 @@ export function openJmapBackend(
       )
     }
 
-    const url = config.downloadUrl.replace(/\{(\w+)\}/g, (_, name: string) => {
-      const value =
-        name === "accountId"
-          ? accountId
-          : name === "blobId"
-            ? String(part.blobId)
-            : name === "type"
-              ? bareType(meta.type)
-              : name === "name"
-                ? (meta.name ?? "attachment")
-                : ""
-      return encodeURIComponent(value)
-    })
+    const filled = config.downloadUrl.replace(
+      /\{(\w+)\}/g,
+      (_, name: string) => {
+        const value =
+          name === "accountId"
+            ? accountId
+            : name === "blobId"
+              ? String(part.blobId)
+              : name === "type"
+                ? bareType(meta.type)
+                : name === "name"
+                  ? (meta.name ?? "attachment")
+                  : ""
+        return encodeURIComponent(value)
+      },
+    )
 
-    if (!onSameOrigin(url, apiUrl)) {
+    const url = onSameOriginAbsolute(filled, apiUrl)
+
+    if (!url) {
       throw new MailRequestError(
         "The download address is not on the mail server.",
       )

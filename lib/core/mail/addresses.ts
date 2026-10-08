@@ -190,6 +190,30 @@ export function onSameOrigin(named: string, typed: string): string | null {
   }
 }
 
+/**
+ * A finished address, parsed with no base, accepted only when it is absolute
+ * and on the typed origin; the string returned is the one to fetch. Parsing
+ * it the way fetch will is the point: a form like "https:host/x" resolves
+ * against a base as a path on it, and alone as another host. Null otherwise.
+ */
+export function onSameOriginAbsolute(
+  named: string,
+  typed: string,
+): string | null {
+  try {
+    const url = new URL(named)
+
+    if (url.origin !== new URL(typed).origin || url.username || url.password) {
+      return null
+    }
+
+    url.hash = ""
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
 const ADDRESS = /^[^\s@<>()",;:\\[\]]+@[^\s@<>()",;:\\[\]]+$/
 
 /**

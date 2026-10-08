@@ -100,6 +100,24 @@ describe("the session", () => {
     ).toBeNull()
   })
 
+  it("refuses a template whose scheme has no slashes", async () => {
+    // "https:host/x" is a path on the session URL when resolved against it,
+    // and another host once it is fetched on its own.
+    const first = await serve({
+      uploadUrl: "https:evil.example.com/upload/{accountId}",
+    })
+    expect(
+      (await fetchJmapSession(first.sessionUrl, basic())).uploadUrl,
+    ).toBeNull()
+
+    const second = await serve({
+      uploadUrl: `${new URL(api!.origin).protocol}evil.example.com:8443/{accountId}`,
+    })
+    expect(
+      (await fetchJmapSession(second.sessionUrl, basic())).uploadUrl,
+    ).toBeNull()
+  })
+
   it("says when the account may not send", async () => {
     const { sessionUrl } = await serve({ submission: false })
     expect((await fetchJmapSession(sessionUrl, basic())).submission).toBe(false)
@@ -982,5 +1000,51 @@ describe("attachments", () => {
     await expect(
       mail.getAttachment("e2", "blob-csv", { maxBytes: 1000 }),
     ).rejects.toThrow(/no attachment with that id/)
+  })
+
+  it("sends the credential only to the mail server's own origin", async () => {
+    const { fake, session } = await backend()
+
+    for (const template of [
+      "https://evil.example.com/{blobId}",
+      "https:evil.example.com/{blobId}",
+      "/jmap/download/{accountId}/{blobId}/{name}",
+    ]) {
+      const mail = openJmapBackend(
+        { ...session, from: null, downloadUrl: template },
+        basic(),
+      )
+
+      await expect(
+        mail.getAttachment("e1", "blob-csv", { maxBytes: 1000 }),
+      ).rejects.toThrow(/download address is not on the mail server/)
+    }
+
+    const mail = openJmapBackend(
+      {
+        ...session,
+        from: null,
+        uploadUrl: "https:evil.example.com/upload/{accountId}",
+      },
+      basic(),
+    )
+
+    await expect(
+      mail.sendEmail!({
+        to: [{ name: null, email: "x@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+        attachments: [
+          {
+            name: "a.bin",
+            type: "application/octet-stream",
+            bytes: Buffer.from([1]),
+          },
+        ],
+      }),
+    ).rejects.toThrow(/upload address is not on the mail server/)
+    expect(fake.sent).toEqual([])
   })
 })

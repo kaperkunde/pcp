@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   formatMailServer,
   onSameOrigin,
+  onSameOriginAbsolute,
   parseImapAddress,
   parseRecipient,
   parseSmtpAddress,
@@ -99,6 +100,28 @@ describe("onSameOrigin", () => {
     expect(onSameOrigin("http://mail.example.com/jmap", typed)).toBeNull()
     expect(onSameOrigin("https://mail.example.com:8443/jmap", typed)).toBeNull()
     expect(onSameOrigin("https://x@mail.example.com/jmap", typed)).toBeNull()
+  })
+})
+
+describe("onSameOriginAbsolute", () => {
+  const typed = "https://mail.example.com/.well-known/jmap"
+
+  it("takes an absolute address on the typed origin, as fetch will read it", () => {
+    expect(onSameOriginAbsolute("https://mail.example.com/a#x", typed)).toBe(
+      "https://mail.example.com/a",
+    )
+    expect(onSameOriginAbsolute("https:mail.example.com/a", typed)).toBe(
+      "https://mail.example.com/a",
+    )
+  })
+
+  it("refuses what is not absolute, or is on another origin", () => {
+    expect(onSameOriginAbsolute("/jmap/", typed)).toBeNull()
+    expect(onSameOriginAbsolute("https:evil.example.com/a", typed)).toBeNull()
+    expect(onSameOriginAbsolute("https:\\evil.example.com/a", typed)).toBeNull()
+    expect(
+      onSameOriginAbsolute("https://x@mail.example.com/a", typed),
+    ).toBeNull()
   })
 })
 
