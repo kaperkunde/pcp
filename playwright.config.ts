@@ -195,8 +195,8 @@ export default defineConfig({
     },
     {
       // A token that fetches web pages: the tool and its instructions, a new
-      // site asking first and listed on the token's page, method and site
-      // levels, All tokens, and public addresses only.
+      // site asking first and listed on the token's Advanced page, and
+      // public addresses only until the owner allows private ones.
       name: "web-fetch",
       testMatch: /web-fetch\.spec\.ts/,
       dependencies: ["setup"],

@@ -2,14 +2,13 @@ import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, initialize, toolText } from "../lib/mcp"
-import { OWNER_PASSWORD } from "../lib/auth"
 import {
   addSecret,
   allowAllTools,
   chooseSegment,
-  confirmWithPassword,
   createToken,
   showServerSettings,
+  connectAssistant,
 } from "../lib/ui"
 
 // An API described by an OpenAPI schema, added like a server: PCP reads the
@@ -268,17 +267,11 @@ test("a token reads and changes endpoints only when the owner says so", async ({
     ).toBe(true)
   }
 
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(`Endpoint manager ${RUN}`)
-  await page
-    .getByLabel(
-      "Let an assistant with this token read and change API endpoints",
-    )
-    .check()
-  await page.getByRole("button", { name: "Create token" }).click()
-  await confirmWithPassword(page, OWNER_PASSWORD)
-  await expect(page.getByText("Your new token")).toBeVisible()
-  managerToken = (await page.getByTestId("new-token").textContent())!
+  managerToken = (
+    await connectAssistant(page, `Endpoint manager ${RUN}`, {
+      manageEndpoints: true,
+    })
+  ).token
 
   const manager = await initialize(baseURL!, managerToken)
   expect(manager.tools).toEqual([

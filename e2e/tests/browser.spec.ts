@@ -1,8 +1,13 @@
-import { expect, test, type Page } from "@playwright/test"
+import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, initialize, toolText, type McpResponse } from "../lib/mcp"
-import { allowAllTools, createToken } from "../lib/ui"
+import {
+  allowAllTools,
+  createToken,
+  openTokenAdvanced,
+  setPrivateAddresses,
+} from "../lib/ui"
 
 // The browser: the owner adds it, a token that reaches every server gets
 // its tools and is told how it works; the first page at a site asks the
@@ -47,14 +52,6 @@ function refOf(text: string, pattern: RegExp): string {
   return ref!
 }
 
-async function choose(page: Page, label: string, value: string) {
-  const select = page.getByLabel(label, { exact: true })
-  await select.selectOption(value)
-  await expect(select).toBeEnabled()
-  await page.reload()
-  await expect(page.getByLabel(label, { exact: true })).toHaveValue(value)
-}
-
 test("the owner adds the browser, and a token that reaches it gets its tools and is told how", async ({
   page,
   baseURL,
@@ -73,16 +70,18 @@ test("the owner adds the browser, and a token that reaches it gets its tools and
 
   token = await createToken(page, TOKEN_NAME)
   tokenId = page.url().split("/").pop()!
-  await expect(
-    page.getByRole("heading", { name: "Browser sites" }),
-  ).toBeVisible()
 
   const { instructions } = await initialize(baseURL!, token)
   expect(instructions).toContain("browser/hand_over")
 
   await allowAllTools(page, TOKEN_NAME, "browser")
-  await page.goto(`/tokens/${tokenId}`)
-  await choose(page, "Web fetch private addresses", "allowed")
+  // The browser follows the token's web fetch sites, on its Advanced page;
+  // the fake site is on loopback.
+  await openTokenAdvanced(page, tokenId)
+  await expect(
+    page.getByRole("heading", { name: "Browser sites" }),
+  ).toBeVisible()
+  await setPrivateAddresses(page, true)
 })
 
 test("the first page at a site asks the owner, and the assistant then reads and acts on it", async ({

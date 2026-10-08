@@ -12,13 +12,13 @@ import {
   acceptNextDialog,
   chooseProposedLevel,
   createToken,
+  expectLevel,
   openRequestFromBell,
   openToken,
   permissionFrom,
   proposedLevel,
   showServerSettings,
   showTools,
-  toolLevel,
 } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
@@ -368,7 +368,7 @@ test("Allow for lets a tool run without asking until the time is up or you end i
   await expect(page.getByText("Allowed for now")).toBeVisible()
   await expect(page.getByText(`${SERVER_NAME} · add_numbers`)).toBeVisible()
   await showTools(page, SLUG)
-  await expect(toolLevel(page, SLUG, "add_numbers")).toHaveValue("ask")
+  await expectLevel(page, `Access to ${SLUG}/add_numbers`, "ask")
   await page.getByRole("button", { name: "End now" }).click()
   await expect(page.getByText("Allowed for now")).toHaveCount(0)
   expect(

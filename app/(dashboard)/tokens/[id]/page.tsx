@@ -1,22 +1,36 @@
 import type { Metadata } from "next"
-import { notFound } from "next/navigation"
 
+import { LocalDate, RelativeDate } from "@/components/local-date"
+import { PageColumn } from "@/components/page-column"
 import { PageHeader } from "@/components/page-header"
-import { TokenDetail } from "@/components/token-detail"
+import { TokenAvatar } from "@/components/token-avatar"
+import {
+  TokenAllowances,
+  TokenEnd,
+  TokenReachForm,
+  TokenWaiting,
+} from "@/components/token-detail"
+import { TokenTools } from "@/components/token-tools"
+import { Badge } from "@/components/ui/badge"
 import { ButtonLink } from "@/components/ui/button"
+import { List, ListRow } from "@/components/ui/list"
 import { listTokenAllowances } from "@/lib/core/allowances"
-import { getApiToken, listApiTokens } from "@/lib/core/api-tokens"
-import { isPcpError } from "@/lib/core/errors"
 import { listOpenPermissions } from "@/lib/core/permissions"
-import { listServers } from "@/lib/core/servers"
 import { listTokenToolAccess } from "@/lib/core/tool-access"
-import { getVault } from "@/lib/core/vault"
 import { listFetchRules } from "@/lib/core/web-fetch"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
-export const metadata: Metadata = { title: "API token" }
+import { loadToken } from "./load-token"
 
+export const metadata: Metadata = { title: "Assistant" }
+
+/**
+ * One assistant: what waits for the owner, what it reaches and may do, its
+ * tools' levels, and a way to stop it. What is set once (expiry, every
+ * tool's All tokens box, web sites and methods, what it may propose) is a
+ * page down, under Advanced.
+ */
 export default async function TokenPage({
   params,
 }: {
@@ -24,94 +38,128 @@ export default async function TokenPage({
 }) {
   const ctx = await requireContext()
   const { id } = await params
-
-  let token: Awaited<ReturnType<typeof getApiToken>>
-
-  try {
-    token = await getApiToken(ctx, id)
-  } catch (error) {
-    if (isPcpError(error) && error.code === "not_found") {
-      notFound()
-    }
-
-    throw error
-  }
-
-  const publicUrl = await publicUrlFor(ctx)
-  const [servers, access, tokens, waiting, allowances, vault] =
-    await Promise.all([
-      listServers(ctx),
-      listTokenToolAccess(ctx, id),
-      listApiTokens(ctx),
-      listOpenPermissions(ctx, id, publicUrl),
-      listTokenAllowances(ctx, id),
-      getVault(ctx.vaultId),
-    ])
-  // The browser follows the token's web fetch sites: a token that reaches
-  // it has them, web fetch or not.
-  const reachesBrowser = servers.some(
-    (server) =>
-      server.kind === "browser" &&
-      (token.allowAllServers ||
-        token.servers.some((picked) => picked.id === server.id)),
+  const { token, servers, kinds, browser, expired, locked } = await loadToken(
+    ctx,
+    id,
   )
-  const fetchRules =
-    token.webFetch || reachesBrowser ? await listFetchRules(ctx, id) : null
+  const publicUrl = await publicUrlFor(ctx)
+  const [access, waiting, allowances, fetchRules] = await Promise.all([
+    listTokenToolAccess(ctx, id),
+    listOpenPermissions(ctx, id, publicUrl),
+    listTokenAllowances(ctx, id),
+    token.webFetch || browser ? listFetchRules(ctx, id) : null,
+  ])
+  const advanced = `/tokens/${id}/advanced`
 
   return (
-    <>
+    <PageColumn width="narrow">
       <PageHeader
+        back={{ href: "/tokens", label: "Assistants" }}
+        icon={<TokenAvatar name={token.name} size="lg" dimmed={locked} />}
         title={token.name}
-        description={`${
-          token.oauthClient
-            ? `API token for ${token.oauthClient.name}, which signed in with OAuth.`
-            : `API token ${token.prefix}…`
-        } Choose which tools an assistant using it may run, which ask you first, and which are blocked.`}
+        description={
+          <span className="flex flex-col gap-1">
+            <span>
+              {token.lastUsedAt ? (
+                <>
+                  Last used <RelativeDate value={token.lastUsedAt} />
+                </>
+              ) : (
+                "Not used yet"
+              )}
+              {" · "}
+              {token.expiresAt ? (
+                <>
+                  {expired ? "Expired" : "Expires"}{" "}
+                  <LocalDate value={token.expiresAt} />
+                </>
+              ) : (
+                "Never expires"
+              )}
+            </span>
+            <span className="flex flex-wrap items-center gap-2">
+              {token.revokedAt ? (
+                <Badge variant="destructive">Revoked</Badge>
+              ) : expired ? (
+                <Badge variant="destructive">Expired</Badge>
+              ) : null}
+              {token.oauthClient
+                ? `API token for ${token.oauthClient.name}, which signed in with OAuth.`
+                : `API token ${token.prefix}…`}
+              {locked ? " It is revoked; nothing about it can change." : null}
+            </span>
+          </span>
+        }
         action={
-          <div className="flex gap-2">
-            <ButtonLink
-              href={`/log?token=${encodeURIComponent(id)}`}
-              variant="outline"
-              size="sm"
-            >
-              Its log
-            </ButtonLink>
-            <ButtonLink href="/tokens" variant="outline" size="sm">
-              All tokens
-            </ButtonLink>
-          </div>
+          <ButtonLink
+            href={`/log?token=${encodeURIComponent(id)}`}
+            variant="secondary"
+            size="sm"
+          >
+            Its log
+          </ButtonLink>
         }
       />
-      <TokenDetail
+
+      {waiting.length > 0 ? (
+        <TokenWaiting
+          waiting={waiting.map((request) => ({
+            id: request.id,
+            review: request.kind === "access",
+            title: request.title,
+            lines: request.lines,
+            full: request.full,
+            warning: request.warning,
+            decisions: request.decisions,
+            secret: request.secretToEnter,
+            every:
+              request.kind === "memory_share" && request.memory
+                ? { asked: request.memory.always }
+                : null,
+          }))}
+        />
+      ) : null}
+
+      {allowances.length > 0 ? (
+        <TokenAllowances
+          tokenId={id}
+          allowances={allowances.map((allowance) => ({
+            ...allowance,
+            until: allowance.until.toISOString(),
+          }))}
+        />
+      ) : null}
+
+      <TokenReachForm
         token={token}
-        servers={servers.map(({ id, name, kind }) => ({ id, name, kind }))}
-        access={access}
-        allowances={allowances.map((allowance) => ({
-          ...allowance,
-          until: allowance.until.toISOString(),
-        }))}
-        otherTokens={tokens
-          .filter((other) => other.id !== id)
-          .map(({ id, name }) => ({ id, name }))}
-        waiting={waiting.map((request) => ({
-          id: request.id,
-          review: request.kind === "access",
-          title: request.title,
-          lines: request.lines,
-          full: request.full,
-          warning: request.warning,
-          decisions: request.decisions,
-          secret: request.secretToEnter,
-          every:
-            request.kind === "memory_share" && request.memory
-              ? { asked: request.memory.always }
-              : null,
-        }))}
-        endpointUrl={`${publicUrl}/mcp`}
-        fetchRules={fetchRules}
-        browser={reachesBrowser}
-        username={vault.name}
+        servers={servers}
+        locked={locked}
+        sites={
+          fetchRules
+            ? { href: `${advanced}#web-pages`, count: fetchRules.sites.length }
+            : null
+        }
       />
-    </>
+
+      <TokenTools tokenId={id} access={access} kinds={kinds} locked={locked} />
+
+      <List>
+        <ListRow
+          href={advanced}
+          title="Advanced"
+          description="Name, expiry, every tool's level for all tokens, web sites and methods, what it may propose, copying access"
+        />
+      </List>
+
+      <TokenEnd
+        token={{
+          id,
+          name: token.name,
+          revoked: token.revokedAt !== null,
+          expired,
+          oauthClient: token.oauthClient?.name ?? null,
+        }}
+      />
+    </PageColumn>
   )
 }

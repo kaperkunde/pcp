@@ -1,13 +1,12 @@
 import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
-import { OWNER_PASSWORD } from "../lib/auth"
 import { callTool, initialize, toolText } from "../lib/mcp"
 import {
   addSecret,
   allowAllTools,
-  confirmWithPassword,
   showServerSettings,
+  connectAssistant,
 } from "../lib/ui"
 
 // A wrapper, end to end: an assistant proposes simpler tools over a server
@@ -61,15 +60,8 @@ test("the owner adds a server and a token that may propose wrappers", async ({
     page.getByRole("status").filter({ hasText: "Saved." }),
   ).toBeVisible()
 
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(TOKEN_NAME)
-  await page
-    .getByLabel("Let an assistant with this token propose wrappers")
-    .check()
-  await page.getByRole("button", { name: "Create token" }).click()
-  await confirmWithPassword(page, OWNER_PASSWORD)
-  await expect(page.getByText("Your new token")).toBeVisible()
-  token = (await page.getByTestId("new-token").textContent())!
+  token = (await connectAssistant(page, TOKEN_NAME, { manageWrappers: true }))
+    .token
 
   await allowAllTools(page, TOKEN_NAME, SLUG)
 

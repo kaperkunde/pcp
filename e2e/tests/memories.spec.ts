@@ -1,8 +1,7 @@
 import { expect, test } from "@playwright/test"
 
-import { OWNER_PASSWORD } from "../lib/auth"
 import { callTool, initialize, toolText } from "../lib/mcp"
-import { confirmWithPassword, createToken, permissionFrom } from "../lib/ui"
+import { createToken, permissionFrom, connectAssistant } from "../lib/ui"
 
 // Memories through the gateway: a token the owner lets keep them gets the
 // memory tool and is told when to use it; sharing one asks the owner, who
@@ -21,15 +20,8 @@ test("a token made to keep memories gets the tool and is told when to use it", a
   page,
   baseURL,
 }) => {
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(TOKEN_NAME)
-  await page
-    .getByLabel("Let an assistant with this token keep memories")
-    .check()
-  await page.getByRole("button", { name: "Create token" }).click()
-  await confirmWithPassword(page, OWNER_PASSWORD)
-  await expect(page.getByText("Your new token")).toBeVisible()
-  token = (await page.getByTestId("new-token").textContent())!
+  token = (await connectAssistant(page, TOKEN_NAME, { keepMemories: true }))
+    .token
 
   const { tools, instructions } = await initialize(baseURL!, token)
   expect(tools).toEqual(expect.arrayContaining(["memory", "read_memory"]))

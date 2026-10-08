@@ -200,9 +200,13 @@ test("the owner sees the token under API tokens, and revoking it signs the assis
   const row = page.getByRole("listitem").filter({ hasText: TOKEN_NAME })
   await expect(row.getByText(`signed in from ${CLIENT_NAME}`)).toBeVisible()
 
+  await row.getByRole("link").first().click()
+  await expect(
+    page.getByRole("heading", { name: TOKEN_NAME, level: 1 }),
+  ).toBeVisible()
   page.once("dialog", (dialog) => dialog.accept())
-  await row.getByRole("button", { name: "Revoke" }).click()
-  await expect(row.getByText("Revoked")).toBeVisible()
+  await page.getByRole("button", { name: "Revoke access" }).click()
+  await expect(page.getByText("Revoked", { exact: true })).toBeVisible()
 
   const response = await mcpRequest(baseURL!, tokens.access_token, "tools/list")
   expect(response.status).toBe(401)
