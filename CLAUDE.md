@@ -144,6 +144,11 @@ so in the summary; the bump itself waits for the request.
   site: that site gets its own decision. A site the token has no line for
   gets one of its own on first sight, so the owner sees every site it tried.
   Its limits go in `fetch/limits.ts`. Sites stay out of the request log.
+  A site that answers `cf-mitigated: challenge` is read again through the
+  vault's browser (`browser/solve.ts`): GET only, in a context of its own that
+  starts from none of the vault's sign-ins and is saved nowhere, the same site
+  only, the token's lines deciding as before. The sign-ins (`browser_profile`)
+  are never used for a web_fetch.
 - run_code (`lib/core/code/`) runs an assistant's program in QuickJS
   compiled to WebAssembly, a fresh instance per run, never in Node itself
   (not `vm`, not Node's permission model, not Pyodide in Node: none of
@@ -187,8 +192,10 @@ so in the summary; the bump itself waits for the request.
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
   a permission request (`browse`, `browser_handover`); a site is asked
   about only for the address in the call's arguments, so a call the owner
-  allowed opens it without a second ask. Its limits go in
-  `browser/limits.ts`; the Dockerfile's Chromium is the version
+  allowed opens it without a second ask. `navigate` waits for a check that
+  passes on its own; one that does not is the owner's, through `hand_over`,
+  and nothing asks them by itself. Pages read for web_fetch are not tabs. The
+  limits go in `browser/limits.ts`; the Dockerfile's Chromium is the version
   `playwright-core` drives (`scripts/docker.test.ts`). Chromium is installed
   only by the owner's click (`browser/install.ts`), only from the addresses
   Playwright pins for that version, in PCP's process: never with a child
