@@ -17,7 +17,6 @@ test.describe.configure({ mode: "serial" })
 // Signing in is limited per address: one of its own, as backup.spec.ts.
 test.use({ extraHTTPHeaders: { "x-forwarded-for": "198.51.100.202" } })
 
-const RUN = Date.now().toString(36)
 const STORE = "e2e-touch-id-key"
 const PROMPTS = "e2e-touch-id-prompts"
 const REJECTED = "Touch ID is no longer set up for PCP. Use your password."
