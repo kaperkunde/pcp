@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test"
+import { expect, test, type Page } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import {
@@ -17,7 +17,9 @@ import { createToken, openToken, showTools } from "../lib/ui"
 // copies between tokens; an assistant can propose tool levels, which change
 // only once the owner saves them on PCP's page, and a server, which is added
 // only once the owner agrees, and an OAuth one is connected from a link
-// while check_server waits.
+// while check_server waits. A server an assistant proposes reaches public
+// addresses only, and the fake upstream is on loopback: the owner is told so
+// when asked, and allows private addresses on the server's page.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -55,6 +57,25 @@ function linkIn(text: string): { path: string; id: string } {
   expect(id, text).toBeTruthy()
   return { path: `/permissions/${id}`, id: id! }
 }
+
+/**
+ * An assistant's server reaches public addresses only. The fake upstream is
+ * on loopback, so the owner allows private addresses on its page.
+ */
+async function allowPrivateAddresses(page: Page, slug: string) {
+  await page.goto("/servers")
+  await page
+    .getByRole("link")
+    .filter({ has: page.getByText(slug, { exact: true }) })
+    .click()
+  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
+  await expect(page.getByLabel("Public addresses only")).toBeChecked()
+  await page.getByLabel("Public addresses only").uncheck()
+  await page.getByRole("button", { name: "Save changes" }).click()
+}
+
+const PRIVATE_FLAG =
+  /127\.0\.0\.1 is, or resolves to, a private or local address\. A server an assistant proposes reaches public addresses only/
 
 function callsOf(tool: string): number {
   return upstream.calls.filter((call) => call.tool === tool).length
@@ -486,8 +507,19 @@ test("an assistant can propose a server with a stored secret; it is added once y
   await expect(
     page.getByText(`sends your secret "${SECRET_NAME}"`),
   ).toBeVisible()
+  // The owner is told the address is on their own network; the assistant
+  // is not.
+  await expect(page.getByText(PRIVATE_FLAG)).toBeVisible()
+  expect(toolText(asked)).not.toContain("private or local")
   await page.getByRole("button", { name: "Add server" }).click()
-  await expect(page.getByTestId("permission-outcome")).toContainText("3 tools")
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "only reaches public ones",
+  )
+
+  await allowPrivateAddresses(page, `proposed-${RUN}`)
+  await expect(
+    page.getByRole("status").filter({ hasText: "Saved. Found 3 tools." }),
+  ).toBeVisible()
 
   const after = await initialize(baseURL!, token)
   expect(after.instructions).toContain(
@@ -523,15 +555,23 @@ test("an assistant can propose a server with a secret you do not have yet; you t
     .getByLabel(`Value of the secret "${secretName}"`)
     .fill(upstream.expectedToken)
   await page.getByRole("button", { name: "Add server" }).click()
-  await expect(page.getByTestId("permission-outcome")).toContainText("3 tools")
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "only reaches public ones",
+  )
   await expect(page.getByTestId("permission-outcome")).toContainText(
     `saved in PCP as "${secretName}"`,
   )
 
   // The assistant learns the outcome, never the value.
   const outcome = await callTool(baseURL!, token, "check_permission", { id })
-  expect(toolText(outcome)).toContain("3 tools")
+  expect(toolText(outcome)).toContain(`Added ${name}`)
   expect(toolText(outcome)).not.toContain(upstream.expectedToken)
+
+  // Once the owner allows private addresses, the key typed in reaches it.
+  await allowPrivateAddresses(page, `proposed-new-key-${RUN}`)
+  await expect(
+    page.getByRole("status").filter({ hasText: "Saved. Found 3 tools." }),
+  ).toBeVisible()
 
   await page.goto("/secrets")
   await expect(page.getByText(secretName, { exact: true })).toBeVisible()
@@ -562,6 +602,13 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   expect(connect.startUrl).toContain(
     `/api/servers/${connect.serverId}/oauth/start`,
   )
+
+  // Its sign-in is under the same rule as its requests: the owner allows
+  // the fake upstream's loopback address first.
+  await allowPrivateAddresses(page, connect.slug)
+  await expect(
+    page.getByRole("status").filter({ hasText: "Saved." }),
+  ).toBeVisible()
 
   // check_server waits while the owner signs in, and answers once they have.
   const connected = callTool(baseURL!, token, "check_server", {

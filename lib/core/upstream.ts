@@ -28,8 +28,13 @@ import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
 import type { SshIdentity } from "./ssh/client"
 import { callSshTool, syncSshTools } from "./ssh/hosts"
+import {
+  AddressBlockedError,
+  isOwnAddress,
+  isPublicAddress,
+} from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
-import { send } from "./openapi/transport"
+import { checkedFetch } from "./openapi/transport"
 import {
   applyAuthorizeParams,
   applySignInDefaults,
@@ -567,7 +572,7 @@ export async function verifiedEndpointDiscovery(
   try {
     metadata = await discoverAuthorizationServerMetadata(
       fixed.authorizationServerUrl,
-      { fetchFn: oauthFetch(server) },
+      { fetchFn: serverFetch(server) },
     )
   } catch {
     return { discovery: fixed, elsewhere: null }
@@ -594,35 +599,50 @@ export async function verifiedEndpointDiscovery(
 }
 
 /**
- * How PCP talks to an endpoint's authorization server: under the endpoint's
- * address rule, like its calls, since the token address came from a schema.
+ * An address a public-only MCP server may reach: a public one, and never
+ * PCP's own.
+ */
+function publicServerAddress(address: string, port: number): boolean {
+  return isPublicAddress(address) && !isOwnAddress(address, port)
+}
+
+/**
+ * How PCP talks to a server under its address rule: an MCP server's
+ * requests and the OAuth requests of either kind. A public-only server (one
+ * an assistant proposed, until the owner allows private addresses) reaches
+ * public addresses only, checked as the socket connects (see
+ * openapi/transport.ts). An endpoint follows no redirect, like its calls; an
+ * MCP server follows them as fetch does, each hop checked again.
  * Undefined means the SDK's own fetch.
  */
-export function oauthFetch(
+export function serverFetch(
   server: Pick<McpServer, "kind" | "publicOnly">,
 ): FetchLike | undefined {
-  if (server.kind !== "openapi" || !server.publicOnly) {
+  if (!server.publicOnly) {
     return undefined
   }
 
-  return (url, init) => {
-    const body = init?.body
+  if (server.kind === "openapi") {
+    return checkedFetch({ publicOnly: true })
+  }
 
-    return send(
-      String(url),
-      {
-        method: init?.method,
-        headers: Object.fromEntries(new Headers(init?.headers)),
-        body:
-          typeof body === "string"
-            ? body
-            : body instanceof URLSearchParams
-              ? body.toString()
-              : undefined,
-        signal: init?.signal ?? undefined,
-      },
-      { publicOnly: true },
-    )
+  if (server.kind !== "mcp") {
+    return undefined
+  }
+
+  const checked = checkedFetch(
+    { publicOnly: true, addressCheck: publicServerAddress },
+    { followRedirects: true },
+  )
+
+  return async (url, init) => {
+    try {
+      return await checked(url, init)
+    } catch (error) {
+      throw error instanceof AddressBlockedError
+        ? new AddressBlockedError(error.host, error.address, "server")
+        : error
+    }
   }
 }
 
@@ -685,7 +705,7 @@ async function endpointToken(
     const result = await auth(provider, {
       serverUrl: server.url,
       scope: server.oauthScope ?? undefined,
-      fetchFn: oauthFetch(server),
+      fetchFn: serverFetch(server),
     })
 
     if (result !== "AUTHORIZED") {
@@ -1009,6 +1029,9 @@ export async function openUpstream(
     ...(await oauthTokens(provider)),
   ]
   const endpoint = new URL(server.url)
+  // A public-only server's requests, and its OAuth requests (the SDK makes
+  // those through this too), reach public addresses only.
+  const reach = serverFetch(server) ?? fetch
   let refusal: Refusal | undefined
   const transport = new StreamableHTTPClientTransport(endpoint, {
     // Never cached: these are live calls carrying credentials. It also keeps
@@ -1017,7 +1040,7 @@ export async function openUpstream(
     requestInit: { headers, cache: "no-store" },
     ...(provider ? { authProvider: provider } : {}),
     fetch: async (url, init) => {
-      const response = await fetch(url, init)
+      const response = await reach(url, init)
 
       // Only the server's own answers: not the sign-in's discovery or token
       // requests, which the SDK reports itself.

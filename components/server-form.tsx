@@ -11,8 +11,8 @@ import {
 import { OAuthClientFields } from "@/components/oauth-client-fields"
 import { SubmitButton } from "@/components/submit-button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Input, Select, Textarea } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
+import { Field, Label } from "@/components/ui/label"
 import {
   createServerAction,
   updateServerAction,
@@ -41,6 +41,7 @@ export type ServerFormValues = {
   oauthClientSecretId: string
   oauthScope: string
   oauthAuthorizeParams: string
+  publicOnly: boolean
 }
 
 export const EMPTY_SERVER: ServerFormValues = {
@@ -56,6 +57,7 @@ export const EMPTY_SERVER: ServerFormValues = {
   oauthClientSecretId: "",
   oauthScope: "",
   oauthAuthorizeParams: "",
+  publicOnly: false,
 }
 
 /**
@@ -144,6 +146,24 @@ export function ServerForm({
               placeholder="Code hosting: repositories, issues and pull requests on GitHub."
             />
           </Field>
+
+          <div className="flex flex-col gap-1.5">
+            <Label className="font-normal" htmlFor={`${prefix}-public-only`}>
+              <Checkbox
+                id={`${prefix}-public-only`}
+                name="publicOnly"
+                defaultChecked={initial.publicOnly}
+              />
+              Public addresses only
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              Refuse private, local and link-local addresses, and PCP&apos;s
+              own, for every request to the server and its sign-in, redirects
+              included. On for servers an assistant proposes; turn it off only
+              for a server on your own network that you trust, or when this
+              machine can only reach the internet through a proxy.
+            </p>
+          </div>
 
           <Field label="Authentication" htmlFor={`${prefix}-auth`}>
             <Select

@@ -199,6 +199,23 @@ describe("connecting an OAuth server", () => {
     return new URL((result as { redirectTo: string }).redirectTo)
   }
 
+  it("reaches no private address to sign in to a server limited to public ones", async () => {
+    metadata = { registration_endpoint: `${as.origin}/register` }
+    const { id } = await createServer(ctx, {
+      name: "Mail",
+      url: `${as.origin}/mcp`,
+      authType: "oauth",
+      publicOnly: true,
+    })
+
+    // Discovery, registration and the token request all go through the
+    // server's address rule, like its own requests.
+    await expect(startOAuth(ctx, id, HTTPS)).rejects.toThrow(
+      /private or local address, and this server only reaches public ones/,
+    )
+    expect(as.requests).toHaveLength(0)
+  })
+
   it("asks the owner for a client when the server lets no app register", async () => {
     const id = await oauthServer()
 

@@ -1,3 +1,4 @@
+import dns from "node:dns"
 import { BlockList, isIP } from "node:net"
 import os from "node:os"
 
@@ -165,15 +166,89 @@ export function bareHostname(url: URL): string {
   return url.hostname.replace(/^\[|\]$/g, "")
 }
 
+/** What a name resolves to, every address of it. */
+export type HostLookup = (host: string) => Promise<string[]>
+
+export const lookupAll: HostLookup = async (host) =>
+  (await dns.promises.lookup(host, { all: true })).map((entry) => entry.address)
+
+/** How long a proposal waits for a name to resolve before it goes unflagged. */
+const LOOKUP_TIMEOUT_MS = 5_000
+
+/**
+ * Whether a host an assistant proposed is, or resolves to, a private,
+ * loopback or link-local address, for the owner's approval page. A name that
+ * does not resolve in time is not flagged: nothing is reached through it
+ * before the owner agrees, and the connection checks again (a name can answer
+ * differently later). What it resolves to is never told to the assistant.
+ */
+async function resolvesPrivate(
+  host: string,
+  lookup: HostLookup,
+): Promise<boolean> {
+  const bare = host.replace(/^\[|\]$/g, "")
+
+  if (isIP(bare) !== 0) {
+    return !isPublicAddress(bare)
+  }
+
+  let addresses: string[]
+  let timer: NodeJS.Timeout | undefined
+
+  try {
+    addresses = await Promise.race([
+      lookup(bare),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("no answer")),
+          LOOKUP_TIMEOUT_MS,
+        )
+      }),
+    ])
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+
+  return addresses.some((address) => !isPublicAddress(address))
+}
+
+/**
+ * The owner's note on the hosts of a server an assistant proposed that are,
+ * or resolve to, a private or local address: "mail.lan is, or resolves to,
+ * a private or local address." Null when none is.
+ */
+export async function privateHostsNote(
+  hosts: readonly string[],
+  lookup: HostLookup = lookupAll,
+): Promise<string | null> {
+  const unique = [...new Set(hosts)]
+  const found = await Promise.all(
+    unique.map((host) => resolvesPrivate(host, lookup)),
+  )
+  const flagged = unique.filter((_, index) => found[index])
+
+  if (flagged.length === 0) {
+    return null
+  }
+
+  return flagged.length === 1
+    ? `${flagged[0]} is, or resolves to, a private or local address.`
+    : `${flagged.join(" and ")} are, or resolve to, private or local addresses.`
+}
+
 export class AddressBlockedError extends Error {
   constructor(
     readonly host: string,
     readonly address: string,
+    /** What refused it, as the owner calls it: an endpoint or a server. */
+    noun: "endpoint" | "server" = "endpoint",
   ) {
     // The address stays out of the message, which can reach an assistant:
     // for a name it would say what the owner's DNS holds.
     super(
-      `${host} is, or resolves to, a private or local address, and this endpoint only reaches public ones. The owner can allow private addresses in its settings.`,
+      `${host} is, or resolves to, a private or local address, and this ${noun} only reaches public ones. The owner can allow private addresses in its settings.`,
     )
     this.name = "AddressBlockedError"
   }

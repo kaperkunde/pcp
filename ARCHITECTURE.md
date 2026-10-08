@@ -293,11 +293,14 @@ with a link to connect it. The token is redacted from what the API answers, like
 secret, and the `Authorization` header is never one of an operation's
 arguments.
 
-Private addresses are allowed, as they are for MCP servers: only the owner
-sets a schema URL or base URL, and a self-hosted PCP often talks to services
-on its own network. A multi-tenant host must add an address policy before it
-lets anyone else set one: resolve the name, refuse loopback, private,
-link-local and metadata ranges, and connect to the address it checked.
+Private addresses are allowed, as they are for MCP servers the owner adds:
+only the owner sets a schema URL or base URL, and a self-hosted PCP often
+talks to services on its own network. What an assistant proposes, an
+endpoint or an MCP server, is public-only (below) until the owner allows
+private addresses on its page. A multi-tenant host must add an address policy
+before it lets anyone else set one: resolve the name, refuse loopback,
+private, link-local and metadata ranges, and connect to the address it
+checked.
 
 ## Registering and managing endpoints through the gateway
 
@@ -495,7 +498,12 @@ asked (`mail/probe.ts`): a GET with no credential, public addresses only and
 no redirect followed. A wrong address is refused at once, with where a
 redirect pointed; a private or local address is not looked at, and the owner
 is told so, because only they should send credentials into their own network.
-IMAP is not looked at (a connection without a login shows little).
+IMAP is not looked at (a connection without a login shows little), but the
+names of its IMAP and SMTP servers are resolved (`openapi/address.ts:
+privateHostsNote`) and one on a private or local address is flagged to the
+owner the same way. That line is the owner's alone (`PermissionView.ownerOnly`):
+the assistant's copy of the request leaves it out, so proposals cannot be used
+to learn what the owner's DNS holds.
 
 `upstream.ts` builds the credential and hands it to `mail/accounts.ts` as a
 `MailCredential`: the `Authorization` header for JMAP, the login for IMAP and
@@ -2041,5 +2049,17 @@ request is an API endpoint instead: the gateway has
 `endpoint-admin.ts: prepareRegistration` read the document before asking (so the owner is only asked about something that
 works, and sees its address, tool count and operations), and
 `executeRegister` creates it from the same text with
-`createApprovedEndpoint`: on, public addresses only. Requests are deleted at
-boot a week after they expire.
+`createApprovedEndpoint`: on, public addresses only. An MCP server is made
+public-only too (`mcp_server.public_only`, as for an endpoint): every request
+PCP makes for it, the MCP transport's and its OAuth discovery, registration
+and token requests, goes through `upstream.ts: serverFetch`, which sends it
+over `openapi/transport.ts` with the address checked as the socket connects,
+refusing private, loopback, link-local and PCP's own addresses. It follows
+redirects as fetch does (`checkedFetch`), each hop a request of its own that
+is checked again, so a redirect cannot lead past the check. The owner clears
+it under "Public addresses only" on the server's form, for a server on their
+own network; a server the owner adds is not public-only unless they tick it.
+Before the owner is asked, the server's host is resolved and a private or
+local one is flagged on the approval page (an owner-only line, as for a mail
+account), saying it connects only once they allow private addresses.
+Requests are deleted at boot a week after they expire.

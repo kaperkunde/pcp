@@ -126,7 +126,7 @@ export function ServerDetail({
               {(endpoint || mail) && server.readOnly ? (
                 <Badge variant="outline">Read-only</Badge>
               ) : null}
-              {endpoint && server.publicOnly ? (
+              {(endpoint || server.kind === "mcp") && server.publicOnly ? (
                 <Badge variant="outline">Public addresses only</Badge>
               ) : null}
             </div>
