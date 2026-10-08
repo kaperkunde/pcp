@@ -206,8 +206,8 @@ export async function chooseProposedLevel(
   level: "Allowed" | "Ask you first" | "Blocked",
 ) {
   await proposedLevel(page, slug, tool)
-    .getByText(level, { exact: true })
-    .click()
+    .getByRole("radio", { name: level, exact: true })
+    .check()
 }
 
 /** A tool's level on its token's page, which the owner reaches from Assistants. */

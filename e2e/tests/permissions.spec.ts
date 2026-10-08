@@ -16,7 +16,9 @@ import {
   openToken,
   permissionFrom,
   proposedLevel,
+  showServerSettings,
   showTools,
+  toolLevel,
 } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
@@ -90,6 +92,7 @@ test("sets up a server, with its secret typed into the form, and a token", async
   await page.getByLabel("Save it as (optional)").fill(SECRET_NAME)
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page.getByText("Tools (3)")).toBeVisible()
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
@@ -336,13 +339,14 @@ test("Allow for lets a tool run without asking until the time is up or you end i
   expect(
     toolText(await callTool(baseURL!, assistant, "call_tool", add(1, 2))),
   ).toBe("3")
-  expect(await levelOf(baseURL!, assistant, "add_numbers")).toBe("ask")
 
-  // The owner sees it on the token's page, and ends it early: it asks again.
+  // The owner sees it on the token's page, with the tool's level as it was,
+  // and ends it early: it asks again.
   await openToken(page, name)
   await expect(page.getByText("Allowed for now")).toBeVisible()
   await expect(page.getByText(`${SERVER_NAME} · add_numbers`)).toBeVisible()
   await showTools(page, SLUG)
+  await expect(toolLevel(page, SLUG, "add_numbers")).toHaveValue("ask")
   await page.getByRole("button", { name: "End now" }).click()
   await expect(page.getByText("Allowed for now")).toHaveCount(0)
   expect(
