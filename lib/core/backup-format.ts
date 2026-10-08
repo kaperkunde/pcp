@@ -267,6 +267,10 @@ const McpServerRow = z.strictObject({
   mailSubmission: z.boolean().default(false),
   smtpUrl: str.nullable().default(null),
   mailFrom: str.nullable().default(null),
+  // SSH servers, added in 0.3: absent from older exports, which hold none.
+  sshHostCas: str.nullable().default(null),
+  sshPublicKey: str.nullable().default(null),
+  sshCertificate: str.nullable().default(null),
 })
 
 const ServerAuthHeaderRow = z.strictObject({
@@ -390,6 +394,7 @@ export type ExportPreview = {
     servers: number
     endpoints: number
     mailAccounts: number
+    sshServers: number
     wrappers: number
     tools: number
     secrets: number
@@ -600,6 +605,7 @@ export function previewOf(payload: ExportPayload): ExportPreview {
       mailAccounts: tables.servers.filter(
         (row) => row.kind === "jmap" || row.kind === "imap",
       ).length,
+      sshServers: tables.servers.filter((row) => row.kind === "ssh").length,
       wrappers: tables.servers.filter((row) => row.kind === "wrapper").length,
       tools: tables.tools.length,
       secrets: tables.secrets.filter((row) => row.kind === "text").length,

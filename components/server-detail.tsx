@@ -78,6 +78,8 @@ export type ServerDetailProps = {
   notice: { kind: "ok" | "error"; message: string } | null
   /** Where OAuth servers send you back: what a provider's client lists. */
   redirectUrl: string
+  /** What the kind needs from you, shown under the status (SSH's certificate). */
+  children?: React.ReactNode
 }
 
 export function ServerDetail({
@@ -85,11 +87,13 @@ export function ServerDetail({
   tools,
   notice,
   redirectUrl,
+  children,
 }: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
   const mail = server.kind === "jmap" || server.kind === "imap"
   const browser = server.kind === "browser"
   const wrapper = server.kind === "wrapper"
+  const ssh = server.kind === "ssh"
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
   // Kept here rather than in the form: saving moves the server on from
@@ -169,9 +173,11 @@ export function ServerDetail({
                       ? "Re-read schema"
                       : mail
                         ? "Check account"
-                        : browser
-                          ? "Check browser"
-                          : "Refresh tools"}
+                        : ssh
+                          ? "Check sign-in"
+                          : browser
+                            ? "Check browser"
+                            : "Refresh tools"}
                 </Button>
               ) : null}
               <Button
@@ -187,7 +193,7 @@ export function ServerDetail({
             </div>
           </div>
           <CardDescription>
-            {endpoint ? "Requests go to " : mail ? "Signs in at " : null}
+            {endpoint ? "Requests go to " : mail || ssh ? "Signs in at " : null}
             {browser ? (
               "A headless browser on the machine PCP runs on"
             ) : wrapper ? (
@@ -267,11 +273,14 @@ export function ServerDetail({
         </CardContent>
       </Card>
 
+      {children}
+
       <ToolsCard
         serverId={server.id}
         tools={tools}
         endpoint={endpoint}
         mail={mail}
+        ssh={ssh}
         browser={browser}
         wrapper={wrapper}
       />
@@ -284,11 +293,13 @@ export function ServerDetail({
               ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."
               : mail
                 ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your mail stays on the server, and secrets you added stay."
-                : browser
-                  ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
-                  : wrapper
-                    ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
-                    : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
+                : ssh
+                  ? "Takes the server out of PCP and deletes PCP's key for it, so its certificate cannot be used again. Nothing on the server changes."
+                  : browser
+                    ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
+                    : wrapper
+                      ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
+                      : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
           </CardDescription>
         </CardHeader>
         <CardContent className="items-start">
@@ -319,6 +330,7 @@ function ToolsCard({
   tools,
   endpoint,
   mail,
+  ssh,
   browser,
   wrapper,
 }: {
@@ -326,6 +338,7 @@ function ToolsCard({
   tools: ServerDetailProps["tools"]
   endpoint: boolean
   mail: boolean
+  ssh: boolean
   browser: boolean
   wrapper: boolean
 }) {
@@ -362,11 +375,13 @@ function ToolsCard({
             ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
             : mail
               ? "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
-              : browser
-                ? "What an assistant can find with search_tools: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
-                : wrapper
-                  ? "What an assistant can find with search_tools: each one runs its program below. For a token, a tool here is blocked wherever a tool it calls is, and asks you wherever one of them asks."
-                  : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
+              : ssh
+                ? "What an assistant can find with search_tools: run_command, one command per call. Leave it at ask, and you see each command before it runs."
+                : browser
+                  ? "What an assistant can find with search_tools: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
+                  : wrapper
+                    ? "What an assistant can find with search_tools: each one runs its program below. For a token, a tool here is blocked wherever a tool it calls is, and asks you wherever one of them asks."
+                    : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
         </CardDescription>
       </CardHeader>
       {tools.length === 0 ? (
@@ -376,9 +391,11 @@ function ToolsCard({
               ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
               : mail
                 ? "No tools yet: PCP offers them once it has signed in. Check the settings below, then check the account again, or connect it."
-                : browser
-                  ? "No tools yet: check the browser again."
-                  : "No tools known yet. Connect the server, or refresh its tools."}
+                : ssh
+                  ? "No tools yet: check the sign-in again."
+                  : browser
+                    ? "No tools yet: check the browser again."
+                    : "No tools known yet. Connect the server, or refresh its tools."}
           </p>
         </CardContent>
       ) : open ? (

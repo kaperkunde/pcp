@@ -87,6 +87,26 @@ export function ServerStatusBadge({
     }
   }
 
+  // An SSH server needs the owner's certificate before anything else, and
+  // then is checked by signing in: the certificate or the host can fail.
+  if (kind === "ssh") {
+    if (!connected) {
+      return <Badge variant="warning">Needs a certificate</Badge>
+    }
+
+    switch (status) {
+      case "ok":
+        return <Badge>Ready</Badge>
+      case "auth_required":
+      case "refused":
+        return <Badge variant="warning">Certificate refused</Badge>
+      case "error":
+        return <Badge variant="destructive">Not connected</Badge>
+      default:
+        return <Badge variant="secondary">Not checked yet</Badge>
+    }
+  }
+
   if (status === "client_required") {
     return <Badge variant="warning">Needs an OAuth client</Badge>
   }

@@ -117,6 +117,22 @@ so in the summary; the bump itself waits for the request.
   `mail/tools.ts`, for both protocols where they allow, with its arguments
   checked before anything connects, and is left out of a read-only account
   and refused there if called anyway.
+- SSH servers (`lib/core/ssh/`) sign in by certificate only, both ways.
+  PCP's key for each server is its own (Ed25519, made in PCP, a managed
+  `ssh_key` secret decrypted only in `upstream.ts`, which hands the ssh
+  module an `SshIdentity`); the owner signs it and pastes the certificate,
+  which is taken only for that key and the server's login. The key exchange
+  offers certificate host-key types only, and a host is accepted only with a
+  host certificate from a CA the owner gave, naming the host PCP dialled: no
+  plain host keys, no known_hosts, no trust on first use, no password, no
+  bare key. The client is PCP's own over `node:crypto` (no child process, no
+  `ssh` binary, none of which the desktop app may start); `transport.ts` is
+  both ends, so the test server speaks what the client does. One tool,
+  `run_command` (`ssh/tools.ts`), its arguments checked before anything
+  connects: `exec` only, never a terminal, forwarding, an agent or a file
+  transfer. Only the owner adds or changes one; `register_server` has no kind
+  for it. Its limits go in `ssh/limits.ts`, and a new way to reach a host or
+  sign in gets a test against the test server (`ssh/client.test.ts`).
 - Long tool answers and files are kept only through
   `lib/core/tool-results.ts`: text or bytes, encrypted with
   `tool_result:<id>`, readable by the token whose call produced them, gone
@@ -362,7 +378,8 @@ column with `ALTER TABLE … DROP COLUMN` instead.
 The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
 OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
-signs in to is a "mail account"; a server whose tools are programs over the
+signs in to is a "mail account"; a machine PCP runs commands on is an "SSH
+server" ("SSH servers" in the UI); a server whose tools are programs over the
 others is a "wrapper" ("Wrappers" in the UI); a note an
 assistant keeps between conversations is a "memory", "shared" when every
 assistant reads it; what web_fetch reaches is a "site" (a host), and a level

@@ -26,6 +26,9 @@ import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { invalid, isPcpError, PcpError } from "./errors"
 import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
+import type { SshIdentity } from "./ssh/client"
+import { callSshTool, syncSshTools } from "./ssh/hosts"
+import { ownKeyFromPem, parseCertificateLine } from "./ssh/keys"
 import { makeRedactor } from "./openapi/redact"
 import { send } from "./openapi/transport"
 import {
@@ -45,6 +48,7 @@ import {
 import {
   extraAuthHeaders,
   isMailKind,
+  isSshKind,
   kindNoun,
   renderAuthValue,
   setServerStatus,
@@ -67,7 +71,9 @@ import {
  * endpoints (kind "openapi") branch off to lib/core/endpoints.ts, which
  * makes plain HTTP calls with the header this module builds; mail accounts
  * (kinds "jmap" and "imap") to lib/core/mail/accounts.ts, with the header
- * or login this module builds, or an OAuth token it renews.
+ * or login this module builds, or an OAuth token it renews; SSH servers
+ * (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the server,
+ * decrypted here, and the certificate the owner gave.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -1008,6 +1014,32 @@ export async function openUpstream(
 export type { SyncResult }
 
 /**
+ * PCP's key for an SSH server and the certificate the owner's CA made for
+ * it; null until they pasted one. The key is decrypted here, for the one
+ * connection, and never leaves the ssh module's client.
+ */
+async function sshIdentity(
+  ctx: VaultContext,
+  server: McpServer,
+): Promise<SshIdentity | null> {
+  if (!server.sshCertificate) {
+    return null
+  }
+
+  if (!server.authSecretId) {
+    throw new PcpError(
+      "state",
+      `${server.name} has no key of PCP's: make a new one on its page in PCP.`,
+    )
+  }
+
+  return {
+    key: ownKeyFromPem(await readSecretValue(ctx, server.authSecretId)),
+    certificate: parseCertificateLine(server.sshCertificate),
+  }
+}
+
+/**
  * Reads the server's tool list into the catalogue. Tools that disappeared
  * are removed; the owner's description overrides survive a resync.
  */
@@ -1033,6 +1065,10 @@ export async function syncServerTools(
 
   if (server.kind === "wrapper") {
     return syncWrapperTools(server)
+  }
+
+  if (isSshKind(server.kind)) {
+    return syncSshTools(server, await sshIdentity(ctx, server), { publicUrl })
   }
 
   if (isMailKind(server.kind)) {
@@ -1275,6 +1311,17 @@ async function dispatchCall(
       open ? await resolveHandles(args, open) : args,
       { tokenId, publicUrl },
     )
+  }
+
+  if (isSshKind(server.kind)) {
+    // Before anything connects: an unknown id never reaches the server.
+    const resolved = open ? await resolveHandles(args, open) : args
+
+    return callSshTool(server, toolName, resolved, {
+      identity: await sshIdentity(ctx, server),
+      publicUrl,
+      redact: placed,
+    })
   }
 
   // The endpoint resolves its own handles: an upload's file fields take

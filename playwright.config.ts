@@ -158,6 +158,15 @@ export default defineConfig({
       use: signedIn("mail"),
     },
     {
+      // An SSH server: added in PCP, PCP's key signed by the owner's CA and
+      // the certificate pasted; a command an assistant asks for, shown to the
+      // owner first; and a host whose certificate is from another CA.
+      name: "ssh",
+      testMatch: /ssh\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("ssh"),
+    },
+    {
       // Per-token tool access and the owner's permission: the link (also for
       // a client that offers prompts and panels), copying access, and servers
       // an assistant proposes.

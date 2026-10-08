@@ -7,6 +7,8 @@ import { MailAccountForm } from "@/components/mail-account-form"
 import { PageHeader } from "@/components/page-header"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
+import { SshCertificateCard } from "@/components/ssh-certificate-card"
+import { SshServerForm } from "@/components/ssh-server-form"
 import { WrapperForm } from "@/components/wrapper-form"
 import { db } from "@/lib/core/db"
 import { isPcpError } from "@/lib/core/errors"
@@ -22,6 +24,7 @@ import {
   type AuthType,
   type ServerStatus,
 } from "@/lib/core/servers"
+import { sshServerView } from "@/lib/core/ssh/hosts"
 import { describeOAuthConnection } from "@/lib/core/upstream"
 import { getWrapper, replacedTools } from "@/lib/core/wrappers/admin"
 import { publicUrlFor } from "@/lib/server/public-url"
@@ -56,6 +59,7 @@ export default async function ServerPage({
   const endpoint = kind === "openapi"
   const mail = isMailKind(kind)
   const browser = kind === "browser"
+  const ssh = kind === "ssh" ? sshServerView(server) : null
   const wrapper = kind === "wrapper" ? await getWrapper(ctx, { id }) : null
   const replaced = await replacedTools(ctx, server.id)
   const spec = endpoint
@@ -113,8 +117,9 @@ export default async function ServerPage({
           authType: server.authType as AuthType,
           status: server.status as ServerStatus,
           statusMessage: server.statusMessage,
-          connected:
-            server.authType !== "oauth" || server.oauthConnectedAt !== null,
+          connected: ssh
+            ? server.sshCertificate !== null
+            : server.authType !== "oauth" || server.oauthConnectedAt !== null,
           lastSyncedAt: server.lastSyncedAt,
           oauthConnection,
           oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
@@ -133,7 +138,15 @@ export default async function ServerPage({
         })}
         notice={notice}
         redirectUrl={redirectUrl}
-      />
+      >
+        {ssh ? (
+          <SshCertificateCard
+            serverId={server.id}
+            slug={server.slug}
+            view={ssh}
+          />
+        ) : null}
+      </ServerDetail>
       <h2 className="text-lg">Settings</h2>
       {wrapper ? (
         <WrapperForm
@@ -159,6 +172,19 @@ export default async function ServerPage({
           page. Which sites each token may open is on the token&apos;s page,
           with web fetch.
         </p>
+      ) : ssh ? (
+        <SshServerForm
+          initial={{
+            id: server.id,
+            name: server.name,
+            slug: server.slug,
+            description: server.description,
+            host: ssh.host,
+            port: String(ssh.port),
+            username: ssh.username,
+            hostCas: server.sshHostCas ?? "",
+          }}
+        />
       ) : mail ? (
         <MailAccountForm
           initial={{

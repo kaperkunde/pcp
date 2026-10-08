@@ -56,6 +56,8 @@ associated data (a ciphertext cannot be moved to another row):
   (`tool_result.ciphertext`),
 - what a request waiting for the owner holds: the call's arguments or the
   new server's settings, and the outcome (`permission_request`),
+- the private key PCP makes for each SSH server (a `secret` row of kind
+  `ssh_key`, owned by the server),
 - the browser's sign-ins (`browser_profile`, bound to the vault's id, as
   there is one per vault).
 
@@ -554,6 +556,70 @@ in `upstream.ts`, as an OAuth API endpoint's does (`endpointToken`): renewed a
 minute before it runs out, and once more when the server refuses it. When that
 fails the account needs connecting, and the gateway answers with the link to
 connect it.
+
+## SSH servers
+
+An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
+`auth_username` the login) whose one tool, `run_command`, runs one command per
+call with `exec`: no shell session kept between calls, no terminal, no
+forwarding, no agent, no file transfer. Only the owner adds one, on the
+Servers page; `register_server` has no kind for it, because a shell on a
+machine is more than an assistant should be able to ask for in a sentence.
+`run_command` asks the owner first by default like every tool, and the
+permission page shows the command in full.
+
+**Certificates only, both ways.** PCP never signs in with a password or a
+bare key, and never accepts a host it cannot verify with a certificate:
+
+- **PCP's own key.** Adding a server makes an Ed25519 key for it
+  (`ssh/keys.ts generateOwnKey`). The private half is a managed secret of kind
+  `ssh_key` (`ssh/<server id>`, in `auth_secret_id`, auth type
+  `certificate`), encrypted like every secret and decrypted only in
+  `upstream.ts`, for one connection; the public half is on the row
+  (`ssh_public_key`) and on the server's page, for the owner to sign with
+  their user CA (`ssh-keygen -s`). They paste the certificate back
+  (`ssh_certificate`): PCP takes only a user certificate for that very key
+  and the server's login, not expired, with principals listed (an empty list
+  reads as "anyone" to OpenSSH). The owner can have PCP make a new key, which
+  drops the certificate; deleting the server deletes the key.
+- **The host's certificate.** The owner gives the CA keys that sign the
+  server's host certificates (`ssh_host_cas`, the `.pub` or
+  `@cert-authority` lines). The key exchange offers only certificate host-key
+  types (`*-cert-v01@openssh.com`), so a server with only plain host keys is
+  refused before anything else is sent; a certificate is accepted only when
+  it is a host certificate signed by one of those CAs, valid now, naming the
+  host PCP dialled among its principals (the host as the owner typed it),
+  with no critical option PCP does not know, and the server's signature over
+  the exchange hash verifies with the certified key. There is no
+  known_hosts and no trust on first use.
+
+**The client** (`lib/core/ssh/`) is PCP's own, in TypeScript over
+`node:crypto`, rather than a library: none on npm negotiates certificate host
+keys, and the desktop app starts no child process, so `ssh` itself is out.
+It speaks one modern suite only: `curve25519-sha256` for the key exchange
+(with strict key exchange, the Terrapin countermeasure, when the server
+offers it, and no message but the exchange's accepted before NEWKEYS),
+`aes256-gcm@openssh.com` or `aes128-gcm@openssh.com` for every packet after
+it, no compression, Ed25519, ECDSA and RSA (SHA-2 only, at least 2048 bits)
+for host and CA keys. `transport.ts` is both ends of the transport, so the
+test server (`ssh/fake-server.ts`) speaks exactly what the client does;
+`client.ts` decides what is acceptable. Every byte from the server is read
+with bounds (`wire.ts`), packets are capped at OpenSSH's 256 KB, and a
+server that asks to exchange keys again mid-command is refused rather than
+followed.
+
+**A call** (`ssh/hosts.ts callSshTool`) checks its arguments before anything
+connects (`ssh/tools.ts`: the command, at most 16 KB and no NUL; standard
+input as text or base64, at most 1 MB, which a kept result's handle can stand
+for, resolved in `upstream.ts`; a timeout of 1 to 600 seconds), connects,
+signs in and runs it, and answers with the exit code (or the signal), stdout
+and stderr. Output is capped at 1 MB together; past that, or past the
+timeout, PCP sends the session a TERM signal request (which OpenSSH honours
+for every login but root), closes it and answers with what came so far,
+saying so. A refused certificate or a host that does not check out is
+answered with the server's page in PCP, for the owner; a server that cannot
+be reached is an error. Limits are in `ssh/limits.ts`. The request log keeps
+the call by name like any other, never the command or its output.
 
 ## Memories
 

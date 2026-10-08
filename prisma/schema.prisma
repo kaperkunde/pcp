@@ -354,7 +354,7 @@ model Secret {
   vault       Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   name        String
   description String   @default("")
-  /// text | oauth
+  /// text | oauth | ssh_key (PCP's own private key for an SSH server)
   kind        String   @default("text")
   /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
   /// with the secret id as associated data.
@@ -390,13 +390,14 @@ model McpServer {
   description String @default("")
   /// mcp: the Streamable HTTP endpoint. openapi: the API's base URL, which
   /// every operation's path is appended to. jmap: the session URL. imap:
-  /// imaps://host:port, or imap://host:port for STARTTLS. browser: the
-  /// fixed "pcp:browser", which no request is ever sent to. wrapper: the
-  /// fixed "pcp:wrapper", likewise.
+  /// imaps://host:port, or imap://host:port for STARTTLS. ssh:
+  /// ssh://host:port. browser: the fixed "pcp:browser", which no request is
+  /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise.
   url         String
   enabled     Boolean @default(true)
 
-  /// none | header | oauth | basic
+  /// none | header | oauth | basic | certificate (ssh: PCP's own key, in a
+  /// managed secret, with the certificate the owner's CA made for it)
   authType String @default("none") @map("auth_type")
   /// header auth: the header to send and how the secret goes into it.
   authHeaderName    String? @map("auth_header_name")
@@ -404,7 +405,7 @@ model McpServer {
   authSecretId      String? @map("auth_secret_id")
   authSecret        Secret? @relation("ServerAuthSecret", fields: [authSecretId], references: [id], onDelete: SetNull)
   /// basic auth: the user name sent with the secret (a JMAP server's Basic
-  /// authentication, an IMAP and SMTP login).
+  /// authentication, an IMAP and SMTP login). certificate: the SSH login.
   authUsername      String? @map("auth_username")
 
   /// oauth (an MCP server, or a jmap account that signs in with OAuth): an
@@ -441,11 +442,11 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  /// mcp | openapi | jmap | imap | browser | wrapper. An openapi server is an
+  /// mcp | openapi | jmap | imap | ssh | browser | wrapper. An openapi server is an
   /// HTTP API described by an OpenAPI schema; its tools are the schema's
   /// operations and PCP calls them directly (lib/core/endpoints.ts). jmap and
   /// imap are mail accounts with a fixed set of mail tools (lib/core/mail/);
-  /// browser is the vault's headless browser, with its own
+  /// ssh is a server PCP runs commands on over SSH (lib/core/ssh/); browser is the vault's headless browser, with its own
   /// (lib/core/browser/). A wrapper's tools are programs the owner approved
   /// that call the vault's other tools (lib/core/wrappers/).
   kind       String  @default("mcp")
@@ -482,6 +483,17 @@ model McpServer {
   smtpUrl         String? @map("smtp_url")
   /// jmap/imap: the From address when sending, when the user name is not one.
   mailFrom        String? @map("mail_from")
+
+  /// ssh: the CA keys, one OpenSSH line each, whose host certificates PCP
+  /// accepts for this server. Nothing else proves the host: no plain host
+  /// key, no trust on first use (lib/core/ssh/client.ts).
+  sshHostCas     String? @map("ssh_host_cas")
+  /// ssh: the public half of PCP's own key for this server, whose private
+  /// half is the managed secret in authSecretId. The owner's CA signs it.
+  sshPublicKey   String? @map("ssh_public_key")
+  /// ssh: the user certificate the owner's CA made for that key, as
+  /// ssh-keygen -s writes it. Null until they paste one.
+  sshCertificate String? @map("ssh_certificate")
 
   tools              McpTool[]
   tokens             ApiTokenServer[]

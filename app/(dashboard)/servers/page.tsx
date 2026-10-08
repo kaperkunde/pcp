@@ -25,6 +25,7 @@ export default async function ServersPage() {
   const servers = all.filter((server) => server.kind === "mcp")
   const endpoints = all.filter((server) => server.kind === "openapi")
   const mail = all.filter((server) => isMailKind(server.kind))
+  const ssh = all.filter((server) => server.kind === "ssh")
   const browser = all.filter((server) => server.kind === "browser")
   const wrappers = all.filter((server) => server.kind === "wrapper")
   const now = new Date()
@@ -36,7 +37,7 @@ export default async function ServersPage() {
     <>
       <PageHeader
         title="Servers"
-        description="What an assistant can reach through PCP: MCP servers, APIs described by an OpenAPI schema, mail accounts, a browser on this machine, and wrappers over any of them. Each is described here in your words; that description is what the assistant reads when it searches for a tool."
+        description="What an assistant can reach through PCP: MCP servers, APIs described by an OpenAPI schema, mail accounts, SSH servers, a browser on this machine, and wrappers over any of them. Each is described here in your words; that description is what the assistant reads when it searches for a tool."
       />
 
       {all.length === 0 ? <LetAnAssistantAddThem hasToken={hasToken} /> : null}
@@ -71,6 +72,17 @@ export default async function ServersPage() {
         <ServerList
           servers={mail}
           empty="No mail accounts yet. Add one over JMAP or IMAP, and an assistant can search, read and file its mail, and send from it unless you make it read-only."
+        />
+      </section>
+
+      <section className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg">SSH servers</h2>
+          <ButtonLink href="/servers/ssh/new">Add an SSH server</ButtonLink>
+        </div>
+        <ServerList
+          servers={ssh}
+          empty="No SSH servers yet. Add one, sign PCP's key with your user CA, and an assistant can run commands there, each one shown to you first unless you allow it."
         />
       </section>
 
