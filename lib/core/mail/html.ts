@@ -2,8 +2,9 @@
  * HTML mail made readable as plain text for an assistant: tags dropped,
  * block elements on lines of their own, links followed by their address,
  * entities decoded, blank runs squeezed. A single pass over the text with
- * indexOf, so no input makes it slow. The output is only ever read, never
- * rendered, so this is about legibility, not safety.
+ * indexOf, and what a link's words are checked against is capped
+ * (`LINK_LOOKAHEAD`), so no input makes it slow. The output is only ever read,
+ * never rendered, so this is about legibility, not safety.
  */
 
 const BLOCK = new Set([
@@ -56,6 +57,13 @@ const SKIPPED = new Set([
   "title",
   "noscript",
 ])
+
+/**
+ * How much of a link's words are looked at to see whether they already show
+ * its address. Unclosed or nested anchors before a large block of text would
+ * otherwise each cost the whole text.
+ */
+const LINK_LOOKAHEAD = 2000
 
 const NAMED: Record<string, string> = {
   amp: "&",
@@ -198,7 +206,15 @@ export function htmlToText(
 
         if (link && href && /^(https?:|mailto:)/i.test(href)) {
           // The address goes after the words, unless they already are it.
-          const shown = out.slice(link.start).join("")
+          let shown = ""
+
+          for (
+            let n = link.start;
+            n < out.length && shown.length < LINK_LOOKAHEAD;
+            n++
+          ) {
+            shown += out[n]
+          }
 
           if (!shown.includes(href.replace(/^mailto:/i, ""))) {
             push(` (${href})`)
