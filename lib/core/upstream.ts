@@ -296,6 +296,19 @@ export class PcpOAuthProvider implements OAuthClientProvider {
       )
     }
 
+    // The owner's browser, or the desktop app's window, is sent here, and
+    // the address is whatever the server published: only a web page, as for
+    // an endpoint's sign-in, never a file share or another app's scheme.
+    if (
+      authorizationUrl.protocol !== "https:" &&
+      authorizationUrl.protocol !== "http:"
+    ) {
+      throw new PcpError(
+        "upstream",
+        `${this.server.name}'s sign-in address is not an http:// or https:// address, so PCP does not open it.`,
+      )
+    }
+
     this.authorizationUrl = applySignInDefaults(
       applyAuthorizeParams(authorizationUrl, this.server.oauthAuthorizeParams),
     )

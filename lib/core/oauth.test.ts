@@ -272,6 +272,26 @@ describe("connecting an OAuth server", () => {
     expect(url.searchParams.get("access_type")).toBe("offline")
   })
 
+  it("sends the owner only to a web page to sign in", async () => {
+    const id = await oauthServer({ oauthClientId: "owner-client" })
+
+    for (const address of [
+      "smb://files.example.com/share",
+      "file:///etc/passwd",
+      "search-ms:query=x",
+    ]) {
+      metadata = { authorization_endpoint: address }
+      await expect(startOAuth(ctx, id, HTTP), address).rejects.toThrow(
+        /Mail's sign-in address is not an http:\/\/ or https:\/\/ address/,
+      )
+    }
+
+    metadata = {}
+    expect(signInAddress(await startOAuth(ctx, id, HTTP)).origin).toBe(
+      as.origin,
+    )
+  })
+
   it("takes a client only for an OAuth server", async () => {
     const { id } = await createServer(ctx, {
       name: "Open",
