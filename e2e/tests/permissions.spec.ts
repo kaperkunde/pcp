@@ -205,11 +205,14 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   )
   await page.goto(permissionFrom(toolText(prompted)).path)
   await page.getByRole("button", { name: "Always allow" }).click()
+  // The server repeats its secret back; PCP takes it out of the answer.
   await expect(page.getByTestId("permission-outcome")).toContainText(
-    `Bearer ${upstream.expectedToken}`,
+    "[redacted]",
   )
   await expect(page.getByText("Tell the assistant that asked")).toBeVisible()
-  expect(toolText(await waited)).toContain(`Bearer ${upstream.expectedToken}`)
+  const answer = toolText(await waited)
+  expect(answer).toContain("[redacted]")
+  expect(answer).not.toContain(upstream.expectedToken)
   expect(callsOf("echo_auth")).toBe(1)
 })
 
@@ -267,7 +270,8 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
     tool: "echo_auth",
     arguments: {},
   })
-  expect(toolText(echoed)).toBe(`Bearer ${upstream.expectedToken}`)
+  expect(toolText(echoed)).toContain("[redacted]")
+  expect(toolText(echoed)).not.toContain(upstream.expectedToken)
   const secondRefused = await callTool(baseURL!, second, "call_tool", postcard)
   expect(secondRefused.body.result?.isError).toBe(true)
 })
@@ -525,6 +529,7 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   await page.goto(permissionFrom(toolText(call)).path)
   await page.getByRole("button", { name: "Allow once" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText(
-    "Bearer access-",
+    "[redacted]",
   )
+  expect(upstream.calls.at(-1)?.authorization).toMatch(/^Bearer access-/)
 })

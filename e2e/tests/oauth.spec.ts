@@ -85,8 +85,12 @@ test("an OAuth server added from the Add menu is connected through the browser, 
     arguments: {},
   })
   expect(echoed.body.result?.isError ?? false, toolText(echoed)).toBe(false)
-  const sent = toolText(echoed)
+  // The server got the token PCP holds; its echo reaches the assistant
+  // with the token taken out.
+  const sent = upstream.calls.at(-1)?.authorization ?? ""
   expect(sent).toMatch(/^Bearer access-/)
+  expect(toolText(echoed)).toContain("[redacted]")
+  expect(toolText(echoed)).not.toContain(sent.replace("Bearer ", ""))
   expect(upstream.issuedTokens.has(sent.replace("Bearer ", ""))).toBe(true)
 
   // Disconnecting forgets the tokens.

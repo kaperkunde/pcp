@@ -36,6 +36,9 @@ export function PermissionLines({ lines }: { lines: string[] }) {
               <>
                 <span className="text-xs text-muted-foreground">
                   {match[1]}
+                  {/* Read aloud (and found as text) as the request wrote
+                      it, "Name: value"; the grid shows the pair instead. */}
+                  <span className="sr-only">: </span>
                 </span>
                 <span className="break-words">{match[2]}</span>
               </>

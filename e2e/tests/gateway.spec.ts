@@ -171,13 +171,15 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   expect(sum.body.result?.isError ?? false, toolText(sum)).toBe(false)
   expect(toolText(sum)).toBe("42")
 
-  // The upstream saw the stored secret; the assistant only sees the result.
+  // The upstream saw the stored secret; a server that repeats it back hands
+  // the assistant "[redacted]" in its place.
   const echoed = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "echo_auth",
     arguments: {},
   })
-  expect(toolText(echoed)).toBe(`Bearer ${upstream.expectedToken}`)
+  expect(toolText(echoed)).not.toContain(upstream.expectedToken)
+  expect(toolText(echoed)).toContain("[redacted]")
   expect(upstream.calls.at(-1)?.authorization).toBe(
     `Bearer ${upstream.expectedToken}`,
   )
