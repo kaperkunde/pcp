@@ -20,6 +20,7 @@ import {
   normalizePath,
   runMemoryCommand,
   updateMemory,
+  withoutPresentation,
   type MemoryAsk,
   type MemoryCommand,
   type MemoryOutcome,
@@ -87,6 +88,18 @@ describe("checking what a memory holds", () => {
     expect(hiddenCharacter("selector \u{E0100}")).toBe("U+E0100")
     expect(hiddenCharacter("bell \u0007")).toBe("U+0007")
     expect(() => checkText("hi⁦there", "private")).toThrow(/U\+2066/)
+    // Unicode's Default_Ignorable code points draw nothing either.
+    expect(hiddenCharacter("grapheme͏joiner")).toBe("U+034F")
+    expect(hiddenCharacter("khmer ឴ vowel")).toBe("U+17B4")
+    expect(hiddenCharacter("mongolian᠋")).toBe("U+180B")
+    expect(hiddenCharacter("selector ︀")).toBe("U+FE00")
+    expect(hiddenCharacter("hangul ㅤ filler")).toBe("U+3164")
+    expect(hiddenCharacter("text ❤️")).toBe("U+FE0F")
+  })
+
+  it("drops emoji presentation selectors from text as it arrives", () => {
+    expect(withoutPresentation("❤️ and ☺︎")).toBe("❤ and ☺")
+    expect(() => checkText("❤️", "shared")).toThrow(/U\+FE0F/)
   })
 
   it("keeps a shared memory short enough to read whole", () => {
@@ -107,6 +120,10 @@ describe("checking what a memory holds", () => {
     // Kept for one assistant, shared/x would read as a shared memory.
     expect(() => normalizePath("shared/x.md")).toThrow(/folder of shared/)
     expect(normalizePath("notes/shared/x.md")).toBe("notes/shared/x.md")
+    // Letters that draw nothing: "aㅤb" would read as "ab".
+    expect(() => normalizePath("aㅤb.md")).toThrow(/U\+3164/)
+    expect(() => normalizePath("notes/ᅟx.md")).toThrow(/U\+115F/)
+    expect(() => normalizePath("xﾠ.md")).toThrow(/U\+FFA0/)
   })
 })
 
@@ -211,6 +228,18 @@ describe("sharing a memory", () => {
       },
     })
     expect(await db().memory.count()).toBe(0)
+
+    // An emoji's presentation selector is gone before the owner is asked, so
+    // what they read is what is written.
+    expect(
+      askOf(await run(alice, { ...preferences, file_text: "Units ✔️" })),
+    ).toEqual({
+      kind: "memory_share",
+      input: { path: "preferences.md", text: "Units ✔" },
+    })
+    await expect(
+      run(alice, { ...preferences, file_text: "Units឵ ✔" }),
+    ).rejects.toThrow(/U\+17B5/)
 
     // Asked again before an answer, it is the same ask.
     expect(askOf(await run(alice, preferences))).toEqual(ask)

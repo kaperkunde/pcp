@@ -9,7 +9,7 @@ import { CHALLENGE_LINE } from "../fetch/challenge"
 import { isPcpSite } from "../fetch/fetch"
 import { htmlToMarkdown, sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
-import { hiddenCharacter } from "../memories"
+import { hiddenCharacter, withoutPresentation } from "../memories"
 import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "../rate-limit"
 import { decideSite, loadFetchRules } from "../web-fetch"
@@ -867,7 +867,7 @@ export async function callBrowserTool(
       })
     case "hand_over":
       return onTab(scope, tab, spec, async (current) => {
-        const message = (args.message as string).trim()
+        const message = withoutPresentation(args.message as string).trim()
         const hidden = hiddenCharacter(message)
 
         if (hidden) {

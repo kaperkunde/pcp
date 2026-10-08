@@ -640,11 +640,16 @@ another one reads:
   `decideMemoryAsk` re-reads the memory and writes only if it is still what
   the owner was shown. The owner writes, moves and deletes memories freely on
   the Memories page.
-- **What the owner reads is all there is.** Text with characters that do not
-  show on screen (controls other than tab and newline, format characters such
-  as zero-width spaces, direction overrides and tag characters, private-use,
-  blank fillers, variation selectors that can carry bytes) is refused, and a
-  shared memory is at most 2,000 characters, so it can be read whole.
+- **What the owner reads is all there is.** Text or a path with characters
+  that do not show on screen (controls other than tab and newline, format
+  characters such as zero-width spaces, direction overrides and tag
+  characters, private-use, and every Unicode Default_Ignorable code point:
+  blank fillers such as the Hangul ones that count as letters, variation
+  selectors that can carry bytes) is refused, and a shared memory is at most
+  2,000 characters, so it can be read whole. The emoji presentation
+  selectors (U+FE0E, U+FE0F) are the one exception: text loses them when it
+  arrives, before the owner is asked, so what they approve is what is
+  written; a request answered later is checked as stored, never changed.
 - **The instructions name shared memories by path, and carry the ones read
   in every conversation whole.** The memory paragraph follows the protocol
   Claude's own memory tool adds to the system prompt (look at `/memories`
@@ -906,7 +911,10 @@ it in its arguments. `lib/core/wrappers/` holds it:
   not blocked from), none is a wrapper's (wrappers do not nest), every
   program compiles (QuickJS with `compileOnly`, `code/quickjs.ts
 checkSyntax`), nothing has a character that does not show on screen
-  (`hiddenCharacter`, as for shared memories), and the sizes in
+  (`hiddenCharacter`, as for shared memories: the name, descriptions and
+  titles lose their emoji presentation selectors first; a program, a
+  schema, a secret's argument pointer and template refuse them too), and
+  the sizes in
   `wrappers/limits.ts` hold (a program is 20,000 characters at most, for the
   owner to read). The catalogue's rows for the wrapper's tools are built
   from it (`catalogue.ts`); the row's `operation` carries the calls and

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { hiddenCharacter } from "./memories"
+import { hiddenCharacter, withoutPresentation } from "./memories"
 import {
   argsInFull,
   canonicalJson,
@@ -85,13 +85,18 @@ describe("visible", () => {
     expect(visible("one\n\ttwo\r")).toBe("one\n\ttwo\\r")
     expect(visible("one\n\ttwo", { oneLine: true })).toBe("one\\n\\ttwo")
     expect(visible("plain text, café ❤\uFE0F")).toBe("plain text, café ❤\uFE0F")
+    expect(visible("a\u034Fb\u3164c\uFE01d")).toBe("a\\u034Fb\\u3164c\\uFE01d")
   })
 
   it("writes out every character a memory refuses as one that does not show", () => {
     for (let code = 0; code <= 0x10ffff; code++) {
       const char = String.fromCodePoint(code)
 
-      if (hiddenCharacter(char) !== null && visible(char) === char) {
+      // A memory's text loses its emoji presentation selectors on arrival.
+      if (
+        hiddenCharacter(withoutPresentation(char)) !== null &&
+        visible(char) === char
+      ) {
         expect.fail(`U+${code.toString(16)} is not written out`)
       }
     }

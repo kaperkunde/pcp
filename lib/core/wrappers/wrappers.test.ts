@@ -591,6 +591,66 @@ describe("what an assistant can set", () => {
     expect(hidden.text).toContain("U+202E")
   })
 
+  it("refuses what draws nothing where the owner reads a name, and drops emoji selectors from prose", async () => {
+    const secrets = [
+      { secret: "Things key", tool: "things/echo", argument: "/key" },
+    ]
+    // A Hangul filler is a letter, so "anㅤswer" is a name of its own
+    // that reads as "answer".
+    const program = await call("create_wrapper", {
+      name: "Lookup",
+      tools: [
+        {
+          ...ECHO_TOOL,
+          program: `const anㅤswer = 1; ${ECHO_TOOL.program}`,
+        },
+      ],
+      secrets,
+    })
+    expect(program.isError).toBe(true)
+    expect(program.text).toContain("U+3164")
+    expect(program.text).toContain("as an escape")
+
+    const selector = await call("create_wrapper", {
+      name: "Lookup",
+      tools: [{ ...ECHO_TOOL, program: `// ✔️\n${ECHO_TOOL.program}` }],
+      secrets,
+    })
+    expect(selector.text).toContain("U+FE0F")
+
+    const name = await call("create_wrapper", {
+      name: "Look͏up",
+      tools: [ECHO_TOOL],
+      secrets,
+    })
+    expect(name.isError).toBe(true)
+    expect(name.text).toContain("U+034F")
+
+    const argument = await call("create_wrapper", {
+      name: "Lookup",
+      tools: [ECHO_TOOL],
+      secrets: [{ ...secrets[0], argument: "/k᠋ey" }],
+    })
+    expect(argument.isError).toBe(true)
+    expect(argument.text).toContain("U+180B")
+
+    const prose = await call("create_wrapper", {
+      name: "Lookup ✔️",
+      description: "Things, simpler ✔️",
+      tools: [{ ...ECHO_TOOL, description: "Looks a word up ✔️" }],
+      secrets,
+    })
+    expect(prose.text).toContain("Not done yet")
+    const shown = JSON.stringify(
+      await getPermissionView(ctx, (await newestRequest()).id, {
+        publicUrl: PUBLIC_URL,
+      }),
+    )
+    expect(shown).toContain("Lookup ✔")
+    expect(shown).toContain("Looks a word up ✔")
+    expect(shown).not.toContain("️")
+  })
+
   it("refuses to change a tool it is not given, and a change that changes nothing", async () => {
     await approvedWrapper()
     const missing = await call("update_wrapper", {
