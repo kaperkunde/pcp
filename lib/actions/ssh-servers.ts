@@ -40,13 +40,17 @@ function revalidate(id: string) {
   revalidatePath("/tokens/[id]", "page")
 }
 
-/** Signs in once, for the message the owner sees after a change. */
+/**
+ * Signs in once, for the message the owner sees after a change. It is the
+ * owner's check, so it is the one that pins the host key.
+ */
 async function check(
   ctx: Awaited<ReturnType<typeof requireContext>>,
   id: string,
 ): Promise<string> {
   const sync = await syncServerTools(ctx, await getServer(ctx, id), {
     publicUrl: await publicUrlFor(ctx),
+    byOwner: true,
   })
 
   return sync.status === "ok" ? "PCP signed in." : sync.message

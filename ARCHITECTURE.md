@@ -586,11 +586,15 @@ exchange (the Terrapin countermeasure) to any offer.
   the owner to put in the login's `authorized_keys`. PCP signs in with that
   key alone: no password, no keyboard-interactive, no agent. The owner can
   have PCP make a new key; deleting the server deletes the key.
-- **The host key**, pinned on first use. The first connection that finishes
-  a key exchange stores the key the server proved it holds
-  (`ssh_host_key`), whether or not signing in then works, so it is usually
-  pinned when the owner adds the server, and the page shows its fingerprint
-  to compare with the server's own. `ssh2` asks `hostVerifier` before it
+- **The host key**, pinned on first use, by the owner. The first connection
+  the owner started (adding the server, **Check sign-in**, forgetting the
+  key) that finishes a key exchange stores the key the server proved it
+  holds (`ssh_host_key`), whether or not signing in then works, so it is
+  usually pinned when the owner adds the server, and the page shows its
+  fingerprint to compare with the server's own. A call an assistant makes,
+  or the gateway reading the tools again, never pins a key and does not
+  connect while there is none: whoever answered first would otherwise be
+  the key every later call trusts. It answers with the server's page. `ssh2` asks `hostVerifier` before it
   checks the server's signature, so the key is kept only after the
   `handshake` event, never from inside the verifier. From then on any other
   key is refused before signing in; the owner can forget the pinned key
@@ -1393,6 +1397,20 @@ a different PCP version built, as boot does. The owner's own session goes
 with the vault; the action signs them in again when the password they typed
 opens the restored vault (their own export), and otherwise sends them to sign
 in with the exported PCP's password.
+
+**A restore keeps revocations.** A file made before the owner revoked a token
+holds that token live, with a working wrapped key, so writing it as it is
+would bring back an assistant the owner cut off. Into a vault that exists,
+when the file is an export of that same vault (the ids match: a restore keeps
+the vault's id), every token the file has live that the vault being replaced
+has revoked, or no longer has, is written revoked (the vault's `revoked_at`,
+or now for a deleted one) with its grant blanked as revoking blanks it
+(`carriedRevocations`, read inside the transaction before the wipe). The
+preview lists the file's tokens by name and prefix and marks those that
+come back revoked. At setup, or for another PCP's export, the vault knows
+nothing of them and the file is written as it is. A newer export of a vault
+restored here from an older one has tokens this vault never had; they come
+back revoked too, and the owner makes them again.
 
 **Who may.** The export asks for the owner's password again (or Touch ID in
 the Mac app: `confirmOwner`), as making a token does: a copied session

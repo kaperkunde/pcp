@@ -533,9 +533,10 @@ export function endOAuthSignIns(tokenIds: string[]) {
 /**
  * A revoked token's grant: the wrapped key overwritten with nothing and the
  * lookup hash gone. The row stays because the token row points at it, but
- * it can no longer open anything.
+ * it can no longer open anything. A restore blanks the grants of the tokens
+ * it keeps revoked the same way (lib/core/backup.ts).
  */
-function blankGrant() {
+export function blankGrant() {
   return {
     lookupHash: null,
     wrappedDek: new Uint8Array(new ArrayBuffer(0)),

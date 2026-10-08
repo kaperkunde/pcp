@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { gunzipSync } from "node:zlib"
 
-import { createApiToken, resolveApiToken } from "./api-tokens"
+import {
+  createApiToken,
+  deleteApiToken,
+  resolveApiToken,
+  revokeApiToken,
+} from "./api-tokens"
 import {
   encodeExport,
   exportFileName,
@@ -513,6 +518,93 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
   })
 
+  it("keeps a token revoked that was revoked or deleted after the export", async () => {
+    const { ctx, token } = await populate()
+    const before = await createApiToken(ctx, {
+      name: "Revoked before",
+      allowAllServers: true,
+    })
+    await revokeApiToken(ctx, before.id)
+    const revoked = await createApiToken(ctx, {
+      name: "Revoked since",
+      allowAllServers: true,
+    })
+    const deleted = await createApiToken(ctx, {
+      name: "Deleted since",
+      allowAllServers: true,
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    await revokeApiToken(ctx, revoked.id)
+    const revokedAt = (
+      await db().apiToken.findUniqueOrThrow({ where: { id: revoked.id } })
+    ).revokedAt
+    await deleteApiToken(ctx, deleted.id)
+    const later = await createApiToken(ctx, {
+      name: "Made since",
+      allowAllServers: true,
+    })
+
+    const target = { into: "vault", ctx } as const
+    const { payload, preview } = await readExport(file, EXPORT_PASSWORD, target)
+    expect(
+      Object.fromEntries(preview.tokens.map((t) => [t.name, t.status])),
+    ).toEqual({
+      Claude: "works",
+      "Revoked before": "revoked",
+      "Revoked since": "revoked_here",
+      "Deleted since": "revoked_here",
+    })
+    expect(preview.tokens.find((t) => t.name === "Claude")).toMatchObject({
+      prefix: token.slice(0, 12),
+      createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    })
+    expect(preview.counts.tokens).toBe(1)
+
+    await restoreExport(payload, target, { restoreHostSettings: false })
+
+    expect((await resolveApiToken(token))?.tokenName).toBe("Claude")
+    expect(await resolveApiToken(revoked.token)).toBeNull()
+    expect(await resolveApiToken(deleted.token)).toBeNull()
+    expect(await resolveApiToken(before.token)).toBeNull()
+    // Made after the export: not in the file, so gone.
+    expect(await resolveApiToken(later.token)).toBeNull()
+    expect(await db().apiToken.count({ where: { name: "Made since" } })).toBe(0)
+
+    const rows = await db().apiToken.findMany({ include: { grant: true } })
+    const byName = Object.fromEntries(rows.map((row) => [row.name, row]))
+    // Revoked here: when the vault revoked it. Deleted here: revoked now.
+    expect(byName["Revoked since"]?.revokedAt).toEqual(revokedAt)
+    expect(byName["Deleted since"]?.revokedAt).not.toBeNull()
+    expect(byName["Claude"]?.revokedAt).toBeNull()
+
+    // Revoked tokens hold no copy of the key, as when they are revoked.
+    for (const name of ["Revoked before", "Revoked since", "Deleted since"]) {
+      expect(byName[name]?.grant.lookupHash).toBeNull()
+      expect(byName[name]?.grant.wrappedDek.length).toBe(0)
+    }
+    expect(byName["Claude"]?.grant.lookupHash).not.toBeNull()
+    expect(byName["Claude"]?.grant.wrappedDek.length).toBeGreaterThan(0)
+
+    // The same file at setup, where nothing is known of them, is unchanged.
+    const fresh = await readExport(file, EXPORT_PASSWORD)
+    expect(fresh.preview.counts.tokens).toBe(3)
+    await cleanup()
+    ;({ cleanup } = await scratchDatabase())
+    await restoreExport(
+      fresh.payload,
+      { into: "fresh" },
+      { restoreHostSettings: false },
+    )
+    expect((await resolveApiToken(revoked.token))?.tokenName).toBe(
+      "Revoked since",
+    )
+    expect((await resolveApiToken(deleted.token))?.tokenName).toBe(
+      "Deleted since",
+    )
+    expect(await resolveApiToken(before.token)).toBeNull()
+  })
+
   it("restores into a PCP not set up yet, which then opens with the exported credentials", async () => {
     const { ctx, recoveryKey, token } = await populate()
     const file = await exportVault(ctx, EXPORT_PASSWORD)
@@ -567,6 +659,17 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
     await createSecret(second, { name: "eve-secret", value: "eve" })
 
+    // Another PCP's tokens are not this vault's to compare: none comes back
+    // revoked for not being here.
+    expect(
+      (
+        await readExport(file, EXPORT_PASSWORD, {
+          into: "vault",
+          ctx: second,
+        })
+      ).preview.tokens.map((t) => t.status),
+    ).toEqual(["works"])
+
     await restoreExport(
       payload,
       { into: "vault", ctx: second },
@@ -574,6 +677,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     )
 
     expect(await db().vault.count()).toBe(1)
+    expect((await resolveApiToken(first.token))?.tokenName).toBe("Claude")
     expect((await ownerVault())?.name).toBe("Ada")
     expect(await unlockOwnerVault("eve's own password")).toBeNull()
     expect((await unlockOwnerVault(PASSWORD))?.vaultId).toBe(first.ctx.vaultId)
