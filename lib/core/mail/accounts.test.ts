@@ -89,7 +89,7 @@ describe("adding an account", () => {
     const id = await account()
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
 
-    expect(sync).toEqual({ status: "ok", message: "", toolCount: 11 })
+    expect(sync).toEqual({ status: "ok", message: "", toolCount: 16 })
     const row = await getServer(ctx, id)
     expect(row).toMatchObject({
       kind: "jmap",
@@ -102,7 +102,7 @@ describe("adding an account", () => {
     expect(fake.requests[0]!.authorization).toBe(BASIC)
 
     const [summary] = await listServers(ctx)
-    expect(summary).toMatchObject({ kind: "jmap", toolCount: 11 })
+    expect(summary).toMatchObject({ kind: "jmap", toolCount: 16 })
     expect((await listSecrets(ctx))[0]!.usedBy).toEqual([{ id, name: "Mail" }])
     await expect(deleteSecret(ctx, secretId)).rejects.toThrow()
   })
@@ -111,7 +111,7 @@ describe("adding an account", () => {
     const id = await account({ readOnly: true })
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
 
-    expect(sync.toolCount).toBe(6)
+    expect(sync.toolCount).toBe(7)
     const names = (await getServer(ctx, id)).tools.map((tool) => tool.name)
     expect(names).not.toContain("send_email")
     expect(names).not.toContain("create_draft")
@@ -675,8 +675,102 @@ describe("calling its tools", () => {
         PUBLIC,
       ),
     ).rejects.toMatchObject({ code: "forbidden" })
+
+    for (const [tool, args] of [
+      ["create_mailbox", { name: "New" }],
+      ["rename_mailbox", { mailbox: "Archive", name: "Old" }],
+      ["delete_mailbox", { mailbox: "Archive" }],
+      ["mark_email", { ids: ["e1"], addKeywords: ["x"] }],
+      ["set_vacation_response", { enabled: true }],
+    ] as const) {
+      await expect(
+        callServerTool(ctx, server, tool, args, PUBLIC),
+      ).rejects.toMatchObject({ code: "forbidden" })
+    }
+
     expect(fake.requests.length).toBe(before)
     expect(fake.emails).toHaveLength(3)
+    expect(fake.mailboxes).toHaveLength(5)
+  })
+
+  it("answers one email as it always has, and several with done and failed", async () => {
+    const server = await ready()
+    const one = await callServerTool(
+      ctx,
+      server,
+      "move_email",
+      { id: "e1", mailbox: "archive" },
+      PUBLIC,
+    )
+
+    expect(one.structuredContent).toEqual({
+      id: "e1",
+      previousId: "e1",
+      mailboxId: "mb-archive",
+    })
+
+    const several = await callServerTool(
+      ctx,
+      server,
+      "mark_email",
+      { ids: ["e1", "e2", "gone"], addKeywords: ["Paid"] },
+      PUBLIC,
+    )
+    expect(several.isError).toBeUndefined()
+    const answer = several.structuredContent as {
+      done: Array<{ id: string; keywords: string[] }>
+      failed: unknown[]
+    }
+    expect(answer.done.map((email) => [email.id, email.keywords])).toEqual([
+      ["e1", ["paid"]],
+      ["e2", ["paid"]],
+    ])
+    expect(answer.failed).toEqual([
+      { id: "gone", error: "No email with that id." },
+    ])
+
+    const missing = await callServerTool(
+      ctx,
+      server,
+      "delete_email",
+      { id: "gone" },
+      PUBLIC,
+    )
+    expect(missing.isError).toBe(true)
+    expect(textOf(missing)).toMatch(/No email with that id/)
+  })
+
+  it("makes, moves and removes a mailbox, and sets the automatic reply", async () => {
+    const server = await ready()
+    const call = (tool: string, args: Record<string, unknown>) =>
+      callServerTool(ctx, server, tool, args, PUBLIC)
+
+    const made = await call("create_mailbox", { name: "Clients" })
+    expect(made.structuredContent).toMatchObject({
+      mailbox: { name: "Clients", path: "Clients" },
+    })
+    await call("create_mailbox", { name: "Acme", parent: "Clients" })
+    expect(
+      (await call("rename_mailbox", { mailbox: "Clients/Acme", parent: null }))
+        .structuredContent,
+    ).toMatchObject({ mailbox: { path: "Acme", parentId: null } })
+    expect(
+      (await call("delete_mailbox", { mailbox: "Acme" })).structuredContent,
+    ).toMatchObject({ deleted: { name: "Acme" } })
+
+    const refused = await call("delete_mailbox", { mailbox: "inbox" })
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toMatch(/PCP does not delete it/)
+
+    expect(
+      (
+        await call("set_vacation_response", {
+          enabled: true,
+          text: "Away",
+        })
+      ).structuredContent,
+    ).toMatchObject({ vacationResponse: { enabled: true, text: "Away" } })
+    expect(fake.vacation.isEnabled).toBe(true)
   })
 
   it("answers a request the server refuses as an error, and leaves the account's status alone", async () => {
@@ -725,7 +819,7 @@ describe("calling its tools", () => {
     const instructions = buildInstructions(await loadGatewayServers(scope))
 
     expect(instructions).toContain("MCP servers, APIs and mail accounts")
-    expect(instructions).toContain("- mail: Mail (11 tools)")
+    expect(instructions).toContain("- mail: Mail (16 tools)")
   })
 })
 

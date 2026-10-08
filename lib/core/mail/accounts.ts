@@ -69,6 +69,7 @@ import {
 import {
   MailAuthError,
   MailRequestError,
+  type BulkResult,
   type MailBackend,
   type MailCredential,
   type SearchQuery,
@@ -357,6 +358,7 @@ export async function syncMailTools(
 
   try {
     let canSend: boolean
+    let canVacation = false
 
     if (kind === "jmap") {
       const session = await fetchJmapSession(server.url, credential)
@@ -371,6 +373,7 @@ export async function syncMailTools(
         },
       })
       canSend = session.submission
+      canVacation = session.vacation
     } else {
       await checkImapAccount(
         imapConfig(server),
@@ -382,7 +385,7 @@ export async function syncMailTools(
 
     const toolCount = await storeTools(
       server.id,
-      mailTools({ kind, readOnly: server.readOnly, canSend }),
+      mailTools({ kind, readOnly: server.readOnly, canSend, canVacation }),
     )
     await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
 
@@ -607,24 +610,102 @@ async function runTool(
       return { draft: await backend.createDraft(composed(args, attachments)) }
 
     case "move_email":
-      return backend.moveEmail(String(args.id), String(args.mailbox))
+      return oneOrMany(args, (ids) =>
+        backend.moveEmails(ids, String(args.mailbox)),
+      )
 
     case "mark_email":
-      return backend.markEmail(String(args.id), {
-        ...(args.read !== undefined ? { read: Boolean(args.read) } : {}),
-        ...(args.flagged !== undefined
-          ? { flagged: Boolean(args.flagged) }
-          : {}),
-      })
+      return oneOrMany(args, (ids) =>
+        backend.markEmails(ids, {
+          ...(args.read !== undefined ? { read: Boolean(args.read) } : {}),
+          ...(args.flagged !== undefined
+            ? { flagged: Boolean(args.flagged) }
+            : {}),
+          ...(args.answered !== undefined
+            ? { answered: Boolean(args.answered) }
+            : {}),
+          ...(Array.isArray(args.addKeywords)
+            ? { addKeywords: args.addKeywords.map(String) }
+            : {}),
+          ...(Array.isArray(args.removeKeywords)
+            ? { removeKeywords: args.removeKeywords.map(String) }
+            : {}),
+        }),
+      )
 
     case "delete_email":
-      return backend.deleteEmail(String(args.id))
+      return oneOrMany(args, (ids) => backend.deleteEmails(ids))
+
+    case "create_mailbox":
+      return {
+        mailbox: await backend.createMailbox(
+          String(args.name),
+          args.parent === undefined ? undefined : String(args.parent),
+        ),
+      }
+
+    case "rename_mailbox":
+      return {
+        mailbox: await backend.renameMailbox(String(args.mailbox), {
+          ...(args.name !== undefined ? { name: String(args.name) } : {}),
+          ...(args.parent !== undefined
+            ? { parent: args.parent === null ? null : String(args.parent) }
+            : {}),
+        }),
+      }
+
+    case "delete_mailbox":
+      return { deleted: await backend.deleteMailbox(String(args.mailbox)) }
+
+    case "get_vacation_response": {
+      if (!backend.getVacationResponse) break
+      return { vacationResponse: await backend.getVacationResponse() }
+    }
+
+    case "set_vacation_response": {
+      if (!backend.setVacationResponse) break
+      const text = (key: string) =>
+        args[key] === undefined
+          ? {}
+          : { [key]: args[key] === null ? null : String(args[key]) }
+
+      return {
+        vacationResponse: await backend.setVacationResponse({
+          enabled: Boolean(args.enabled),
+          ...text("from"),
+          ...text("to"),
+          ...text("subject"),
+          ...text("text"),
+        }),
+      }
+    }
   }
 
   throw new PcpError(
     "state",
     `${server.name} cannot ${toolName.replace(/_/g, " ")}.`,
   )
+}
+
+/**
+ * A change to one email (id) or several (ids): one answers as it always
+ * has, its refusal a refusal; several answer with done and failed.
+ */
+async function oneOrMany<T>(
+  args: Record<string, unknown>,
+  run: (ids: string[]) => Promise<BulkResult<T>>,
+): Promise<unknown> {
+  if (Array.isArray(args.ids)) {
+    return run(args.ids.map(String))
+  }
+
+  const { done, failed } = await run([String(args.id)])
+
+  if (failed[0] || !done[0]) {
+    throw new MailRequestError(failed[0]?.error ?? "No email with that id.")
+  }
+
+  return done[0]
 }
 
 /** The email send_email and create_draft write, from their arguments. */

@@ -18,14 +18,24 @@ import {
   MAIL_CONNECT_TIMEOUT_MS,
   MAX_ATTACHMENTS_LISTED,
   MAX_MAILBOXES,
+  MAX_SEARCH_ALL_WINDOW,
+  MAX_SEARCH_MAILBOXES,
 } from "./limits"
-import { draftsMailbox, findMailbox, mailboxByRole } from "./mailboxes"
+import {
+  checkDeletable,
+  checkNewParent,
+  draftsMailbox,
+  findMailbox,
+  mailboxByRole,
+} from "./mailboxes"
 import { bareType, isTextType } from "../media-types"
 import {
+  otherKeywords,
   MailAuthError,
   MailRequestError,
   MailTransportError,
   type AttachmentContent,
+  type BulkResult,
   type DraftResult,
   type MailAddress,
   type MailBackend,
@@ -33,6 +43,7 @@ import {
   type MailboxSummary,
   type MailMessageDetail,
   type MailMessageSummary,
+  type MarkChange,
   type MoveResult,
   type SearchQuery,
   type SearchResult,
@@ -68,6 +79,8 @@ export interface ImapClientLike {
     Array<{
       path: string
       name: string
+      /** Null or absent: the server keeps mailboxes flat. */
+      delimiter?: string | null
       parentPath: string
       flags: Set<string>
       specialUse?: string
@@ -120,6 +133,12 @@ export interface ImapClientLike {
     content: Buffer,
     flags?: string[],
   ): Promise<{ uid?: number; uidValidity?: bigint } | false>
+  mailboxCreate(path: string): Promise<{ path: string; created: boolean }>
+  mailboxRename(
+    path: string,
+    newPath: string,
+  ): Promise<{ path: string; newPath: string }>
+  mailboxDelete(path: string): Promise<{ path: string }>
 }
 
 export type OutgoingMail = {
@@ -272,6 +291,43 @@ export function decodeImapId(id: string): {
     uidValidity: BigInt(match[2]!),
     path: Buffer.from(match[3]!, "base64url").toString("utf8"),
   }
+}
+
+/** Emails named by id, grouped by the mailbox (and its state) they are in. */
+type EmailGroup = {
+  path: string
+  uidValidity: bigint
+  members: Array<{ id: string; uid: number }>
+}
+
+function groupIds(ids: string[]): {
+  groups: EmailGroup[]
+  failed: BulkResult<never>["failed"]
+} {
+  const groups = new Map<string, EmailGroup>()
+  const failed: BulkResult<never>["failed"] = []
+
+  for (const id of new Set(ids)) {
+    let decoded: ReturnType<typeof decodeImapId>
+
+    try {
+      decoded = decodeImapId(id)
+    } catch (error) {
+      failed.push({ id, error: (error as Error).message })
+      continue
+    }
+
+    const key = `${decoded.uidValidity} ${decoded.path}`
+    const group = groups.get(key) ?? {
+      path: decoded.path,
+      uidValidity: decoded.uidValidity,
+      members: [],
+    }
+    group.members.push({ id, uid: decoded.uid })
+    groups.set(key, group)
+  }
+
+  return { groups: [...groups.values()], failed }
 }
 
 type Parts = {
@@ -587,9 +643,20 @@ export function openImapBackend(
         answered: flags.has("\\Answered"),
         draft: flags.has("\\Draft"),
       },
+      keywords: otherKeywords(flags),
       hasAttachments: pickParts(message.bodyStructure).attachments.length > 0,
       size: typeof message.size === "number" ? message.size : null,
     }
+  }
+
+  /**
+   * What the last listing said beyond the summaries: the hierarchy
+   * delimiter (null when the server keeps mailboxes flat), and the
+   * mailboxes that hold no mail of their own and cannot be opened.
+   */
+  let listing: { delimiter: string | null; unselectable: Set<string> } = {
+    delimiter: "/",
+    unselectable: new Set(),
   }
 
   async function mailboxes(): Promise<MailboxSummary[]> {
@@ -602,6 +669,19 @@ export function openImapBackend(
       })
     } catch (error) {
       throw describeImapError(error, "IMAP")
+    }
+
+    const named = listed.find((box) => box.delimiter !== undefined)
+    listing = {
+      delimiter: named ? (named.delimiter ?? null) : "/",
+      unselectable: new Set(
+        listed
+          .filter(
+            (box) =>
+              box.flags.has("\\Noselect") || box.flags.has("\\NonExistent"),
+          )
+          .map((box) => box.path),
+      ),
     }
 
     return listed.slice(0, MAX_MAILBOXES).map((box) => ({
@@ -632,29 +712,235 @@ export function openImapBackend(
     }
   }
 
-  async function move(id: string, target: MailboxSummary): Promise<MoveResult> {
-    return withEmail(id, false, async (imap, uid, path) => {
-      if (target.id === path) {
-        return { id, previousId: id, mailboxId: target.id }
+  /**
+   * Runs on the emails named, a mailbox at a time, with only the ones that
+   * are there: an id that names no email, or whose mailbox has changed or
+   * is gone, fails alone and stops no other.
+   */
+  async function eachGroup<T>(
+    ids: string[],
+    readOnly: boolean,
+    run: (
+      imap: ImapClientLike,
+      group: EmailGroup,
+      uidValidity: bigint,
+    ) => Promise<BulkResult<T>>,
+  ): Promise<BulkResult<T>> {
+    const { groups, failed } = groupIds(ids)
+    const done: T[] = []
+
+    for (const group of groups) {
+      try {
+        const result = await inMailbox(
+          group.path,
+          readOnly,
+          async (imap, current): Promise<BulkResult<T>> => {
+            if (current !== group.uidValidity) {
+              throw new MailRequestError(
+                "That email id is from before its mailbox changed; search again for a fresh one.",
+              )
+            }
+
+            const uids = group.members.map((member) => member.uid)
+            const there = new Set(
+              (await imap.fetchAll(uids, { uid: true }, { uid: true })).map(
+                (message) => message.uid,
+              ),
+            )
+            const present = group.members.filter((m) => there.has(m.uid))
+            const missing = group.members
+              .filter((m) => !there.has(m.uid))
+              .map((m) => ({ id: m.id, error: "No email with that id." }))
+
+            if (present.length === 0) {
+              return { done: [], failed: missing }
+            }
+
+            const ran = await run(imap, { ...group, members: present }, current)
+            return { done: ran.done, failed: [...missing, ...ran.failed] }
+          },
+        )
+        done.push(...result.done)
+        failed.push(...result.failed)
+      } catch (error) {
+        if (!(error instanceof MailRequestError)) {
+          throw error
+        }
+
+        failed.push(
+          ...group.members.map((member) => ({
+            id: member.id,
+            error: error.message,
+          })),
+        )
+      }
+    }
+
+    return { done, failed }
+  }
+
+  async function move(
+    ids: string[],
+    target: MailboxSummary,
+    { refuseHere }: { refuseHere?: string } = {},
+  ): Promise<BulkResult<MoveResult>> {
+    return eachGroup(ids, false, async (imap, group) => {
+      if (target.id === group.path) {
+        return refuseHere
+          ? {
+              done: [],
+              failed: group.members.map((m) => ({
+                id: m.id,
+                error: refuseHere,
+              })),
+            }
+          : {
+              done: group.members.map((m) => ({
+                id: m.id,
+                previousId: m.id,
+                mailboxId: target.id,
+              })),
+              failed: [],
+            }
       }
 
-      const moved = await imap.messageMove(uid, target.id, { uid: true })
+      const moved = await imap.messageMove(
+        group.members.map((m) => m.uid).join(","),
+        target.id,
+        { uid: true },
+      )
 
       if (!moved) {
-        throw new MailRequestError("No email with that id.")
+        return {
+          done: [],
+          failed: group.members.map((m) => ({
+            id: m.id,
+            error: "The IMAP server did not move the email.",
+          })),
+        }
       }
-
-      const newUid = moved.uidMap?.get(Number(uid))
 
       return {
-        id:
-          newUid !== undefined && moved.uidValidity !== undefined
-            ? encodeImapId(newUid, moved.uidValidity, target.id)
-            : null,
-        previousId: id,
-        mailboxId: target.id,
+        done: group.members.map((m) => {
+          const newUid = moved.uidMap?.get(m.uid)
+
+          return {
+            id:
+              newUid !== undefined && moved.uidValidity !== undefined
+                ? encodeImapId(newUid, moved.uidValidity, target.id)
+                : null,
+            previousId: m.id,
+            mailboxId: target.id,
+          }
+        }),
+        failed: [],
       }
     })
+  }
+
+  /** IMAP's search for a query, whichever mailbox it runs in. */
+  function criteriaOf(query: SearchQuery): SearchObject {
+    const criteria: SearchObject = {}
+
+    if (query.text) criteria.text = query.text
+    if (query.from) criteria.from = query.from
+    if (query.to) criteria.to = query.to
+    if (query.subject) criteria.subject = query.subject
+    if (query.after) criteria.since = new Date(Date.parse(query.after))
+    if (query.before) criteria.before = new Date(Date.parse(query.before))
+    if (query.unread !== undefined) criteria.seen = !query.unread
+    if (query.flagged !== undefined) criteria.flagged = query.flagged
+    if (query.keyword) criteria.keyword = query.keyword.toLowerCase()
+    if (query.notKeyword) criteria.unKeyword = query.notKeyword.toLowerCase()
+    // IMAP has no attachment search; a mixed multipart is the usual sign.
+    if (query.hasAttachment === true) {
+      criteria.header = { "content-type": "multipart/mixed" }
+    } else if (query.hasAttachment === false) {
+      criteria.not = { header: { "content-type": "multipart/mixed" } }
+    }
+
+    if (Object.keys(criteria).length === 0) {
+      criteria.all = true
+    }
+
+    return criteria
+  }
+
+  /** One mailbox's matches, newest first, from start up to end. */
+  async function searchBox(
+    box: MailboxSummary,
+    criteria: SearchObject,
+    start: number,
+    end: number,
+  ): Promise<{ total: number; emails: MailMessageSummary[] }> {
+    return inMailbox(box.id, true, async (imap, uidValidity) => {
+      const found = (await imap.search(criteria, { uid: true })) || []
+      // Newest first: a higher UID arrived later.
+      const page = [...found].sort((a, b) => b - a).slice(start, end)
+      const messages =
+        page.length > 0
+          ? await imap.fetchAll(page, SUMMARY_QUERY, { uid: true })
+          : []
+      const byUid = new Map(messages.map((message) => [message.uid, message]))
+
+      return {
+        total: found.length,
+        emails: page.flatMap((uid) =>
+          byUid.has(uid) ? [summary(byUid.get(uid)!, box.id, uidValidity)] : [],
+        ),
+      }
+    })
+  }
+
+  /** The path of a mailbox named name inside parent (null: the top). */
+  function childPath(parent: string | null, name: string): string {
+    const { delimiter } = listing
+
+    if (delimiter && name.includes(delimiter)) {
+      throw new MailRequestError(
+        `A mailbox name on this server cannot hold "${delimiter}"; parent puts one inside another.`,
+      )
+    }
+
+    if (parent === null) {
+      return name
+    }
+
+    if (!delimiter) {
+      throw new MailRequestError(
+        "This IMAP server keeps mailboxes side by side, never one inside another.",
+      )
+    }
+
+    return `${parent}${delimiter}${name}`
+  }
+
+  /** A mailbox as list_mailboxes shows it, read again after a change. */
+  async function mailboxAt(path: string): Promise<MailboxSummary> {
+    const found = (await mailboxes()).find((box) => box.id === path)
+    const { delimiter } = listing
+    const cut = delimiter ? path.lastIndexOf(delimiter) : -1
+
+    return (
+      found ?? {
+        id: path,
+        name: cut >= 0 ? path.slice(cut + delimiter!.length) : path,
+        path,
+        role: null,
+        parentId: cut >= 0 ? path.slice(0, cut) : null,
+        totalEmails: null,
+        unreadEmails: null,
+      }
+    )
+  }
+
+  /** A mailbox command, its failure said as the server said it. */
+  async function onServer<T>(run: (imap: ImapClientLike) => Promise<T>) {
+    try {
+      return await run(await client())
+    } catch (error) {
+      throw describeImapError(error, "IMAP")
+    }
   }
 
   /** The From address: the one the owner set, or the user name. */
@@ -759,52 +1045,74 @@ export function openImapBackend(
 
     async searchEmails(query: SearchQuery): Promise<SearchResult> {
       const boxes = await mailboxes()
-      const box = query.mailbox
-        ? findMailbox(boxes, query.mailbox)
-        : (mailboxByRole(boxes, "inbox") ?? findMailbox(boxes, "INBOX"))
-      const criteria: SearchObject = {}
+      const criteria = criteriaOf(query)
+      const end = query.offset + query.limit
 
-      if (query.text) criteria.text = query.text
-      if (query.from) criteria.from = query.from
-      if (query.to) criteria.to = query.to
-      if (query.subject) criteria.subject = query.subject
-      if (query.after) criteria.since = new Date(Date.parse(query.after))
-      if (query.before) criteria.before = new Date(Date.parse(query.before))
-      if (query.unread !== undefined) criteria.seen = !query.unread
-      if (query.flagged !== undefined) criteria.flagged = query.flagged
-      // IMAP has no attachment search; a mixed multipart is the usual sign.
-      if (query.hasAttachment === true) {
-        criteria.header = { "content-type": "multipart/mixed" }
-      } else if (query.hasAttachment === false) {
-        criteria.not = { header: { "content-type": "multipart/mixed" } }
+      if (!query.allMailboxes) {
+        const box = query.mailbox
+          ? findMailbox(boxes, query.mailbox)
+          : (mailboxByRole(boxes, "inbox") ?? findMailbox(boxes, "INBOX"))
+        const found = await searchBox(box, criteria, query.offset, end)
+
+        return { ...found, offset: query.offset }
       }
 
-      if (Object.keys(criteria).length === 0) {
-        criteria.all = true
+      // IMAP searches one mailbox at a time: each hands over its newest
+      // matches, and they are merged by date.
+      if (end > MAX_SEARCH_ALL_WINDOW) {
+        throw new MailRequestError(
+          `A search of every mailbox pages only to ${MAX_SEARCH_ALL_WINDOW} emails on IMAP; narrow it, or name a mailbox.`,
+        )
       }
 
-      return inMailbox(box.id, true, async (imap, uidValidity) => {
-        const found = (await imap.search(criteria, { uid: true })) || []
-        // Newest first: a higher UID arrived later.
-        const page = [...found]
-          .sort((a, b) => b - a)
-          .slice(query.offset, query.offset + query.limit)
-        const messages =
-          page.length > 0
-            ? await imap.fetchAll(page, SUMMARY_QUERY, { uid: true })
-            : []
-        const byUid = new Map(messages.map((message) => [message.uid, message]))
+      // A server with an All Mail mailbox (Gmail) holds every email there
+      // once; elsewhere the same email would come back from each folder
+      // showing it, so its views (Flagged, Important) are left out.
+      const allMail = mailboxByRole(boxes, "all")
+      const searchable = allMail
+        ? [allMail]
+        : boxes.filter(
+            (box) =>
+              box.role !== "trash" &&
+              box.role !== "junk" &&
+              box.role !== "flagged" &&
+              box.role !== "important" &&
+              !listing.unselectable.has(box.id),
+          )
+      const searched = searchable.slice(0, MAX_SEARCH_MAILBOXES)
+      const emails: MailMessageSummary[] = []
+      let total = 0
 
-        return {
-          emails: page.flatMap((uid) =>
-            byUid.has(uid)
-              ? [summary(byUid.get(uid)!, box.id, uidValidity)]
-              : [],
-          ),
-          total: found.length,
-          offset: query.offset,
+      for (const box of searched) {
+        let found: Awaited<ReturnType<typeof searchBox>>
+
+        try {
+          found = await searchBox(box, criteria, 0, end)
+        } catch (error) {
+          // A mailbox gone since the listing has nothing to add.
+          if (error instanceof MailRequestError) continue
+          throw error
         }
-      })
+
+        total += found.total
+        emails.push(...found.emails)
+      }
+
+      const time = (email: MailMessageSummary) =>
+        email.date ? Date.parse(email.date) : 0
+
+      return {
+        emails: emails
+          .sort((a, b) => time(b) - time(a))
+          .slice(query.offset, end),
+        total,
+        offset: query.offset,
+        ...(searchable.length > searched.length
+          ? {
+              note: `Searched the first ${searched.length} of ${searchable.length} mailboxes; name a mailbox to search another.`,
+            }
+          : {}),
+      }
     },
 
     async getEmail(id, { bodyBytes }): Promise<MailMessageDetail> {
@@ -867,34 +1175,55 @@ export function openImapBackend(
       })
     },
 
-    async moveEmail(id, mailbox): Promise<MoveResult> {
-      return move(id, findMailbox(await mailboxes(), mailbox))
+    async moveEmails(ids, mailbox): Promise<BulkResult<MoveResult>> {
+      return move(ids, findMailbox(await mailboxes(), mailbox))
     },
 
-    async markEmail(id, flags): Promise<MailMessageSummary> {
-      const { uidValidity } = decodeImapId(id)
+    async markEmails(
+      ids,
+      change: MarkChange,
+    ): Promise<BulkResult<MailMessageSummary>> {
+      const add: string[] = []
+      const remove: string[] = []
+      const set = (flag: string, on: boolean | undefined) => {
+        if (on === true) add.push(flag)
+        if (on === false) remove.push(flag)
+      }
 
-      return withEmail(id, false, async (imap, uid, path) => {
-        const change = async (flag: string, on: boolean | undefined) => {
-          if (on === true)
-            await imap.messageFlagsAdd(uid, [flag], { uid: true })
-          if (on === false)
-            await imap.messageFlagsRemove(uid, [flag], { uid: true })
+      set("\\Seen", change.read)
+      set("\\Flagged", change.flagged)
+      set("\\Answered", change.answered)
+      change.removeKeywords?.forEach((keyword) =>
+        set(keyword.toLowerCase(), false),
+      )
+      change.addKeywords?.forEach((keyword) => set(keyword.toLowerCase(), true))
+
+      return eachGroup(ids, false, async (imap, group, uidValidity) => {
+        const uids = group.members.map((m) => m.uid)
+        const range = uids.join(",")
+
+        // Removed first, so a keyword both removed and added ends up on.
+        if (remove.length) {
+          await imap.messageFlagsRemove(range, remove, { uid: true })
+        }
+        if (add.length) {
+          await imap.messageFlagsAdd(range, add, { uid: true })
         }
 
-        await change("\\Seen", flags.read)
-        await change("\\Flagged", flags.flagged)
-        const message = await imap.fetchOne(uid, SUMMARY_QUERY, { uid: true })
+        const messages = await imap.fetchAll(uids, SUMMARY_QUERY, {
+          uid: true,
+        })
 
-        if (!message) {
-          throw new MailRequestError("No email with that id.")
+        return {
+          done: messages.map((message) =>
+            summary(message, group.path, uidValidity),
+          ),
+          failed: [],
         }
-
-        return summary(message, path, uidValidity)
       })
     },
 
-    async deleteEmail(id): Promise<MoveResult> {
+    async deleteEmails(ids): Promise<BulkResult<MoveResult>> {
       const trash = mailboxByRole(await mailboxes(), "trash")
 
       if (!trash) {
@@ -903,13 +1232,69 @@ export function openImapBackend(
         )
       }
 
-      if (decodeImapId(id).path === trash.id) {
-        throw new MailRequestError(
+      return move(ids, trash, {
+        refuseHere:
           "That email is in the Trash already, and PCP never deletes an email for good.",
-        )
+      })
+    },
+
+    async createMailbox(name, parent): Promise<MailboxSummary> {
+      const boxes = await mailboxes()
+      const under = parent ? findMailbox(boxes, parent) : null
+      const path = childPath(under?.id ?? null, name)
+
+      if (boxes.some((box) => box.id === path)) {
+        throw new MailRequestError(`There is a mailbox ${path} already.`)
       }
 
-      return move(id, trash)
+      const made = await onServer((imap) => imap.mailboxCreate(path))
+
+      if (!made.created) {
+        throw new MailRequestError(`There is a mailbox ${path} already.`)
+      }
+
+      return mailboxAt(made.path || path)
+    },
+
+    async renameMailbox(mailbox, change): Promise<MailboxSummary> {
+      const boxes = await mailboxes()
+      const box = findMailbox(boxes, mailbox)
+
+      if (box.role === "inbox") {
+        throw new MailRequestError("The inbox keeps its name and place.")
+      }
+
+      let parent = box.parentId
+
+      if (change.parent !== undefined) {
+        const under = change.parent ? findMailbox(boxes, change.parent) : null
+        checkNewParent(boxes, box, under)
+        parent = under?.id ?? null
+      }
+
+      const path = childPath(parent, change.name ?? box.name)
+
+      if (path === box.id) {
+        return box
+      }
+
+      if (boxes.some((other) => other.id === path)) {
+        throw new MailRequestError(`There is a mailbox ${path} already.`)
+      }
+
+      const renamed = await onServer((imap) => imap.mailboxRename(box.id, path))
+      return mailboxAt(renamed.newPath || path)
+    },
+
+    async deleteMailbox(mailbox): Promise<MailboxSummary> {
+      const boxes = await mailboxes()
+      const box = findMailbox(boxes, mailbox)
+      // IMAP's DELETE takes the mail inside with it, so the count the
+      // listing just gave decides: only an empty mailbox goes.
+      checkDeletable(boxes, box)
+      await onServer((imap) => imap.mailboxDelete(box.id))
+
+      return box
     },
 
     async getAttachment(

@@ -2051,7 +2051,7 @@ describe("a mail account an assistant proposes", () => {
       real,
     )
 
-    expect(textOf(added)).toMatch(/Added Mail as "mail" with 11 tools/)
+    expect(textOf(added)).toMatch(/Added Mail as "mail" with 16 tools/)
     expect(textOf(added)).toMatch(/saved in PCP as "Mail password"/)
     expect(textOf(added)).not.toContain(PASSWORD)
 
@@ -2132,7 +2132,7 @@ describe("a mail account an assistant proposes", () => {
       web,
       real,
     )
-    expect(textOf(added)).toMatch(/Added Mail as "mail" with 11 tools/)
+    expect(textOf(added)).toMatch(/Added Mail as "mail" with 16 tools/)
     expect(fake.requests[0]!.authorization).toBe(BASIC)
   })
 
@@ -2167,7 +2167,7 @@ describe("a mail account an assistant proposes", () => {
       { ...web, secretValue: "token-1" },
       real,
     )
-    expect(textOf(added)).toMatch(/Added Mail as "mail" with 6 tools/)
+    expect(textOf(added)).toMatch(/Added Mail as "mail" with 7 tools/)
     expect(fake.requests[0]!.authorization).toBe("Bearer token-1")
     expect(
       await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),

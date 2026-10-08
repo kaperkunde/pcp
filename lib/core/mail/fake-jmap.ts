@@ -1,8 +1,9 @@
 /**
  * An in-memory JMAP mail server for tests: the unit tests mount it on
  * startTestApi, the e2e suite on its fake upstream. It answers the methods
- * PCP uses (Mailbox/get, Email/query, Email/get, Email/set, Thread/get,
- * Identity/get, EmailSubmission/set) well enough to check what PCP sends
+ * PCP uses (Mailbox/get, Mailbox/set, Email/query, Email/get, Email/set,
+ * Thread/get, Identity/get, EmailSubmission/set, VacationResponse/get and
+ * /set) well enough to check what PCP sends
  * and what it makes of the answers, and records every request with its
  * Authorization header. Like a real server (RFC 8621 7.5), an
  * EmailSubmission/set with onSuccessUpdateEmail is answered twice under its
@@ -61,11 +62,32 @@ export type FakeJmapOptions = {
    * cannot move the sent email does), or "error" (that call fails).
    */
   onSuccessUpdate?: "apply" | "refuse" | "error"
+  /** Whether the session offers VacationResponse (default true). */
+  vacation?: boolean
+}
+
+export type FakeMailbox = {
+  id: string
+  name: string
+  role: string | null
+  parentId: string | null
+}
+
+export type FakeVacation = {
+  isEnabled: boolean
+  fromDate: string | null
+  toDate: string | null
+  subject: string | null
+  textBody: string | null
+  htmlBody: string | null
 }
 
 export type FakeJmap = {
   base: string
   emails: FakeEmail[]
+  /** The mailboxes, as Mailbox/set leaves them. */
+  mailboxes: FakeMailbox[]
+  vacation: FakeVacation
   sent: Array<{ emailId: string; identityId: string }>
   /** Blobs uploaded, in order: what an email to send attaches. */
   uploads: Array<{ blobId: string; type: string; content: Buffer }>
@@ -81,7 +103,7 @@ export type FakeJmap = {
   }) => { status: number; type: string; body: string | Buffer } | null
 }
 
-export const FAKE_MAILBOXES = [
+export const FAKE_MAILBOXES: readonly FakeMailbox[] = [
   { id: "mb-inbox", name: "Inbox", role: "inbox", parentId: null },
   { id: "mb-drafts", name: "Drafts", role: "drafts", parentId: null },
   { id: "mb-sent", name: "Sent", role: "sent", parentId: null },
@@ -172,6 +194,13 @@ function matches(email: FakeEmail, filter: Json | undefined): boolean {
       .join(" ")
 
   if (filter.inMailbox && !email.mailboxIds[String(filter.inMailbox)])
+    return false
+  if (
+    Array.isArray(filter.inMailboxOtherThan) &&
+    Object.keys(email.mailboxIds).every((id) =>
+      (filter.inMailboxOtherThan as string[]).includes(id),
+    )
+  )
     return false
   if (
     filter.text &&
@@ -296,7 +325,11 @@ function applyPatch(email: FakeEmail, patch: Json): void {
       if (value) email.mailboxIds[key] = true
       else delete email.mailboxIds[key]
     } else if (path.startsWith("keywords/")) {
-      const key = path.slice("keywords/".length)
+      // A JSON Pointer: ~1 is "/", ~0 is "~".
+      const key = path
+        .slice("keywords/".length)
+        .replace(/~1/g, "/")
+        .replace(/~0/g, "~")
       if (value) email.keywords[key] = true
       else delete email.keywords[key]
     }
@@ -307,7 +340,18 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
   const base = options.base ?? "/jmap"
   const accountId = options.accountId ?? "acct-1"
   const submission = options.submission ?? true
+  const vacationOffered = options.vacation ?? true
   const emails = fakeEmails()
+  const mailboxes: FakeMailbox[] = FAKE_MAILBOXES.map((box) => ({ ...box }))
+  const vacation: FakeVacation = {
+    isEnabled: false,
+    fromDate: null,
+    toDate: null,
+    subject: null,
+    textBody: null,
+    htmlBody: null,
+  }
+  let createdBoxes = 0
   const sent: FakeJmap["sent"] = []
   const uploads: FakeJmap["uploads"] = []
   const requests: FakeRequest[] = []
@@ -335,7 +379,7 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
           name,
           {
             accountId,
-            list: FAKE_MAILBOXES.map((box) => ({
+            list: mailboxes.map((box) => ({
               ...box,
               totalEmails: emails.filter((e) => e.mailboxIds[box.id]).length,
               unreadEmails: emails.filter(
@@ -345,6 +389,108 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
             notFound: [],
           },
         ]
+      case "Mailbox/set": {
+        const result: Json = {
+          accountId,
+          created: {},
+          updated: {},
+          destroyed: [],
+          notCreated: {},
+          notUpdated: {},
+          notDestroyed: {},
+        }
+        const parentOk = (parentId: unknown) =>
+          parentId === null ||
+          parentId === undefined ||
+          mailboxes.some((box) => box.id === parentId)
+
+        for (const [key, value] of Object.entries(
+          (args.create as Json) ?? {},
+        )) {
+          const box = value as Json
+          const parentId = (box.parentId as string | null) ?? null
+
+          if (
+            !parentOk(parentId) ||
+            mailboxes.some(
+              (other) => other.parentId === parentId && other.name === box.name,
+            )
+          ) {
+            ;(result.notCreated as Json)[key] = { type: "invalidProperties" }
+            continue
+          }
+
+          const id = `mb-new-${++createdBoxes}`
+          mailboxes.push({ id, name: String(box.name), role: null, parentId })
+          ;(result.created as Json)[key] = { id }
+        }
+
+        for (const [id, value] of Object.entries((args.update as Json) ?? {})) {
+          const box = mailboxes.find((candidate) => candidate.id === id)
+          const patch = value as Json
+
+          if (!box) {
+            ;(result.notUpdated as Json)[id] = { type: "notFound" }
+            continue
+          }
+
+          if ("parentId" in patch && !parentOk(patch.parentId)) {
+            ;(result.notUpdated as Json)[id] = { type: "invalidProperties" }
+            continue
+          }
+
+          if (typeof patch.name === "string") box.name = patch.name
+          if ("parentId" in patch) {
+            box.parentId = (patch.parentId as string | null) ?? null
+          }
+          ;(result.updated as Json)[id] = null
+        }
+
+        for (const id of (args.destroy as string[]) ?? []) {
+          const box = mailboxes.find((candidate) => candidate.id === id)
+
+          if (!box) {
+            ;(result.notDestroyed as Json)[id] = { type: "notFound" }
+          } else if (mailboxes.some((other) => other.parentId === id)) {
+            ;(result.notDestroyed as Json)[id] = { type: "mailboxHasChild" }
+          } else if (
+            args.onDestroyRemoveEmails !== true &&
+            emails.some((email) => email.mailboxIds[id])
+          ) {
+            ;(result.notDestroyed as Json)[id] = { type: "mailboxHasEmail" }
+          } else {
+            mailboxes.splice(mailboxes.indexOf(box), 1)
+            ;(result.destroyed as string[]).push(id)
+          }
+        }
+
+        return [name, result]
+      }
+      case "VacationResponse/get":
+        return vacationOffered
+          ? [
+              name,
+              {
+                accountId,
+                list: [{ id: "singleton", ...vacation }],
+                notFound: [],
+              },
+            ]
+          : ["error", { type: "unknownMethod" }]
+      case "VacationResponse/set": {
+        if (!vacationOffered) {
+          return ["error", { type: "unknownMethod" }]
+        }
+
+        const patch = ((args.update as Json) ?? {}).singleton as
+          Json | undefined
+
+        if (patch) {
+          Object.assign(vacation, patch)
+        }
+
+        return [name, { accountId, updated: patch ? { singleton: null } : {} }]
+      }
       case "Identity/get":
         return [name, { accountId, list: FAKE_IDENTITIES, notFound: [] }]
       case "Email/query": {
@@ -522,6 +668,8 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
   return {
     base,
     emails,
+    mailboxes,
+    vacation,
     sent,
     uploads,
     requests,
@@ -576,6 +724,9 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
             "urn:ietf:params:jmap:core": { maxSizeUpload: 1_000_000 },
             "urn:ietf:params:jmap:mail": {},
             ...(submission ? { "urn:ietf:params:jmap:submission": {} } : {}),
+            ...(vacationOffered
+              ? { "urn:ietf:params:jmap:vacationresponse": {} }
+              : {}),
           },
           accounts: {
             [accountId]: {
@@ -585,6 +736,9 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
                 "urn:ietf:params:jmap:mail": {},
                 ...(submission
                   ? { "urn:ietf:params:jmap:submission": {} }
+                  : {}),
+                ...(vacationOffered
+                  ? { "urn:ietf:params:jmap:vacationresponse": {} }
                   : {}),
               },
             },

@@ -26,6 +26,21 @@ export const MAX_SEND_ATTACHMENTS = 10
 export const MAX_SEND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 export const MAX_SEARCH_TEXT_CHARS = 500
 
+/** Emails one move_email, mark_email or delete_email changes. */
+export const MAX_BULK_EMAILS = 100
+/** Keywords one mark_email adds or removes. */
+export const MAX_KEYWORDS = 20
+export const MAX_KEYWORD_CHARS = 255
+export const MAX_MAILBOX_NAME_CHARS = 200
+/** IMAP: mailboxes a search of every mailbox looks in, one at a time. */
+export const MAX_SEARCH_MAILBOXES = 50
+/**
+ * IMAP: how far a search of every mailbox pages (offset + limit), since
+ * each mailbox hands over that many of its newest to be merged.
+ */
+export const MAX_SEARCH_ALL_WINDOW = 500
+export const MAX_VACATION_SUBJECT_CHARS = 500
+
 /*
  * An attachment get_attachment reads and keeps for the token is at most the
  * largest file PCP keeps (`resourceLimits().fileBytes`), so one that is read

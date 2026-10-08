@@ -35,6 +35,8 @@ type Box = {
   uidValidity: bigint
   uidNext: number
   specialUse?: string
+  /** A mailbox that only holds others (\\Noselect). */
+  noselect?: boolean
   messages: StoredMessage[]
 }
 
@@ -152,6 +154,12 @@ function fakeImap(
   const current = () => boxes.get(open!)!
   const find = (uid: string) =>
     current().messages.find((message) => message.uid === Number(uid))
+  /** The messages a UID set names: "1", or "1,3". */
+  const findAll = (range: string) =>
+    range.split(",").flatMap((uid) => {
+      const message = find(uid)
+      return message ? [message] : []
+    })
   const view = (message: StoredMessage): FetchMessageObject => ({
     seq: 1,
     uid: message.uid,
@@ -180,10 +188,11 @@ function fakeImap(
       return [...boxes.entries()].map(([path, box]) => ({
         path,
         name: path.split("/").at(-1)!,
+        delimiter: "/",
         parentPath: path.includes("/")
           ? path.split("/").slice(0, -1).join("/")
           : "",
-        flags: new Set<string>(),
+        flags: new Set<string>(box.noselect ? ["\\Noselect"] : []),
         specialUse: box.specialUse,
         status: {
           messages: box.messages.length,
@@ -212,6 +221,12 @@ function fakeImap(
             ? (m.envelope?.subject ?? "").includes(criteria.text)
             : true,
         )
+        .filter((m) =>
+          criteria.keyword ? m.flags.has(criteria.keyword) : true,
+        )
+        .filter((m) =>
+          criteria.unKeyword ? !m.flags.has(criteria.unKeyword) : true,
+        )
         .map((m) => m.uid)
     },
     async fetchAll(range) {
@@ -232,25 +247,52 @@ function fakeImap(
         content: Readable.from([Buffer.from(text).subarray(0, maxBytes + 10)]),
       }
     },
-    async messageMove(uid, destination) {
-      const message = find(uid)
-      if (!message) return false
+    async messageMove(range, destination) {
+      calls.push(`move ${range} ${destination}`)
+      const messages = findAll(range)
+      if (messages.length === 0) return false
       const target = boxes.get(destination)!
-      current().messages.splice(current().messages.indexOf(message), 1)
-      const newUid = target.uidNext++
-      target.messages.push({ ...message, uid: newUid })
-      return {
-        uidMap: new Map([[Number(uid), newUid]]),
-        uidValidity: target.uidValidity,
+      const uidMap = new Map<number, number>()
+      for (const message of messages) {
+        current().messages.splice(current().messages.indexOf(message), 1)
+        const newUid = target.uidNext++
+        target.messages.push({ ...message, uid: newUid })
+        uidMap.set(message.uid, newUid)
       }
+      return { uidMap, uidValidity: target.uidValidity }
     },
-    async messageFlagsAdd(uid, flags) {
-      flags.forEach((flag) => find(uid)?.flags.add(flag))
+    async messageFlagsAdd(range, flags) {
+      calls.push(`add ${range} ${flags.join(" ")}`)
+      findAll(range).forEach((m) => flags.forEach((flag) => m.flags.add(flag)))
       return true
     },
-    async messageFlagsRemove(uid, flags) {
-      flags.forEach((flag) => find(uid)?.flags.delete(flag))
+    async messageFlagsRemove(range, flags) {
+      calls.push(`remove ${range} ${flags.join(" ")}`)
+      findAll(range).forEach((m) =>
+        flags.forEach((flag) => m.flags.delete(flag)),
+      )
       return true
+    },
+    async mailboxCreate(path) {
+      calls.push(`create ${path}`)
+      if (boxes.has(path)) return { path, created: false }
+      boxes.set(path, { uidValidity: 20n, uidNext: 1, messages: [] })
+      return { path, created: true }
+    },
+    async mailboxRename(path, newPath) {
+      calls.push(`rename ${path} ${newPath}`)
+      for (const [key, box] of [...boxes.entries()]) {
+        if (key === path || key.startsWith(`${path}/`)) {
+          boxes.delete(key)
+          boxes.set(newPath + key.slice(path.length), box)
+        }
+      }
+      return { path, newPath }
+    },
+    async mailboxDelete(path) {
+      calls.push(`delete ${path}`)
+      boxes.delete(path)
+      return { path }
     },
     async append(path, raw, flags) {
       appended.push({ path, raw: raw.toString("utf8"), flags })
@@ -498,47 +540,276 @@ describe("reading", () => {
 describe("changing", () => {
   it("moves an email and gives its new id", async () => {
     const { mail, boxes } = setup()
-    const moved = await mail.moveEmail(
-      encodeImapId(2, 7n, "INBOX"),
+    const moved = await mail.moveEmails(
+      [encodeImapId(2, 7n, "INBOX")],
       "Archive/2026",
     )
 
     expect(moved).toEqual({
-      id: encodeImapId(1, 10n, "Archive/2026"),
-      previousId: encodeImapId(2, 7n, "INBOX"),
-      mailboxId: "Archive/2026",
+      done: [
+        {
+          id: encodeImapId(1, 10n, "Archive/2026"),
+          previousId: encodeImapId(2, 7n, "INBOX"),
+          mailboxId: "Archive/2026",
+        },
+      ],
+      failed: [],
     })
     expect(boxes.get("Archive/2026")!.messages).toHaveLength(1)
   })
 
+  it("moves several at once, a mailbox at a time, and says which it could not", async () => {
+    const boxes = world()
+    boxes.get("Sent")!.messages.push({
+      ...boxes.get("INBOX")!.messages[0]!,
+      uid: 5,
+      flags: new Set(["\\Seen"]),
+    })
+    const { mail, imap } = setup({ boxes })
+    const moved = await mail.moveEmails(
+      [
+        encodeImapId(1, 7n, "INBOX"),
+        encodeImapId(3, 7n, "INBOX"),
+        encodeImapId(5, 8n, "Sent"),
+        encodeImapId(99, 7n, "INBOX"),
+        encodeImapId(1, 6n, "INBOX"),
+        "not-an-id",
+      ],
+      "Archive/2026",
+    )
+
+    expect(moved.done.map((entry) => entry.previousId)).toEqual([
+      encodeImapId(1, 7n, "INBOX"),
+      encodeImapId(3, 7n, "INBOX"),
+      encodeImapId(5, 8n, "Sent"),
+    ])
+    expect(moved.done.map((entry) => entry.id)).toEqual([
+      encodeImapId(1, 10n, "Archive/2026"),
+      encodeImapId(2, 10n, "Archive/2026"),
+      encodeImapId(3, 10n, "Archive/2026"),
+    ])
+    expect(moved.failed).toEqual([
+      { id: "not-an-id", error: expect.stringMatching(/not an email id/) },
+      { id: encodeImapId(99, 7n, "INBOX"), error: "No email with that id." },
+      {
+        id: encodeImapId(1, 6n, "INBOX"),
+        error: expect.stringMatching(/before its mailbox changed/),
+      },
+    ])
+    // One MOVE per mailbox, not one per email.
+    expect(imap.calls.filter((call) => call.startsWith("move"))).toEqual([
+      "move 1,3 Archive/2026",
+      "move 5 Archive/2026",
+    ])
+  })
+
   it("marks an email read and flagged", async () => {
     const { mail } = setup()
+    const marked = await mail.markEmails([encodeImapId(1, 7n, "INBOX")], {
+      read: true,
+      flagged: true,
+    })
 
-    expect(
-      (
-        await mail.markEmail(encodeImapId(1, 7n, "INBOX"), {
-          read: true,
-          flagged: true,
-        })
-      ).flags,
-    ).toMatchObject({ unread: false, flagged: true })
+    expect(marked.done[0]!.flags).toMatchObject({
+      unread: false,
+      flagged: true,
+    })
+  })
+
+  it("adds and removes keywords, lowercased, and answers with them", async () => {
+    const { mail, imap } = setup()
+    const ids = [encodeImapId(1, 7n, "INBOX"), encodeImapId(2, 7n, "INBOX")]
+
+    await mail.markEmails(ids, { addKeywords: ["Invoices", "todo"] })
+    const marked = await mail.markEmails(ids, {
+      answered: true,
+      removeKeywords: ["todo"],
+    })
+
+    expect(marked.done.map((email) => email.keywords)).toEqual([
+      ["invoices"],
+      ["invoices"],
+    ])
+    expect(marked.done[0]!.flags.answered).toBe(true)
+    expect(imap.calls).toContain("add 1,2 invoices todo")
+    expect(imap.calls).toContain("remove 1,2 todo")
+
+    const found = await mail.searchEmails({
+      keyword: "invoices",
+      offset: 0,
+      limit: 10,
+    })
+    expect(found.emails).toHaveLength(2)
+    expect(imap.calls).toContain('search {"keyword":"invoices"}')
   })
 
   it("deletes into the Trash only", async () => {
     const { mail, boxes } = setup()
-    const moved = await mail.deleteEmail(encodeImapId(1, 7n, "INBOX"))
+    const moved = await mail.deleteEmails([encodeImapId(1, 7n, "INBOX")])
 
-    expect(moved.mailboxId).toBe("Trash")
-    await expect(mail.deleteEmail(moved.id!)).rejects.toThrow(
-      /in the Trash already/,
-    )
+    expect(moved.done[0]!.mailboxId).toBe("Trash")
+    expect((await mail.deleteEmails([moved.done[0]!.id!])).failed).toEqual([
+      {
+        id: moved.done[0]!.id,
+        error: expect.stringMatching(/in the Trash already/),
+      },
+    ])
 
     const noTrash = world()
     noTrash.delete("Trash")
     await expect(
-      setup({ boxes: noTrash }).mail.deleteEmail(encodeImapId(1, 7n, "INBOX")),
+      setup({ boxes: noTrash }).mail.deleteEmails([
+        encodeImapId(1, 7n, "INBOX"),
+      ]),
     ).rejects.toThrow(/no Trash mailbox/)
     expect(boxes.get("INBOX")!.messages).toHaveLength(2)
+  })
+})
+
+describe("mailboxes", () => {
+  it("creates one at the top or inside another", async () => {
+    const { mail, imap, boxes } = setup()
+
+    expect(await mail.createMailbox("Clients")).toMatchObject({
+      id: "Clients",
+      name: "Clients",
+      parentId: null,
+      totalEmails: 0,
+    })
+    expect(await mail.createMailbox("Acme", "Clients")).toMatchObject({
+      id: "Clients/Acme",
+      parentId: "Clients",
+    })
+    expect(boxes.has("Clients/Acme")).toBe(true)
+    expect(imap.calls).toContain("create Clients/Acme")
+
+    await expect(mail.createMailbox("Acme", "Clients")).rejects.toThrow(
+      /already/,
+    )
+    await expect(mail.createMailbox("a/b")).rejects.toThrow(/cannot hold "\/"/)
+    await expect(mail.createMailbox("x", "Nowhere")).rejects.toThrow(
+      /No mailbox called Nowhere/,
+    )
+  })
+
+  it("renames one and moves it, never into itself, and never the inbox", async () => {
+    const { mail, boxes } = setup()
+    await mail.createMailbox("Clients")
+
+    expect(
+      await mail.renameMailbox("Archive/2026", { name: "Old" }),
+    ).toMatchObject({ id: "Archive/Old", name: "Old" })
+    expect(
+      await mail.renameMailbox("Archive/Old", { parent: "Clients" }),
+    ).toMatchObject({ id: "Clients/Old", parentId: "Clients" })
+    expect(
+      await mail.renameMailbox("Clients/Old", { parent: null }),
+    ).toMatchObject({ id: "Old", parentId: null })
+    expect(boxes.has("Old")).toBe(true)
+
+    await mail.createMailbox("Inner", "Clients")
+    await expect(
+      mail.renameMailbox("Clients", { parent: "Clients/Inner" }),
+    ).rejects.toThrow(/cannot go inside itself/)
+    await expect(mail.renameMailbox("INBOX", { name: "In" })).rejects.toThrow(
+      /inbox keeps/,
+    )
+  })
+
+  it("deletes only an empty mailbox with no role and nothing inside it", async () => {
+    const { mail, imap, boxes } = setup()
+
+    await expect(mail.deleteMailbox("Trash")).rejects.toThrow(
+      /trash mailbox; PCP does not delete it/,
+    )
+    await expect(mail.deleteMailbox("INBOX")).rejects.toThrow(/inbox mailbox/)
+
+    await mail.createMailbox("Full")
+    boxes.get("Full")!.messages.push(boxes.get("INBOX")!.messages[0]!)
+    await expect(mail.deleteMailbox("Full")).rejects.toThrow(
+      /holds 1 email; move or delete/,
+    )
+
+    await mail.createMailbox("Parent")
+    await mail.createMailbox("Child", "Parent")
+    await expect(mail.deleteMailbox("Parent")).rejects.toThrow(
+      /mailboxes inside it/,
+    )
+
+    expect(await mail.deleteMailbox("Parent/Child")).toMatchObject({
+      id: "Parent/Child",
+    })
+    expect(boxes.has("Parent/Child")).toBe(false)
+    expect(imap.calls.filter((call) => call.startsWith("delete"))).toEqual([
+      "delete Parent/Child",
+    ])
+  })
+})
+
+describe("searching every mailbox", () => {
+  it("merges the newest from each, leaving out Trash, Junk and folders that hold none", async () => {
+    const boxes = world()
+    boxes.get("Archive/2026")!.messages.push({
+      ...boxes.get("INBOX")!.messages[0]!,
+      uid: 1,
+      internalDate: new Date("2026-10-02T12:00:00Z"),
+      envelope: { subject: "Archived" },
+    })
+    boxes.get("Trash")!.messages.push({
+      ...boxes.get("INBOX")!.messages[0]!,
+      uid: 1,
+      internalDate: new Date("2026-10-05T12:00:00Z"),
+      envelope: { subject: "Binned" },
+    })
+    boxes.set("Archive", {
+      uidValidity: 11n,
+      uidNext: 1,
+      noselect: true,
+      messages: [],
+    })
+    const { mail, imap } = setup({ boxes })
+    const found = await mail.searchEmails({
+      allMailboxes: true,
+      offset: 0,
+      limit: 3,
+    })
+
+    expect(found.emails.map((email) => email.subject)).toEqual([
+      "Long",
+      "Archived",
+      "Newsletter",
+    ])
+    expect(found.total).toBe(4)
+    expect(imap.calls.filter((call) => call.startsWith("lock"))).toEqual([
+      "lock INBOX read-only",
+      "lock Sent read-only",
+      "lock Archive/2026 read-only",
+    ])
+
+    await expect(
+      mail.searchEmails({ allMailboxes: true, offset: 490, limit: 20 }),
+    ).rejects.toThrow(/pages only to 500/)
+  })
+
+  it("searches only All Mail where the server has one, so no email comes twice", async () => {
+    const boxes = world()
+    boxes.set("[Gmail]/All Mail", {
+      uidValidity: 12n,
+      uidNext: 2,
+      specialUse: "\\All",
+      messages: [{ ...boxes.get("INBOX")!.messages[0]!, uid: 1 }],
+    })
+    const { mail, imap } = setup({ boxes })
+    const found = await mail.searchEmails({
+      allMailboxes: true,
+      offset: 0,
+      limit: 10,
+    })
+
+    expect(found.total).toBe(1)
+    expect(imap.calls.filter((call) => call.startsWith("lock"))).toEqual([
+      "lock [Gmail]/All Mail read-only",
+    ])
   })
 })
 
