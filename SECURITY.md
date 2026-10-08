@@ -228,11 +228,8 @@ Not defended against:
 - **Pages the browser opens.** A page is someone else's text, and an
   assistant reading it can be steered by it, while it acts as you where the
   browser is signed in. Keep its tools at Ask you first where a click could
-  cost something. In the Docker image Chromium runs without its own sandbox
-  (an unprivileged container gives it none to use), so a flaw in Chromium
-  that a page exploits runs as PCP's user in the container, with PCP's data
-  directory and a network without PCP's proxy in reach; keep the image
-  current. Chromium installed from the Browser page (the desktop app, a
+  cost something. In the Docker image Chromium has no sandbox of its own
+  (see the next entries). Chromium installed from the Browser page (the desktop app, a
   checkout) comes from the addresses Playwright pins for it, over HTTPS,
   with no checksum of PCP's own.
 - **Programs an assistant runs.** A token you let run code can call every
@@ -248,6 +245,25 @@ Not defended against:
   system and no capabilities but changing user, as a user that cannot reach
   PCP's socket; a flaw in the kernel or the container runtime would be what
   let it out, so keep the host updated too.
+- **Chromium without its own sandbox.** In the Docker image Chromium runs
+  without the sandbox it normally puts around its page-rendering processes
+  (`PCP_BROWSER_SANDBOX=off` in the Dockerfile: an unprivileged container has
+  no user namespaces to build one from). Elsewhere PCP tries the sandbox and,
+  where the machine cannot give one (running as root, an unprivileged
+  container), starts Chromium without it and says nothing. So a flaw in
+  Chromium that a page exploits is not contained by Chromium: it runs as
+  PCP's own user in PCP's container, with the data directory (the vault's
+  ciphertext, the request log, host settings, TLS keys) and the container's
+  network, loopback and PCP's own port included, in reach. PCP's proxy and
+  address checks do not hold against code running in the renderer. What
+  limits it: the browser is off until you add it on the Browser page, and
+  Chromium starts only when a page is opened (by an assistant you let use
+  its tools, by you, or by web fetch reading past a Cloudflare check when the
+  browser is added), and stops after fifteen minutes idle. Keep the image
+  current (its Chromium is the version its Playwright pins, so it moves with
+  the image), do not add the browser if you do not use it, and keep its
+  tools at Ask you first, with sites you do not know blocked or asked
+  about.
 - **Site names on disk.** The sites a token reached, with when, are stored
   unencrypted, like server addresses, so the token's page can list them. A
   copy of the disk shows them.
@@ -292,6 +308,25 @@ Not defended against:
   your DNS name. With HTTPS on, the certificate's private key and the ACME
   account key are files under `tls/` in the data directory (mode 0600). Treat
   backups of the data volume accordingly.
+- A pcp.gg connection key is stored the same way: **unencrypted** in the
+  `host_setting` table (`pcpgg.config`), because PCP stays connected while
+  nobody is signed in. Whoever holds it can connect as your name and take it
+  over: pcp.gg sends them the name's traffic instead of PCP. It is never in an
+  export and never sent back to the browser, but it is in the data
+  directory and in any copy of it, like the dynamic DNS token above.
+- What pcp.gg can and cannot see. TLS for a pcp.gg name ends in your PCP, with
+  a certificate PCP gets for it from Let's Encrypt, so the relay carries
+  bytes it cannot read: it sees the name, sizes, timing and the clients'
+  addresses, not the requests or the answers. But pcp.gg runs the DNS zone
+  for the name and receives all of its traffic, so it could itself obtain a
+  certificate for your name (Let's Encrypt validates by DNS or by the
+  traffic pcp.gg carries) and stand in for PCP without your knowing. Using
+  pcp.gg means trusting it not to. If you do not extend that trust, use your
+  own name and router, or a proxy of your own.
+- Every client reaches PCP through the pcp.gg tunnel from `127.0.0.1`, so
+  PCP's limit on sign-in tries per address (above) counts all of them as one:
+  someone guessing at your name spends the same tries as you do. The 60 tries
+  for the whole instance hold either way.
 - PCP's own HTTPS listeners face the internet directly and overwrite any
   `X-Forwarded-*` header a client sends.
 - The desktop app's own port (3000) answers this computer only

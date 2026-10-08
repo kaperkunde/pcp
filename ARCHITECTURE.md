@@ -1006,7 +1006,10 @@ as it starts. It starts without `--enable-automation`, with
 with service workers blocked (one could answer a navigation without the
 network, around the gate). Chromium's own sandbox is used where the machine
 gives one and dropped where it cannot (root, or an unprivileged container;
-the Docker image says so with `PCP_BROWSER_SANDBOX=off`).
+the Docker image says so with `PCP_BROWSER_SANDBOX=off`). Without it a
+renderer exploit runs as PCP's user with the data directory in reach, and the
+automatic fallback tells no one; SECURITY.md lists that as not defended
+against.
 
 **The virtual display** (`display.ts`). In the container image
 (`PCP_CONTAINER=1`), or on another Linux machine with
