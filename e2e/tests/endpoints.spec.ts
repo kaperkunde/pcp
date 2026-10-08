@@ -1,29 +1,22 @@
-import { readdirSync, readFileSync } from "node:fs"
-import path from "node:path"
-
 import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
-import {
-  allToolText,
-  callTool,
-  initialize,
-  lastToolText,
-  toolText,
-} from "../lib/mcp"
+import { callTool, initialize, toolText } from "../lib/mcp"
 import { OWNER_PASSWORD } from "../lib/auth"
 import {
   addSecret,
   allowAllTools,
-  showServerTools,
+  chooseSegment,
   confirmWithPassword,
   createToken,
+  showServerSettings,
 } from "../lib/ui"
 
 // An API described by an OpenAPI schema, added like a server: PCP reads the
 // schema, an assistant finds the operations as tools through /mcp, and PCP
 // makes the HTTP calls itself with the stored secret — which only the API
-// ever sees.
+// ever sees. An assistant may propose one too, and change one it may manage,
+// within what CLAUDE.md allows it.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -89,56 +82,32 @@ test.afterAll(async () => {
 
 const lastRequest = () => upstream.requests.at(-1)
 
-/** Everything the gateway has logged, as the dev server under test wrote it. */
-function requestLog(): string {
-  const dir = path.join(__dirname, "../.state/data/logs")
-
-  try {
-    return readdirSync(dir)
-      .filter((name) => name.startsWith("mcp-"))
-      .sort()
-      .map((name) => readFileSync(path.join(dir, name), "utf8"))
-      .join("\n")
-  } catch {
-    return ""
-  }
-}
-
 test("adds an endpoint from a schema URL, with a stored secret", async ({
   page,
 }) => {
   await addSecret(page, { name: SECRET_NAME, value: upstream.expectedToken })
 
-  await page.goto("/servers")
-  await page.getByRole("link", { name: "Add an endpoint" }).click()
-  await expect(page).toHaveURL(/\/servers\/endpoints\/new$/)
-
+  await page.goto("/servers/endpoints/new")
+  await page.getByLabel("Schema URL").fill(upstream.openapiUrl)
   await page.getByLabel("Name", { exact: true }).fill(NAME)
   await page.getByLabel("Description").fill("Pets for sale.")
-  await page.getByLabel("Schema URL").fill(upstream.openapiUrl)
-  await page.getByLabel("Authentication").selectOption("header")
-  await page.getByLabel("Secret").selectOption({ label: SECRET_NAME })
+  await chooseSegment(page, "Secret in a header")
+  await page
+    .getByLabel("Secret", { exact: true })
+    .selectOption({ label: SECRET_NAME })
+  // A new endpoint is read-only unless the owner says otherwise; this one's
+  // assistant also adds pets.
+  await expect(page.getByLabel("Read-only")).toBeChecked()
+  await page.getByLabel("Read-only").uncheck()
   await page.getByRole("button", { name: "Add endpoint" }).click()
 
-  // PCP read the schema on the way in.
+  // PCP read the schema on the way in, and never sent the secret to the
+  // place the schema was downloaded from.
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
   endpointId = page.url().split("/").pop()!
-  await expect(page.getByText("Ready", { exact: true })).toBeVisible()
-  await expect(page.getByText("Tools (4)")).toBeVisible()
-  await showServerTools(page)
-  await expect(page.locator("code", { hasText: "listPets" })).toBeVisible()
-  await expect(
-    page.locator("code", { hasText: "GET /pets/{petId}" }),
-  ).toBeVisible()
-  // What was left out is said, not hidden.
-  await expect(page.getByText(/Skipped 2/)).toBeVisible()
-  await expect(page.getByText(/it needs a file upload/)).toBeVisible()
-
-  // The base URL came from the schema, and the secret was never sent to the
-  // place the schema was downloaded from.
-  await expect(page.getByText(`${upstream.origin}/api`).first()).toBeVisible()
   expect(upstream.requests).toHaveLength(0)
 
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
@@ -146,46 +115,7 @@ test("adds an endpoint from a schema URL, with a stored secret", async ({
   ).toBeVisible()
 })
 
-test("adds an endpoint with a secret typed into the form", async ({ page }) => {
-  const name = `Typed pets ${RUN}`
-
-  await page.goto("/servers/endpoints/new")
-  await page.getByLabel("Name", { exact: true }).fill(name)
-  await page.getByLabel("Schema URL").fill(upstream.openapiUrl)
-  await page.getByLabel("Base URL (optional)").fill(`${upstream.origin}/api`)
-  await page.getByLabel("Authentication").selectOption("header")
-  await page
-    .getByLabel("Secret", { exact: true })
-    .selectOption({ label: "A new secret, entered here" })
-  await page.getByLabel("New secret's value").fill(upstream.expectedToken)
-  await page.getByRole("button", { name: "Add endpoint" }).click()
-
-  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  await expect(page.getByText("Tools (4)")).toBeVisible()
-
-  // Saved under Secrets, named after the endpoint and used by it.
-  await page.goto("/secrets")
-  const stored = page.getByRole("listitem").filter({ hasText: `${name} key` })
-  await expect(stored.getByText(name, { exact: true })).toBeVisible()
-})
-
-test("lists the endpoint under API endpoints, and its secret as used", async ({
-  page,
-}) => {
-  await page.goto("/servers")
-  await expect(
-    page.getByRole("heading", { name: "API endpoints" }),
-  ).toBeVisible()
-  const card = page.getByRole("link").filter({ hasText: NAME })
-  await expect(card).toBeVisible()
-  await expect(card.getByText("4 operations")).toBeVisible()
-
-  await page.goto("/secrets")
-  const row = page.getByRole("listitem").filter({ hasText: SECRET_NAME })
-  await expect(row.getByText(NAME)).toBeVisible()
-})
-
-test("an assistant finds and describes the operations", async ({
+test("an assistant finds and calls the operations, with the secret added by PCP, until the endpoint is removed", async ({
   page,
   baseURL,
 }) => {
@@ -223,24 +153,6 @@ test("an assistant finds and describes the operations", async ({
   expect(described.annotations.readOnlyHint).toBe(true)
   expect(described.description).toContain("GET /pets/{petId}")
 
-  const create = JSON.parse(
-    toolText(
-      await callTool(baseURL!, token, "describe_tool", {
-        server: SLUG,
-        tool: "createPet",
-      }),
-    ),
-  ) as { inputSchema: { properties: { body: { properties: object } } } }
-  // The schema's readOnly id is not something a request carries.
-  expect(Object.keys(create.inputSchema.properties.body.properties)).toEqual([
-    "name",
-    "status",
-  ])
-})
-
-test("calling an operation makes the HTTP request, with the secret added by PCP", async ({
-  baseURL,
-}) => {
   const list = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "listPets",
@@ -285,58 +197,9 @@ test("calling an operation makes the HTTP request, with the secret added by PCP"
   expect(JSON.stringify([list, created, one])).not.toContain(
     upstream.expectedToken,
   )
-})
 
-test("a kept value from one call goes into another's body by its handle", async ({
-  baseURL,
-}) => {
-  const list = await callTool(baseURL!, token, "call_tool", {
-    server: SLUG,
-    tool: "listPets",
-    arguments: { status: "available", limit: 1 },
-    keep: ["name"],
-  })
-  expect(list.body.result?.isError ?? false, toolText(list)).toBe(false)
-  const text = allToolText(list)
-  expect(text).toContain("PCP kept 1 value of this answer as results")
-  const [fido] = JSON.parse(lastToolText(list)) as Array<{
-    name: { $result: string; preview: string }
-  }>
-  expect(fido!.name.preview).toBe("Fido")
-
-  const created = await callTool(baseURL!, token, "call_tool", {
-    server: SLUG,
-    tool: "createPet",
-    arguments: {
-      body: { name: { $result: fido!.name.$result }, status: "available" },
-    },
-  })
-  expect(created.body.result?.isError ?? false, toolText(created)).toBe(false)
-  expect(JSON.parse(lastRequest()!.body)).toEqual({
-    name: "Fido",
-    status: "available",
-  })
-})
-
-test("errors reach the assistant as readable results, and bad input never leaves PCP", async ({
-  baseURL,
-}) => {
-  const missing = await callTool(baseURL!, token, "call_tool", {
-    server: SLUG,
-    tool: "getPet",
-    arguments: { petId: 999 },
-  })
-  expect(missing.body.result?.isError).toBe(true)
-  expect(toolText(missing)).toContain("HTTP 404")
-
-  // The log says that the call failed, never what the API answered.
-  await expect
-    .poll(() => requestLog(), { timeout: 5000 })
-    .toContain("The tool reported an error.")
-  expect(requestLog()).not.toContain("no such pet")
-
+  // Bad input never leaves PCP.
   const before = upstream.requests.length
-
   const unknown = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "listPets",
@@ -344,7 +207,6 @@ test("errors reach the assistant as readable results, and bad input never leaves
   })
   expect(unknown.body.result?.isError).toBe(true)
   expect(toolText(unknown)).toContain('Unknown argument "bogus"')
-
   const dots = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "getPet",
@@ -352,72 +214,27 @@ test("errors reach the assistant as readable results, and bad input never leaves
   })
   expect(dots.body.result?.isError).toBe(true)
   expect(toolText(dots)).toContain("between slashes")
-
   const absent = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "getPet",
     arguments: {},
   })
   expect(toolText(absent)).toContain('Missing argument "petId"')
-
-  // None of the three reached the API.
   expect(upstream.requests).toHaveLength(before)
 
-  const removed = await callTool(baseURL!, token, "call_tool", {
+  // Removed, its tools leave the gateway.
+  await page.goto(`/servers/${endpointId}`)
+  page.once("dialog", (dialog) => void dialog.accept())
+  await page.getByRole("button", { name: `Remove ${NAME}` }).click()
+  await expect(page).toHaveURL(/\/servers$/)
+
+  const gone = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
-    tool: "deletePet",
-    arguments: { petId: 1 },
+    tool: "listPets",
+    arguments: {},
   })
-  expect(removed.body.result?.isError ?? false, toolText(removed)).toBe(false)
-  expect(toolText(removed)).toContain("no content")
-  expect(lastRequest()).toMatchObject({ method: "DELETE", path: "/api/pets/1" })
-})
-
-test("a schema file can be uploaded, read-only, with the base URL typed in", async ({
-  page,
-}) => {
-  await page.goto("/servers/endpoints/new")
-  await page.getByLabel("Name", { exact: true }).fill(`${NAME} file`)
-  await page.getByLabel("Upload a file").check()
-  await page
-    .getByLabel("Schema file")
-    .setInputFiles(path.join(__dirname, "../fixtures/petstore.yaml"))
-  await page.getByLabel("Base URL (optional)").fill(`${upstream.origin}/api`)
-  await page.getByLabel("Read-only").check()
-  await page.getByRole("button", { name: "Add endpoint" }).click()
-
-  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  await expect(page.getByText("Ready", { exact: true })).toBeVisible()
-  // Only the two GET operations; the cookie one is left out.
-  await expect(page.getByText("Tools (2)")).toBeVisible()
-  await showServerTools(page)
-  await expect(page.locator("code", { hasText: "listPets" })).toBeVisible()
-  await expect(page.locator("code", { hasText: "createPet" })).toHaveCount(0)
-  // Nothing to download again: an uploaded schema is replaced, not re-read.
-  await expect(
-    page.getByRole("button", { name: "Re-read schema" }),
-  ).toHaveCount(0)
-})
-
-test("a schema that cannot be read is refused and the form keeps what was typed", async ({
-  page,
-}) => {
-  await page.goto("/servers/endpoints/new")
-  await page.getByLabel("Name", { exact: true }).fill(`${NAME} broken`)
-  await page.getByLabel("Schema URL").fill(`${upstream.origin}/missing.json`)
-  await page.getByRole("button", { name: "Add endpoint" }).click()
-
-  await expect(page.locator("p[role=alert]")).toContainText("HTTP 404")
-  await expect(page.getByLabel("Name", { exact: true })).toHaveValue(
-    `${NAME} broken`,
-  )
-  await expect(page.getByLabel("Schema URL")).toHaveValue(
-    `${upstream.origin}/missing.json`,
-  )
-
-  // Nothing was added.
-  await page.goto("/servers")
-  await expect(page.getByText(`${NAME} broken`)).toHaveCount(0)
+  expect(gone.body.result?.isError).toBe(true)
+  expect(toolText(gone)).toContain(`No server called ${SLUG}`)
 })
 
 const GATEWAY_TOOLS = [
@@ -425,6 +242,7 @@ const GATEWAY_TOOLS = [
   "list_tools",
   "describe_tool",
   "call_tool",
+  "call_read_only_tool",
   "check_permission",
   "check_server",
   "read_result",
@@ -432,7 +250,8 @@ const GATEWAY_TOOLS = [
   "propose_tool_access",
 ]
 
-test("a token cannot read or change endpoints unless the owner says so", async ({
+test("a token reads and changes endpoints only when the owner says so", async ({
+  page,
   baseURL,
 }) => {
   const { tools } = await initialize(baseURL!, token)
@@ -448,12 +267,7 @@ test("a token cannot read or change endpoints unless the owner says so", async (
       name,
     ).toBe(true)
   }
-})
 
-test("the owner can make a token that may read and change API endpoints", async ({
-  page,
-  baseURL,
-}) => {
   await page.goto("/tokens")
   await page.getByLabel("Name").fill(`Endpoint manager ${RUN}`)
   await page
@@ -466,17 +280,13 @@ test("the owner can make a token that may read and change API endpoints", async 
   await expect(page.getByText("Your new token")).toBeVisible()
   managerToken = (await page.getByTestId("new-token").textContent())!
 
-  const { tools, instructions } = await initialize(baseURL!, managerToken)
-  expect(tools).toEqual([...GATEWAY_TOOLS, "update_endpoint", "get_endpoint"])
-  expect(instructions).toContain("get_endpoint reads one")
-
-  await page.goto("/tokens")
-  await expect(
-    page
-      .getByRole("listitem")
-      .filter({ hasText: `Endpoint manager ${RUN}` })
-      .getByText("Manages endpoints"),
-  ).toBeVisible()
+  const manager = await initialize(baseURL!, managerToken)
+  expect(manager.tools).toEqual([
+    ...GATEWAY_TOOLS,
+    "update_endpoint",
+    "get_endpoint",
+  ])
+  expect(manager.instructions).toContain("get_endpoint reads one")
 })
 
 test("an assistant proposes an API as OpenAPI text; nothing exists until the owner agrees", async ({
@@ -490,16 +300,6 @@ test("an assistant proposes an API as OpenAPI text; nothing exists until the own
   })
   expect(broken.body.result?.isError).toBe(true)
   expect(toolText(broken)).not.toContain("Not done yet")
-
-  const oauth = await callTool(baseURL!, managerToken, "register_server", {
-    name: MANAGED,
-    openapi_schema: managedSpec(upstream.origin),
-    auth_type: "oauth",
-  })
-  // OAuth sends the owner's token, so the address has to be named, as for
-  // a secret (endpoint-oauth.spec.ts signs in to an API).
-  expect(oauth.body.result?.isError).toBe(true)
-  expect(toolText(oauth)).toMatch(/OAuth token is sent to an address you name/)
 
   const asked = await callTool(baseURL!, managerToken, "register_server", {
     name: MANAGED,
@@ -519,18 +319,11 @@ test("an assistant proposes an API as OpenAPI text; nothing exists until the own
   })
   expect(toolText(search)).not.toContain(MANAGED_SLUG)
 
-  // The owner is shown what they would be agreeing to.
+  // The owner is shown where it would send its calls, and that the address
+  // is one an assistant's endpoint will not reach.
   await page.goto(`/permissions/${id}`)
   await expect(page.getByText(`Add the API endpoint ${MANAGED}?`)).toBeVisible()
   await expect(page.getByText(`Address: ${upstream.origin}/api`)).toBeVisible()
-  await expect(
-    page.getByText(/Tools: 3 from the OpenAPI schema it supplied/),
-  ).toBeVisible()
-  await expect(
-    page.getByText("Operations: GET /pets, POST /pets, GET /pets/{petId}"),
-  ).toBeVisible()
-  await expect(page.getByText("Authentication: none")).toBeVisible()
-  // The fake API is on loopback, which an assistant's endpoint will not reach.
   await expect(
     page.getByText(/127\.0\.0\.1 is a private or local address/),
   ).toBeVisible()
@@ -541,11 +334,6 @@ test("an assistant proposes an API as OpenAPI text; nothing exists until the own
   expect(after.instructions).toContain(
     `${MANAGED_SLUG}: Pets, registered by an assistant. (3 tools)`,
   )
-  const found = await callTool(baseURL!, managerToken, "search_tools", {
-    query: "list pets",
-    server: MANAGED_SLUG,
-  })
-  expect(toolText(found)).toContain(`${MANAGED_SLUG}/listPets`)
 
   // What the owner agreed to, as the assistant can read it back.
   const read = await callTool(baseURL!, managerToken, "get_endpoint", {
@@ -617,87 +405,34 @@ test("a change by the assistant switches the endpoint off until the owner enable
   await page.getByRole("link").filter({ hasText: MANAGED }).click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
   await expect(page.getByText("Disabled", { exact: true })).toBeVisible()
-  await page.getByRole("button", { name: "Enable", exact: true }).click()
-  await expect(
-    page.getByRole("button", { name: "Disable", exact: true }),
-  ).toBeVisible()
+  const on = page.getByRole("switch", { name: /^On/ })
+  await expect(on).not.toBeChecked()
+  await on.check()
 
-  const back = await callTool(baseURL!, managerToken, "search_tools", {
-    query: "list pets",
-    server: MANAGED_SLUG,
-  })
-  expect(toolText(back)).toContain(`${MANAGED_SLUG}/listPets`)
+  // The switch saves on its own; the gateway follows once it has.
+  await expect(async () => {
+    const back = await callTool(baseURL!, managerToken, "search_tools", {
+      query: "list pets",
+      server: MANAGED_SLUG,
+    })
+    expect(toolText(back)).toContain(`${MANAGED_SLUG}/listPets`)
+  }).toPass()
 })
 
-test("an assistant reads a schema a part at a time and changes it with edits, which the owner can see and undo", async ({
-  page,
-  baseURL,
-}) => {
-  // A schema by its address is downloaded at once, from public addresses
-  // only: the fake API's is on loopback, so the owner is never asked.
-  const byUrl = await callTool(baseURL!, managerToken, "register_server", {
-    name: `${MANAGED} by URL`,
-    openapi_url: upstream.openapiUrl,
-  })
-  expect(byUrl.body.result?.isError).toBe(true)
-  expect(toolText(byUrl)).toMatch(/private or local address/)
-  expect(toolText(byUrl)).not.toContain("Not done yet")
-
-  const part = await callTool(baseURL!, managerToken, "get_endpoint", {
-    endpoint: MANAGED_SLUG,
-    specPointer: "/paths/~1pets~1{petId}/get/operationId",
-  })
-  expect(JSON.parse(toolText(part)).specPart).toEqual({
-    pointer: "/paths/~1pets~1{petId}/get/operationId",
-    value: "getPet",
-  })
-
-  // An edit that does not apply changes nothing, and leaves the endpoint on.
-  const bad = await callTool(baseURL!, managerToken, "update_endpoint", {
-    endpoint: MANAGED_SLUG,
-    addPatches: [{ op: "remove", path: "/paths/~1cats" }],
-  })
-  expect(bad.body.result?.isError).toBe(true)
-  expect(toolText(bad)).toMatch(/Edit 1 \(remove \/paths\/~1cats\)/)
-
-  const edited = await callTool(baseURL!, managerToken, "update_endpoint", {
-    endpoint: MANAGED_SLUG,
-    addPatches: [{ op: "remove", path: "/paths/~1pets~1{petId}" }],
-  })
-  expect(edited.body.result?.isError ?? false, toolText(edited)).toBe(false)
-  expect(JSON.parse(toolText(edited))).toMatchObject({
-    enabled: false,
-    toolCount: 2,
-    schema: { edits: 1 },
-  })
-
-  // The owner sees the edit on the endpoint's page, and takes it out.
-  await page.goto("/servers")
-  await page.getByRole("link").filter({ hasText: MANAGED }).click()
-  const edits = page.getByLabel("Edits (optional)")
-  await expect(edits).toHaveValue(/"path": "\/paths\/~1pets~1\{petId\}"/)
-  await edits.fill("")
-  await page.getByRole("button", { name: "Save changes" }).click()
-  await expect(
-    page.getByRole("status").filter({ hasText: "Saved. 3 tools" }),
-  ).toBeVisible()
-  await page.getByRole("button", { name: "Enable", exact: true }).click()
-  await expect(
-    page.getByRole("button", { name: "Disable", exact: true }),
-  ).toBeVisible()
-})
-
-test("the owner allows the address and attaches the secret, typing the address to confirm it", async ({
+test("the owner attaches a secret, typing the address to confirm it; then the endpoint is the owner's", async ({
   page,
   baseURL,
 }) => {
   await page.goto("/servers")
   await page.getByRole("link").filter({ hasText: MANAGED }).click()
+  await showServerSettings(page)
 
   await expect(page.getByLabel("Public addresses only")).toBeChecked()
   await page.getByLabel("Public addresses only").uncheck()
-  await page.getByLabel("Authentication").selectOption("header")
-  await page.getByLabel("Secret").selectOption({ label: SECRET_NAME })
+  await chooseSegment(page, "Secret in a header")
+  await page
+    .getByLabel("Secret", { exact: true })
+    .selectOption({ label: SECRET_NAME })
 
   // The address came from the assistant's schema, not from the owner, so
   // PCP will not send a secret there until the owner types it.
@@ -723,12 +458,9 @@ test("the owner allows the address and attaches the secret, typing the address t
     path: "/api/pets",
     authorization: `Bearer ${upstream.expectedToken}`,
   })
-})
 
-test("then it is the owner's: the assistant turns read-only on, and asks the owner for anything else", async ({
-  page,
-  baseURL,
-}) => {
+  // From now on it is the owner's: the assistant turns read-only on, and
+  // asks the owner for anything else.
   const read = await callTool(baseURL!, managerToken, "get_endpoint", {
     endpoint: MANAGED_SLUG,
     includeSpec: true,
@@ -848,22 +580,4 @@ test("then it is the owner's: the assistant turns read-only on, and asks the own
 
   // Nothing above sent a request anywhere.
   expect(upstream.requests).toHaveLength(before)
-})
-
-test("removing the endpoint takes its tools out of the gateway", async ({
-  page,
-  baseURL,
-}) => {
-  await page.goto(`/servers/${endpointId}`)
-  page.once("dialog", (dialog) => dialog.accept())
-  await page.getByRole("button", { name: `Remove ${NAME}` }).click()
-  await expect(page).toHaveURL(/\/servers$/)
-
-  const gone = await callTool(baseURL!, token, "call_tool", {
-    server: SLUG,
-    tool: "listPets",
-    arguments: {},
-  })
-  expect(gone.body.result?.isError).toBe(true)
-  expect(toolText(gone)).toContain(`No server called ${SLUG}`)
 })

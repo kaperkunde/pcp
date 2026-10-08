@@ -257,3 +257,20 @@ export async function addServerFromMenu(page: Page, kind: string) {
   await page.getByRole("button", { name: "Add", exact: true }).click()
   await page.getByRole("menuitem", { name: new RegExp(`^${kind}`) }).click()
 }
+
+/** Chooses one option of a SegmentedControl by its label. */
+export async function chooseSegment(page: Page, label: string) {
+  const radio = page.getByRole("radio", { name: label, exact: true })
+  await radio.check()
+  await expect(radio).toBeChecked()
+}
+
+/** Opens "More options" on an add form. */
+export async function openMoreOptions(page: Page) {
+  const more = page.locator("details", {
+    has: page.locator("summary", { hasText: /^More options/ }),
+  })
+  if ((await more.getAttribute("open")) === null) {
+    await more.locator("summary").click()
+  }
+}

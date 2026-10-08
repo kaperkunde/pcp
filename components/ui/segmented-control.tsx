@@ -59,7 +59,9 @@ function SegmentedControl<T extends string>({
               id={optionId}
               name={name}
               value={option.value}
-              className="peer sr-only"
+              // Laid over its label, invisible: a click lands on the radio
+              // itself, as it would on a plain one (and a test's check()).
+              className="peer absolute inset-0 z-10 m-0 size-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
               {...(value !== undefined
                 ? { checked: value === option.value }
                 : { defaultChecked: defaultValue === option.value })}
