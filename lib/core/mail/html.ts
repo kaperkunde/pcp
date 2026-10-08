@@ -213,7 +213,7 @@ export function htmlToText(
             n < out.length && shown.length < LINK_LOOKAHEAD;
             n++
           ) {
-            shown += out[n]
+            shown += out[n]!.slice(0, LINK_LOOKAHEAD - shown.length)
           }
 
           if (!shown.includes(href.replace(/^mailto:/i, ""))) {

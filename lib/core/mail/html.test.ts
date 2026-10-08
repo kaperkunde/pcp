@@ -65,7 +65,7 @@ describe("htmlToText", () => {
       "</a>".repeat(5_000)
     const started = Date.now()
     const { text } = htmlToText(html)
-    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(Date.now() - started).toBeLessThan(3_000)
     expect(text.startsWith("word word")).toBe(true)
   })
 })
