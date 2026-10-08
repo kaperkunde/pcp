@@ -179,7 +179,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
 | `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits  |
-| `lib/core/browser/`                  | The browser: Chromium, its proxy, profile, tabs, tools        |
+| `lib/core/browser/`                  | Browser: Chromium, proxy, tabs, tools; web_fetch past a check |
 | `lib/core/code/`                     | run_code: QuickJS, the bridge, the sandbox executor, limits   |
 | `sandbox/`                           | The sandbox container: its runner and the `pcp` command       |
 | `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input     |

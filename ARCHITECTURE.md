@@ -670,9 +670,43 @@ at a time (20,000 characters by default, 50,000 at most) after a few lines
 saying the final address, the status, the type, the title and where the
 next part starts. An error status is an error result with the page in it.
 
+**A site that checks its visitors.** Cloudflare can answer with a check
+instead of the page ("Just a moment…", a Turnstile), marked with the response
+header `cf-mitigated: challenge` on any status, usually 403 or 503
+(`fetch/challenge.ts`). A plain request whose answer carries it says so in its
+text: "Cloudflare is asking this site's visitors to prove they are human
+before it shows the page." For a GET, when the vault has the browser added and
+enabled and Chromium is found, PCP then reads the page again through the
+browser (`browser/solve.ts`). The read happens in a second browser context
+of its own, beside the vault's: it starts from none of the vault's sign-ins
+and is never saved, because the sign-ins are never used for a web_fetch. A
+fetch keeps no cookie and reads no secret, and a page read with the owner's
+sign-ins would show an assistant what only the owner can see, under a level
+given for a fetch. The context may open that one site only; a redirect to
+another site is reported as web_fetch reports one, with where it points, so
+that site gets its own decision. The token's own private-address line decides
+private addresses for that site, as for the plain request, and the token's
+decision for the site comes first: the browser only reads again what the
+token was already allowed to fetch. The read waits up to twenty seconds for a
+check that passes on its own and is bounded by 45 seconds in all, with at
+most two such pages per vault at once. They are not tabs: nobody lists,
+watches or drives them. The answer has web_fetch's usual format, with a Type
+line saying the page was read through PCP's browser, after the site's check.
+A site whose check passed is read through the browser first for thirty
+minutes, per vault and in memory only: what passed is a bot check, not a
+sign-in, and a restart forgets it. When the check does not pass, or there is
+no browser, the answer says so and adds one hint: to open the site with
+`navigate` and call `hand_over` (when the token reaches the browser), that
+the owner can let the token use the browser, or that the owner can add the
+browser on PCP's Browser page. Nothing here asks the owner, and there is no
+new kind of permission request. It needs nothing more than the browser: the
+container image and the desktop app run it as they run any page, with no
+second container.
+
 **Bounded** (`fetch/limits.ts`). Thirty seconds per request with its
 redirects, 2 MB of an answer read, a thousand method and site lines per
-vault, and 120 requests per token per ten minutes, asked about or not.
+vault, and 120 requests per token per ten minutes, asked about or not. The
+second read of a page behind a check has limits of its own (see Browser).
 
 The sites a token reached are on its page and in `web_fetch_rule`, in the
 clear like server addresses, and never in the request log: the gateway logs
@@ -777,7 +811,8 @@ proposed for and called like any server, and a long snapshot is kept for
 owner) and closed after fifteen minutes with no tool call, no input and
 nobody watching. The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
-Chromium runs with one in-memory context: no profile is written to disk.
+Chromium runs with one in-memory context for the vault (and one more for
+each page read for web_fetch, below): no profile is written to disk.
 Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
 private temporary folder of its own, removed once it has closed: its crash
 reporter keeps its database there, and without a folder it can write to
@@ -788,9 +823,25 @@ as it starts. It starts without `--enable-automation`, with
 with service workers blocked (one could answer a navigation without the
 network, around the gate). Chromium's own sandbox is used where the machine
 gives one and dropped where it cannot (root, or an unprivileged container;
-the Docker image says so with `PCP_BROWSER_SANDBOX=off`). PCP adds no
-stealth beyond that: the strictest sites may still refuse a headless
-Chromium.
+the Docker image says so with `PCP_BROWSER_SANDBOX=off`).
+
+**Sites that check their visitors.** Every context tells pages of a 1920 by
+1080 screen and a window 100 px taller than the 1280 by 800 viewport, since
+headless would otherwise make both the viewport itself. It is the full
+Chromium in Chromium's new headless mode: PCP always passes the executable, so
+Playwright never picks its separate headless shell. `navigate` waits up to
+twenty seconds for a check that passes on its own (Cloudflare's, marked
+`cf-mitigated: challenge`). One that does not stays on the page. The answer
+leads with the sentence web_fetch uses for it and adds that the check did not
+pass on its own in this tab and that `hand_over` is how the owner passes it
+themselves; so does every later answer that reports the tab (after a click, a
+`back`, a snapshot). The assistant decides: nothing asks the owner
+automatically. A clearance cookie a passed check sets lands in the vault's
+profile, as any cookie does. PCP adds no stealth scripts and uses no patched
+Playwright, so some tells remain: WebGL is SwiftShader (software
+rendering), Playwright's automation protocol leaves traces a page can look
+for, and a server's datacenter address is not a person's at home. The
+strictest checks may still want a person, which is what `hand_over` is for.
 
 **The sign-ins** (`profile.ts`). The context starts from the vault's
 `browser_profile`: Playwright's storage state (cookies, local storage,
@@ -804,6 +855,9 @@ the browser. The idle close has no key and saves nothing, so what a page
 changed on its own since the last save is lost. Counts (sites, cookies,
 size) are kept in the clear for the page. An export carries the row as
 ciphertext; Forget all sites closes the browser unsaved and deletes it.
+Starting the browser for a page read for web_fetch loads the profile into the
+vault's own context as any start does; the read happens in a context of its
+own, which never touches the profile and is never saved.
 
 **Which pages open** (the gate in `runtime.ts`). A page's main frame loads
 nothing the gate has not passed: the DevTools protocol pauses each document
@@ -831,7 +885,10 @@ owner allows the call, `runCall` (told so by `executeCall`) opens the site
 for that tab as Allow once would, with no `browse` request after it. Only
 `navigate` and `tabs` ask about a site, and only for the address in their
 arguments, so the site is always one the owner saw. A blocked site stays
-blocked, and a hand-over during such a call is still asked.
+blocked, and a hand-over during such a call is still asked. A page read for
+web_fetch (see Web fetch) passes the gate for its one site only, the site the
+token was just allowed to fetch. It is not a tab: nobody lists, watches or
+drives it.
 
 **Which addresses it reaches** (`proxy.ts`). Every connection goes through
 a forward proxy on 127.0.0.1 (`--proxy-server`, with loopback not
@@ -917,7 +974,11 @@ carries it.
 the owner's together; thirty seconds per page load and ten per action; 300
 tool calls per token per ten minutes; four people watching a tab; and the
 owner's input in batches of at most 500 events, 200 batches per session in
-ten seconds.
+ten seconds. A check that may pass on its own is waited for twenty seconds
+(`CHALLENGE_WAIT_MS`). A page read for web_fetch takes 45 seconds at most
+(`SOLVE_TIMEOUT_MS`), two such pages per vault at once (`MAX_SOLVES`), and a
+site whose check passed is remembered for thirty minutes
+(`CLEARANCE_MEMORY_MS`).
 
 **Chromium on the machine** (`executable.ts`, `install.ts`).
 `PCP_BROWSER_EXECUTABLE`, then PCP's own install, then Playwright's own

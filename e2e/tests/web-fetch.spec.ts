@@ -1,9 +1,8 @@
 import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
-import { OWNER_PASSWORD } from "../lib/auth"
 import { callTool, initialize, toolText } from "../lib/mcp"
-import { confirmWithPassword, createToken } from "../lib/ui"
+import { createFetchingToken, createToken } from "../lib/ui"
 
 // Web fetch through the gateway: a token the owner lets fetch gets the
 // web_fetch tool and is told how; the first request to a site asks the
@@ -31,26 +30,6 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await upstream?.close()
 })
-
-async function createFetchingToken(
-  page: import("@playwright/test").Page,
-  name: string,
-): Promise<{ token: string; id: string }> {
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(name)
-  await page
-    .getByLabel("Let an assistant with this token fetch web pages")
-    .check()
-  await page.getByRole("button", { name: "Create token" }).click()
-  await confirmWithPassword(page, OWNER_PASSWORD)
-  await expect(page.getByText("Your new token")).toBeVisible()
-  await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
-
-  return {
-    token: (await page.getByTestId("new-token").textContent())!,
-    id: page.url().split("/").pop()!,
-  }
-}
 
 /** Picks a level in a select on the token page and waits for it to save. */
 async function choose(
