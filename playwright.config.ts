@@ -105,7 +105,8 @@ export default defineConfig({
       use: signedIn("gateway"),
     },
     {
-      // Connecting an OAuth upstream through the browser, then using it.
+      // The Servers page's Add menu, and an OAuth upstream added from it:
+      // connected through the browser, used, then disconnected.
       name: "oauth",
       testMatch: /(^|\/)oauth\.spec\.ts$/,
       dependencies: ["setup"],
@@ -232,11 +233,7 @@ export default defineConfig({
     {
       // The browser: added by the owner, its tools and instructions, a new
       // site asking first, refs to act on a page, a link to another site
-      // stopped, the live view with a click on it, hand_over on the
-      // request's page, a site behind a Cloudflare check (waited for when
-      // it passes on its own, left to hand_over when it does not, and read
-      // through the browser by web_fetch), and the sign-ins kept across a
-      // restart and forgotten.
+      // stopped, and the sign-ins kept across a restart and forgotten.
       name: "browser",
       testMatch: /browser\.spec\.ts/,
       dependencies: ["setup"],

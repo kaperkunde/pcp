@@ -1,31 +1,30 @@
 "use client"
 
-import { ChevronRight } from "lucide-react"
-import Link from "next/link"
 import {
   useActionState,
   useEffect,
   useId,
+  useOptimistic,
   useState,
   useTransition,
+  type ReactNode,
 } from "react"
 
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
-import { LocalDate } from "@/components/local-date"
+import { LocalDate, RelativeDate } from "@/components/local-date"
+import { PageHeader } from "@/components/page-header"
 import { ServerStatusBadge } from "@/components/server-status-badge"
+import { ServerTools, type ServerTool } from "@/components/server-tools"
 import { SubmitButton } from "@/components/submit-button"
-import { Button, buttonVariants } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Input, Textarea } from "@/components/ui/input"
+import { Button, buttonVariants } from "@/components/ui/button"
+import { Disclosure } from "@/components/ui/disclosure"
+import { IconTile, serverKindLabel } from "@/components/ui/icon-tile"
+import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
+import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
+import { SwitchRow } from "@/components/ui/switch"
 import {
   deleteServerAction,
   disconnectOAuthAction,
@@ -33,10 +32,8 @@ import {
   setOAuthClientAction,
   setServerEnabledAction,
   setSignInParamsAction,
-  setToolDescriptionAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
-import { showReplacedToolAction } from "@/lib/actions/wrappers"
 import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
 import type { OAuthConnection } from "@/lib/core/upstream"
 import { cn } from "@/lib/utils"
@@ -47,6 +44,7 @@ export type ServerDetailProps = {
     kind: ServerKind
     name: string
     slug: string
+    description: string
     url: string
     /** imap: where mail is sent; null when the account cannot send. */
     smtpUrl?: string | null
@@ -65,28 +63,28 @@ export type ServerDetailProps = {
     /** OAuth: what the sign-in adds to its address, as the owner set it. */
     oauthAuthorizeParams: string
   }
-  tools: Array<{
-    name: string
-    title: string | null
-    description: string
-    descriptionOverride: string | null
-    /** An API endpoint's tool: the request it makes. */
-    operation: { method: string; path: string } | null
-    /** Wrappers' tools that stand in for this one in search. */
-    replacedBy?: Array<{ id: string; name: string; tool: string }>
-  }>
+  tools: ServerTool[]
   notice: { kind: "ok" | "error"; message: string } | null
   /** Where OAuth servers send you back: what a provider's client lists. */
   redirectUrl: string
-  /** What the kind needs from you, shown under the status (SSH's keys). */
-  children?: React.ReactNode
+  /** The kind's settings form, folded under Advanced. */
+  settings: ReactNode
+  /** What the kind needs from you, shown after About (SSH's keys). */
+  children?: ReactNode
 }
 
+/**
+ * One server's page: its state and main action at the top, what needs the
+ * owner right under it, then About (description, sign-in, on/off), the
+ * kind's own section, its tools, everything set once under Advanced, and
+ * Remove last. DESIGN.md › What goes where.
+ */
 export function ServerDetail({
   server,
   tools,
   notice,
   redirectUrl,
+  settings,
   children,
 }: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
@@ -94,8 +92,11 @@ export function ServerDetail({
   const browser = server.kind === "browser"
   const wrapper = server.kind === "wrapper"
   const ssh = server.kind === "ssh"
+  const oauth = server.authType === "oauth"
+  const advancedId = useId()
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
+  const [enabled, setEnabled] = useOptimistic(server.enabled)
   // Kept here rather than in the form: saving moves the server on from
   // "needs a client", which removes the form, and the note should stay.
   const [clientState, saveClient] = useActionState<
@@ -109,305 +110,409 @@ export function ServerDetail({
     })
   }
 
+  /** Unfolds Advanced, and puts the cursor in one of its fields. */
+  function openAdvanced(field?: string) {
+    const details = document.getElementById(advancedId)
+    if (!(details instanceof HTMLDetailsElement)) return
+    details.open = true
+    const target = field
+      ? details.querySelector<HTMLElement>(`[name="${field}"]`)
+      : null
+    ;(target ?? details).scrollIntoView({ behavior: "smooth", block: "center" })
+    target?.focus({ preventScroll: true })
+  }
+
+  // An uploaded schema has nothing to download again; it is replaced
+  // under Advanced.
+  const canRefresh = !wrapper && (!endpoint || server.specSource === "url")
+  const refreshLabel = endpoint
+    ? "Re-read schema"
+    : mail
+      ? "Check account"
+      : ssh
+        ? "Check sign-in"
+        : browser
+          ? "Check browser"
+          : "Refresh tools"
+  const statusTrouble = server.statusMessage && server.status !== "ok"
+
   return (
-    <div className="flex flex-col gap-6">
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <CardTitle>Status</CardTitle>
-              <ServerStatusBadge
-                status={server.status}
-                connected={server.connected}
-                enabled={server.enabled}
-                kind={server.kind}
-                oauth={server.authType === "oauth"}
-              />
-              {(endpoint || mail) && server.readOnly ? (
-                <Badge variant="outline">Read-only</Badge>
-              ) : null}
-              {endpoint && server.publicOnly ? (
-                <Badge variant="outline">Public addresses only</Badge>
-              ) : null}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {server.authType === "oauth" ? (
-                <>
-                  {/* A plain anchor, not next/link: the route redirects to
-                      the server's sign-in page, which must be a full page
-                      load. */}
-                  <a
-                    href={`/api/servers/${server.id}/oauth/start`}
-                    className={buttonVariants({ size: "sm" })}
-                  >
-                    {server.connected ? "Reconnect" : "Connect"}
-                  </a>
-                  {server.connected ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={pending}
-                      onClick={() =>
-                        run(() => disconnectOAuthAction(server.id))
-                      }
-                    >
-                      Disconnect
-                    </Button>
-                  ) : null}
-                </>
-              ) : null}
-              {/* An uploaded schema has nothing to download again; replace
-                  it in the settings below. */}
-              {!wrapper && (!endpoint || server.specSource === "url") ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={pending}
-                  onClick={() => run(() => refreshToolsAction(server.id))}
-                >
-                  {pending
-                    ? endpoint
-                      ? "Reading…"
-                      : "Checking…"
-                    : endpoint
-                      ? "Re-read schema"
-                      : mail
-                        ? "Check account"
-                        : ssh
-                          ? "Check sign-in"
-                          : browser
-                            ? "Check browser"
-                            : "Refresh tools"}
-                </Button>
-              ) : null}
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={pending}
-                onClick={() =>
-                  run(() => setServerEnabledAction(server.id, !server.enabled))
-                }
-              >
-                {server.enabled ? "Disable" : "Enable"}
-              </Button>
-            </div>
-          </div>
-          <CardDescription>
-            {endpoint ? "Requests go to " : mail || ssh ? "Signs in at " : null}
-            {browser ? (
-              "A headless browser on the machine PCP runs on"
-            ) : wrapper ? (
-              "Programs over your other tools, run in PCP"
-            ) : (
-              <code className="text-xs">{server.url}</code>
-            )}
-            {mail && server.smtpUrl ? (
-              <>
-                {" "}
-                · sends through{" "}
-                <code className="text-xs">{server.smtpUrl}</code>
-              </>
+    <>
+      <PageHeader
+        back={{ href: "/servers", label: "Servers" }}
+        icon={<IconTile kind={server.kind} size="lg" />}
+        title={server.name}
+        description={
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <ServerStatusBadge
+              status={server.status}
+              connected={server.connected}
+              enabled={server.enabled}
+              kind={server.kind}
+              oauth={oauth}
+              className="text-sm"
+            />
+            <span aria-hidden>·</span>
+            <span>{serverKindLabel(server.kind)}</span>
+            <span aria-hidden>·</span>
+            <span>
+              {tools.length} {tools.length === 1 ? "tool" : "tools"}
+            </span>
+            {(endpoint || mail) && server.readOnly ? (
+              <Badge variant="secondary">Read-only</Badge>
             ) : null}
-            {endpoint ? (
-              <>
-                {" "}
-                · schema{" "}
-                {server.specSource === "url" && server.specUrl ? (
-                  <>
-                    from <code className="text-xs">{server.specUrl}</code>
-                  </>
-                ) : (
-                  "uploaded"
-                )}{" "}
-                · read <LocalDate value={server.lastSyncedAt} />
-              </>
-            ) : (
-              <>
-                {" "}
-                · last checked <LocalDate value={server.lastSyncedAt} />
-              </>
-            )}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {/* What the last visit to Connect said is out of date once you
-              have given the server a client. */}
-          {notice && clientState.status !== "ok" ? (
-            notice.kind === "ok" ? (
-              <FormNote message={notice.message} />
-            ) : (
-              <FormError error={notice.message} />
-            )
-          ) : null}
-          {server.oauthConnection && !server.oauthConnection.renewable ? (
-            <RenewalNotice
-              server={server}
-              connection={server.oauthConnection}
-            />
-          ) : null}
-          {server.statusMessage ? (
-            <p
-              className={
-                server.status === "ok"
-                  ? "text-muted-foreground"
-                  : "text-warning"
-              }
-            >
-              {server.statusMessage}
-            </p>
-          ) : null}
-          {server.authType === "oauth" &&
-          server.status === "client_required" ? (
-            <OAuthClientForm
-              serverId={server.id}
-              redirectUrl={redirectUrl}
-              action={saveClient}
-              error={clientState.status === "error" ? clientState.error : null}
-            />
-          ) : null}
+          </span>
+        }
+        action={
+          <>
+            {canRefresh ? (
+              <Button
+                variant="secondary"
+                disabled={pending}
+                onClick={() => run(() => refreshToolsAction(server.id))}
+              >
+                {pending ? (endpoint ? "Reading…" : "Checking…") : refreshLabel}
+              </Button>
+            ) : null}
+            {wrapper ? (
+              <Button variant="secondary" onClick={() => openAdvanced()}>
+                Edit
+              </Button>
+            ) : null}
+            {oauth ? (
+              // A plain anchor, not next/link: the route redirects to the
+              // server's sign-in page, which must be a full page load.
+              <a
+                href={`/api/servers/${server.id}/oauth/start`}
+                className={buttonVariants({
+                  variant: server.connected ? "secondary" : "default",
+                })}
+              >
+                {server.connected ? "Reconnect" : "Connect"}
+              </a>
+            ) : null}
+          </>
+        }
+      />
+
+      {/* What the last visit to Connect said is out of date once you have
+          given the server a client. */}
+      {notice && clientState.status !== "ok" ? (
+        notice.kind === "ok" ? (
+          <FormNote
+            message={notice.message}
+            className="rounded-xl bg-card px-4 py-3 text-foreground"
+          />
+        ) : (
+          <FormError
+            error={notice.message}
+            className="rounded-xl bg-card px-4 py-3"
+          />
+        )
+      ) : null}
+      {result.status !== "idle" || clientState.status === "ok" ? (
+        <div className="-mt-4 flex flex-col gap-1 px-1 empty:hidden">
           <FormNote
             message={clientState.status === "ok" ? clientState.message : null}
           />
           <FormError error={result.status === "error" ? result.error : null} />
           <FormNote message={result.status === "ok" ? result.message : null} />
-        </CardContent>
-      </Card>
+        </div>
+      ) : null}
+      {statusTrouble ? (
+        <Attention>
+          <p>{server.statusMessage}</p>
+        </Attention>
+      ) : null}
+      {server.oauthConnection && !server.oauthConnection.renewable ? (
+        <RenewalNotice server={server} connection={server.oauthConnection} />
+      ) : null}
+      {oauth && server.status === "client_required" ? (
+        <OAuthClientForm
+          serverId={server.id}
+          redirectUrl={redirectUrl}
+          action={saveClient}
+          error={clientState.status === "error" ? clientState.error : null}
+        />
+      ) : null}
+
+      <ListSection title="About">
+        <List>
+          <div className="flex min-h-14 flex-wrap items-start gap-x-3.5 gap-y-2 px-4 py-3 text-sm">
+            <div className="flex min-w-0 flex-1 basis-56 flex-col gap-1">
+              <span className="text-xs text-muted-foreground">Description</span>
+              <p
+                className={cn(
+                  "text-[15px] leading-snug whitespace-pre-line",
+                  !server.description && "text-muted-foreground",
+                )}
+              >
+                {server.description || "No description yet."}
+              </p>
+              <span className="text-xs leading-relaxed text-muted-foreground">
+                Assistants read this when they look for a tool. Write it in your
+                words.
+              </span>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => openAdvanced("description")}
+            >
+              Edit
+            </Button>
+          </div>
+          <SignInRow
+            server={server}
+            pending={pending}
+            onDisconnect={() => run(() => disconnectOAuthAction(server.id))}
+          />
+          <ListRow
+            title={
+              endpoint ? (
+                <>
+                  Schema read <RelativeDate value={server.lastSyncedAt} />
+                </>
+              ) : wrapper ? (
+                <>
+                  Changed <RelativeDate value={server.lastSyncedAt} />
+                </>
+              ) : (
+                <>
+                  Last checked <RelativeDate value={server.lastSyncedAt} />
+                </>
+              )
+            }
+            description={
+              server.status === "ok" && server.statusMessage
+                ? server.statusMessage
+                : null
+            }
+          />
+          <SwitchRow
+            id={`server-enabled-${server.id}`}
+            label="On"
+            description="Off hides every tool from every assistant."
+            checked={enabled}
+            disabled={pending}
+            onChange={(event) => {
+              const next = event.target.checked
+              startTransition(async () => {
+                setEnabled(next)
+                setResult(await setServerEnabledAction(server.id, next))
+              })
+            }}
+          />
+        </List>
+      </ListSection>
 
       {children}
 
-      <ToolsCard
-        serverId={server.id}
-        tools={tools}
-        endpoint={endpoint}
-        mail={mail}
-        ssh={ssh}
-        browser={browser}
-        wrapper={wrapper}
-      />
+      {browser ? (
+        <ListSection title="Tabs and sign-ins">
+          <List>
+            <ListRow
+              href="/browser"
+              title="Browser page"
+              description="Its tabs, live, the sign-ins it keeps, and Chromium on this machine. Which sites each token may open is on the token's page, with web fetch."
+            />
+          </List>
+        </ListSection>
+      ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Remove</CardTitle>
-          <CardDescription>
-            {endpoint
-              ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."
-              : mail
-                ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your mail stays on the server, and secrets you added stay."
-                : ssh
-                  ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too."
-                  : browser
-                    ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
-                    : wrapper
-                      ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
-                      : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="items-start">
-          <form
-            action={() => deleteServerAction(server.id)}
-            onSubmit={(event) => {
-              if (!window.confirm(`Remove ${server.name} from PCP?`)) {
-                event.preventDefault()
-              }
-            }}
-          >
-            <SubmitButton variant="destructive" pendingText="Removing…">
-              Remove {server.name}
-            </SubmitButton>
-          </form>
-        </CardContent>
-      </Card>
+      <ServerTools serverId={server.id} kind={server.kind} tools={tools} />
+
+      <Disclosure
+        id={advancedId}
+        title="Advanced"
+        description={advancedSummary(server.kind)}
+      >
+        {endpoint ? <EndpointFacts server={server} /> : null}
+        {settings}
+      </Disclosure>
+
+      <RemoveServer server={server} />
+    </>
+  )
+}
+
+function advancedSummary(kind: ServerKind): string {
+  switch (kind) {
+    case "openapi":
+      return "Schema, base URL, sign-in, edits to the schema, public addresses, name"
+    case "jmap":
+    case "imap":
+      return "Addresses, sign-in, sender, read-only, name"
+    case "ssh":
+      return "Host, port, login, name"
+    case "wrapper":
+      return "The whole definition as JSON, short name, name"
+    case "browser":
+      return "Name and description"
+    default:
+      return "Address, sign-in, headers, sign-in app, short name"
+  }
+}
+
+/** A box for what needs the owner now: amber, at the top. */
+function Attention({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-xl bg-card p-4 text-sm leading-relaxed text-warning ring-1 ring-warning/30">
+      {children}
     </div>
   )
 }
 
-/**
- * The server's tools, folded until asked for: a server can bring hundreds,
- * and the cards below them should stay in reach.
- */
-function ToolsCard({
-  serverId,
-  tools,
-  endpoint,
-  mail,
-  ssh,
-  browser,
-  wrapper,
+/** How PCP signs in, and, with OAuth, whether it is signed in. */
+function SignInRow({
+  server,
+  pending,
+  onDisconnect,
 }: {
-  serverId: string
-  tools: ServerDetailProps["tools"]
-  endpoint: boolean
-  mail: boolean
-  ssh: boolean
-  browser: boolean
-  wrapper: boolean
+  server: ServerDetailProps["server"]
+  pending: boolean
+  onDisconnect: () => void
 }) {
-  const [open, setOpen] = useState(false)
-  const listId = useId()
+  if (
+    server.kind === "browser" ||
+    server.kind === "wrapper" ||
+    server.kind === "ssh"
+  ) {
+    return null
+  }
+
+  if (server.authType === "oauth") {
+    const connection = server.oauthConnection
+
+    return (
+      <ListRow
+        title="Sign-in"
+        description={
+          !server.connected ? (
+            "With OAuth, not signed in yet: Connect opens the server's sign-in."
+          ) : connection?.renewable ? (
+            "Signed in with OAuth. PCP renews its access on its own."
+          ) : connection?.expiresAt ? (
+            <>
+              Signed in with OAuth, until{" "}
+              <LocalDate value={connection.expiresAt} />.
+            </>
+          ) : (
+            "Signed in with OAuth."
+          )
+        }
+        trailing={
+          server.connected ? (
+            <Button
+              variant="plain"
+              size="sm"
+              disabled={pending}
+              onClick={onDisconnect}
+            >
+              Disconnect
+            </Button>
+          ) : null
+        }
+      />
+    )
+  }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>
-          {tools.length === 0 ? (
-            "Tools (0)"
-          ) : (
-            <button
-              type="button"
-              aria-expanded={open}
-              aria-controls={listId}
-              onClick={() => setOpen((value) => !value)}
-              className="-ml-1 flex cursor-pointer items-center gap-1 rounded-md px-1 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              <ChevronRight
-                className={cn(
-                  "size-4 shrink-0 text-muted-foreground transition-transform",
-                  open && "rotate-90",
-                )}
-                aria-hidden
-              />
-              Tools ({tools.length})
-            </button>
-          )}
-        </CardTitle>
-        <CardDescription>
-          {endpoint
-            ? "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
-            : mail
-              ? "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
-              : ssh
-                ? "What an assistant can find with search_tools: run_command, one command per call. Leave it at ask, and you see each command before it runs."
-                : browser
-                  ? "What an assistant can find with search_tools: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
-                  : wrapper
-                    ? "What an assistant can find with search_tools: each one runs its program below. For a token, a tool here is blocked wherever a tool it calls is, and asks you wherever one of them asks."
-                    : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
-        </CardDescription>
-      </CardHeader>
-      {tools.length === 0 ? (
-        <CardContent>
-          <p className="text-muted-foreground">
-            {endpoint
-              ? "No operations are offered yet. Re-read the schema, or replace it in the settings below."
-              : mail
-                ? "No tools yet: PCP offers them once it has signed in. Check the settings below, then check the account again, or connect it."
-                : ssh
-                  ? "No tools yet: check the sign-in again."
-                  : browser
-                    ? "No tools yet: check the browser again."
-                    : "No tools known yet. Connect the server, or refresh its tools."}
-          </p>
-        </CardContent>
-      ) : open ? (
-        <CardContent>
-          <ul id={listId} className="flex flex-col divide-y divide-border">
-            {tools.map((tool) => (
-              <ToolRow key={tool.name} serverId={serverId} tool={tool} />
-            ))}
-          </ul>
-        </CardContent>
-      ) : null}
-    </Card>
+    <ListRow
+      title="Sign-in"
+      trailing={
+        <RowValue>
+          {server.authType === "header"
+            ? "A secret in a header"
+            : server.authType === "basic"
+              ? "User name and password"
+              : "None"}
+        </RowValue>
+      }
+    />
+  )
+}
+
+/**
+ * An endpoint's facts its form does not show as they are: where requests
+ * go (the form's base URL is left empty, for the owner to type), where the
+ * schema came from and when it was read, and which addresses it may reach.
+ * Every other kind's form shows its own settings whole.
+ */
+function EndpointFacts({ server }: { server: ServerDetailProps["server"] }) {
+  const code = (value: string) => (
+    <code className="text-[13px] break-all text-foreground">{value}</code>
+  )
+  const facts: Array<{ label: string; value: ReactNode }> = [
+    { label: "Requests go to", value: code(server.url) },
+    {
+      label: "Schema",
+      value:
+        server.specSource === "url" && server.specUrl ? (
+          <>from {code(server.specUrl)}</>
+        ) : (
+          "Uploaded"
+        ),
+    },
+    { label: "Read", value: <LocalDate value={server.lastSyncedAt} /> },
+    {
+      label: "Addresses",
+      value: server.publicOnly
+        ? "Public addresses only"
+        : "Private addresses allowed",
+    },
+  ]
+
+  return (
+    <dl className="flex flex-col divide-y divide-separator rounded-lg bg-field">
+      {facts.map((fact) => (
+        <div
+          key={fact.label}
+          className="flex flex-wrap items-baseline gap-x-4 gap-y-0.5 px-3 py-2.5"
+        >
+          <dt className="w-32 shrink-0 text-xs text-muted-foreground">
+            {fact.label}
+          </dt>
+          <dd className="min-w-0 flex-1 text-[13px]">{fact.value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+/** Last on the page, centred and red, with what it does. */
+function RemoveServer({ server }: { server: ServerDetailProps["server"] }) {
+  const what =
+    server.kind === "openapi"
+      ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."
+      : server.kind === "jmap" || server.kind === "imap"
+        ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your mail stays on the server, and secrets you added stay."
+        : server.kind === "ssh"
+          ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too."
+          : server.kind === "browser"
+            ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
+            : server.kind === "wrapper"
+              ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
+              : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."
+
+  return (
+    <div className="flex flex-col items-center gap-1.5 pt-2 text-center">
+      <form
+        action={() => deleteServerAction(server.id)}
+        onSubmit={(event) => {
+          if (!window.confirm(`Remove ${server.name} from PCP?`)) {
+            event.preventDefault()
+          }
+        }}
+      >
+        <SubmitButton variant="destructive" pendingText="Removing…">
+          Remove {server.name}
+        </SubmitButton>
+      </form>
+      <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
+        {what}
+      </p>
+    </div>
   )
 }
 
@@ -448,59 +553,59 @@ function RenewalNotice({
 
   if (connection.reconnectRenews) {
     return (
-      <div className="flex flex-col items-start gap-2">
-        <p className="text-warning">
+      <Attention>
+        <p>
           This sign-in to {server.name} lasts {lasts}, and PCP cannot renew it.
-          Sign in again to fix that: PCP now asks for access it can renew.
+          Choose Reconnect above to fix that: PCP now asks for access it can
+          renew.
         </p>
-        <a href={start} className={buttonVariants({ size: "sm" })}>
-          Reconnect
-        </a>
-      </div>
+      </Attention>
     )
   }
 
   const prefix = `sign-in-params-${server.id}`
 
   return (
-    <form
-      action={action}
-      className="flex flex-col gap-4 rounded-lg border border-border p-4"
-    >
-      <input type="hidden" name="id" value={server.id} />
-      <p className="text-warning">
-        This sign-in to {server.name} lasts {lasts}, and PCP cannot renew it, so
-        you would have to reconnect then. Many servers give renewable access
-        only when the sign-in asks for it: enter what the server&apos;s
-        documentation says, and sign in again.
-      </p>
-      <Field
-        label="Extra sign-in parameters"
-        htmlFor={`${prefix}-params`}
-        hint="Added to the sign-in address, like access_type=offline&prompt=consent."
-      >
-        <Input
-          id={`${prefix}-params`}
-          name="oauthAuthorizeParams"
-          defaultValue={server.oauthAuthorizeParams}
-          required
-          autoComplete="off"
-          spellCheck={false}
-        />
-      </Field>
-      <FormError error={state.status === "error" ? state.error : null} />
-      <div>
-        <SubmitButton size="sm" pendingText="Saving…">
-          Save and reconnect
-        </SubmitButton>
-      </div>
-    </form>
+    <Attention>
+      <form action={action} className="flex flex-col gap-4">
+        <input type="hidden" name="id" value={server.id} />
+        <p>
+          This sign-in to {server.name} lasts {lasts}, and PCP cannot renew it,
+          so you would have to reconnect then. Many servers give renewable
+          access only when the sign-in asks for it: enter what the server&apos;s
+          documentation says, and sign in again.
+        </p>
+        <div className="text-foreground">
+          <Field
+            label="Extra sign-in parameters"
+            htmlFor={`${prefix}-params`}
+            hint="Added to the sign-in address, like access_type=offline&prompt=consent."
+          >
+            <Input
+              id={`${prefix}-params`}
+              name="oauthAuthorizeParams"
+              defaultValue={server.oauthAuthorizeParams}
+              required
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+        </div>
+        <FormError error={state.status === "error" ? state.error : null} />
+        <div>
+          <SubmitButton size="sm" pendingText="Saving…">
+            Save and reconnect
+          </SubmitButton>
+        </div>
+      </form>
+    </Attention>
   )
 }
 
 /**
  * The client a server that does not let PCP register itself needs, asked for
- * where its status says so. Scope and sign-in parameters stay in Settings.
+ * where its status says so. Scope and sign-in parameters stay under
+ * Advanced.
  */
 function OAuthClientForm({
   serverId,
@@ -516,166 +621,47 @@ function OAuthClientForm({
   const prefix = `oauth-client-${serverId}`
 
   return (
-    <form
-      action={action}
-      className="flex flex-col gap-4 rounded-lg border border-border p-4"
-    >
-      <input type="hidden" name="id" value={serverId} />
-      <p className="text-muted-foreground">
-        The redirect URI to give the provider:
-      </p>
-      <CopyableValue value={redirectUrl} />
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Client ID" htmlFor={`${prefix}-id`}>
-          <Input
-            id={`${prefix}-id`}
-            name="oauthClientId"
-            required
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </Field>
-        <Field
-          label="Client secret"
-          htmlFor={`${prefix}-secret`}
-          hint="Saved as one of your secrets."
-        >
-          <Input
-            id={`${prefix}-secret`}
-            name="oauthClientSecretValue"
-            type="password"
-            autoComplete="off"
-          />
-        </Field>
-      </div>
-      <FormError error={error} />
-      <div>
-        <SubmitButton size="sm" pendingText="Saving…">
-          Save client
-        </SubmitButton>
-      </div>
-    </form>
-  )
-}
-
-function ToolRow({
-  serverId,
-  tool,
-}: {
-  serverId: string
-  tool: ServerDetailProps["tools"][number]
-}) {
-  const [editing, setEditing] = useState(false)
-  const [state, action] = useActionState<ServerActionResult, FormData>(
-    setToolDescriptionAction,
-    { status: "idle" },
-  )
-
-  return (
-    <li className="flex flex-col gap-2 py-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <code className="text-sm">{tool.name}</code>
-          {tool.title ? (
-            <span className="text-xs text-muted-foreground">{tool.title}</span>
-          ) : null}
-          {tool.operation ? (
-            <code className="text-xs text-muted-foreground">
-              {tool.operation.method} {tool.operation.path}
-            </code>
-          ) : null}
-          {tool.descriptionOverride ? (
-            <span className="text-xs text-primary">edited</span>
-          ) : null}
-          {tool.replacedBy && tool.replacedBy.length > 0 ? (
-            <Badge variant="outline">Left out of search</Badge>
-          ) : null}
-        </div>
-        <Button
-          variant="ghost"
-          size="xs"
-          onClick={() => setEditing((value) => !value)}
-        >
-          {editing ? "Cancel" : "Edit description"}
-        </Button>
-      </div>
-      {editing ? (
-        <form action={action} className="flex flex-col gap-2">
-          <input type="hidden" name="serverId" value={serverId} />
-          <input type="hidden" name="tool" value={tool.name} />
-          <Textarea
-            name="description"
-            defaultValue={tool.descriptionOverride ?? tool.description}
-            aria-label={`Description of ${tool.name}`}
-            maxLength={2000}
-          />
-          <p className="text-xs text-muted-foreground">
-            Leave it empty to go back to the original description.
-          </p>
-          <FormError error={state.status === "error" ? state.error : null} />
-          <div>
-            <SubmitButton size="sm" pendingText="Saving…">
-              Save description
-            </SubmitButton>
-          </div>
-        </form>
-      ) : (
-        <p className="whitespace-pre-line text-muted-foreground">
-          {tool.descriptionOverride ?? tool.description ?? ""}
+    <Attention>
+      <form action={action} className="flex flex-col gap-4">
+        <input type="hidden" name="id" value={serverId} />
+        <p>
+          This server lets no app register itself. Create an OAuth client in the
+          provider&apos;s developer settings with this redirect URI, and enter
+          its client ID and secret here:
         </p>
-      )}
-      {tool.replacedBy && tool.replacedBy.length > 0 ? (
-        <ReplacedNote
-          serverId={serverId}
-          tool={tool.name}
-          by={tool.replacedBy}
-        />
-      ) : null}
-    </li>
-  )
-}
-
-/**
- * A tool a wrapper stands in for: assistants find the wrapper's instead, and
- * can still call this one by name. Showing it again takes it out of what
- * every wrapper replaces.
- */
-function ReplacedNote({
-  serverId,
-  tool,
-  by,
-}: {
-  serverId: string
-  tool: string
-  by: Array<{ id: string; name: string; tool: string }>
-}) {
-  const [state, action] = useActionState<ServerActionResult, FormData>(
-    showReplacedToolAction,
-    { status: "idle" },
-  )
-
-  return (
-    <form action={action} className="flex flex-col items-start gap-2">
-      <input type="hidden" name="serverId" value={serverId} />
-      <input type="hidden" name="tool" value={tool} />
-      <p className="text-xs text-muted-foreground">
-        Left out of search_tools and list_tools: assistants find{" "}
-        {by.map((entry, index) => (
-          <span key={`${entry.id}/${entry.tool}`}>
-            {index > 0 ? ", " : null}
-            <Link href={`/servers/${entry.id}`} className="underline">
-              {entry.name}
-            </Link>{" "}
-            <code>{entry.tool}</code>
-          </span>
-        ))}{" "}
-        instead. It can still be called by its name.
-      </p>
-      <FormError error={state.status === "error" ? state.error : null} />
-      <FormNote message={state.status === "ok" ? state.message : null} />
-      <SubmitButton size="xs" variant="outline" pendingText="Showing…">
-        Show it in search again
-      </SubmitButton>
-    </form>
+        <div className="flex flex-col gap-4 text-foreground">
+          <CopyableValue value={redirectUrl} />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Client ID" htmlFor={`${prefix}-id`}>
+              <Input
+                id={`${prefix}-id`}
+                name="oauthClientId"
+                required
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </Field>
+            <Field
+              label="Client secret"
+              htmlFor={`${prefix}-secret`}
+              hint="Saved as one of your secrets."
+            >
+              <Input
+                id={`${prefix}-secret`}
+                name="oauthClientSecretValue"
+                type="password"
+                autoComplete="off"
+              />
+            </Field>
+          </div>
+        </div>
+        <FormError error={error} />
+        <div>
+          <SubmitButton size="sm" pendingText="Saving…">
+            Save client
+          </SubmitButton>
+        </div>
+      </form>
+    </Attention>
   )
 }
