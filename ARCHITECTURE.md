@@ -809,10 +809,11 @@ like a mail account's, and `upstream.ts` hands its calls to
 proposed for and called like any server, and a long snapshot is kept for
 `read_result` by `runCall` like any long answer.
 
-**What runs** (`runtime.ts`). One headless Chromium per vault, driven by
+**What runs** (`runtime.ts`). One Chromium per vault, driven by
 `playwright-core`, started on the first page opened (by an assistant or the
 owner) and closed after fifteen minutes with no tool call, no input and
-nobody watching. The registry is on `globalThis`, as the network's is,
+nobody watching. It runs headless, or in the container image with windows
+on a virtual display (below). The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
 Chromium runs with one in-memory context for the vault (and one more,
 made on the first page read for web_fetch, for all of those, below): no
@@ -829,10 +830,25 @@ network, around the gate). Chromium's own sandbox is used where the machine
 gives one and dropped where it cannot (root, or an unprivileged container;
 the Docker image says so with `PCP_BROWSER_SANDBOX=off`).
 
+**The virtual display** (`display.ts`). In the container image
+(`PCP_CONTAINER=1`), or on another Linux machine with
+`PCP_BROWSER_DISPLAY=virtual`, Chromium runs as a desktop's Chrome does, with
+a window around each page, on a screen PCP starts itself: one Xvfb per
+process (1920 by 1080), started with the first browser and stopped when the
+last one closes. A site's check then sees a browser with a window, not one
+whose window is exactly the page. The display takes only clients that show
+its cookie, kept in a private folder and handed to Chromium alone, so
+another program on the machine cannot watch the browser or type into it.
+WebGL there is Chromium's software renderer, as headless uses by itself
+(`--enable-unsafe-swiftshader`; without it a windowed Chromium with no
+graphics card has no WebGL at all). An Xvfb that does not start leaves the
+browser headless; `PCP_BROWSER_DISPLAY=headless` asks for that. The desktop
+app never uses it: it starts no child process, and runs on a real screen.
+
 **Sites that check their visitors.** Every context tells pages of a 1920 by
 1080 screen, since headless would otherwise make the screen the 1280 by 800
-viewport itself. It is the full Chromium in Chromium's new headless mode: PCP
-always passes the executable, so Playwright never picks its separate headless
+viewport itself. It is the full Chromium, headless or windowed: PCP always
+passes the executable, so Playwright never picks its separate headless
 shell (the Docker image does not download it). `navigate`, and an action that
 can load a page (`back`, a click, typing, a key, a choice, a dialog's
 answer), waits up to twenty seconds for a check that passes on its own
@@ -844,10 +860,14 @@ how the owner passes it themselves; so does every later answer about the tab
 owner automatically. A clearance cookie a passed check sets lands in the
 vault's profile, as any cookie does. PCP adds no stealth scripts and uses no
 patched Playwright, so some tells remain: WebGL is SwiftShader (software
-rendering), the window is exactly the viewport (Playwright sizes it so, and
-Chromium's `--window-size` does not change that), Playwright's automation
-protocol leaves traces a page can look for, and a server's datacenter address
-is not a person's at home. The strictest checks may still want a person,
+rendering), headless the window is exactly the viewport (Playwright sizes it
+so, and Chromium's `--window-size` does not change that; on the virtual
+display it is not), Playwright's automation protocol leaves traces a page can
+look for, and a server's datacenter address is not a person's at home. A
+click sent through the DevTools protocol into a cross-site frame (a
+Turnstile checkbox) carried the frame's own coordinates as its screen
+position up to about Chromium 141, which a check could tell from a mouse;
+the Chromium that PCP's Playwright drives (153) reports a mouse's. The strictest checks may still want a person,
 which is what `hand_over` is for.
 
 **The sign-ins** (`profile.ts`). The context starts from the vault's
@@ -969,9 +989,12 @@ browser coalesced), wheel, keys and pastes go back in batches every 40 ms
 to a second route, each event with the time it happened. They are replayed
 through the DevTools protocol (`Input.dispatchMouseEvent` and
 `dispatchKeyEvent`, which Chromium treats as a device's input: trusted
-events), each at its own time plus a fixed delay and stamped with it, so a
-CAPTCHA reading the movement sees its real cadence; a batch that arrives
-late starts a new clock. Coordinates are mapped with the frame's own
+events), each at its own time plus a delay and stamped with it, so a
+CAPTCHA reading the movement sees its real cadence. Input that arrives late
+(a slow or uneven link) moves the replay further behind, up to 400 ms, so
+what follows plays at its own pace instead of in a burst, and the delay
+closes up by a millisecond an event while input arrives in time; a batch
+more than 600 ms late starts a new clock. Coordinates are mapped with the frame's own
 metadata. Both routes check PCP's origin and the owner's session, as the
 export download does. A WebSocket would answer a little sooner, but needs a
 server of its own around Next; the input's format is the same whatever

@@ -18,6 +18,11 @@ import { isPcpSite } from "../fetch/fetch"
 import { resolveFetchAccess, siteKey, type FetchRuleSet } from "../fetch/rules"
 import { isOwnAddress, isPublicAddress } from "../openapi/address"
 import { watchDocuments, type DocumentWatch } from "./challenge"
+import {
+  acquireDisplay,
+  wantsVirtualDisplay,
+  type VirtualDisplay,
+} from "./display"
 import { chromiumExecutable } from "./executable"
 import {
   DIALOG_DISMISS_MS,
@@ -37,9 +42,10 @@ import {
 import type { TabControl, TabView } from "./types"
 
 /**
- * The browser's running side: one headless Chromium per vault, started on
- * first use and closed after IDLE_CLOSE_MS with nothing happening, its
- * tabs, and who drives each. One per process, kept on globalThis because
+ * The browser's running side: one Chromium per vault, started on first use
+ * and closed after IDLE_CLOSE_MS with nothing happening, its tabs, and who
+ * drives each. It runs headless, or with windows on PCP's virtual display
+ * where there is one (display.ts: the container image). One per process, kept on globalThis because
  * the gateway, the Server Actions and the route handlers are bundled apart
  * and would otherwise each have their own copy of this module.
  *
@@ -121,6 +127,8 @@ export type VaultBrowser = {
   proxy: BrowserProxy
   /** Chromium's own sandbox: off when the machine cannot give it one. */
   sandbox: boolean
+  /** The virtual display its windows are on (display.ts), or headless. */
+  display: string | null
   /** Chromium's folder for what it keeps outside the profile (launch). */
   scratchDir: string
   tabs: Map<string, Tab>
@@ -283,23 +291,33 @@ async function launch(
   proxyPort: number,
   sandbox: boolean,
   scratchDir: string,
+  display: VirtualDisplay | null,
 ): Promise<Browser> {
   const { chromium } = await import("playwright-core")
 
   return chromium.launch({
     executablePath,
-    headless: true,
+    // With windows on the virtual display where there is one, as a
+    // desktop's Chrome runs; headless otherwise.
+    headless: display === null,
     chromiumSandbox: sandbox,
     env: {
       ...process.env,
       XDG_CONFIG_HOME: path.join(scratchDir, "config"),
       XDG_CACHE_HOME: path.join(scratchDir, "cache"),
+      ...(display
+        ? { DISPLAY: display.display, XAUTHORITY: display.authFile }
+        : {}),
     },
     // What tells a page it is being driven: the automation switch and the
-    // webdriver flag. The rest of headless Chromium is as it is.
+    // webdriver flag. The rest of Chromium is as it is.
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
       "--disable-blink-features=AutomationControlled",
+      // A display with no graphics card: WebGL on Chromium's software
+      // renderer, which headless uses by itself. Without it a windowed
+      // Chromium there has no WebGL at all.
+      ...(display ? ["--enable-unsafe-swiftshader"] : []),
       "--disable-dev-shm-usage",
       // UDP would go around the proxy: no QUIC, and WebRTC only through it.
       "--disable-quic",
@@ -402,17 +420,26 @@ async function start(
   let browser: Browser
   let sandbox = sandboxSetting() !== "off"
   const scratchDir = await makeScratchDir()
+  const screen = wantsVirtualDisplay() ? await acquireDisplay() : null
+  const display = screen?.display ?? null
 
   try {
     try {
-      browser = await launch(executable, proxy.port, sandbox, scratchDir)
+      browser = await launch(
+        executable,
+        proxy.port,
+        sandbox,
+        scratchDir,
+        display,
+      )
     } catch (error) {
       // An unprivileged container, or root, has no sandbox to give.
       if (!sandbox || sandboxSetting() === "on") throw error
       sandbox = false
-      browser = await launch(executable, proxy.port, false, scratchDir)
+      browser = await launch(executable, proxy.port, false, scratchDir, display)
     }
   } catch (error) {
+    screen?.release()
     await proxy.close()
     removeScratchDir(scratchDir)
     console.error("[browser] Chromium did not start", error)
@@ -421,6 +448,9 @@ async function start(
       "Chromium did not start on the machine PCP runs on. The owner can see why in PCP's log.",
     )
   }
+
+  // The display is given back however the browser ends.
+  browser.on("disconnected", () => screen?.release())
 
   await startGate(browser, () => vault).catch(async (error) => {
     await browser.close().catch(() => {})
@@ -440,6 +470,7 @@ async function start(
     context,
     proxy,
     sandbox,
+    display: display?.display ?? null,
     scratchDir,
     tabs: new Map(),
     lastTabByToken: new Map(),

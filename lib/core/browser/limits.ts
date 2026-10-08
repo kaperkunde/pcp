@@ -29,12 +29,15 @@ export const MAX_SCREENSHOT_BYTES = 1024 * 1024
 /** The size every tab renders at, in CSS pixels. */
 export const VIEWPORT = BROWSER_VIEWPORT
 /**
- * The screen a page is told it has: a common desktop screen. Headless, it
- * would otherwise be the viewport itself, which tells a site no person is
- * looking. (The window stays the viewport: Playwright sizes it so, and
- * Chromium's --window-size does not change that.)
+ * The screen a page is told it has, and the virtual display's (display.ts):
+ * a common desktop screen. Headless, it would otherwise be the viewport
+ * itself, which tells a site no person is looking. Headless, the window
+ * stays the viewport too (Playwright sizes it so); on the virtual display
+ * Chromium draws its own window around the page.
  */
 export const SCREEN = { width: 1920, height: 1080 } as const
+/** The virtual display (display.ts) has this long to start. */
+export const DISPLAY_START_TIMEOUT_MS = 10_000
 /** JPEG quality of the live view's frames. */
 export const SCREENCAST_QUALITY = 55
 /** People watching one tab at once. */
@@ -45,10 +48,14 @@ export const MAX_INPUT_EVENTS = 500
 /** Batches of input per session: about 25 a second while the mouse moves. */
 export const INPUT_BATCHES = { max: 200, windowMs: 10_000 }
 /**
- * Input is replayed with the cadence it was made with, this far behind
- * real time; a batch that arrives later than this is replayed at once.
+ * Input is replayed with the cadence it was made with, at least this far
+ * behind real time. Input that arrives late (a slow or uneven link) moves
+ * the replay further behind, up to the most, so what follows plays at its
+ * own pace rather than in a burst; input more than INPUT_RESYNC_MS late
+ * starts a new clock instead.
  */
 export const INPUT_REPLAY_DELAY_MS = 60
+export const MAX_INPUT_REPLAY_DELAY_MS = 400
 export const INPUT_RESYNC_MS = 600
 /** Tool calls per token, asked about or not. */
 export const BROWSER_ACTIONS = { max: 300, windowMs: 10 * 60_000 }

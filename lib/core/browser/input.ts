@@ -1,4 +1,9 @@
-import { INPUT_REPLAY_DELAY_MS, INPUT_RESYNC_MS, VIEWPORT } from "./limits"
+import {
+  INPUT_REPLAY_DELAY_MS,
+  INPUT_RESYNC_MS,
+  MAX_INPUT_REPLAY_DELAY_MS,
+  VIEWPORT,
+} from "./limits"
 import type { ParsedInputBatch, ParsedInputEvent } from "./input-protocol"
 import { MODIFIER_BITS } from "./input-protocol"
 import type { Tab } from "./runtime"
@@ -9,8 +14,12 @@ import type { Tab } from "./runtime"
  * (isTrusted), in the order and at the pace they were made. Each event is
  * dispatched at the time it happened on the owner's screen plus a fixed
  * delay, with that time as its timestamp, so a batch that took 40 ms to
- * make takes 40 ms to replay. A batch that arrives too late (a slow
- * network) starts a new clock rather than racing to catch up.
+ * make takes 40 ms to replay. Input that arrives late (a slow or uneven
+ * link, as through pcp.gg or from a phone) moves the replay further
+ * behind, up to MAX_INPUT_REPLAY_DELAY_MS, so what follows plays at its own
+ * pace rather than in a burst, and the delay shrinks back slowly while
+ * input arrives in time. A batch that arrives far too late starts a new
+ * clock rather than racing to catch up.
  */
 
 type Clock = {
@@ -18,6 +27,8 @@ type Clock = {
   client: number
   server: number
   last: number
+  /** How far behind the owner's time the replay runs now. */
+  delay: number
   chain: Promise<unknown>
 }
 
@@ -27,7 +38,13 @@ function clockOf(tab: Tab): Clock {
   let clock = tab.extra.get(CLOCK) as Clock | undefined
 
   if (!clock) {
-    clock = { client: -1, server: 0, last: 0, chain: Promise.resolve() }
+    clock = {
+      client: -1,
+      server: 0,
+      last: 0,
+      delay: INPUT_REPLAY_DELAY_MS,
+      chain: Promise.resolve(),
+    }
     tab.extra.set(CLOCK, clock)
   }
 
@@ -139,7 +156,7 @@ async function replay(tab: Tab, batch: ParsedInputBatch): Promise<void> {
 
   for (const event of batch.events) {
     const now = Date.now()
-    let due = clock.server + (event.t - clock.client) + INPUT_REPLAY_DELAY_MS
+    let due = clock.server + (event.t - clock.client) + clock.delay
 
     // The first event, a jump back in the owner's time, or input that came
     // in long after it was made: start the clock again from here.
@@ -150,7 +167,18 @@ async function replay(tab: Tab, batch: ParsedInputBatch): Promise<void> {
     ) {
       clock.client = event.t
       clock.server = now
-      due = now + INPUT_REPLAY_DELAY_MS
+      clock.delay = INPUT_REPLAY_DELAY_MS
+      due = now + clock.delay
+    } else if (due < now) {
+      // Late: run further behind, so this plays now and what follows
+      // keeps its pace instead of coming out all at once.
+      const delay = Math.min(MAX_INPUT_REPLAY_DELAY_MS, clock.delay + now - due)
+      due += delay - clock.delay
+      clock.delay = delay
+    } else if (clock.delay > INPUT_REPLAY_DELAY_MS) {
+      // In time: close up a millisecond per event, a pace nobody sees.
+      clock.delay -= 1
+      due -= 1
     }
 
     due = Math.max(due, clock.last)

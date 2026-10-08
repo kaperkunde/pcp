@@ -188,7 +188,10 @@ so in the summary; the bump itself waits for the request.
   tool runs JavaScript, reads or sets cookies or storage, or downloads. A
   refusal that names a site is a tool error, never a thrown `PcpError` (the
   request log keeps those). The owner's input enters through the DevTools
-  protocol with each event's own time (`input.ts`), never as page script. A
+  protocol with each event's own time (`input.ts`), never as page script.
+  In the container image Chromium runs with windows on a virtual display PCP
+  starts itself (`display.ts`: Xvfb, its own cookie, stopped with the last
+  browser); never in the desktop app, which starts no child process. A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
   a permission request (`browse`, `browser_handover`); a site is asked
   about only for the address in the call's arguments, so a call the owner

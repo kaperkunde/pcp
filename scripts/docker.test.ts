@@ -23,6 +23,16 @@ describe("the Docker image's Chromium", () => {
     expect(pkg.devDependencies["@playwright/test"]).toContain(installed)
   })
 
+  it("has a virtual display to run with windows on", () => {
+    const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
+
+    // display.ts starts it where PCP_CONTAINER is set, as the image sets.
+    expect(dockerfile).toMatch(
+      /apt-get install -y --no-install-recommends xvfb/,
+    )
+    expect(dockerfile).toMatch(/PCP_CONTAINER=1/)
+  })
+
   it("is the full Chromium only: PCP never launches the headless shell", () => {
     const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
 
