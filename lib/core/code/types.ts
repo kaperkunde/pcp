@@ -36,6 +36,11 @@ export type RunResult = RunEnd & {
 
 export type Executor = (input: {
   code: string
+  /**
+   * A wrapper tool's arguments as JSON text (lib/core/wrappers/run.ts): the
+   * program sees them parsed, as `args`. Only text crosses into the engine.
+   */
+  input?: string
   bridge: Bridge
   /** Aborted when the run is out of time or the request went away. */
   signal: AbortSignal

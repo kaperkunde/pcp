@@ -24,7 +24,7 @@ import {
   RUN_TIMEOUT_MS,
 } from "./limits"
 import { runJavaScript } from "./quickjs"
-import type { Bridge, BridgeReply, Executor } from "./types"
+import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
 
 /**
  * run_code: an assistant's program that calls the owner's tools and works on
@@ -75,8 +75,6 @@ export type CodeLister = (
 /** What run_code shows of each part before keeping the rest. */
 const SHOWN_OUTPUT_CHARS = 20_000
 const SHOWN_RETURN_CHARS = 30_000
-
-let running = 0
 
 function text(value: string, isError = false): CallToolResult {
   return {
@@ -160,20 +158,7 @@ export async function runCode(
     /** A shell program has no value to return, only output and a status. */
     returns?: boolean
   },
-  {
-    call,
-    list,
-    signal,
-    executor = runJavaScript,
-    timeoutMs = RUN_TIMEOUT_MS,
-  }: {
-    call: CodeCaller
-    list?: CodeLister
-    /** The request's own: the run stops when it goes away. */
-    signal?: AbortSignal
-    executor?: Executor
-    timeoutMs?: number
-  },
+  options: RunOptions,
 ): Promise<CallToolResult> {
   if (typeof input.code !== "string" || input.code.trim() === "") {
     return text("Send the program in code.", true)
@@ -187,15 +172,110 @@ export async function runCode(
   }
 
   const limits = await loadResourceLimits()
+  const run = await runProgram(scope, { code: input.code }, options)
 
-  if (running >= limits.programsAtOnce) {
-    return text(
-      `PCP is running ${limits.programsAtOnce} ${limits.programsAtOnce === 1 ? "program" : "programs"} already, as many as the owner's settings allow at once. Try again in a moment.`,
-      true,
+  if ("busy" in run) {
+    return text(run.busy, true)
+  }
+
+  const { result, stop, calls, took } = run
+  const did = `${seconds(took)}, ${plural(calls, "call")}`
+  const output = await shownOutput(scope, result.output, result.dropped)
+
+  if (result.kind === "stopped" && stop) {
+    return withLead(
+      [
+        `The program stopped at ${stop.at} after ${did}: the owner has to act before that call can run, and nothing of the program ran after it. Calls before it did run.`,
+        ...(output ? [`It printed:\n${output}`] : []),
+        isConnectResult(stop.result)
+          ? "Once the owner has connected it (check_server says when), run the program again."
+          : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow, or Allow for while that lasts).",
+      ].join("\n\n"),
+      stop.result,
     )
   }
 
-  running += 1
+  if (result.kind === "done") {
+    return text(
+      [
+        `The program finished in ${did}.`,
+        ...(output ? [`It printed:\n${output}`] : []),
+        ...(result.returned !== null
+          ? [
+              `It returned:\n${await shownReturn(scope, result.returned, limits)}`,
+            ]
+          : input.returns === false
+            ? []
+            : ["It returned nothing."]),
+      ].join("\n\n"),
+    )
+  }
+
+  return text(
+    [
+      `The program failed after ${did}.`,
+      result.kind === "error" ? result.message : "It was stopped.",
+      ...(output ? [`It printed:\n${output}`] : []),
+    ].join("\n\n"),
+    true,
+  )
+}
+
+export type RunOptions = {
+  call: CodeCaller
+  list?: CodeLister
+  /** The request's own: the run stops when it goes away. */
+  signal?: AbortSignal
+  executor?: Executor
+  timeoutMs?: number
+}
+
+/** How one program's run went, before it is put into words. */
+export type ProgramRun =
+  | {
+      result: RunResult
+      /** Where the owner has to act first, when a call said so. */
+      stop: { at: string; result: CallToolResult } | null
+      calls: number
+      took: number
+    }
+  /** Too many programs run already; nothing ran. */
+  | { busy: string }
+
+/** Programs under way in this process, run_code's and wrappers' apart. */
+const runningBy = { run_code: 0, wrapper: 0 }
+
+/**
+ * Runs a program with the bridge: run_code's, or a wrapper tool's
+ * (lib/core/wrappers/run.ts), which is given its arguments as `input` and
+ * logs its calls and keeps its values under "wrapper". Each counts against
+ * the owner's programs-at-once on its own, so a run_code program calling a
+ * wrapper does not wait on itself.
+ */
+export async function runProgram(
+  scope: PermissionScope,
+  {
+    code,
+    input,
+    label = "run_code",
+  }: { code: string; input?: string; label?: "run_code" | "wrapper" },
+  {
+    call,
+    list,
+    signal,
+    executor = runJavaScript,
+    timeoutMs = RUN_TIMEOUT_MS,
+  }: RunOptions,
+): Promise<ProgramRun> {
+  const limits = await loadResourceLimits()
+
+  if (runningBy[label] >= limits.programsAtOnce) {
+    return {
+      busy: `PCP is running ${limits.programsAtOnce} ${limits.programsAtOnce === 1 ? "program" : "programs"} already, as many as the owner's settings allow at once. Try again in a moment.`,
+    }
+  }
+
+  runningBy[label] += 1
 
   const controller = new AbortController()
   const timer = setTimeout(
@@ -317,7 +397,7 @@ export async function runCode(
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
         tokenId: scope.tokenId,
-        tool: "run_code",
+        tool: label,
         server,
         upstreamTool: tool,
         ok: owner || outcome.ok,
@@ -435,7 +515,7 @@ export async function runCode(
     const kept = await keepResult(scope.ctx, {
       tokenId: scope.tokenId,
       serverId: null,
-      toolName: "run_code",
+      toolName: label,
       text: payload.value,
       mediaType: type,
       name,
@@ -474,7 +554,7 @@ export async function runCode(
       const kept = await keepBytes(scope.ctx, {
         tokenId: scope.tokenId,
         serverId: null,
-        toolName: "run_code",
+        toolName: label,
         bytes: Buffer.from(bare, "base64"),
         mediaType: type,
         name,
@@ -526,57 +606,17 @@ export async function runCode(
 
   try {
     const result = await executor({
-      code: input.code,
+      code,
+      ...(input !== undefined ? { input } : {}),
       bridge,
       signal: controller.signal,
     })
-    const took = Date.now() - started
-    const did = `${seconds(took)}, ${plural(calls, "call")}`
-    const output = await shownOutput(scope, result.output, result.dropped)
 
-    const stop = halt.stop
-
-    if (result.kind === "stopped" && stop) {
-      return withLead(
-        [
-          `The program stopped at ${stop.at} after ${did}: the owner has to act before that call can run, and nothing of the program ran after it. Calls before it did run.`,
-          ...(output ? [`It printed:\n${output}`] : []),
-          isConnectResult(stop.result)
-            ? "Once the owner has connected it (check_server says when), run the program again."
-            : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow, or Allow for while that lasts).",
-        ].join("\n\n"),
-        stop.result,
-      )
-    }
-
-    if (result.kind === "done") {
-      return text(
-        [
-          `The program finished in ${did}.`,
-          ...(output ? [`It printed:\n${output}`] : []),
-          ...(result.returned !== null
-            ? [
-                `It returned:\n${await shownReturn(scope, result.returned, limits)}`,
-              ]
-            : input.returns === false
-              ? []
-              : ["It returned nothing."]),
-        ].join("\n\n"),
-      )
-    }
-
-    return text(
-      [
-        `The program failed after ${did}.`,
-        result.kind === "error" ? result.message : "It was stopped.",
-        ...(output ? [`It printed:\n${output}`] : []),
-      ].join("\n\n"),
-      true,
-    )
+    return { result, stop: halt.stop, calls, took: Date.now() - started }
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener("abort", onGone)
-    running -= 1
+    runningBy[label] -= 1
   }
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { javaScriptExecutor, runJavaScript } from "./quickjs"
+import { checkSyntax, javaScriptExecutor, runJavaScript } from "./quickjs"
 import type { Bridge, BridgeReply } from "./types"
 
 // The QuickJS executor on its own, with a bridge that answers from a table:
@@ -428,5 +428,27 @@ describe("how a run ends", () => {
     expect(await run(`return typeof leftBehind`)).toMatchObject({
       returned: '"undefined"',
     })
+  })
+})
+
+describe("a wrapper tool's program", () => {
+  it("reads its arguments as args, parsed from the text it was handed", async () => {
+    const result = await runJavaScript({
+      code: "return { args, left: typeof globalThis.__pcp_input }",
+      input: JSON.stringify({ word: "hi", n: 2 }),
+      bridge: async () => ({ ok: true, value: null }),
+      signal: new AbortController().signal,
+    })
+
+    expect(result).toMatchObject({
+      kind: "done",
+      returned: '{"args":{"word":"hi","n":2},"left":"undefined"}',
+    })
+  })
+
+  it("is checked for its syntax without running", async () => {
+    expect(await checkSyntax("return args.word")).toBeNull()
+    expect(await checkSyntax("while (true) {}")).toBeNull()
+    expect(await checkSyntax("return (")).toMatch(/SyntaxError/)
   })
 })

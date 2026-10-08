@@ -34,13 +34,17 @@ const DELETE_CHUNK = 500
  * server's tools change whenever its makers ship, and so can a schema
  * fetched from an address. An uploaded schema changes only when the owner
  * uploads another. A mail account is read again too: whether it may send
- * can change, and reading it checks that it still signs in.
+ * can change, and reading it checks that it still signs in. A wrapper's
+ * tools change only when the owner changes it.
  */
 export function canRereadTools(server: {
   kind: string
   specSource: string | null
 }): boolean {
-  return server.kind !== "openapi" || server.specSource === "url"
+  return (
+    server.kind !== "wrapper" &&
+    (server.kind !== "openapi" || server.specSource === "url")
+  )
 }
 
 export async function storeTools(

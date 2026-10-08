@@ -18,6 +18,7 @@ import type {
   Vault,
   VaultToolAccess,
   WebFetchRule,
+  WrapperSpec,
 } from "@/lib/generated/prisma/client"
 
 import { asBytes } from "./crypto"
@@ -134,6 +135,7 @@ const ApiTokenRow = z.strictObject({
   keepMemories: z.boolean(),
   webFetch: z.boolean(),
   runCode: z.boolean().default(false),
+  manageWrappers: z.boolean().default(false),
   expiresAt: dateOrNull,
   revokedAt: dateOrNull,
   createdAt: date,
@@ -300,6 +302,14 @@ const OpenApiSpecRow = z.strictObject({
   builtWith: str.nullable(),
 })
 
+// Wrappers, added in 0.4: absent from older files.
+const WrapperSpecRow = z.strictObject({
+  serverId: id,
+  definition: str,
+  hash: str,
+  updatedAt: date,
+})
+
 const SettingRow = z.strictObject({ vaultId: id, key: str, value: str })
 
 // The browser's sign-ins, added in 0.3: absent from older files.
@@ -358,6 +368,7 @@ export const PayloadSchema = z.strictObject({
     serverAuthHeaders: z.array(ServerAuthHeaderRow),
     tools: z.array(McpToolRow),
     openApiSpecs: z.array(OpenApiSpecRow),
+    wrapperSpecs: z.array(WrapperSpecRow).default([]),
     settings: z.array(SettingRow),
     browserProfiles: z.array(BrowserProfileRow).default([]),
   }),
@@ -379,6 +390,7 @@ export type ExportPreview = {
     servers: number
     endpoints: number
     mailAccounts: number
+    wrappers: number
     tools: number
     secrets: number
     tokens: number
@@ -565,6 +577,10 @@ export function checkReferences(payload: ExportPayload): void {
   for (const spec of tables.openApiSpecs) {
     pointsAt(spec.serverId, servers, "a server")
   }
+
+  for (const spec of tables.wrapperSpecs) {
+    pointsAt(spec.serverId, servers, "a server")
+  }
 }
 
 export function previewOf(payload: ExportPayload): ExportPreview {
@@ -584,6 +600,7 @@ export function previewOf(payload: ExportPayload): ExportPreview {
       mailAccounts: tables.servers.filter(
         (row) => row.kind === "jmap" || row.kind === "imap",
       ).length,
+      wrappers: tables.servers.filter((row) => row.kind === "wrapper").length,
       tools: tables.tools.length,
       secrets: tables.secrets.filter((row) => row.kind === "text").length,
       tokens: tables.apiTokens.filter((row) => row.revokedAt === null).length,
@@ -658,6 +675,7 @@ export const FORMAT_COVERS_SCHEMA: {
   >
   tool: Covers<McpTool, z.output<typeof McpToolRow>>
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
+  wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
   setting: Covers<Setting, z.output<typeof SettingRow>>
   browserProfile: Covers<BrowserProfile, z.output<typeof BrowserProfileRow>>
   hostSetting: Covers<HostSetting, z.output<typeof HostSettingRow>>
@@ -676,6 +694,7 @@ export const FORMAT_COVERS_SCHEMA: {
   serverAuthHeader: true,
   tool: true,
   openApiSpec: true,
+  wrapperSpec: true,
   setting: true,
   browserProfile: true,
   hostSetting: true,

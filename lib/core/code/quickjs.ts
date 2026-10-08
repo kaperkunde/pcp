@@ -359,8 +359,51 @@ const PRELUDE = `(() => {
  * value comes back as JSON text, made inside the engine. It starts on the
  * first line, so the line numbers in an error are the program's own.
  */
-function wrap(code: string): string {
-  return `(async () => { const value = await (async () => {${code}\n})(); const json = JSON.stringify(value); return json === undefined ? null : json })()`
+function wrap(code: string, withInput = false): string {
+  // A wrapper tool's program reads its arguments as `args`: parsed inside
+  // the engine from the text PCP set, which is gone before the program runs.
+  return withInput
+    ? `(async (args) => { delete globalThis.__pcp_input; const value = await (async () => {${code}\n})(); const json = JSON.stringify(value); return json === undefined ? null : json })(JSON.parse(globalThis.__pcp_input))`
+    : `(async () => { const value = await (async () => {${code}\n})(); const json = JSON.stringify(value); return json === undefined ? null : json })()`
+}
+
+/**
+ * Whether a program compiles, without running any of it: null when it does,
+ * else the engine's message. For a wrapper's programs, checked before the
+ * owner is asked about them (lib/core/wrappers/definition.ts).
+ */
+export async function checkSyntax(code: string): Promise<string | null> {
+  // Compiling runs none of the program; its memory is capped all the same.
+  const memory = new WebAssembly.Memory({
+    initial: INITIAL_PAGES,
+    maximum: Math.max(
+      INITIAL_PAGES,
+      Math.floor((64 * 1024 * 1024) / PAGE_BYTES),
+    ),
+  })
+  const engine = await newQuickJSWASMModuleFromVariant(
+    newVariant(VARIANT, { wasmMemory: memory }),
+  )
+  const runtime = engine.newRuntime()
+  const vm = runtime.newContext()
+
+  try {
+    const compiled = vm.evalCode(wrap(code, true), "code.js", {
+      compileOnly: true,
+    })
+
+    if (compiled.error) {
+      const thrown = vm.dump(compiled.error) as unknown
+      compiled.error.dispose()
+      return describeThrown(thrown)
+    }
+
+    compiled.value.dispose()
+    return null
+  } finally {
+    vm.dispose()
+    runtime.dispose()
+  }
 }
 
 /** Requests one run may send, of every kind together. */
@@ -420,7 +463,7 @@ export function javaScriptExecutor({
 export const runJavaScript: Executor = javaScriptExecutor()
 
 async function runInQuickJs(
-  { code, bridge, signal }: Parameters<Executor>[0],
+  { code, input, bridge, signal }: Parameters<Executor>[0],
   { cpuMs, memoryBytes }: { cpuMs: number; memoryBytes: number },
 ): Promise<RunResult> {
   const output = new Output()
@@ -606,6 +649,13 @@ async function runInQuickJs(
   vm.setProp(vm.global, "__pcp_host", host)
   vm.setProp(vm.global, "__pcp_print", print)
   vm.setProp(vm.global, "__pcp_random", random)
+
+  if (input !== undefined) {
+    const text = vm.newString(input)
+    vm.setProp(vm.global, "__pcp_input", text)
+    text.dispose()
+  }
+
   host.dispose()
   print.dispose()
   random.dispose()
@@ -629,7 +679,9 @@ async function runInQuickJs(
 
     prelude.value.dispose()
 
-    const started = inGuest(() => vm.evalCode(wrap(code), "code.js"))
+    const started = inGuest(() =>
+      vm.evalCode(wrap(code, input !== undefined), "code.js"),
+    )
 
     if (started.error) {
       return failure(started.error)

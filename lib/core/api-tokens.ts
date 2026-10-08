@@ -37,6 +37,8 @@ export type ApiTokenSummary = {
   webFetch: boolean
   /** May run programs that call its tools (the gateway's run_code tool). */
   runCode: boolean
+  /** May propose wrappers (create_wrapper and its kin). */
+  manageWrappers: boolean
   servers: Array<{ id: string; name: string }>
   expiresAt: Date | null
   revokedAt: Date | null
@@ -60,6 +62,8 @@ export type TokenInput = {
   webFetch?: boolean
   /** Left alone on an update when undefined. */
   runCode?: boolean
+  /** Left alone on an update when undefined. */
+  manageWrappers?: boolean
   expiresAt?: Date | null
 }
 
@@ -77,6 +81,8 @@ export type ResolvedToken = {
   webFetch: boolean
   /** May run programs whose calls follow its tool levels (run_code). */
   runCode: boolean
+  /** May read wrappers and propose new ones and changes (get_wrapper, …). */
+  manageWrappers: boolean
 }
 
 function summaryInclude(now: Date) {
@@ -101,6 +107,7 @@ type SummaryRow = {
   keepMemories: boolean
   webFetch: boolean
   runCode: boolean
+  manageWrappers: boolean
   expiresAt: Date | null
   revokedAt: Date | null
   createdAt: Date
@@ -121,6 +128,7 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     keepMemories: row.keepMemories,
     webFetch: row.webFetch,
     runCode: row.runCode,
+    manageWrappers: row.manageWrappers,
     servers: row.servers.map((link) => link.server),
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
@@ -253,6 +261,7 @@ export async function createApiToken(
       keepMemories: input.keepMemories ?? false,
       webFetch: input.webFetch ?? false,
       runCode: input.runCode ?? false,
+      manageWrappers: input.manageWrappers ?? false,
       expiresAt: input.expiresAt ?? null,
       servers: { create: serverIds.map((serverId) => ({ serverId })) },
     },
@@ -298,6 +307,7 @@ export async function createOAuthApiToken(
         keepMemories: input.keepMemories ?? false,
         webFetch: input.webFetch ?? false,
         runCode: input.runCode ?? false,
+        manageWrappers: input.manageWrappers ?? false,
         expiresAt: input.expiresAt ?? null,
         oauthClientId: input.clientId,
         oauthClientName: input.clientName,
@@ -337,6 +347,9 @@ export async function updateApiToken(
           : {}),
         ...(input.webFetch !== undefined ? { webFetch: input.webFetch } : {}),
         ...(input.runCode !== undefined ? { runCode: input.runCode } : {}),
+        ...(input.manageWrappers !== undefined
+          ? { manageWrappers: input.manageWrappers }
+          : {}),
         ...(input.expiresAt !== undefined
           ? { expiresAt: input.expiresAt }
           : {}),
@@ -420,6 +433,7 @@ export async function liveToken(
     keepMemories: record.keepMemories,
     webFetch: record.webFetch,
     runCode: record.runCode,
+    manageWrappers: record.manageWrappers,
   }
 }
 

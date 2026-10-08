@@ -23,9 +23,10 @@ import { db } from "./db"
 import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
-import { isPcpError, PcpError } from "./errors"
+import { invalid, isPcpError, PcpError } from "./errors"
 import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
+import { makeRedactor } from "./openapi/redact"
 import { send } from "./openapi/transport"
 import {
   applyAuthorizeParams,
@@ -44,12 +45,21 @@ import {
 import {
   extraAuthHeaders,
   isMailKind,
+  kindNoun,
   renderAuthValue,
   setServerStatus,
 } from "./servers"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
 import { PCP_VERSION } from "./version"
+import { syncWrapperTools } from "./wrappers/catalogue"
+import {
+  findPlaceholders,
+  matchGrant,
+  placeValues,
+  scrubResult,
+  type SecretGrant,
+} from "./wrappers/placeholders"
 
 /**
  * Talking to the servers in the registry: opening a connection with the
@@ -1021,6 +1031,10 @@ export async function syncServerTools(
     return syncBrowserTools(server)
   }
 
+  if (server.kind === "wrapper") {
+    return syncWrapperTools(server)
+  }
+
   if (isMailKind(server.kind)) {
     let signIn: MailCredential
 
@@ -1086,19 +1100,33 @@ async function callEndpoint(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl, open }: { publicUrl: string; open?: ResultOpener },
+  {
+    publicUrl,
+    open,
+    placed = [],
+  }: {
+    publicUrl: string
+    open?: ResultOpener
+    /** Secrets a wrapper's call carries in its arguments (placeSecrets). */
+    placed?: string[]
+  },
 ): Promise<CallToolResult> {
   try {
     const { headers, redact } = await credential(ctx, server, { publicUrl })
 
     return await callEndpointTool(server, toolName, args, {
       authHeaders: headers,
-      redact,
+      redact: [...redact, ...placed],
       open,
       ...(server.authType === "oauth"
         ? {
-            renew: async () =>
-              credential(ctx, server, { publicUrl, renew: true }),
+            renew: async () => {
+              const renewed = await credential(ctx, server, {
+                publicUrl,
+                renew: true,
+              })
+              return { ...renewed, redact: [...renewed.redact, ...placed] }
+            },
           }
         : {}),
     })
@@ -1113,33 +1141,128 @@ async function callEndpoint(
   }
 }
 
+export type CallOptions = {
+  publicUrl: string
+  /** The token the call is made for: the browser drives tabs as it. */
+  tokenId?: string
+  /** Keeps a long text whole for read_result (mail bodies, attachments). */
+  keep?: ResultKeeper
+  /** Keeps a file's bytes for the token (a mail attachment read). */
+  keepBytes?: BytesKeeper
+  /**
+   * Opens a result the token kept, for the handles in the arguments
+   * ({"$result": id}): they are replaced by what they stand for before
+   * anything is sent, and an id the token has no result for is refused.
+   */
+  open?: ResultOpener
+  /**
+   * Where a wrapper's call may carry the owner's secrets
+   * (lib/core/wrappers/placeholders.ts): each {"$secret": name} in the
+   * arguments is replaced here, only at a place this names, and the values
+   * are scrubbed from the answer. Without it a placeholder is refused.
+   */
+  secrets?: SecretGrant
+}
+
 export async function callServerTool(
   ctx: VaultContext,
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  {
-    publicUrl,
-    tokenId,
-    keep,
-    keepBytes,
-    open,
-  }: {
-    publicUrl: string
-    /** The token the call is made for: the browser drives tabs as it. */
-    tokenId?: string
-    /** Keeps a long text whole for read_result (mail bodies, attachments). */
-    keep?: ResultKeeper
-    /** Keeps a file's bytes for the token (a mail attachment read). */
-    keepBytes?: BytesKeeper
-    /**
-     * Opens a result the token kept, for the handles in the arguments
-     * ({"$result": id}): they are replaced by what they stand for before
-     * anything is sent, and an id the token has no result for is refused.
-     */
-    open?: ResultOpener
-  },
+  options: CallOptions,
 ): Promise<CallToolResult> {
+  const { args: sent, redact } = await placeSecrets(
+    ctx,
+    server,
+    toolName,
+    args,
+    options.secrets,
+  )
+
+  if (redact.length === 0) {
+    return dispatchCall(ctx, server, toolName, sent, options, [])
+  }
+
+  const scrub = makeRedactor(redact)
+
+  try {
+    return scrubResult(
+      await dispatchCall(ctx, server, toolName, sent, options, redact),
+      redact,
+    )
+  } catch (error) {
+    if (isPcpError(error)) {
+      throw new PcpError(error.code, scrub.text(error.message))
+    }
+
+    throw new PcpError(
+      "upstream",
+      `${server.name} could not be reached: ${scrub.text(error instanceof Error ? error.message : String(error))}`.slice(
+        0,
+        500,
+      ),
+    )
+  }
+}
+
+/**
+ * The arguments with a wrapper's secrets in place, and the values to take
+ * out of what comes back. A placeholder needs a binding the owner approved
+ * for this very argument, on this server as it was when they approved it;
+ * the browser never takes one (a typed value would stay on the page).
+ */
+async function placeSecrets(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  grant: SecretGrant | undefined,
+): Promise<{ args: Record<string, unknown>; redact: string[] }> {
+  const found = findPlaceholders(args)
+
+  if (found.length === 0) {
+    return { args, redact: [] }
+  }
+
+  if (server.kind === "browser" || server.kind === "wrapper") {
+    throw invalid(`A secret cannot go to ${kindNoun(server.kind)}.`)
+  }
+
+  const bindings = matchGrant(found, grant, `${server.slug}/${toolName}`)
+  const values = new Map<string, string>()
+  const redact: string[] = []
+
+  for (const binding of bindings) {
+    if (binding.url !== server.url) {
+      throw invalid(
+        `${server.name}'s address has changed since the owner allowed the secret "${binding.name}" there, so the call was not made.`,
+      )
+    }
+
+    const secret = await readSecretValue(ctx, binding.secretId)
+    const value = renderAuthValue(binding.template, secret)
+    values.set(binding.pointer, value)
+    redact.push(secret, value)
+  }
+
+  return { args: placeValues(args, values), redact }
+}
+
+async function dispatchCall(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  { publicUrl, tokenId, keep, keepBytes, open }: CallOptions,
+  placed: string[],
+): Promise<CallToolResult> {
+  if (server.kind === "wrapper") {
+    throw new PcpError(
+      "state",
+      "A wrapper's tools run through the gateway, for a token.",
+    )
+  }
+
   if (server.kind === "browser") {
     if (!tokenId) {
       throw new PcpError("state", "The browser is used through a token.")
@@ -1157,7 +1280,11 @@ export async function callServerTool(
   // The endpoint resolves its own handles: an upload's file fields take
   // the kept file's bytes, not its base64.
   if (server.kind === "openapi") {
-    return callEndpoint(ctx, server, toolName, args, { publicUrl, open })
+    return callEndpoint(ctx, server, toolName, args, {
+      publicUrl,
+      open,
+      placed,
+    })
   }
 
   if (isMailKind(server.kind)) {
@@ -1182,7 +1309,7 @@ export async function callServerTool(
     }
 
     return callMailTool(server, toolName, args, {
-      credential: signIn,
+      credential: { ...signIn, redact: [...signIn.redact, ...placed] },
       keep,
       keepBytes,
       open,
@@ -1202,6 +1329,7 @@ export async function callServerTool(
     )
   } catch (error) {
     const failure = describeFailure(server, error, connection)
+    failure.message = makeRedactor(placed).text(failure.message)
     await setServerStatus(server.id, failure.status, failure.message)
 
     // "unauthorized" tells the gateway the server needs connecting (or its

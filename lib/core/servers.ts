@@ -31,7 +31,8 @@ import {
 /** basic: a user name and a secret (an API's or a mail account's login). */
 export type AuthType = "none" | "header" | "oauth" | "basic"
 
-export type ServerKind = "mcp" | "openapi" | "jmap" | "imap" | "browser"
+export type ServerKind =
+  "mcp" | "openapi" | "jmap" | "imap" | "browser" | "wrapper"
 
 export type MailKind = Extract<ServerKind, "jmap" | "imap">
 
@@ -41,6 +42,7 @@ const SERVER_KINDS: readonly ServerKind[] = [
   "jmap",
   "imap",
   "browser",
+  "wrapper",
 ]
 
 /**
@@ -48,6 +50,17 @@ const SERVER_KINDS: readonly ServerKind[] = [
  * not something reached at an address, so its row names none.
  */
 export const BROWSER_URL = "pcp:browser"
+
+/**
+ * A wrapper's url: its tools are programs over the vault's other tools
+ * (lib/core/wrappers/), run in PCP, so nothing is reached at an address.
+ */
+export const WRAPPER_URL = "pcp:wrapper"
+
+/** Programs over the vault's other tools, rather than something PCP reaches. */
+export function isWrapperKind(kind: string): kind is "wrapper" {
+  return kind === "wrapper"
+}
 
 /** The vault's own headless browser, rather than something PCP reaches. */
 export function isBrowserKind(kind: string): kind is "browser" {
@@ -69,6 +82,8 @@ export function kindNoun(kind: string): string {
       return "a mail account"
     case "browser":
       return "the browser"
+    case "wrapper":
+      return "a wrapper"
     default:
       return "an MCP server"
   }

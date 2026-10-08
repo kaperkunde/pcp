@@ -106,6 +106,7 @@ export type PermissionKind =
   | "fetch"
   | "browse"
   | "browser_handover"
+  | "wrapper_change"
 
 /**
  * The HTTP methods web_fetch has a level for. Each is the default for a
