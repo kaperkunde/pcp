@@ -222,6 +222,47 @@ describe("proposing a mail account", () => {
       ]),
     )
     expect(view.lines.some((line) => line.startsWith("Checked:"))).toBe(false)
+    // The owner is told the sign-in is not encrypted.
+    expect(view.lines).toContainEqual(
+      expect.stringMatching(
+        /^Not encrypted: the session URL starts with http:/,
+      ),
+    )
+  })
+
+  it("refuses http:// to a public address or a name that is not private, before the owner is asked", async () => {
+    for (const url of [
+      "http://8.8.8.8",
+      "http://mail.example.invalid:8080/.well-known/jmap",
+    ]) {
+      const asked = await register({
+        kind: "jmap",
+        name: "Mail",
+        url,
+        auth_type: "oauth",
+        oauth_scope: "urn:ietf:params:oauth:scope:mail",
+      })
+
+      expect(asked.isError).toBe(true)
+      expect(asked.text).toMatch(/unencrypted.*https:\/\//)
+    }
+
+    expect(probed).toEqual([])
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("does not flag an https session URL as unencrypted", async () => {
+    await register({
+      kind: "jmap",
+      name: "Mail",
+      url: "https://mail.example.com",
+      auth_type: "oauth",
+      oauth_scope: "urn:ietf:params:oauth:scope:mail",
+    })
+
+    expect(
+      (await shown()).lines.some((line) => line.startsWith("Not encrypted")),
+    ).toBe(false)
   })
 
   it("asks for an IMAP account with an SMTP server, read-only if it says so", async () => {

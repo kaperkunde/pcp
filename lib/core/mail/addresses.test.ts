@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest"
 
 import {
   formatMailServer,
+  mailSendOptions,
   onSameOrigin,
   onSameOriginAbsolute,
   parseImapAddress,
   parseRecipient,
   parseSmtpAddress,
+  requireEncryptedOrPrivate,
   validateSessionUrl,
 } from "./addresses"
 
@@ -26,6 +28,86 @@ describe("validateSessionUrl", () => {
     ).toThrow(/query/)
     expect(() => validateSessionUrl("ftp://mail.example.com")).toThrow(/https/)
     expect(() => validateSessionUrl("not a url")).toThrow(/session URL/)
+  })
+})
+
+describe("a session URL over http://", () => {
+  it("is taken for a private, loopback or link-local address", () => {
+    for (const url of [
+      "http://192.168.1.5:8080/.well-known/jmap",
+      "http://10.0.0.2/jmap",
+      "http://127.0.0.1:9/jmap",
+      "http://[::1]/jmap",
+      "http://169.254.1.1/jmap",
+      "http://[fe80::1]/jmap",
+    ]) {
+      expect(validateSessionUrl(url)).toBe(new URL(url).toString())
+    }
+  })
+
+  it("is refused for a public address, whatever follows it", () => {
+    for (const url of [
+      "http://8.8.8.8/jmap",
+      "http://[2606:4700:4700::1111]/jmap",
+      "http://93.184.216.34:8080/.well-known/jmap",
+    ]) {
+      expect(() => validateSessionUrl(url)).toThrow(/unencrypted.*https:\/\//)
+    }
+  })
+
+  it("is looked up for a name, and taken only when every address is private", async () => {
+    const answers =
+      (...addresses: string[]) =>
+      async () =>
+        addresses
+    const session = "http://mail.lan/.well-known/jmap"
+
+    await expect(
+      requireEncryptedOrPrivate(session, answers("192.168.1.5")),
+    ).resolves.toBeUndefined()
+    await expect(
+      requireEncryptedOrPrivate(session, answers("127.0.0.1", "::1")),
+    ).resolves.toBeUndefined()
+
+    // One public address among private ones, a public one, none, or no answer.
+    for (const lookup of [
+      answers("192.168.1.5", "8.8.8.8"),
+      answers("8.8.8.8"),
+      answers(),
+      async () => {
+        throw new Error("ENOTFOUND")
+      },
+    ]) {
+      await expect(requireEncryptedOrPrivate(session, lookup)).rejects.toThrow(
+        /unencrypted/,
+      )
+    }
+  })
+
+  it("needs no lookup over https://, and none for an IP address", async () => {
+    const never = async (): Promise<string[]> => {
+      throw new Error("looked up")
+    }
+
+    await expect(
+      requireEncryptedOrPrivate("https://mail.example.com/jmap", never),
+    ).resolves.toBeUndefined()
+    await expect(
+      requireEncryptedOrPrivate("http://192.168.1.5/jmap", never),
+    ).resolves.toBeUndefined()
+    await expect(
+      requireEncryptedOrPrivate("http://8.8.8.8/jmap", never),
+    ).rejects.toThrow(/unencrypted/)
+  })
+
+  it("is sent only to a private address, checked where the socket connects", () => {
+    expect(mailSendOptions("https://mail.example.com/jmap")).toEqual({})
+
+    const options = mailSendOptions("http://mail.lan/jmap")
+    expect(options.publicOnly).toBe(true)
+    expect(options.addressCheck!("192.168.1.5", 80)).toBe(true)
+    expect(options.addressCheck!("fe80::1", 80)).toBe(true)
+    expect(options.addressCheck!("8.8.8.8", 80)).toBe(false)
   })
 })
 

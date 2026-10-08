@@ -781,6 +781,11 @@ async function summarizeRow(
               ? "Protocol: IMAP, sending through SMTP"
               : "Protocol: IMAP (it cannot send: no SMTP server was named)",
           jmap ? `Session URL: ${input.url}` : `IMAP server: ${input.url}`,
+          ...(jmap && input.url.startsWith("http:")
+            ? [
+                "Not encrypted: the session URL starts with http://, so your sign-in travels unprotected across your network. Only agree if you trust every device on it.",
+              ]
+            : []),
           ...(smtpUrl ? [`SMTP server: ${smtpUrl}`] : []),
           ...(checked ? [`Checked: ${checked}`] : []),
           ...(privateAddress

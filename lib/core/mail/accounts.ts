@@ -43,6 +43,7 @@ import {
   parseImapAddress,
   parseRecipient,
   parseSmtpAddress,
+  requireEncryptedOrPrivate,
   validateSessionUrl,
 } from "./addresses"
 import {
@@ -125,6 +126,11 @@ async function normalizeMailAccount(
   const url = imap
     ? formatMailServer("imap", parseImapAddress(input.url))
     : validateSessionUrl(input.url)
+
+  if (!imap) {
+    await requireEncryptedOrPrivate(url)
+  }
+
   const smtpUrl =
     imap && input.smtpUrl?.trim()
       ? formatMailServer("smtp", parseSmtpAddress(input.smtpUrl))

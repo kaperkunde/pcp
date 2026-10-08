@@ -107,6 +107,29 @@ describe("adding an account", () => {
     await expect(deleteSecret(ctx, secretId)).rejects.toThrow()
   })
 
+  it("refuses a session URL over http:// to a public address, on adding and on changing", async () => {
+    await expect(
+      account({ url: "http://8.8.8.8/jmap/session" }),
+    ).rejects.toThrow(/unencrypted/)
+    // A name that does not resolve to a private address is no better.
+    await expect(
+      account({ url: "http://mail.example.invalid/jmap/session" }),
+    ).rejects.toThrow(/unencrypted/)
+
+    const id = await account()
+    await expect(
+      updateMailAccount(ctx, id, {
+        name: "Mail",
+        url: "http://8.8.8.8/jmap/session",
+        readOnly: false,
+        authType: "basic",
+        authUsername: "ada@example.com",
+        authSecretId: secretId,
+      }),
+    ).rejects.toThrow(/unencrypted/)
+    expect((await getServer(ctx, id)).url).toBe(`${api.origin}/jmap/session`)
+  })
+
   it("offers a read-only account the reading tools only", async () => {
     const id = await account({ readOnly: true })
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)

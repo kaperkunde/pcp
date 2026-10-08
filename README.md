@@ -349,7 +349,8 @@ To remove PCP itself:
    offers it, so it stays signed in). Or add one over **IMAP**, with an SMTP
    server to send through if it should send. Passwords and tokens are secrets
    you pick, and mail only travels encrypted (TLS, or STARTTLS on `imap://` and
-   `smtp://`). Every account offers the same tools: list mailboxes, search one
+   `smtp://`; a JMAP session URL is `https://`, or `http://` for a server on
+   your own network only). Every account offers the same tools: list mailboxes, search one
    mailbox or all of them, read an email or an attachment (a text one as text,
    any other as a handle), move, flag, label (keywords) and delete into the
    Trash (never for good), many emails in one call, write a draft and send,

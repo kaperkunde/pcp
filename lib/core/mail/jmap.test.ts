@@ -50,6 +50,15 @@ async function serve(
   return { fake, origin: api.origin, sessionUrl: `${api.origin}/jmap/session` }
 }
 
+describe("a session over http://", () => {
+  it("is never sent to a public address, the credential included", async () => {
+    // An IP literal is refused before anything connects.
+    await expect(
+      fetchJmapSession("http://8.8.8.8/.well-known/jmap", basic()),
+    ).rejects.toThrow(/unencrypted.*Use an https:\/\/ session URL/)
+  })
+})
+
 function basic(): MailCredential {
   return {
     headers: { Authorization: BASIC },

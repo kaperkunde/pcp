@@ -79,7 +79,8 @@ both from every answer. It can propose a mail account, naming its password
 or token and never holding it: nothing is added until you agree on PCP's page,
 where you type the value in or connect it, and a private address it proposes is
 flagged there. It cannot change an account. Over JMAP,
-PCP sends the credential only to the session URL's origin and never follows
+PCP sends the credential only to the session URL's origin, over https:// (http://
+only to a server on your own network), and never follows
 a redirect; over IMAP and SMTP, only over an encrypted connection.
 
 **An assistant with a token that may manage endpoints** can read an API

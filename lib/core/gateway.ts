@@ -89,6 +89,7 @@ import {
   parseImapAddress,
   parseRecipient,
   parseSmtpAddress,
+  requireEncryptedOrPrivate,
 } from "./mail/addresses"
 import { probeJmapSession, type JmapProbe } from "./mail/probe"
 import {
@@ -1671,6 +1672,8 @@ export function buildGatewayServer(
 
           if (kind === "jmap") {
             url = completeSessionUrl(args.url!)
+            // http:// only for a server on the owner's own network.
+            await requireEncryptedOrPrivate(url)
             // A wrong address is refused here, before the owner is asked.
             probe = await probeJmap(url)
           } else {

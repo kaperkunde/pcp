@@ -507,7 +507,10 @@ JMAP only) or `oauth` (JMAP only).
 **JMAP** (`mail/jmap.ts`): `url` is the session URL the owner typed. Reading
 the account GETs it with the credential, and the API, download and upload
 addresses it names are accepted only on that URL's origin, so the credential
-goes nowhere the owner did not type; they are kept (`mail_api_url`,
+goes nowhere the owner did not type; the URL is `https://`, or `http://` only
+for a private, loopback or link-local address or a name that resolves only to
+those (`requireEncryptedOrPrivate` when it is saved or proposed, and every
+request again, to the address the socket connects to); they are kept (`mail_api_url`,
 `mail_download_url`, `mail_upload_url`, `mail_account_id`,
 `mail_submission`) and forgotten when
 the address or sign-in changes. Redirects are never followed: PCP names
