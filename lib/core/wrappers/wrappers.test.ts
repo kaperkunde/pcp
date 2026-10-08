@@ -139,7 +139,11 @@ async function newestRequest() {
 }
 
 /** Proposes the echo wrapper and has the owner agree, typing the key in. */
-async function approvedWrapper(tool = ECHO_TOOL) {
+async function approvedWrapper(
+  tool: typeof ECHO_TOOL & {
+    annotations?: Record<string, boolean>
+  } = ECHO_TOOL,
+) {
   const asked = await call("create_wrapper", {
     name: "Lookup",
     description: "Things, simpler.",
@@ -602,5 +606,33 @@ describe("what an assistant can set", () => {
     })
     expect(same.isError).toBe(true)
     expect(same.text).toContain("would not change")
+  })
+})
+
+describe("calling a wrapper's tool as read-only", () => {
+  it("counts only when every tool it calls only reads", async () => {
+    const wrapper = await approvedWrapper({
+      ...ECHO_TOOL,
+      annotations: { readOnlyHint: true },
+    })
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    const args = {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "hi" },
+    }
+
+    // An API's GET only reads, so the wrapper's tool does too.
+    const read = await call("call_read_only_tool", args)
+    expect(read.isError, read.text).toBe(false)
+
+    // Once the tool it calls is not marked so, its own word is not enough.
+    await db().mcpTool.updateMany({
+      where: { serverId: endpointId, name: "echo" },
+      data: { annotations: JSON.stringify({ readOnlyHint: false }) },
+    })
+    const refused = await call("call_read_only_tool", args)
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain("not marked read-only")
   })
 })

@@ -400,6 +400,7 @@ and these tools:
 | `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                          |
 | `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                      |
 | `call_tool`           | Runs it, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer (some parts only, base64 decoded, parts as handles).             |
+| `call_read_only_tool` | `call_tool` for a tool its server marks read-only (an API's GET, a mail search, an MCP tool with `readOnlyHint`); anything else is refused.                       |
 | `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                         |
 | `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                   |
 | `read_result`         | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                              |
@@ -414,6 +415,7 @@ described further down:
 | `get_endpoint`    | **read and change API endpoints**               | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.         |
 | `update_endpoint` | **read and change API endpoints**               | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again. |
 | `memory`          | **keep memories**                               | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                               |
+| `read_memory`     | **keep memories**                               | Reads those notes (`every`, `view`, `search`) and nothing else.                                                                            |
 | `web_fetch`       | **fetch web pages**                             | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.              |
 | `run_code`        | **run code that calls its tools**               | Runs a program that calls the token's tools and works on their answers inside PCP.                                                         |
 
@@ -487,10 +489,10 @@ A token made with **Let an assistant with this token keep memories** gets a
 `memory` tool: notes that last between conversations and stay with you rather
 than with one app. It works like Claude's own memory tool (files under
 `/memories`: view, create, str_replace, insert, delete, rename, plus search
-and every), and PCP's instructions, modelled on the protocol Claude's own
+and every), with `read_memory` for the reading commands alone, and PCP's instructions, modelled on the protocol Claude's own
 memory tool uses, tell the assistant to look there before anything else and to
 save what you would not want to say twice as it goes. Before its first reply
-it calls `every`, which returns the memories you chose to have read in every
+it calls `every` through `read_memory`, which returns the memories you chose to have read in every
 conversation and lists the rest.
 
 - `/memories/…` is the assistant's own: only the token that wrote a memory
