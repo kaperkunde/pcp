@@ -334,6 +334,16 @@ export function normalizePath(input: string): string {
     throw invalid(`Keep the path under ${MAX_MEMORY_PATH} characters.`)
   }
 
+  const hidden = hiddenCharacter(path)
+
+  // A letter can draw nothing too (U+3164, the Hangul filler): two paths
+  // that read the same would be two memories.
+  if (hidden) {
+    throw invalid(
+      `The path has a character that does not show on screen (${hidden}). Take it out.`,
+    )
+  }
+
   const segments = path.split("/")
 
   for (const segment of segments) {
@@ -358,12 +368,27 @@ export function normalizePath(input: string): string {
 /**
  * Characters a person does not see on screen: controls other than tab and
  * newline, format characters (zero-width, direction overrides, tag
- * characters), private-use and lone surrogates, blank fillers, and the
- * variation selectors that can carry hidden bytes. Text an assistant wants
- * another one to read must be exactly what the owner reads.
+ * characters), private-use and lone surrogates, and every code point Unicode
+ * says draws nothing (Default_Ignorable: blank fillers, the variation
+ * selectors that can carry hidden bytes, the combining grapheme joiner).
+ * Text an assistant wants another one to read must be exactly what the owner
+ * reads.
  */
 const HIDDEN =
-  /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\u115F\u1160\u2028\u2029\u2800\u3164\uFFA0\uFE00-\uFE0D]|[\u{E0100}-\u{E01EF}]/gu
+  /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Default_Ignorable_Code_Point}\u2028\u2029\u2800]/gu
+
+/**
+ * The emoji presentation selectors (U+FE0E, U+FE0F), which only pick how the
+ * emoji before them is drawn and come with emoji pasted from anywhere.
+ * Prose loses them when it arrives, before anything asks the owner, so what
+ * they approve is what is written; everywhere else they count as hidden.
+ */
+const PRESENTATION = /[\uFE0E\uFE0F]/gu
+
+/** Text without its emoji presentation selectors. */
+export function withoutPresentation(text: string): string {
+  return text.replace(PRESENTATION, "")
+}
 
 /** The first hidden character in the text, as U+XXXX, or null. */
 export function hiddenCharacter(text: string): string | null {
@@ -380,7 +405,9 @@ export function hiddenCharacter(text: string): string | null {
 
 /**
  * A memory's text, checked for its folder and for whether it is read in
- * every conversation; newlines made plain.
+ * every conversation; newlines made plain. Text that has just arrived goes
+ * through `withoutPresentation` first; what an owner's answer writes is
+ * checked as they read it, never changed.
  */
 export function checkText(
   input: string,
@@ -732,7 +759,7 @@ async function change(
   entry: Entry,
   text: string,
 ): Promise<MemoryOutcome> {
-  const checked = checkText(text, entry.visibility)
+  const checked = checkText(withoutPresentation(text), entry.visibility)
 
   if (checked === entry.text) {
     return { text: "Nothing changed: the text is the same." }
@@ -775,7 +802,7 @@ async function create(
 ): Promise<MemoryOutcome> {
   const target = fileTarget(required(args.path, "path"))
   const text = checkText(
-    required(args.file_text, "file_text"),
+    withoutPresentation(required(args.file_text, "file_text")),
     target.visibility,
   )
   const existing = entries.find((entry) =>
@@ -1293,7 +1320,7 @@ export async function createMemory(
 ): Promise<{ id: string }> {
   const always = input.always ?? false
   const path = ownerPath(input.path)
-  const text = checkText(input.text, "shared", always)
+  const text = checkText(withoutPresentation(input.text), "shared", always)
   const entries = await load(ctx)
 
   if (taken(entries, "shared", path, null)) {
@@ -1349,7 +1376,7 @@ export async function updateMemory(
 
   const always = input.always ?? entry.always
   const path = ownerPath(input.path)
-  const text = checkText(input.text, visibility, always)
+  const text = checkText(withoutPresentation(input.text), visibility, always)
 
   if (taken(entries, visibility, path, entry.tokenId, id)) {
     throw new PcpError(

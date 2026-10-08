@@ -8,6 +8,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import {
   checkAuthorizationRequest,
   consentQuery,
+  errorGoesBack,
   tokensForClient,
 } from "@/lib/core/oauth-server/authorize"
 import { listServers } from "@/lib/core/servers"
@@ -39,6 +40,51 @@ function Refusal({ message }: { message: string }) {
               make an API token
             </Link>{" "}
             for it instead.
+          </p>
+        </CardContent>
+      </Card>
+    </AuthShell>
+  )
+}
+
+/**
+ * An error for an app the owner has not let in before: shown here rather
+ * than sent back on its own, since anyone can register an app with any
+ * return address. Going back is the owner's click on a plain link.
+ */
+function ErrorForApp({
+  name,
+  host,
+  returnHost,
+  description,
+  url,
+}: {
+  name: string
+  host: string
+  returnHost: string
+  description: string
+  url: string
+}) {
+  return (
+    <AuthShell title="This sign-in cannot go ahead">
+      <Card>
+        <CardContent className="flex flex-col gap-4">
+          <p>
+            {name} ({host}) asked for a sign-in PCP cannot give. {description}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            You have not let this app in before, so PCP did not send you back to
+            it on its own. If you started this in the app, go back and it is
+            told what went wrong; if you did not, close this page.
+          </p>
+          <p>
+            <a
+              href={url}
+              rel="noreferrer"
+              className="text-primary hover:underline"
+            >
+              Return to {returnHost}
+            </a>
           </p>
         </CardContent>
       </Card>
@@ -79,7 +125,19 @@ export default async function AuthorizePage({
   const check = await checkAuthorizationRequest(query, publicUrl)
 
   if (check.kind === "redirect") {
-    redirect(check.url)
+    if (await errorGoesBack(session.ctx, check.client.id)) {
+      redirect(check.url)
+    }
+
+    return (
+      <ErrorForApp
+        name={check.client.name}
+        host={check.client.host}
+        returnHost={check.returnHost}
+        description={check.description}
+        url={check.url}
+      />
+    )
   }
 
   if (check.kind === "show") {

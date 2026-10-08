@@ -91,11 +91,20 @@ export function isOpen(
  * Characters a person does not see on screen, as `hiddenCharacter` in
  * memories.ts counts them (its tests hold this to that): controls, format
  * characters (zero-width, direction overrides, tag characters), private-use
- * and lone surrogates, blank fillers, and the variation selectors that can
- * carry hidden bytes.
+ * and lone surrogates, and every code point Unicode says draws nothing
+ * (Default_Ignorable: blank fillers, the variation selectors that can carry
+ * hidden bytes). The emoji presentation selectors stay as they are (see
+ * `PRESENT`).
  */
 const UNSEEN =
-  /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\u115F\u1160\u2028\u2029\u2800\u3164\uFFA0\uFE00-\uFE0D]|[\u{E0100}-\u{E01EF}]/gu
+  /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Default_Ignorable_Code_Point}\u2028\u2029\u2800]/gu
+
+/**
+ * U+FE0E and U+FE0F only pick how the emoji before them is drawn, so a
+ * value's emoji reads as an emoji. Text a person reads before another
+ * assistant does has lost them before it is shown (`withoutPresentation`).
+ */
+const PRESENT = new Set(["\uFE0E", "\uFE0F"])
 
 const WRITTEN: Record<string, string> = {
   "\n": "\\n",
@@ -111,7 +120,7 @@ const WRITTEN: Record<string, string> = {
  */
 export function visible(text: string, { oneLine = false } = {}): string {
   return text.replace(UNSEEN, (char) => {
-    if (!oneLine && (char === "\n" || char === "\t")) {
+    if (PRESENT.has(char) || (!oneLine && (char === "\n" || char === "\t"))) {
       return char
     }
 

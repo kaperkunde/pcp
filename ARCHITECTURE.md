@@ -652,11 +652,16 @@ another one reads:
   `decideMemoryAsk` re-reads the memory and writes only if it is still what
   the owner was shown. The owner writes, moves and deletes memories freely on
   the Memories page.
-- **What the owner reads is all there is.** Text with characters that do not
-  show on screen (controls other than tab and newline, format characters such
-  as zero-width spaces, direction overrides and tag characters, private-use,
-  blank fillers, variation selectors that can carry bytes) is refused, and a
-  shared memory is at most 2,000 characters, so it can be read whole.
+- **What the owner reads is all there is.** Text or a path with characters
+  that do not show on screen (controls other than tab and newline, format
+  characters such as zero-width spaces, direction overrides and tag
+  characters, private-use, and every Unicode Default_Ignorable code point:
+  blank fillers such as the Hangul ones that count as letters, variation
+  selectors that can carry bytes) is refused, and a shared memory is at most
+  2,000 characters, so it can be read whole. The emoji presentation
+  selectors (U+FE0E, U+FE0F) are the one exception: text loses them when it
+  arrives, before the owner is asked, so what they approve is what is
+  written; a request answered later is checked as stored, never changed.
 - **The instructions name shared memories by path, and carry the ones read
   in every conversation whole.** The memory paragraph follows the protocol
   Claude's own memory tool adds to the system prompt (look at `/memories`
@@ -918,7 +923,10 @@ it in its arguments. `lib/core/wrappers/` holds it:
   not blocked from), none is a wrapper's (wrappers do not nest), every
   program compiles (QuickJS with `compileOnly`, `code/quickjs.ts
 checkSyntax`), nothing has a character that does not show on screen
-  (`hiddenCharacter`, as for shared memories), and the sizes in
+  (`hiddenCharacter`, as for shared memories: the name, descriptions and
+  titles lose their emoji presentation selectors first; a program, a
+  schema, a secret's argument pointer and template refuse them too), and
+  the sizes in
   `wrappers/limits.ts` hold (a program is 20,000 characters at most, for the
   owner to read). The catalogue's rows for the wrapper's tools are built
   from it (`catalogue.ts`); the row's `operation` carries the calls and
@@ -942,9 +950,10 @@ checkSyntax`), nothing has a character that does not show on screen
   counting as blocked. It is blocked for a token wherever one of its calls
   is, and asks wherever one of them asks. When the owner allows such a call
   (a `call` request like any other; the page names the tools it may call),
-  the program runs with `approved`, so a call that would ask runs once in
-  that run; one that is blocked stays refused, and nothing asks again inside
-  it. A run that was not allowed by the owner never makes a call that asks.
+  the program runs with `approved`, so a tool that would ask runs in that
+  run as often as the program calls it, with the arguments it works out (up
+  to run_code's `MAX_CALLS_PER_RUN`), and the page says so; one that is
+  blocked stays refused, and nothing asks again inside it. A run that was not allowed by the owner never makes a call that asks.
   Always allow writes only the wrapper tool's own level, which the
   strictest-level rule keeps asking while a tool it calls asks.
 - **Secrets** go in only as a placeholder, `{"$secret": "<name>"}`, in a
@@ -1776,7 +1785,13 @@ The authorization response carries `iss` (RFC 9207).
 Redirect URIs are https, http to this computer, or an app's private-use
 scheme, and are matched exactly. Until the client and its redirect URI check
 out, the page tells the owner what is wrong and sends nothing back; after
-that, a bad request goes back to the client as an OAuth error.
+that, a bad request goes back to the client as an OAuth error. It goes back
+on its own only to a client the owner let in before and that still has a
+live token from it (`errorGoesBack`): anyone can register a client or
+publish a document with any redirect URI, so for any other one PCP would be
+an open redirector (RFC 9700 §4.11.2). The page shows that error instead,
+with the app's name and host and a plain "Return to …" link to the URI with
+the error, which the owner follows or not.
 
 **The owner's page** (`/oauth/authorize`) needs the owner signed in: a
 locked PCP sends them to `/login`, which goes on to the sign-in page and

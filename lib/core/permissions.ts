@@ -34,6 +34,7 @@ import {
   type EndpointChangeAsk,
   type EndpointRegistration,
 } from "./endpoint-admin"
+import { MAX_CALLS_PER_RUN } from "./code/limits"
 import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
@@ -906,7 +907,9 @@ async function summarizeRow(
 
 /**
  * What a call to a wrapper's tool does: the program the owner approved runs,
- * and may call these tools; any of them that would ask runs in this call.
+ * and may call these tools. One that would ask is not asked about again in
+ * this run: the program calls it as often as it does, with the arguments it
+ * works out, up to run_code's limit on calls in one run.
  */
 async function wrapperCallLines(
   ctx: VaultContext,
@@ -925,7 +928,7 @@ async function wrapperCallLines(
 
   return [
     `Runs the program you approved for the wrapper ${server.name}, which may call: ${calls.map((call) => `${slugs.get(call.serverId) ?? "(removed server)"}/${call.tool}`).join(", ")}`,
-    "Allowing this call lets those calls run in it, as the token's levels allow; any of them that would ask you first runs this once, with what the program sends.",
+    `Allowing this call lets those calls run in it, as the token's levels allow. Any of them that would ask you first is not asked about again in this run: the program may call it as often as it does (at most ${MAX_CALLS_PER_RUN} calls in all), with whatever arguments it works out.`,
   ]
 }
 
