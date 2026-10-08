@@ -86,7 +86,7 @@ on its own, what it has to ask you about first, and what it cannot touch.
      `curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh`
    - **From a checkout**, run
      `git clone https://github.com/kaperkunde/pcp.git && cd pcp && docker compose up -d`
-2. **Open http://localhost:3000** (the app opens its own window on it; on a
+2. **Open http://localhost:3000** (the app opens its own window, at 127.0.0.1; on a
    server, use the address the installer prints). Pick your name and a
    password, and store the **recovery key** you are shown in a password
    manager: it is shown once, and nothing else resets a password.

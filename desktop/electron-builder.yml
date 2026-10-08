@@ -11,6 +11,7 @@ directories:
   buildResources: build
 files:
   - main.mjs
+  - cookie-migration.mjs
   - settings.mjs
   - touch-id.mjs
   - touch-id-store.mjs

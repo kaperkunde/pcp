@@ -24,6 +24,7 @@ import {
   Menu,
   nativeImage,
   Notification,
+  session,
   shell,
   Tray,
   utilityProcess,
@@ -34,7 +35,9 @@ import { createRequire } from "node:module"
 import net from "node:net"
 import path from "node:path"
 
+import { moveSessionCookie } from "./cookie-migration.mjs"
 import { lanAddresses, readSettings, writeSettings } from "./settings.mjs"
+import { pcpOrigin } from "./touch-id-store.mjs"
 import { serveTouchId } from "./touch-id.mjs"
 import {
   isNewer,
@@ -149,6 +152,13 @@ async function start() {
 
   if (process.platform !== "darwin") {
     createTray()
+  }
+  try {
+    // The window used to load localhost; its sign-in cookie sits there.
+    await moveSessionCookie(session.defaultSession.cookies, settings.port)
+    await session.defaultSession.cookies.flushStore()
+  } catch (error) {
+    console.error("Could not carry the sign-in over:", error)
   }
   createWindow()
   watchForUpdateRequests()
@@ -318,8 +328,12 @@ function sleep(ms) {
 
 // --- The window -----------------------------------------------------------
 
+// The window loads 127.0.0.1, the address the server binds (also when it
+// accepts other devices), and trusts exactly that origin (touch-id-store.mjs,
+// preload.cjs). "localhost" may resolve to ::1, where another program could
+// answer on the same port.
 function localUrl() {
-  return `http://localhost:${settings.port}/`
+  return `${pcpOrigin(settings.port)}/`
 }
 
 function createWindow() {

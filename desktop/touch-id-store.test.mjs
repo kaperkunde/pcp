@@ -89,13 +89,14 @@ describe("the Touch ID key's file", () => {
 
 describe("isPcpPage", () => {
   it("is PCP's own pages in the window, and nothing else", () => {
-    expect(isPcpPage("http://localhost:3000/login", 3000)).toBe(true)
-    expect(isPcpPage("http://localhost:3000/settings?x=1#y", 3000)).toBe(true)
+    expect(isPcpPage("http://127.0.0.1:3000/login", 3000)).toBe(true)
+    expect(isPcpPage("http://127.0.0.1:3000/settings?x=1#y", 3000)).toBe(true)
 
-    expect(isPcpPage("http://localhost:3001/login", 3000)).toBe(false)
-    expect(isPcpPage("https://localhost:3000/login", 3000)).toBe(false)
-    expect(isPcpPage("http://127.0.0.1:3000/login", 3000)).toBe(false)
-    expect(isPcpPage("http://localhost.example.com:3000/", 3000)).toBe(false)
+    expect(isPcpPage("http://127.0.0.1:3001/login", 3000)).toBe(false)
+    expect(isPcpPage("https://127.0.0.1:3000/login", 3000)).toBe(false)
+    expect(isPcpPage("http://localhost:3000/login", 3000)).toBe(false)
+    expect(isPcpPage("http://[::1]:3000/login", 3000)).toBe(false)
+    expect(isPcpPage("http://127.0.0.1.example.com:3000/", 3000)).toBe(false)
     expect(isPcpPage("https://accounts.google.com/signin", 3000)).toBe(false)
     expect(isPcpPage("about:blank", 3000)).toBe(false)
     expect(isPcpPage("not a url", 3000)).toBe(false)

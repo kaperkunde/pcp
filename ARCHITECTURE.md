@@ -1287,7 +1287,7 @@ app keeps and hands over only after Touch ID.
     ID prompt (`systemPreferences.promptTouchID`). A checkout, a fork, or a
     release built without the profile works this way.
 - **How a page reaches it.** The window's preload (`desktop/preload.cjs`)
-  gives PCP's own pages, and only those (plain http on localhost),
+  gives PCP's own pages, and only those (plain http on 127.0.0.1),
   `window.pcpDesktop.touchId`: `status`, `unlock`, `save`, `forget`. The
   main process (`desktop/touch-id.mjs`) checks again that the call comes
   from the window's main frame at the app's own address and port, shows the

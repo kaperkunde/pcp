@@ -50,7 +50,7 @@ export function webUrl(url) {
  *
  * @param {{ permission: string, url: unknown, isMainFrame?: boolean }} request
  *   url is the asking page's address or origin.
- * @param {number} port PCP's port on localhost.
+ * @param {number} port PCP's port on 127.0.0.1.
  */
 export function permissionAllowed({ permission, url, isMainFrame }, port) {
   return (
