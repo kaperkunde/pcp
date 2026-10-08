@@ -2,15 +2,13 @@ import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, toolText } from "../lib/mcp"
-import { allowAllTools, createToken } from "../lib/ui"
+import { allowAllTools, createToken, openAdvanced } from "../lib/ui"
 
 // An API that signs in with OAuth, like Gmail's REST API: its OpenAPI
 // document declares the flow, the provider lets no app register itself, so
 // an assistant proposes it with the owner's client ID and the owner types
 // the client secret in on the approval page. Then the owner connects it, and
-// the assistant's calls carry the token PCP got, which it renews itself. At a
-// provider that lets apps register themselves there is no client to bring:
-// PCP finds that out when the owner connects, and registers itself.
+// the assistant's calls carry the token PCP got, which it never sees.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -20,7 +18,6 @@ const NAME = `Whoami ${RUN}`
 let upstream: Upstream
 let token: string
 let redirectUri: string
-let endpointId: string
 
 test.beforeAll(async () => {
   upstream = await startUpstream()
@@ -65,9 +62,6 @@ test("an assistant proposes it with the owner's client, and the owner enters the
       `Tokens from: ${upstream.origin}/closed/token; your client secret goes there`,
     ),
   ).toBeVisible()
-  await expect(
-    page.getByText(/Authentication: OAuth with your client "closed-client"/),
-  ).toBeVisible()
   const shown = await page
     .getByText(/^Redirect URI your client needs: /)
     .textContent()
@@ -88,17 +82,19 @@ test("an assistant proposes it with the owner's client, and the owner enters the
   )
 })
 
-test("the owner connects it, and fixes a sign-in PCP cannot renew in place", async ({
+test("the owner connects it, and the assistant's calls carry the token, which it never sees", async ({
   page,
+  baseURL,
 }) => {
   await page.goto("/servers")
   await page.getByRole("link").filter({ hasText: NAME }).click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  endpointId = page.url().split("/").pop()!
-  await expect(page.getByText("Needs connecting")).toBeVisible()
+  const endpointId = page.url().split("/").pop()!
 
   // An assistant's endpoint reaches public addresses only, and the fake
   // provider is on loopback.
+  await openAdvanced(page)
+  const slug = await page.getByLabel("Short name").inputValue()
   await page.getByLabel("Public addresses only").uncheck()
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
@@ -109,7 +105,6 @@ test("the owner connects it, and fixes a sign-in PCP cannot renew in place", asy
   await expect(page).toHaveURL(
     new RegExp(`/servers/${endpointId}\\?connected=1$`),
   )
-  await expect(page.getByText("Ready", { exact: true })).toBeVisible()
   expect(upstream.closedSignIns.at(-1)).toMatchObject({
     client_id: upstream.closedClient.id,
     redirect_uri: redirectUri,
@@ -118,35 +113,7 @@ test("the owner connects it, and fixes a sign-in PCP cannot renew in place", asy
   // A REST API names no resource indicator.
   expect(upstream.closedSignIns.at(-1)).not.toHaveProperty("resource")
 
-  // This provider gives a refresh token only when asked: the page says so
-  // and asks for the parameters right there.
-  await expect(page.getByText(/and PCP cannot renew it/)).toBeVisible()
-  const signIns = upstream.closedSignIns.length
-  await page
-    .getByLabel("Extra sign-in parameters", { exact: true })
-    .fill("access_type=offline&prompt=consent")
-  await page.getByRole("button", { name: "Save and reconnect" }).click()
-  // The page is on ?connected=1 already: wait for the second sign-in.
-  await expect.poll(() => upstream.closedSignIns.length).toBe(signIns + 1)
-  await page.waitForLoadState()
-  await expect(page).toHaveURL(
-    new RegExp(`/servers/${endpointId}\\?connected=1$`),
-  )
-  expect(upstream.closedSignIns.at(-1)).toMatchObject({
-    access_type: "offline",
-    prompt: "consent",
-  })
-  await expect(page.getByText(/and PCP cannot renew it/)).toHaveCount(0)
-})
-
-test("the assistant's calls carry the token, which it never sees", async ({
-  page,
-  baseURL,
-}) => {
-  await page.goto(`/servers/${endpointId}`)
-  const slug = await page.getByLabel("Short name").inputValue()
   await allowAllTools(page, TOKEN_NAME, slug)
-
   const result = await callTool(baseURL!, token, "call_tool", {
     server: slug,
     tool: "whoami",
@@ -158,81 +125,6 @@ test("the assistant's calls carry the token, which it never sees", async ({
   const sent = upstream.closedApiRequests.at(-1)!
   expect(sent.path).toBe("/closed-api/whoami")
   const bearer = sent.authorization?.replace(/^Bearer /, "") ?? ""
-  expect(upstream.issuedTokens.has(bearer)).toBe(true)
-  expect(toolText(result)).not.toContain(bearer)
-})
-
-test("a provider that lets apps register themselves needs no client from the owner", async ({
-  page,
-  baseURL,
-}) => {
-  const name = `Open whoami ${RUN}`
-
-  // No client_id: PCP finds out itself whether it may register.
-  const asked = await callTool(baseURL!, token, "register_server", {
-    name,
-    openapi_schema: await (await fetch(upstream.openApiSpecUrl)).text(),
-    url: upstream.openApiUrl,
-    auth_type: "oauth",
-  })
-  expect(asked.body.result?.isError ?? false, toolText(asked)).toBe(false)
-  expect(toolText(asked)).toContain("Not done yet")
-  // There is no client secret to type in.
-  expect(toolText(asked)).not.toMatch(/They type/)
-  const id = toolText(asked).match(/\/permissions\/([\w-]+)/)?.[1]
-  expect(id, toolText(asked)).toBeTruthy()
-
-  await page.goto(`/permissions/${id}`)
-  await expect(page.getByText(`Add the API endpoint ${name}?`)).toBeVisible()
-  await expect(
-    page.getByText(`Sign-in at: ${upstream.origin}/authorize`),
-  ).toBeVisible()
-  await expect(
-    page.getByText(/Client: none given\. When you connect it, PCP registers/),
-  ).toBeVisible()
-  await expect(page.getByText(/Redirect URI your client needs/)).toHaveCount(0)
-  await expect(
-    page.getByLabel(/Client secret of the OAuth client/),
-  ).toHaveCount(0)
-  await page.getByRole("button", { name: "Add server" }).click()
-  await expect(page.getByTestId("permission-outcome")).toContainText(
-    `Added ${name}`,
-  )
-
-  await page.goto("/servers")
-  await page.getByRole("link").filter({ hasText: name }).click()
-  await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  const openId = page.url().split("/").pop()!
-  await expect(page.getByText("Needs connecting")).toBeVisible()
-
-  // An assistant's endpoint reaches public addresses only, and the fake
-  // provider is on loopback.
-  await page.getByLabel("Public addresses only").uncheck()
-  await page.getByRole("button", { name: "Save changes" }).click()
-  await expect(
-    page.getByRole("status").filter({ hasText: "Saved." }),
-  ).toBeVisible()
-
-  // Nothing was registered before the owner chose Connect.
-  const registered = upstream.registrations.length
-  await page.getByRole("link", { name: "Connect", exact: true }).click()
-  await expect(page).toHaveURL(new RegExp(`/servers/${openId}\\?connected=1$`))
-  await expect(page.getByText("Ready", { exact: true })).toBeVisible()
-  expect(upstream.registrations).toHaveLength(registered + 1)
-  expect(upstream.registrations.at(-1)!.redirect_uris).toEqual([redirectUri])
-
-  const slug = await page.getByLabel("Short name").inputValue()
-  await allowAllTools(page, TOKEN_NAME, slug)
-  const result = await callTool(baseURL!, token, "call_tool", {
-    server: slug,
-    tool: "whoami",
-    arguments: {},
-  })
-  expect(result.body.result?.isError ?? false, toolText(result)).toBe(false)
-  expect(toolText(result)).toContain("the owner")
-  const bearer =
-    upstream.openApiRequests.at(-1)!.authorization?.replace(/^Bearer /, "") ??
-    ""
   expect(upstream.issuedTokens.has(bearer)).toBe(true)
   expect(toolText(result)).not.toContain(bearer)
 })

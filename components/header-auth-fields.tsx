@@ -1,17 +1,19 @@
 "use client"
 
-import { useRef, useState } from "react"
+import { Plus } from "lucide-react"
+import { useRef, useState, type ReactNode } from "react"
 
+import {
+  SecretChoice,
+  type SecretOption,
+} from "@/components/auth-fields-secret"
 import { Button } from "@/components/ui/button"
+import { Disclosure } from "@/components/ui/disclosure"
 import { Input, Select } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
-import {
-  MAX_AUTH_HEADERS,
-  NEW_SECRET,
-  SECRET_PLACEHOLDER,
-} from "@/lib/core/constants"
+import { MAX_AUTH_HEADERS, SECRET_PLACEHOLDER } from "@/lib/core/constants"
 
-export type SecretOption = { id: string; name: string }
+export type { SecretOption }
 
 export type ExtraHeaderValues = {
   secretId: string
@@ -36,24 +38,23 @@ export type HeaderAuthValues = {
  * are held in state: React resets an uncontrolled form after every action, a
  * failed one included, which would empty these fields each time a submit is
  * refused.
+ *
+ * With `foldHeader` the header's name and format, and any further headers,
+ * sit under a fold that says what is sent: most APIs take the default.
  */
 export function HeaderAuthFields({
   prefix,
   secrets,
   initial,
+  foldHeader = false,
 }: {
   prefix: string
   secrets: SecretOption[]
   initial: HeaderAuthValues
+  foldHeader?: boolean
 }) {
-  const [secretId, setSecretId] = useState(
-    initial.authSecretId || (secrets.length === 0 ? NEW_SECRET : ""),
-  )
-  const [newName, setNewName] = useState("")
-  const [newValue, setNewValue] = useState("")
   const [header, setHeader] = useState(initial.authHeaderName)
   const [template, setTemplate] = useState(initial.authValueTemplate)
-  const typingNew = secretId === NEW_SECRET
   const nextKey = useRef(initial.authExtraHeaders.length)
   const [extras, setExtras] = useState(
     initial.authExtraHeaders.map((extra, key) => ({ ...extra, key })),
@@ -66,66 +67,8 @@ export function HeaderAuthFields({
       ),
     )
 
-  return (
-    <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
-      <Field
-        label="Secret"
-        htmlFor={`${prefix}-secret`}
-        hint={
-          typingNew
-            ? "Saved under Secrets with the form, where you can rotate it later."
-            : "Stored encrypted; PCP sends it, an assistant never sees it."
-        }
-      >
-        <Select
-          id={`${prefix}-secret`}
-          name="authSecretId"
-          value={secretId}
-          onChange={(event) => setSecretId(event.target.value)}
-          required
-        >
-          <option value="">Choose a secret…</option>
-          <option value={NEW_SECRET}>A new secret, entered here</option>
-          {secrets.map((secret) => (
-            <option key={secret.id} value={secret.id}>
-              {secret.name}
-            </option>
-          ))}
-        </Select>
-      </Field>
-      {typingNew ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="New secret's value"
-            htmlFor={`${prefix}-secret-value`}
-            hint="The key or token itself. PCP sends it; an assistant never sees it."
-          >
-            <Input
-              id={`${prefix}-secret-value`}
-              name="authSecretValue"
-              type="password"
-              value={newValue}
-              onChange={(event) => setNewValue(event.target.value)}
-              autoComplete="off"
-              required
-            />
-          </Field>
-          <Field
-            label="Save it as (optional)"
-            htmlFor={`${prefix}-secret-name`}
-            hint="Left empty, it is named after this server."
-          >
-            <Input
-              id={`${prefix}-secret-name`}
-              name="authSecretName"
-              value={newName}
-              onChange={(event) => setNewName(event.target.value)}
-              maxLength={100}
-              autoComplete="off"
-            />
-          </Field>
-        </div>
-      ) : null}
+  const headerFields: ReactNode = (
+    <>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Header" htmlFor={`${prefix}-header`}>
           <Input
@@ -135,6 +78,8 @@ export function HeaderAuthFields({
             onChange={(event) => setHeader(event.target.value)}
             pattern="[A-Za-z0-9-]+"
             required
+            spellCheck={false}
+            className="font-mono"
           />
         </Field>
         <Field
@@ -148,6 +93,8 @@ export function HeaderAuthFields({
             value={template}
             onChange={(event) => setTemplate(event.target.value)}
             required
+            spellCheck={false}
+            className="font-mono"
           />
         </Field>
       </div>
@@ -157,10 +104,11 @@ export function HeaderAuthFields({
         const n = index + 2
 
         return (
-          <div
+          <fieldset
             key={extra.key}
-            className="flex flex-col gap-4 border-t border-border pt-4"
+            className="m-0 flex min-w-0 flex-col gap-4 border-0 border-t border-separator p-0 pt-4"
           >
+            <legend className="sr-only">Secret header {n}</legend>
             <Field label={`Secret ${n}`} htmlFor={`${id}-secret`}>
               <Select
                 id={`${id}-secret`}
@@ -190,6 +138,8 @@ export function HeaderAuthFields({
                   }
                   pattern="[A-Za-z0-9-]+"
                   required
+                  spellCheck={false}
+                  className="font-mono"
                 />
               </Field>
               <Field label={`Value ${n}`} htmlFor={`${id}-template`}>
@@ -203,31 +153,32 @@ export function HeaderAuthFields({
                     })
                   }
                   required
+                  spellCheck={false}
+                  className="font-mono"
                 />
               </Field>
             </div>
-            <div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() =>
-                  setExtras((current) =>
-                    current.filter((other) => other.key !== extra.key),
-                  )
-                }
-              >
-                Remove header {n}
-              </Button>
-            </div>
-          </div>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              className="self-start"
+              onClick={() =>
+                setExtras((current) =>
+                  current.filter((other) => other.key !== extra.key),
+                )
+              }
+            >
+              Remove header {n}
+            </Button>
+          </fieldset>
         )
       })}
       {extras.length + 1 < MAX_AUTH_HEADERS ? (
-        <div>
+        <div className="flex flex-col items-start gap-1">
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={() =>
               setExtras((current) => [
@@ -241,15 +192,57 @@ export function HeaderAuthFields({
               ])
             }
           >
+            <Plus aria-hidden />
             Add another secret header
           </Button>
-          <p className="mt-1 text-xs text-muted-foreground">
+          <p className="text-xs text-muted-foreground">
             For an API that wants several secrets at once, such as a key and a
             secret key, each in its own header. Further headers send secrets
             stored under Secrets.
           </p>
         </div>
       ) : null}
+    </>
+  )
+
+  return (
+    <div className="flex flex-col gap-4">
+      <SecretChoice
+        prefix={prefix}
+        label="Secret"
+        secrets={secrets}
+        initialId={initial.authSecretId}
+        typeNew={{
+          option: "A new secret, entered here",
+          valueLabel: "New secret's value",
+          valueHint:
+            "The key or token itself. PCP sends it; an assistant never sees it.",
+          nameHint: "Left empty, it is named after this server.",
+        }}
+      />
+      {foldHeader ? (
+        <Disclosure
+          title="Header and format"
+          description={
+            <>
+              Sent as{" "}
+              <code className="text-foreground">
+                {header || "…"}: {template}
+              </code>
+              {extras.length > 0
+                ? `, and ${extras.length} more header${extras.length === 1 ? "" : "s"}`
+                : null}
+              . Change it if the API wants another header or format.
+            </>
+          }
+          defaultOpen={initial.authExtraHeaders.length > 0}
+          className="rounded-[10px] border border-input bg-field"
+        >
+          {headerFields}
+        </Disclosure>
+      ) : (
+        headerFields
+      )}
     </div>
   )
 }

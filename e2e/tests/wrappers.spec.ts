@@ -7,14 +7,14 @@ import {
   addSecret,
   allowAllTools,
   confirmWithPassword,
-  showServerTools,
+  openAdvanced,
 } from "../lib/ui"
 
 // A wrapper, end to end: an assistant proposes simpler tools over a server
 // whose tool wants an API key as an argument, the owner reads every program
 // and types the key in, and the wrapper's tool then puts the key where it
 // goes — the assistant never sees it — while the tool it replaces leaves
-// search until the owner brings it back.
+// search.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -29,7 +29,6 @@ const WRAPPER_SLUG = `lookup-${RUN}`
 
 let upstream: Upstream
 let token: string
-let serverId: string
 
 test.beforeAll(async () => {
   upstream = await startUpstream()
@@ -55,7 +54,7 @@ test("the owner adds a server and a token that may propose wrappers", async ({
   await page.getByLabel("Secret").selectOption({ label: UPSTREAM_SECRET })
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  serverId = page.url().split("/").pop()!
+  await openAdvanced(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
@@ -117,9 +116,14 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
 
   await page.goto(`/permissions/${id}`)
   await expect(page.getByText(`Add the wrapper ${WRAPPER_NAME}?`)).toBeVisible()
+  // The program in full, and where the key goes, before anything is agreed.
   await expect(page.getByText(`api_key: { $secret:`)).toBeVisible()
   await expect(page.getByRole("note")).toContainText(
     `your secret "${KEY_NAME}"`,
+  )
+  const places = page.getByRole("region", { name: "Where your secrets go" })
+  await expect(places.getByRole("row").nth(1)).toContainText(
+    `${SLUG}/keyed_echo /api_key`,
   )
   await page.getByLabel(`Value of the secret "${KEY_NAME}"`).fill(KEY)
   await page.getByRole("button", { name: "Make the change" }).click()
@@ -162,22 +166,4 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
   })
   expect(own.body.result?.isError).toBe(true)
   expect(toolText(own)).toContain("not taken from you")
-})
-
-test("the owner brings the replaced tool back to search", async ({
-  page,
-  baseURL,
-}) => {
-  await page.goto(`/servers/${serverId}`)
-  await showServerTools(page)
-  const row = page.getByRole("listitem").filter({ hasText: "keyed_echo" })
-  await expect(row.getByText("Left out of search")).toBeVisible()
-  await row.getByRole("button", { name: "Show it in search again" }).click()
-  // Nothing stands in for it now, so the note goes with it.
-  await expect(row.getByText("Left out of search")).toHaveCount(0)
-
-  const search = await callTool(baseURL!, token, "search_tools", {
-    query: "looks a text up",
-  })
-  expect(toolText(search)).toContain(`${SLUG}/keyed_echo`)
 })

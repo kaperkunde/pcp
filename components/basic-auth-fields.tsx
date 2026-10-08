@@ -2,10 +2,10 @@
 
 import { useState } from "react"
 
+import { SecretChoice } from "@/components/auth-fields-secret"
 import type { SecretOption } from "@/components/header-auth-fields"
-import { Input, Select } from "@/components/ui/input"
+import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
-import { NEW_SECRET } from "@/lib/core/constants"
 
 export type BasicAuthValues = {
   authUsername: string
@@ -29,89 +29,36 @@ export function BasicAuthFields({
   initial: BasicAuthValues
 }) {
   const [username, setUsername] = useState(initial.authUsername)
-  const [secretId, setSecretId] = useState(
-    initial.authSecretId || (secrets.length === 0 ? NEW_SECRET : ""),
-  )
-  const [newName, setNewName] = useState("")
-  const [newValue, setNewValue] = useState("")
-  const typingNew = secretId === NEW_SECRET
 
   return (
-    <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="User name" htmlFor={`${prefix}-username`}>
-          <Input
-            id={`${prefix}-username`}
-            name="authUsername"
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            required
-            autoComplete="off"
-          />
-        </Field>
-        <Field
-          label="Password"
-          htmlFor={`${prefix}-secret`}
-          hint={
-            typingNew
-              ? "Saved under Secrets with the form, where you can rotate it later."
-              : "Stored encrypted; PCP sends it, an assistant never sees it."
-          }
-        >
-          <Select
-            id={`${prefix}-secret`}
-            name="authSecretId"
-            value={secretId}
-            onChange={(event) => setSecretId(event.target.value)}
-            required
-          >
-            <option value="">Choose a secret…</option>
-            <option value={NEW_SECRET}>A new password, entered here</option>
-            {secrets.map((secret) => (
-              <option key={secret.id} value={secret.id}>
-                {secret.name}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      </div>
-      {typingNew ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="New password"
-            htmlFor={`${prefix}-secret-value`}
-            hint="PCP sends it with the user name; an assistant never sees it."
-          >
-            <Input
-              id={`${prefix}-secret-value`}
-              name="authSecretValue"
-              type="password"
-              value={newValue}
-              onChange={(event) => setNewValue(event.target.value)}
-              autoComplete="off"
-              required
-            />
-          </Field>
-          <Field
-            label="Save it as (optional)"
-            htmlFor={`${prefix}-secret-name`}
-            hint="Left empty, it is named after this endpoint."
-          >
-            <Input
-              id={`${prefix}-secret-name`}
-              name="authSecretName"
-              value={newName}
-              onChange={(event) => setNewName(event.target.value)}
-              maxLength={100}
-              autoComplete="off"
-            />
-          </Field>
-        </div>
-      ) : null}
-      <p className="text-xs text-muted-foreground">
-        Sent as HTTP Basic authentication in the Authorization header with every
-        call, to the base URL.
-      </p>
+    <div className="flex flex-col gap-4">
+      <Field
+        label="User name"
+        htmlFor={`${prefix}-username`}
+        hint="Sent with the password as HTTP Basic authentication, in the Authorization header of every call to the base URL."
+      >
+        <Input
+          id={`${prefix}-username`}
+          name="authUsername"
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          required
+          autoComplete="off"
+        />
+      </Field>
+      <SecretChoice
+        prefix={prefix}
+        label="Password"
+        secrets={secrets}
+        initialId={initial.authSecretId}
+        typeNew={{
+          option: "A new password, entered here",
+          valueLabel: "New password",
+          valueHint:
+            "PCP sends it with the user name; an assistant never sees it.",
+          nameHint: "Left empty, it is named after this endpoint.",
+        }}
+      />
     </div>
   )
 }

@@ -157,3 +157,45 @@ export async function allowAllTools(
     expect(values.every((value) => value === "allowed")).toBe(true)
   }).toPass()
 }
+
+/**
+ * Opens the "Advanced" disclosure on a server's page, where its settings
+ * form sits, once that form is on the page. Does nothing when the page
+ * shows the form unfolded.
+ */
+export async function openAdvanced(page: Page) {
+  await expect(
+    page.getByRole("button", { name: "Save changes" }).first(),
+  ).toBeAttached()
+  const advanced = page.locator("details", {
+    has: page.locator("summary", { hasText: /^Advanced/ }),
+  })
+  if (
+    (await advanced.count()) > 0 &&
+    (await advanced.first().getAttribute("open")) === null
+  ) {
+    await advanced.first().locator("summary").first().click()
+  }
+}
+
+/**
+ * Chooses one option of a SegmentedControl by its label. Its radio is
+ * visually hidden under the label, which takes the click, so a radio's
+ * check() never finds it clickable.
+ */
+export async function chooseSegment(page: Page, label: string) {
+  await page.locator("label", { hasText: new RegExp(`^${label}$`) }).click()
+  await expect(
+    page.getByRole("radio", { name: label, exact: true }),
+  ).toBeChecked()
+}
+
+/** Opens "More options" on an add form. */
+export async function openMoreOptions(page: Page) {
+  const more = page.locator("details", {
+    has: page.locator("summary", { hasText: /^More options/ }),
+  })
+  if ((await more.getAttribute("open")) === null) {
+    await more.locator("summary").click()
+  }
+}
