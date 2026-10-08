@@ -74,7 +74,11 @@ test("deletes the vault after the box and the password, and starts over", async 
 
   await page.getByRole("link", { name: "I have saved it — continue" }).click()
   await page.getByRole("link", { name: "Skip for now — open PCP" }).click()
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
+  await expect(
+    page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Servers" }),
+  ).toBeVisible()
 
   // A new vault: the secret from before is not in it.
   await page.goto("/secrets")

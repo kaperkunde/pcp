@@ -364,6 +364,14 @@ Not defended against:
   daily update (`PCP_AUTO_UPDATE=1`, by its own timer or Podman's) starts PCP
   again from whatever image is published as `ghcr.io/kaperkunde/pcp:latest`,
   with no step for you to look first.
+- **Install and restart** under the Linux installer does the same when you
+  choose it: PCP writes the request (an id and a time, nothing else) in its
+  data folder, and the installer's watcher on the host reads it through
+  `docker exec` every 30 seconds and runs its own update. PCP gets no Docker
+  socket and no way to reach the host. The watcher reads the file as
+  untrusted, so even a PCP that was taken over could do no more than have
+  the published image pulled again, at most once every five minutes.
+  `PCP_UPDATE_BUTTON=0` turns it off.
 - The desktop app installs an update only when you choose **Install and
   restart**, downloading it from PCP's GitHub releases over HTTPS. On a Mac,
   the updater takes only an app signed with the same Developer ID; the

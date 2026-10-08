@@ -2,7 +2,8 @@
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the key-files
 table, and [ARCHITECTURE.md](ARCHITECTURE.md) for the encryption and tenancy
-model. This file is the conventions that are easy to get wrong.
+model, and [DESIGN.md](DESIGN.md) for how the owner's pages look and where
+things go on them. This file is the conventions that are easy to get wrong.
 
 ## Before pushing
 
@@ -327,7 +328,11 @@ so in the summary; the bump itself waits for the request.
   from it), and runs no timer and no request while the owner has it off; it
   asks nothing before setup. It tells the owner how to update for the way PCP
   was installed; in a container or a checkout PCP never pulls, builds or
-  restarts itself.
+  restarts itself. Install and restart in the Linux installer's container is
+  a file in the data folder (`updates/host-signal.ts`: an id and a time,
+  nothing of the vault) that the installer's `watch` reads through `exec` and
+  checks as untrusted input before it runs its own `update`; PCP never
+  addresses the host.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` and `PCP_DESKTOP_UPDATER` (`lib/server/desktop.ts`), for

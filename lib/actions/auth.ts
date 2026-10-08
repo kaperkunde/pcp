@@ -91,7 +91,7 @@ export async function loginAction(
   }
 
   await signIn(ctx)
-  redirect(returnPath(field(formData, "next")) ?? "/servers")
+  redirect(returnPath(field(formData, "next")) ?? "/home")
 }
 
 export type TouchIdLoginResult = ActionState
@@ -126,7 +126,7 @@ export async function touchIdLoginAction(
   }
 
   await signIn(ctx)
-  redirect(returnPath(field(formData, "next")) ?? "/servers")
+  redirect(returnPath(field(formData, "next")) ?? "/home")
 }
 
 export async function logoutAction(): Promise<void> {
@@ -169,5 +169,5 @@ export async function recoverAction(
   }
 
   await signIn(result.ctx)
-  redirect("/servers")
+  redirect("/home")
 }

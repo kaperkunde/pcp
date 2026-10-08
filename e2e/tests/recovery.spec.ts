@@ -41,7 +41,11 @@ test("resets the password with the recovery key", async ({ page, baseURL }) => {
   await page.getByLabel("Repeat new password").fill(TEMPORARY_PASSWORD)
   await page.getByLabel("Also revoke every API token").check()
   await page.getByRole("button", { name: "Set the new password" }).click()
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
+  await expect(
+    page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Servers" }),
+  ).toBeVisible()
 
   expect((await mcpRequest(baseURL!, token, "tools/list")).status).toBe(401)
 

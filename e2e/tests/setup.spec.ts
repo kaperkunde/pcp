@@ -55,7 +55,11 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
       ddns.getByRole("link", { name: "Open duckdns.org" }),
     ).toHaveAttribute("href", "https://www.duckdns.org/")
     await page.getByRole("link", { name: "Skip for now — open PCP" }).click()
-    await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
+    await expect(
+      page
+        .getByRole("navigation", { name: "Main" })
+        .getByRole("link", { name: "Servers" }),
+    ).toBeVisible()
 
     // Nothing added yet: an assistant can do it, given a token.
     const start = page.getByTestId("servers-start")

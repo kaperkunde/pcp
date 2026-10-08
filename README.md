@@ -167,10 +167,12 @@ Fedora Atomic systems come with Podman), pulls the published image
 (`ghcr.io/kaperkunde/pcp`) and keeps PCP running on port 3000 across reboots:
 as a container Docker restarts, or as a systemd unit under Podman. It never
 runs `sudo` or installs Docker for you; when neither is usable, it prints what
-to run. Run the same line again to update PCP, or once with
-`PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`) to have it update PCP by
-itself once a day. The top of [`install.sh`](install.sh) lists its settings
-(`PCP_PORT`, `PCP_HTTPS`, `PCP_AUTO_UPDATE` and a few more); it remembers
+to run. Run the same line again to update PCP, or choose **Install and
+restart** under **Settings → Updates** when PCP says a new version is out.
+Run it once with `PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`) to have it
+update PCP by itself once a day. The top of [`install.sh`](install.sh) lists its settings
+(`PCP_PORT`, `PCP_HTTPS`, `PCP_AUTO_UPDATE`, `PCP_UPDATE_BUTTON` and a few
+more); it remembers
 them in `~/.config/pcp/install.conf` (`/etc/pcp/install.conf` as root), so a
 later run keeps them.
 `… | sh -s -- uninstall` removes PCP and keeps your data.
@@ -239,12 +241,14 @@ start it.
 PCP asks GitHub once a day which release is the latest, and says so in its
 header when a newer one is out. **Settings → Updates** shows what it found,
 with the release notes, and says how to update the PCP you are looking at:
-the app, the container or a checkout. GitHub sees this PCP's address and
-version, nothing else. Turn the daily check off there (or in the step after
-setup) and PCP asks only when you choose **Check now**. In a container or a
-checkout PCP never pulls, builds or restarts itself; only the installer's
-daily update (`PCP_AUTO_UPDATE=1`, above) does that for a container, and the
-page says when it is on.
+the app, the container or a checkout. The Mac and Windows app and the Linux
+installer can install it from there (**Install and restart**). GitHub sees this
+PCP's address and version, nothing else. Turn the daily check off there (or in
+the step after setup) and PCP asks only when you choose **Check now**. In a
+container or a checkout PCP never pulls, builds or restarts itself; only the
+installer does that for a container, when you press **Install and restart**
+or with its daily update (`PCP_AUTO_UPDATE=1`, above), and the page says
+which.
 
 ### Cleanup
 
@@ -296,7 +300,7 @@ To remove PCP itself:
   The uninstaller keeps your vault in `%APPDATA%\PCP`; delete that folder to
   remove it too.
 - **Linux, from the installer**: run it with `uninstall`. It removes the
-  container, the systemd unit under Podman, the daily update timer and its
+  container, the systemd unit under Podman, its update timers and its
   settings file, and keeps the `pcp-data` volume, your vault:
 
   ```bash
@@ -305,8 +309,8 @@ To remove PCP itself:
   docker image rm ghcr.io/kaperkunde/pcp # the image (podman image rm …)
   ```
 
-  If the installer gave you a crontab line to update PCP (on a machine
-  without a systemd session), remove it with `crontab -e`.
+  If the installer gave you crontab lines to update PCP (on a machine
+  without a systemd session), remove them with `crontab -e`.
 
 - **From a checkout with `docker compose`**: `docker compose down` stops and
   removes PCP and keeps the vault; `docker compose down -v` deletes the

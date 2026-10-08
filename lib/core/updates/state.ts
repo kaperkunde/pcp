@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto"
 import { invalid } from "../errors"
 import { getHostJson, setHostJson } from "../host-settings"
 import { PCP_VERSION } from "../version"
+import { removeInstallSignal, writeInstallSignal } from "./host-signal"
 import { releasePageUrl } from "./limits"
 import type { Release } from "./release"
 import { isNewer } from "./semver"
@@ -17,7 +18,10 @@ import { isNewer } from "./semver"
  * this machine and never does.
  */
 
-/** How long an install request stays worth acting on (desktop/updates.mjs agrees). */
+/**
+ * How long an install request stays worth acting on (desktop/updates.mjs and
+ * install.sh agree).
+ */
 export const INSTALL_REQUEST_FRESH_MS = 15 * 60_000
 
 export const UPDATE_CONFIG_KEY = "update.config"
@@ -35,7 +39,10 @@ export type UpdateStatus = {
   /** Consecutive failures, for the back-off. */
   failures?: number
   nextAttemptAt?: string
-  /** The owner asked the desktop app to install `version` (see the desktop app's updater). */
+  /**
+   * The owner asked the desktop app, or the Linux installer's watcher, to
+   * install `version` (desktop/updates.mjs, install.sh).
+   */
   installRequest?: { id: string; at: string; version: string }
 }
 
@@ -76,7 +83,7 @@ export type UpdatesOverview = {
   latest: (Release & { url: string }) | null
   /** `latest` is later than `current`. */
   available: boolean
-  /** An install the owner asked the desktop app for, while it is fresh. */
+  /** An install the owner asked for, while it is fresh. */
   installRequest: { id: string; at: string; version: string } | null
 }
 
@@ -101,11 +108,14 @@ export async function pendingInstallRequest(
 }
 
 /**
- * The owner asks the desktop app to install the newer release the last check
- * found. The app reads it from /api/health; PCP itself installs nothing.
+ * The owner asks for the newer release the last check found. The desktop app
+ * reads the request from /api/health; with `signalHost` it is also left in
+ * the data folder for the Linux installer's watcher (./host-signal.ts). PCP
+ * itself installs nothing.
  */
 export async function requestInstall(
   now = new Date(),
+  { signalHost = false }: { signalHost?: boolean } = {},
 ): Promise<InstallRequest> {
   const status = await getUpdateStatus()
   const release = newerRelease(status)
@@ -120,6 +130,9 @@ export async function requestInstall(
     version: release.version,
   }
   await saveUpdateStatus({ ...status, installRequest: request })
+  if (signalHost) {
+    await writeInstallSignal(request)
+  }
 
   return request
 }
@@ -128,9 +141,13 @@ export async function requestInstall(
 export async function clearFinishedInstall(now = new Date()): Promise<void> {
   const status = await getUpdateStatus()
 
-  if (status.installRequest && !freshRequest(status.installRequest, now)) {
+  if (freshRequest(status.installRequest, now)) {
+    return
+  }
+  if (status.installRequest) {
     await saveUpdateStatus({ ...status, installRequest: undefined })
   }
+  await removeInstallSignal()
 }
 
 export async function updatesOverview(): Promise<UpdatesOverview> {

@@ -15,5 +15,5 @@ export default async function Home() {
     redirect("/setup")
   }
 
-  redirect((await currentSession()) ? "/servers" : "/login")
+  redirect((await currentSession()) ? "/home" : "/login")
 }
