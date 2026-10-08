@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest"
+import os from "node:os"
+
+import { describe, expect, it, vi } from "vitest"
 
 import { isOwnAddress, isPublicAddress, pcpPorts } from "./address"
 
@@ -122,6 +124,35 @@ describe("isOwnAddress", () => {
     expect(isOwnAddress("127.0.0.1", 5173)).toBe(false)
     expect(isOwnAddress("192.168.1.20", app!)).toBe(false)
     expect(isOwnAddress("8.8.8.8", app!)).toBe(false)
+  })
+
+  it("knows this machine's addresses in their IPv6 spellings too", () => {
+    const [app] = pcpPorts()
+    const spy = vi.spyOn(os, "networkInterfaces").mockReturnValue({
+      eth0: [
+        { address: "192.0.2.2", family: "IPv4" },
+        { address: "2001:db8:0:0::5", family: "IPv6" },
+      ] as os.NetworkInterfaceInfo[],
+    })
+
+    try {
+      for (const address of [
+        "192.0.2.2",
+        "::ffff:192.0.2.2",
+        "[::ffff:192.0.2.2]",
+        "::ffff:c000:202",
+        "0:0:0:0:0:ffff:c000:0202",
+        "2001:db8::5",
+        "2001:DB8:0000::0005",
+      ]) {
+        expect(isOwnAddress(address, app!), address).toBe(true)
+      }
+
+      expect(isOwnAddress("::ffff:192.0.2.3", app!)).toBe(false)
+      expect(isOwnAddress("2001:db8::6", app!)).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it("counts extra listeners of PCP's own, such as the browser's proxy", () => {

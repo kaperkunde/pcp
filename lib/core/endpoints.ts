@@ -873,6 +873,41 @@ export type EndpointChanges = {
    * written (an edit that does not apply) leaves it as it was.
    */
   disable?: boolean
+  /**
+   * The endpoint as the caller read it to decide on the change. It is
+   * written only while these still say the same, so a change decided on an
+   * older read (an assistant's, waiting on a download) is refused rather
+   * than made to an endpoint the owner has since taken over or enabled.
+   */
+  unchanged?: Pick<
+    McpServer,
+    "url" | "enabled" | "authType" | "publicOnly" | "specUrl"
+  >
+}
+
+/** Writes a change's columns, only to the endpoint as `unchanged` says. */
+async function writeChange(
+  id: string,
+  data: Record<string, unknown>,
+  unchanged: EndpointChanges["unchanged"],
+): Promise<McpServer> {
+  if (!unchanged) {
+    return db().mcpServer.update({ where: { id }, data })
+  }
+
+  const where = { id, ...unchanged }
+  const { count } = Object.keys(data).length
+    ? await db().mcpServer.updateMany({ where, data })
+    : { count: await db().mcpServer.count({ where }) }
+
+  if (count === 0) {
+    throw new PcpError(
+      "state",
+      "The endpoint changed while this change was being made, so nothing changed. Read it again with get_endpoint and try again.",
+    )
+  }
+
+  return db().mcpServer.findUniqueOrThrow({ where: { id } })
 }
 
 /**
@@ -941,9 +976,10 @@ export async function changeEndpoint(
     readOnly !== existing.readOnly
 
   if (!regenerate) {
-    const server = Object.keys(data).length
-      ? await db().mcpServer.update({ where: { id }, data })
-      : existing
+    const server =
+      Object.keys(data).length || changes.unchanged
+        ? await writeChange(id, data, changes.unchanged)
+        : existing
 
     return {
       sync: {
@@ -967,10 +1003,7 @@ export async function changeEndpoint(
     authHeaderNames: await authHeaderNames(existing),
     patches,
   })
-  const server = await db().mcpServer.update({
-    where: { id },
-    data: { ...data, readOnly },
-  })
+  const server = await writeChange(id, { ...data, readOnly }, changes.unchanged)
 
   return {
     sync: await applySpec(

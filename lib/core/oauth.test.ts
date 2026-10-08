@@ -14,6 +14,7 @@ import {
 } from "./servers"
 import { scratchDatabase } from "./test-db"
 import {
+  callServerTool,
   describeOAuthConnection,
   PcpOAuthProvider,
   refusalReason,
@@ -272,6 +273,26 @@ describe("connecting an OAuth server", () => {
     expect(url.searchParams.get("access_type")).toBe("offline")
   })
 
+  it("sends the owner only to a web page to sign in", async () => {
+    const id = await oauthServer({ oauthClientId: "owner-client" })
+
+    for (const address of [
+      "smb://files.example.com/share",
+      "file:///etc/passwd",
+      "search-ms:query=x",
+    ]) {
+      metadata = { authorization_endpoint: address }
+      await expect(startOAuth(ctx, id, HTTP), address).rejects.toThrow(
+        /Mail's sign-in address is not an http:\/\/ or https:\/\/ address/,
+      )
+    }
+
+    metadata = {}
+    expect(signInAddress(await startOAuth(ctx, id, HTTP)).origin).toBe(
+      as.origin,
+    )
+  })
+
   it("takes a client only for an OAuth server", async () => {
     const { id } = await createServer(ctx, {
       name: "Open",
@@ -403,6 +424,68 @@ describe("connecting an OAuth server", () => {
       /^Mail refused PCP's request although PCP is signed in \(HTTP 403: Mail API is not enabled for this project\)\./,
     )
     expect(server.statusMessage).not.toMatch(/Sends a mail|jsonrpc/)
+  })
+
+  it("keeps its tokens out of what a server answers", async () => {
+    tokenAnswer = {
+      access_token: "access-token-0123456789",
+      refresh_token: "refresh-token-0123456789",
+      token_type: "Bearer",
+      expires_in: 3600,
+    }
+    const id = await oauthServer({ oauthClientId: "owner-client" })
+    const url = signInAddress(await startOAuth(ctx, id, HTTP))
+    signedIn = (body, res) => {
+      const { id: rpcId, method } = JSON.parse(body) as {
+        id?: number
+        method: string
+      }
+      const sent = as.requests.at(-1)!.headers.authorization
+
+      if (rpcId === undefined) {
+        res.statusCode = 202
+        return res.end()
+      }
+
+      json(res, 200, {
+        jsonrpc: "2.0",
+        id: rpcId,
+        result:
+          method === "initialize"
+            ? {
+                protocolVersion: "2025-06-18",
+                capabilities: { tools: {} },
+                serverInfo: { name: "mail", version: "1" },
+              }
+            : {
+                content: [
+                  {
+                    type: "text",
+                    text: `Authorization: ${sent}; refresh-token-0123456789`,
+                  },
+                ],
+              },
+      })
+    }
+    await finishOAuth(
+      ctx,
+      new URLSearchParams({
+        code: "the-code",
+        state: url.searchParams.get("state")!,
+      }),
+      HTTP,
+    )
+
+    const result = await callServerTool(
+      ctx,
+      await getServer(ctx, id),
+      "send",
+      {},
+      HTTP,
+    )
+    expect(result.content).toEqual([
+      { type: "text", text: "Authorization: Bearer [redacted]; [redacted]" },
+    ])
   })
 
   it("refuses a callback for another server at its old address", async () => {

@@ -92,9 +92,11 @@ export function isMethodGroup(value: string): value is FetchMethodGroup {
 /**
  * What a site is: the host, with the port when it is not the scheme's own.
  * http and https on one host are one site; a subdomain is a site of its own.
+ * A name's trailing dot ("example.com.") reaches the same host, so it goes.
  */
 export function siteKey(url: URL): string {
-  return url.host.toLowerCase()
+  const host = url.hostname.toLowerCase().replace(/\.$/, "")
+  return url.port ? `${host}:${url.port}` : host
 }
 
 /** A site as the owner types it: example.com, or a whole address. */
