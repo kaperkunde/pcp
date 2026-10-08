@@ -124,8 +124,10 @@ The installer finds Docker or Podman on the computer (Bazzite and other
 Fedora Atomic systems come with Podman), pulls the published image
 (`ghcr.io/kaperkunde/pcp`) and keeps PCP running on port 3000 across reboots:
 as a container Docker restarts, or as a systemd unit under Podman. Run the
-same line again to update PCP, or once with `PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`)
-to have it update PCP by itself once a day. The top of [`install.sh`](install.sh) lists
+same line again to update PCP, or choose **Install and restart** under
+**Settings → Updates** when PCP says a new version is out. Run it once with
+`PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`) to have it update PCP by itself
+once a day. The top of [`install.sh`](install.sh) lists
 its settings (`PCP_PORT`, `PCP_HTTPS` and a few more), and
 `… | sh -s -- uninstall` removes it and keeps your data.
 
@@ -184,10 +186,12 @@ start it.
 PCP asks GitHub once a day which release is the latest, and says so in its
 header when a newer one is out. **Settings → Updates** shows what it found,
 with the release notes, and says how to update the PCP you are looking at:
-the app, the container or a checkout. GitHub sees this PCP's address and
-version, nothing else. Turn the daily check off there (or in the step after
-setup) and PCP asks only when you choose **Check now**. PCP never updates
-itself in a container or a checkout.
+the app, the container or a checkout. The Mac and Windows app and the Linux
+installer can install it from there (**Install and restart**). GitHub sees this
+PCP's address and version, nothing else. Turn the daily check off there (or in
+the step after setup) and PCP asks only when you choose **Check now**. PCP
+never updates itself in a container or a checkout: the installer does it, when
+you ask on that page.
 
 ## Use it
 
