@@ -21,6 +21,7 @@ import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
+import { visible, type ShownText } from "./permission-rules"
 import {
   fetchWeb,
   withNote,
@@ -413,12 +414,21 @@ export function describeFetchAsk(
   title: string
   lines: string[]
   warning: string | null
+  full: ShownText[] | null
 } {
   const host = fetchHostOf(args)
   const reading = args.method === "GET" || args.method === "HEAD"
-  const headers = Object.entries(args.headers)
+  const headers = Object.entries(args.headers).map(([name, value]) => ({
+    name,
+    value,
+    shown: visible(value, { oneLine: true }),
+  }))
   const body = args.body ?? ""
   const clipped = body.length > 2000 ? `${body.slice(0, 1999)}…` : body
+  // Anything cut or written out above is there whole, below the lines.
+  const cut =
+    headers.some(({ value, shown }) => value.length > 200 || shown !== value) ||
+    clipped !== body
 
   return {
     title: reading
@@ -429,7 +439,7 @@ export function describeFetchAsk(
       `Method: ${args.method}`,
       ...(headers.length > 0
         ? [
-            `Headers: ${headers.map(([name, value]) => `${name}: ${value.length > 200 ? `${value.slice(0, 199)}…` : value}`).join("; ")}`,
+            `Headers: ${headers.map(({ name, value, shown }) => (value.length > 200 ? `${name} (${value.length.toLocaleString("en")} characters): ${visible(value.slice(0, 199), { oneLine: true })}…` : `${name}: ${shown}`)).join("; ")}`,
           ]
         : []),
       ...(body
@@ -442,6 +452,28 @@ export function describeFetchAsk(
     warning: reading
       ? null
       : `A ${args.method} request ${CHANGING_METHODS_WARNING}`,
+    full: cut
+      ? [
+          ...(headers.length > 0
+            ? [
+                {
+                  label: "Headers",
+                  text: headers
+                    .map(({ name, shown }) => `${name}: ${shown}`)
+                    .join("\n"),
+                },
+              ]
+            : []),
+          ...(body
+            ? [
+                {
+                  label: `Body (${body.length.toLocaleString("en")} characters)`,
+                  text: visible(body),
+                },
+              ]
+            : []),
+        ]
+      : null,
   }
 }
 

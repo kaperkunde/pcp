@@ -95,6 +95,7 @@ export default async function TokenPage({
           review: request.kind === "access",
           title: request.title,
           lines: request.lines,
+          full: request.full,
           warning: request.warning,
           decisions: request.decisions,
           secret: request.secretToEnter,

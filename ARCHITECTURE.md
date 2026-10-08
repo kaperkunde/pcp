@@ -566,7 +566,9 @@ forwarding, no agent, no file transfer. Only the owner adds one, on the
 Servers page; `register_server` has no kind for it, because a shell on a
 machine is more than an assistant should be able to ask for in a sentence.
 `run_command` asks the owner first by default like every tool, and the
-permission page shows the command in full.
+permission page shows the command and its standard input in full (under Show
+everything when the lines cut them short), with `stdin_base64` read as text
+too when it is UTF-8; a kept result's handle is described, not shown.
 
 The protocol is `ssh2`'s (`lib/core/ssh/client.ts`), in pure JavaScript: pnpm
 does not build its optional native parts (it is not in `allowBuilds`), so the
@@ -1914,6 +1916,15 @@ owner answers on that page, and only there (the header's bell lists every
 request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
+
+The page shows a call's arguments one line each, and a long value is cut
+there, saying how long it is; Show everything under the lines has each
+argument whole, which is what runs when the owner allows it
+(`argsInFull` in `permission-rules.ts`; web fetch's headers and body the
+same way). Both write out what does not show on screen (`\u202E`), and a
+line writes out a value's newlines too (`visible`), so nothing an assistant
+sends can turn the text around, hide in it or pass for a line of the page's
+own.
 
 "Allow for" (15 minutes, an hour or eight hours, `ALLOW_FOR_MINUTES`) writes
 no level: it leaves an allowance (`lib/core/allowances.ts`,

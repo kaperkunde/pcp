@@ -19,6 +19,7 @@ import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { clearNewToken, peekNewToken } from "@/components/new-token-handoff"
 import { PermissionDecision } from "@/components/permission-decision"
 import { ServerScopeFields } from "@/components/server-scope-fields"
+import { ShownInFull } from "@/components/shown-in-full"
 import { SubmitButton } from "@/components/submit-button"
 import { WebFetchCard } from "@/components/web-fetch-card"
 import { ManageWrappersField } from "@/components/manage-wrappers-field"
@@ -46,6 +47,7 @@ import {
   type UpdateTokenResult,
 } from "@/lib/actions/tokens"
 import type { ApiTokenSummary } from "@/lib/core/api-tokens"
+import type { ShownText } from "@/lib/core/permission-rules"
 import type { ServerKind } from "@/lib/core/servers"
 import {
   TOOL_ACCESS_LABELS,
@@ -64,6 +66,8 @@ export type WaitingRequest = {
   review: boolean
   title: string
   lines: string[]
+  /** Everything it carries, when the lines cut it short. */
+  full: ShownText[] | null
   warning: string | null
   decisions: Array<{ value: Decision; label: string }>
   /** A new server's secret, typed in when agreeing to it. */
@@ -206,6 +210,7 @@ function WaitingCard({ waiting }: { waiting: WaitingRequest[] }) {
                   <li key={index}>{line}</li>
                 ))}
               </ul>
+              {item.full ? <ShownInFull parts={item.full} /> : null}
               {item.warning ? (
                 <p
                   className="rounded-md border border-destructive/50 p-2"

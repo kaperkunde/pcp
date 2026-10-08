@@ -57,6 +57,7 @@ import {
 } from "./connect"
 import { waitForOwner } from "./owner-wait"
 import {
+  argsInFull,
   canonicalJson,
   decisionsFor,
   isOpen,
@@ -66,7 +67,9 @@ import {
   requestHash,
   storedResultText,
   summaryText,
+  visible,
   type PermissionStatus,
+  type ShownText,
 } from "./permission-rules"
 import type { MailRegistration } from "./register-rules"
 import { summarize } from "./search"
@@ -94,6 +97,7 @@ import {
   resultOpener,
 } from "./tool-results"
 import { finishHandover, performNavigate } from "./browser/call"
+import { RUN_COMMAND, stdinAsText } from "./ssh/tools"
 import { describeBrowseAsk, describeHandoverAsk } from "./browser/describe"
 import type { fetchThroughBrowser } from "./browser/solve"
 import {
@@ -221,6 +225,12 @@ export type PermissionView = {
   title: string
   lines: string[]
   warning: string | null
+  /**
+   * Everything the request carries, for the page to fold under the lines
+   * when they cut it short or wrote out what is in it; null when they say
+   * it all.
+   */
+  full: ShownText[] | null
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
   /** A wrapper request's tools and secrets, for the page to show in full. */
@@ -638,6 +648,7 @@ async function summarizeRow(
   title: string
   lines: string[]
   warning: string | null
+  full?: ShownText[] | null
   memory?: MemoryShown
   wrapper?: WrapperShown
 }> {
@@ -856,6 +867,11 @@ async function summarizeRow(
   const about = tool
     ? summarize(tool.descriptionOverride ?? tool.description)
     : ""
+  // Standard input sent as base64 is read as the text it is, when it is.
+  const stdin =
+    row.server?.kind === "ssh" && row.toolName === RUN_COMMAND
+      ? stdinAsText(args)
+      : null
 
   return {
     title: `Allow ${toolLabel(row)}?`,
@@ -874,6 +890,12 @@ async function summarizeRow(
     warning: destructive
       ? "The server marks this tool as destructive: it can change or delete things for good."
       : null,
+    full: argsInFull(
+      args,
+      stdin === null
+        ? []
+        : [{ label: "stdin_base64, decoded as text", text: visible(stdin) }],
+    ),
   }
 }
 
@@ -960,6 +982,7 @@ async function toView(
   const {
     memory = null,
     wrapper = null,
+    full = null,
     ...summary
   } = await summarizeRow(ctx, row, publicUrl)
   const kind = row.kind as PermissionKind
@@ -980,6 +1003,10 @@ async function toView(
     serverKind: row.server?.kind ?? null,
     tool: row.toolName,
     ...summary,
+    // Whatever made the lines, nothing in them hides from the owner.
+    title: visible(summary.title),
+    lines: summary.lines.map((line) => visible(line)),
+    full,
     memory,
     wrapper,
     browserTabId: browserTabOf(ctx, row),
@@ -1899,7 +1926,7 @@ export async function listPendingRequests(
 
       return {
         id: row.id,
-        title,
+        title: visible(title),
         tokenName: row.token.name,
         createdAt: row.createdAt,
       }

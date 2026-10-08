@@ -27,6 +27,7 @@ import { setupVault } from "./vault"
 import {
   addFetchSite,
   decideFetch,
+  describeFetchAsk,
   listFetchRules,
   loadFetchRules,
   recordFetch,
@@ -867,5 +868,42 @@ describe("a site's check of its visitors", () => {
         (site) => site.host === "walled.example",
       )?.lastFetchedAt,
     ).toBeInstanceOf(Date)
+  })
+})
+
+describe("what the owner reads about a request", () => {
+  it("says how long a cut header is, and shows every header and the body whole", () => {
+    const long = `Bearer ${"t".repeat(300)}`
+    const body = `${"pet=Rex&".repeat(300)}owner=mallory`
+    const asked = describeFetchAsk(
+      get("https://shop.example/orders", {
+        method: "POST",
+        headers: { "x-long": long, accept: "text/plain" },
+        body,
+      }),
+    )
+
+    expect(asked.lines[2]).toBe(
+      `Headers: x-long (307 characters): ${long.slice(0, 199)}…; accept: text/plain`,
+    )
+    expect(asked.full).toEqual([
+      { label: "Headers", text: `x-long: ${long}\naccept: text/plain` },
+      { label: "Body (2,413 characters)", text: body },
+    ])
+  })
+
+  it("writes out what does not show, and has nothing more to show when nothing was cut", () => {
+    const rlo = String.fromCodePoint(0x202e)
+    const asked = describeFetchAsk(
+      get("https://shop.example/", { headers: { "x-name": `a${rlo}b` } }),
+    )
+
+    expect(asked.lines[2]).toBe("Headers: x-name: a\\u202Eb")
+    expect(asked.full).toEqual([
+      { label: "Headers", text: "x-name: a\\u202Eb" },
+    ])
+    expect(
+      describeFetchAsk(get("https://shop.example/", { body: "pet=Rex" })).full,
+    ).toBeNull()
   })
 })
