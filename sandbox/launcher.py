@@ -10,13 +10,15 @@ so that dropping privileges happens before anything of the program does:
 `run` gives up root for the program's user, sets the limits, makes the job
 directory, writes the code there and replaces itself with bash or python3.
 `clean`, as the same user, kills every process that user still has and
-removes everything it left behind, so nothing of one program is there for
-the next, which may be another token's.
+removes everything it left behind (files, System V shared memory,
+semaphores and message queues, POSIX message queues), so nothing of one
+program is there for the next, which may be another token's.
 
 With PCP_SANDBOX_SAME_USER=1 (tests and development only) nothing changes
 user: `clean` then removes the job directory alone.
 """
 
+import ctypes
 import os
 import resource
 import shutil
@@ -27,8 +29,20 @@ PROGRAM_UID = int(os.environ.get("PCP_SANDBOX_UID", "2000"))
 SAME_USER = os.environ.get("PCP_SANDBOX_SAME_USER") == "1"
 WORK = os.environ.get("PCP_SANDBOX_WORK", "/work")
 # Places a program can write: the job directories, and the shared
-# temporary ones a library may use regardless of TMPDIR.
-SCRATCH = [WORK, "/tmp", "/dev/shm", "/var/tmp"]
+# temporary ones a library may use regardless of TMPDIR. /dev/mqueue lists
+# the POSIX message queues of the container's IPC namespace as files, and
+# unlinking one removes the queue (it is there where the runtime mounts it).
+SCRATCH = [WORK, "/tmp", "/dev/shm", "/var/tmp", "/dev/mqueue"]
+
+# System V objects live in the container's IPC namespace, not in a file
+# system, and outlive the processes that made them: the table that lists
+# each kind, the column that names one, and the call that removes it.
+SYSV = [
+    ("/proc/sysvipc/shm", "shmid", "shmctl"),
+    ("/proc/sysvipc/sem", "semid", "semctl"),
+    ("/proc/sysvipc/msg", "msqid", "msgctl"),
+]
+IPC_RMID = 0
 
 LIMITS = {
     resource.RLIMIT_CPU: 60,
@@ -95,6 +109,40 @@ def remove(path):
         pass
 
 
+def remove_sysv_ipc():
+    """Removes every System V shared memory segment, semaphore set and
+    message queue the program's user made or owns. Its creator can always
+    remove one, even after changing its owner, and `clean` runs as that
+    user, so no capability is needed."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    for table, id_column, call in SYSV:
+        try:
+            with open(table) as lines:
+                header = lines.readline().split()
+                rows = [line.split() for line in lines]
+            id_at, uid_at, cuid_at = (
+                header.index(id_column),
+                header.index("uid"),
+                header.index("cuid"),
+            )
+        except (OSError, ValueError):
+            continue
+        for row in rows:
+            try:
+                owners = (int(row[uid_at]), int(row[cuid_at]))
+                if PROGRAM_UID not in owners:
+                    continue
+                identifier = int(row[id_at])
+            except (IndexError, ValueError):
+                continue
+            # semctl takes the semaphore number between the two; ignored for
+            # IPC_RMID.
+            if call == "semctl":
+                libc.semctl(identifier, 0, IPC_RMID)
+            else:
+                getattr(libc, call)(identifier, IPC_RMID, None)
+
+
 def clean(job_dir):
     if SAME_USER:
         remove(job_dir)
@@ -120,6 +168,8 @@ def clean(job_dir):
                     remove(path)
             except OSError:
                 pass
+
+    remove_sysv_ipc()
 
 
 def main():

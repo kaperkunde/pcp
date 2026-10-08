@@ -870,7 +870,9 @@ under the program's job. PCP hands it to the bridge as it would QuickJS's,
 so a shell program has exactly a JavaScript program's rights; a request for
 any other job is ignored. A stop from the bridge, an abort or the time limit
 makes the runner kill every process of the program's user and remove every
-file it owns, so nothing of one program, which may be another token's, is
+file it owns, and every System V shared memory segment, semaphore set and
+message queue and POSIX message queue it made (they outlive their processes),
+so nothing of one program, which may be another token's, is
 left for the next. What the program prints, stdout and stderr together,
 comes back with its exit status. `run_code` offers a `language` argument only
 while a runner is connected, so a token on an install without the sandbox
