@@ -356,10 +356,12 @@ export async function runFetch(
     allowPrivate: await privateAllowedFor(ctx.vaultId, tokenId),
     publicUrl,
   }
-  const canSolve = args.method === "GET" && (await available(ctx))
+  // Whether the browser can read the page is asked only when it would:
+  // most sites never check, and the answer can mean loading Playwright.
+  const reading = args.method === "GET"
   let answer: FetchAnswer
 
-  if (canSolve && clearance(ctx.vaultId, host)) {
+  if (reading && clearance(ctx.vaultId, host) && (await available(ctx))) {
     answer = await solver(ctx, args, options)
 
     if (answer.challenged) {
@@ -368,7 +370,7 @@ export async function runFetch(
   } else {
     answer = await fetcher(args, options)
 
-    if (answer.challenged && canSolve) {
+    if (answer.challenged && reading && (await available(ctx))) {
       answer = await solver(ctx, args, options)
     }
   }
