@@ -74,11 +74,11 @@ test("a JMAP account is added with a user name and an app password", async ({
   await page.getByLabel("Session URL").fill(upstream.jmapSessionUrl)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
-    page.getByRole("status").filter({ hasText: "Saved. Signed in; 10 tools." }),
+    page.getByRole("status").filter({ hasText: "Saved. Signed in; 11 tools." }),
   ).toBeVisible()
   await page.reload()
   await expect(page.getByText("Ready", { exact: true })).toBeVisible()
-  await expect(page.getByText("Tools (10)")).toBeVisible()
+  await expect(page.getByText("Tools (11)")).toBeVisible()
   await expect(
     page.getByText(`Signs in at ${upstream.jmapSessionUrl}`),
   ).toBeVisible()
@@ -104,7 +104,7 @@ test("an assistant reads, files and sends mail through the gateway", async ({
   const { instructions } = await initialize(baseURL!, token)
   expect(instructions).toContain("MCP servers, APIs and mail accounts")
   expect(instructions).toContain(
-    `${SLUG}: Ada's mail at example.com. (10 tools)`,
+    `${SLUG}: Ada's mail at example.com. (11 tools)`,
   )
   await allowAllTools(page, TOKEN_NAME, SLUG)
 
@@ -195,9 +195,13 @@ test("an assistant reads, files and sends mail through the gateway", async ({
     }),
   )
   expect(sent).toMatchObject({
-    sent: { savedTo: "Sent", subject: "Re: The engine" },
+    sent: { savedTo: "Sent", subject: "Re: The engine", answered: true },
   })
   expect(upstream.jmap.sent).toHaveLength(1)
+  // The email it answers is marked answered, as a mail app would.
+  expect(
+    upstream.jmap.emails.find((email) => email.id === "e1")!.keywords,
+  ).toMatchObject({ $answered: true })
 
   // The picture read above goes out as an attachment, by its handle.
   const forwarded = json(
@@ -353,7 +357,7 @@ test("a JMAP account signs in with OAuth through Connect, and renews its token",
 
   await page.getByRole("link", { name: "Connect", exact: true }).click()
   await expect(page).toHaveURL(new RegExp(`/servers/${id}\\?connected=1$`))
-  await expect(page.getByText("Tools (10)")).toBeVisible()
+  await expect(page.getByText("Tools (11)")).toBeVisible()
 
   await allowAllTools(page, TOKEN_NAME, OAUTH_SLUG)
   const before = upstream.tokenRequests.filter(
@@ -458,7 +462,7 @@ test("an assistant proposes a JMAP account; the owner types the app password in 
     .fill(upstream.expectedToken)
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText(
-    `Added ${proposed} as "${slug}" with 10 tools`,
+    `Added ${proposed} as "${slug}" with 11 tools`,
   )
   await expect(page.getByTestId("permission-outcome")).toContainText(
     `saved in PCP as "${secretName}"`,
@@ -466,7 +470,7 @@ test("an assistant proposes a JMAP account; the owner types the app password in 
 
   // The assistant learns the outcome, never the password.
   const outcome = await callTool(baseURL!, token, "check_permission", { id })
-  expect(toolText(outcome)).toContain("10 tools")
+  expect(toolText(outcome)).toContain("11 tools")
   expect(toolText(outcome)).not.toContain(upstream.expectedToken)
   expect(upstream.jmap.requests.at(-1)!.authorization).toBe(basic())
 

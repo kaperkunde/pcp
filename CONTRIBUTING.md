@@ -25,7 +25,7 @@ pnpm format          # Prettier, writing
 pnpm format:check    # Prettier, reporting — what the hook and CI run
 pnpm typecheck       # tsc --noEmit
 pnpm build           # next build
-pnpm test            # unit tests (vitest)
+pnpm test            # unit tests (vitest; the browser's skip without Chromium)
 pnpm test:e2e        # Playwright against a fresh e2e database
 shellcheck --shell=sh install.sh   # the install script, which the tests run
 ```
@@ -35,13 +35,16 @@ commit, then `pnpm typecheck` and `pnpm format:check` over the whole tree.
 Fix what the hook reports; `pnpm format` settles the formatting ones.
 
 GitHub Actions runs the checks on pull requests only
-(`.github/workflows/ci.yml`): lint, format, shellcheck, typecheck and build in
-one job, unit tests in another, the Playwright suite in a third, side by side.
-The one thing a push runs is the release workflow, on `main` (below).
+(`.github/workflows/ci.yml`), in four jobs side by side: lint, format,
+shellcheck, typecheck and build; the unit tests (with Chromium installed for
+the browser's); the Playwright suite; and, on a macOS runner, the Touch ID
+keychain module built for both Mac architectures and loaded once. The one
+thing a push runs is the release workflow, on `main` (below).
 
 `pnpm lint`, `pnpm format:check` and `pnpm test` cover `desktop/` too (its
-scripts and the settings module's test); the app itself is built by hand or
-by the release workflow, see "Desktop app" below.
+scripts and its modules' tests: settings, updates, Touch ID's store, the
+keychain profile check); the app itself is built by hand or by the release
+workflow, see "Desktop app" below.
 
 ## Branches and releases
 
@@ -60,8 +63,9 @@ attached to the draft under stable names (`PCP-mac-arm64.dmg`,
 `PCP-mac-x64.dmg`, `PCP-windows-x64.exe`, so the README's
 `releases/latest/download/…` links keep working), with the files the app's
 own updater reads beside them (`latest-<arch>[-mac].yml`, and on macOS the
-zip it installs from), and the release is published. An app build that fails does not hold the release back: the
-publish job warns, and re-running the failed job attaches the app.
+zip it installs from), and the release is published. An app build that
+fails does not hold the release back: the publish job warns, and re-running
+the failed job attaches the app.
 
 The same run builds the container image from the tag, for amd64 and arm64,
 and pushes it to `ghcr.io/kaperkunde/pcp` as `<version>` and `latest`, which
@@ -93,12 +97,12 @@ refuses pushes from GitHub Actions.
 ## Desktop app
 
 `desktop/` wraps the production build in Electron for Mac and Windows: the
-same `next build --output standalone` the Docker image runs, started as a
-child process with its data in the system's application data folder, and a
-window on it. It is its own pnpm project, so Electron is never part of a
-root install. The wrapper imports nothing from the app and the app knows the
-wrapper only as `PCP_DESKTOP=1` (and `PCP_DESKTOP_UPDATER`, whether it can
-install an update itself); a change to PCP reaches the app through
+same `next build --output standalone` the Docker image runs, started in an
+Electron utility process with its data in the system's application data
+folder, and a window on it. It is its own pnpm project, so Electron is never
+part of a root install. The wrapper imports nothing from the app and the app
+knows the wrapper only as `PCP_DESKTOP=1` (and `PCP_DESKTOP_UPDATER`, whether
+it can install an update itself); a change to PCP reaches the app through
 `pnpm build`, and a change to how the server is laid out (what the Dockerfile
 copies) is mirrored in `desktop/scripts/stage.mjs`.
 
@@ -132,13 +136,17 @@ the release builds (unsigned without them).
 
 Two kinds, held to different bars:
 
-- **Unit tests** (`lib/**/*.test.ts`) for pure and near-pure code: the
-  crypto, the migrator, tool search, the core against a scratch SQLite file.
-  New code gets one when it has logic worth pinning down, not by default.
+- **Unit tests** (`lib/**/*.test.ts`, `scripts/*.test.ts`,
+  `desktop/**/*.test.mjs`) for pure and near-pure code: the crypto, the
+  migrator, tool search, the core against a scratch SQLite file, and the
+  files around the app (the Dockerfile, the sandbox's compose file,
+  `install.sh`, the version script). New code gets one when it has logic
+  worth pinning down, not by default.
 - **E2E tests** (`e2e/`) for the happy paths a person actually walks: setup,
   secrets, adding a server and calling it through the gateway, OAuth, API
-  endpoints, permission requests, memories, recovery. One project per spec;
-  `e2e/README.md` has the mechanics.
+  endpoints, mail accounts, permission requests, memories, web fetch,
+  run_code, the browser, updates, Touch ID, recovery, export and restore.
+  One project per spec; `e2e/README.md` has the mechanics.
 
 A bug that regressed gets a test that fails before the fix and passes after
 (red, then green), whichever kind fits. That bar is low on purpose.
@@ -158,6 +166,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/upstream.ts`               | Connecting to upstreams; the OAuth client provider            |
 | `lib/core/oauth.ts`                  | The authorization flow (start, callback, disconnect)          |
 | `lib/core/oauth-client.ts`           | How PCP gets a client ID; redirect URI; sign-in parameters    |
+| `lib/core/oauth-server/`             | PCP's own OAuth server, for apps that sign in to `/mcp`       |
 | `lib/core/endpoints.ts`              | API endpoints: reading a schema, creating them, calling them  |
 | `lib/core/openapi/`                  | OpenAPI → tools and call plans; building and sending requests |
 | `lib/core/answers.ts`                | Shaping an answer: fields, decode, handles, preview           |
@@ -170,7 +179,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
 | `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits  |
-| `lib/core/browser/`                  | The browser: Chromium, its proxy, profile, tabs, tools        |
+| `lib/core/browser/`                  | Browser: Chromium, proxy, tabs, tools; web_fetch past a check |
 | `lib/core/code/`                     | run_code: QuickJS, the bridge, the sandbox executor, limits   |
 | `sandbox/`                           | The sandbox container: its runner and the `pcp` command       |
 | `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input     |
@@ -180,25 +189,36 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/tool-access.ts`            | Tool levels per token and for all tokens; copying them        |
 | `lib/core/access-requests.ts`        | Tool levels an assistant proposes; the owner's save           |
 | `lib/core/permissions.ts`            | Asking the owner before a call runs; running it once          |
+| `lib/core/request-log.ts`            | One line per gateway call, never its arguments or results     |
 | `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in           |
 | `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server   |
 | `lib/core/migrate.ts`                | Boot-time migrations                                          |
 | `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts     |
 | `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
-| `lib/core/network/`                  | Optional dynamic DNS and HTTPS (Let's Encrypt, edge, proxy)   |
+| `lib/core/network/`                  | Optional pcp.gg, dynamic DNS and HTTPS (Let's Encrypt, edge)  |
 | `lib/core/updates/`                  | The daily check for a newer release; what it found            |
+| `lib/core/version.ts`                | `PCP_VERSION`, read from `package.json`                       |
+| `scripts/version.mjs`                | The next release's version; `pnpm version:bump`               |
+| `lib/core/request-log.ts`            | The request log: writing, reading a page, pruning old days    |
+| `lib/core/activity.ts`               | The Log page's lines: token names, how a request was answered |
+| `lib/core/cleanup/`                  | The scheduled cleanup (node-cron): schedule, parts, status    |
 | `lib/server/install-kind.ts`         | App, container or checkout: how Settings says to update       |
 | `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |
 | `lib/actions/`                       | Server Actions the forms call                                 |
 | `app/mcp/route.ts`                   | The gateway endpoint                                          |
 | `app/api/oauth/`                     | OAuth callback; PCP's client metadata document                |
+| `app/oauth/`, `app/.well-known/`     | PCP's OAuth server: sign-in page, token, register, discovery  |
 | `app/api/servers/[id]/oauth/`        | OAuth start; the per-server callback older clients use        |
+| `app/api/export/route.ts`            | The export download (a file needs `Content-Disposition`)      |
+| `app/api/health/route.ts`            | Health check; in the app, the version and an install request  |
 | `e2e/fixtures/upstream.ts`           | The fake MCP, OAuth, REST and JMAP servers the e2e suite uses |
 | `app/manifest.ts`, `public/icons/`   | The manifest and icon set; `assets/icon.png` is the master    |
 | `lib/core/local-address.ts`          | Whether PCP's own address is one only a home network reaches  |
 | `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                  |
 | `desktop/main.mjs`                   | The desktop app: starts the server, opens the window          |
+| `desktop/preload.cjs`                | `window.pcpDesktop`, for PCP's own pages only                 |
 | `desktop/touch-id.mjs`               | Touch ID in the app: answers `preload.cjs`, keeps the key     |
+| `desktop/updates.mjs`                | When the app installs an update the owner asked for           |
 | `desktop/native/keychain/`           | Touch ID's keychain item; `scripts/keychain-profile.mjs`      |
 | `desktop/scripts/stage.mjs`          | Stages the server for the app, as the Dockerfile lays it out  |
 | `.github/workflows/release.yml`      | Tags, builds the apps and the image, publishes the release    |

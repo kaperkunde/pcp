@@ -86,6 +86,44 @@ describe("replaying the owner's input", () => {
     expect(sent).toHaveLength(2)
   })
 
+  it("keeps the pace of input that arrives late, rather than bursting it", async () => {
+    const { tab, sent } = fakeTab()
+
+    await dispatchInput(
+      tab,
+      parse({
+        seq: 0,
+        events: [
+          { type: "move", t: 0, x: 1, y: 1 },
+          { type: "move", t: 20, x: 2, y: 2 },
+        ],
+      }),
+    )
+    // The next batch was made right after, but a slow link delivers it
+    // about 200 ms late.
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await dispatchInput(
+      tab,
+      parse({
+        seq: 1,
+        events: [
+          { type: "move", t: 40, x: 3, y: 3 },
+          { type: "move", t: 80, x: 4, y: 4 },
+          { type: "move", t: 120, x: 5, y: 5 },
+        ],
+      }),
+    )
+
+    const late = sent.slice(2)
+    expect(late[1]!.at - late[0]!.at).toBeGreaterThanOrEqual(30)
+    expect(late[2]!.at - late[1]!.at).toBeGreaterThanOrEqual(30)
+    // Stamped at that pace too, less the millisecond per event the replay
+    // closes up by once input is in time again.
+    const stamps = late.map((call) => (call.params.timestamp as number) * 1000)
+    expect(stamps[2]! - stamps[0]!).toBeGreaterThanOrEqual(76)
+    expect(stamps[2]! - stamps[0]!).toBeLessThanOrEqual(80)
+  })
+
   it("types printable keys as text and leaves shortcuts as keys", async () => {
     const { tab, sent } = fakeTab()
 

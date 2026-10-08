@@ -169,6 +169,29 @@ export type SendResult = {
   subject: string
   /** The mailbox the sent copy is in, when there is one. */
   savedTo: string | null
+  /**
+   * With inReplyTo: whether the email it answers is now marked as answered.
+   * False when the server refused that; the email was sent all the same.
+   */
+  answered?: boolean
+}
+
+export type DraftResult = {
+  /**
+   * The draft's id, for get_email. Null when the server does not say what
+   * it is (IMAP without UIDPLUS).
+   */
+  id: string | null
+  messageId: string | null
+  /** Null when the account names no From address to write in. */
+  from: MailAddress | null
+  to: MailAddress[]
+  cc: MailAddress[]
+  bcc: MailAddress[]
+  subject: string
+  /** The Drafts mailbox: its id (a JMAP id, an IMAP path) and name. */
+  mailboxId: string
+  mailbox: string
 }
 
 export type MoveResult = {
@@ -202,6 +225,8 @@ export interface MailBackend {
   getThread?(threadId: string): Promise<MailMessageSummary[]>
   listIdentities?(): Promise<MailIdentity[]>
   sendEmail?(input: SendInput): Promise<SendResult>
+  /** Writes the email into Drafts, marked as a draft; sends nothing. */
+  createDraft(input: SendInput): Promise<DraftResult>
   moveEmail(id: string, mailbox: string): Promise<MoveResult>
   markEmail(
     id: string,

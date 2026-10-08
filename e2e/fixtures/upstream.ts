@@ -71,6 +71,12 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   browser: a form that greets by name and sets a cookie, a button that
  *   fills the page (for a click on the live view), and one that shows the
  *   cookie it was sent.
+ * - `/browser/walled`, `/browser/walled-forever` — pages behind a Cloudflare
+ *   check: until the visitor holds a `cf_clearance` cookie, a 403 marked
+ *   `cf-mitigated: challenge` titled "Just a moment...". The check on
+ *   `/walled` passes on its own (a script sets the cookie and reloads, and the
+ *   page then reads "Behind the wall"); the one on `/walled-forever` never
+ *   does, whatever cookie it is sent.
  *
  * - `/ddns/update` — a dynamic DNS service's update URL. It records every
  *   update in `ddns.updates` and answers with `ddns.status`.
@@ -1026,6 +1032,35 @@ export async function startUpstream({
         res.setHeader("content-type", "text/html; charset=utf-8")
         return res.end(
           `<!doctype html><title>Cookie</title><h1>Cookie: ${(req.headers.cookie ?? "none").replace(/[<>&]/g, "")}</h1>`,
+        )
+      }
+
+      if (
+        url.pathname === "/browser/walled" ||
+        url.pathname === "/browser/walled-forever"
+      ) {
+        // A site behind a Cloudflare check: until the visitor holds a
+        // cf_clearance cookie, a 403 marked `cf-mitigated: challenge`. The
+        // check on /walled passes on its own (a script sets the cookie and
+        // reloads); the one on /walled-forever never does and ignores the
+        // cookie, which is shared by every path of the host.
+        const cleared = /(?:^|;\s*)cf_clearance=/.test(req.headers.cookie ?? "")
+        res.setHeader("content-type", "text/html; charset=utf-8")
+
+        if (cleared && url.pathname === "/browser/walled") {
+          return res.end(
+            "<!doctype html><title>Walled</title><h1>Behind the wall</h1>",
+          )
+        }
+
+        res.statusCode = 403
+        res.setHeader("cf-mitigated", "challenge")
+        return res.end(
+          `<!doctype html><title>Just a moment...</title><h1>Checking your browser before accessing this site.</h1>${
+            url.pathname === "/browser/walled"
+              ? `<script>setTimeout(() => { document.cookie = "cf_clearance=passed; max-age=600; path=/"; location.reload() }, 300)</script>`
+              : ""
+          }`,
         )
       }
 

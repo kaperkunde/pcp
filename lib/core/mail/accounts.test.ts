@@ -89,7 +89,7 @@ describe("adding an account", () => {
     const id = await account()
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
 
-    expect(sync).toEqual({ status: "ok", message: "", toolCount: 10 })
+    expect(sync).toEqual({ status: "ok", message: "", toolCount: 11 })
     const row = await getServer(ctx, id)
     expect(row).toMatchObject({
       kind: "jmap",
@@ -102,7 +102,7 @@ describe("adding an account", () => {
     expect(fake.requests[0]!.authorization).toBe(BASIC)
 
     const [summary] = await listServers(ctx)
-    expect(summary).toMatchObject({ kind: "jmap", toolCount: 10 })
+    expect(summary).toMatchObject({ kind: "jmap", toolCount: 11 })
     expect((await listSecrets(ctx))[0]!.usedBy).toEqual([{ id, name: "Mail" }])
     await expect(deleteSecret(ctx, secretId)).rejects.toThrow()
   })
@@ -112,9 +112,9 @@ describe("adding an account", () => {
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
 
     expect(sync.toolCount).toBe(6)
-    expect(
-      (await getServer(ctx, id)).tools.map((tool) => tool.name),
-    ).not.toContain("send_email")
+    const names = (await getServer(ctx, id)).tools.map((tool) => tool.name)
+    expect(names).not.toContain("send_email")
+    expect(names).not.toContain("create_draft")
   })
 
   it("says when the credentials are refused or the server is gone", async () => {
@@ -536,6 +536,110 @@ describe("calling its tools", () => {
     expect(fake.requests.length).toBe(before)
   })
 
+  it("writes a draft in Drafts with an attachment by its handle, and sends nothing", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const keepers = resultKeepers(ctx, tokenId)
+    const options = {
+      ...PUBLIC,
+      keep: keepers.text,
+      keepBytes: keepers.bytes,
+      open: resultOpener(ctx, tokenId),
+    }
+    const read = await callServerTool(
+      ctx,
+      server,
+      "get_attachment",
+      { id: "e1", attachment: "blob-png" },
+      options,
+    )
+    const id = (read.structuredContent as { result: { $result: string } })
+      .result.$result
+
+    const result = await callServerTool(
+      ctx,
+      server,
+      "create_draft",
+      {
+        to: ["Charles Babbage <charles@example.com>"],
+        subject: "The drawing",
+        text: "As promised.",
+        inReplyTo: "e1",
+        attachments: [{ $result: id, name: "engine.png" }],
+      },
+      options,
+    )
+
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({
+      draft: {
+        mailboxId: "mb-drafts",
+        mailbox: "Drafts",
+        to: [{ name: "Charles Babbage", email: "charles@example.com" }],
+      },
+    })
+    expect(fake.sent).toEqual([])
+    const draftId = (result.structuredContent as { draft: { id: string } })
+      .draft.id
+    expect(fake.emails.find((email) => email.id === draftId)).toMatchObject({
+      mailboxIds: { "mb-drafts": true },
+      keywords: { $draft: true, $seen: true },
+      attachments: [
+        expect.objectContaining({ name: "engine.png", type: "image/png" }),
+      ],
+    })
+
+    // A draft to nobody yet is a draft all the same.
+    const bare = await callServerTool(
+      ctx,
+      server,
+      "create_draft",
+      { subject: "Notes", text: "" },
+      options,
+    )
+    expect(bare.structuredContent).toMatchObject({
+      draft: { to: [], mailboxId: "mb-drafts" },
+    })
+    expect(fake.sent).toEqual([])
+  })
+
+  it("refuses a draft's bad arguments and attachments before anything connects", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const open = resultOpener(ctx, tokenId)
+    const draft = (args: Record<string, unknown>, withOpen = true) =>
+      callServerTool(ctx, server, "create_draft", args, {
+        ...PUBLIC,
+        ...(withOpen ? { open } : {}),
+      })
+    const before = fake.requests.length
+
+    await expect(
+      draft({ to: ["a@b.c\r\nBcc: x@y.z"], subject: "", text: "" }),
+    ).rejects.toMatchObject({ code: "validation" })
+    await expect(
+      draft({ subject: "", text: "", extra: true }),
+    ).rejects.toMatchObject({ code: "validation" })
+    await expect(
+      draft({ subject: "s", text: "t", attachments: [{ $result: "gone" }] }),
+    ).rejects.toThrow(/No kept result "gone" for this token/)
+    await expect(
+      draft(
+        { subject: "s", text: "t", attachments: [{ $result: "gone" }] },
+        false,
+      ),
+    ).rejects.toThrow(/create_draft's attachments .* cannot read them/)
+    expect(fake.requests.length).toBe(before)
+  })
+
   it("refuses bad arguments before anything is sent", async () => {
     const server = await ready()
     const before = fake.requests.length
@@ -557,10 +661,22 @@ describe("calling its tools", () => {
 
   it("refuses writing tools on a read-only account, whatever the catalogue says", async () => {
     const server = await ready({ readOnly: true })
+    const before = fake.requests.length
 
     await expect(
       callServerTool(ctx, server, "delete_email", { id: "e1" }, PUBLIC),
     ).rejects.toMatchObject({ code: "forbidden" })
+    await expect(
+      callServerTool(
+        ctx,
+        server,
+        "create_draft",
+        { subject: "s", text: "t" },
+        PUBLIC,
+      ),
+    ).rejects.toMatchObject({ code: "forbidden" })
+    expect(fake.requests.length).toBe(before)
+    expect(fake.emails).toHaveLength(3)
   })
 
   it("answers a request the server refuses as an error, and leaves the account's status alone", async () => {
@@ -609,7 +725,7 @@ describe("calling its tools", () => {
     const instructions = buildInstructions(await loadGatewayServers(scope))
 
     expect(instructions).toContain("MCP servers, APIs and mail accounts")
-    expect(instructions).toContain("- mail: Mail (10 tools)")
+    expect(instructions).toContain("- mail: Mail (11 tools)")
   })
 })
 

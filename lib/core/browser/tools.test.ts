@@ -45,6 +45,22 @@ describe("the browser's tools", () => {
       "wait_for",
       "screenshot",
     ])
+
+    // What the owner's permission page warns about: acting on a site, not
+    // opening one.
+    const destructive = tools
+      .filter(
+        (tool) =>
+          (tool.annotations as { destructiveHint?: boolean }).destructiveHint,
+      )
+      .map((tool) => tool.name)
+    expect(destructive).toEqual([
+      "click",
+      "type",
+      "press_key",
+      "select_option",
+      "handle_dialog",
+    ])
   })
 
   it("offer nothing that runs code or reads the sign-ins", () => {

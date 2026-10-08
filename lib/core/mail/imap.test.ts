@@ -544,7 +544,7 @@ describe("changing", () => {
 
 describe("sending", () => {
   it("sends over SMTP as the user name, into the conversation, and files a copy in Sent", async () => {
-    const { mail, mailed, imap } = setup()
+    const { mail, mailed, imap, boxes } = setup()
 
     const sent = await mail.sendEmail!({
       to: [{ name: "Charles Babbage", email: "charles@example.com" }],
@@ -575,8 +575,31 @@ describe("sending", () => {
       id: encodeImapId(1, 8n, "Sent"),
       savedTo: "Sent",
       from: { email: "ada@example.com" },
+      answered: true,
     })
     expect(sent.messageId).toBe(mailed[0]!.messageId.slice(1, -1))
+    // The email it answers is marked answered, as a mail app would.
+    const original = boxes
+      .get("INBOX")!
+      .messages.find((message) => message.uid === 1)!
+    expect(original.flags.has("\\Answered")).toBe(true)
+  })
+
+  it("says so when the email it answers cannot be marked, and the email still goes", async () => {
+    const { mail, mailed, imap } = setup()
+    imap.messageFlagsAdd = async () => false
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: encodeImapId(1, 7n, "INBOX"),
+    })
+
+    expect(mailed).toHaveLength(1)
+    expect(sent).toMatchObject({ savedTo: "Sent", answered: false })
   })
 
   it("sends attachments over SMTP and in the Sent copy alike", async () => {
@@ -607,7 +630,7 @@ describe("sending", () => {
       text: "t",
     })
 
-    expect(mailed[0]!.from.address).toBe("ada@example.org")
+    expect(mailed[0]!.from?.address).toBe("ada@example.org")
   })
 
   it("cannot send without an SMTP server", () => {
@@ -677,6 +700,141 @@ describe("sending", () => {
     expect(raw).toContain(
       Buffer.from("part,count\ncog,42\n").toString("base64"),
     )
+  })
+})
+
+describe("drafting", () => {
+  function withDrafts(specialUse: string | undefined = "\\Drafts") {
+    const boxes = world()
+    boxes.set("Drafts", {
+      uidValidity: 11n,
+      uidNext: 1,
+      ...(specialUse ? { specialUse } : {}),
+      messages: [],
+    })
+    return boxes
+  }
+
+  it("appends a draft to Drafts with the Draft flag, and sends nothing", async () => {
+    const { mail, mailed, imap, boxes, deps } = setup({ boxes: withDrafts() })
+    const composed: OutgoingMail[] = []
+    const compose = deps.compose
+    deps.compose = async (mail) => {
+      composed.push(mail)
+      return compose(mail)
+    }
+    const pdf = Buffer.from("%PDF-1.7 the plan")
+
+    const draft = await mail.createDraft({
+      to: [{ name: "Charles Babbage", email: "charles@example.com" }],
+      cc: [],
+      bcc: [{ name: null, email: "archive@example.com" }],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: encodeImapId(1, 7n, "INBOX"),
+      attachments: [{ name: "plan.pdf", type: "application/pdf", bytes: pdf }],
+    })
+
+    expect(mailed).toEqual([])
+    expect(imap.appended).toEqual([
+      {
+        path: "Drafts",
+        raw: "Subject: Re: The engine\r\n\r\nThursday suits me.",
+        flags: ["\\Draft", "\\Seen"],
+      },
+    ])
+    expect(composed).toEqual([
+      expect.objectContaining({
+        from: { name: "", address: "ada@example.com" },
+        to: [{ name: "Charles Babbage", address: "charles@example.com" }],
+        bcc: [{ name: "", address: "archive@example.com" }],
+        inReplyTo: "<engine-1@example.com>",
+        references: ["<older@example.com>", "<engine-1@example.com>"],
+        attachments: [
+          {
+            filename: "plan.pdf",
+            contentType: "application/pdf",
+            content: pdf,
+          },
+        ],
+      }),
+    ])
+    expect(draft).toMatchObject({
+      id: encodeImapId(1, 11n, "Drafts"),
+      from: { email: "ada@example.com" },
+      mailboxId: "Drafts",
+      mailbox: "Drafts",
+    })
+    expect(`<${draft.messageId}>`).toBe(composed[0]!.messageId)
+    // A draft answers nothing yet.
+    const original = boxes
+      .get("INBOX")!
+      .messages.find((message) => message.uid === 1)!
+    expect(original.flags.has("\\Answered")).toBe(false)
+  })
+
+  it("finds Drafts by name, and needs neither SMTP, a From address nor UIDPLUS", async () => {
+    const { imap, deps, config } = setup({
+      boxes: withDrafts(undefined),
+      config: { smtp: null },
+    })
+    imap.append = async (path, raw, flags) => {
+      imap.appended.push({ path, raw: raw.toString("utf8"), flags })
+      return {}
+    }
+    const composed: OutgoingMail[] = []
+    deps.compose = async (mail) => {
+      composed.push(mail)
+      return Buffer.from(mail.text)
+    }
+    const mail = openImapBackend(
+      config,
+      { username: "ada", password: "app-password" },
+      deps,
+    )
+
+    expect(mail.sendEmail).toBeUndefined()
+    const draft = await mail.createDraft({
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: "Notes",
+      text: "To finish later.",
+    })
+
+    expect(draft).toMatchObject({ id: null, from: null, mailboxId: "Drafts" })
+    expect(composed[0]).not.toHaveProperty("from")
+    expect(composed[0]!.messageId).toMatch(/@pcp\.invalid>$/)
+    expect(imap.appended).toEqual([
+      { path: "Drafts", raw: "To finish later.", flags: ["\\Draft", "\\Seen"] },
+    ])
+  })
+
+  it("writes nothing when the account has no Drafts mailbox", async () => {
+    const { mail, imap } = setup()
+
+    await expect(
+      mail.createDraft({ to: [], cc: [], bcc: [], subject: "s", text: "t" }),
+    ).rejects.toThrow(/no Drafts mailbox/)
+    expect(imap.appended).toEqual([])
+  })
+
+  it("writes a message with no From or To at all", async () => {
+    const raw = (
+      await defaultImapDeps.compose({
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: "Notes",
+        text: "To finish later.",
+        messageId: "<m3@pcp.invalid>",
+      })
+    ).toString("utf8")
+
+    expect(raw).not.toMatch(/^From:/m)
+    expect(raw).not.toMatch(/^To:/m)
+    expect(raw).toMatch(/^Subject: Notes$/m)
+    expect(raw).toContain("To finish later.")
   })
 })
 

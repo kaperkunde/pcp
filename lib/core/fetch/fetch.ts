@@ -16,6 +16,7 @@ import {
 import { describeFetchError, discard, readCapped } from "../openapi/http"
 import { send, type SendOptions } from "../openapi/transport"
 import { PCP_VERSION } from "../version"
+import { CHALLENGE_LINE, isChallenge } from "./challenge"
 import {
   decodeBody,
   htmlToMarkdown,
@@ -47,10 +48,21 @@ import { siteKey } from "./rules"
  * Redirects are followed by hand and only within the site the owner decided
  * about. One to another site ends the call with where it pointed, so that
  * site gets its own decision when the assistant fetches it.
+ *
+ * A site that answers with a check of its visitors (challenge.ts) is said to
+ * have done so, in the text and in `challenged`, so the caller can read it
+ * again through the browser (web-fetch.ts, browser/solve.ts).
  */
 
 const USER_AGENT = `pcp/${PCP_VERSION} (web_fetch)`
 const REDIRECTS = new Set([301, 302, 303, 307, 308])
+
+/** A web_fetch answer, and whether the site checked its visitors instead. */
+export type FetchAnswer = {
+  result: CallToolResult
+  /** The site answered with its check (`cf-mitigated: challenge`). */
+  challenged: boolean
+}
 
 export type FetchOptions = Pick<SendOptions, "addressCheck"> & {
   /** The owner allowed private addresses for the token. */
@@ -91,6 +103,34 @@ function result(text: string, isError: boolean): CallToolResult {
   }
 }
 
+function answer(text: string, isError: boolean): FetchAnswer {
+  return { result: result(text, isError), challenged: false }
+}
+
+/**
+ * Adds a line to an answer's lead (the lines in front of the page), or at
+ * its end when it has none.
+ */
+export function withNote(answer: CallToolResult, note: string): CallToolResult {
+  const content = answer.content.map((part, index) => {
+    if (index !== 0 || part.type !== "text") {
+      return part
+    }
+
+    const split = part.text.indexOf("\n\n")
+
+    return {
+      ...part,
+      text:
+        split === -1
+          ? `${part.text}\n${note}`
+          : `${part.text.slice(0, split)}\n${note}${part.text.slice(split)}`,
+    }
+  })
+
+  return { ...answer, content }
+}
+
 function headersFor(args: FetchArgs): Record<string, string> {
   const headers: Record<string, string> = {
     "user-agent": USER_AGENT,
@@ -119,7 +159,7 @@ function headersFor(args: FetchArgs): Record<string, string> {
 export async function fetchWeb(
   args: FetchArgs,
   { addressCheck, allowPrivate = false, publicUrl }: FetchOptions = {},
-): Promise<CallToolResult> {
+): Promise<FetchAnswer> {
   const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS)
   const site = siteKey(new URL(args.url))
   const check = addressCheck ?? addressCheckFor(allowPrivate)
@@ -174,7 +214,7 @@ export async function fetchWeb(
     try {
       next = new URL(location, url)
     } catch {
-      return result(
+      return answer(
         `${statusLine(response)}: ${url} redirects to an address PCP cannot read.`,
         true,
       )
@@ -187,21 +227,18 @@ export async function fetchWeb(
       next.username ||
       next.password
     ) {
-      return result(
+      return answer(
         `${statusLine(response)}: ${url} redirects to an address web_fetch does not follow (${next.protocol}).`,
         true,
       )
     }
 
     if (siteKey(next) !== site) {
-      return result(
-        `${statusLine(response)}: ${url} redirects to ${next}, which is another site. PCP follows redirects only within a site, so the owner decides about that one on its own: call web_fetch with ${next} to continue.`,
-        false,
-      )
+      return answer(otherSite(statusLine(response), url, next), false)
     }
 
     if (hop >= MAX_FETCH_REDIRECTS) {
-      return result(
+      return answer(
         `${url} redirected more than ${MAX_FETCH_REDIRECTS} times; give the final address.`,
         true,
       )
@@ -223,11 +260,20 @@ export async function fetchWeb(
   }
 }
 
+/** What web_fetch says of a redirect to another site, which it does not follow. */
+export function otherSite(
+  status: string,
+  from: URL | string,
+  to: URL | string,
+) {
+  return `${status}: ${from} redirects to ${to}, which is another site. PCP follows redirects only within a site, so the owner decides about that one on its own: call web_fetch with ${to} to continue.`
+}
+
 async function readAnswer(
   response: Response,
   url: URL,
   args: FetchArgs,
-): Promise<CallToolResult> {
+): Promise<FetchAnswer> {
   let read: { bytes: Buffer; truncated: boolean }
 
   try {
@@ -239,34 +285,91 @@ async function readAnswer(
     )
   }
 
-  const ok = response.status >= 200 && response.status < 300
+  const challenged = isChallenge(response.headers)
   const type = mediaType(response)
   const contentType = response.headers.get("content-type") ?? ""
   const { bytes, truncated } = read
-  const lead = [`URL: ${url}`, `Status: ${statusLine(response)}`]
-
-  if (bytes.length === 0) {
-    return result(`${lead.join("\n")}\n\n(no content)`, !ok)
-  }
-
   const html = isHtml(type) || (type === "" && looksLikeHtml(bytes))
   const textual = html || isJson(type) || isText(type)
   const unlabelledText = type === "" && !html && decodeUtf8(bytes) !== null
 
-  if (!textual && !unlabelledText) {
+  return {
+    challenged,
+    result: presentPage(
+      {
+        url: url.toString(),
+        status: statusLine(response),
+        ok: response.status >= 200 && response.status < 300,
+        notes: challenged ? [CHALLENGE_LINE] : [],
+        type,
+        html,
+        text:
+          bytes.length > 0 && (textual || unlabelledText)
+            ? decodeBody(bytes, contentType, html)
+            : null,
+        bytes: bytes.length,
+        truncated,
+      },
+      args,
+    ),
+  }
+}
+
+/** A page as web_fetch reads it, from the network or from the browser. */
+export type PageRead = {
+  url: string
+  /** The status line: "HTTP 200 OK". */
+  status: string
+  ok: boolean
+  /** Lines said after the status. */
+  notes?: string[]
+  /** The media type as labelled, lower case; "" when unlabelled. */
+  type: string
+  html: boolean
+  /** The text, or null when it is not text (or there is none). */
+  text: string | null
+  /** How many bytes came. */
+  bytes: number
+  truncated: boolean
+  /** Said after the type: where the text came from, when not the network. */
+  source?: string
+}
+
+/**
+ * The answer web_fetch gives for a page: the lines in front (address,
+ * status, title, type, length) and the part of the text asked for, HTML as
+ * Markdown unless `raw`.
+ */
+export function presentPage(
+  page: PageRead,
+  args: Pick<FetchArgs, "raw" | "startIndex" | "maxLength">,
+): CallToolResult {
+  const { ok, type, html, truncated } = page
+  const lead = [
+    `URL: ${page.url}`,
+    `Status: ${page.status}`,
+    ...(page.notes ?? []),
+  ]
+  const source = page.source ? ` (${page.source})` : ""
+
+  if (page.bytes === 0) {
+    return result(`${lead.join("\n")}\n\n(no content)`, !ok)
+  }
+
+  if (page.text === null) {
     lead.push(`Type: ${type || "unlabelled binary data"}`)
     return result(
-      `${lead.join("\n")}\n\n(The page is ${bytes.length}${truncated ? "+" : ""} bytes of ${type || "binary data"}; web_fetch passes on HTML, text and JSON only.)`,
+      `${lead.join("\n")}\n\n(The page is ${page.bytes}${truncated ? "+" : ""} bytes of ${type || "binary data"}; web_fetch passes on HTML, text and JSON only.)`,
       !ok,
     )
   }
 
-  let text = decodeBody(bytes, contentType, html)
+  let text = page.text
   let kind = type || (html ? "text/html" : "text/plain")
 
   if (html && !args.raw) {
     try {
-      const converted = htmlToMarkdown(text, url.toString())
+      const converted = htmlToMarkdown(text, page.url)
 
       if (converted.title) {
         lead.push(`Title: ${converted.title}`)
@@ -285,7 +388,7 @@ async function readAnswer(
     }
   }
 
-  lead.push(`Type: ${kind}`)
+  lead.push(`Type: ${kind}${source}`)
 
   if (truncated) {
     lead.push(

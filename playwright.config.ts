@@ -5,6 +5,7 @@ import { defineConfig, devices } from "@playwright/test"
 import {
   E2E_EDGE_HTTP_PORT,
   E2E_EDGE_HTTPS_PORT,
+  E2E_PCPGG_RELAY_URL,
   E2E_RELEASES_URL,
 } from "./e2e/lib/network"
 
@@ -77,6 +78,8 @@ export default defineConfig({
       // The update check asks the fake upstream (the updates project starts
       // it on this port), never GitHub.
       PCP_RELEASES_URL: E2E_RELEASES_URL,
+      // The pcpgg project's copy of pcp.gg, never pcp.gg itself.
+      PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
     },
   },
   projects: [
@@ -105,9 +108,18 @@ export default defineConfig({
     {
       // Connecting an OAuth upstream through the browser, then using it.
       name: "oauth",
-      testMatch: /oauth\.spec\.ts/,
+      testMatch: /(^|\/)oauth\.spec\.ts$/,
       dependencies: ["setup"],
       use: signedIn("oauth"),
+    },
+    {
+      // PCP's own authorization server: an assistant finds it from /mcp's
+      // 401, registers itself, the owner signs in and allows it, and the
+      // token it gets works, rotates, and is revoked under API tokens.
+      name: "oauth-server",
+      testMatch: /oauth-server\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("oauth-server"),
     },
     {
       // An API that signs in with OAuth: proposed by an assistant with the
@@ -146,9 +158,9 @@ export default defineConfig({
       use: signedIn("mail"),
     },
     {
-      // Per-token tool access and the owner's permission: the link, the
-      // client's own prompt, PCP's panel, copying access, and servers an
-      // assistant proposes.
+      // Per-token tool access and the owner's permission: the link (also for
+      // a client that offers prompts and panels), copying access, and servers
+      // an assistant proposes.
       name: "permissions",
       testMatch: /permissions\.spec\.ts/,
       dependencies: ["setup"],
@@ -170,6 +182,15 @@ export default defineConfig({
       testMatch: /network\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("network"),
+    },
+    {
+      // pcp.gg against a copy of its relay: a key it refuses (the card and
+      // the bell), a key it takes (online at the name, HTTPS for it turned
+      // on and, with no Let's Encrypt to answer, off again), disconnected.
+      name: "pcpgg",
+      testMatch: /pcpgg\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("pcpgg"),
     },
     {
       // An API that wants HTTP Basic authentication: a user name and a
@@ -211,8 +232,10 @@ export default defineConfig({
       // The browser: added by the owner, its tools and instructions, a new
       // site asking first, refs to act on a page, a link to another site
       // stopped, the live view with a click on it, hand_over on the
-      // request's page, and the sign-ins kept across a restart and
-      // forgotten.
+      // request's page, a site behind a Cloudflare check (waited for when
+      // it passes on its own, left to hand_over when it does not, and read
+      // through the browser by web_fetch), and the sign-ins kept across a
+      // restart and forgotten.
       name: "browser",
       testMatch: /browser\.spec\.ts/,
       dependencies: ["setup"],
@@ -226,6 +249,14 @@ export default defineConfig({
       testMatch: /updates\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("updates"),
+    },
+    {
+      // The Log page (a token's calls by tool and outcome, the filters, the
+      // token's own link) and Settings → Cleanup.
+      name: "log",
+      testMatch: /log\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("log"),
     },
     {
       // Touch ID with a stand-in for the Mac app. Signs every browser out,
@@ -248,6 +279,15 @@ export default defineConfig({
       // browser out too: after recovery, signing in on its own.
       name: "backup",
       testMatch: /backup\.spec\.ts/,
+      dependencies: ["setup"],
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      // Deletes the vault from Settings and sets it up again with the same
+      // name and password, which ends every session and token: after
+      // backup, signing in on its own.
+      name: "reset",
+      testMatch: /reset\.spec\.ts/,
       dependencies: ["setup"],
       use: { ...devices["Desktop Chrome"] },
     },

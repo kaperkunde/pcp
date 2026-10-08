@@ -10,8 +10,6 @@ import {
   handleOf,
   keepBytes,
   keepResult,
-  MAX_KEPT_RESULT_BYTES,
-  MAX_KEPT_RESULT_CHARS,
   MAX_KEPT_RESULTS_PER_TOKEN,
   keepWholeAnswer,
   openResult,
@@ -23,6 +21,11 @@ import {
   resultNotices,
 } from "./tool-results"
 import { scratchDatabase } from "./test-db"
+import {
+  EMPTY_CONFIG,
+  resourceLimits,
+  saveResourceConfig,
+} from "./resources/state"
 import { setupVault } from "./vault"
 
 // Long answers kept for the token that asked, read back a slice at a time.
@@ -170,9 +173,38 @@ describe("keeping and reading", () => {
   })
 
   it("keeps at most so much of one answer, and says what was dropped", async () => {
-    const kept = await keep("z".repeat(MAX_KEPT_RESULT_CHARS + 5))
+    const { textChars } = resourceLimits()
+    const kept = await keep("z".repeat(textChars + 5))
 
-    expect(kept).toMatchObject({ length: MAX_KEPT_RESULT_CHARS, dropped: 5 })
+    expect(kept).toMatchObject({ length: textChars, dropped: 5 })
+  })
+
+  it("lets go of a token's oldest results past what the owner lets it keep", async () => {
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 4, keptMb: 10 })
+    const start = Date.parse("2026-10-04T12:00:00Z")
+    const ids: string[] = []
+
+    for (let i = 0; i < 4; i++) {
+      const kept = await keepBytes(
+        ctx,
+        {
+          tokenId,
+          serverId: null,
+          toolName: "files",
+          bytes: Buffer.alloc(3 * 1024 * 1024, i),
+          mediaType: "application/octet-stream",
+          name: null,
+        },
+        new Date(start + i * 1000),
+      )
+      ids.push(kept.id)
+    }
+
+    const left = await db().toolResult.findMany({
+      where: { tokenId },
+      select: { id: true },
+    })
+    expect(left.map((row) => row.id).sort()).toEqual(ids.slice(1).sort())
   })
 
   it("lets go of a token's oldest results past its limit", async () => {
@@ -200,7 +232,8 @@ describe("keepWholeAnswer", () => {
       {
         raw,
         shown: shapeAnswer(raw, { fields }),
-        whole: () => shapeAnswer(raw, { fields, max: MAX_KEPT_RESULT_CHARS }),
+        whole: () =>
+          shapeAnswer(raw, { fields, max: resourceLimits().textChars }),
       },
       resultKeeper(ctx, tokenId),
       context,
@@ -338,10 +371,15 @@ describe("keeping a file", () => {
     expect(opened?.bytes().equals(PNG)).toBe(true)
   })
 
-  it("refuses a file over the cap instead of cutting it", async () => {
+  it("refuses a file over the owner's cap instead of cutting it", async () => {
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 1 })
+
     await expect(
-      keepFile(Buffer.alloc(MAX_KEPT_RESULT_BYTES + 1), "application/pdf"),
+      keepFile(Buffer.alloc(1024 * 1024 + 1), "application/pdf"),
     ).rejects.toThrow(/more than PCP keeps/)
+    expect(
+      (await keepFile(Buffer.alloc(1024 * 1024), "application/pdf")).length,
+    ).toBe(1024 * 1024)
   })
 
   it("cleans a name of paths and control characters, and drops an empty one", async () => {
@@ -352,6 +390,7 @@ describe("keeping a file", () => {
   })
 
   it("counts bytes with characters against the token's caps", async () => {
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 10, keptMb: 50 })
     const big = Buffer.alloc(9_000_000, 1)
     const kept = []
 
@@ -359,7 +398,7 @@ describe("keeping a file", () => {
       kept.push(await keepFile(big, "application/octet-stream", `f${n}`))
     }
 
-    // 6 x 9 MB passes the 50 M cap: the oldest goes, the newest stays.
+    // 6 x 9 MB passes the 50 MB cap: the oldest goes, the newest stays.
     expect(await openResult(ctx, { tokenId, id: kept[0]!.id })).toBeNull()
     expect(await openResult(ctx, { tokenId, id: kept[5]!.id })).not.toBeNull()
   })

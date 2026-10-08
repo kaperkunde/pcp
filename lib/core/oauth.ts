@@ -339,9 +339,10 @@ function isLoopback(hostname: string): boolean {
 /**
  * The `iss` a callback carries, reconciled with the issuer discovery
  * recorded. Next.js rewrites the first loopback address in a request URL to
- * "localhost" — and when the server listens on 0.0.0.0 (the Docker image)
- * that first address is the encoded `iss` value itself, so an authorization
- * server on 127.0.0.1 comes back as localhost and fails RFC 9207's check.
+ * "localhost" — and when the server listens on every address (:: in the
+ * Docker image) that first address is the encoded `iss` value itself, so an
+ * authorization server on 127.0.0.1 comes back as localhost and fails RFC
+ * 9207's check.
  *
  * Only two loopback spellings of the same origin and path are treated as
  * the same issuer. Anything else goes to the SDK unchanged, so a real
@@ -384,6 +385,10 @@ export async function disconnectOAuth(
   await forgetOAuthTokens(ctx, server)
 }
 
-export async function pruneOAuthStates(): Promise<void> {
-  await db().oAuthState.deleteMany({ where: { expiresAt: { lt: new Date() } } })
+export async function pruneOAuthStates(): Promise<number> {
+  const { count } = await db().oAuthState.deleteMany({
+    where: { expiresAt: { lt: new Date() } },
+  })
+
+  return count
 }

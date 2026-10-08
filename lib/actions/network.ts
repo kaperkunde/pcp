@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache"
 
+import { invalid } from "@/lib/core/errors"
 import {
   clearDdnsConfig,
   type DdnsConfig,
@@ -10,7 +11,16 @@ import {
   getDdnsStatus,
   saveDdnsConfig,
 } from "@/lib/core/network/ddns"
-import { reconcileNetwork } from "@/lib/core/network/runtime"
+import {
+  clearPcpggConfig,
+  getPcpggConfig,
+  savePcpggConfig,
+} from "@/lib/core/network/pcpgg"
+import {
+  networkOverview,
+  pcpggSettled,
+  reconcileNetwork,
+} from "@/lib/core/network/runtime"
 import {
   clearTlsConfig,
   saveTlsConfig,
@@ -20,7 +30,7 @@ import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import { requireContext } from "@/lib/server/session"
 
 /**
- * Dynamic DNS and HTTPS. These are settings of the machine, not of the
+ * Dynamic DNS, HTTPS and pcp.gg. These are settings of the machine, not of the
  * vault (lib/core/host-settings.ts), but only the signed-in owner changes
  * them.
  */
@@ -106,6 +116,12 @@ export async function saveHttpsAction(
   await requireContext()
 
   const result = await guarded(async () => {
+    if (await getPcpggConfig()) {
+      throw invalid(
+        "PCP uses its pcp.gg name while it is connected to pcp.gg. Disconnect from pcp.gg first to use another name.",
+      )
+    }
+
     const ddns = await getDdnsConfig()
     const config = await saveTlsConfig(
       {
@@ -142,6 +158,63 @@ export async function retryHttpsAction(): Promise<NetworkResult> {
 export async function disableHttpsAction(): Promise<void> {
   await requireContext()
   await clearTlsConfig()
+  await reconcileNetwork()
+  refresh()
+}
+
+export async function savePcpggAction(
+  _previous: NetworkResult,
+  formData: FormData,
+): Promise<NetworkResult> {
+  await requireContext()
+
+  const result = await guarded(async () => {
+    await savePcpggConfig({
+      key: field(formData, "key"),
+      agreed: field(formData, "agreed") === "on",
+    })
+    await reconcileNetwork()
+    await pcpggSettled()
+    const { pcpgg } = await networkOverview()
+
+    switch (pcpgg?.state) {
+      case "online":
+        return {
+          message: `PCP is online at ${pcpgg.name}. It is getting its HTTPS certificate now; that usually takes under a minute.`,
+        }
+      case "rejected":
+        throw invalid(pcpgg.error ?? "pcp.gg did not accept the key.")
+      case "offline":
+        return {
+          message: `Saved. ${pcpgg.error ?? "pcp.gg did not answer."} PCP keeps trying.`,
+        }
+      default:
+        return { message: "Saved. PCP is connecting to pcp.gg." }
+    }
+  })
+
+  refresh()
+  return result
+}
+
+/** After Let's Encrypt refused the first certificate for the pcp.gg name. */
+export async function retryPcpggHttpsAction(): Promise<NetworkResult> {
+  await requireContext()
+
+  const result = await guarded(async () => {
+    await clearTlsConfig()
+    await reconcileNetwork({ tlsNow: true })
+    return { message: "Asking Let's Encrypt again." }
+  })
+
+  refresh()
+  return result
+}
+
+export async function disablePcpggAction(): Promise<void> {
+  await requireContext()
+  await clearPcpggConfig()
+  // Also turns HTTPS for the pcp.gg name off.
   await reconcileNetwork()
   refresh()
 }

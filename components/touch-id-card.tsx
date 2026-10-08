@@ -103,9 +103,10 @@ export function TouchIdCard({
         <CardTitle>Touch ID</CardTitle>
         <CardDescription>
           Unlock PCP in the Mac app with your fingerprint, and confirm a new API
-          token, an export or a restore with it instead of your password. A new
-          password or recovery key still takes your password. Recovering with
-          the recovery key, or signing out everywhere, turns Touch ID off.
+          token, an export, a restore or deleting the vault with it instead of
+          your password. A new password or recovery key still takes your
+          password. Recovering with the recovery key, signing out everywhere or
+          deleting the vault turns Touch ID off.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">

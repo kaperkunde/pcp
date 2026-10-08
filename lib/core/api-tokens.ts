@@ -1,5 +1,7 @@
+import type { Prisma } from "@/lib/generated/prisma/client"
+
 import type { VaultContext } from "./context"
-import { randomSecret } from "./crypto"
+import { newHkdfParams, randomSecret } from "./crypto"
 import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
@@ -10,6 +12,12 @@ import { createCredentialGrant, unlockWithCredential } from "./keys"
  * one wraps its own copy of the data key (an `api_token` grant), so the
  * gateway can decrypt the secrets a call needs — and only while it holds
  * the token. Revoking a token deletes that copy.
+ *
+ * A token can also be made by an assistant signing in with OAuth
+ * (lib/core/oauth-server/): it has no pcp_ value and an empty grant, and the
+ * key travels in its OAuth credentials instead, each with a grant of its
+ * own. Everything else (levels, memories, the request log) is the token's,
+ * as for any other; revoking or deleting it removes those credentials too.
  */
 
 export const TOKEN_PREFIX = "pcp_"
@@ -36,6 +44,8 @@ export type ApiTokenSummary = {
   lastUsedAt: Date | null
   /** Requests from this token still waiting for the owner's answer. */
   openPermissions: number
+  /** The assistant it was made for by signing in with OAuth, if it was. */
+  oauthClient: { id: string; name: string } | null
 }
 
 export type TokenInput = {
@@ -95,6 +105,8 @@ type SummaryRow = {
   revokedAt: Date | null
   createdAt: Date
   lastUsedAt: Date | null
+  oauthClientId: string | null
+  oauthClientName: string | null
   servers: Array<{ server: { id: string; name: string } }>
   _count: { permissionRequests: number }
 }
@@ -115,6 +127,9 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     createdAt: row.createdAt,
     lastUsedAt: row.lastUsedAt,
     openPermissions: row._count.permissionRequests,
+    oauthClient: row.oauthClientId
+      ? { id: row.oauthClientId, name: row.oauthClientName ?? "" }
+      : null,
   }
 }
 
@@ -247,6 +262,54 @@ export async function createApiToken(
 }
 
 /**
+ * A token for an assistant the owner let sign in with OAuth. It gets no
+ * pcp_ value: its grant is empty from the start (as a revoked token's is),
+ * and what unwraps the key are the credentials the authorization server
+ * issues for it. Called with the owner's key, after they confirmed.
+ */
+export async function createOAuthApiToken(
+  ctx: VaultContext,
+  input: TokenInput & { clientId: string; clientName: string },
+): Promise<{ id: string }> {
+  const { name, serverIds } = await validateTokenInput(ctx, input)
+  const grantId = newId()
+  const id = newId()
+
+  await db().$transaction([
+    db().keyGrant.create({
+      data: {
+        id: grantId,
+        vaultId: ctx.vaultId,
+        kind: "api_token",
+        kdf: "hkdf",
+        kdfParams: JSON.stringify(newHkdfParams()),
+        ...blankGrant(),
+      },
+    }),
+    db().apiToken.create({
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        grantId,
+        name,
+        prefix: "",
+        allowAllServers: input.allowAllServers,
+        manageEndpoints: input.manageEndpoints ?? false,
+        keepMemories: input.keepMemories ?? false,
+        webFetch: input.webFetch ?? false,
+        runCode: input.runCode ?? false,
+        expiresAt: input.expiresAt ?? null,
+        oauthClientId: input.clientId,
+        oauthClientName: input.clientName,
+        servers: { create: serverIds.map((serverId) => ({ serverId })) },
+      },
+    }),
+  ])
+
+  return { id }
+}
+
+/**
  * Changes a token after the fact: its name, the servers it reaches, what
  * else it may do, and its expiry (each optional field
  * is left alone when undefined). The token itself, and the key it unwraps,
@@ -309,8 +372,20 @@ export async function resolveApiToken(
     return null
   }
 
+  return liveToken({ grantId: unlocked.grant.id }, unlocked.dek)
+}
+
+/**
+ * The token a credential opened (an API token's grant, or an OAuth access
+ * token's, oauth-server/tokens.ts), with the key it unwrapped: null when
+ * the token is revoked or expired.
+ */
+export async function liveToken(
+  where: Prisma.ApiTokenWhereUniqueInput,
+  dek: Buffer,
+): Promise<ResolvedToken | null> {
   const record = await db().apiToken.findUnique({
-    where: { grantId: unlocked.grant.id },
+    where,
     include: { servers: { select: { serverId: true } } },
   })
 
@@ -335,7 +410,7 @@ export async function resolveApiToken(
   }
 
   return {
-    ctx: { vaultId: record.vaultId, dek: unlocked.dek },
+    ctx: { vaultId: record.vaultId, dek },
     tokenId: record.id,
     tokenName: record.name,
     serverIds: record.allowAllServers
@@ -361,15 +436,37 @@ export async function revokeApiToken(
     throw notFound("That token")
   }
 
+  await revokeTokenRecord(record)
+}
+
+/**
+ * Revokes a token an assistant signed in for, when the assistant itself
+ * asks (RFC 7009 revocation of its refresh token): the same as the owner's
+ * Revoke.
+ */
+export async function revokeOAuthApiToken(id: string): Promise<void> {
+  const record = await db().apiToken.findUnique({ where: { id } })
+
+  if (record) {
+    await revokeTokenRecord(record)
+  }
+}
+
+async function revokeTokenRecord(record: {
+  id: string
+  grantId: string
+  revokedAt: Date | null
+}): Promise<void> {
   await db().$transaction([
     db().apiToken.update({
-      where: { id },
+      where: { id: record.id },
       data: { revokedAt: record.revokedAt ?? new Date() },
     }),
     db().keyGrant.update({
       where: { id: record.grantId },
       data: blankGrant(),
     }),
+    ...endOAuthSignIns([record.id]),
   ])
 }
 
@@ -396,9 +493,27 @@ export async function revokeAllApiTokens(ctx: VaultContext): Promise<number> {
       where: { id: { in: live.map((token) => token.grantId) } },
       data: blankGrant(),
     }),
+    ...endOAuthSignIns(live.map((token) => token.id)),
   ])
 
   return live.length
+}
+
+/**
+ * Deletes what an assistant that signed in with OAuth holds for these
+ * tokens: every code, access token and refresh token, with the copies of
+ * the key in their grants. Deleting the token row alone would leave those
+ * grants behind (they hang off the grant, not the token).
+ */
+export function endOAuthSignIns(tokenIds: string[]) {
+  return [
+    db().keyGrant.deleteMany({
+      where: { oauthCredential: { is: { tokenId: { in: tokenIds } } } },
+    }),
+    db().oAuthCredential.deleteMany({
+      where: { tokenId: { in: tokenIds } },
+    }),
+  ] as const
 }
 
 /**
@@ -425,5 +540,8 @@ export async function deleteApiToken(
     throw notFound("That token")
   }
 
-  await db().keyGrant.delete({ where: { id: record.grantId } })
+  await db().$transaction([
+    ...endOAuthSignIns([id]),
+    db().keyGrant.delete({ where: { id: record.grantId } }),
+  ])
 }

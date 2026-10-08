@@ -3,26 +3,24 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 import { readFields, type AnswerShape } from "../answers"
 import { isConnectResult } from "../connect"
 import { isPcpError } from "../errors"
+import { bareType, isTextType } from "../media-types"
 import type { CodeCallOutcome, PermissionScope } from "../permissions"
-import { appendRequestLog } from "../request-log"
+import { appendRequestLog, noteOwnerAsked, withLogNote } from "../request-log"
 import { MAX_HANDLE_DEPTH, missingResultMessage } from "../result-handles"
 import {
   handleOf,
+  keepBytes,
   keepResult,
-  MAX_KEPT_RESULT_CHARS,
   openResult,
   resultNotice,
 } from "../tool-results"
+import { loadResourceLimits, type ResourceLimits } from "../resources/state"
 import {
-  MAX_CALL_ARGS_CHARS,
   MAX_CALLS_PER_RUN,
-  MAX_CODE_ANSWER_CHARS,
   MAX_CODE_CHARS,
-  MAX_CONCURRENT_RUNS,
   MAX_KEEPS_PER_RUN,
   MAX_PARALLEL_CALLS,
   MAX_READS_PER_RUN,
-  MAX_RETURN_CHARS,
   RUN_TIMEOUT_MS,
 } from "./limits"
 import { runJavaScript } from "./quickjs"
@@ -41,13 +39,17 @@ import type { Bridge, BridgeReply, Executor } from "./types"
  *   call_tool would leave), and an allowed tool runs through the same
  *   upstream path as call_tool (permissions.ts runCodeCall). Every call is
  *   in the request log, under run_code, by server and tool.
- * - `read` opens one of the token's own kept results, as text.
- * - `keep` keeps a text as a result of the token's, and hands back its
- *   handle, which any later call (the program's or the assistant's) can
- *   name in place of the text.
+ * - `read` opens one of the token's own kept results, as text, or as
+ *   base64 for a file's bytes.
+ * - `keep` keeps a text, or bytes sent as base64, as a result of the
+ *   token's, and hands back its handle, which any later call (the
+ *   program's or the assistant's) can name in place of the value.
+ * - `tools` lists what the gateway's list_tools would: the token's servers,
+ *   or one server's tools it can see, at its levels. It reaches no server.
  *
  * Files move as handles: a file in an answer is kept and the program gets
- * its handle, never its bytes, and passes the handle on.
+ * its handle, and passes the handle on; it reads the bytes only when it
+ * asks to (`read` as base64).
  *
  * Nothing here reads a secret or opens a connection, and the program's text
  * is not logged or kept.
@@ -61,6 +63,14 @@ export type CodeCaller = (
     args: Record<string, unknown>
   } & AnswerShape,
 ) => Promise<CodeCallOutcome>
+
+/**
+ * How the gateway lists for a program: with no server, the token's servers;
+ * with one, the tools on it the token can see. Nothing is fetched.
+ */
+export type CodeLister = (
+  server: string | null,
+) => { ok: true; value: unknown } | { ok: false; error: string }
 
 /** What run_code shows of each part before keeping the rest. */
 const SHOWN_OUTPUT_CHARS = 20_000
@@ -124,6 +134,7 @@ export function bareHandles(value: unknown, depth = 0): unknown {
 }
 
 const MEDIA_TYPE = /^[\w.+-]+\/[\w.+-]+(\s*;.*)?$/
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 
 function refuse(error: string): BridgeReply {
   return { ok: false, error }
@@ -151,11 +162,13 @@ export async function runCode(
   },
   {
     call,
+    list,
     signal,
     executor = runJavaScript,
     timeoutMs = RUN_TIMEOUT_MS,
   }: {
     call: CodeCaller
+    list?: CodeLister
     /** The request's own: the run stops when it goes away. */
     signal?: AbortSignal
     executor?: Executor
@@ -173,9 +186,11 @@ export async function runCode(
     )
   }
 
-  if (running >= MAX_CONCURRENT_RUNS) {
+  const limits = await loadResourceLimits()
+
+  if (running >= limits.programsAtOnce) {
     return text(
-      `PCP is running ${MAX_CONCURRENT_RUNS} programs already. Try again in a moment.`,
+      `PCP is running ${limits.programsAtOnce} ${limits.programsAtOnce === 1 ? "program" : "programs"} already, as many as the owner's settings allow at once. Try again in a moment.`,
       true,
     )
   }
@@ -246,9 +261,9 @@ export async function runCode(
       return refuse(`The arguments of ${server}/${tool} are an object.`)
     }
 
-    if ((JSON.stringify(args) ?? "").length > MAX_CALL_ARGS_CHARS) {
+    if ((JSON.stringify(args) ?? "").length > limits.answerChars) {
       return refuse(
-        `The arguments of ${server}/${tool} are longer than a call takes (${MAX_CALL_ARGS_CHARS.toLocaleString("en")} characters of JSON). Keep a long value with pcp.keep and pass its handle.`,
+        `The arguments of ${server}/${tool} are longer than a call takes (${limits.answerChars.toLocaleString("en")} characters of JSON). Keep a long value with pcp.keep and pass its handle.`,
       )
     }
 
@@ -282,13 +297,22 @@ export async function runCode(
       }
 
       const at = Date.now()
-      const outcome = await call({
-        server,
-        tool,
-        args: bareHandles(args) as Record<string, unknown>,
-        ...shape,
-      })
+      // A note of the call's own, for the request it made; the run itself
+      // asked the owner too, so it goes on run_code's note as well.
+      const { outcome, note } = await withLogNote(async (note) => ({
+        outcome: await call({
+          server,
+          tool,
+          args: bareHandles(args) as Record<string, unknown>,
+          ...shape,
+        }),
+        note,
+      }))
       const owner = "owner" in outcome
+
+      if (note.asked) {
+        noteOwnerAsked(note.request)
+      }
 
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
@@ -299,6 +323,8 @@ export async function runCode(
         ok: owner || outcome.ok,
         ms: Date.now() - at,
         ...(!owner && !outcome.ok ? { error: "The call failed." } : {}),
+        ...(owner || note.asked ? { asked: true } : {}),
+        ...(note.request ? { request: note.request } : {}),
       })
 
       if ("owner" in outcome) {
@@ -312,9 +338,14 @@ export async function runCode(
 
   async function read(payload: unknown): Promise<BridgeReply> {
     const id = isRecord(payload) ? payload.id : undefined
+    const as = isRecord(payload) ? (payload.as ?? "text") : undefined
 
     if (typeof id !== "string" || id === "" || id.length > 64) {
       return refuse("pcp.read takes a handle, or its id: pcp.read(handle).")
+    }
+
+    if (as !== "text" && as !== "base64") {
+      return refuse('pcp.read reads as "text" (the default) or "base64".')
     }
 
     if (++reads > MAX_READS_PER_RUN) {
@@ -327,12 +358,23 @@ export async function runCode(
       return refuse(missingResultMessage(id))
     }
 
-    try {
-      const value = opened.text()
+    if (
+      as === "text" &&
+      opened.kind === "bytes" &&
+      !isTextType(opened.mediaType)
+    ) {
+      return refuse(
+        `Result ${id} is ${bareType(opened.mediaType)}, not text: read its bytes as base64 instead (as: "base64").`,
+      )
+    }
 
-      if (value.length > MAX_CODE_ANSWER_CHARS) {
+    try {
+      const value =
+        as === "base64" ? opened.bytes().toString("base64") : opened.text()
+
+      if (value.length > limits.answerChars) {
         return refuse(
-          `Result ${id} is ${value.length.toLocaleString("en")} characters, more than a program reads at once (${MAX_CODE_ANSWER_CHARS.toLocaleString("en")}).`,
+          `Result ${id} is ${value.length.toLocaleString("en")} characters${as === "base64" ? " as base64" : ""}, more than a program reads at once (${limits.answerChars.toLocaleString("en")}). The owner can raise the largest file in PCP's settings, under Resources.`,
         )
       }
 
@@ -353,7 +395,15 @@ export async function runCode(
       )
     }
 
-    const type = payload.type ?? "text/plain"
+    const encoding = payload.encoding ?? "text"
+
+    if (encoding !== "text" && encoding !== "base64") {
+      return refuse('pcp.keep\'s encoding is "text" (the default) or "base64".')
+    }
+
+    const type =
+      payload.type ??
+      (encoding === "base64" ? "application/octet-stream" : "text/plain")
     const name = payload.name ?? null
 
     if (
@@ -368,9 +418,13 @@ export async function runCode(
       return refuse("pcp.keep's name is a file name.")
     }
 
-    if (payload.value.length > MAX_KEPT_RESULT_CHARS) {
+    if (encoding === "base64") {
+      return keepFile(payload.value, type, name)
+    }
+
+    if (payload.value.length > limits.textChars) {
       return refuse(
-        `That is ${payload.value.length.toLocaleString("en")} characters; PCP keeps ${MAX_KEPT_RESULT_CHARS.toLocaleString("en")} of one text at most.`,
+        `That is ${payload.value.length.toLocaleString("en")} characters; PCP keeps ${limits.textChars.toLocaleString("en")} of one text at most.`,
       )
     }
 
@@ -390,6 +444,71 @@ export async function runCode(
     return { ok: true, value: handleOf(kept) }
   }
 
+  /** Bytes sent as base64, kept as a file of the token's. */
+  async function keepFile(
+    base64: string,
+    type: string,
+    name: string | null,
+  ): Promise<BridgeReply> {
+    // Base64 is 4 characters for every 3 bytes; anything longer than the
+    // largest file is refused before it is decoded.
+    if (base64.length > Math.ceil(limits.fileBytes / 3) * 4 + 4) {
+      return refuse(
+        `That is more than PCP keeps of one file (${limits.fileBytes.toLocaleString("en")} bytes). The owner can raise that in PCP's settings, under Resources.`,
+      )
+    }
+
+    const bare = base64.replace(/\s+/g, "")
+
+    if (bare.length % 4 === 1 || !BASE64.test(bare)) {
+      return refuse(
+        'pcp.keep was told the value is base64, and it is not: only A-Z, a-z, 0-9, "+", "/" and "=" at the end.',
+      )
+    }
+
+    if (++keeps > MAX_KEEPS_PER_RUN) {
+      return refuse(`A run keeps at most ${MAX_KEEPS_PER_RUN} values.`)
+    }
+
+    try {
+      const kept = await keepBytes(scope.ctx, {
+        tokenId: scope.tokenId,
+        serverId: null,
+        toolName: "run_code",
+        bytes: Buffer.from(bare, "base64"),
+        mediaType: type,
+        name,
+      })
+
+      return { ok: true, value: handleOf(kept) }
+    } catch (error) {
+      if (isPcpError(error)) {
+        return refuse(error.message)
+      }
+
+      throw error
+    }
+  }
+
+  function tools(payload: unknown): BridgeReply {
+    const server = isRecord(payload) ? (payload.server ?? null) : undefined
+
+    if (
+      server !== null &&
+      (typeof server !== "string" || server === "" || server.length > 200)
+    ) {
+      return refuse(
+        'pcp.tools lists the servers, or with a server\'s name its tools: pcp.tools("github").',
+      )
+    }
+
+    if (!list) {
+      return refuse("PCP cannot list tools here.")
+    }
+
+    return list(server)
+  }
+
   const bridge: Bridge = async (op, payload) => {
     switch (op) {
       case "call":
@@ -398,6 +517,8 @@ export async function runCode(
         return read(payload)
       case "keep":
         return keep(payload)
+      case "tools":
+        return tools(payload)
       default:
         return refuse(`PCP does not know "${String(op).slice(0, 40)}".`)
     }
@@ -422,7 +543,7 @@ export async function runCode(
           ...(output ? [`It printed:\n${output}`] : []),
           isConnectResult(stop.result)
             ? "Once the owner has connected it (check_server says when), run the program again."
-            : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow).",
+            : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow, or Allow for while that lasts).",
         ].join("\n\n"),
         stop.result,
       )
@@ -434,7 +555,9 @@ export async function runCode(
           `The program finished in ${did}.`,
           ...(output ? [`It printed:\n${output}`] : []),
           ...(result.returned !== null
-            ? [`It returned:\n${await shownReturn(scope, result.returned)}`]
+            ? [
+                `It returned:\n${await shownReturn(scope, result.returned, limits)}`,
+              ]
             : input.returns === false
               ? []
               : ["It returned nothing."]),
@@ -502,13 +625,14 @@ async function shownOutput(
 async function shownReturn(
   scope: PermissionScope,
   returned: string,
+  limits: ResourceLimits,
 ): Promise<string> {
   if (returned.length <= SHOWN_RETURN_CHARS) {
     return returned
   }
 
-  if (returned.length > MAX_RETURN_CHARS) {
-    return `(${returned.length.toLocaleString("en")} characters of JSON, more than run_code passes on: ${MAX_RETURN_CHARS.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
+  if (returned.length > limits.textChars) {
+    return `(${returned.length.toLocaleString("en")} characters of JSON, more than run_code passes on: ${limits.textChars.toLocaleString("en")}. Return less, or keep it with pcp.keep and return the handle.)`
   }
 
   const kept = await keepResult(scope.ctx, {

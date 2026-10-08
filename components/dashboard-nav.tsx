@@ -11,6 +11,7 @@ const TABS = [
   { href: "/tokens", label: "API tokens" },
   { href: "/memories", label: "Memories" },
   { href: "/browser", label: "Browser" },
+  { href: "/log", label: "Log" },
   { href: "/settings", label: "Settings" },
 ]
 

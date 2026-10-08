@@ -4,7 +4,9 @@
  * PCP uses (Mailbox/get, Email/query, Email/get, Email/set, Thread/get,
  * Identity/get, EmailSubmission/set) well enough to check what PCP sends
  * and what it makes of the answers, and records every request with its
- * Authorization header.
+ * Authorization header. Like a real server (RFC 8621 7.5), an
+ * EmailSubmission/set with onSuccessUpdateEmail is answered twice under its
+ * call id: its own answer, then the Email/set the server ran for it.
  */
 
 type Json = Record<string, unknown>
@@ -53,6 +55,12 @@ export type FakeJmapOptions = {
   apiUrl?: string
   /** Overrides the uploadUrl the session names; null leaves it out. */
   uploadUrl?: string | null
+  /**
+   * What the Email/set a submission's onSuccessUpdateEmail runs does:
+   * "apply" (the default), "refuse" (it answers notUpdated, as a server that
+   * cannot move the sent email does), or "error" (that call fails).
+   */
+  onSuccessUpdate?: "apply" | "refuse" | "error"
 }
 
 export type FakeJmap = {
@@ -304,6 +312,8 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
   const uploads: FakeJmap["uploads"] = []
   const requests: FakeRequest[] = []
   let created = 0
+  /** Answers to calls the server made itself, added after the one that asked. */
+  const pendingImplicit: Array<[string, Json]> = []
 
   function json(status: number, body: unknown) {
     return { status, type: "application/json", body: JSON.stringify(body) }
@@ -402,8 +412,8 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
             mailboxIds: draft.mailboxIds as Record<string, boolean>,
             keywords: draft.keywords as Record<string, boolean>,
             receivedAt: new Date().toISOString(),
-            from: draft.from as FakeEmail["from"],
-            to: draft.to as FakeEmail["to"],
+            from: (draft.from as FakeEmail["from"]) ?? [],
+            to: (draft.to as FakeEmail["to"]) ?? [],
             cc: draft.cc as FakeEmail["cc"],
             bcc: draft.bcc as FakeEmail["bcc"],
             subject: String(draft.subject ?? ""),
@@ -445,6 +455,14 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
         }
 
         const result: Json = { accountId, created: {}, notCreated: {} }
+        const onSuccess = args.onSuccessUpdateEmail as Json | undefined
+        const implicit: Json = {
+          accountId,
+          oldState: "s1",
+          newState: "s2",
+          updated: {},
+          notUpdated: {},
+        }
 
         for (const [key, value] of Object.entries(
           (args.create as Json) ?? {},
@@ -469,10 +487,29 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
             identityId: String(submissionArgs.identityId),
           })
           ;(result.created as Json)[key] = { id: `sub-${sent.length}` }
-          const update = (args.onSuccessUpdateEmail as Json | undefined)?.[
-            `#${key}`
-          ]
-          if (update) applyPatch(email, update as Json)
+          const update = onSuccess?.[`#${key}`]
+
+          if (!update) {
+            continue
+          }
+
+          if ((options.onSuccessUpdate ?? "apply") === "apply") {
+            applyPatch(email, update as Json)
+            ;(implicit.updated as Json)[email.id] = null
+          } else {
+            ;(implicit.notUpdated as Json)[email.id] = {
+              type: "forbidden",
+              description: "The Sent mailbox is read-only.",
+            }
+          }
+        }
+
+        if (onSuccess && Object.keys(result.created as Json).length > 0) {
+          pendingImplicit.push(
+            options.onSuccessUpdate === "error"
+              ? ["error", { type: "serverFail" }]
+              : ["Email/set", implicit],
+          )
         }
 
         return [name, result]
@@ -575,10 +612,19 @@ export function createFakeJmap(options: FakeJmapOptions): FakeJmap {
         const ids = new Map<string, string>()
         const methodResponses = (
           payload.methodCalls as Array<[string, Json, string]>
-        ).map(([name, args, id]) => {
+        ).flatMap(([name, args, id]) => {
           const [answerName, answer] = call(name, args, answers, ids)
           answers.set(id, answer)
-          return [answerName, answer, id]
+          const implicit = pendingImplicit.splice(0)
+
+          return [
+            [answerName, answer, id],
+            ...implicit.map(([implicitName, implicitAnswer]) => [
+              implicitName,
+              implicitAnswer,
+              id,
+            ]),
+          ]
         })
 
         return json(200, { methodResponses, sessionState: "s1" })

@@ -33,6 +33,7 @@ import {
   encrypt,
   newScryptParams,
 } from "./crypto"
+import { withBrowserClosed } from "./browser/runtime"
 import { db } from "./db"
 import { invalid, isPcpError, PcpError } from "./errors"
 import { listMigrations } from "./migrate"
@@ -69,7 +70,7 @@ export type RestoreTarget =
   /** A PCP not set up yet: the file's vault becomes its owner's. */
   | { into: "fresh" }
   /** A signed-in owner's vault, replaced whole. */
-  | { into: "vault"; vaultId: string }
+  | { into: "vault"; ctx: VaultContext }
 
 export function exportFileName(at: Date): string {
   return `pcp-export-${at.toISOString().slice(0, 10)}${EXPORT_FILE_SUFFIX}`
@@ -298,6 +299,23 @@ function parseJson(buffer: Buffer, orElse: string): unknown {
 export async function restoreExport(
   payload: ExportPayload,
   target: RestoreTarget,
+  options: { restoreHostSettings: boolean },
+): Promise<void> {
+  if (target.into === "fresh") {
+    return writeExport(payload, target, options)
+  }
+
+  // The vault's browser holds sign-ins from before and would save them over
+  // the profile written here: closed first (its profile saved, so a restore
+  // that fails loses nothing) and kept from starting until the rows are in.
+  return withBrowserClosed(target.ctx, () =>
+    writeExport(payload, target, options),
+  )
+}
+
+async function writeExport(
+  payload: ExportPayload,
+  target: RestoreTarget,
   { restoreHostSettings }: { restoreHostSettings: boolean },
 ): Promise<void> {
   const { vault, tables, host } = payload
@@ -311,7 +329,7 @@ export async function restoreExport(
           }
         } else {
           const existing = await tx.vault.findUnique({
-            where: { id: target.vaultId },
+            where: { id: target.ctx.vaultId },
             select: { id: true },
           })
 
@@ -319,7 +337,7 @@ export async function restoreExport(
             throw new PcpError("state", "The vault to replace is gone.")
           }
 
-          await wipeVault(tx, target.vaultId)
+          await wipeVault(tx, target.ctx.vaultId)
         }
 
         if (restoreHostSettings) {
@@ -402,8 +420,11 @@ export async function restoreExport(
   }
 }
 
-/** Everything of one vault, children before parents. */
-async function wipeVault(
+/**
+ * Everything of one vault, children before parents: for a restore, and for
+ * deleting the vault (lib/core/vault-reset.ts).
+ */
+export async function wipeVault(
   tx: Prisma.TransactionClient,
   vaultId: string,
 ): Promise<void> {
@@ -416,12 +437,19 @@ async function wipeVault(
   // Answers kept for read_result are not exported: a day's cache, bound to
   // the tokens this restore replaces.
   await tx.toolResult.deleteMany(byVault)
+  // Nor are tools and sites allowed for a while: an answer to a request,
+  // for the tokens this restore replaces, and over within hours.
+  await tx.apiTokenToolAllowance.deleteMany(byToken)
+  await tx.apiTokenSiteAllowance.deleteMany(byToken)
   await tx.memory.deleteMany(byVault)
   await tx.permissionRequest.deleteMany(byVault)
   await tx.webFetchRule.deleteMany(byVault)
   await tx.vaultToolAccess.deleteMany(byVault)
   await tx.apiTokenToolAccess.deleteMany(byToken)
   await tx.apiTokenServer.deleteMany(byToken)
+  // An assistant's OAuth sign-ins are not exported (their grants are like a
+  // session's): it signs in again after a restore.
+  await tx.oAuthCredential.deleteMany(byVault)
   await tx.oAuthState.deleteMany(byServer)
   await tx.openApiSpec.deleteMany(byServer)
   await tx.mcpTool.deleteMany(byServer)

@@ -34,3 +34,19 @@ export function mailboxByRole(
 ): MailboxSummary | null {
   return boxes.find((box) => box.role === role) ?? null
 }
+
+/**
+ * The mailbox drafts go in: the one with the drafts role, or else one
+ * called Drafts, as a server without roles (or SPECIAL-USE) names it.
+ */
+export function draftsMailbox(boxes: MailboxSummary[]): MailboxSummary | null {
+  return (
+    mailboxByRole(boxes, "drafts") ??
+    boxes.find(
+      (box) =>
+        box.name.toLowerCase() === "drafts" ||
+        box.path?.toLowerCase() === "drafts",
+    ) ??
+    null
+  )
+}

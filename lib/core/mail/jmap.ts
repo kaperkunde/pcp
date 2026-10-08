@@ -6,7 +6,7 @@ import { describeFetchError, discard, readCapped } from "../openapi/http"
 import { send } from "../openapi/transport"
 import { PCP_VERSION } from "../version"
 import { onSameOrigin } from "./addresses"
-import { findMailbox, mailboxByRole } from "./mailboxes"
+import { draftsMailbox, findMailbox, mailboxByRole } from "./mailboxes"
 import { htmlToText } from "./html"
 import {
   MAIL_CALL_TIMEOUT_MS,
@@ -22,6 +22,7 @@ import {
   MailRequestError,
   MailTransportError,
   type AttachmentContent,
+  type DraftResult,
   type MailAddress,
   type MailBackend,
   type MailboxRole,
@@ -288,7 +289,15 @@ function downloadTemplate(template: string, sessionUrl: string): string | null {
 type MethodCall = [string, Json, string]
 type MethodResponse = [string, Json, string]
 
-/** One JMAP request: its method calls, answered by call id. */
+/**
+ * One JMAP request: its method calls, answered by call id. A server can add
+ * answers of its own under a call's id: for an EmailSubmission/set with
+ * onSuccessUpdateEmail, RFC 8621 (7.5) has it run an Email/set and answer it
+ * after the submission's own answer, with the same id. A call's answer is the
+ * first one under its id named after its method (or an error); any other is
+ * kept apart, under implicitKey, so it never stands in for the call's answer,
+ * and a failure there does not read as the call failing.
+ */
 export async function jmapRequest(
   apiUrl: string,
   credential: MailCredential,
@@ -335,9 +344,20 @@ export async function jmapRequest(
     }
 
     const [name, args, id] = entry as MethodResponse
+    const call = calls.find((candidate) => candidate[2] === id)
+
+    if (
+      typeof id === "string" &&
+      (byId.has(id) || (name !== "error" && name !== call?.[0]))
+    ) {
+      if (isObject(args)) {
+        byId.set(implicitKey(id, name), args)
+      }
+
+      continue
+    }
 
     if (name === "error") {
-      const call = calls.find((candidate) => candidate[2] === id)
       const type = typeof args?.type === "string" ? args.type : "an error"
       const description =
         typeof args?.description === "string" ? `: ${args.description}` : ""
@@ -353,6 +373,11 @@ export async function jmapRequest(
   }
 
   return byId
+}
+
+/** Where jmapRequest keeps an answer the server added under a call's id. */
+export function implicitKey(id: string, method: string): string {
+  return `${id} ${method}`
 }
 
 function answerOf(answers: Map<string, Json>, id: string): Json {
@@ -439,6 +464,19 @@ function summary(email: Json): MailMessageSummary {
 }
 
 /** A UTCDate (RFC 8620 1.4): no fractional seconds when they are zero. */
+function mailboxSummary(box: Json): MailboxSummary {
+  return {
+    id: String(box.id),
+    name: typeof box.name === "string" ? box.name : String(box.id),
+    path: null,
+    role: role(box.role),
+    parentId: typeof box.parentId === "string" ? box.parentId : null,
+    totalEmails: typeof box.totalEmails === "number" ? box.totalEmails : null,
+    unreadEmails:
+      typeof box.unreadEmails === "number" ? box.unreadEmails : null,
+  }
+}
+
 function utcDate(value: string): string {
   return new Date(Date.parse(value)).toISOString().replace(".000Z", "Z")
 }
@@ -473,17 +511,7 @@ export function openJmapBackend(
 
     return list(answerOf(answers, "m").list)
       .slice(0, MAX_MAILBOXES)
-      .map((box) => ({
-        id: String(box.id),
-        name: typeof box.name === "string" ? box.name : String(box.id),
-        path: null,
-        role: role(box.role),
-        parentId: typeof box.parentId === "string" ? box.parentId : null,
-        totalEmails:
-          typeof box.totalEmails === "number" ? box.totalEmails : null,
-        unreadEmails:
-          typeof box.unreadEmails === "number" ? box.unreadEmails : null,
-      }))
+      .map(mailboxSummary)
   }
 
   async function summaries(ids: string[]): Promise<MailMessageSummary[]> {
@@ -523,6 +551,140 @@ export function openJmapBackend(
   async function move(id: string, target: MailboxSummary): Promise<MoveResult> {
     await setEmail(id, { mailboxIds: { [target.id]: true } })
     return { id, previousId: id, mailboxId: target.id }
+  }
+
+  /**
+   * The email send_email and create_draft write, without its mailbox and
+   * keywords: from the identity (or, for a draft on an account that cannot
+   * send, the account's From address), with the reply's headers, and with
+   * the attachments uploaded. place() picks its mailbox, before anything is
+   * uploaded, and refuses when there is none; nothing is created here.
+   */
+  async function compose(
+    input: SendInput,
+    {
+      send,
+      place,
+    }: { send: boolean; place: (boxes: MailboxSummary[]) => MailboxSummary },
+  ): Promise<{
+    email: Json
+    boxes: MailboxSummary[]
+    home: MailboxSummary
+    from: MailAddress | null
+    messageId: string
+    identityId: string
+  }> {
+    // Identities are part of submission: an account that cannot send has
+    // none to ask for.
+    const withIdentities = send || config.submission
+    const first = await request(
+      [
+        ["Mailbox/get", { accountId, properties: ["id", "name", "role"] }, "m"],
+        ...(withIdentities
+          ? ([["Identity/get", { accountId }, "i"]] as MethodCall[])
+          : []),
+        ...(input.inReplyTo
+          ? ([
+              [
+                "Email/get",
+                {
+                  accountId,
+                  ids: [input.inReplyTo],
+                  properties: ["messageId", "references"],
+                },
+                "r",
+              ],
+            ] as MethodCall[])
+          : []),
+      ],
+      withIdentities ? [CORE, MAIL, SUBMISSION] : [CORE, MAIL],
+    )
+    const boxes = list(answerOf(first, "m").list)
+      .slice(0, MAX_MAILBOXES)
+      .map(mailboxSummary)
+    const identities = withIdentities ? list(answerOf(first, "i").list) : []
+    const wantedFrom = config.from?.toLowerCase()
+    const identity = input.identity
+      ? identities.find((candidate) => candidate.id === input.identity)
+      : (identities.find(
+          (candidate) =>
+            typeof candidate.email === "string" &&
+            candidate.email.toLowerCase() === wantedFrom,
+        ) ?? identities[0])
+
+    if (input.identity && !identity) {
+      throw new MailRequestError(
+        withIdentities
+          ? "No identity with that id; list_identities lists them."
+          : "This account cannot send, so it has no identities: leave identity out.",
+      )
+    }
+
+    if (send && (!identity || typeof identity.email !== "string")) {
+      throw new MailRequestError("This account has no identity to send as.")
+    }
+
+    const home = place(boxes)
+    let inReplyTo: string[] = []
+    let references: string[] = []
+
+    if (input.inReplyTo) {
+      const [original] = list(answerOf(first, "r").list)
+
+      if (!original) {
+        throw new MailRequestError("No email with the id given as inReplyTo.")
+      }
+
+      inReplyTo = strings(original.messageId).slice(0, 1)
+      references = [...strings(original.references), ...inReplyTo].slice(-20)
+    }
+
+    const from: MailAddress | null =
+      identity && typeof identity.email === "string"
+        ? {
+            name:
+              typeof identity.name === "string" && identity.name
+                ? identity.name
+                : null,
+            email: identity.email,
+          }
+        : config.from
+          ? { name: null, email: config.from }
+          : null
+    const domain = from?.email.split("@")[1] ?? "pcp.invalid"
+    const messageId = `${randomUUID()}@${domain}`
+    // Uploaded first: a failed upload leaves nothing behind to clean up.
+    const attached: Json[] = []
+
+    for (const attachment of input.attachments ?? []) {
+      const blob = await upload(attachment)
+      attached.push({
+        blobId: blob.blobId,
+        type: blob.type ?? attachment.type,
+        name: attachment.name,
+        disposition: "attachment",
+      })
+    }
+
+    return {
+      email: {
+        ...(from ? { from: [from] } : {}),
+        ...(input.to.length ? { to: input.to } : {}),
+        ...(input.cc.length ? { cc: input.cc } : {}),
+        ...(input.bcc.length ? { bcc: input.bcc } : {}),
+        subject: input.subject,
+        messageId: [messageId],
+        ...(inReplyTo.length ? { inReplyTo, references } : {}),
+        bodyValues: { body: { value: input.text } },
+        textBody: [{ partId: "body", type: "text/plain" }],
+        ...(attached.length ? { attachments: attached } : {}),
+      },
+      boxes,
+      home,
+      from,
+      messageId,
+      identityId: identity ? String(identity.id) : "",
+    }
   }
 
   return {
@@ -704,99 +866,30 @@ export function openJmapBackend(
         throw new MailRequestError("This account cannot send mail.")
       }
 
-      const first = await request(
-        [
-          [
-            "Mailbox/get",
-            { accountId, properties: ["id", "name", "role"] },
-            "m",
-          ],
-          ["Identity/get", { accountId }, "i"],
-          ...(input.inReplyTo
-            ? ([
-                [
-                  "Email/get",
-                  {
-                    accountId,
-                    ids: [input.inReplyTo],
-                    properties: ["messageId", "references"],
-                  },
-                  "r",
-                ],
-              ] as MethodCall[])
-            : []),
-        ],
-        [CORE, MAIL, SUBMISSION],
+      const { email, boxes, home, from, messageId, identityId } = await compose(
+        input,
+        {
+          send: true,
+          place: (boxes) => {
+            const home = draftsMailbox(boxes) ?? mailboxByRole(boxes, "sent")
+
+            if (!home) {
+              throw new MailRequestError(
+                "This account has no Drafts or Sent mailbox to send from.",
+              )
+            }
+
+            return home
+          },
+        },
       )
-      const boxes = list(answerOf(first, "m").list)
-      const drafts = boxes.find((box) => role(box.role) === "drafts")
-      const sent = boxes.find((box) => role(box.role) === "sent")
-      const identities = list(answerOf(first, "i").list)
-      const wantedFrom = config.from?.toLowerCase()
-      const identity = input.identity
-        ? identities.find((candidate) => candidate.id === input.identity)
-        : (identities.find(
-            (candidate) =>
-              typeof candidate.email === "string" &&
-              candidate.email.toLowerCase() === wantedFrom,
-          ) ?? identities[0])
-
-      if (!identity || typeof identity.email !== "string") {
-        throw new MailRequestError(
-          input.identity
-            ? "No identity with that id; list_identities lists them."
-            : "This account has no identity to send as.",
-        )
-      }
-
-      const home = drafts ?? sent
-
-      if (!home) {
-        throw new MailRequestError(
-          "This account has no Drafts or Sent mailbox to send from.",
-        )
-      }
-
-      let inReplyTo: string[] = []
-      let references: string[] = []
-
-      if (input.inReplyTo) {
-        const [original] = list(answerOf(first, "r").list)
-
-        if (!original) {
-          throw new MailRequestError("No email with the id given as inReplyTo.")
-        }
-
-        inReplyTo = strings(original.messageId).slice(0, 1)
-        references = [...strings(original.references), ...inReplyTo].slice(-20)
-      }
-
-      const domain = identity.email.split("@")[1] ?? "pcp.invalid"
-      const messageId = `${randomUUID()}@${domain}`
-      const from: MailAddress = {
-        name:
-          typeof identity.name === "string" && identity.name
-            ? identity.name
-            : null,
-        email: identity.email,
-      }
+      const draftsBox = draftsMailbox(boxes)
+      const sentBox = mailboxByRole(boxes, "sent")
       const onSuccess: Json = { "keywords/$draft": null }
-      // Uploaded first: a failed upload leaves nothing behind to clean up.
-      const attached: Json[] = []
 
-      for (const attachment of input.attachments ?? []) {
-        const blob = await upload(attachment)
-        attached.push({
-          blobId: blob.blobId,
-          type: blob.type ?? attachment.type,
-          name: attachment.name,
-          disposition: "attachment",
-        })
-      }
-
-      if (drafts && sent) {
-        onSuccess[`mailboxIds/${String(drafts.id)}`] = null
-        onSuccess[`mailboxIds/${String(sent.id)}`] = true
+      if (draftsBox && sentBox) {
+        onSuccess[`mailboxIds/${draftsBox.id}`] = null
+        onSuccess[`mailboxIds/${sentBox.id}`] = true
       }
 
       const answers = await request(
@@ -807,18 +900,9 @@ export function openJmapBackend(
               accountId,
               create: {
                 draft: {
-                  mailboxIds: { [String(home.id)]: true },
+                  ...email,
+                  mailboxIds: { [home.id]: true },
                   keywords: { $draft: true, $seen: true },
-                  from: [from],
-                  to: input.to,
-                  ...(input.cc.length ? { cc: input.cc } : {}),
-                  ...(input.bcc.length ? { bcc: input.bcc } : {}),
-                  subject: input.subject,
-                  messageId: [messageId],
-                  ...(inReplyTo.length ? { inReplyTo, references } : {}),
-                  bodyValues: { body: { value: input.text } },
-                  textBody: [{ partId: "body", type: "text/plain" }],
-                  ...(attached.length ? { attachments: attached } : {}),
                 },
               },
             },
@@ -829,7 +913,7 @@ export function openJmapBackend(
             {
               accountId,
               create: {
-                send: { identityId: String(identity.id), emailId: "#draft" },
+                send: { identityId, emailId: "#draft" },
               },
               onSuccessUpdateEmail: { "#send": onSuccess },
             },
@@ -857,19 +941,101 @@ export function openJmapBackend(
           ? submitted.notCreated.send
           : null
         throw new MailRequestError(
-          `The mail server did not send the email (it is left in ${String(home.name ?? "Drafts")}): ${describeSetError(error)}`,
+          `The mail server did not send the email (it is left in ${home.name}): ${describeSetError(error)}`,
+        )
+      }
+
+      // The email has gone. Whether it left Drafts for Sent is the server's
+      // own Email/set, answered under the submission's id.
+      const draftId = typeof draft.id === "string" ? draft.id : null
+      const filed = answers.get(implicitKey("s", "Email/set"))
+      const notFiled =
+        answers.has(implicitKey("s", "error")) ||
+        (isObject(filed?.notUpdated) &&
+          draftId !== null &&
+          draftId in filed.notUpdated)
+
+      // A reply marks the email it answers, as mail apps do; the email has
+      // gone whatever happens here, so a refusal is reported, not thrown.
+      let answered: boolean | undefined
+
+      if (input.inReplyTo) {
+        try {
+          await setEmail(input.inReplyTo, { "keywords/$answered": true })
+          answered = true
+        } catch {
+          answered = false
+        }
+      }
+
+      return {
+        id: draftId,
+        messageId,
+        from: from!,
+        to: input.to,
+        cc: input.cc,
+        bcc: input.bcc,
+        subject: input.subject,
+        // Left in Drafts when the server would not move it.
+        savedTo: sentBox && !(draftsBox && notFiled) ? sentBox.name : home.name,
+        ...(answered !== undefined ? { answered } : {}),
+      }
+    },
+
+    async createDraft(input: SendInput): Promise<DraftResult> {
+      const { email, home, from, messageId } = await compose(input, {
+        send: false,
+        place: (boxes) => {
+          const drafts = draftsMailbox(boxes)
+
+          if (!drafts) {
+            throw new MailRequestError(
+              "This account has no Drafts mailbox to write the draft in.",
+            )
+          }
+
+          return drafts
+        },
+      })
+      // Email/set alone: no EmailSubmission, so nothing is sent.
+      const answers = await request([
+        [
+          "Email/set",
+          {
+            accountId,
+            create: {
+              draft: {
+                ...email,
+                mailboxIds: { [home.id]: true },
+                keywords: { $draft: true, $seen: true },
+              },
+            },
+          },
+          "e",
+        ],
+      ])
+      const created = answerOf(answers, "e")
+      const draft = isObject(created.created) ? created.created.draft : null
+
+      if (!isObject(draft) || typeof draft.id !== "string") {
+        const error = isObject(created.notCreated)
+          ? created.notCreated.draft
+          : null
+        throw new MailRequestError(
+          `The mail server did not take the draft: ${describeSetError(error)}`,
         )
       }
 
       return {
-        id: typeof draft.id === "string" ? draft.id : null,
+        id: draft.id,
         messageId,
         from,
         to: input.to,
         cc: input.cc,
         bcc: input.bcc,
         subject: input.subject,
-        savedTo: sent ? String(sent.name ?? "Sent") : String(home.name ?? ""),
+        mailboxId: home.id,
+        mailbox: home.name,
       }
     },
 
