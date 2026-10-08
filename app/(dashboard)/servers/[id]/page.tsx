@@ -1,10 +1,10 @@
 import type { Metadata } from "next"
-import Link from "next/link"
 import { notFound } from "next/navigation"
 
+import { BrowserDescribeForm } from "@/components/browser-describe-form"
 import { EndpointForm } from "@/components/endpoint-form"
 import { MailAccountForm } from "@/components/mail-account-form"
-import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@/components/page-column"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
 import { SshAccessCard } from "@/components/ssh-access-card"
@@ -92,18 +92,131 @@ export default async function ServerPage({
           }
         : null
 
+  const settings = wrapper ? (
+    <WrapperForm
+      initial={{
+        id: wrapper.id,
+        name: wrapper.name,
+        slug: wrapper.slug,
+        description: wrapper.description,
+        definition: JSON.stringify(
+          { tools: wrapper.tools, secrets: wrapper.secrets },
+          null,
+          2,
+        ),
+      }}
+      secretNames={secrets.map((secret) => secret.name)}
+    />
+  ) : browser ? (
+    <BrowserDescribeForm name={server.name} description={server.description} />
+  ) : ssh ? (
+    <SshServerForm
+      initial={{
+        id: server.id,
+        name: server.name,
+        slug: server.slug,
+        description: server.description,
+        host: ssh.host,
+        port: String(ssh.port),
+        username: ssh.username,
+      }}
+    />
+  ) : mail ? (
+    <MailAccountForm
+      initial={{
+        id: server.id,
+        protocol: kind === "imap" ? "imap" : "jmap",
+        name: server.name,
+        slug: server.slug,
+        description: server.description,
+        url: server.url,
+        smtpUrl: server.smtpUrl ?? "",
+        readOnly: server.readOnly,
+        authType:
+          server.authType === "header" || server.authType === "oauth"
+            ? server.authType
+            : "basic",
+        authUsername: server.authUsername ?? "",
+        authSecretId: server.authSecretId ?? "",
+        mailFrom: server.mailFrom ?? "",
+        oauthClientId: server.oauthClientId ?? "",
+        oauthClientSecretId: server.oauthClientSecretId ?? "",
+        oauthScope: server.oauthScope ?? "",
+        oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+      }}
+      secrets={secrets}
+      redirectUrl={redirectUrl}
+    />
+  ) : endpoint ? (
+    <EndpointForm
+      initial={{
+        id: server.id,
+        name: server.name,
+        slug: server.slug,
+        description: server.description,
+        specSource: server.specSource === "upload" ? "upload" : "url",
+        specUrl: server.specUrl ?? "",
+        specReadAt: spec?.fetchedAt ?? null,
+        specUrlFromAssistant: server.specUrlFromAssistant,
+        patches: patches.length > 0 ? JSON.stringify(patches, null, 2) : "",
+        // Not prefilled: a value in the field is something the owner
+        // typed, which is what lets them confirm where a secret goes.
+        baseUrl: "",
+        currentBaseUrl: server.url,
+        readOnly: server.readOnly,
+        publicOnly: server.publicOnly,
+        authType:
+          server.authType === "header" ||
+          server.authType === "basic" ||
+          server.authType === "oauth"
+            ? server.authType
+            : "none",
+        authUsername: server.authUsername ?? "",
+        authHeaderName: server.authHeaderName ?? "Authorization",
+        authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
+        authSecretId: server.authSecretId ?? "",
+        authExtraHeaders,
+        oauthClientId: server.oauthClientId ?? "",
+        oauthClientSecretId: server.oauthClientSecretId ?? "",
+        oauthScope: server.oauthScope ?? "",
+        oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+      }}
+      secrets={secrets}
+      redirectUrl={redirectUrl}
+    />
+  ) : (
+    <ServerForm
+      initial={{
+        id: server.id,
+        name: server.name,
+        slug: server.slug,
+        url: server.url,
+        description: server.description,
+        authType: server.authType as AuthType,
+        authHeaderName: server.authHeaderName ?? "Authorization",
+        authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
+        authSecretId: server.authSecretId ?? "",
+        authExtraHeaders,
+        oauthClientId: server.oauthClientId ?? "",
+        oauthClientSecretId: server.oauthClientSecretId ?? "",
+        oauthScope: server.oauthScope ?? "",
+        oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+        publicOnly: server.publicOnly,
+      }}
+      secrets={secrets}
+      redirectUrl={redirectUrl}
+    />
+  )
+
   return (
-    <>
-      <PageHeader
-        title={server.name}
-        description={server.description || "No description yet."}
-      />
+    <PageColumn width="narrow">
       <ServerDetail
         server={{
           id: server.id,
           kind,
           name: server.name,
           slug: server.slug,
+          description: server.description,
           url: server.url,
           smtpUrl: server.smtpUrl,
           enabled: server.enabled,
@@ -137,132 +250,10 @@ export default async function ServerPage({
         })}
         notice={notice}
         redirectUrl={redirectUrl}
+        settings={settings}
       >
         {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}
       </ServerDetail>
-      <h2 className="text-lg">Settings</h2>
-      {wrapper ? (
-        <WrapperForm
-          initial={{
-            id: wrapper.id,
-            name: wrapper.name,
-            slug: wrapper.slug,
-            description: wrapper.description,
-            definition: JSON.stringify(
-              { tools: wrapper.tools, secrets: wrapper.secrets },
-              null,
-              2,
-            ),
-          }}
-          secretNames={secrets.map((secret) => secret.name)}
-        />
-      ) : browser ? (
-        <p className="text-muted-foreground">
-          The browser&apos;s name, its tabs and the sign-ins it keeps are on the{" "}
-          <Link href="/browser" className="underline">
-            Browser
-          </Link>{" "}
-          page. Which sites each token may open is on the token&apos;s page,
-          with web fetch.
-        </p>
-      ) : ssh ? (
-        <SshServerForm
-          initial={{
-            id: server.id,
-            name: server.name,
-            slug: server.slug,
-            description: server.description,
-            host: ssh.host,
-            port: String(ssh.port),
-            username: ssh.username,
-          }}
-        />
-      ) : mail ? (
-        <MailAccountForm
-          initial={{
-            id: server.id,
-            protocol: kind === "imap" ? "imap" : "jmap",
-            name: server.name,
-            slug: server.slug,
-            description: server.description,
-            url: server.url,
-            smtpUrl: server.smtpUrl ?? "",
-            readOnly: server.readOnly,
-            authType:
-              server.authType === "header" || server.authType === "oauth"
-                ? server.authType
-                : "basic",
-            authUsername: server.authUsername ?? "",
-            authSecretId: server.authSecretId ?? "",
-            mailFrom: server.mailFrom ?? "",
-            oauthClientId: server.oauthClientId ?? "",
-            oauthClientSecretId: server.oauthClientSecretId ?? "",
-            oauthScope: server.oauthScope ?? "",
-            oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
-          }}
-          secrets={secrets}
-          redirectUrl={redirectUrl}
-        />
-      ) : endpoint ? (
-        <EndpointForm
-          initial={{
-            id: server.id,
-            name: server.name,
-            slug: server.slug,
-            description: server.description,
-            specSource: server.specSource === "upload" ? "upload" : "url",
-            specUrl: server.specUrl ?? "",
-            specReadAt: spec?.fetchedAt ?? null,
-            specUrlFromAssistant: server.specUrlFromAssistant,
-            patches: patches.length > 0 ? JSON.stringify(patches, null, 2) : "",
-            // Not prefilled: a value in the field is something the owner
-            // typed, which is what lets them confirm where a secret goes.
-            baseUrl: "",
-            currentBaseUrl: server.url,
-            readOnly: server.readOnly,
-            publicOnly: server.publicOnly,
-            authType:
-              server.authType === "header" ||
-              server.authType === "basic" ||
-              server.authType === "oauth"
-                ? server.authType
-                : "none",
-            authUsername: server.authUsername ?? "",
-            authHeaderName: server.authHeaderName ?? "Authorization",
-            authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
-            authSecretId: server.authSecretId ?? "",
-            authExtraHeaders,
-            oauthClientId: server.oauthClientId ?? "",
-            oauthClientSecretId: server.oauthClientSecretId ?? "",
-            oauthScope: server.oauthScope ?? "",
-            oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
-          }}
-          secrets={secrets}
-          redirectUrl={redirectUrl}
-        />
-      ) : (
-        <ServerForm
-          initial={{
-            id: server.id,
-            name: server.name,
-            slug: server.slug,
-            url: server.url,
-            description: server.description,
-            authType: server.authType as AuthType,
-            authHeaderName: server.authHeaderName ?? "Authorization",
-            authValueTemplate: server.authValueTemplate ?? "Bearer {{secret}}",
-            authSecretId: server.authSecretId ?? "",
-            authExtraHeaders,
-            oauthClientId: server.oauthClientId ?? "",
-            oauthClientSecretId: server.oauthClientSecretId ?? "",
-            oauthScope: server.oauthScope ?? "",
-            oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
-            publicOnly: server.publicOnly,
-          }}
-          secrets={secrets}
-          redirectUrl={redirectUrl}
-        />
-      )}
-    </>
+    </PageColumn>
   )
 }

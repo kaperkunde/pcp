@@ -1577,11 +1577,11 @@ export function refusalReason(
 /** What to tell the owner about a server that refused a request. */
 function refusedMessage(server: McpServer, said: string): string {
   if (server.authType === "header") {
-    return `${server.name} refused the secret PCP sent (${said}). Check the secret under Settings, then choose Refresh tools.`
+    return `${server.name} refused the secret PCP sent (${said}). Check the secret under Advanced on its page, then choose Refresh tools.`
   }
 
   if (server.authType !== "oauth") {
-    return `${server.name} refused PCP's request (${said}). It may need a secret or a sign-in: set one under Settings.`
+    return `${server.name} refused PCP's request (${said}). It may need a secret or a sign-in: set one under Advanced on its page.`
   }
 
   // Google's MCP servers are APIs of their own (gmailmcp.googleapis.com

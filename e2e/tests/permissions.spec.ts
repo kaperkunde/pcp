@@ -8,7 +8,12 @@ import {
   mcpToolCall2026,
   toolText,
 } from "../lib/mcp"
-import { createToken, openToken, showTools } from "../lib/ui"
+import {
+  createToken,
+  openToken,
+  showServerSettings,
+  showTools,
+} from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
 // answers through a link (or the header's bell) and check_permission gives
@@ -69,6 +74,7 @@ async function allowPrivateAddresses(page: Page, slug: string) {
     .filter({ has: page.getByText(slug, { exact: true }) })
     .click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
+  await showServerSettings(page)
   await expect(page.getByLabel("Public addresses only")).toBeChecked()
   await page.getByLabel("Public addresses only").uncheck()
   await page.getByRole("button", { name: "Save changes" }).click()
@@ -97,6 +103,7 @@ test("sets up a server, with its secret typed into the form, and a token", async
   await page.getByLabel("Save it as (optional)").fill(SECRET_NAME)
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page.getByText("Tools (3)")).toBeVisible()
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
