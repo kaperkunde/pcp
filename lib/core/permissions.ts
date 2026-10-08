@@ -95,6 +95,7 @@ import {
 } from "./tool-results"
 import { finishHandover, performNavigate } from "./browser/call"
 import { describeBrowseAsk, describeHandoverAsk } from "./browser/describe"
+import type { fetchThroughBrowser } from "./browser/solve"
 import {
   isOwnerNeeded,
   type BrowseAsk,
@@ -187,6 +188,8 @@ export type PermissionExecutor = {
   syncTools: typeof syncServerTools
   /** web_fetch's request; the real one when left out. */
   fetchWeb?: typeof fetchWeb
+  /** web_fetch's read through the browser past a site's check; the real one when left out. */
+  solveWeb?: typeof fetchThroughBrowser
   /** The browser opening a site the owner allowed; the real one when left out. */
   browse?: typeof performNavigate
 }
@@ -1443,6 +1446,7 @@ async function executeFetch(
   return runFetch(ctx, row.tokenId, readArgs(ctx, row) as FetchArgs, {
     publicUrl,
     fetcher: executor.fetchWeb ?? fetchWeb,
+    solver: executor.solveWeb,
   })
 }
 
