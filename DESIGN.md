@@ -121,6 +121,52 @@ Anything an assistant proposes (a server, an endpoint change, a wrapper, a
 shared memory) is never folded on the page that asks the owner: they read
 it whole before they agree.
 
+## Patterns built on these
+
+Reuse these before writing a new one; each settles a question once.
+
+- **Asking the owner** (`components/permission-actions.tsx`): the
+  decision buttons of a request, the main yes last at the right (on top on
+  a phone), at most three in the row; a smaller choice ("Allow for" and its
+  time) at the left under them, rarer answers (Block, Discard) as quiet
+  text at the right; then "Nothing runs until you answer". What the
+  request carries is `PermissionLines`, and `ShownInFull` when the lines
+  cut it short. The token page's waiting requests use the same pieces.
+- **A server's form** (`components/server-form-parts.tsx`): the frame,
+  sections, name and short name, a choice field (segmented or select),
+  switch groups, More options and the footer, shared by the MCP server,
+  endpoint, mail, SSH and wrapper forms. On an add page it is a card with
+  More options; under a server's Advanced it is drawn flat, every setting
+  in view.
+- **A setting that opens in place** (`components/settings-item.tsx`): a
+  Settings row whose form unfolds under it, with a grey line saying its
+  state now. A row that needs the owner (an update, an HTTPS problem)
+  opens by itself.
+- **A token's settings** (`components/token-settings-form.tsx`,
+  `components/token-options.tsx`): one table of the options' words, and a
+  form that sends the settings it does not show as they are, so each
+  section saves alone. A new expiry for an expired token asks for the
+  password first, as making one does.
+- **Adding** (`components/server-add-menu.tsx`, `assistant-connect.tsx`,
+  `secret-add-dialog.tsx`, `memory-add-dialog.tsx`): one primary button
+  per list, opening a menu of kinds or a sheet; never a form always open at
+  the top of a list.
+- **Choosing one of a few** (`components/assistant-choice.tsx`): large
+  choice cards with a radio, for a decision that shapes the next step
+  (which app, what it reaches).
+
+## Defaults
+
+Opinionated, and each one the safe side:
+
+- A new API endpoint added by the owner is read-only until they turn that
+  off (the add form says so).
+- A new assistant reaches all servers, but every tool asks first; memories,
+  web pages, running code and proposing are off until turned on.
+- A server an assistant proposes reaches public addresses only.
+- Advanced and More options start folded, except where something in them
+  needs the owner now.
+
 ## Look
 
 Dark only: PCP is a control panel kept open beside other windows. The
@@ -169,3 +215,8 @@ part of its contract: a `SwitchRow`'s label, a `SegmentedControl`'s legend,
 a button's text. Change one and the specs that use it change with it, in
 the same commit. Shared selectors live in `e2e/lib/ui.ts` and
 `e2e/lib/auth.ts`.
+
+A folded row is opened before what is in it is used (`openSettingsRow`,
+`showServerSettings`, `openMoreOptions`); a segment is chosen by checking
+its radio (`chooseSegment`, `chooseLevel`), never by clicking its label,
+which the radio lies over.

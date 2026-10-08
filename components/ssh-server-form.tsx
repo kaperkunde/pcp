@@ -8,7 +8,7 @@ import {
   MoreOptions,
   NameFields,
   ServerFormFrame,
-} from "@/components/endpoint-form-parts"
+} from "@/components/server-form-parts"
 import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import type { ServerActionResult } from "@/lib/actions/servers"

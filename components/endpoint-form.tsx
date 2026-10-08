@@ -11,7 +11,7 @@ import {
   NameFields,
   ServerFormFrame,
   SwitchGroup,
-} from "@/components/endpoint-form-parts"
+} from "@/components/server-form-parts"
 import {
   HeaderAuthFields,
   type ExtraHeaderValues,

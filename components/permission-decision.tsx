@@ -219,7 +219,6 @@ export function PermissionDecision({
             <div className="flex gap-2 sm:items-center">
               <Button
                 type="button"
-                size="lg"
                 variant="secondary"
                 className="flex-1 sm:flex-none"
                 disabled={pending}
@@ -232,7 +231,7 @@ export function PermissionDecision({
                 value={String(minutes)}
                 onChange={(event) => setMinutes(Number(event.target.value))}
                 disabled={pending}
-                className="h-11 w-auto"
+                className="h-9 w-auto"
               >
                 {ALLOW_FOR_MINUTES.map((option) => (
                   <option key={option} value={option}>
