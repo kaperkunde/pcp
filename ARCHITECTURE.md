@@ -98,8 +98,10 @@ Consequences:
 - **A session cannot outlast itself.** Making an API token or a recovery key
   asks for the password again (`lib/server/password-attempts.ts`). A session
   cookie can be copied, so it may use the DEK but not mint a grant that
-  survives the session. In the Mac app the Touch ID key stands in for the
-  password before a new API token (an app's sign-in included), a new public
+  survives the session. An expired token keeps its grant, so giving it a new
+  expiry (or none) is the same as making one (`revivesToken`). In the Mac app
+  the Touch ID key stands in for the password before a new API token (an
+  app's sign-in included, or a new expiry for an expired one), a new public
   URL, an export or a restore (`confirmOwner`),
   never before a new recovery key, a new password or another Touch ID key:
   only the password and the recovery key decide who gets in. See "Touch ID

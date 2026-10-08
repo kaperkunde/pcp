@@ -193,6 +193,27 @@ export async function requireLiveToken(ctx: VaultContext, id: string) {
   return token
 }
 
+/**
+ * Whether an update's expiry (`undefined`: left as it is) brings back a
+ * token whose expiry has passed. An expired token is refused but keeps its
+ * copy of the key, so a new expiry, or none, makes it work again: that is a
+ * lasting way into the vault, like a new token, and takes the owner rather
+ * than a session (updateApiToken's `ownerConfirmed`).
+ */
+export function revivesToken(
+  token: { expiresAt: Date | null },
+  expiresAt: Date | null | undefined,
+): boolean {
+  return (
+    expiresAt !== undefined &&
+    token.expiresAt !== null &&
+    token.expiresAt.getTime() <= Date.now()
+  )
+}
+
+export const EXPIRED_TOKEN_NEEDS_OWNER =
+  "This token has expired. Confirm it is you to give it a new expiry."
+
 /** Checks a token's name, servers and expiry; returns them cleaned up. */
 async function validateTokenInput(
   ctx: VaultContext,
@@ -323,14 +344,22 @@ export async function createOAuthApiToken(
  * Changes a token after the fact: its name, the servers it reaches, what
  * else it may do, and its expiry (each optional field
  * is left alone when undefined). The token itself, and the key it unwraps,
- * stay the same.
+ * stay the same. A new expiry for a token that has expired brings it back
+ * (revivesToken), and is refused unless the caller has confirmed the owner
+ * (`ownerConfirmed`); every other change is the session's to make.
  */
 export async function updateApiToken(
   ctx: VaultContext,
   id: string,
   input: TokenInput,
+  { ownerConfirmed = false }: { ownerConfirmed?: boolean } = {},
 ): Promise<void> {
-  await requireLiveToken(ctx, id)
+  const token = await requireLiveToken(ctx, id)
+
+  if (!ownerConfirmed && revivesToken(token, input.expiresAt)) {
+    throw new PcpError("forbidden", EXPIRED_TOKEN_NEEDS_OWNER)
+  }
+
   const { name, serverIds } = await validateTokenInput(ctx, input)
 
   await db().$transaction([

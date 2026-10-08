@@ -10,6 +10,7 @@ import { isPcpError } from "@/lib/core/errors"
 import { listOpenPermissions } from "@/lib/core/permissions"
 import { listServers } from "@/lib/core/servers"
 import { listTokenToolAccess } from "@/lib/core/tool-access"
+import { getVault } from "@/lib/core/vault"
 import { listFetchRules } from "@/lib/core/web-fetch"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
@@ -37,13 +38,15 @@ export default async function TokenPage({
   }
 
   const publicUrl = await publicUrlFor(ctx)
-  const [servers, access, tokens, waiting, allowances] = await Promise.all([
-    listServers(ctx),
-    listTokenToolAccess(ctx, id),
-    listApiTokens(ctx),
-    listOpenPermissions(ctx, id, publicUrl),
-    listTokenAllowances(ctx, id),
-  ])
+  const [servers, access, tokens, waiting, allowances, vault] =
+    await Promise.all([
+      listServers(ctx),
+      listTokenToolAccess(ctx, id),
+      listApiTokens(ctx),
+      listOpenPermissions(ctx, id, publicUrl),
+      listTokenAllowances(ctx, id),
+      getVault(ctx.vaultId),
+    ])
   // The browser follows the token's web fetch sites: a token that reaches
   // it has them, web fetch or not.
   const reachesBrowser = servers.some(
@@ -107,6 +110,7 @@ export default async function TokenPage({
         endpointUrl={`${publicUrl}/mcp`}
         fetchRules={fetchRules}
         browser={reachesBrowser}
+        username={vault.name}
       />
     </>
   )

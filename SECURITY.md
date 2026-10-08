@@ -136,7 +136,8 @@ browser; **Forget all sites** signs it out of everything.
 
 **Someone with your session cookie but not your password** can use PCP as you
 while the session lasts (30 days from sign-in). They cannot make an API token
-(nor let an app sign in, which makes one), a new recovery key, a Touch ID key
+(nor let an app sign in, which makes one, or give an expired token a new
+expiry, which brings it back), a new recovery key, a Touch ID key
 or an export, because each asks for the password again, so they cannot keep a way in once the session ends. Nor can
 they change PCP's public address, which decides where sign-ins, permission
 links and the address you give assistants point: that asks for the password
@@ -146,7 +147,8 @@ with it; recovery does the same. Pin the public address again afterwards if
 you had set one, and rotate any secret they could have seen.
 
 **Touch ID in the Mac app** unlocks PCP, and confirms a new API token (an
-app's sign-in included), a new public address, an export, a restore or
+app's sign-in included, or a new expiry for an expired one), a new public
+address, an export, a restore or
 deleting the vault, with your fingerprint. It is a key of its own that PCP
 makes once you have typed your password, not your password. A release built
 with PCP's provisioning profile keeps it in a keychain item that macOS itself

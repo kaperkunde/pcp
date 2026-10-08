@@ -2,6 +2,7 @@
 
 import { ChevronRight, RefreshCw } from "lucide-react"
 import {
+  type FormEvent,
   useActionState,
   useEffect,
   useId,
@@ -17,6 +18,7 @@ import { LocalDate } from "@/components/local-date"
 import { KeepMemoriesField } from "@/components/keep-memories-field"
 import { ManageEndpointsField } from "@/components/manage-endpoints-field"
 import { clearNewToken, peekNewToken } from "@/components/new-token-handoff"
+import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { PermissionDecision } from "@/components/permission-decision"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { ShownInFull } from "@/components/shown-in-full"
@@ -102,6 +104,7 @@ export function TokenDetail({
   endpointUrl,
   fetchRules,
   browser = false,
+  username,
 }: {
   token: ApiTokenSummary
   servers: Array<{ id: string; name: string; kind?: ServerKind }>
@@ -115,6 +118,8 @@ export function TokenDetail({
   fetchRules: TokenFetchRules | null
   /** The token reaches the browser, which follows the same sites. */
   browser?: boolean
+  /** For the password asked before an expired token gets a new expiry. */
+  username: string
 }) {
   const locked = token.revokedAt !== null
   // Only right after the token list made it (new-token-handoff.ts).
@@ -148,7 +153,12 @@ export function TokenDetail({
           browser={browser}
         />
       ) : null}
-      <SettingsCard token={token} servers={servers} locked={locked} />
+      <SettingsCard
+        token={token}
+        servers={servers}
+        locked={locked}
+        username={username}
+      />
     </div>
   )
 }
@@ -663,15 +673,45 @@ function SettingsCard({
   token,
   servers,
   locked,
+  username,
 }: {
   token: ApiTokenSummary
   servers: Array<{ id: string; name: string; kind?: ServerKind }>
   locked: boolean
+  username: string
 }) {
   const [state, action] = useActionState<UpdateTokenResult, FormData>(
     updateTokenAction,
     { status: "idle" },
   )
+  const expired =
+    token.expiresAt !== null && token.expiresAt.getTime() <= Date.now()
+  // What the form chose, while a second form asks for the password: a new
+  // expiry brings an expired token back (updateTokenAction).
+  const [draft, setDraft] = useState<Array<[string, string]> | null>(null)
+  const error = state.status === "error" ? state.error : null
+
+  useEffect(() => {
+    if (state.status === "ok") setDraft(null)
+  }, [state])
+
+  function review(event: FormEvent<HTMLFormElement>) {
+    const data = new FormData(event.currentTarget)
+
+    if (!expired || data.get("expiresIn") === "keep") {
+      return
+    }
+
+    // Not sent from here: the second form sends it with the password.
+    event.preventDefault()
+    const entries: Array<[string, string]> = []
+
+    for (const [key, value] of data) {
+      if (typeof value === "string") entries.push([key, value])
+    }
+
+    setDraft(entries)
+  }
 
   return (
     <Card>
@@ -686,8 +726,11 @@ function SettingsCard({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <form action={action}>
-          <fieldset disabled={locked} className="flex flex-col gap-4">
+        <form action={action} onSubmit={review}>
+          <fieldset
+            disabled={locked || draft !== null}
+            className="flex flex-col gap-4"
+          >
             <input type="hidden" name="id" value={token.id} />
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Name" htmlFor="token-name">
@@ -737,15 +780,46 @@ function SettingsCard({
               id="token-wrappers"
               defaultChecked={token.manageWrappers}
             />
-            <FormError error={state.status === "error" ? state.error : null} />
+            <FormError error={draft === null ? error : null} />
             <FormNote message={state.status === "ok" ? state.message : null} />
-            {locked ? null : (
+            {locked || draft !== null ? null : (
               <div>
                 <SubmitButton pendingText="Saving…">Save settings</SubmitButton>
               </div>
             )}
           </fieldset>
         </form>
+        {draft !== null ? (
+          <form
+            action={action}
+            className="mt-6 flex flex-col gap-4 rounded-lg border border-border p-4"
+          >
+            <p className="text-muted-foreground">
+              This token has expired. A new expiry makes it work again, so PCP
+              asks for your password first.
+            </p>
+            {draft.map(([key, value], index) => (
+              <input key={index} type="hidden" name={key} value={value} />
+            ))}
+            <OwnerConfirmFields
+              idPrefix="token-revive"
+              username={username}
+              error={error}
+              autoFocus
+            />
+            <FormError error={error} />
+            <div className="flex gap-2">
+              <SubmitButton pendingText="Checking…">Confirm</SubmitButton>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setDraft(null)}
+              >
+                Back
+              </Button>
+            </div>
+          </form>
+        ) : null}
       </CardContent>
     </Card>
   )
