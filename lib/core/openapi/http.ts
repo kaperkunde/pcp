@@ -4,7 +4,7 @@
  */
 
 export async function readCapped(
-  response: Response,
+  response: Pick<Response, "body">,
   maxBytes: number,
 ): Promise<{ bytes: Buffer; truncated: boolean }> {
   if (!response.body) {
