@@ -35,6 +35,44 @@ export async function findBrowserServer(
   })
 }
 
+/**
+ * The vault's browser, enabled, when a token reaches it: the token is the
+ * vault's own, neither revoked nor expired, and has every server or the
+ * browser among its servers (as owner.ts lists the tokens a tab can go
+ * to). For what an answer may tell the token (its tools' names); it
+ * decides nothing.
+ */
+export async function tokenReachesBrowser(
+  ctx: VaultContext,
+  tokenId: string,
+): Promise<McpServer | null> {
+  const server = await findBrowserServer(ctx)
+
+  if (!server?.enabled) {
+    return null
+  }
+
+  const token = await db().apiToken.findFirst({
+    where: {
+      id: tokenId,
+      vaultId: ctx.vaultId,
+      revokedAt: null,
+      AND: [
+        { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+        {
+          OR: [
+            { allowAllServers: true },
+            { servers: { some: { serverId: server.id } } },
+          ],
+        },
+      ],
+    },
+    select: { id: true },
+  })
+
+  return token ? server : null
+}
+
 export async function syncBrowserTools(
   server: Pick<McpServer, "id">,
 ): Promise<SyncResult> {
