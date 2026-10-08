@@ -1599,6 +1599,21 @@ which pulls the image and starts PCP again only when the image changed. The
 installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
 
+**The Linux installer also installs it when the owner asks** (on unless
+`PCP_UPDATE_BUTTON=0`, and only for the `latest` tag). It passes
+`PCP_HOST_UPDATER=1` into the container, so Settings shows **Install and
+restart**, and sets up `pcp-update-request.timer`, which runs the copy of the
+installer with `watch` every 30 seconds. The button records the request in
+`update.status` as the app's does, and also writes `install-request` in the
+data folder (`updates/host-signal.ts`): the request's id and when it was made,
+one line, nothing of the vault. `watch` reads it with `docker exec` /
+`podman exec` and treats it as untrusted: only a well-formed id and time,
+fifteen minutes old at most, one it has not answered, and no more than one
+every five minutes. It notes the id before it runs `update`, so a failed
+install is not retried. The new PCP clears the request and the file at boot.
+The host reads the container; PCP never addresses the host and has no Docker
+socket.
+
 ## Cleanup and the log
 
 **The request log** (`lib/core/request-log.ts`) is what assistants did with
