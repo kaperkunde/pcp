@@ -616,12 +616,15 @@ export function parseMailArgs(
   return parsed.data as Record<string, unknown>
 }
 
-/** Recipients as parsed addresses. */
+/** Recipients as parsed addresses; `field` (to, cc, bcc) names them in a refusal. */
 export function parseRecipients(
   values: unknown,
+  field: string,
 ): Array<{ name: string | null; email: string }> {
   return Array.isArray(values)
-    ? values.map((value) => parseRecipient(String(value)))
+    ? values.map((value, index) =>
+        parseRecipient(String(value), `Recipient ${index + 1} in ${field}`),
+      )
     : []
 }
 

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
   formatMailServer,
   onSameOrigin,
+  onSameOriginAbsolute,
   parseImapAddress,
   parseRecipient,
   parseSmtpAddress,
@@ -102,6 +103,28 @@ describe("onSameOrigin", () => {
   })
 })
 
+describe("onSameOriginAbsolute", () => {
+  const typed = "https://mail.example.com/.well-known/jmap"
+
+  it("takes an absolute address on the typed origin, as fetch will read it", () => {
+    expect(onSameOriginAbsolute("https://mail.example.com/a#x", typed)).toBe(
+      "https://mail.example.com/a",
+    )
+    expect(onSameOriginAbsolute("https:mail.example.com/a", typed)).toBe(
+      "https://mail.example.com/a",
+    )
+  })
+
+  it("refuses what is not absolute, or is on another origin", () => {
+    expect(onSameOriginAbsolute("/jmap/", typed)).toBeNull()
+    expect(onSameOriginAbsolute("https:evil.example.com/a", typed)).toBeNull()
+    expect(onSameOriginAbsolute("https:\\evil.example.com/a", typed)).toBeNull()
+    expect(
+      onSameOriginAbsolute("https://x@mail.example.com/a", typed),
+    ).toBeNull()
+  })
+})
+
 describe("parseRecipient", () => {
   it("reads an address with or without a name", () => {
     expect(parseRecipient("ada@example.com")).toEqual({
@@ -120,5 +143,28 @@ describe("parseRecipient", () => {
     ).toThrow(/line breaks/)
     expect(() => parseRecipient("not an address")).toThrow(/not an email/)
     expect(() => parseRecipient("a,b@example.com")).toThrow(/not an email/)
+  })
+
+  it("names a refused address by where it was, never by its text", () => {
+    const secret = "hunter2-token-9f3a"
+    const messages = [
+      `${secret} is no address`,
+      `${secret}\r\nBcc: eve@example.com`,
+      `<${secret}"@example.com>`,
+      `"Bad <Name>" <${secret}@example.com>`,
+    ].map((raw) => {
+      try {
+        parseRecipient(raw, "Recipient 2 in to")
+      } catch (error) {
+        return (error as Error).message
+      }
+      return ""
+    })
+
+    for (const message of messages) {
+      expect(message).toMatch(/^(Recipient 2 in to|The name in recipient 2)/)
+      expect(message).not.toContain(secret)
+    }
+    expect(messages[0]).toBe("Recipient 2 in to is not an email address.")
   })
 })

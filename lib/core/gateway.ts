@@ -1663,7 +1663,7 @@ export function buildGatewayServer(
           }
 
           const mailFrom = args.mail_from?.trim()
-            ? parseRecipient(args.mail_from).email
+            ? parseRecipient(args.mail_from, "The mail_from address").email
             : null
           let url: string
           let smtpUrl: string | null = null
