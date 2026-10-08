@@ -130,7 +130,7 @@ async function normalizeMailAccount(
       ? formatMailServer("smtp", parseSmtpAddress(input.smtpUrl))
       : null
   const mailFrom = input.mailFrom?.trim()
-    ? parseRecipient(input.mailFrom).email
+    ? parseRecipient(input.mailFrom, "The mail_from address").email
     : null
   const auth = { ...EMPTY_AUTH }
   let newSecret: NewSecret | null = null
@@ -714,9 +714,9 @@ function composed(
   attachments: SendInput["attachments"],
 ): SendInput {
   return {
-    to: parseRecipients(args.to),
-    cc: parseRecipients(args.cc),
-    bcc: parseRecipients(args.bcc),
+    to: parseRecipients(args.to, "to"),
+    cc: parseRecipients(args.cc, "cc"),
+    bcc: parseRecipients(args.bcc, "bcc"),
     subject: String(args.subject ?? ""),
     text: String(args.text ?? ""),
     ...(args.inReplyTo ? { inReplyTo: String(args.inReplyTo) } : {}),
@@ -850,7 +850,7 @@ export async function callMailTool(
 
   if (COMPOSES.has(toolName)) {
     for (const key of ["to", "cc", "bcc"] as const) {
-      parseRecipients(args[key])
+      parseRecipients(args[key], key)
     }
   }
 

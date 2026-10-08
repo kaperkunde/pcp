@@ -219,16 +219,21 @@ const ADDRESS = /^[^\s@<>()",;:\\[\]]+@[^\s@<>()",;:\\[\]]+$/
 /**
  * One recipient as an assistant writes it: "ada@example.com" or
  * "Ada Lovelace <ada@example.com>". Nothing that could start a header of
- * its own gets through.
+ * its own gets through. A refusal names the address by `where` ("Recipient 2
+ * in to"), never by its text: the request log keeps these messages, and not
+ * what an assistant sent.
  */
-export function parseRecipient(raw: string): {
+export function parseRecipient(
+  raw: string,
+  where = "The address",
+): {
   name: string | null
   email: string
 } {
   const value = raw.trim()
 
   if (/[\u0000-\u001f\u007f]/.test(value)) {
-    throw invalid("An address cannot have line breaks or control characters.")
+    throw invalid(`${where} cannot have line breaks or control characters.`)
   }
 
   const named = /^(.*?)\s*<([^<>]+)>$/.exec(value)
@@ -236,12 +241,12 @@ export function parseRecipient(raw: string): {
   const name = named ? named[1]!.trim().replace(/^"(.*)"$/, "$1") || null : null
 
   if (!ADDRESS.test(email) || email.length > 320) {
-    throw invalid(`${raw.slice(0, 100)} is not an email address.`)
+    throw invalid(`${where} is not an email address.`)
   }
 
   if (name && (name.length > 200 || /[<>"]/.test(name))) {
     throw invalid(
-      `The name in ${raw.slice(0, 100)} cannot have <, > or quotes.`,
+      `The name in ${where.toLowerCase()} cannot have <, > or quotes, and is at most 200 characters.`,
     )
   }
 
