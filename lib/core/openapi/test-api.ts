@@ -72,3 +72,39 @@ export function json(res: ServerResponse, status: number, body: unknown) {
   res.setHeader("content-type", "application/json")
   res.end(JSON.stringify(body))
 }
+
+/** The cookie the fake check below sets once a browser has run its script. */
+export const WALL_COOKIE = "cf_clearance"
+
+/**
+ * A page behind a fake Cloudflare check, for tests: without the clearance
+ * cookie, a 403 marked `cf-mitigated: challenge` whose script (when the
+ * check `clears`) sets the cookie after a moment and reloads, as a check
+ * that passes on its own does; with it, the page. web_fetch runs no script,
+ * so it only ever sees the check; a browser gets through.
+ */
+export function answerWalled(
+  request: Recorded,
+  res: ServerResponse,
+  { clears = true }: { clears?: boolean } = {},
+): void {
+  res.setHeader("content-type", "text/html; charset=utf-8")
+
+  if ((request.headers.cookie ?? "").includes(`${WALL_COOKIE}=`)) {
+    res.end(
+      "<!doctype html><title>Walled</title><h1>Behind the wall</h1><p>The page itself.</p>",
+    )
+    return
+  }
+
+  res.statusCode = 403
+  res.setHeader("cf-mitigated", "challenge")
+  res.end(`<!doctype html><title>Just a moment...</title>
+<h1>Checking your browser</h1>
+<noscript>Enable JavaScript and cookies to continue</noscript>
+${
+  clears
+    ? `<script>setTimeout(() => { document.cookie = "${WALL_COOKIE}=passed; max-age=600; path=/"; location.reload() }, 300)</script>`
+    : ""
+}`)
+}

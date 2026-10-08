@@ -82,7 +82,10 @@ function stub() {
     syncTools: async () => ({ status: "ok", message: "", toolCount: 0 }),
     fetchWeb: async (args) => {
       fetched.push(args)
-      return { content: [{ type: "text", text: `fetched ${args.url}` }] }
+      return {
+        result: { content: [{ type: "text", text: `fetched ${args.url}` }] },
+        challenged: false,
+      }
     },
   }
   return { fetched, executor }
@@ -417,7 +420,10 @@ describe("private addresses", () => {
           allowPrivate: options?.allowPrivate,
           publicUrl: options?.publicUrl,
         })
-        return { content: [{ type: "text", text: "ok" }] }
+        return {
+          result: { content: [{ type: "text", text: "ok" }] },
+          challenged: false,
+        }
       },
     }
     await decideFetch(scope, get("http://printer.lan/"))

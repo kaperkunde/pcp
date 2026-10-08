@@ -15,7 +15,7 @@ import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
-import { fetchWeb, type FetchOptions } from "./fetch/fetch"
+import { fetchWeb, type FetchAnswer, type FetchOptions } from "./fetch/fetch"
 import { MAX_FETCH_RULES } from "./fetch/limits"
 import type { FetchArgs } from "./fetch/request"
 import {
@@ -321,13 +321,10 @@ export async function runFetch(
     fetcher = fetchWeb,
   }: {
     publicUrl: string
-    fetcher?: (
-      args: FetchArgs,
-      options?: FetchOptions,
-    ) => Promise<CallToolResult>
+    fetcher?: (args: FetchArgs, options?: FetchOptions) => Promise<FetchAnswer>
   },
 ): Promise<CallToolResult> {
-  const result = await fetcher(args, {
+  const { result } = await fetcher(args, {
     allowPrivate: await privateAllowedFor(ctx.vaultId, tokenId),
     publicUrl,
   })

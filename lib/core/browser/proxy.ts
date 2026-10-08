@@ -46,15 +46,23 @@ function bare(host: string): string {
   return host.replace(/^\[|\]$/g, "")
 }
 
+/** Decides one address the browser is about to connect to, for a host. */
+export type AddressCheck = (
+  address: string,
+  port: number,
+  /** The name the browser asked for, lower case, without brackets. */
+  host: string,
+) => AddressVerdict
+
 async function resolveChecked(
   host: string,
   port: number,
-  check: (address: string, port: number) => AddressVerdict,
+  check: AddressCheck,
 ): Promise<string> {
-  const name = bare(host)
+  const name = bare(host).toLowerCase()
 
   if (isIP(name)) {
-    const verdict = check(name, port)
+    const verdict = check(name, port, name)
 
     if (verdict !== "ok") {
       throw new Refused(verdict)
@@ -72,7 +80,7 @@ async function resolveChecked(
   // Every address the name has must pass: the one the socket would pick
   // is not ours to choose.
   for (const entry of found) {
-    const verdict = check(entry.address, port)
+    const verdict = check(entry.address, port, name)
 
     if (verdict !== "ok") {
       throw new Refused(verdict)
@@ -105,7 +113,7 @@ export async function startBrowserProxy({
   check,
 }: {
   /** Decides each address as the browser is about to connect to it. */
-  check: (address: string, port: number) => AddressVerdict
+  check: AddressCheck
 }): Promise<BrowserProxy> {
   const sockets = new Set<Duplex>()
   const refusals = new Map<

@@ -1,8 +1,14 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { json, startTestApi, type TestApi } from "../openapi/test-api"
-import { fetchWeb } from "./fetch"
+import {
+  answerWalled,
+  json,
+  startTestApi,
+  type TestApi,
+} from "../openapi/test-api"
+import { CHALLENGE_LINE } from "./challenge"
+import { fetchWeb, withNote } from "./fetch"
 import { MAX_FETCH_RESPONSE_BYTES } from "./limits"
 import { prepareFetch, type FetchInput } from "./request"
 
@@ -25,12 +31,13 @@ function textOf(result: CallToolResult): string {
     .join("")
 }
 
-function fetchFrom(input: Omit<FetchInput, "url"> & { path: string }) {
+async function fetchFrom(input: Omit<FetchInput, "url"> & { path: string }) {
   const { path, ...rest } = input
-  return fetchWeb(
+  const { result } = await fetchWeb(
     prepareFetch({ ...rest, url: `${api!.origin}${path}` }),
     reachLoopback,
   )
+  return result
 }
 
 describe("fetching a page", () => {
@@ -194,6 +201,54 @@ describe("redirects", () => {
   })
 })
 
+describe("a site that checks its visitors", () => {
+  it("says so, and marks the answer as one", async () => {
+    api = await startTestApi((request, res) => answerWalled(request, res))
+
+    const answer = await fetchWeb(
+      prepareFetch({ url: `${api.origin}/walled` }),
+      reachLoopback,
+    )
+    const text = textOf(answer.result)
+
+    expect(answer.challenged).toBe(true)
+    expect(answer.result.isError).toBe(true)
+    expect(text).toMatch(
+      new RegExp(`^URL: .*\nStatus: HTTP 403 Forbidden\n${CHALLENGE_LINE}\n`),
+    )
+    expect(text).toContain("Title: Just a moment...")
+    expect(text).not.toContain("Behind the wall")
+  })
+
+  it("does not mark an ordinary refusal", async () => {
+    api = await startTestApi((_, res) => {
+      res.statusCode = 403
+      res.setHeader("content-type", "text/html")
+      res.end("<title>Forbidden</title><h1>No</h1>")
+    })
+
+    const answer = await fetchWeb(
+      prepareFetch({ url: `${api.origin}/` }),
+      reachLoopback,
+    )
+
+    expect(answer.challenged).toBe(false)
+    expect(textOf(answer.result)).not.toContain(CHALLENGE_LINE)
+  })
+
+  it("adds a note to the lines in front of the page", () => {
+    const noted = withNote(
+      { content: [{ type: "text", text: "URL: x\nStatus: y\n\nThe page" }] },
+      "A note.",
+    )
+
+    expect(textOf(noted)).toBe("URL: x\nStatus: y\nA note.\n\nThe page")
+    expect(
+      textOf(withNote({ content: [{ type: "text", text: "One line" }] }, "N")),
+    ).toBe("One line\nN")
+  })
+})
+
 describe("public addresses only", () => {
   it("refuses the loopback address before anything is sent", async () => {
     api = await startTestApi((_, res) => res.end("secret admin page"))
@@ -227,7 +282,7 @@ describe("private addresses, where the owner allowed them", () => {
       res.end("the printer's page")
     })
 
-    const result = await fetchWeb(prepareFetch({ url: `${api.origin}/` }), {
+    const { result } = await fetchWeb(prepareFetch({ url: `${api.origin}/` }), {
       allowPrivate: true,
     })
 
