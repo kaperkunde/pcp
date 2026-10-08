@@ -680,9 +680,12 @@ enabled and Chromium is found, PCP then reads the page again through the
 browser (`browser/solve.ts`). The read happens in a second browser context
 of its own, beside the vault's: it starts from none of the vault's sign-ins
 and is never saved, because the sign-ins are never used for a web_fetch. A
-fetch keeps no cookie and reads no secret, and a page read with the owner's
-sign-ins would show an assistant what only the owner can see, under a level
-given for a fetch. The context may open that one site only; a redirect to
+plain request keeps no cookie and reads no secret, and a page read with the
+owner's sign-ins would show an assistant what only the owner can see, under
+a level given for a fetch. What that context keeps (the clearance a check
+leaves, and any other cookie a site sets while read) is shared by every
+token's web_fetch until the browser closes: they are reads signed in to
+nothing, of sites each token was allowed to fetch. The context may open that one site only; a redirect to
 another site is reported as web_fetch reports one, with where it points, so
 that site gets its own decision. The token's own private-address line decides
 private addresses for that site, as for the plain request, and the token's
@@ -811,8 +814,9 @@ proposed for and called like any server, and a long snapshot is kept for
 owner) and closed after fifteen minutes with no tool call, no input and
 nobody watching. The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
-Chromium runs with one in-memory context for the vault (and one more for
-each page read for web_fetch, below): no profile is written to disk.
+Chromium runs with one in-memory context for the vault (and one more,
+made on the first page read for web_fetch, for all of those, below): no
+profile is written to disk.
 Its config and cache folders (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) are a
 private temporary folder of its own, removed once it has closed: its crash
 reporter keeps its database there, and without a folder it can write to
@@ -826,22 +830,25 @@ gives one and dropped where it cannot (root, or an unprivileged container;
 the Docker image says so with `PCP_BROWSER_SANDBOX=off`).
 
 **Sites that check their visitors.** Every context tells pages of a 1920 by
-1080 screen and a window 100 px taller than the 1280 by 800 viewport, since
-headless would otherwise make both the viewport itself. It is the full
-Chromium in Chromium's new headless mode: PCP always passes the executable, so
-Playwright never picks its separate headless shell. `navigate` waits up to
-twenty seconds for a check that passes on its own (Cloudflare's, marked
-`cf-mitigated: challenge`). One that does not stays on the page. The answer
-leads with the sentence web_fetch uses for it and adds that the check did not
-pass on its own in this tab and that `hand_over` is how the owner passes it
-themselves; so does every later answer that reports the tab (after a click, a
-`back`, a snapshot). The assistant decides: nothing asks the owner
-automatically. A clearance cookie a passed check sets lands in the vault's
-profile, as any cookie does. PCP adds no stealth scripts and uses no patched
-Playwright, so some tells remain: WebGL is SwiftShader (software
-rendering), Playwright's automation protocol leaves traces a page can look
-for, and a server's datacenter address is not a person's at home. The
-strictest checks may still want a person, which is what `hand_over` is for.
+1080 screen, since headless would otherwise make the screen the 1280 by 800
+viewport itself. It is the full Chromium in Chromium's new headless mode: PCP
+always passes the executable, so Playwright never picks its separate headless
+shell (the Docker image does not download it). `navigate`, and an action that
+can load a page (`back`, a click, typing, a key, a choice, a dialog's
+answer), waits up to twenty seconds for a check that passes on its own
+(Cloudflare's, marked `cf-mitigated: challenge`). One that does not stays on
+the page. The answer leads with the sentence web_fetch uses for it and adds
+that the check did not pass on its own in this tab and that `hand_over` is
+how the owner passes it themselves; so does every later answer about the tab
+(a snapshot, `read_page`, `wait_for`). The assistant decides: nothing asks the
+owner automatically. A clearance cookie a passed check sets lands in the
+vault's profile, as any cookie does. PCP adds no stealth scripts and uses no
+patched Playwright, so some tells remain: WebGL is SwiftShader (software
+rendering), the window is exactly the viewport (Playwright sizes it so, and
+Chromium's `--window-size` does not change that), Playwright's automation
+protocol leaves traces a page can look for, and a server's datacenter address
+is not a person's at home. The strictest checks may still want a person,
+which is what `hand_over` is for.
 
 **The sign-ins** (`profile.ts`). The context starts from the vault's
 `browser_profile`: Playwright's storage state (cookies, local storage,

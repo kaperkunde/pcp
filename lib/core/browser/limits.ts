@@ -29,16 +29,12 @@ export const MAX_SCREENSHOT_BYTES = 1024 * 1024
 /** The size every tab renders at, in CSS pixels. */
 export const VIEWPORT = BROWSER_VIEWPORT
 /**
- * The screen and window a page is told it has: a common desktop screen,
- * and a window a little larger than the viewport (a browser's frame and
- * toolbar), as a desktop browser's are. Headless, both would otherwise be
- * the viewport itself, which tells a site no person is looking.
+ * The screen a page is told it has: a common desktop screen. Headless, it
+ * would otherwise be the viewport itself, which tells a site no person is
+ * looking. (The window stays the viewport: Playwright sizes it so, and
+ * Chromium's --window-size does not change that.)
  */
 export const SCREEN = { width: 1920, height: 1080 } as const
-export const WINDOW = {
-  width: VIEWPORT.width,
-  height: VIEWPORT.height + 100,
-} as const
 /** JPEG quality of the live view's frames. */
 export const SCREENCAST_QUALITY = 55
 /** People watching one tab at once. */

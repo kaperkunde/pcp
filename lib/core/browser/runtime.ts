@@ -27,7 +27,6 @@ import {
   PROFILE_SAVE_INTERVAL_MS,
   SCREEN,
   VIEWPORT,
-  WINDOW,
 } from "./limits"
 import { loadProfile, saveProfile } from "./profile"
 import {
@@ -301,9 +300,6 @@ async function launch(
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
       "--disable-blink-features=AutomationControlled",
-      // A window around the viewport, as a desktop browser has: headless,
-      // the window is otherwise exactly the page (outerWidth = innerWidth).
-      `--window-size=${WINDOW.width},${WINDOW.height}`,
       "--disable-dev-shm-usage",
       // UDP would go around the proxy: no QUIC, and WebRTC only through it.
       "--disable-quic",
