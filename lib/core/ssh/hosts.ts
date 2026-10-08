@@ -22,34 +22,16 @@ import {
 import { deleteManagedSecret, writeManagedSecret } from "../secrets"
 import {
   SshAuthError,
-  SshHostError,
-  defaultSshDeps,
+  SshHostKeyError,
   sshCheck,
   sshExec,
-  type SshDeps,
+  type HostSeen,
   type SshIdentity,
   type SshTarget,
 } from "./client"
-import {
-  certificateDate,
-  certificateProblem,
-  fingerprint,
-  generateOwnKey,
-  parseCertificateLine,
-  parsePublicKeyLine,
-  parsePublicKeyLines,
-  publicKeyLine,
-  type SshCertificate,
-} from "./keys"
-import {
-  MAX_CA_TEXT_CHARS,
-  MAX_CERTIFICATE_CHARS,
-  MAX_HOST_CAS,
-  MAX_OUTPUT_BYTES,
-  MAX_USERNAME_CHARS,
-} from "./limits"
+import { fingerprint, generateOwnKey, keyType } from "./keys"
+import { MAX_OUTPUT_BYTES, MAX_USERNAME_CHARS } from "./limits"
 import { parseRunCommand, RUN_COMMAND, sshTools } from "./tools"
-import { SshFormatError } from "./wire"
 
 /**
  * SSH servers: servers of kind "ssh", which an assistant runs commands on.
@@ -57,12 +39,13 @@ import { SshFormatError } from "./wire"
  * a shell on a machine is more than any assistant should be able to ask
  * for in a sentence.
  *
- * Signing in is by certificate only, both ways (client.ts). PCP makes its
- * own Ed25519 key for each server, kept as a managed secret that only
- * upstream.ts decrypts; the owner signs its public half with their user CA
- * and pastes the certificate back. The host proves itself with a host
- * certificate from a CA the owner gave. Nothing here reads the private key:
- * upstream.ts hands in an SshIdentity.
+ * PCP signs in with a key of its own, never a password: an Ed25519 key made
+ * for each server, kept as a managed secret that only upstream.ts decrypts,
+ * whose public half the owner adds to the login's authorized_keys. The
+ * server's host key is pinned the first time PCP finishes a key exchange
+ * with it, and shown to the owner; another key is refused until they forget
+ * the pinned one. Nothing here reads the private key: upstream.ts hands in
+ * an SshIdentity.
  */
 
 export const DEFAULT_SSH_PORT = 22
@@ -75,8 +58,6 @@ export type SshServerInput = {
   /** Overrides a port in `host`; empty is 22. */
   port?: string | number | null
   username: string
-  /** The host CA keys, one OpenSSH line each. */
-  hostCas: string
 }
 
 export type SshAddress = { host: string; port: number }
@@ -170,36 +151,6 @@ export function validateLogin(raw: string): string {
   return login
 }
 
-/** The host CA keys, as PCP stores them: one canonical line each. */
-export function normalizeHostCas(text: string): string {
-  if (text.length > MAX_CA_TEXT_CHARS) {
-    throw invalid("That is more text than CA keys take.")
-  }
-
-  let keys
-
-  try {
-    keys = parsePublicKeyLines(text)
-  } catch (error) {
-    throw invalid(
-      `A host CA key cannot be read: ${error instanceof Error ? error.message : "it is malformed"}`,
-    )
-  }
-
-  if (keys.length === 0) {
-    throw invalid(
-      "Paste the public key of the CA that signs this server's host certificate (the .pub file, or its @cert-authority line from known_hosts).",
-    )
-  }
-
-  if (keys.length > MAX_HOST_CAS) {
-    throw invalid(`Give at most ${MAX_HOST_CAS} host CA keys.`)
-  }
-
-  const lines = [...new Set(keys.map((key) => publicKeyLine(key)))]
-  return lines.join("\n")
-}
-
 function normalize(input: SshServerInput) {
   const { name, description } = normalizeNameAndDescription(input)
 
@@ -208,7 +159,6 @@ function normalize(input: SshServerInput) {
     description,
     url: formatSshAddress(parseSshAddress(input.host, input.port)),
     authUsername: validateLogin(input.username),
-    sshHostCas: normalizeHostCas(input.hostCas),
   }
 }
 
@@ -217,12 +167,14 @@ export function sshKeySecretName(serverId: string): string {
   return `ssh/${serverId}`
 }
 
-const AWAITING_CERTIFICATE =
-  "Waiting for a certificate: sign PCP's key with your user CA and paste it on this page."
+/** What the owner does before PCP can sign in, for a login. */
+function addKeyNote(username: string): string {
+  return `Add PCP's key to ${username}'s ~/.ssh/authorized_keys on the server, then check the sign-in.`
+}
 
 /**
- * Adds an SSH server, with a new key of PCP's own for it. It has no
- * certificate yet, so nothing can run until the owner pastes one.
+ * Adds an SSH server, with a new key of PCP's own for it. Nothing can sign
+ * in until the owner adds that key on the server.
  */
 export async function createSshServer(
   ctx: VaultContext,
@@ -231,11 +183,11 @@ export async function createSshServer(
   const data = normalize(input)
   const id = newId()
   const slug = await uniqueSlug(ctx.vaultId, slugify(data.name))
-  const { privatePem, key } = generateOwnKey()
+  const key = generateOwnKey(`pcp-${slug}`)
   const secret = await writeManagedSecret(ctx, {
     name: sshKeySecretName(id),
     description: `PCP's SSH key for ${data.name}.`,
-    value: privatePem,
+    value: key.privateKey,
     kind: "ssh_key",
   })
 
@@ -247,11 +199,9 @@ export async function createSshServer(
         kind: "ssh",
         slug,
         ...data,
-        authType: "certificate",
+        authType: "key",
         authSecretId: secret.id,
-        sshPublicKey: publicKeyLine(key.publicKey, `pcp-${slug}`),
-        status: "auth_required",
-        statusMessage: AWAITING_CERTIFICATE,
+        sshPublicKey: key.publicKey,
       },
     })
   } catch (error) {
@@ -276,8 +226,8 @@ async function sshServer(ctx: VaultContext, id: string) {
 }
 
 /**
- * Saves a server's settings. `reconnect` says it should be checked again:
- * its address, login or host CAs changed.
+ * Saves a server's settings. Another address is another host: its key is
+ * pinned afresh. `reconnect` says it should be checked again.
  */
 export async function updateSshServer(
   ctx: VaultContext,
@@ -286,134 +236,45 @@ export async function updateSshServer(
 ): Promise<{ reconnect: boolean }> {
   const existing = await sshServer(ctx, id)
   const data = normalize(input)
-
-  await db().mcpServer.update({ where: { id }, data })
-
-  return {
-    reconnect:
-      data.url !== existing.url ||
-      data.authUsername !== existing.authUsername ||
-      data.sshHostCas !== existing.sshHostCas,
-  }
-}
-
-/**
- * Takes the certificate the owner's CA made for PCP's key. It must be a
- * user certificate for that very key and this login, and valid now or
- * later; whether the server trusts its CA, only signing in tells.
- */
-export async function setSshCertificate(
-  ctx: VaultContext,
-  id: string,
-  text: string,
-): Promise<void> {
-  const existing = await sshServer(ctx, id)
-  const line = text.trim()
-
-  if (!line) {
-    throw invalid(
-      "Paste the certificate ssh-keygen wrote (the -cert.pub file).",
-    )
-  }
-
-  if (line.length > MAX_CERTIFICATE_CHARS) {
-    throw invalid("That is more text than a certificate takes.")
-  }
-
-  let certificate: SshCertificate
-
-  try {
-    certificate = parseCertificateLine(line)
-  } catch (error) {
-    throw invalid(
-      `The certificate cannot be read: ${error instanceof Error ? error.message : "it is malformed"}`,
-    )
-  }
-
-  const own = existing.sshPublicKey
-    ? parsePublicKeyLine(existing.sshPublicKey)
-    : null
-
-  if (!own || !certificate.publicKey.blob.equals(own.blob)) {
-    throw invalid(
-      "That certificate is for another key. Sign the key shown on this page (PCP's), not one of yours.",
-    )
-  }
-
-  const problem = certificateProblemFor(
-    certificate,
-    existing.authUsername ?? "",
-    {
-      // A certificate that starts later is kept; it is used once it is valid.
-      allowFuture: true,
-    },
-  )
-
-  if (problem) {
-    throw invalid(`That certificate cannot be used. ${problem}`)
-  }
+  const moved = data.url !== existing.url
 
   await db().mcpServer.update({
     where: { id },
-    data: {
-      sshCertificate: certificateLineOf(line),
-      status: "unknown",
-      statusMessage: "",
-    },
+    data: { ...data, ...(moved ? { sshHostKey: null } : {}) },
   })
+
+  return { reconnect: moved || data.authUsername !== existing.authUsername }
 }
 
-/** The line as stored: type and base64, without the comment. */
-function certificateLineOf(line: string): string {
-  return line.split(/\s+/).slice(0, 2).join(" ")
-}
-
-function certificateProblemFor(
-  certificate: SshCertificate,
-  username: string,
-  { allowFuture = false }: { allowFuture?: boolean } = {},
-): string | null {
-  const now = new Date()
-  const at = allowFuture
-    ? new Date(
-        Math.max(
-          now.getTime(),
-          (certificateDate(certificate.validAfter)?.getTime() ?? 0) + 1000,
-        ),
-      )
-    : now
-
-  return identityProblemOf(certificate, username, at)
-}
-
-/** Type, dates and principal; the key is checked where it is known. */
-function identityProblemOf(
-  certificate: SshCertificate,
-  username: string,
-  now: Date,
-): string | null {
-  return certificateProblem(certificate, {
-    type: "user",
-    principal: username,
-    authorities: null,
-    now,
+/**
+ * Forgets the pinned host key, for a server whose key was changed on
+ * purpose: the next connection pins the key it shows then.
+ */
+export async function forgetSshHostKey(
+  ctx: VaultContext,
+  id: string,
+): Promise<void> {
+  await sshServer(ctx, id)
+  await db().mcpServer.update({
+    where: { id },
+    data: { sshHostKey: null, status: "unknown", statusMessage: "" },
   })
 }
 
 /**
  * Makes PCP a new key for the server, for when the old one may have been
- * seen. Its certificate goes with it: the owner signs the new key.
+ * seen. The owner adds the new one on the server (and removes the old).
  */
 export async function replaceSshKey(
   ctx: VaultContext,
   id: string,
 ): Promise<void> {
   const existing = await sshServer(ctx, id)
-  const { privatePem, key } = generateOwnKey()
+  const key = generateOwnKey(`pcp-${existing.slug}`)
   const secret = await writeManagedSecret(ctx, {
     name: sshKeySecretName(id),
     description: `PCP's SSH key for ${existing.name}.`,
-    value: privatePem,
+    value: key.privateKey,
     kind: "ssh_key",
   })
 
@@ -421,10 +282,9 @@ export async function replaceSshKey(
     where: { id },
     data: {
       authSecretId: secret.id,
-      sshPublicKey: publicKeyLine(key.publicKey, `pcp-${existing.slug}`),
-      sshCertificate: null,
+      sshPublicKey: key.publicKey,
       status: "auth_required",
-      statusMessage: AWAITING_CERTIFICATE,
+      statusMessage: addKeyNote(existing.authUsername ?? ""),
     },
   })
 }
@@ -436,108 +296,70 @@ export type SshServerView = {
   username: string
   publicKey: string
   publicKeyFingerprint: string
-  hostCas: Array<{ line: string; fingerprint: string }>
-  certificate: {
-    line: string
-    keyId: string
-    serial: string
-    principals: string[]
-    validAfter: Date | null
-    validBefore: Date | null
-    criticalOptions: Array<{ name: string; value: string }>
-    extensions: string[]
-    authority: string
-    /** Why it cannot be used now; null when it can. */
-    problem: string | null
-  } | null
+  /** The pinned host key; null until PCP first connected. */
+  hostKey: { type: string; fingerprint: string } | null
 }
 
 export function sshServerView(
   server: Pick<
     McpServer,
-    "url" | "authUsername" | "sshPublicKey" | "sshHostCas" | "sshCertificate"
+    "url" | "authUsername" | "sshPublicKey" | "sshHostKey"
   >,
-  now = new Date(),
 ): SshServerView {
   const address = parseSshAddress(server.url)
-  const own = server.sshPublicKey
-    ? parsePublicKeyLine(server.sshPublicKey)
-    : null
-  let certificate: SshServerView["certificate"] = null
-
-  if (server.sshCertificate) {
-    try {
-      const read = parseCertificateLine(server.sshCertificate)
-      certificate = {
-        line: server.sshCertificate,
-        keyId: read.keyId,
-        serial: read.serial.toString(),
-        principals: read.principals,
-        validAfter: certificateDate(read.validAfter),
-        validBefore: certificateDate(read.validBefore),
-        criticalOptions: read.criticalOptions,
-        extensions: read.extensions,
-        authority: fingerprint(read.signatureKey),
-        problem:
-          own && !read.publicKey.blob.equals(own.blob)
-            ? "It is for another key than PCP's."
-            : identityProblemOf(read, server.authUsername ?? "", now),
-      }
-    } catch (error) {
-      certificate = {
-        line: server.sshCertificate,
-        keyId: "",
-        serial: "",
-        principals: [],
-        validAfter: null,
-        validBefore: null,
-        criticalOptions: [],
-        extensions: [],
-        authority: "",
-        problem:
-          error instanceof SshFormatError
-            ? error.message
-            : "It cannot be read.",
-      }
-    }
-  }
 
   return {
     host: address.host,
     port: address.port,
     username: server.authUsername ?? "",
     publicKey: server.sshPublicKey ?? "",
-    publicKeyFingerprint: own ? fingerprint(own) : "",
-    hostCas: (server.sshHostCas ?? "")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => ({
-        line,
-        fingerprint: fingerprint(parsePublicKeyLine(line)),
-      })),
-    certificate,
+    publicKeyFingerprint: server.sshPublicKey
+      ? fingerprint(server.sshPublicKey)
+      : "",
+    hostKey: server.sshHostKey
+      ? {
+          type: keyType(server.sshHostKey),
+          fingerprint: fingerprint(server.sshHostKey),
+        }
+      : null,
   }
 }
 
-/** Where to connect and whom to trust, from the server's row. */
+/** Where to connect, as whom, and the host key to expect. */
 export function sshTarget(server: McpServer): SshTarget {
-  const address = parseSshAddress(server.url)
-
   return {
-    ...address,
+    ...parseSshAddress(server.url),
     username: server.authUsername ?? "",
-    hostAuthorities: parsePublicKeyLines(server.sshHostCas ?? ""),
+    hostKey: server.sshHostKey,
   }
+}
+
+/**
+ * Pins the host key a connection proved, the first time there is one. Only
+ * while the row still has no key and the same address, so a key seen for
+ * an address the owner has since changed is not kept for the new one.
+ */
+function pinner(server: McpServer) {
+  return async (seen: HostSeen) => {
+    if (server.sshHostKey || !seen.hostKey) {
+      return
+    }
+
+    await db().mcpServer.updateMany({
+      where: { id: server.id, sshHostKey: null, url: server.url },
+      data: { sshHostKey: seen.hostKey },
+    })
+  }
+}
+
+/** The server's page in PCP, where its key and host key are. */
+function pageOf(server: McpServer, publicUrl: string): string {
+  return `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`
 }
 
 function seconds(ms: number): string {
   const count = ms / 1000
   return `${count} second${count === 1 ? "" : "s"}`
-}
-
-/** The server's page in PCP, where its certificate is pasted. */
-function pageOf(server: McpServer, publicUrl: string): string {
-  return `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`
 }
 
 /** The status and the words for the assistant, from a failure. */
@@ -555,15 +377,15 @@ async function fail(
     await setServerStatus(server.id, "auth_required", reason)
     return {
       status: "auth_required",
-      message: `${server.name} did not let PCP sign in. ${reason} The owner gives PCP a new certificate on its page:\n${pageOf(server, publicUrl)}`,
+      message: `${server.name} did not let PCP sign in. ${reason} The owner finds PCP's key on its page:\n${pageOf(server, publicUrl)}`,
     }
   }
 
-  if (error instanceof SshHostError) {
+  if (error instanceof SshHostKeyError) {
     await setServerStatus(server.id, "error", reason)
     return {
       status: "error",
-      message: `PCP did not connect: ${reason} The owner checks the server's host CA on its page:\n${pageOf(server, publicUrl)}`,
+      message: `PCP did not connect. ${reason} Its page:\n${pageOf(server, publicUrl)}`,
     }
   }
 
@@ -573,13 +395,13 @@ async function fail(
 }
 
 /**
- * Stores the server's tool and checks that PCP can sign in. Without a
- * certificate the tool is there, and answers that the owner has to give one.
+ * Stores the server's tool and checks that PCP can sign in, pinning the
+ * host key on the first connection.
  */
 export async function syncSshTools(
   server: McpServer,
-  identity: SshIdentity | null,
-  { publicUrl, deps = defaultSshDeps }: { publicUrl: string; deps?: SshDeps },
+  identity: SshIdentity,
+  { publicUrl }: { publicUrl: string },
 ): Promise<SyncResult> {
   const target = sshTarget(server)
   const toolCount = await storeTools(
@@ -587,18 +409,19 @@ export async function syncSshTools(
     sshTools({ host: target.host, username: target.username }),
   )
 
-  if (!identity) {
-    await setServerStatus(server.id, "auth_required", AWAITING_CERTIFICATE)
-    return { status: "auth_required", message: AWAITING_CERTIFICATE, toolCount }
-  }
-
   try {
-    await sshCheck(target, identity, deps)
+    await sshCheck(target, identity, pinner(server))
     await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
     return { status: "ok", message: "", toolCount }
   } catch (error) {
     if (isPcpError(error)) {
       throw error
+    }
+
+    if (error instanceof SshAuthError) {
+      const message = `${server.name} turned down PCP's key. ${addKeyNote(target.username)}`
+      await setServerStatus(server.id, "auth_required", message)
+      return { status: "auth_required", message, toolCount }
     }
 
     return {
@@ -621,12 +444,10 @@ export async function callSshTool(
     identity,
     publicUrl,
     redact = [],
-    deps = defaultSshDeps,
   }: {
-    identity: SshIdentity | null
+    identity: SshIdentity
     publicUrl: string
     redact?: string[]
-    deps?: SshDeps
   },
 ): Promise<CallToolResult> {
   if (toolName !== RUN_COMMAND) {
@@ -634,12 +455,6 @@ export async function callSshTool(
   }
 
   const call = parseRunCommand(args)
-
-  if (!identity) {
-    return errorToolResult(
-      `${server.name} has no certificate for PCP yet, so nothing can run there. The owner signs PCP's key and pastes the certificate on its page:\n${pageOf(server, publicUrl)}`,
-    )
-  }
 
   try {
     const result = await sshExec(
@@ -651,7 +466,7 @@ export async function callSshTool(
         timeoutMs: call.timeoutMs,
         maxOutputBytes: MAX_OUTPUT_BYTES,
       },
-      deps,
+      pinner(server),
     )
 
     if (server.status !== "ok") {
@@ -684,9 +499,9 @@ export async function callSshTool(
 
     const failure = await fail(server, error, { publicUrl, redact })
 
-    // What the owner has to fix (the certificate, the host's) is answered
+    // What the owner has to fix (PCP's key, a changed host key) is answered
     // with their page's link; a server PCP could not reach is an error.
-    if (error instanceof SshAuthError || error instanceof SshHostError) {
+    if (error instanceof SshAuthError || error instanceof SshHostKeyError) {
       return errorToolResult(failure.message, { redact })
     }
 

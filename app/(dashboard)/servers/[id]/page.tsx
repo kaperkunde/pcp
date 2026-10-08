@@ -7,7 +7,7 @@ import { MailAccountForm } from "@/components/mail-account-form"
 import { PageHeader } from "@/components/page-header"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
-import { SshCertificateCard } from "@/components/ssh-certificate-card"
+import { SshAccessCard } from "@/components/ssh-access-card"
 import { SshServerForm } from "@/components/ssh-server-form"
 import { WrapperForm } from "@/components/wrapper-form"
 import { db } from "@/lib/core/db"
@@ -117,9 +117,8 @@ export default async function ServerPage({
           authType: server.authType as AuthType,
           status: server.status as ServerStatus,
           statusMessage: server.statusMessage,
-          connected: ssh
-            ? server.sshCertificate !== null
-            : server.authType !== "oauth" || server.oauthConnectedAt !== null,
+          connected:
+            server.authType !== "oauth" || server.oauthConnectedAt !== null,
           lastSyncedAt: server.lastSyncedAt,
           oauthConnection,
           oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
@@ -139,13 +138,7 @@ export default async function ServerPage({
         notice={notice}
         redirectUrl={redirectUrl}
       >
-        {ssh ? (
-          <SshCertificateCard
-            serverId={server.id}
-            slug={server.slug}
-            view={ssh}
-          />
-        ) : null}
+        {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}
       </ServerDetail>
       <h2 className="text-lg">Settings</h2>
       {wrapper ? (
@@ -182,7 +175,6 @@ export default async function ServerPage({
             host: ssh.host,
             port: String(ssh.port),
             username: ssh.username,
-            hostCas: server.sshHostCas ?? "",
           }}
         />
       ) : mail ? (

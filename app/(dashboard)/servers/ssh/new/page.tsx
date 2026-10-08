@@ -13,7 +13,7 @@ export default async function NewSshServerPage() {
     <>
       <PageHeader
         title="Add an SSH server"
-        description="An assistant runs commands on it, one per call, with the run_command tool. PCP signs in with a certificate only: once the server is added, PCP shows you a key of its own to sign with your user CA. It connects only to a server that presents a host certificate from the CA you give here."
+        description="An assistant runs commands on it, one per call, with the run_command tool. PCP signs in with a key of its own, never a password: once the server is added, its page shows the key to add to the login's authorized_keys. PCP pins the server's host key the first time it connects and refuses any other after that."
       />
       <SshServerForm initial={EMPTY_SSH_SERVER} />
     </>

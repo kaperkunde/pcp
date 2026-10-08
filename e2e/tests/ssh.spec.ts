@@ -1,26 +1,16 @@
 import { expect, test } from "@playwright/test"
 
-import {
-  issueCertificate,
-  makeEd25519,
-  startFakeSsh,
-  type FakeSsh,
-  type TestCa,
-} from "../../lib/core/ssh/fake-server"
-import {
-  certificateLine,
-  parsePublicKeyLine,
-  publicKeyLine,
-} from "../../lib/core/ssh/keys"
+import { startFakeSsh, type FakeSsh } from "../../lib/core/ssh/fake-server"
+import { fingerprint } from "../../lib/core/ssh/keys"
 import { callTool, toolText } from "../lib/mcp"
 import { createToken } from "../lib/ui"
 
 // An SSH server, added in PCP and used by an assistant through /mcp. PCP
-// signs in with a certificate only: the page shows PCP's own key, the
-// owner's CA signs it (here, the test's), and nothing runs until that
-// certificate is pasted. The server proves itself with a host certificate
-// from the CA the owner gave, or PCP does not connect. The test SSH server
-// runs in this process and records the logins and commands it saw.
+// signs in with a key of its own, which the owner puts in the login's
+// authorized_keys, and pins the server's host key the first time it
+// connects; a server that later shows another key is refused until the
+// owner forgets the pinned one. The test SSH server runs in this process
+// and records the logins and commands it saw.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -29,48 +19,30 @@ const SLUG = `build-box-${RUN}`
 const TOKEN_NAME = `SSH assistant ${RUN}`
 
 let fake: FakeSsh
-let hostCa: TestCa
-let userCa: TestCa
+/** The test server's authorized_keys. */
+let authorized: string | null = null
 let token: string
 
-test.beforeAll(async () => {
-  hostCa = makeEd25519()
-  userCa = makeEd25519()
-  const hostKey = makeEd25519()
-  fake = await startFakeSsh({
-    hostKey,
-    hostCertificate: issueCertificate({
-      ca: hostCa,
-      key: hostKey.publicKey,
-      type: "host",
-      principals: ["127.0.0.1"],
-    }),
-    userAuthority: userCa.publicKey,
+function startServer(port?: number) {
+  return startFakeSsh({
+    port,
+    authorizedKey: () => authorized,
     run: (command, stdin) => ({
       stdout: `ran ${command}${stdin.length ? ` with ${stdin.toString()}` : ""}\n`,
       exitCode: 0,
     }),
   })
+}
+
+test.beforeAll(async () => {
+  fake = await startServer()
 })
 
 test.afterAll(async () => {
   await fake?.close()
 })
 
-/** What the owner does with ssh-keygen -s: sign the key the page shows. */
-function sign(publicKey: string, principals = ["deploy"]): string {
-  return certificateLine(
-    issueCertificate({
-      ca: userCa,
-      key: parsePublicKeyLine(publicKey),
-      type: "user",
-      principals,
-      keyId: "pcp",
-    }),
-  )
-}
-
-test("an SSH server runs nothing until PCP's key is signed", async ({
+test("an SSH server signs in once PCP's key is in authorized_keys", async ({
   page,
 }) => {
   await page.goto("/servers")
@@ -81,44 +53,38 @@ test("an SSH server runs nothing until PCP's key is signed", async ({
   await page.getByLabel("Host", { exact: true }).fill("127.0.0.1")
   await page.getByLabel("Port").fill(String(fake.port))
   await page.getByLabel("Login").fill("deploy")
-  await page
-    .getByLabel("Host CA")
-    .fill(`@cert-authority * ${publicKeyLine(hostCa.publicKey, "host-ca")}`)
   await page.getByRole("button", { name: "Add SSH server" }).click()
 
+  // PCP connected once: the host key is pinned, PCP's key not yet accepted.
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
   await expect(
-    page.getByText("Needs a certificate", { exact: true }),
+    page.getByText("Key not accepted", { exact: true }),
   ).toBeVisible()
+  await expect(
+    page.getByText(/deploy's ~\/.ssh\/authorized_keys/),
+  ).toBeVisible()
+  await expect(page.getByTestId("ssh-host-key")).toContainText(
+    fingerprint(fake.hostKey),
+  )
   await expect(page.getByText("Tools (1)")).toBeVisible()
   const publicKey = (await page.getByTestId("ssh-public-key").textContent())!
   expect(publicKey).toMatch(/^ssh-ed25519 \S+ pcp-build-box-/)
+  expect(fake.logins).toEqual([])
+
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
     page.getByRole("status").filter({ hasText: "Saved." }),
   ).toBeVisible()
 
-  // Signed for another login: refused before anything connects.
-  await page
-    .getByLabel("Certificate", { exact: true })
-    .fill(sign(publicKey, ["root"]))
-  await page.getByRole("button", { name: "Save certificate" }).click()
-  await expect(page.getByText(/It is not for deploy/)).toBeVisible()
-  expect(fake.logins).toEqual([])
-
-  await page.getByLabel("Certificate", { exact: true }).fill(sign(publicKey))
-  await page.getByRole("button", { name: "Save certificate" }).click()
+  authorized = publicKey
+  await page.getByRole("button", { name: "Check sign-in" }).click()
   await expect(
-    page
-      .getByRole("status")
-      .filter({ hasText: "Certificate saved. PCP signed in." }),
+    page.getByRole("status").filter({ hasText: "PCP signed in." }),
   ).toBeVisible()
   expect(fake.logins).toEqual(["deploy"])
-
   await page.reload()
   await expect(page.getByText("Ready", { exact: true })).toBeVisible()
-  await expect(page.getByTestId("ssh-certificate")).toContainText("deploy")
 
   // The key PCP made is a secret of its own, used by this server.
   await page.goto("/secrets")
@@ -170,28 +136,43 @@ test("an assistant's command is shown to the owner before it runs", async ({
   })
 })
 
-test("PCP does not connect to a host its CA did not certify", async ({
+test("a server with another host key is refused until the owner forgets the old one", async ({
   page,
   baseURL,
 }) => {
+  // The same address, another machine: a new host key.
+  const port = fake.port
+  const before = fake.hostKey
+  await fake.close()
+  fake = await startServer(port)
+  expect(fake.hostKey).not.toBe(before)
+
+  const call = () =>
+    callTool(baseURL!, token, "call_tool", {
+      server: SLUG,
+      tool: "run_command",
+      arguments: { command: "uptime" },
+    })
+
+  const refused = await call()
+  expect(toolText(refused)).toMatch(/not the one PCP pinned/)
+  expect(fake.logins).toEqual([])
+
   await page.goto("/servers")
   await page.getByRole("link").filter({ hasText: NAME }).click()
-  await page
-    .getByLabel("Host CA")
-    .fill(publicKeyLine(makeEd25519().publicKey, "another-ca"))
-  await page.getByRole("button", { name: "Save changes" }).click()
-  await expect(
-    page.getByRole("status").filter({ hasText: /CA you have not given PCP/ }),
-  ).toBeVisible()
-  await page.reload()
   await expect(page.getByText("Not connected", { exact: true })).toBeVisible()
+  await expect(page.getByTestId("ssh-host-key")).toContainText(
+    fingerprint(before),
+  )
 
-  const logins = fake.logins.length
-  const refused = await callTool(baseURL!, token, "call_tool", {
-    server: SLUG,
-    tool: "run_command",
-    arguments: { command: "uptime" },
-  })
-  expect(toolText(refused)).toMatch(/CA you have not given PCP/)
-  expect(fake.logins.length).toBe(logins)
+  page.once("dialog", (dialog) => void dialog.accept())
+  await page.getByRole("button", { name: "Forget host key" }).click()
+  await expect(
+    page.getByRole("status").filter({ hasText: /Forgotten.*PCP signed in\./ }),
+  ).toBeVisible()
+  await expect(page.getByTestId("ssh-host-key")).toContainText(
+    fingerprint(fake.hostKey),
+  )
+
+  expect(JSON.parse(toolText(await call()))).toMatchObject({ exit_code: 0 })
 })

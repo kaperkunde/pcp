@@ -9,35 +9,29 @@ import { scratchDatabase } from "../test-db"
 import { keepResult, resultOpener } from "../tool-results"
 import { callServerTool, syncServerTools } from "../upstream"
 import { setupVault } from "../vault"
-import {
-  issueCertificate,
-  makeEd25519,
-  startFakeSsh,
-  type FakeSsh,
-  type TestCa,
-} from "./fake-server"
+import { startFakeSsh, type FakeSsh } from "./fake-server"
 import {
   createSshServer,
+  forgetSshHostKey,
   parseSshAddress,
   replaceSshKey,
-  setSshCertificate,
   sshServerView,
   updateSshServer,
   validateLogin,
 } from "./hosts"
-import { certificateLine, parsePublicKeyLine, publicKeyLine } from "./keys"
+import { fingerprint } from "./keys"
 
-// SSH servers end to end in the core: added by the owner, given a
-// certificate, read and called through upstream.ts like any server, against
-// the test SSH server on 127.0.0.1.
+// SSH servers end to end in the core: added by the owner, PCP's key put in
+// the test server's authorized_keys, read and called through upstream.ts
+// like any server, against an SSH server on 127.0.0.1.
 
 const PUBLIC = { publicUrl: "http://localhost:3000" }
 
 let cleanup: () => Promise<void>
 let ctx: VaultContext
 let fake: FakeSsh
-let hostCa: TestCa
-let userCa: TestCa
+/** The test server's authorized_keys: what the owner pasted there. */
+let authorized: string | null
 
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
@@ -45,18 +39,9 @@ beforeEach(async () => {
     name: "Ada",
     password: "correct horse battery staple",
   })
-  hostCa = makeEd25519()
-  userCa = makeEd25519()
-  const hostKey = makeEd25519()
+  authorized = null
   fake = await startFakeSsh({
-    hostKey,
-    hostCertificate: issueCertificate({
-      ca: hostCa,
-      key: hostKey.publicKey,
-      type: "host",
-      principals: ["127.0.0.1"],
-    }),
-    userAuthority: userCa.publicKey,
+    authorizedKey: () => authorized,
     run: (command, stdin) => ({
       stdout: `${command}: ${stdin.toString()}`,
       exitCode: command === "false" ? 1 : 0,
@@ -69,32 +54,31 @@ afterEach(async () => {
   await cleanup()
 })
 
-async function addServer(overrides: { hostCas?: string } = {}) {
+async function addServer() {
   const { id } = await createSshServer(ctx, {
     name: "Build box",
     host: "127.0.0.1",
     port: fake.port,
     username: "deploy",
-    hostCas: overrides.hostCas ?? publicKeyLine(hostCa.publicKey, "host CA"),
   })
   return id
 }
 
-/** What the owner does with ssh-keygen -s: sign the key the page shows. */
-async function certify(
-  id: string,
-  overrides: Partial<Parameters<typeof issueCertificate>[0]> = {},
-) {
-  const view = sshServerView(await getServer(ctx, id))
-  const certificate = issueCertificate({
-    ca: userCa,
-    key: parsePublicKeyLine(view.publicKey),
-    type: "user",
-    principals: ["deploy"],
-    keyId: "pcp",
-    ...overrides,
-  })
-  return certificateLine(certificate, "pcp-cert")
+/** Adds the server and puts PCP's key in authorized_keys, as the owner does. */
+async function readyServer() {
+  const id = await addServer()
+  authorized = (await getServer(ctx, id)).sshPublicKey
+  return id
+}
+
+async function run(id: string, args: Record<string, unknown>) {
+  return callServerTool(
+    ctx,
+    await getServer(ctx, id),
+    "run_command",
+    args,
+    PUBLIC,
+  )
 }
 
 describe("adding an SSH server", () => {
@@ -105,11 +89,10 @@ describe("adding an SSH server", () => {
 
     expect(row.kind).toBe("ssh")
     expect(row.url).toBe(`ssh://127.0.0.1:${fake.port}`)
-    expect(row.authType).toBe("certificate")
-    expect(row.status).toBe("auth_required")
+    expect(row.authType).toBe("key")
     expect(view.publicKey).toMatch(/^ssh-ed25519 \S+ pcp-build-box$/)
     expect(view.publicKeyFingerprint).toMatch(/^SHA256:/)
-    expect(view.certificate).toBeNull()
+    expect(view.hostKey).toBeNull()
 
     const secrets = await listSecrets(ctx)
     expect(secrets).toEqual([
@@ -123,7 +106,7 @@ describe("adding an SSH server", () => {
     expect(JSON.stringify(row)).not.toContain("PRIVATE KEY")
   })
 
-  it("refuses addresses, logins and CA keys it cannot use", async () => {
+  it("refuses addresses and logins it cannot use", () => {
     expect(parseSshAddress("Example.COM")).toEqual({
       host: "example.com",
       port: 22,
@@ -139,141 +122,82 @@ describe("adding an SSH server", () => {
     expect(() => validateLogin("-oProxyCommand=x")).toThrow()
     expect(() => validateLogin("de ploy")).toThrow()
     expect(validateLogin("svc.deploy@corp")).toBe("svc.deploy@corp")
+  })
+})
 
-    await expect(addServer({ hostCas: "" })).rejects.toThrow(
-      /Paste the public key/,
-    )
-    const cert = issueCertificate({
-      ca: hostCa,
-      key: makeEd25519().publicKey,
-      type: "host",
-      principals: ["x"],
+describe("the host key", () => {
+  it("is pinned on the first connection, even before PCP's key is added", async () => {
+    const id = await addServer()
+    const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
+
+    expect(sync).toMatchObject({ status: "auth_required", toolCount: 1 })
+    expect(sync.message).toMatch(/deploy's ~\/.ssh\/authorized_keys/)
+    const row = await getServer(ctx, id)
+    expect(row.sshHostKey).toBe(fake.hostKey)
+    expect(sshServerView(row).hostKey).toEqual({
+      type: "ssh-ed25519",
+      fingerprint: fingerprint(fake.hostKey),
     })
-    await expect(addServer({ hostCas: certificateLine(cert) })).rejects.toThrow(
-      /cannot be read/,
-    )
   })
 
-  it("rechecks the server when its address, login or CAs change", async () => {
-    const id = await addServer()
+  it("refuses a server that shows another key, until the owner forgets it", async () => {
+    const id = await readyServer()
+    await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
+    // As if the server had been swapped for another since.
+    await db().mcpServer.update({
+      where: { id },
+      data: {
+        sshHostKey: `ssh-ed25519 ${Buffer.alloc(51).toString("base64")}`,
+      },
+    })
+    const logins = fake.logins.length
+
+    const refused = await run(id, { command: "uptime" })
+    expect(refused.isError).toBe(true)
+    expect(JSON.stringify(refused.content)).toMatch(/not the one PCP pinned/)
+    expect(JSON.stringify(refused.content)).toContain(`/servers/${id}`)
+    expect((await getServer(ctx, id)).status).toBe("error")
+    expect(fake.logins.length).toBe(logins)
+    expect(fake.commands).toEqual([])
+
+    await forgetSshHostKey(ctx, id)
+    const ran = await run(id, { command: "uptime" })
+    expect(ran.isError).toBeFalsy()
+    expect((await getServer(ctx, id)).sshHostKey).toBe(fake.hostKey)
+  })
+
+  it("is pinned afresh when the address changes", async () => {
+    const id = await readyServer()
+    await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
     const input = {
       name: "Build box, renamed",
       host: "127.0.0.1",
       port: fake.port,
       username: "deploy",
-      hostCas: publicKeyLine(hostCa.publicKey),
     }
 
     expect(await updateSshServer(ctx, id, input)).toEqual({ reconnect: false })
+    expect((await getServer(ctx, id)).sshHostKey).toBe(fake.hostKey)
+
     expect(
-      await updateSshServer(ctx, id, { ...input, username: "root" }),
+      await updateSshServer(ctx, id, { ...input, host: "localhost" }),
     ).toEqual({ reconnect: true })
-  })
-})
-
-describe("the certificate", () => {
-  it("is taken only for PCP's key, this login, as a user certificate that has not expired", async () => {
-    const id = await addServer()
-    const other = makeEd25519().publicKey
-    const otherKey = certificateLine(
-      issueCertificate({
-        ca: userCa,
-        key: other,
-        type: "user",
-        principals: ["deploy"],
-      }),
-    )
-
-    await expect(setSshCertificate(ctx, id, otherKey)).rejects.toThrow(
-      /another key/,
-    )
-    await expect(
-      setSshCertificate(ctx, id, await certify(id, { principals: ["root"] })),
-    ).rejects.toThrow(/not for deploy/)
-    await expect(
-      setSshCertificate(ctx, id, await certify(id, { type: "host" })),
-    ).rejects.toThrow(/not a user certificate/)
-    await expect(
-      setSshCertificate(
-        ctx,
-        id,
-        await certify(id, {
-          validBefore: BigInt(Math.floor(Date.now() / 1000) - 60),
-        }),
-      ),
-    ).rejects.toThrow(/expired/)
-    await expect(setSshCertificate(ctx, id, "garbage")).rejects.toThrow(
-      /cannot be read/,
-    )
-
-    // One that starts tomorrow is kept, and shown as not valid yet.
-    const tomorrow = BigInt(Math.floor(Date.now() / 1000) + 86_400)
-    await setSshCertificate(
-      ctx,
-      id,
-      await certify(id, { validAfter: tomorrow }),
-    )
-    const view = sshServerView(await getServer(ctx, id))
-    expect(view.certificate?.problem).toMatch(/not valid until/)
-    expect(view.certificate?.principals).toEqual(["deploy"])
-    // Stored without its comment.
-    expect(view.certificate?.line).not.toContain("pcp-cert")
-  })
-
-  it("is dropped with the key when PCP makes a new one", async () => {
-    const id = await addServer()
-    await setSshCertificate(ctx, id, await certify(id))
-    const before = await getServer(ctx, id)
-
-    await replaceSshKey(ctx, id)
-    const after = await getServer(ctx, id)
-
-    expect(after.sshPublicKey).not.toBe(before.sshPublicKey)
-    expect(after.sshCertificate).toBeNull()
-    expect(after.authSecretId).toBe(before.authSecretId)
-    expect(after.status).toBe("auth_required")
+    expect((await getServer(ctx, id)).sshHostKey).toBeNull()
   })
 })
 
 describe("running commands", () => {
-  it("answers with the owner's page until there is a certificate, after checking the arguments", async () => {
-    const id = await addServer()
-    const server = await getServer(ctx, id)
-    const sync = await syncServerTools(ctx, server, PUBLIC)
-
-    expect(sync).toMatchObject({ status: "auth_required", toolCount: 1 })
-    await expect(
-      callServerTool(ctx, server, "run_command", {}, PUBLIC),
-    ).rejects.toThrow(/Give the command/)
-
-    const result = await callServerTool(
-      ctx,
-      server,
-      "run_command",
-      { command: "uptime" },
-      PUBLIC,
-    )
-    expect(result.isError).toBe(true)
-    expect(JSON.stringify(result.content)).toContain(
-      `http://localhost:3000/servers/${id}`,
-    )
-    expect(fake.commands).toEqual([])
-  })
-
-  it("signs in, runs the command and returns what it wrote", async () => {
-    const id = await addServer()
-    await setSshCertificate(ctx, id, await certify(id))
+  it("signs in with PCP's key, runs the command and returns what it wrote", async () => {
+    const id = await readyServer()
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
 
     expect(sync).toEqual({ status: "ok", message: "", toolCount: 1 })
 
-    const result = await callServerTool(
-      ctx,
-      await getServer(ctx, id),
-      "run_command",
-      { command: "cat", stdin: "hello", timeout_seconds: 5 },
-      PUBLIC,
-    )
+    const result = await run(id, {
+      command: "cat",
+      stdin: "hello",
+      timeout_seconds: 5,
+    })
 
     expect(result.isError).toBeFalsy()
     expect(result.structuredContent).toEqual({
@@ -294,8 +218,7 @@ describe("running commands", () => {
   })
 
   it("feeds a kept result's text to standard input", async () => {
-    const id = await addServer()
-    await setSshCertificate(ctx, id, await certify(id))
+    const id = await readyServer()
     const { id: tokenId } = await createApiToken(ctx, {
       name: "Claude",
       allowAllServers: true,
@@ -320,89 +243,61 @@ describe("running commands", () => {
     expect(result.structuredContent).toMatchObject({ stdout: "wc: kept text" })
   })
 
-  it("refuses arguments it does not know and timeouts out of range", async () => {
-    const id = await addServer()
-    await setSshCertificate(ctx, id, await certify(id))
-    const server = await getServer(ctx, id)
+  it("refuses arguments it does not know before connecting", async () => {
+    const id = await readyServer()
 
+    await expect(run(id, { command: "ls", pty: true })).rejects.toThrow(
+      /no argument "pty"/,
+    )
     await expect(
-      callServerTool(
-        ctx,
-        server,
-        "run_command",
-        { command: "ls", pty: true },
-        PUBLIC,
-      ),
-    ).rejects.toThrow(/no argument "pty"/)
-    await expect(
-      callServerTool(
-        ctx,
-        server,
-        "run_command",
-        { command: "ls", timeout_seconds: 3600 },
-        PUBLIC,
-      ),
+      run(id, { command: "ls", timeout_seconds: 3600 }),
     ).rejects.toThrow(/timeout_seconds/)
-    await expect(
-      callServerTool(ctx, server, "run_command", { command: "a\0b" }, PUBLIC),
-    ).rejects.toThrow(/NUL/)
-    await expect(
-      callServerTool(ctx, server, "shell", { command: "ls" }, PUBLIC),
-    ).rejects.toThrow(/no tool called shell/)
-    expect(fake.commands).toEqual([])
-  })
-
-  it("does not connect to a host whose certificate is from another CA", async () => {
-    const id = await addServer({
-      hostCas: publicKeyLine(makeEd25519().publicKey),
-    })
-    await setSshCertificate(ctx, id, await certify(id))
-
-    const result = await callServerTool(
-      ctx,
-      await getServer(ctx, id),
-      "run_command",
-      { command: "uptime" },
-      PUBLIC,
-    )
-
-    expect(result.isError).toBe(true)
-    expect(JSON.stringify(result.content)).toMatch(/CA you have not given PCP/)
-    expect((await getServer(ctx, id)).status).toBe("error")
-    expect(fake.logins).toEqual([])
-  })
-
-  it("asks the owner for a new certificate when the server turns it down", async () => {
-    const id = await addServer()
-    await setSshCertificate(ctx, id, await certify(id, { ca: makeEd25519() }))
-
-    const result = await callServerTool(
-      ctx,
-      await getServer(ctx, id),
-      "run_command",
-      { command: "uptime" },
-      PUBLIC,
-    )
-
-    expect(result.isError).toBe(true)
-    expect(JSON.stringify(result.content)).toContain(`/servers/${id}`)
-    expect((await getServer(ctx, id)).status).toBe("auth_required")
-  })
-
-  it("reports a server it cannot reach as an error", async () => {
-    const id = await addServer()
-    await setSshCertificate(ctx, id, await certify(id))
-    await fake.close()
-
+    await expect(run(id, { command: "a\0b" })).rejects.toThrow(/NUL/)
     await expect(
       callServerTool(
         ctx,
         await getServer(ctx, id),
-        "run_command",
-        { command: "uptime" },
+        "shell",
+        { command: "ls" },
         PUBLIC,
       ),
-    ).rejects.toThrow(/could not be reached/)
+    ).rejects.toThrow(/no tool called shell/)
+    expect(fake.logins).toEqual([])
+  })
+
+  it("answers with the owner's page when the server turns PCP's key down", async () => {
+    const id = await addServer()
+
+    const result = await run(id, { command: "uptime" })
+
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain(`/servers/${id}`)
+    expect((await getServer(ctx, id)).status).toBe("auth_required")
+    expect(fake.commands).toEqual([])
+  })
+
+  it("stops working with the old key once PCP makes a new one", async () => {
+    const id = await readyServer()
+    const before = await getServer(ctx, id)
+
+    await replaceSshKey(ctx, id)
+    const after = await getServer(ctx, id)
+
+    expect(after.sshPublicKey).not.toBe(before.sshPublicKey)
+    expect(after.authSecretId).toBe(before.authSecretId)
+    expect((await run(id, { command: "uptime" })).isError).toBe(true)
+
+    authorized = after.sshPublicKey
+    expect((await run(id, { command: "uptime" })).isError).toBeFalsy()
+  })
+
+  it("reports a server it cannot reach as an error", async () => {
+    const id = await readyServer()
+    await fake.close()
+
+    await expect(run(id, { command: "uptime" })).rejects.toThrow(
+      /could not be reached/,
+    )
   })
 })
 

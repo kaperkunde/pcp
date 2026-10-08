@@ -117,22 +117,22 @@ so in the summary; the bump itself waits for the request.
   `mail/tools.ts`, for both protocols where they allow, with its arguments
   checked before anything connects, and is left out of a read-only account
   and refused there if called anyway.
-- SSH servers (`lib/core/ssh/`) sign in by certificate only, both ways.
-  PCP's key for each server is its own (Ed25519, made in PCP, a managed
-  `ssh_key` secret decrypted only in `upstream.ts`, which hands the ssh
-  module an `SshIdentity`); the owner signs it and pastes the certificate,
-  which is taken only for that key and the server's login. The key exchange
-  offers certificate host-key types only, and a host is accepted only with a
-  host certificate from a CA the owner gave, naming the host PCP dialled: no
-  plain host keys, no known_hosts, no trust on first use, no password, no
-  bare key. The client is PCP's own over `node:crypto` (no child process, no
-  `ssh` binary, none of which the desktop app may start); `transport.ts` is
-  both ends, so the test server speaks what the client does. One tool,
+- SSH servers (`lib/core/ssh/`) sign in with PCP's own key, never a
+  password: an Ed25519 key made in PCP per server, a managed `ssh_key` secret
+  decrypted only in `upstream.ts`, which hands the ssh module an
+  `SshIdentity`; the owner puts its public half in `authorized_keys`. The
+  host key is pinned the first time a key exchange finishes (after `ssh2`'s
+  `handshake` event, never from `hostVerifier`, which runs before the
+  signature is checked), and any other key is refused until the owner
+  forgets it; a new address forgets it too. The protocol is `ssh2`'s, pure
+  JavaScript (its native parts stay out of `allowBuilds`), narrowed to the
+  algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
   `run_command` (`ssh/tools.ts`), its arguments checked before anything
   connects: `exec` only, never a terminal, forwarding, an agent or a file
   transfer. Only the owner adds or changes one; `register_server` has no kind
-  for it. Its limits go in `ssh/limits.ts`, and a new way to reach a host or
-  sign in gets a test against the test server (`ssh/client.test.ts`).
+  for it. Its limits go in `ssh/limits.ts`, and a change to how a host is
+  trusted or PCP signs in gets a test against the test server
+  (`ssh/client.test.ts`).
 - Long tool answers and files are kept only through
   `lib/core/tool-results.ts`: text or bytes, encrypted with
   `tool_result:<id>`, readable by the token whose call produced them, gone

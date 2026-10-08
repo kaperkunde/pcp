@@ -268,9 +268,8 @@ const McpServerRow = z.strictObject({
   smtpUrl: str.nullable().default(null),
   mailFrom: str.nullable().default(null),
   // SSH servers, added in 0.3: absent from older exports, which hold none.
-  sshHostCas: str.nullable().default(null),
   sshPublicKey: str.nullable().default(null),
-  sshCertificate: str.nullable().default(null),
+  sshHostKey: str.nullable().default(null),
 })
 
 const ServerAuthHeaderRow = z.strictObject({

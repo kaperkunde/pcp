@@ -172,7 +172,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/answers.ts`                | Shaping an answer: fields, decode, handles, preview           |
 | `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
 | `lib/core/mail/`                     | Mail accounts: JMAP and IMAP/SMTP behind one set of tools     |
-| `lib/core/ssh/`                      | SSH servers: PCP's SSH client, certificates, `run_command`    |
+| `lib/core/ssh/`                      | SSH servers: PCP's key, the pinned host key, `run_command`    |
 | `lib/core/register-rules.ts`         | What register_server accepts for each kind                    |
 | `lib/core/tool-results.ts`           | Kept answers and files, encrypted; `read_result`, handles     |
 | `lib/core/result-handles.ts`         | Handles in a call's arguments, replaced before sending        |

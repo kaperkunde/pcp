@@ -158,9 +158,9 @@ export default defineConfig({
       use: signedIn("mail"),
     },
     {
-      // An SSH server: added in PCP, PCP's key signed by the owner's CA and
-      // the certificate pasted; a command an assistant asks for, shown to the
-      // owner first; and a host whose certificate is from another CA.
+      // An SSH server: added in PCP, PCP's key put in authorized_keys, the
+      // host key pinned; a command an assistant asks for, shown to the owner
+      // first; and a server that later shows another host key.
       name: "ssh",
       testMatch: /ssh\.spec\.ts/,
       dependencies: ["setup"],

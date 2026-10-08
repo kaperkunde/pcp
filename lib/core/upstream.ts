@@ -28,7 +28,6 @@ import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
 import type { SshIdentity } from "./ssh/client"
 import { callSshTool, syncSshTools } from "./ssh/hosts"
-import { ownKeyFromPem, parseCertificateLine } from "./ssh/keys"
 import { makeRedactor } from "./openapi/redact"
 import { send } from "./openapi/transport"
 import {
@@ -73,7 +72,7 @@ import {
  * (kinds "jmap" and "imap") to lib/core/mail/accounts.ts, with the header
  * or login this module builds, or an OAuth token it renews; SSH servers
  * (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the server,
- * decrypted here, and the certificate the owner gave.
+ * decrypted here.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -1014,18 +1013,13 @@ export async function openUpstream(
 export type { SyncResult }
 
 /**
- * PCP's key for an SSH server and the certificate the owner's CA made for
- * it; null until they pasted one. The key is decrypted here, for the one
- * connection, and never leaves the ssh module's client.
+ * PCP's private key for an SSH server. Decrypted here, for the one
+ * connection, and handed to the ssh module's client, never further.
  */
 async function sshIdentity(
   ctx: VaultContext,
   server: McpServer,
-): Promise<SshIdentity | null> {
-  if (!server.sshCertificate) {
-    return null
-  }
-
+): Promise<SshIdentity> {
   if (!server.authSecretId) {
     throw new PcpError(
       "state",
@@ -1033,10 +1027,7 @@ async function sshIdentity(
     )
   }
 
-  return {
-    key: ownKeyFromPem(await readSecretValue(ctx, server.authSecretId)),
-    certificate: parseCertificateLine(server.sshCertificate),
-  }
+  return { privateKey: await readSecretValue(ctx, server.authSecretId) }
 }
 
 /**

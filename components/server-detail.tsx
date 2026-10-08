@@ -78,7 +78,7 @@ export type ServerDetailProps = {
   notice: { kind: "ok" | "error"; message: string } | null
   /** Where OAuth servers send you back: what a provider's client lists. */
   redirectUrl: string
-  /** What the kind needs from you, shown under the status (SSH's certificate). */
+  /** What the kind needs from you, shown under the status (SSH's keys). */
   children?: React.ReactNode
 }
 
@@ -294,7 +294,7 @@ export function ServerDetail({
               : mail
                 ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your mail stays on the server, and secrets you added stay."
                 : ssh
-                  ? "Takes the server out of PCP and deletes PCP's key for it, so its certificate cannot be used again. Nothing on the server changes."
+                  ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too."
                   : browser
                     ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
                     : wrapper

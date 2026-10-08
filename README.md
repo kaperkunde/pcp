@@ -56,11 +56,11 @@ on its own, what it has to ask you about first, and what it cannot touch.
   Fastmail, Cyrus) or IMAP with SMTP, or let an assistant propose one for you
   to agree to, and an assistant can search, read, file, draft and send its
   mail, with the same tools whichever protocol it speaks.
-- **Commands over SSH, by certificate only.** Add an SSH server, sign the key
-  PCP makes for it with your user CA, and an assistant can run commands there,
-  each one shown to you first unless you allow it. PCP connects only to a
-  server whose host certificate your CA signed: no passwords, no bare keys, no
-  trusting a host on first sight.
+- **Commands over SSH, with a key.** Add an SSH server, put the key PCP makes
+  for it in the login's `authorized_keys`, and an assistant can run commands
+  there, each one shown to you first unless you allow it. No passwords; PCP
+  pins the server's host key the first time it connects and refuses any
+  other.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
@@ -362,15 +362,15 @@ To remove PCP itself:
    server, the user name and how PCP signs in, type the app password on that
    page (it never passes through the assistant) or connect it with OAuth, and
    nothing exists until you agree.
-5. **SSH servers.** Add one with its host, port, the login PCP uses and the
-   public key of the CA that signs its host certificate. PCP makes a key of its
-   own for the server and shows it on the server's page with the `ssh-keygen -s`
-   line to sign it; paste the certificate back and PCP signs in. It never uses a
-   password or a bare key, and connects only when the server presents a host
-   certificate from your CA for that host. Its one tool, `run_command`, runs a
-   command and returns the exit code, standard output and standard error;
-   leave it on **Ask you first** and you see each command before it runs. Only
-   you add SSH servers; an assistant cannot propose one.
+5. **SSH servers.** Add one with its host, port and the login PCP uses. PCP
+   makes a key of its own for the server and shows it on the server's page:
+   put it in that login's `~/.ssh/authorized_keys` and choose **Check
+   sign-in**. PCP never uses a password. It pins the server's host key the
+   first time it connects, shows its fingerprint for you to compare, and
+   refuses any other key until you choose **Forget host key**. Its one tool,
+   `run_command`, runs a command and returns the exit code, standard output
+   and standard error; leave it on **Ask you first** and you see each command
+   before it runs. Only you add SSH servers; an assistant cannot propose one.
 6. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password (or Touch ID in the Mac app) to make one. A token can reach every
    server and endpoint or only the ones you pick, and can expire. Revoking it

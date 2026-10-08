@@ -82,7 +82,7 @@ export default async function ServersPage() {
         </div>
         <ServerList
           servers={ssh}
-          empty="No SSH servers yet. Add one, sign PCP's key with your user CA, and an assistant can run commands there, each one shown to you first unless you allow it."
+          empty="No SSH servers yet. Add one, put PCP's key in the login's authorized_keys, and an assistant can run commands there, each one shown to you first unless you allow it."
         />
       </section>
 

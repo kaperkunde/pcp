@@ -33,11 +33,10 @@ import {
 export type AuthType = "none" | "header" | "oauth" | "basic"
 
 /**
- * What a stored server signs in with: an AuthType, or an SSH server's
- * certificate (PCP's own key and the certificate the owner's CA made for it),
- * which only the SSH server's own page sets.
+ * What a stored server signs in with: an AuthType, or an SSH server's key
+ * (PCP's own, in a managed secret), which only the SSH server's page sets.
  */
-export type StoredAuthType = AuthType | "certificate"
+export type StoredAuthType = AuthType | "key"
 
 export type ServerKind =
   "mcp" | "openapi" | "jmap" | "imap" | "ssh" | "browser" | "wrapper"
@@ -805,7 +804,6 @@ function summarize(row: {
   statusMessage: string
   lastSyncedAt: Date | null
   oauthConnectedAt: Date | null
-  sshCertificate: string | null
   _count: { tools: number }
 }): ServerSummary {
   return {
@@ -827,12 +825,7 @@ function summarize(row: {
     statusMessage: row.statusMessage,
     lastSyncedAt: row.lastSyncedAt,
     toolCount: row._count.tools,
-    // An SSH server signs in once it has a certificate; an OAuth one once
-    // it has tokens.
-    connected:
-      row.authType === "certificate"
-        ? row.sshCertificate !== null
-        : row.authType !== "oauth" || row.oauthConnectedAt !== null,
+    connected: row.authType !== "oauth" || row.oauthConnectedAt !== null,
   }
 }
 

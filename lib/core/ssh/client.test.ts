@@ -2,54 +2,22 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import {
   SshAuthError,
-  SshHostError,
+  SshHostKeyError,
   sshCheck,
   sshExec,
-  type SshIdentity,
+  type HostSeen,
   type SshTarget,
 } from "./client"
 import {
-  issueCertificate,
-  makeEd25519,
+  makeHostKey,
   startFakeSsh,
   type FakeSsh,
   type FakeSshOptions,
 } from "./fake-server"
 import { generateOwnKey } from "./keys"
 
-const hostCa = makeEd25519()
-const userCa = makeEd25519()
-const hostKey = makeEd25519()
-const HOUR = 3600n
-const nowSeconds = () => BigInt(Math.floor(Date.now() / 1000))
-
-function hostCertificate(
-  overrides: Partial<Parameters<typeof issueCertificate>[0]> = {},
-) {
-  return issueCertificate({
-    ca: hostCa,
-    key: hostKey.publicKey,
-    type: "host",
-    principals: ["127.0.0.1", "localhost"],
-    ...overrides,
-  })
-}
-
-function identity(
-  overrides: Partial<Parameters<typeof issueCertificate>[0]> = {},
-): SshIdentity {
-  const { key } = generateOwnKey()
-  return {
-    key,
-    certificate: issueCertificate({
-      ca: userCa,
-      key: key.publicKey,
-      type: "user",
-      principals: ["deploy"],
-      ...overrides,
-    }),
-  }
-}
+const own = generateOwnKey("pcp-test")
+const identity = { privateKey: own.privateKey }
 
 let server: FakeSsh | null = null
 
@@ -58,11 +26,12 @@ afterEach(async () => {
   server = null
 })
 
-async function start(options: Partial<FakeSshOptions> = {}) {
+async function start(
+  options: Partial<FakeSshOptions> = {},
+  pinned: "none" | "right" | "wrong" = "none",
+) {
   server = await startFakeSsh({
-    hostKey,
-    hostCertificate: hostCertificate(),
-    userAuthority: userCa.publicKey,
+    authorizedKey: () => own.publicKey,
     run: (command, stdin) => ({
       stdout: `ran ${command} with ${stdin.length} bytes\n`,
       stderr: "a warning\n",
@@ -71,13 +40,36 @@ async function start(options: Partial<FakeSshOptions> = {}) {
     ...options,
   })
 
+  const other = await startFakeSsh({
+    authorizedKey: () => null,
+    run: () => ({}),
+  })
+  const wrongKey = other.hostKey
+  await other.close()
+
   const target: SshTarget = {
     host: "127.0.0.1",
     port: server.port,
     username: "deploy",
-    hostAuthorities: [hostCa.publicKey],
+    hostKey:
+      pinned === "right"
+        ? server.hostKey
+        : pinned === "wrong"
+          ? wrongKey
+          : null,
   }
   return { server, target }
+}
+
+/** What a connection reported about the host, for the pin. */
+function recorder() {
+  const seen: HostSeen[] = []
+  return {
+    seen,
+    onSeen: async (value: HostSeen) => {
+      seen.push(value)
+    },
+  }
 }
 
 const run = { command: "uptime", timeoutMs: 5000, maxOutputBytes: 1 << 20 }
@@ -85,7 +77,8 @@ const run = { command: "uptime", timeoutMs: 5000, maxOutputBytes: 1 << 20 }
 describe("sshExec", () => {
   it("runs a command and returns its output and exit code", async () => {
     const { server, target } = await start()
-    const result = await sshExec(target, identity(), run)
+    const { seen, onSeen } = recorder()
+    const result = await sshExec(target, identity, run, onSeen)
 
     expect(result.stdout.toString()).toBe("ran uptime with 0 bytes\n")
     expect(result.stderr.toString()).toBe("a warning\n")
@@ -93,159 +86,129 @@ describe("sshExec", () => {
     expect(result.truncated).toBe(false)
     expect(server.logins).toEqual(["deploy"])
     expect(server.commands).toEqual(["uptime"])
+    // The host key, once the server proved it holds it.
+    expect(seen).toEqual([{ hostKey: server.hostKey }])
   })
 
   it("sends standard input past the server's window", async () => {
     const { target } = await start()
-    const result = await sshExec(target, identity(), {
-      ...run,
-      command: "wc -c",
-      stdin: Buffer.alloc(300_000, 1),
-    })
+    const result = await sshExec(
+      target,
+      identity,
+      { ...run, command: "wc -c", stdin: Buffer.alloc(300_000, 1) },
+      recorder().onSeen,
+    )
 
     expect(result.stdout.toString()).toBe("ran wc -c with 300000 bytes\n")
   })
 
   it("reports the signal that ended a command", async () => {
     const { target } = await start({ run: () => ({ signal: "KILL" }) })
-    const result = await sshExec(target, identity(), run)
+    const result = await sshExec(target, identity, run, recorder().onSeen)
 
     expect(result.exitCode).toBeNull()
     expect(result.signal).toBe("KILL")
   })
 
-  it("stops a command that writes more than it may", async () => {
+  it("stops collecting from a command that writes more than it may", async () => {
     const { target } = await start({ run: () => ({ flood: true }) })
-    const result = await sshExec(target, identity(), {
-      ...run,
-      maxOutputBytes: 100_000,
-    })
+    const result = await sshExec(
+      target,
+      identity,
+      { ...run, maxOutputBytes: 100_000 },
+      recorder().onSeen,
+    )
 
     expect(result.truncated).toBe(true)
     expect(result.stdout.length).toBe(100_000)
+    await expect.poll(() => server!.signals).toEqual(["TERM"])
   })
 
-  it("stops a command that runs out of time", async () => {
+  it("stops waiting for a command that runs out of time", async () => {
     const { target } = await start({ run: () => ({ hang: true }) })
-    const result = await sshExec(target, identity(), {
-      ...run,
-      timeoutMs: 300,
-    })
+    const result = await sshExec(
+      target,
+      identity,
+      { ...run, timeoutMs: 300 },
+      recorder().onSeen,
+    )
 
     expect(result.timedOut).toBe(true)
     expect(result.exitCode).toBeNull()
-  })
-
-  it("stops waiting for a server that never opens the session", async () => {
-    const { target } = await start({ stallSession: true })
-    const result = await sshExec(target, identity(), {
-      ...run,
-      timeoutMs: 300,
-    })
-
-    expect(result.timedOut).toBe(true)
-  })
-
-  it("works with a server that does not offer strict key exchange", async () => {
-    const { target } = await start({ strict: false })
-    const result = await sshExec(target, identity(), run)
-
-    expect(result.exitCode).toBe(3)
+    // Asked to end, not just left: standard input had been sent already.
+    await expect.poll(() => server!.signals).toEqual(["TERM"])
   })
 })
 
-describe("the server's host certificate", () => {
-  it("refuses a server with a plain host key", async () => {
-    const { server, target } = await start({ hostCertificate: null })
+describe("the host key", () => {
+  it("connects when the pinned key is the one the server shows", async () => {
+    const { target } = await start({}, "right")
 
-    await expect(sshCheck(target, identity())).rejects.toThrow(
-      /presents no host certificate/,
+    await expect(
+      sshCheck(target, identity, recorder().onSeen),
+    ).resolves.toBeUndefined()
+  })
+
+  it("refuses a server that shows another key than the pinned one", async () => {
+    const { server, target } = await start({}, "wrong")
+    const { seen, onSeen } = recorder()
+
+    await expect(sshCheck(target, identity, onSeen)).rejects.toThrow(
+      SshHostKeyError,
     )
     expect(server.logins).toEqual([])
+    // A key that did not match is never reported as one to pin.
+    expect(seen).toEqual([{ hostKey: null }])
   })
 
-  it("refuses a certificate from another CA", async () => {
-    const { target } = await start({
-      hostCertificate: hostCertificate({ ca: makeEd25519() }),
-    })
+  it("reports the host key even when the server turns PCP's key down", async () => {
+    const { server, target } = await start({ authorizedKey: () => null })
+    const { seen, onSeen } = recorder()
 
-    await expect(sshCheck(target, identity())).rejects.toThrow(
-      /CA you have not given PCP/,
+    await expect(sshCheck(target, identity, onSeen)).rejects.toThrow(
+      SshAuthError,
     )
+    expect(seen).toEqual([{ hostKey: server.hostKey }])
   })
 
-  it("refuses a certificate for another host", async () => {
-    const { target } = await start({
-      hostCertificate: hostCertificate({ principals: ["other.example"] }),
+  it("keeps a test server's own host key when given one", async () => {
+    const hostKey = makeHostKey()
+    const first = await startFakeSsh({
+      hostKey,
+      authorizedKey: () => null,
+      run: () => ({}),
     })
+    const shown = first.hostKey
+    await first.close()
 
-    await expect(sshCheck(target, identity())).rejects.toThrow(SshHostError)
-  })
-
-  it("refuses an expired certificate, and a user certificate", async () => {
-    const expired = await start({
-      hostCertificate: hostCertificate({ validBefore: nowSeconds() - HOUR }),
-    })
-    await expect(sshCheck(expired.target, identity())).rejects.toThrow(
-      /expired/,
-    )
-    await expired.server.close()
-
-    const user = await start({
-      hostCertificate: hostCertificate({ type: "user" }),
-    })
-    await expect(sshCheck(user.target, identity())).rejects.toThrow(
-      /not a host certificate/,
-    )
-  })
-
-  it("refuses a server that cannot prove it holds the certified key", async () => {
-    const { server, target } = await start({ wrongHostSignature: true })
-
-    await expect(sshCheck(target, identity())).rejects.toThrow(
-      /could not prove it holds the key/,
-    )
-    expect(server.logins).toEqual([])
-  })
-
-  it("names the host and its CA when it checks out", async () => {
-    const { target } = await start({
-      hostCertificate: hostCertificate({ keyId: "web-1" }),
-    })
-
-    await expect(sshCheck(target, identity())).resolves.toMatchObject({
-      keyId: "web-1",
-      authority: expect.stringMatching(/^SHA256:/),
-    })
+    const { server } = await start({ hostKey })
+    expect(server.hostKey).toBe(shown)
   })
 })
 
-describe("PCP's certificate", () => {
-  it("is turned down when the server does not trust its CA", async () => {
+describe("signing in", () => {
+  it("is refused for another login, or a key the server does not have", async () => {
     const { server, target } = await start()
 
     await expect(
-      sshCheck(target, identity({ ca: makeEd25519() })),
+      sshCheck({ ...target, username: "root" }, identity, recorder().onSeen),
+    ).rejects.toThrow(/turned down PCP's key for root/)
+    await expect(
+      sshCheck(
+        target,
+        { privateKey: generateOwnKey("other").privateKey },
+        recorder().onSeen,
+      ),
     ).rejects.toThrow(SshAuthError)
     expect(server.logins).toEqual([])
   })
 
-  it("is not offered when it is for another login, expired or another key", async () => {
+  it("fails on a port nothing listens on", async () => {
     const { server, target } = await start()
+    await server.close()
 
-    await expect(
-      sshCheck(target, identity({ principals: ["root"] })),
-    ).rejects.toThrow(/not for deploy/)
-    await expect(
-      sshCheck(target, identity({ validBefore: nowSeconds() - HOUR })),
-    ).rejects.toThrow(/expired/)
-    await expect(
-      sshCheck(target, {
-        key: generateOwnKey().key,
-        certificate: identity().certificate,
-      }),
-    ).rejects.toThrow(/another key than PCP's/)
-    // None of them got as far as connecting.
-    expect(server.logins).toEqual([])
+    await expect(sshCheck(target, identity, recorder().onSeen)).rejects.toThrow(
+      /ECONNREFUSED/,
+    )
   })
 })

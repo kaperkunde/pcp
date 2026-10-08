@@ -21,7 +21,6 @@ export type SshServerFormValues = {
   host: string
   port: string
   username: string
-  hostCas: string
 }
 
 export const EMPTY_SSH_SERVER: SshServerFormValues = {
@@ -30,14 +29,13 @@ export const EMPTY_SSH_SERVER: SshServerFormValues = {
   host: "",
   port: "22",
   username: "",
-  hostCas: "",
 }
 
 /**
- * Add or edit an SSH server: where it is, the login, and the CA that signs
- * its host certificate. PCP's own key and the certificate for it are on the
- * server's page once it exists. Fields are held in state so a refused
- * submit keeps what was typed.
+ * Add or edit an SSH server: where it is and the login. PCP's own key, to
+ * add on the server, and the host key it pinned are on the server's page
+ * once it exists. Fields are held in state so a refused submit keeps what
+ * was typed.
  */
 export function SshServerForm({ initial }: { initial: SshServerFormValues }) {
   const editing = Boolean(initial.id)
@@ -53,7 +51,6 @@ export function SshServerForm({ initial }: { initial: SshServerFormValues }) {
   const [host, setHost] = useState(initial.host)
   const [port, setPort] = useState(initial.port)
   const [username, setUsername] = useState(initial.username)
-  const [hostCas, setHostCas] = useState(initial.hostCas)
 
   return (
     <Card>
@@ -104,11 +101,7 @@ export function SshServerForm({ initial }: { initial: SshServerFormValues }) {
             />
           </Field>
           <div className="grid gap-4 sm:grid-cols-[1fr_8rem_1fr]">
-            <Field
-              label="Host"
-              htmlFor={`${prefix}-host`}
-              hint="As its host certificate names it."
-            >
+            <Field label="Host" htmlFor={`${prefix}-host`}>
               <Input
                 id={`${prefix}-host`}
                 name="host"
@@ -134,7 +127,7 @@ export function SshServerForm({ initial }: { initial: SshServerFormValues }) {
             <Field
               label="Login"
               htmlFor={`${prefix}-username`}
-              hint="One of the principals you sign PCP's certificate for."
+              hint="The account PCP's key goes in."
             >
               <Input
                 id={`${prefix}-username`}
@@ -148,24 +141,6 @@ export function SshServerForm({ initial }: { initial: SshServerFormValues }) {
               />
             </Field>
           </div>
-          <Field
-            label="Host CA"
-            htmlFor={`${prefix}-host-cas`}
-            hint="The public key of the CA that signs the server's host certificate (its .pub file, or the @cert-authority line from known_hosts); one per line for more than one. PCP connects only when the server presents a host certificate from one of them, for this host: there is no accepting a host key on first sight."
-          >
-            <Textarea
-              id={`${prefix}-host-cas`}
-              name="hostCas"
-              value={hostCas}
-              onChange={(event) => setHostCas(event.target.value)}
-              required
-              rows={3}
-              spellCheck={false}
-              className="font-mono text-xs"
-              placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA… host-ca"
-            />
-          </Field>
-
           <FormError error={state.status === "error" ? state.error : null} />
           <FormNote message={state.status === "ok" ? state.message : null} />
           <div>

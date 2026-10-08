@@ -6,8 +6,8 @@ import { redirect } from "next/navigation"
 import { getServer, renameServerSlug } from "@/lib/core/servers"
 import {
   createSshServer,
+  forgetSshHostKey,
   replaceSshKey,
-  setSshCertificate,
   updateSshServer,
   type SshServerInput,
 } from "@/lib/core/ssh/hosts"
@@ -19,9 +19,9 @@ import { requireContext } from "@/lib/server/session"
 import type { ServerActionResult } from "./servers"
 
 /**
- * Adding and editing SSH servers, and giving PCP its certificate. Checking,
- * enabling and removing one use the server actions in ./servers: an SSH
- * server is a server to them.
+ * Adding and editing SSH servers, PCP's key for one and the host key it
+ * pinned. Checking, enabling and removing one use the server actions in
+ * ./servers: an SSH server is a server to them.
  */
 
 function inputFrom(formData: FormData): SshServerInput {
@@ -31,7 +31,6 @@ function inputFrom(formData: FormData): SshServerInput {
     host: field(formData, "host"),
     port: field(formData, "port") || null,
     username: field(formData, "username"),
-    hostCas: field(formData, "hostCas"),
   }
 }
 
@@ -64,8 +63,8 @@ export async function createSshServerAction(
     return result
   }
 
-  // Stores its tool; there is no certificate yet, so the page opens with
-  // PCP's key to sign.
+  // Stores its tool and pins the host key. Signing in fails until the owner
+  // adds PCP's key on the server, which the page then says.
   await check(ctx, result.id)
 
   revalidatePath("/servers")
@@ -96,16 +95,16 @@ export async function updateSshServerAction(
   return result
 }
 
-export async function setSshCertificateAction(
-  _previous: ServerActionResult,
-  formData: FormData,
+export async function forgetSshHostKeyAction(
+  id: string,
 ): Promise<ServerActionResult> {
   const ctx = await requireContext()
-  const id = field(formData, "id")
 
   const result = await guarded(async () => {
-    await setSshCertificate(ctx, id, field(formData, "certificate"))
-    return { message: `Certificate saved. ${await check(ctx, id)}` }
+    await forgetSshHostKey(ctx, id)
+    return {
+      message: `Forgotten, and PCP pinned the key the server shows now: check its fingerprint against the server's own. ${await check(ctx, id)}`,
+    }
   })
 
   revalidate(id)
@@ -121,7 +120,7 @@ export async function replaceSshKeyAction(
     await replaceSshKey(ctx, id)
     return {
       message:
-        "PCP has a new key and has forgotten the old one. Sign the new key with your user CA and paste its certificate. If the old key may have been copied, revoke its certificate on the server (RevokedKeys).",
+        "PCP has a new key and has forgotten the old one. Put the new key in authorized_keys on the server in place of the old one.",
     }
   })
 

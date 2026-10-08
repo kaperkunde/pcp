@@ -87,19 +87,16 @@ export function ServerStatusBadge({
     }
   }
 
-  // An SSH server needs the owner's certificate before anything else, and
-  // then is checked by signing in: the certificate or the host can fail.
+  // An SSH server is checked by signing in with PCP's key: the server can
+  // refuse the key (not added yet), or show another host key than the one
+  // PCP pinned.
   if (kind === "ssh") {
-    if (!connected) {
-      return <Badge variant="warning">Needs a certificate</Badge>
-    }
-
     switch (status) {
       case "ok":
         return <Badge>Ready</Badge>
       case "auth_required":
       case "refused":
-        return <Badge variant="warning">Certificate refused</Badge>
+        return <Badge variant="warning">Key not accepted</Badge>
       case "error":
         return <Badge variant="destructive">Not connected</Badge>
       default:

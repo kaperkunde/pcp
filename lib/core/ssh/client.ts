@@ -1,117 +1,86 @@
-import { connect as netConnect } from "node:net"
-import type { Duplex } from "node:stream"
+import { Client, type ClientChannel, type ConnectConfig } from "ssh2"
 
 import { PCP_VERSION } from "../version"
-import {
-  certificateProblem,
-  fingerprint,
-  signEd25519,
-  verifySignature,
-  type OwnKey,
-  type SshCertificate,
-  type SshPublicKey,
-  parseCertificateBlob,
-} from "./keys"
-import {
-  CHANNEL_MAX_PACKET,
-  CHANNEL_WINDOW,
-  SSH_CONNECT_TIMEOUT_MS,
-} from "./limits"
-import {
-  CIPHER_NAMES,
-  DISCONNECT,
-  KEX_ALGORITHMS,
-  MSG,
-  PacketStream,
-  SshProtocolError,
-  STRICT_KEX_CLIENT,
-  STRICT_KEX_SERVER,
-  choose,
-  deriveKeys,
-  disconnectPayload,
-  ephemeralKey,
-  exchangeHash,
-  readDisconnect,
-  readKexInit,
-  sharedSecret,
-  writeKexInit,
-  type CipherName,
-} from "./transport"
-import { SshFormatError, SshReader, SshWriter } from "./wire"
+import { hostKeyLine } from "./keys"
+import { SSH_CONNECT_TIMEOUT_MS } from "./limits"
 
 /**
- * PCP's SSH client: one connection per call, signed in with a certificate
- * and nothing else, to a server that proves itself with a certificate and
- * nothing else.
+ * PCP's SSH connections, through ssh2: one connection per call, signed in
+ * with PCP's own key and nothing else, to a host whose key is the one PCP
+ * pinned.
  *
- * - The server's host key is accepted only as an OpenSSH host certificate
- *   (the key exchange offers no plain host key type at all), signed by one
- *   of the CAs the owner gave, valid now, naming the host PCP dialled, with
- *   no critical option PCP does not know. There is no trust on first use
- *   and no known_hosts: a server without such a certificate is refused.
- * - PCP signs in with publickey, offering only its user certificate (its
- *   own Ed25519 key, signed by the owner's CA). No password, no keyboard
- *   interaction, no bare key; a server that wants anything else is refused.
- * - It opens one session channel and runs one command with `exec`: no
- *   shell, no terminal, no forwarding of any kind, no agent.
+ * - The host key is checked against the pin when there is one. Without
+ *   one, the key the server shows is taken, but reported as seen only after
+ *   the key exchange has finished: ssh2 asks hostVerifier before it checks
+ *   the server's signature, so a key is worth keeping only once the
+ *   `handshake` event says the server proved it holds it.
+ * - Only publickey: no password, no keyboard-interactive, no agent.
+ * - One session channel, one command with `exec`: no terminal, no
+ *   forwarding of any kind, no file transfer.
  */
 
-const CLIENT_ID = `SSH-2.0-PCP_${PCP_VERSION.replace(/[^A-Za-z0-9.]/g, "_")}`
+/** Modern algorithms only: ssh2's defaults still carry SHA-1 ones. */
+const ALGORITHMS: ConnectConfig["algorithms"] = {
+  kex: [
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+    "diffie-hellman-group16-sha512",
+    "diffie-hellman-group18-sha512",
+    "diffie-hellman-group14-sha256",
+  ],
+  serverHostKey: [
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "rsa-sha2-512",
+    "rsa-sha2-256",
+  ],
+  cipher: [
+    "chacha20-poly1305@openssh.com",
+    "aes256-gcm@openssh.com",
+    "aes128-gcm@openssh.com",
+    "aes256-ctr",
+    "aes192-ctr",
+    "aes128-ctr",
+  ],
+  hmac: [
+    "hmac-sha2-256-etm@openssh.com",
+    "hmac-sha2-512-etm@openssh.com",
+    "hmac-sha2-256",
+    "hmac-sha2-512",
+  ],
+  compress: ["none"],
+}
 
-/** Host key types offered, all certificates; with the signature each uses. */
-const HOST_KEY_ALGORITHMS = {
-  "ssh-ed25519-cert-v01@openssh.com": {
-    certificate: "ssh-ed25519-cert-v01@openssh.com",
-    signature: "ssh-ed25519",
-  },
-  "ecdsa-sha2-nistp256-cert-v01@openssh.com": {
-    certificate: "ecdsa-sha2-nistp256-cert-v01@openssh.com",
-    signature: "ecdsa-sha2-nistp256",
-  },
-  "ecdsa-sha2-nistp384-cert-v01@openssh.com": {
-    certificate: "ecdsa-sha2-nistp384-cert-v01@openssh.com",
-    signature: "ecdsa-sha2-nistp384",
-  },
-  "ecdsa-sha2-nistp521-cert-v01@openssh.com": {
-    certificate: "ecdsa-sha2-nistp521-cert-v01@openssh.com",
-    signature: "ecdsa-sha2-nistp521",
-  },
-  "rsa-sha2-512-cert-v01@openssh.com": {
-    certificate: "ssh-rsa-cert-v01@openssh.com",
-    signature: "rsa-sha2-512",
-  },
-  "rsa-sha2-256-cert-v01@openssh.com": {
-    certificate: "ssh-rsa-cert-v01@openssh.com",
-    signature: "rsa-sha2-256",
-  },
-} as const
-
-export const HOST_CERTIFICATE_TYPES = Object.keys(HOST_KEY_ALGORITHMS)
-
-/** Where to connect and whom to trust there. */
+/** Where to connect, as whom, and the host key PCP pinned, if any. */
 export type SshTarget = {
   host: string
   port: number
   username: string
-  /** The CAs whose host certificates PCP accepts for this server. */
-  hostAuthorities: SshPublicKey[]
+  /** `type base64`; null until PCP first finished a key exchange there. */
+  hostKey: string | null
 }
 
-/** PCP's key and the certificate the owner's CA made for it. */
-export type SshIdentity = {
-  key: OwnKey
-  certificate: SshCertificate
-}
+/** PCP's private key for the server, in OpenSSH's format. */
+export type SshIdentity = { privateKey: string }
 
-/** The server's host certificate did not check out. */
-export class SshHostError extends Error {
-  constructor(message: string) {
+/** The server showed another host key than the one PCP pinned. */
+export class SshHostKeyError extends Error {
+  constructor(
+    message: string,
+    /** The key it showed, `type base64`. */
+    readonly shown: string,
+  ) {
     super(message)
-    this.name = "SshHostError"
+    this.name = "SshHostKeyError"
   }
 }
 
-/** The server turned down PCP's certificate, or it cannot be used. */
+/** The server turned PCP's key down. */
 export class SshAuthError extends Error {
   constructor(message: string) {
     super(message)
@@ -126,368 +95,100 @@ export class SshTimeoutError extends Error {
   }
 }
 
-export type SshDeps = {
-  connect: (host: string, port: number) => Duplex
-  now: () => Date
-}
+/**
+ * What a connection learned about the host, whether or not signing in
+ * worked: the key it proved it holds (null when the key exchange did not
+ * finish).
+ */
+export type HostSeen = { hostKey: string | null }
 
-export const defaultSshDeps: SshDeps = {
-  connect: (host, port) => netConnect({ host, port }),
-  now: () => new Date(),
-}
-
-/** What the host proved itself with, for the owner's page. */
-export type HostProof = {
-  keyId: string
-  fingerprint: string
-  authority: string
-}
-
-type Session = {
-  stream: PacketStream
-  host: HostProof
-  /** The next message that is not transport upkeep. */
-  message: () => Promise<Buffer>
-  close: () => void
-}
-
-/** Why PCP's own certificate cannot be used for this login, if it cannot. */
-export function identityProblem(
-  identity: SshIdentity,
-  username: string,
-  now: Date,
-): string | null {
-  if (
-    !identity.certificate.publicKey.blob.equals(identity.key.publicKey.blob)
-  ) {
-    return "The certificate is for another key than PCP's."
-  }
-
-  return certificateProblem(identity.certificate, {
-    type: "user",
-    principal: username,
-    authorities: null,
-    now,
-  })
-}
-
-/** Transport messages handled the same way at every step. */
-function upkeep(stream: PacketStream, payload: Buffer): boolean {
-  switch (payload[0]) {
-    case MSG.IGNORE:
-    case MSG.DEBUG:
-    case MSG.UNIMPLEMENTED:
-    case MSG.EXT_INFO:
-      return true
-    case MSG.DISCONNECT:
-      throw readDisconnect(payload)
-    case MSG.KEXINIT:
-      throw new SshProtocolError(
-        "The server asked to exchange keys again, which PCP does not do within one command.",
-      )
-    case MSG.GLOBAL_REQUEST: {
-      const reader = new SshReader(payload)
-      reader.byte()
-      reader.string()
-      if (reader.boolean()) {
-        stream.send(Buffer.from([MSG.REQUEST_FAILURE]))
-      }
-      return true
-    }
-    default:
-      return false
-  }
-}
-
-async function handshake(
-  stream: PacketStream,
-  target: SshTarget,
-  now: Date,
-): Promise<{ sessionId: Buffer; host: HostProof }> {
-  stream.writeIdentification(CLIENT_ID)
-  const serverId = await stream.readIdentification()
-
-  const clientKexInit = writeKexInit({
-    kex: [...KEX_ALGORITHMS, STRICT_KEX_CLIENT],
-    hostKey: HOST_CERTIFICATE_TYPES,
-    ciphers: CIPHER_NAMES,
-  })
-  stream.send(clientKexInit)
-
-  // Strict or not, the key exchange is the first thing a server sends.
-  const serverInit = readKexInit(await stream.next())
-  const strict = serverInit.kex.includes(STRICT_KEX_SERVER)
-  const kexMessage = async (): Promise<Buffer> => {
-    for (;;) {
-      const payload = await stream.next()
-
-      if (payload[0] === MSG.DISCONNECT) {
-        throw readDisconnect(payload)
-      }
-
-      // Without strict key exchange these may come in between; with it,
-      // nothing may (CVE-2023-48795).
-      if (!strict && (payload[0] === MSG.IGNORE || payload[0] === MSG.DEBUG)) {
-        continue
-      }
-
-      return payload
-    }
-  }
-
-  const kex = choose(KEX_ALGORITHMS, serverInit.kex, "key exchange")
-  let hostAlgorithm: keyof typeof HOST_KEY_ALGORITHMS
-
-  try {
-    hostAlgorithm = choose(
-      HOST_CERTIFICATE_TYPES,
-      serverInit.hostKey,
-      "host certificate",
-    ) as keyof typeof HOST_KEY_ALGORITHMS
-  } catch {
-    throw new SshHostError(
-      `${target.host} presents no host certificate, only plain host keys (${serverInit.hostKey.join(", ") || "none"}). PCP connects only to a server whose host key is certified by your CA.`,
-    )
-  }
-
-  const cipherOut = choose(CIPHER_NAMES, serverInit.cipherOut, "cipher")
-  const cipherIn = choose(CIPHER_NAMES, serverInit.cipherIn, "cipher")
-
-  // A server that guessed our choices wrong sends a packet to be ignored.
-  if (
-    serverInit.firstFollows &&
-    (serverInit.kex[0] !== kex || serverInit.hostKey[0] !== hostAlgorithm)
-  ) {
-    await kexMessage()
-  }
-
-  const ephemeral = ephemeralKey()
-  stream.send(
-    new SshWriter()
-      .byte(MSG.KEX_ECDH_INIT)
-      .string(ephemeral.publicRaw)
-      .toBuffer(),
-  )
-
-  const reply = await kexMessage()
-  if (reply[0] !== MSG.KEX_ECDH_REPLY) {
-    throw new SshProtocolError("The server did not answer the key exchange.")
-  }
-
-  const reader = new SshReader(reply)
-  reader.byte()
-  const hostKeyBlob = reader.string()
-  const serverPublic = reader.string()
-  const signature = reader.string()
-  reader.end()
-
-  const expected = HOST_KEY_ALGORITHMS[hostAlgorithm]
-  let certificate: SshCertificate
-
-  try {
-    certificate = parseCertificateBlob(hostKeyBlob)
-  } catch (error) {
-    throw new SshHostError(
-      `${target.host}'s host certificate cannot be read: ${error instanceof Error ? error.message : "it is malformed"}`,
-    )
-  }
-
-  if (certificate.type !== expected.certificate) {
-    throw new SshHostError(
-      `${target.host} sent a ${certificate.type} where it agreed to a ${expected.certificate}.`,
-    )
-  }
-
-  const problem = certificateProblem(certificate, {
-    type: "host",
-    principal: target.host,
-    authorities: target.hostAuthorities,
-    now,
-  })
-  if (problem) {
-    throw new SshHostError(
-      `${target.host}'s host certificate is not accepted. ${problem}`,
-    )
-  }
-
-  const secret = sharedSecret(ephemeral.privateKey, serverPublic)
-  const hash = exchangeHash({
-    clientId: CLIENT_ID,
-    serverId,
-    clientKexInit,
-    serverKexInit: serverInit.payload,
-    hostKey: hostKeyBlob,
-    clientPublic: ephemeral.publicRaw,
-    serverPublic,
-    secret,
-  })
-
-  // Proves the server holds the private half of the certified key.
-  if (
-    !verifySignature(certificate.publicKey, signature, hash, expected.signature)
-  ) {
-    throw new SshHostError(
-      `${target.host} could not prove it holds the key its certificate names.`,
-    )
-  }
-
-  const keys = deriveKeys(secret, hash, hash)
-  stream.send(Buffer.from([MSG.NEWKEYS]))
-  stream.encryptWith(cipherOut as CipherName, keys.clientKey, keys.clientIv)
-
-  const newKeys = await kexMessage()
-  if (newKeys[0] !== MSG.NEWKEYS || newKeys.length !== 1) {
-    throw new SshProtocolError("The server did not finish the key exchange.")
-  }
-  stream.decryptWith(cipherIn as CipherName, keys.serverKey, keys.serverIv)
-
-  return {
-    sessionId: hash,
-    host: {
-      keyId: certificate.keyId,
-      fingerprint: fingerprint(certificate.publicKey),
-      authority: fingerprint(certificate.signatureKey),
-    },
-  }
-}
-
-async function signIn(
-  stream: PacketStream,
-  target: SshTarget,
-  identity: SshIdentity,
-  sessionId: Buffer,
-  message: () => Promise<Buffer>,
-): Promise<void> {
-  stream.send(
-    new SshWriter().byte(MSG.SERVICE_REQUEST).string("ssh-userauth").toBuffer(),
-  )
-
-  const accepted = await message()
-  if (accepted[0] !== MSG.SERVICE_ACCEPT) {
-    throw new SshProtocolError("The server did not offer to sign PCP in.")
-  }
-
-  const algorithm = identity.certificate.type
-  const signed = new SshWriter()
-    .string(sessionId)
-    .byte(MSG.USERAUTH_REQUEST)
-    .string(target.username)
-    .string("ssh-connection")
-    .string("publickey")
-    .boolean(true)
-    .string(algorithm)
-    .string(identity.certificate.blob)
-    .toBuffer()
-
-  stream.send(
-    new SshWriter()
-      .byte(MSG.USERAUTH_REQUEST)
-      .string(target.username)
-      .string("ssh-connection")
-      .string("publickey")
-      .boolean(true)
-      .string(algorithm)
-      .string(identity.certificate.blob)
-      .string(signEd25519(identity.key.privateKey, signed))
-      .toBuffer(),
-  )
-
-  for (;;) {
-    const answer = await message()
-
-    switch (answer[0]) {
-      case MSG.USERAUTH_BANNER:
-        continue
-      case MSG.USERAUTH_SUCCESS:
-        return
-      case MSG.USERAUTH_FAILURE:
-        throw new SshAuthError(
-          `${target.host} turned down PCP's certificate for ${target.username}. Check that the server trusts your user CA (TrustedUserCAKeys) and that ${target.username} is one of the certificate's principals.`,
-        )
-      default:
-        throw new SshProtocolError("The server answered the sign-in oddly.")
-    }
-  }
-}
+type Session = { client: Client; seen: HostSeen }
 
 /**
- * Connects, checks the host, signs in. Fails within the connect timeout,
- * and on anything the server does that PCP does not expect.
+ * Connects and signs in. `onSeen` hears the host key once the key exchange
+ * has finished, before signing in, so a key is pinned even when the login
+ * is refused (the owner has not added PCP's key yet).
  */
 async function open(
   target: SshTarget,
   identity: SshIdentity,
-  deps: SshDeps,
+  onSeen: (seen: HostSeen) => Promise<void>,
 ): Promise<Session> {
-  const now = deps.now()
-  const problem = identityProblem(identity, target.username, now)
-
-  if (problem) {
-    throw new SshAuthError(`PCP's certificate cannot be used. ${problem}`)
-  }
-
-  const socket = deps.connect(target.host, target.port)
-  const stream = new PacketStream(socket)
-  const timer = setTimeout(
-    () =>
-      stream.fail(
-        new SshTimeoutError(
-          `${target.host}:${target.port} did not finish signing PCP in within ${SSH_CONNECT_TIMEOUT_MS / 1000} seconds.`,
-        ),
-      ),
-    SSH_CONNECT_TIMEOUT_MS,
-  )
-  const close = () => {
-    clearTimeout(timer)
-
-    try {
-      stream.send(disconnectPayload(DISCONNECT.BY_APPLICATION, ""))
-    } catch {
-      // The connection is gone already.
-    }
-
-    stream.close()
-  }
-  const message = async (): Promise<Buffer> => {
-    for (;;) {
-      const payload = await stream.next()
-
-      if (!upkeep(stream, payload)) {
-        return payload
-      }
-    }
-  }
+  const client = new Client()
+  const seen: HostSeen = { hostKey: null }
+  let shown: string | null = null
 
   try {
-    const { sessionId, host } = await handshake(stream, target, now)
-    await signIn(stream, target, identity, sessionId, message)
-    clearTimeout(timer)
-    return { stream, host, message, close }
+    await new Promise<void>((resolve, reject) => {
+      client.on("handshake", () => {
+        // The server has signed the exchange with the key it showed.
+        seen.hostKey = shown
+      })
+      client.on("ready", () => resolve())
+      client.on("error", (error: Error & { level?: string }) => {
+        if (error.level === "client-authentication") {
+          reject(
+            new SshAuthError(
+              `${target.host} turned down PCP's key for ${target.username}. Add PCP's key to ${target.username}'s ~/.ssh/authorized_keys on the server.`,
+            ),
+          )
+        } else if (error.level === "client-timeout") {
+          reject(
+            new SshTimeoutError(
+              `${target.host}:${target.port} did not finish signing PCP in within ${SSH_CONNECT_TIMEOUT_MS / 1000} seconds.`,
+            ),
+          )
+        } else if (shown && target.hostKey && shown !== target.hostKey) {
+          reject(
+            new SshHostKeyError(
+              `${target.host}'s host key is not the one PCP pinned the first time it connected. If the server's key was changed on purpose, forget the old one on its page in PCP; otherwise someone may be in the way.`,
+              shown,
+            ),
+          )
+        } else {
+          reject(error)
+        }
+      })
+      client.on("close", () =>
+        reject(new Error(`${target.host} closed the connection.`)),
+      )
+
+      client.connect({
+        host: target.host,
+        port: target.port,
+        username: target.username,
+        privateKey: identity.privateKey,
+        // Nothing but the key: no password, no keyboard, no agent.
+        authHandler: ["publickey"],
+        tryKeyboard: false,
+        agentForward: false,
+        algorithms: ALGORITHMS,
+        readyTimeout: SSH_CONNECT_TIMEOUT_MS,
+        ident: `PCP_${PCP_VERSION.replace(/[^A-Za-z0-9.]/g, "_")}`,
+        hostVerifier: (key: Buffer) => {
+          shown = hostKeyLine(key)
+          return target.hostKey === null || shown === target.hostKey
+        },
+      })
+    })
   } catch (error) {
-    close()
-    throw asSshError(error)
-  }
-}
-
-function asSshError(error: unknown): unknown {
-  if (error instanceof SshFormatError) {
-    return new SshProtocolError(
-      `The server sent something malformed: ${error.message}`,
-    )
+    client.end()
+    await onSeen(seen)
+    throw error
   }
 
-  return error
+  await onSeen(seen)
+  return { client, seen }
 }
 
 /** Connects and signs in, then leaves: what the server's page checks. */
 export async function sshCheck(
   target: SshTarget,
   identity: SshIdentity,
-  deps: SshDeps = defaultSshDeps,
-): Promise<HostProof> {
-  const session = await open(target, identity, deps)
-  session.close()
-  return session.host
+  onSeen: (seen: HostSeen) => Promise<void>,
+): Promise<void> {
+  const { client } = await open(target, identity, onSeen)
+  client.end()
 }
 
 export type ExecOptions = {
@@ -503,26 +204,60 @@ export type ExecResult = {
   signal: string | null
   stdout: Buffer
   stderr: Buffer
-  /** It wrote more than PCP keeps, and was stopped. */
+  /** It wrote more than PCP keeps. */
   truncated: boolean
   timedOut: boolean
 }
 
 /**
+ * Sends a signal to the command. ssh2's own `channel.signal()` does nothing
+ * once the channel's writable side has ended, which it has as soon as
+ * standard input is sent, so this goes to its protocol layer the way that
+ * method would. The test server records the signals it gets
+ * (client.test.ts), so an ssh2 that moves these fails a test rather than
+ * leaving commands running.
+ */
+function signal(client: Client, channel: ClientChannel, name: string) {
+  const protocol = (
+    client as unknown as {
+      _protocol?: { signal?: (id: number, name: string) => void }
+    }
+  )._protocol
+  const outgoing = (
+    channel as unknown as { outgoing?: { id?: number; state?: string } }
+  ).outgoing
+
+  try {
+    if (
+      typeof protocol?.signal === "function" &&
+      typeof outgoing?.id === "number" &&
+      // "eof" once standard input was sent; a signal is still the
+      // channel's until it is closed.
+      (outgoing.state === "open" || outgoing.state === "eof")
+    ) {
+      protocol.signal(outgoing.id, name)
+    }
+  } catch {
+    // The connection is closing anyway.
+  }
+}
+
+/**
  * Runs one command and collects what it writes until it exits, writes too
  * much, or runs out of time. Either of the last two asks the server to end
- * it (a TERM signal request, which OpenSSH honours for every login but
- * root), closes the channel and the connection, and returns what it wrote
- * so far.
+ * it (a TERM signal, which OpenSSH honours for every login but root),
+ * closes the connection and returns what it wrote so far.
  */
 export async function sshExec(
   target: SshTarget,
   identity: SshIdentity,
   options: ExecOptions,
-  deps: SshDeps = defaultSshDeps,
+  onSeen: (seen: HostSeen) => Promise<void>,
 ): Promise<ExecResult> {
-  const session = await open(target, identity, deps)
-  const { stream, message } = session
+  const { client } = await open(target, identity, onSeen)
+  const stdout: Buffer[] = []
+  const stderr: Buffer[] = []
+  let collected = 0
   const result: ExecResult = {
     exitCode: null,
     signal: null,
@@ -531,224 +266,70 @@ export async function sshExec(
     truncated: false,
     timedOut: false,
   }
-  const stdout: Buffer[] = []
-  const stderr: Buffer[] = []
-  let collected = 0
-  let remoteId: number | null = null
-
-  const channelRequest = (name: string, extra?: (w: SshWriter) => void) => {
-    if (remoteId === null) {
-      return
-    }
-
-    const writer = new SshWriter()
-      .byte(MSG.CHANNEL_REQUEST)
-      .uint32(remoteId)
-      .string(name)
-      .boolean(false)
-    extra?.(writer)
-    stream.send(writer.toBuffer())
-  }
-  const stop = () => {
-    try {
-      channelRequest("signal", (w) => w.string("TERM"))
-      if (remoteId !== null) {
-        stream.send(
-          new SshWriter().byte(MSG.CHANNEL_CLOSE).uint32(remoteId).toBuffer(),
-        )
-      }
-    } catch {
-      // Closing anyway.
-    }
-  }
-
-  // From here on the command's own time runs: a server that never opens
-  // the session is as stuck as a command that never ends.
-  const timer = setTimeout(() => {
-    result.timedOut = true
-    stream.fail(new SshTimeoutError("timed out"))
-  }, options.timeoutMs)
 
   try {
-    stream.send(
-      new SshWriter()
-        .byte(MSG.CHANNEL_OPEN)
-        .string("session")
-        .uint32(0)
-        .uint32(CHANNEL_WINDOW)
-        .uint32(CHANNEL_MAX_PACKET)
-        .toBuffer(),
-    )
+    await new Promise<void>((resolve, reject) => {
+      let channel: ClientChannel | null = null
+      const stop = () => {
+        if (channel) {
+          signal(client, channel, "TERM")
+        }
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        result.timedOut = true
+        stop()
+      }, options.timeoutMs)
+      const take = (into: Buffer[], data: Buffer) => {
+        const room = options.maxOutputBytes - collected
+        into.push(data.subarray(0, Math.max(0, room)))
+        collected += Math.min(data.length, Math.max(0, room))
 
-    const opened = await message()
-    const reader = new SshReader(opened)
-    const type = reader.byte()
+        if (data.length > room && !result.truncated) {
+          result.truncated = true
+          clearTimeout(timer)
+          stop()
+        }
+      }
 
-    if (type === MSG.CHANNEL_OPEN_FAILURE) {
-      reader.uint32()
-      reader.uint32()
-      throw new SshProtocolError(
-        `${target.host} would not open a session: ${reader.text().slice(0, 200) || "no reason given"}.`,
-      )
-    }
+      client.on("error", (error) => {
+        clearTimeout(timer)
+        reject(error)
+      })
+      client.on("close", () => {
+        clearTimeout(timer)
+        resolve()
+      })
 
-    if (type !== MSG.CHANNEL_OPEN_CONFIRMATION || reader.uint32() !== 0) {
-      throw new SshProtocolError("The server answered the session oddly.")
-    }
-
-    const channel = reader.uint32()
-    remoteId = channel
-    let remoteWindow = reader.uint32()
-    const remoteMaxPacket = Math.min(reader.uint32(), CHANNEL_MAX_PACKET)
-    let localWindow = CHANNEL_WINDOW
-
-    stream.send(
-      new SshWriter()
-        .byte(MSG.CHANNEL_REQUEST)
-        .uint32(channel)
-        .string("exec")
-        .boolean(true)
-        .string(options.command)
-        .toBuffer(),
-    )
-
-    let accepted = false
-    let input = options.stdin ?? Buffer.alloc(0)
-    let inputDone = false
-
-    const feed = () => {
-      while (!inputDone && remoteWindow > 0) {
-        if (input.length === 0) {
-          stream.send(
-            new SshWriter().byte(MSG.CHANNEL_EOF).uint32(channel).toBuffer(),
+      client.exec(options.command, { pty: false }, (error, stream) => {
+        if (error) {
+          clearTimeout(timer)
+          reject(
+            new Error(
+              `${target.host} would not run the command: ${error.message}`,
+            ),
           )
-          inputDone = true
           return
         }
 
-        const size = Math.min(input.length, remoteWindow, remoteMaxPacket)
-        stream.send(
-          new SshWriter()
-            .byte(MSG.CHANNEL_DATA)
-            .uint32(channel)
-            .string(input.subarray(0, size))
-            .toBuffer(),
-        )
-        input = input.subarray(size)
-        remoteWindow -= size
-      }
-
-      // An empty remainder still owes the EOF, window or not.
-      if (!inputDone && input.length === 0) {
-        stream.send(
-          new SshWriter().byte(MSG.CHANNEL_EOF).uint32(channel).toBuffer(),
-        )
-        inputDone = true
-      }
-    }
-
-    const take = (into: Buffer[], data: Buffer) => {
-      if (data.length > localWindow || data.length > CHANNEL_MAX_PACKET) {
-        throw new SshProtocolError(
-          "The server sent more than PCP made room for.",
-        )
-      }
-
-      localWindow -= data.length
-      const room = options.maxOutputBytes - collected
-      into.push(data.subarray(0, Math.max(0, room)))
-      collected += Math.min(data.length, Math.max(0, room))
-
-      if (data.length > room) {
-        result.truncated = true
-        return
-      }
-
-      if (localWindow < CHANNEL_WINDOW / 2) {
-        stream.send(
-          new SshWriter()
-            .byte(MSG.CHANNEL_WINDOW_ADJUST)
-            .uint32(channel)
-            .uint32(CHANNEL_WINDOW - localWindow)
-            .toBuffer(),
-        )
-        localWindow = CHANNEL_WINDOW
-      }
-    }
-
-    for (;;) {
-      const payload = await message()
-      const r = new SshReader(payload)
-      const kind = r.byte()
-
-      if (kind < MSG.CHANNEL_WINDOW_ADJUST || kind > MSG.CHANNEL_FAILURE) {
-        throw new SshProtocolError(
-          `The server sent message ${kind} mid-command.`,
-        )
-      }
-
-      if (r.uint32() !== 0) {
-        throw new SshProtocolError(
-          "The server wrote to a channel PCP did not open.",
-        )
-      }
-
-      if (kind === MSG.CHANNEL_SUCCESS && !accepted) {
-        accepted = true
-        feed()
-      } else if (kind === MSG.CHANNEL_FAILURE && !accepted) {
-        throw new SshProtocolError(`${target.host} refused to run the command.`)
-      } else if (kind === MSG.CHANNEL_WINDOW_ADJUST) {
-        remoteWindow = Math.min(remoteWindow + r.uint32(), 0xffffffff)
-        if (accepted) {
-          feed()
-        }
-      } else if (kind === MSG.CHANNEL_DATA) {
-        take(stdout, r.string())
-      } else if (kind === MSG.CHANNEL_EXTENDED_DATA) {
-        const code = r.uint32()
-        const data = r.string()
-        // 1 is stderr; anything else is counted and dropped.
-        take(code === 1 ? stderr : [], data)
-      } else if (kind === MSG.CHANNEL_REQUEST) {
-        const name = r.string().toString("latin1")
-        const wantReply = r.boolean()
-
-        if (name === "exit-status") {
-          result.exitCode = r.uint32()
-        } else if (name === "exit-signal") {
-          result.signal = r.string().toString("latin1").slice(0, 40)
-        } else if (wantReply) {
-          stream.send(
-            new SshWriter()
-              .byte(MSG.CHANNEL_FAILURE)
-              .uint32(channel)
-              .toBuffer(),
-          )
-        }
-      } else if (kind === MSG.CHANNEL_CLOSE) {
-        stream.send(
-          new SshWriter().byte(MSG.CHANNEL_CLOSE).uint32(channel).toBuffer(),
-        )
-        remoteId = null
-        break
-      }
-      // CHANNEL_EOF: the exit status and the close follow.
-
-      if (result.truncated) {
-        stop()
-        break
-      }
-    }
-  } catch (error) {
-    if (!result.timedOut) {
-      throw asSshError(error)
-    }
-
-    stop()
+        channel = stream
+        stream.on("data", (data: Buffer) => take(stdout, data))
+        stream.stderr.on("data", (data: Buffer) => take(stderr, data))
+        stream.on("exit", (code: number | null, signal?: string) => {
+          result.exitCode = typeof code === "number" ? code : null
+          result.signal = signal
+            ? String(signal).replace(/^SIG/, "").slice(0, 40)
+            : null
+        })
+        stream.on("close", () => {
+          clearTimeout(timer)
+          resolve()
+        })
+        stream.end(options.stdin ?? Buffer.alloc(0))
+      })
+    })
   } finally {
-    clearTimeout(timer)
-    session.close()
+    client.end()
   }
 
   result.stdout = Buffer.concat(stdout)
