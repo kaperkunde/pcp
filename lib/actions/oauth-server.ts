@@ -5,9 +5,8 @@ import { revalidatePath } from "next/cache"
 import { PcpError } from "@/lib/core/errors"
 import {
   approveAuthorization,
-  checkAuthorizationRequest,
   denyAuthorization,
-  type AuthorizationParams,
+  recheckAuthorization,
   type AuthorizationRequest,
 } from "@/lib/core/oauth-server/authorize"
 import {
@@ -22,23 +21,21 @@ import { requireSession } from "@/lib/server/session"
 
 /**
  * The owner's answer to an assistant's sign-in (app/oauth/authorize/). The
- * request travels back as the query it came with and is checked again
- * here, client and metadata document included: nothing the page held is
- * taken on trust. Either way the answer is where to send the browser.
+ * request travels back as the query it came with, the return address the
+ * page resolved written in, and is checked again here, client and metadata
+ * document included: nothing the page held is taken on trust, and an app
+ * that reads differently than the owner saw is refused. Either way the
+ * answer is where to send the browser.
  */
 
 export type SignInAnswer = ActionState<{ redirect: string }>
-
-function requestParams(query: string): AuthorizationParams {
-  return Object.fromEntries(new URLSearchParams(query))
-}
 
 /** The checked request, or the redirect that refuses it. */
 async function recheck(
   query: string,
   publicUrl: string,
 ): Promise<{ request: AuthorizationRequest } | { redirect: string }> {
-  const check = await checkAuthorizationRequest(requestParams(query), publicUrl)
+  const check = await recheckAuthorization(query, publicUrl)
 
   if (check.kind === "show") {
     throw new PcpError("validation", check.message)
