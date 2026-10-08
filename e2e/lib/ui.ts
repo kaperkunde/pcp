@@ -256,10 +256,13 @@ type Level = keyof typeof LEVEL_WORDS
  */
 export async function chooseLevel(page: Page, legend: string, level: Level) {
   const group = page.getByRole("group", { name: legend, exact: true })
-  await group.getByText(LEVEL_WORDS[level], { exact: true }).click()
-  const radio = group.getByRole("radio", { name: LEVEL_WORDS[level] })
-  await expect(radio).toBeChecked()
+  const radio = group.getByRole("radio", {
+    name: LEVEL_WORDS[level],
+    exact: true,
+  })
+  await radio.check()
   await expect(radio).toBeEnabled()
+  await expect(radio).toBeChecked()
 }
 
 /** Checks the level a segmented control shows. */
