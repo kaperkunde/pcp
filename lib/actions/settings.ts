@@ -11,7 +11,11 @@ import {
   SETTING_PUBLIC_URL,
   setSetting,
 } from "@/lib/core/settings"
-import { changePassword, rotateRecoveryKey } from "@/lib/core/vault"
+import {
+  changePassword,
+  rotateRecoveryKey,
+  validatePassword,
+} from "@/lib/core/vault"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import {
   confirmPassword,
@@ -61,6 +65,14 @@ export async function changePasswordAction(
 
   if (password !== field(formData, "confirm")) {
     return { status: "error", error: "The new passwords do not match." }
+  }
+
+  // A new password that would be refused is no guess at the current one:
+  // say so before a try is spent on it.
+  const weak = validatePassword(password)
+
+  if (weak) {
+    return { status: "error", error: weak }
   }
 
   // Checking the current password is a guess like any other.

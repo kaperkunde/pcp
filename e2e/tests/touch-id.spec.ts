@@ -192,6 +192,26 @@ test("turns on at sign-in, and signing out everywhere turns it off", async ({
   })
   expect(await savedKey(page)).toMatch(/^pcp_device_/)
 
+  // Turned off in Settings, the app forgets its key too; the sign-in page
+  // offers it again.
+  await page.goto("/settings")
+  await card(page, "Touch ID")
+    .getByRole("button", { name: "Turn off Touch ID" })
+    .click()
+  await expect(
+    card(page, "Touch ID").getByRole("button", { name: "Turn on Touch ID" }),
+  ).toBeVisible()
+  await expect.poll(() => savedKey(page)).toBeNull()
+
+  await lock(page)
+  await page.getByLabel("Password").fill(OWNER_PASSWORD)
+  await page.getByLabel("Unlock with Touch ID from now on").check()
+  await page.getByRole("button", { name: "Unlock", exact: true }).click()
+  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible({
+    timeout: 30_000,
+  })
+  expect(await savedKey(page)).toMatch(/^pcp_device_/)
+
   // Signing out everywhere takes Touch ID with it: the app's key is refused
   // on the next unlock, and forgotten.
   await page.goto("/settings")
