@@ -7,6 +7,7 @@ import { MailAccountForm } from "@/components/mail-account-form"
 import { PageHeader } from "@/components/page-header"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
+import { WrapperForm } from "@/components/wrapper-form"
 import { db } from "@/lib/core/db"
 import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
@@ -22,6 +23,7 @@ import {
   type ServerStatus,
 } from "@/lib/core/servers"
 import { describeOAuthConnection } from "@/lib/core/upstream"
+import { getWrapper, replacedTools } from "@/lib/core/wrappers/admin"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -54,6 +56,8 @@ export default async function ServerPage({
   const endpoint = kind === "openapi"
   const mail = isMailKind(kind)
   const browser = kind === "browser"
+  const wrapper = kind === "wrapper" ? await getWrapper(ctx, { id }) : null
+  const replaced = await replacedTools(ctx, server.id)
   const spec = endpoint
     ? await db().openApiSpec.findUnique({
         where: { serverId: server.id },
@@ -124,13 +128,29 @@ export default async function ServerPage({
             description: tool.description,
             descriptionOverride: tool.descriptionOverride,
             operation: plan ? { method: plan.method, path: plan.path } : null,
+            replacedBy: replaced.get(tool.name) ?? [],
           }
         })}
         notice={notice}
         redirectUrl={redirectUrl}
       />
       <h2 className="text-lg">Settings</h2>
-      {browser ? (
+      {wrapper ? (
+        <WrapperForm
+          initial={{
+            id: wrapper.id,
+            name: wrapper.name,
+            slug: wrapper.slug,
+            description: wrapper.description,
+            definition: JSON.stringify(
+              { tools: wrapper.tools, secrets: wrapper.secrets },
+              null,
+              2,
+            ),
+          }}
+          secretNames={secrets.map((secret) => secret.name)}
+        />
+      ) : browser ? (
         <p className="text-muted-foreground">
           The browser&apos;s name, its tabs and the sign-ins it keeps are on the{" "}
           <Link href="/browser" className="underline">

@@ -1,6 +1,7 @@
 "use client"
 
 import { ChevronRight } from "lucide-react"
+import Link from "next/link"
 import {
   useActionState,
   useEffect,
@@ -35,6 +36,7 @@ import {
   setToolDescriptionAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
+import { showReplacedToolAction } from "@/lib/actions/wrappers"
 import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
 import type { OAuthConnection } from "@/lib/core/upstream"
 import { cn } from "@/lib/utils"
@@ -70,6 +72,8 @@ export type ServerDetailProps = {
     descriptionOverride: string | null
     /** An API endpoint's tool: the request it makes. */
     operation: { method: string; path: string } | null
+    /** Wrappers' tools that stand in for this one in search. */
+    replacedBy?: Array<{ id: string; name: string; tool: string }>
   }>
   notice: { kind: "ok" | "error"; message: string } | null
   /** Where OAuth servers send you back: what a provider's client lists. */
@@ -85,6 +89,7 @@ export function ServerDetail({
   const endpoint = server.kind === "openapi"
   const mail = server.kind === "jmap" || server.kind === "imap"
   const browser = server.kind === "browser"
+  const wrapper = server.kind === "wrapper"
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
   // Kept here rather than in the form: saving moves the server on from
@@ -149,7 +154,7 @@ export function ServerDetail({
               ) : null}
               {/* An uploaded schema has nothing to download again; replace
                   it in the settings below. */}
-              {!endpoint || server.specSource === "url" ? (
+              {!wrapper && (!endpoint || server.specSource === "url") ? (
                 <Button
                   variant="outline"
                   size="sm"
@@ -185,6 +190,8 @@ export function ServerDetail({
             {endpoint ? "Requests go to " : mail ? "Signs in at " : null}
             {browser ? (
               "A headless browser on the machine PCP runs on"
+            ) : wrapper ? (
+              "Programs over your other tools, run in PCP"
             ) : (
               <code className="text-xs">{server.url}</code>
             )}
@@ -266,6 +273,7 @@ export function ServerDetail({
         endpoint={endpoint}
         mail={mail}
         browser={browser}
+        wrapper={wrapper}
       />
 
       <Card>
@@ -278,7 +286,9 @@ export function ServerDetail({
                 ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your mail stays on the server, and secrets you added stay."
                 : browser
                   ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
-                  : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
+                  : wrapper
+                    ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
+                    : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."}
           </CardDescription>
         </CardHeader>
         <CardContent className="items-start">
@@ -310,12 +320,14 @@ function ToolsCard({
   endpoint,
   mail,
   browser,
+  wrapper,
 }: {
   serverId: string
   tools: ServerDetailProps["tools"]
   endpoint: boolean
   mail: boolean
   browser: boolean
+  wrapper: boolean
 }) {
   const [open, setOpen] = useState(false)
   const listId = useId()
@@ -352,7 +364,9 @@ function ToolsCard({
               ? "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
               : browser
                 ? "What an assistant can find with search_tools: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
-                : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
+                : wrapper
+                  ? "What an assistant can find with search_tools: each one runs its program below. For a token, a tool here is blocked wherever a tool it calls is, and asks you wherever one of them asks."
+                  : "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."}
         </CardDescription>
       </CardHeader>
       {tools.length === 0 ? (
@@ -556,6 +570,9 @@ function ToolRow({
           {tool.descriptionOverride ? (
             <span className="text-xs text-primary">edited</span>
           ) : null}
+          {tool.replacedBy && tool.replacedBy.length > 0 ? (
+            <Badge variant="outline">Left out of search</Badge>
+          ) : null}
         </div>
         <Button
           variant="ghost"
@@ -590,6 +607,58 @@ function ToolRow({
           {tool.descriptionOverride ?? tool.description ?? ""}
         </p>
       )}
+      {tool.replacedBy && tool.replacedBy.length > 0 ? (
+        <ReplacedNote
+          serverId={serverId}
+          tool={tool.name}
+          by={tool.replacedBy}
+        />
+      ) : null}
     </li>
+  )
+}
+
+/**
+ * A tool a wrapper stands in for: assistants find the wrapper's instead, and
+ * can still call this one by name. Showing it again takes it out of what
+ * every wrapper replaces.
+ */
+function ReplacedNote({
+  serverId,
+  tool,
+  by,
+}: {
+  serverId: string
+  tool: string
+  by: Array<{ id: string; name: string; tool: string }>
+}) {
+  const [state, action] = useActionState<ServerActionResult, FormData>(
+    showReplacedToolAction,
+    { status: "idle" },
+  )
+
+  return (
+    <form action={action} className="flex flex-col items-start gap-2">
+      <input type="hidden" name="serverId" value={serverId} />
+      <input type="hidden" name="tool" value={tool} />
+      <p className="text-xs text-muted-foreground">
+        Left out of search_tools and list_tools: assistants find{" "}
+        {by.map((entry, index) => (
+          <span key={`${entry.id}/${entry.tool}`}>
+            {index > 0 ? ", " : null}
+            <Link href={`/servers/${entry.id}`} className="underline">
+              {entry.name}
+            </Link>{" "}
+            <code>{entry.tool}</code>
+          </span>
+        ))}{" "}
+        instead. It can still be called by its name.
+      </p>
+      <FormError error={state.status === "error" ? state.error : null} />
+      <FormNote message={state.status === "ok" ? state.message : null} />
+      <SubmitButton size="xs" variant="outline" pendingText="Showing…">
+        Show it in search again
+      </SubmitButton>
+    </form>
   )
 }

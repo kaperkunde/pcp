@@ -825,6 +825,96 @@ printed (up to a million characters) and what it returned come back in the
 answer, and a long part is kept as a result of the token's (the returned
 value as JSON, shown by its handle) rather than cut.
 
+## Wrappers
+
+A wrapper is a server of its own (`mcp_server.kind = "wrapper"`, its url the
+fixed `pcp:wrapper`) whose tools are programs over the vault's other tools:
+a cleaner way to use a long-winded server, written by an assistant or the
+owner. A tool takes fewer arguments, fills in the rest, makes several calls
+as one, cuts an answer to what matters, or puts a secret where an API wants
+it in its arguments. `lib/core/wrappers/` holds it:
+
+- **The definition** (`definition.ts`, the `wrapper_spec` row beside the
+  server, like an endpoint's schema) is each tool's name, description,
+  input schema, hints, program, the tools its program `calls`, and the ones
+  it `replaces`; and the wrapper's secret bindings. Other tools are named by
+  server id, never by short name, so a server added later under the same
+  short name inherits nothing. `resolveDefinition` checks a proposed one
+  whole: every tool named exists (for an assistant, is one of its own it is
+  not blocked from), none is a wrapper's (wrappers do not nest), every
+  program compiles (QuickJS with `compileOnly`, `code/quickjs.ts
+checkSyntax`), nothing has a character that does not show on screen
+  (`hiddenCharacter`, as for shared memories), and the sizes in
+  `wrappers/limits.ts` hold (a program is 20,000 characters at most, for the
+  owner to read). The catalogue's rows for the wrapper's tools are built
+  from it (`catalogue.ts`); the row's `operation` carries the calls and
+  replaced tools, so the gateway reads levels without loading programs.
+- **Running a tool** (`run.ts`) is run_code's machinery with less reach:
+  `code/run.ts runProgram` runs the program in a fresh QuickJS instance,
+  with the caller's arguments handed in as text and parsed inside the engine
+  as `args`, and logs each of its calls under `wrapper`. Its `pcp.call`
+  reaches only the tools listed in that tool's `calls`, at the calling
+  token's own levels, through `runCodeCall` like a run_code call; a call to
+  anything else is an error the program sees. The arguments are checked
+  against the tool's schema at the top level first. What it returns is the
+  tool's answer (a string as it is, anything else as JSON), shaped by
+  `runCall` as any tool's is. Gateway calls and the owner's allowed requests
+  run with `withWrappers(executor)`, which sends a wrapper's tool to its
+  program and every other call to the executor underneath, so a program's
+  own calls can never reach a wrapper.
+- **Levels.** A wrapper's tool never reaches what the token could not:
+  `loadGatewayServers` (`gateway-servers.ts`) gives it the strictest of its
+  own level and of every tool it calls, a tool outside the token's servers
+  counting as blocked. It is blocked for a token wherever one of its calls
+  is, and asks wherever one of them asks. When the owner allows such a call
+  (a `call` request like any other; the page names the tools it may call),
+  the program runs with `approved`, so a call that would ask runs once in
+  that run; one that is blocked stays refused, and nothing asks again inside
+  it. A run that was not allowed by the owner never makes a call that asks.
+  Always allow writes only the wrapper tool's own level, which the
+  strictest-level rule keeps asking while a tool it calls asks.
+- **Secrets** go in only as a placeholder, `{"$secret": "<name>"}`, in a
+  call the program makes, and only where a binding the owner approved names
+  that very place: the secret, the tool (by server id), the argument (a JSON
+  Pointer), how it is written (`{{secret}}` in a template) and the server's
+  address as approved. `run.ts` hands the call the tool's bindings as a
+  grant; `upstream.ts callServerTool` matches every placeholder to one
+  (`placeholders.ts`) before anything is read or sent, refuses any other,
+  refuses a server whose address changed since, never puts one into the
+  browser, reads the value (`readSecretValue`) and writes it in. The values
+  are taken out of the answer (`scrubResult`, `openapi/redact.ts`: text,
+  structured content, text resources, and an endpoint's or a mail account's
+  own redaction), out of errors and out of the status the server page shows,
+  before the program or the assistant sees them. A placeholder in an
+  assistant's own call is refused by `resolveCall`. Scrubbing cannot catch a
+  value a tool transforms or stores and answers with later: the owner's
+  review of the place a secret goes is what decides, and the page says so.
+- **Replacing.** A tool listed in `replaces` (it has to be among the
+  tool's `calls`) is left out of `search_tools`, `list_tools`, `pcp.tools`
+  and the instructions' counts (`listedTools`) for a token while the
+  wrapper's tool is not blocked for it; it can still be called and
+  described by name, and `describe_tool` says what replaced it. The owner
+  shows it again from the server's page (`showReplacedTool`, which takes it
+  out of every wrapper's lists).
+- **Changes** (`admin.ts`). A token made with "propose wrappers"
+  (`api_token.manage_wrappers`, off unless the owner turns it on) gets
+  `get_wrapper`, `create_wrapper`, `update_wrapper` and `delete_wrapper`.
+  Each change is a permission request (`wrapper_change`) and nothing else:
+  it is checked as if it were being made, and the owner is shown every
+  tool new, changed (with the program before) or removed, every schema,
+  call and replaced tool, and every place a secret would go with the
+  server's address (`WrapperShown`, worked out when the request is made, as
+  an endpoint change's is). A secret PCP does not hold yet is typed in on
+  the page, as for `register_server`. `applyWrapperChange` writes exactly
+  what was shown, and only to the wrapper as it was when the owner was
+  asked (`basis`: the definition's hash, name and description), else
+  nothing. The request's row names no server, so deleting the wrapper keeps
+  its outcome. A binding the owner approved keeps its secret through later
+  changes, even if the secret is renamed. Requests are limited to 20 per
+  token in ten minutes and a vault to 50 wrappers. The owner adds and edits
+  wrappers directly on the Servers page (`saveWrapperByOwner`, the same
+  checks, with secrets they hold).
+
 ## Browser
 
 The browser is a server of kind `browser`, one per vault, added by the
@@ -1636,8 +1726,9 @@ An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
 for a token with the right to manage endpoints, `memory` for a token that
-keeps memories, `web_fetch` for a token that fetches web pages, and
-`run_code` for a token that runs code, all above). A request without a valid
+keeps memories, `web_fetch` for a token that fetches web pages, `run_code`
+for a token that runs code, and four for a token that proposes wrappers, all
+above). A request without a valid
 token is answered 401, and a token makes at most 240 requests a minute, one
 message each (`app/mcp/route.ts`). The tools:
 
@@ -1735,7 +1826,8 @@ row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search_tools`, `list_tools` and `describe_tool`, and
 `call_tool` and `run_code` refuse them. The gateway loads the levels by
-token id.
+token id. A wrapper's tool comes out at the strictest of its own level and
+those of the tools it calls (Wrappers, above).
 
 A tool can also have a level for **all tokens** (`vault_tool_access`, the
 "All tokens" box on a token's page), and a token's own level wins over it:

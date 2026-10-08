@@ -49,7 +49,8 @@ so in the summary; the bump itself waits for the request.
   `lib/core/constants.ts` and `import type`. Anything else drags Prisma into
   the browser bundle and the build fails in webpack, not in the dev server.
 - Secrets are decrypted in `lib/core/secrets.ts` and used in
-  `lib/core/upstream.ts`. Nothing returns a secret value to an assistant;
+  `lib/core/upstream.ts` (headers, and a wrapper's bound placeholders).
+  Nothing returns a secret value to an assistant;
   `revealSecret` is for the owner's own screen. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
   header by `upstream.ts` and never read a secret; `openapi/call.ts` scrubs
@@ -159,7 +160,8 @@ so in the summary; the bump itself waits for the request.
   call in the request log, files as handles (read as base64 only when the
   program asks). Listing (`pcp.tools`) shows what `list_tools` would. No credential, network, file
   or timer ever reaches the program, and nothing but strings crosses into
-  it. Its memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
+  it (a wrapper's program gets its arguments the same way, as text). Its
+  memory is capped by the `WebAssembly.Memory` maximum (QuickJS's
   own limit counts nothing in these builds). The sandbox container
   (`code/sandbox.ts`, `sandbox/`, `docker-compose.sandbox.yaml`) is a second
   executor behind the same bridge: PCP only listens on its socket, and only
@@ -178,6 +180,22 @@ so in the summary; the bump itself waits for the request.
   for a while is removed by the cleanup (`lib/core/cleanup/`), which also
   gives the disk back (`cleanup/space.ts`); anything new PCP keeps on disk
   is removed there too.
+- Wrappers (`lib/core/wrappers/`) are servers whose tools are programs the
+  owner approved, run as run_code's are (`code/run.ts runProgram`, a fresh
+  QuickJS instance, `args` handed in as text). A program calls only the
+  tools its definition lists for it, never a wrapper's, at the calling
+  token's own levels; a wrapper's tool comes out at the strictest of its
+  own level and those of the tools it calls (`gateway-servers.ts`), and a
+  call that asks runs only in a call the owner allowed (`approved`). A
+  secret goes in only as `{"$secret": name}` where a binding the owner
+  approved names that tool (by server id), argument and address: matched
+  and written in `upstream.ts`, scrubbed from the answer, errors and status
+  there, refused in an assistant's own call and never put into the browser.
+  An assistant's create, change and delete are a permission request
+  (`wrapper_change`) that shows every program, schema, call, replaced tool
+  and secret place in full and writes only that, to the wrapper as it was
+  (`basis`). Add a test for each new field an assistant can set
+  (`wrappers.test.ts`).
 - The browser (`lib/core/browser/`) runs Chromium for the vault and keeps
   nothing on disk: its sign-ins are the vault's `browser_profile`,
   encrypted, saved only while a request holds the key. Every connection goes
@@ -344,7 +362,8 @@ column with `ALTER TABLE … DROP COLUMN` instead.
 The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
 OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
-signs in to is a "mail account"; a note an
+signs in to is a "mail account"; a server whose tools are programs over the
+others is a "wrapper" ("Wrappers" in the UI); a note an
 assistant keeps between conversations is a "memory", "shared" when every
 assistant reads it; what web_fetch reaches is a "site" (a host), and a level
 every token follows is "for all tokens" ("All tokens" in the UI); unlocking

@@ -42,6 +42,15 @@ export function ServerStatusBadge({
     }
   }
 
+  // A wrapper's tools are built from what you approved: nothing to reach.
+  if (kind === "wrapper") {
+    return status === "error" ? (
+      <Badge variant="destructive">Broken</Badge>
+    ) : (
+      <Badge>Ready</Badge>
+    )
+  }
+
   // The browser is checked by finding Chromium on this machine.
   if (kind === "browser") {
     switch (status) {

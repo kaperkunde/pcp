@@ -229,6 +229,17 @@ export default defineConfig({
       use: signedIn("run-code"),
     },
     {
+      // Wrappers: a token that may propose them gets their tools; a wrapper
+      // over a tool that wants its key as an argument, approved with the key
+      // typed in on the request's page; its tool puts the key in and the
+      // answer shows it redacted; the tool it replaces leaves search until
+      // the owner brings it back.
+      name: "wrappers",
+      testMatch: /wrappers\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("wrappers"),
+    },
+    {
       // The browser: added by the owner, its tools and instructions, a new
       // site asking first, refs to act on a page, a link to another site
       // stopped, the live view with a click on it, hand_over on the

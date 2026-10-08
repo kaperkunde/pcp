@@ -24,7 +24,8 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   reached the upstream and nothing else did. `lateTools` holding
  *   "long_text" adds a tool whose answer is as long as it is asked to be;
  *   "picture" answers JSON with a base64 PNG in it, and "measure" says how
- *   long the text it was given is, for handles moving a file between tools.
+ *   long the text it was given is, for handles moving a file between tools;
+ *   "keyed_echo" takes an API key as an argument and says it back.
  * - `/oauth/mcp` — the same server behind OAuth: an authorization server
  *   with metadata, dynamic client registration, an authorize page that
  *   approves at once, and a token endpoint. Enough for the real SDK flow
@@ -487,6 +488,33 @@ function buildServer(
     // "picture" and "measure" show a file moving between tools by its handle.
     if (name === "picture" || name === "measure") {
       registerHandleTools(server, name, calls, authorization)
+      continue
+    }
+
+    // "keyed_echo" wants its key as an argument, as some APIs' tools do, and
+    // says it back: how the wrapper tests show a secret put in and scrubbed.
+    if (name === "keyed_echo") {
+      server.registerTool(
+        name,
+        {
+          description:
+            "Looks a text up with an API key passed as an argument, and says both back.",
+          inputSchema: z.object({ api_key: z.string(), text: z.string() }),
+          annotations: { readOnlyHint: true },
+        },
+        async ({ api_key, text }) => {
+          calls.push({
+            tool: name,
+            args: { api_key, text },
+            authorization: authorization(),
+          })
+          return {
+            content: [
+              { type: "text", text: `${text} (asked with ${api_key})` },
+            ],
+          }
+        },
+      )
       continue
     }
 
