@@ -76,7 +76,10 @@ function logDay(day: string): void {
 }
 
 describe("the schedule", () => {
-  const now = new Date("2026-10-06T10:00:00Z")
+  // node-cron reads the next runs ahead from the real clock, so the gap to
+  // the first is measured from the real time too: a fixed date here turns
+  // every schedule into one that skips a day once that date is past.
+  const now = new Date()
 
   it("takes five fields that run at least once a day", () => {
     expect(checkCron("*/15 * * * *", now)).toBe("*/15 * * * *")
