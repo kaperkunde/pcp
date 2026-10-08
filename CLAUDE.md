@@ -316,7 +316,8 @@ so in the summary; the bump itself waits for the request.
   at most one, an export never carries it, and recovery, signing out
   everywhere and a restore remove it. It stands in for the password to
   unlock and in `confirmOwner` (a new API token or an app's sign-in, an
-  export, a restore, deleting the vault),
+  export, a restore, deleting the vault, the public address, a new expiry
+  for an expired API token),
   never for a new password, a new recovery key or another Touch ID key:
   only the password and the recovery key decide who gets in. A new place
   that accepts it goes through `confirmOwner`, with a test.
