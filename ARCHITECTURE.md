@@ -1015,7 +1015,12 @@ its cookie, kept in a private folder and handed to Chromium alone, so
 another program on the machine cannot watch the browser or type into it.
 WebGL there is Chromium's software renderer, as headless uses by itself
 (`--enable-unsafe-swiftshader`; without it a windowed Chromium with no
-graphics card has no WebGL at all). An Xvfb that does not start leaves the
+graphics card has no WebGL at all). Chromium's RenderDocument is off there:
+with it (Chromium 153) a script that runs while a new document loads often
+reads the window as 0 by 0 at 0,0 until the window's place reaches it, which
+no desktop's Chrome shows. Chromium keeps only the last `--disable-features`
+it is given, so PCP's list carries Playwright's own too, and a test checks it
+against the playwright-core installed. An Xvfb that does not start leaves the
 browser headless; `PCP_BROWSER_DISPLAY=headless` asks for that. The desktop
 app never uses it: it starts no child process, and runs on a real screen.
 

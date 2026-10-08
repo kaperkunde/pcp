@@ -54,6 +54,51 @@ function state(): DisplayState {
   return holder[DISPLAY]
 }
 
+/**
+ * The features Playwright turns off in every Chromium it launches
+ * (chromiumSwitches.ts in playwright-core). Chromium keeps only the last
+ * --disable-features it is given, so a list of PCP's own has to carry
+ * Playwright's too; display.test.ts checks this one against the
+ * playwright-core installed.
+ */
+export const PLAYWRIGHT_DISABLED_FEATURES = [
+  "AvoidUnnecessaryBeforeUnloadCheckSync",
+  "DestroyProfileOnBrowserClose",
+  "DialMediaRouteProvider",
+  "GlobalMediaControls",
+  "HttpsUpgrades",
+  "LensOverlay",
+  "MediaRouter",
+  "PaintHolding",
+  "ThirdPartyStoragePartitioning",
+  "BlockOriginHeaderModificationOnRedirect",
+  "Translate",
+  "AutoDeElevate",
+  "OptimizationHints",
+  "msForceBrowserSignIn",
+  "msEdgeUpdateLaunchServicesPreferredVersion",
+] as const
+
+/**
+ * Chromium's switches for a window on the virtual display.
+ *
+ * WebGL on Chromium's software renderer, which headless uses by itself:
+ * without it a windowed Chromium on a display with no graphics card has no
+ * WebGL at all.
+ *
+ * RenderDocument off: with it (Chromium 153), every navigation starts a new
+ * document in a new frame, and a script that runs while that document loads
+ * often sees a window of 0 by 0 at 0,0 (outerWidth, outerHeight, screenX,
+ * screenY) until the window's place reaches it a moment later. A site's
+ * check reads those as it loads, and 0 is what no desktop's Chrome shows.
+ */
+export function displaySwitches(): string[] {
+  return [
+    "--enable-unsafe-swiftshader",
+    `--disable-features=${[...PLAYWRIGHT_DISABLED_FEATURES, "RenderDocument"].join(",")}`,
+  ]
+}
+
 /** Uses another Xvfb command (a missing one, to test the fallback). */
 export function setXvfbCommand(command: string | null): void {
   state().command = command
