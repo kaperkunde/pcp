@@ -21,7 +21,8 @@ export default async function RecoverPage() {
       intro={
         <p>
           The recovery key from setup unlocks the vault without the password.
-          Setting a new password signs every browser out. API tokens keep
+          Setting a new password signs every browser out, turns Touch ID off and
+          forgets the public address pinned under Settings. API tokens keep
           working unless you revoke them here too.
         </p>
       }

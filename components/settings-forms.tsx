@@ -1,10 +1,12 @@
 "use client"
 
-import { useActionState, type FormEvent } from "react"
+import { useActionState, useEffect, useState, type FormEvent } from "react"
 
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
+import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { SubmitButton } from "@/components/submit-button"
+import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -27,14 +29,21 @@ import { MIN_PASSWORD_LENGTH } from "@/lib/core/constants"
 export function PublicUrlForm({
   pinned,
   detected,
+  username,
 }: {
   pinned: string
   detected: string
+  username: string
 }) {
-  const [state, action] = useActionState<SettingsResult, FormData>(
-    setPublicUrlAction,
-    { status: "idle" },
-  )
+  // The address typed, while the second form asks for the password.
+  const [draft, setDraft] = useState<string | null>(null)
+  const [saved, setSaved] = useState<string | null>(null)
+
+  function review(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSaved(null)
+    setDraft(String(new FormData(event.currentTarget).get("publicUrl") ?? ""))
+  }
 
   return (
     <Card>
@@ -47,25 +56,109 @@ export function PublicUrlForm({
           when that is not the address others should use.
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <form action={action} className="flex flex-col gap-4">
-          <Field label="Public address" htmlFor="settings-public-url">
-            <Input
-              id="settings-public-url"
-              name="publicUrl"
-              type="url"
-              defaultValue={pinned}
-              placeholder={detected}
-            />
-          </Field>
-          <FormError error={state.status === "error" ? state.error : null} />
-          <FormNote message={state.status === "ok" ? state.message : null} />
-          <div>
-            <SubmitButton pendingText="Saving…">Save</SubmitButton>
-          </div>
+      <CardContent className="flex flex-col gap-6">
+        {/* Two forms, as for a new token: the one with the password holds
+            the account and the password and nothing else. */}
+        <form onSubmit={review}>
+          <fieldset disabled={draft !== null} className="flex flex-col gap-4">
+            <Field label="Public address" htmlFor="settings-public-url">
+              <Input
+                id="settings-public-url"
+                name="publicUrl"
+                type="url"
+                defaultValue={pinned}
+                placeholder={detected}
+              />
+            </Field>
+            <FormNote message={saved} />
+            {draft === null ? (
+              <div>
+                <Button type="submit">Save</Button>
+              </div>
+            ) : null}
+          </fieldset>
         </form>
+        {draft !== null ? (
+          <PublicUrlConfirm
+            address={draft}
+            username={username}
+            idPrefix="public-url"
+            onBack={() => setDraft(null)}
+            onSaved={(message) => {
+              setDraft(null)
+              setSaved(message)
+            }}
+          />
+        ) : null}
       </CardContent>
     </Card>
+  )
+}
+
+/**
+ * The owner's password (or Touch ID) before the public address changes
+ * (setPublicUrlAction). It decides where sign-ins, permission links and the
+ * MCP address point, so a copied session must not be able to move it.
+ */
+export function PublicUrlConfirm({
+  address,
+  username,
+  idPrefix,
+  onBack,
+  onSaved,
+}: {
+  /** The address to pin, or "" to go back to the one requests come in on. */
+  address: string
+  username: string
+  idPrefix: string
+  onBack: () => void
+  onSaved: (message: string) => void
+}) {
+  const [state, action] = useActionState<SettingsResult, FormData>(
+    setPublicUrlAction,
+    { status: "idle" },
+  )
+  const error = state.status === "error" ? state.error : null
+
+  useEffect(() => {
+    if (state.status === "ok") {
+      onSaved(state.message ?? "")
+    }
+    // Once per answer, not again when the parent hands a new callback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state])
+
+  return (
+    <form
+      action={action}
+      className="flex flex-col gap-4 rounded-lg border border-border p-4"
+    >
+      <p className="text-muted-foreground">
+        {address.trim() ? (
+          <>
+            PCP will use <code>{address.trim()}</code> as its public address.
+          </>
+        ) : (
+          "PCP will use the address each request comes in on."
+        )}{" "}
+        Sign-ins, permission links and the address you give assistants follow
+        it, so PCP asks for your password before it changes.
+      </p>
+      <input type="hidden" name="publicUrl" value={address} />
+      <OwnerConfirmFields
+        idPrefix={idPrefix}
+        username={username}
+        error={error}
+        autoFocus
+      />
+      <FormError error={error} />
+      <div className="flex gap-2">
+        <SubmitButton pendingText="Checking…">Confirm</SubmitButton>
+        <Button type="button" variant="outline" onClick={onBack}>
+          Back
+        </Button>
+      </div>
+    </form>
   )
 }
 
@@ -208,9 +301,11 @@ export function SessionsCard() {
       <CardHeader>
         <CardTitle>Sessions</CardTitle>
         <CardDescription>
-          Sign every browser out, including this one, and turn Touch ID off. If
-          you think someone else has had your password or a token, revoke every
-          API token as well; your assistants will need new ones.
+          Sign every browser out, including this one, turn Touch ID off and go
+          back to the address each request comes in on (pin the public address
+          again if you set one). If you think someone else has had your password
+          or a token, revoke every API token as well; your assistants will need
+          new ones.
         </CardDescription>
       </CardHeader>
       <CardContent className="items-start">

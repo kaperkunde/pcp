@@ -15,6 +15,7 @@ import {
   unlockWithPassword,
 } from "./keys"
 import { destroyAllSessions } from "./sessions"
+import { SETTING_PUBLIC_URL, setSetting } from "./settings"
 
 /**
  * The vault: one per person. The single-user product has exactly one, made
@@ -190,10 +191,35 @@ export async function changePassword(
 }
 
 /**
- * Sets a new password from the recovery key. Every session is signed out and
- * Touch ID is turned off. API tokens hold their own copy of the key and keep
- * working, unless `revokeApiTokens` is set: the choice for someone who
- * thinks another person has had their password or a token.
+ * Ends every session, turns Touch ID off and forgets the pinned public
+ * address. API tokens hold their own copy of the key and keep working,
+ * unless `revokeApiTokens` is set: the choice for someone who thinks another
+ * person has had their password or a token.
+ *
+ * The public address goes too because it decides where permission links,
+ * the MCP address on token pages and PCP's sign-in metadata point: one
+ * pinned from a stolen session would send the next sign-in elsewhere long
+ * after that session is gone. PCP goes back to the address each request
+ * comes in on until the owner pins it again.
+ */
+export async function signOutEverywhere(
+  ctx: VaultContext,
+  { revokeApiTokens = false }: { revokeApiTokens?: boolean } = {},
+): Promise<void> {
+  if (revokeApiTokens) {
+    await revokeAllApiTokens(ctx)
+  }
+
+  await setSetting(ctx, SETTING_PUBLIC_URL, null)
+  // Touch ID signs in, so it goes with the sessions.
+  await removeDeviceKeys(ctx.vaultId)
+  await destroyAllSessions(ctx.vaultId)
+}
+
+/**
+ * Sets a new password from the recovery key, then signs out everywhere
+ * (signOutEverywhere): every session, Touch ID and the pinned public
+ * address, and every API token too when `revokeApiTokens` is set.
  */
 export async function resetPasswordWithRecoveryKey(
   recoveryKey: string,
@@ -218,12 +244,7 @@ export async function resetPasswordWithRecoveryKey(
   const { grant, dek } = unlocked
   const ctx = { vaultId: grant.vaultId, dek }
   await replacePasswordGrant(grant.vaultId, dek, newPassword)
-  await destroyAllSessions(grant.vaultId)
-  await removeDeviceKeys(grant.vaultId)
-
-  if (revokeApiTokens) {
-    await revokeAllApiTokens(ctx)
-  }
+  await signOutEverywhere(ctx, { revokeApiTokens })
 
   return ctx
 }

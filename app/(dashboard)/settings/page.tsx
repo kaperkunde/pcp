@@ -87,7 +87,11 @@ export default async function SettingsPage({
           <CopyableValue value={`${publicUrl}/mcp`} />
         </CardContent>
       </Card>
-      <PublicUrlForm pinned={pinned ?? ""} detected={detected} />
+      <PublicUrlForm
+        pinned={pinned ?? ""}
+        detected={detected}
+        username={vault.name}
+      />
       {isLocalAddress(publicUrl) ? (
         <OutsideAccessCard address={publicUrl} desktop={isDesktopApp()} />
       ) : null}
@@ -95,6 +99,7 @@ export default async function SettingsPage({
         pcpgg={network.pcpgg}
         ports={network.ports}
         pinnedPublicUrl={pinned}
+        username={vault.name}
       />
       <DdnsCard ddns={network.ddns} />
       <HttpsCard
@@ -103,6 +108,7 @@ export default async function SettingsPage({
         ddnsName={network.ddnsName}
         ports={network.ports}
         pinnedPublicUrl={pinned}
+        username={vault.name}
         pcpggName={network.pcpgg ? network.pcpgg.name : undefined}
       />
       <UpdatesCard
