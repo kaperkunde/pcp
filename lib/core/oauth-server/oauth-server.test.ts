@@ -17,7 +17,9 @@ import { setupVault } from "../vault"
 import {
   approveAuthorization,
   checkAuthorizationRequest,
+  consentQuery,
   denyAuthorization,
+  recheckAuthorization,
   tokensForClient,
   type AuthorizationParams,
   type AuthorizationRequest,
@@ -762,6 +764,70 @@ describe("client metadata documents", () => {
       PUBLIC_URL,
     )
     expect(await resolveAccessToken(tokens.access_token)).not.toBeNull()
+  })
+
+  it("binds the approval to the return address and app the owner was shown", async () => {
+    const { challenge } = pkce()
+    const query = params(DOCUMENT_URL, challenge)
+    delete query.redirect_uri
+
+    const shown = await checkAuthorizationRequest(
+      query,
+      PUBLIC_URL,
+      serving(JSON.stringify(document)),
+    )
+    expect(shown.kind).toBe("ok")
+    const request = (shown as { request: AuthorizationRequest }).request
+    expect(request.redirectUri).toBe("https://claude.ai/api/mcp/auth_callback")
+
+    // The form carries the resolved address, and marks a client sent itself
+    // are replaced by what the page saw.
+    const carried = consentQuery({ ...query, pcp_seen_name: "Mine" }, request)
+    expect(new URLSearchParams(carried).get("redirect_uri")).toBe(
+      request.redirectUri,
+    )
+
+    const same = await recheckAuthorization(
+      carried,
+      PUBLIC_URL,
+      serving(JSON.stringify(document)),
+    )
+    expect(same.kind).toBe("ok")
+
+    // The document now lists another address only: the one carried is not
+    // registered any more.
+    const moved = serving(
+      JSON.stringify({
+        ...document,
+        redirect_uris: ["https://evil.example/callback"],
+      }),
+    )
+    const redirected = await recheckAuthorization(carried, PUBLIC_URL, moved)
+    expect(redirected.kind).toBe("show")
+
+    // The same address under another name is not the app they were shown.
+    const renamed = await recheckAuthorization(
+      carried,
+      PUBLIC_URL,
+      serving(JSON.stringify({ ...document, client_name: "Someone else" })),
+    )
+    expect(renamed).toMatchObject({
+      kind: "show",
+      message: expect.stringContaining("Start connecting it again"),
+    })
+
+    // A query that never came through the page carries no marks.
+    const bare = await recheckAuthorization(
+      new URLSearchParams(
+        Object.entries({
+          ...query,
+          redirect_uri: request.redirectUri,
+        }) as [string, string][],
+      ).toString(),
+      PUBLIC_URL,
+      serving(JSON.stringify(document)),
+    )
+    expect(bare.kind).toBe("show")
   })
 
   it("refuses a document that is not the client's own, public, small and JSON", async () => {

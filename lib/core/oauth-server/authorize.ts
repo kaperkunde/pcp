@@ -173,6 +173,82 @@ export async function checkAuthorizationRequest(
   }
 }
 
+/** Where the owner is sent back to, as the consent page shows it. */
+function returnHostOf(redirectUri: string): string {
+  return new URL(redirectUri).host || redirectUri
+}
+
+const SEEN_NAME = "pcp_seen_name"
+const SEEN_HOST = "pcp_seen_host"
+const SEEN_RETURN = "pcp_seen_return"
+
+/**
+ * The query the consent page carries back with the owner's answer: the
+ * request with the return address it resolved written in (a client that
+ * sent none had its document's one address filled in, and a document read
+ * again later must not choose a different one), and the app and return host
+ * the owner was shown. The three marks are the page's own; any a client
+ * sent are replaced.
+ */
+export function consentQuery(
+  params: AuthorizationParams,
+  request: AuthorizationRequest,
+): string {
+  const query = new URLSearchParams()
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) {
+      query.set(key, value)
+    }
+  }
+
+  query.set("redirect_uri", request.redirectUri)
+  query.set(SEEN_NAME, request.client.name)
+  query.set(SEEN_HOST, request.client.host)
+  query.set(SEEN_RETURN, returnHostOf(request.redirectUri))
+
+  return query.toString()
+}
+
+/**
+ * The consent page's query checked again at the answer: the client's
+ * document is read afresh, and the answer stands only if it still names the
+ * app and return host the owner saw. The page may have been open for a
+ * while, and a document is the client's to change.
+ */
+export async function recheckAuthorization(
+  query: string,
+  publicUrl: string,
+  fetcher?: DocumentFetcher,
+): Promise<AuthorizationCheck> {
+  const params: AuthorizationParams = Object.fromEntries(
+    new URLSearchParams(query),
+  )
+  const seen = [SEEN_NAME, SEEN_HOST, SEEN_RETURN].map((key) => params[key])
+
+  for (const key of [SEEN_NAME, SEEN_HOST, SEEN_RETURN]) {
+    delete params[key]
+  }
+
+  const check = await checkAuthorizationRequest(params, publicUrl, fetcher)
+
+  if (check.kind !== "ok") {
+    return check
+  }
+
+  const { client, redirectUri } = check.request
+  const now = [client.name, client.host, returnHostOf(redirectUri)]
+
+  if (now.some((value, index) => value !== seen[index])) {
+    return {
+      kind: "show",
+      message: `What ${client.name} says about itself changed since you were shown this sign-in. Start connecting it again from the app.`,
+    }
+  }
+
+  return check
+}
+
 /** Where the owner's choice goes: a new token, or one this client had. */
 export type AuthorizationChoice = { tokenId: string } | { token: TokenInput }
 

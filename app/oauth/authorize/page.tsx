@@ -7,6 +7,7 @@ import { SignInConsent } from "@/components/sign-in-consent"
 import { Card, CardContent } from "@/components/ui/card"
 import {
   checkAuthorizationRequest,
+  consentQuery,
   tokensForClient,
 } from "@/lib/core/oauth-server/authorize"
 import { listServers } from "@/lib/core/servers"
@@ -103,7 +104,7 @@ export default async function AuthorizePage({
       }
     >
       <SignInConsent
-        request={search}
+        request={consentQuery(query, check.request)}
         client={{
           name: client.name,
           host: client.host,
