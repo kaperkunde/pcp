@@ -1,7 +1,10 @@
+import { existsSync, readFileSync } from "node:fs"
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
+import { installSignalFile } from "./host-signal"
 import {
   checkNow,
   reconcileUpdates,
@@ -197,5 +200,27 @@ describe("an install request for the desktop app", () => {
     })
     await clearFinishedInstall(later(60_000))
     expect((await getUpdateStatus()).installRequest).toBeUndefined()
+  })
+
+  it("is left in the data folder for the installer only when asked", async () => {
+    setUpdateFetch(answer("v999.0.0"))
+    await checkNow()
+
+    await requestInstall(NOW)
+    expect(existsSync(installSignalFile())).toBe(false)
+
+    const request = await requestInstall(NOW, { signalHost: true })
+    // One line a POSIX shell can check: the id, then seconds since 1970.
+    expect(readFileSync(installSignalFile(), "utf8")).toBe(
+      `${request.id} ${NOW.getTime() / 1000}\n`,
+    )
+
+    await clearFinishedInstall(later(60_000))
+    expect(existsSync(installSignalFile())).toBe(true)
+
+    await clearFinishedInstall(later(INSTALL_REQUEST_FRESH_MS + 1))
+    expect(existsSync(installSignalFile())).toBe(false)
+    // Nothing to remove is fine too.
+    await clearFinishedInstall(later(INSTALL_REQUEST_FRESH_MS + 1))
   })
 })

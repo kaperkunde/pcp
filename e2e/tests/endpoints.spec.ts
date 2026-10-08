@@ -9,7 +9,7 @@ import {
   chooseSegment,
   confirmWithPassword,
   createToken,
-  openAdvanced,
+  showServerSettings,
 } from "../lib/ui"
 
 // An API described by an OpenAPI schema, added like a server: PCP reads the
@@ -107,7 +107,7 @@ test("adds an endpoint from a schema URL, with a stored secret", async ({
   endpointId = page.url().split("/").pop()!
   expect(upstream.requests).toHaveLength(0)
 
-  await openAdvanced(page)
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
@@ -405,16 +405,18 @@ test("a change by the assistant switches the endpoint off until the owner enable
   await page.getByRole("link").filter({ hasText: MANAGED }).click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
   await expect(page.getByText("Disabled", { exact: true })).toBeVisible()
-  await page.getByRole("button", { name: "Enable", exact: true }).click()
-  await expect(
-    page.getByRole("button", { name: "Disable", exact: true }),
-  ).toBeVisible()
+  const on = page.getByRole("switch", { name: /^On/ })
+  await expect(on).not.toBeChecked()
+  await on.check()
 
-  const back = await callTool(baseURL!, managerToken, "search_tools", {
-    query: "list pets",
-    server: MANAGED_SLUG,
-  })
-  expect(toolText(back)).toContain(`${MANAGED_SLUG}/listPets`)
+  // The switch saves on its own; the gateway follows once it has.
+  await expect(async () => {
+    const back = await callTool(baseURL!, managerToken, "search_tools", {
+      query: "list pets",
+      server: MANAGED_SLUG,
+    })
+    expect(toolText(back)).toContain(`${MANAGED_SLUG}/listPets`)
+  }).toPass()
 })
 
 test("the owner attaches a secret, typing the address to confirm it; then the endpoint is the owner's", async ({
@@ -423,7 +425,7 @@ test("the owner attaches a secret, typing the address to confirm it; then the en
 }) => {
   await page.goto("/servers")
   await page.getByRole("link").filter({ hasText: MANAGED }).click()
-  await openAdvanced(page)
+  await showServerSettings(page)
 
   await expect(page.getByLabel("Public addresses only")).toBeChecked()
   await page.getByLabel("Public addresses only").uncheck()

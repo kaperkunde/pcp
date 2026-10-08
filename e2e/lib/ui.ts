@@ -159,23 +159,46 @@ export async function allowAllTools(
 }
 
 /**
- * Opens the "Advanced" disclosure on a server's page, where its settings
- * form sits, once that form is on the page. Does nothing when the page
- * shows the form unfolded.
+ * A folded row of the Settings page ("Password", "Touch ID", "Export"),
+ * opened: the row is a disclosure, and its form is not on screen until it
+ * is. Returns the row to look for the form's fields and buttons in.
  */
-export async function openAdvanced(page: Page) {
-  await expect(
-    page.getByRole("button", { name: "Save changes" }).first(),
-  ).toBeAttached()
-  const advanced = page.locator("details", {
-    has: page.locator("summary", { hasText: /^Advanced/ }),
+export async function openSettingsRow(page: Page, title: string) {
+  const row = page.locator("details[data-slot=disclosure]").filter({
+    has: page.locator("summary").getByText(title, { exact: true }),
   })
-  if (
-    (await advanced.count()) > 0 &&
-    (await advanced.first().getAttribute("open")) === null
-  ) {
-    await advanced.first().locator("summary").first().click()
+
+  if ((await row.getAttribute("open")) === null) {
+    await row.locator("summary").first().click()
   }
+
+  await expect(row).toHaveAttribute("open", "")
+  return row
+}
+
+/**
+ * Unfolds Advanced on a server's page: its settings form (name, short name,
+ * address, sign-in) lives there, folded until asked for.
+ */
+export async function showServerSettings(page: Page) {
+  const advanced = page
+    .locator("details")
+    .filter({ has: page.locator("summary", { hasText: /^Advanced/ }) })
+    .first()
+  if (!(await advanced.evaluate((element) => element.hasAttribute("open")))) {
+    await advanced.locator("summary").first().click()
+  }
+  await expect(advanced).toHaveAttribute("open", "")
+}
+
+/**
+ * Goes to a kind's add page through the Servers page's Add menu: "MCP
+ * server", "API endpoint", "Mail account", "SSH server", "Wrapper".
+ */
+export async function addServerFromMenu(page: Page, kind: string) {
+  await page.goto("/servers")
+  await page.getByRole("button", { name: "Add", exact: true }).click()
+  await page.getByRole("menuitem", { name: new RegExp(`^${kind}`) }).click()
 }
 
 /**

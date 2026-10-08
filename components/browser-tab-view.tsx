@@ -284,12 +284,12 @@ export function BrowserTabView({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl bg-card p-2">
         {holding ? (
           <>
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
               size="sm"
               disabled={pending}
               onClick={() => act(() => backTabAction(tabId))}
@@ -298,7 +298,7 @@ export function BrowserTabView({
             </Button>
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
               size="sm"
               disabled={pending}
               onClick={() => act(() => reloadTabAction(tabId))}
@@ -328,7 +328,7 @@ export function BrowserTabView({
           </>
         ) : (
           <code
-            className="min-w-0 grow truncate rounded-md border border-border px-2 py-1 text-xs"
+            className="min-w-0 grow truncate rounded-lg bg-field px-3 py-2 text-xs text-muted-foreground"
             data-testid="browser-address"
           >
             {view.url}
@@ -336,14 +336,14 @@ export function BrowserTabView({
         )}
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-1 text-sm">
         <div className="flex flex-wrap items-center gap-2">
           {holding ? (
             <Badge>You have this tab</Badge>
           ) : (
             <Badge variant="secondary">Assistants have this tab</Badge>
           )}
-          <span className="text-muted-foreground">
+          <span className="text-[13px] leading-relaxed text-muted-foreground">
             {status === "connecting"
               ? "Connecting…"
               : status === "lost"
@@ -364,7 +364,7 @@ export function BrowserTabView({
         <div className="flex flex-wrap gap-2">
           {holding ? (
             handover ? null : tokens.length === 0 ? (
-              <span className="text-muted-foreground">
+              <span className="text-[13px] text-muted-foreground">
                 No token can use the browser yet, so there is no one to hand it
                 to.
               </span>
@@ -413,7 +413,7 @@ export function BrowserTabView({
           {mode === "tab" ? (
             <Button
               type="button"
-              variant="outline"
+              variant="plain"
               size="sm"
               disabled={pending || status === "closed"}
               onClick={() => {
@@ -430,7 +430,7 @@ export function BrowserTabView({
 
       <FormError error={error} />
 
-      <div className="relative w-full max-w-[1280px] overflow-hidden rounded-md border border-border bg-muted">
+      <div className="relative w-full max-w-[1280px] overflow-hidden rounded-xl bg-card ring-1 ring-separator">
         <canvas
           ref={canvas}
           width={meta?.deviceWidth ?? BROWSER_VIEWPORT.width}

@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, toolText } from "../lib/mcp"
-import { allowAllTools, createToken, openAdvanced } from "../lib/ui"
+import { allowAllTools, createToken, showServerSettings } from "../lib/ui"
 
 // An API that signs in with OAuth, like Gmail's REST API: its OpenAPI
 // document declares the flow, the provider lets no app register itself, so
@@ -93,7 +93,7 @@ test("the owner connects it, and the assistant's calls carry the token, which it
 
   // An assistant's endpoint reaches public addresses only, and the fake
   // provider is on loopback.
-  await openAdvanced(page)
+  await showServerSettings(page)
   const slug = await page.getByLabel("Short name").inputValue()
   await page.getByLabel("Public addresses only").uncheck()
   await page.getByRole("button", { name: "Save changes" }).click()

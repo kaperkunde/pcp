@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test"
 import { startFakeSsh, type FakeSsh } from "../../lib/core/ssh/fake-server"
 import { fingerprint } from "../../lib/core/ssh/keys"
 import { callTool, toolText } from "../lib/mcp"
-import { createToken, openAdvanced, openMoreOptions } from "../lib/ui"
+import { createToken, showServerSettings, openMoreOptions } from "../lib/ui"
 
 // An SSH server, added in PCP and used by an assistant through /mcp. PCP
 // signs in with a key of its own, which the owner puts in the login's
@@ -65,7 +65,7 @@ test("an SSH server signs in once PCP's key is in authorized_keys", async ({
   expect(publicKey).toMatch(/^ssh-ed25519 \S+ pcp-build-box-/)
   expect(fake.logins).toEqual([])
 
-  await openAdvanced(page)
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(

@@ -7,7 +7,7 @@ import {
   addSecret,
   allowAllTools,
   confirmWithPassword,
-  openAdvanced,
+  showServerSettings,
 } from "../lib/ui"
 
 // A wrapper, end to end: an assistant proposes simpler tools over a server
@@ -54,7 +54,7 @@ test("the owner adds a server and a token that may propose wrappers", async ({
   await page.getByLabel("Secret").selectOption({ label: UPSTREAM_SECRET })
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  await openAdvanced(page)
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(

@@ -1,9 +1,11 @@
 "use client"
 
+import { AppWindow } from "lucide-react"
 import Link from "next/link"
 import { useActionState, useEffect, useState, useTransition } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
+import { BrowserDescribeForm } from "@/components/browser-describe-form"
+import { FormError } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
@@ -15,8 +17,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Input, Textarea } from "@/components/ui/input"
+import { IconTile } from "@/components/ui/icon-tile"
+import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
+import { List, ListRow, ListSection } from "@/components/ui/list"
 import {
   browserOverviewAction,
   closeBrowserAction,
@@ -25,7 +29,6 @@ import {
   forgetSitesAction,
   installChromiumAction,
   openTabAction,
-  updateBrowserAction,
 } from "@/lib/actions/browser"
 import type { BrowserOverview } from "@/lib/core/browser/owner"
 import type { ActionState } from "@/lib/server/action-state"
@@ -38,8 +41,9 @@ const INSTALL_REFRESH_MS = 1_000
 type ErrorPlace = "page" | "chromium"
 
 /**
- * The Browser page's cards: adding the browser, its tabs (live), opening
- * one of your own, the sign-ins it keeps, and Chromium on this machine.
+ * The Browser page's sections: adding the browser, its tabs (live), opening
+ * one of your own, the sign-ins it keeps, Chromium on this machine, and
+ * what assistants read about it.
  */
 export function BrowserManager({
   initial,
@@ -93,9 +97,9 @@ export function BrowserManager({
   const { server, chromium, status, profile, tabs } = overview
 
   return (
-    <div className="flex flex-col gap-6">
+    <>
       {!server ? (
-        <Card>
+        <Card className="ring-1 ring-primary/25">
           <CardHeader>
             <CardTitle>Add the browser</CardTitle>
             <CardDescription>
@@ -120,190 +124,214 @@ export function BrowserManager({
         </Card>
       ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Tabs</CardTitle>
-          <CardDescription>
-            Every tab open in the browser, the assistants&apos; and yours. An
-            assistant sees only its own tabs: the ones it opened and the ones
-            you hand it. Open one to watch it live, or to take it over: while
-            you have a tab, its assistant leaves it alone.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
+      <ListSection
+        title="Tabs"
+        footer="Every tab open in the browser, the assistants' and yours. An assistant sees only its own tabs: the ones it opened and the ones you hand it. Open one to watch it live, or to take it over: while you have a tab, its assistant leaves it alone."
+      >
+        <List as="ul" aria-label="Open tabs">
           {tabs.length === 0 ? (
-            <p className="text-muted-foreground">
-              No tabs are open
-              {status.running ? "." : ": the browser is not running."}
-            </p>
+            <ListRow
+              as="li"
+              title={
+                <span className="text-muted-foreground">
+                  No tabs are open
+                  {status.running ? "." : ": the browser is not running."}
+                </span>
+              }
+            />
           ) : (
-            <ul
-              className="flex flex-col divide-y divide-border"
-              aria-label="Open tabs"
-            >
-              {tabs.map((tab) => (
-                <li
-                  key={tab.id}
-                  className="flex flex-wrap items-center justify-between gap-2 py-2"
-                  aria-label={tab.title || tab.url}
-                >
-                  <div className="flex min-w-0 flex-col gap-0.5">
-                    <Link
-                      href={`/browser/tabs/${tab.id}`}
-                      className="truncate font-medium underline-offset-4 hover:underline"
-                    >
-                      {tab.title || "(no title)"}
-                    </Link>
-                    <code className="truncate text-xs text-muted-foreground">
-                      {tab.url}
-                    </code>
-                    <span className="text-xs text-muted-foreground">
+            tabs.map((tab) => (
+              <ListRow
+                as="li"
+                key={tab.id}
+                aria-label={tab.title || tab.url}
+                icon={<IconTile icon={AppWindow} size="sm" />}
+                title={
+                  <Link
+                    href={`/browser/tabs/${tab.id}`}
+                    className="block truncate font-medium text-foreground hover:text-primary"
+                  >
+                    {tab.title || "(no title)"}
+                  </Link>
+                }
+                description={
+                  <span className="flex min-w-0 flex-col">
+                    <code className="truncate">{tab.url}</code>
+                    <span>
                       Opened by{" "}
                       {tab.openedBy === "owner" ? "you" : tab.openedBy} · last
                       used <LocalDate value={tab.lastUsedAt} />
                     </span>
-                  </div>
-                  <div className="flex items-center gap-2">
+                  </span>
+                }
+                trailing={
+                  <span className="flex items-center gap-2">
                     {tab.control === "owner" ? (
                       <Badge>{tab.handover ? "Handed to you" : "Yours"}</Badge>
                     ) : null}
                     <ButtonLink
                       href={`/browser/tabs/${tab.id}`}
                       size="sm"
-                      variant="outline"
+                      variant="secondary"
                     >
                       Watch
                     </ButtonLink>
                     <Button
                       type="button"
                       size="sm"
-                      variant="ghost"
+                      variant="plain"
                       disabled={pending}
                       onClick={() => act(() => closeTabAction(tab.id))}
                       aria-label={`Close ${tab.title || tab.url}`}
                     >
                       Close
                     </Button>
-                  </div>
-                </li>
-              ))}
-            </ul>
+                  </span>
+                }
+              />
+            ))
           )}
-          {server ? <OpenTabForm /> : null}
-        </CardContent>
-      </Card>
+        </List>
+        {server ? <OpenTabForm /> : null}
+      </ListSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Sign-ins</CardTitle>
-          <CardDescription>
-            The browser keeps the cookies, local storage and IndexedDB of the
-            sites it visits, encrypted with your vault, so a sign-in lasts
-            between conversations. Where you have signed in, an assistant with
-            the browser acts as you. It cannot read them: no tool hands back a
-            cookie or runs a script.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col items-start gap-3">
-          {profile ? (
-            <p data-testid="browser-profile">
-              Kept for {profile.sites} {profile.sites === 1 ? "site" : "sites"}{" "}
-              ({profile.cookies} {profile.cookies === 1 ? "cookie" : "cookies"}
-              ), saved <LocalDate value={profile.savedAt} />.
-              {profile.partial
-                ? " Some sites stored more than PCP keeps, so their IndexedDB was left out."
-                : null}
-            </p>
-          ) : (
-            <p className="text-muted-foreground" data-testid="browser-profile">
-              Nothing kept yet.
-            </p>
-          )}
-          <Button
-            type="button"
-            variant="destructive"
-            size="sm"
-            disabled={pending || (!profile && !status.running)}
-            onClick={() =>
-              act(forgetSitesAction, {
-                confirm: "Close the browser and sign it out of every site?",
-              })
+      <ListSection
+        title="Sign-ins"
+        footer="The browser keeps the cookies, local storage and IndexedDB of the sites it visits, encrypted with your vault, so a sign-in lasts between conversations. Where you have signed in, an assistant with the browser acts as you. It cannot read them: no tool hands back a cookie or runs a script."
+      >
+        <List>
+          <ListRow
+            title={
+              profile ? (
+                <span data-testid="browser-profile">
+                  Kept for {profile.sites}{" "}
+                  {profile.sites === 1 ? "site" : "sites"} ({profile.cookies}{" "}
+                  {profile.cookies === 1 ? "cookie" : "cookies"}), saved{" "}
+                  <LocalDate value={profile.savedAt} />.
+                </span>
+              ) : (
+                <span
+                  className="text-muted-foreground"
+                  data-testid="browser-profile"
+                >
+                  Nothing kept yet.
+                </span>
+              )
             }
-          >
-            Forget all sites
-          </Button>
-        </CardContent>
-      </Card>
+            description={
+              profile?.partial
+                ? "Some sites stored more than PCP keeps, so their IndexedDB was left out."
+                : null
+            }
+            trailing={
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                disabled={pending || (!profile && !status.running)}
+                onClick={() =>
+                  act(forgetSitesAction, {
+                    confirm: "Close the browser and sign it out of every site?",
+                  })
+                }
+              >
+                Forget all sites
+              </Button>
+            }
+          />
+        </List>
+      </ListSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Chromium</CardTitle>
-          <CardDescription>
-            The browser is Chromium, run without a window on this machine. It
-            starts with the first page opened and closes after fifteen minutes
-            with nothing happening.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col items-start gap-3">
+      <ListSection
+        title="Chromium"
+        footer="The browser is Chromium, run without a window on this machine. It starts with the first page opened and closes after fifteen minutes with nothing happening."
+      >
+        <List>
           {chromium.path ? (
-            <p>
-              Found at <code className="text-xs">{chromium.path}</code>
-              {chromium.fromInstall ? ", installed by PCP" : null}.{" "}
-              {status.running
-                ? `Running, with ${status.tabs} ${status.tabs === 1 ? "tab" : "tabs"}${status.sandbox === false ? ", without Chromium's own sandbox (this machine does not provide one)" : ""}.`
-                : "Not running."}
-            </p>
-          ) : (
-            <ChromiumInstall
-              chromium={chromium}
-              desktop={desktop}
-              disabled={pending}
-              onInstall={() =>
-                act(installChromiumAction, { place: "chromium" })
+            <ListRow
+              title={
+                status.running
+                  ? `Running, with ${status.tabs} ${status.tabs === 1 ? "tab" : "tabs"}${status.sandbox === false ? ", without Chromium's own sandbox (this machine does not provide one)" : ""}.`
+                  : "Not running."
+              }
+              description={
+                <>
+                  Found at <code className="break-all">{chromium.path}</code>
+                  {chromium.fromInstall ? ", installed by PCP" : null}.
+                </>
+              }
+              trailing={
+                status.running ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={pending}
+                    onClick={() => act(closeBrowserAction)}
+                  >
+                    Close the browser
+                  </Button>
+                ) : null
               }
             />
+          ) : (
+            <div className="flex flex-col items-start gap-3 px-4 py-4 text-sm">
+              <ChromiumInstall
+                chromium={chromium}
+                desktop={desktop}
+                disabled={pending}
+                onInstall={() =>
+                  act(installChromiumAction, { place: "chromium" })
+                }
+              />
+              {status.running ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={pending}
+                  onClick={() => act(closeBrowserAction)}
+                >
+                  Close the browser
+                </Button>
+              ) : null}
+            </div>
           )}
-          {status.running ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={pending}
-              onClick={() => act(closeBrowserAction)}
-            >
-              Close the browser
-            </Button>
-          ) : null}
-          <FormError
-            error={errorAt("chromium") ?? (server ? errorAt("page") : null)}
-          />
-        </CardContent>
-      </Card>
+        </List>
+        <FormError
+          className="px-1"
+          error={errorAt("chromium") ?? (server ? errorAt("page") : null)}
+        />
+      </ListSection>
 
       {server ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>For assistants</CardTitle>
-            <CardDescription>
+        <ListSection
+          title="For assistants"
+          description={
+            <>
               A token reaches the browser like any server: one that reaches
               every server, or one you picked it for. Which sites it opens
               follows its web fetch sites and GET setting, on{" "}
-              <Link href="/tokens" className="underline">
+              <Link href="/tokens" className="text-primary">
                 its page
               </Link>
               , and which browser tools it runs without asking, on{" "}
-              <Link href={`/servers/${server.id}`} className="underline">
+              <Link href={`/servers/${server.id}`} className="text-primary">
                 the browser&apos;s server page
               </Link>
               . The name and description are what assistants read.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <DescribeForm name={server.name} description={serverDescription} />
-          </CardContent>
-        </Card>
+            </>
+          }
+        >
+          <Card>
+            <BrowserDescribeForm
+              name={server.name}
+              description={serverDescription}
+            />
+          </Card>
+        </ListSection>
       ) : null}
-    </div>
+    </>
   )
 }
 
@@ -373,7 +401,7 @@ function ChromiumInstall({
           ? "The Chromium PCP installed was for an earlier version of PCP; this one drives a newer build."
           : "Chromium is not on this machine yet."}
       </p>
-      <p className="text-muted-foreground">
+      <p className="text-[13px] leading-relaxed text-muted-foreground">
         Install Chromium downloads the build PCP drives, about 200 MB, from
         Playwright&apos;s servers into PCP&apos;s data folder
         {chromium.outdated ? ", and removes the earlier one" : null}.
@@ -407,75 +435,36 @@ function ChromiumInstall({
   )
 }
 
+/** A tab of the owner's own, opened taken over, to sign in somewhere. */
 function OpenTabForm() {
   const [state, action] = useActionState<ActionState, FormData>(openTabAction, {
     status: "idle",
   })
 
   return (
-    <form
-      action={action}
-      className="flex flex-col gap-2 rounded-lg border border-border p-3"
-    >
-      <Field label="Open a tab of your own" htmlFor="browser-open-url">
-        <Input
-          id="browser-open-url"
-          name="url"
-          required
-          maxLength={8192}
-          autoComplete="off"
-          placeholder="https://example.com/login"
-        />
-      </Field>
-      <p className="text-xs text-muted-foreground">
-        It opens taken over by you, to sign in somewhere for the assistants;
-        hand it back when they may use it.
-      </p>
-      <FormError error={state.status === "error" ? state.error : null} />
-      <div>
-        <SubmitButton pendingText="Opening…">Open</SubmitButton>
-      </div>
-    </form>
-  )
-}
-
-function DescribeForm({
-  name,
-  description,
-}: {
-  name: string
-  description: string
-}) {
-  const [state, action] = useActionState<
-    ActionState<{ message: string }>,
-    FormData
-  >(updateBrowserAction, { status: "idle" })
-
-  return (
-    <form action={action} className="flex flex-col gap-3">
-      <Field label="Name" htmlFor="browser-name">
-        <Input
-          id="browser-name"
-          name="name"
-          defaultValue={name}
-          maxLength={80}
-          required
-        />
-      </Field>
-      <Field label="Description" htmlFor="browser-description">
-        <Textarea
-          id="browser-description"
-          name="description"
-          defaultValue={description}
-          maxLength={1000}
-          rows={3}
-        />
-      </Field>
-      <FormError error={state.status === "error" ? state.error : null} />
-      <FormNote message={state.status === "ok" ? state.message : null} />
-      <div>
-        <SubmitButton pendingText="Saving…">Save</SubmitButton>
-      </div>
-    </form>
+    <Card className="gap-3 p-4">
+      <form action={action} className="flex flex-col gap-2">
+        <Field
+          label="Open a tab of your own"
+          htmlFor="browser-open-url"
+          hint="It opens taken over by you, to sign in somewhere for the assistants; hand it back when they may use it."
+        >
+          <div className="flex gap-2">
+            <Input
+              id="browser-open-url"
+              name="url"
+              required
+              maxLength={8192}
+              autoComplete="off"
+              placeholder="https://example.com/login"
+            />
+            <SubmitButton variant="secondary" pendingText="Opening…">
+              Open
+            </SubmitButton>
+          </div>
+        </Field>
+        <FormError error={state.status === "error" ? state.error : null} />
+      </form>
+    </Card>
   )
 }
