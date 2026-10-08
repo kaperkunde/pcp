@@ -124,34 +124,34 @@ export default defineConfig({
     {
       // An API that signs in with OAuth: proposed by an assistant with the
       // owner's client ID, the client secret typed in on the approval page,
-      // connected, and called with the token; and at a provider that lets
-      // apps register themselves, with no client at all.
+      // connected, and called with the token, which the assistant never
+      // sees.
       name: "endpoint-oauth",
       testMatch: /endpoint-oauth\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("endpoint-oauth"),
     },
     {
-      // An OAuth upstream that lets no app register itself: the owner's own
-      // client, its redirect URI, and extra sign-in parameters.
+      // An OAuth upstream that lets no app register itself: its redirect URI
+      // on the add form, and the owner's own client connecting it.
       name: "oauth-client",
       testMatch: /oauth-client\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("oauth-client"),
     },
     {
-      // An API described by an OpenAPI schema: added from a URL and from a
-      // file, its operations found and called through the gateway.
+      // An API described by an OpenAPI schema: added from a URL with a
+      // secret, its operations found and called through the gateway; one an
+      // assistant proposes, and what it may change once the owner's.
       name: "endpoints",
       testMatch: /endpoints\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("endpoints"),
     },
     {
-      // A mail account: JMAP with an app password and with OAuth, read-only,
-      // a refused password, an unreachable IMAP server; its tools called
-      // through the gateway; and accounts an assistant proposes, which the
-      // owner agrees to on PCP's page.
+      // A mail account: JMAP with an app password, its tools called through
+      // the gateway, a read-only one that cannot send, and one an assistant
+      // proposes, whose password the owner types in on PCP's page.
       name: "mail",
       testMatch: /mail\.spec\.ts/,
       dependencies: ["setup"],
@@ -184,21 +184,14 @@ export default defineConfig({
       use: signedIn("memories"),
     },
     {
-      // An API that wants HTTP Basic authentication: a user name and a
-      // password typed into the form, or proposed by an assistant and typed
-      // in on the approval page; the login sent, and kept from the assistant.
-      name: "endpoint-basic",
-      testMatch: /endpoint-basic\.spec\.ts/,
+      // APIs an assistant proposes with more than a bearer token: HTTP Basic
+      // with the password typed in on the approval page, and a key and a
+      // secret key in two headers; each sent by PCP, and kept from the
+      // assistant.
+      name: "endpoint-credentials",
+      testMatch: /endpoint-credentials\.spec\.ts/,
       dependencies: ["setup"],
-      use: signedIn("endpoint-basic"),
-    },
-    {
-      // An API whose credential is a key and a secret key in two headers:
-      // added by the owner, called through /mcp, proposed by an assistant.
-      name: "secret-headers",
-      testMatch: /secret-headers\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("secret-headers"),
+      use: signedIn("endpoint-credentials"),
     },
     {
       // A token that fetches web pages: the tool and its instructions, a new
@@ -223,8 +216,7 @@ export default defineConfig({
       // Wrappers: a token that may propose them gets their tools; a wrapper
       // over a tool that wants its key as an argument, approved with the key
       // typed in on the request's page; its tool puts the key in and the
-      // answer shows it redacted; the tool it replaces leaves search until
-      // the owner brings it back.
+      // answer shows it redacted; the tool it replaces leaves search.
       name: "wrappers",
       testMatch: /wrappers\.spec\.ts/,
       dependencies: ["setup"],

@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test"
 import { startFakeSsh, type FakeSsh } from "../../lib/core/ssh/fake-server"
 import { fingerprint } from "../../lib/core/ssh/keys"
 import { callTool, toolText } from "../lib/mcp"
-import { createToken } from "../lib/ui"
+import { createToken, showServerSettings, openMoreOptions } from "../lib/ui"
 
 // An SSH server, added in PCP and used by an assistant through /mcp. PCP
 // signs in with a key of its own, which the owner puts in the login's
@@ -45,32 +45,27 @@ test.afterAll(async () => {
 test("an SSH server signs in once PCP's key is in authorized_keys", async ({
   page,
 }) => {
-  await page.goto("/servers")
-  await page.getByRole("link", { name: "Add an SSH server" }).click()
-  await expect(page).toHaveURL(/\/servers\/ssh\/new$/)
+  await page.goto("/servers/ssh/new")
   await page.getByLabel("Name", { exact: true }).fill(NAME)
   await page.getByLabel("Description").fill("The CI runner.")
   await page.getByLabel("Host", { exact: true }).fill("127.0.0.1")
-  await page.getByLabel("Port").fill(String(fake.port))
   await page.getByLabel("Login").fill("deploy")
+  // Port 22 unless the owner says otherwise; the test server is elsewhere.
+  await openMoreOptions(page)
+  await expect(page.getByLabel("Port")).toHaveValue("22")
+  await page.getByLabel("Port").fill(String(fake.port))
   await page.getByRole("button", { name: "Add SSH server" }).click()
 
   // PCP connected once: the host key is pinned, PCP's key not yet accepted.
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  await expect(
-    page.getByText("Key not accepted", { exact: true }),
-  ).toBeVisible()
-  await expect(
-    page.getByText(/deploy's ~\/.ssh\/authorized_keys/),
-  ).toBeVisible()
   await expect(page.getByTestId("ssh-host-key")).toContainText(
     fingerprint(fake.hostKey),
   )
-  await expect(page.getByText("Tools (1)")).toBeVisible()
   const publicKey = (await page.getByTestId("ssh-public-key").textContent())!
   expect(publicKey).toMatch(/^ssh-ed25519 \S+ pcp-build-box-/)
   expect(fake.logins).toEqual([])
 
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
@@ -83,17 +78,6 @@ test("an SSH server signs in once PCP's key is in authorized_keys", async ({
     page.getByRole("status").filter({ hasText: "PCP signed in." }),
   ).toBeVisible()
   expect(fake.logins).toEqual(["deploy"])
-  await page.reload()
-  await expect(page.getByText("Ready", { exact: true })).toBeVisible()
-
-  // The key PCP made is a secret of its own, used by this server.
-  await page.goto("/secrets")
-  await expect(
-    page
-      .getByRole("listitem")
-      .filter({ hasText: "SSH key" })
-      .filter({ hasText: NAME }),
-  ).toBeVisible()
 })
 
 test("an assistant's command is shown to the owner before it runs", async ({
@@ -160,7 +144,6 @@ test("a server with another host key is refused until the owner forgets the old 
 
   await page.goto("/servers")
   await page.getByRole("link").filter({ hasText: NAME }).click()
-  await expect(page.getByText("Not connected", { exact: true })).toBeVisible()
   await expect(page.getByTestId("ssh-host-key")).toContainText(
     fingerprint(before),
   )

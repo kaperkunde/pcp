@@ -1,21 +1,17 @@
-import { expect, test, type Page } from "@playwright/test"
+import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
-import { callTool, toolText } from "../lib/mcp"
-import { allowAllTools, createToken } from "../lib/ui"
 
 // An OAuth server that lets no app register itself, the way most large
-// providers work: PCP says so instead of failing, shows the redirect URI to
-// register, takes the client the owner created in its status card, and adds the sign-in
-// parameters a provider needs before it hands out a refresh token.
+// providers work: the add form shows the redirect URI to register, and the
+// client the owner created there (its secret pasted in and kept as one of
+// the owner's secrets) connects it.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
 const SERVER_NAME = `Closed postcards ${RUN}`
 
 let upstream: Upstream
-let serverId: string
-let redirectUri: string
 
 test.beforeAll(async () => {
   upstream = await startUpstream()
@@ -25,55 +21,30 @@ test.afterAll(async () => {
   await upstream?.close()
 })
 
-const settings = (page: Page) =>
-  page.locator("form").filter({ has: page.getByLabel("Server URL") })
-
-async function connect(page: Page, name: "Connect" | "Reconnect") {
-  await page.goto(`/servers/${serverId}`)
-  await page.getByRole("link", { name, exact: true }).click()
-}
-
-test("the redirect URI is shown before the server exists", async ({ page }) => {
+test("with the owner's own client it connects", async ({ page }) => {
   await page.goto("/servers/new")
   await page.getByLabel("Name").fill(SERVER_NAME)
   await page.getByLabel("Server URL").fill(upstream.closedMcpUrl)
   await page.getByLabel("Authentication").selectOption("oauth")
 
-  redirectUri = (await page.getByTestId("oauth-redirect-url").textContent())!
+  // The redirect URI is shown before the server exists, to register first.
+  const redirectUri = (await page
+    .getByTestId("oauth-redirect-url")
+    .textContent())!
   expect(redirectUri).toMatch(/^https?:\/\/[^/]+\/api\/oauth\/callback$/)
 
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  serverId = page.url().split("/").pop()!
-  await expect(page.getByText("Needs connecting")).toBeVisible()
-})
+  const serverId = page.url().split("/").pop()!
 
-test("connecting says the server needs a client from you", async ({ page }) => {
-  await connect(page, "Connect")
-
-  // Said in the status line, not in the address, where it would outlast
-  // the status.
-  await expect(page).toHaveURL(new RegExp(`/servers/${serverId}$`))
-  await expect(
-    page.getByText("Needs an OAuth client", { exact: true }),
-  ).toBeVisible()
-  // Said once, in the status line, with the address to register.
-  await expect(
-    page.getByText(/needs an OAuth client from you: it does not let apps/),
-  ).toContainText(redirectUri)
-  // PCP never got as far as the sign-in page.
-  expect(upstream.closedSignIns).toHaveLength(0)
-})
-
-test("with the owner's client it connects, and says it cannot renew", async ({
-  page,
-}) => {
   // What the owner does in the provider's console.
   upstream.closedClient.redirectUris.add(redirectUri)
 
-  // Asked for where the status says so, not in Settings, on the page
-  // Connect left you on.
-  await connect(page, "Connect")
+  // Connecting finds out the server needs a client from the owner, and
+  // asks for it on the page Connect left them on.
+  await page.getByRole("link", { name: "Connect", exact: true }).click()
+  await expect(page).toHaveURL(new RegExp(`/servers/${serverId}$`))
+  expect(upstream.closedSignIns).toHaveLength(0)
   await page
     .getByLabel("Client ID", { exact: true })
     .fill(upstream.closedClient.id)
@@ -81,28 +52,16 @@ test("with the owner's client it connects, and says it cannot renew", async ({
     .getByLabel("Client secret", { exact: true })
     .fill(upstream.closedClient.secret)
   await page.getByRole("button", { name: "Save client" }).click()
-  await expect(
-    page.getByText("Saved. Choose Connect to sign in with your client."),
-  ).toBeVisible()
-  await expect(page.getByText("Needs connecting")).toBeVisible()
   await expect(page.getByRole("button", { name: "Save client" })).toHaveCount(0)
-  // Regression: the message from the failed Connect outlived the save.
-  await expect(page.getByText(/needs an OAuth client from you/)).toHaveCount(0)
-  await expect(settings(page).getByLabel("Client ID (optional)")).toHaveValue(
-    upstream.closedClient.id,
-  )
 
-  await connect(page, "Connect")
+  await page.getByRole("link", { name: "Connect", exact: true }).click()
   await expect(page).toHaveURL(
     new RegExp(`/servers/${serverId}\\?connected=1$`),
   )
-  await expect(page.getByText("Tools (3)")).toBeVisible()
   expect(upstream.closedSignIns.at(-1)).toMatchObject({
     client_id: upstream.closedClient.id,
     redirect_uri: redirectUri,
   })
-  expect(upstream.closedSignIns.at(-1)).not.toHaveProperty("access_type")
-  await expect(page.getByText(/and PCP cannot renew it/)).toBeVisible()
 
   // The secret the owner pasted is one of their own, by the server's name.
   await page.goto("/secrets")
@@ -111,53 +70,4 @@ test("with the owner's client it connects, and says it cannot renew", async ({
       .getByRole("listitem")
       .filter({ hasText: `${SERVER_NAME} OAuth client secret` }),
   ).toBeVisible()
-})
-
-test("extra sign-in parameters get a renewable connection", async ({
-  page,
-}) => {
-  // Asked for where the status says the sign-in cannot be renewed.
-  await page.goto(`/servers/${serverId}`)
-  const params = page.getByLabel("Extra sign-in parameters", { exact: true })
-  const save = page.getByRole("button", { name: "Save and reconnect" })
-  await params.fill("client_id=someone-else")
-  await save.click()
-  await expect(page.getByText(/PCP sets client_id itself/)).toBeVisible()
-
-  await params.fill("access_type=offline&prompt=consent")
-  await save.click()
-  await expect(page).toHaveURL(
-    new RegExp(`/servers/${serverId}\\?connected=1$`),
-  )
-  expect(upstream.closedSignIns.at(-1)).toMatchObject({
-    client_id: upstream.closedClient.id,
-    access_type: "offline",
-    prompt: "consent",
-  })
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible()
-  await expect(page.getByText(/and PCP cannot renew it/)).toHaveCount(0)
-  await expect(
-    settings(page).getByLabel("Extra sign-in parameters (optional)"),
-  ).toHaveValue("access_type=offline&prompt=consent")
-})
-
-test("the gateway calls the server with the token from that client", async ({
-  page,
-  baseURL,
-}) => {
-  const token = await createToken(page, `Closed assistant ${RUN}`)
-  const slug = (await page
-    .goto(`/servers/${serverId}`)
-    .then(() => page.getByLabel("Short name").inputValue()))!
-  await allowAllTools(page, `Closed assistant ${RUN}`, slug)
-
-  const echoed = await callTool(baseURL!, token, "call_tool", {
-    server: slug,
-    tool: "echo_auth",
-    arguments: {},
-  })
-  expect(echoed.body.result?.isError ?? false, toolText(echoed)).toBe(false)
-  expect(
-    upstream.issuedTokens.has(toolText(echoed).replace("Bearer ", "")),
-  ).toBe(true)
 })

@@ -5,13 +5,7 @@ import { useState, useTransition } from "react"
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { List, ListRow, ListSection } from "@/components/ui/list"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   forgetSshHostKeyAction,
@@ -45,83 +39,101 @@ export function SshAccessCard({
   }
 
   return (
-    <Card data-testid="ssh-access">
-      <CardHeader>
-        <CardTitle>Sign-in</CardTitle>
-        <CardDescription>
-          PCP signs in as <code className="text-xs">{view.username}</code> with
-          a key of its own, never a password. The private key never leaves PCP.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-5">
-        <section className="flex flex-col gap-2">
-          <h3 className="font-medium">PCP&apos;s key</h3>
-          <p className="text-muted-foreground">
-            Add it to <code className="text-xs">~/.ssh/authorized_keys</code> of{" "}
-            <code className="text-xs">{view.username}</code> on the server:
-          </p>
+    <ListSection
+      title="Sign-in"
+      description={
+        <>
+          PCP signs in as{" "}
+          <code className="text-foreground">{view.username}</code> with a key of
+          its own, never a password. The private key never leaves PCP.
+        </>
+      }
+      data-testid="ssh-access"
+    >
+      <List>
+        <div data-slot="list-row" className="flex flex-col gap-2.5 px-4 py-3.5">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-[15px] leading-snug">PCP&apos;s key</span>
+            <span className="text-xs leading-relaxed text-muted-foreground">
+              Add it to <code>~/.ssh/authorized_keys</code> of{" "}
+              <code>{view.username}</code> on the server.
+            </span>
+          </div>
           <CopyableValue value={view.publicKey} testId="ssh-public-key" />
-          <p className="text-xs text-muted-foreground">
-            {view.publicKeyFingerprint}. To keep PCP to one command there, put{" "}
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            <code className="break-all">{view.publicKeyFingerprint}</code>. To
+            keep PCP to one command there, put{" "}
             <code>command=&quot;…&quot;,restrict</code> in front of it.
           </p>
-        </section>
+        </div>
 
-        <section className="flex flex-col gap-2">
-          <h3 className="font-medium">The server&apos;s host key</h3>
-          {view.hostKey ? (
-            <>
-              <p className="text-muted-foreground">
+        <ListRow
+          title="The server's host key"
+          description={
+            view.hostKey ? (
+              <>
+                <span
+                  data-testid="ssh-host-key"
+                  className="block font-mono break-all text-foreground"
+                >
+                  {view.hostKey.type} {view.hostKey.fingerprint}
+                </span>
                 Pinned the first time PCP connected; PCP refuses any other key
                 from this address. Compare it with the server&apos;s own (
-                <code className="text-xs">ssh-keygen -lf</code> on its{" "}
-                <code className="text-xs">/etc/ssh/ssh_host_*_key.pub</code>).
-              </p>
-              <p data-testid="ssh-host-key">
-                <code className="text-xs">{view.hostKey.type}</code>{" "}
-                <code className="text-xs">{view.hostKey.fingerprint}</code>
-              </p>
-            </>
-          ) : (
-            <p className="text-muted-foreground">
-              Not seen yet: PCP pins it the first time it connects.
-            </p>
-          )}
-        </section>
+                <code>ssh-keygen -lf</code> on its{" "}
+                <code>/etc/ssh/ssh_host_*_key.pub</code>).
+              </>
+            ) : (
+              "Not seen yet: PCP pins it the first time it connects."
+            )
+          }
+          trailing={
+            view.hostKey ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={pending}
+                onClick={() =>
+                  run(
+                    "Forget the pinned host key? PCP connects again at once and pins whatever key the server shows then. Do this only when you changed the server's key yourself.",
+                    () => forgetSshHostKeyAction(serverId),
+                  )
+                }
+              >
+                Forget host key
+              </Button>
+            ) : null
+          }
+        />
 
-        <div className="flex flex-wrap gap-2">
-          {view.hostKey ? (
+        <ListRow
+          title="A new key for PCP"
+          description="PCP forgets the old one: nothing runs there until you add the new key on the server."
+          trailing={
             <Button
-              variant="outline"
+              variant="secondary"
               size="sm"
               disabled={pending}
               onClick={() =>
                 run(
-                  "Forget the pinned host key? PCP connects again at once and pins whatever key the server shows then. Do this only when you changed the server's key yourself.",
-                  () => forgetSshHostKeyAction(serverId),
+                  "Make PCP a new key for this server? It forgets the old one: nothing runs there until you add the new key on the server.",
+                  () => replaceSshKeyAction(serverId),
                 )
               }
             >
-              Forget host key
+              Make a new key
             </Button>
-          ) : null}
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={pending}
-            onClick={() =>
-              run(
-                "Make PCP a new key for this server? It forgets the old one: nothing runs there until you add the new key on the server.",
-                () => replaceSshKeyAction(serverId),
-              )
-            }
-          >
-            Make a new key
-          </Button>
-        </div>
-        <FormError error={result.status === "error" ? result.error : null} />
-        <FormNote message={result.status === "ok" ? result.message : null} />
-      </CardContent>
-    </Card>
+          }
+        />
+      </List>
+      <FormError
+        className="px-1"
+        error={result.status === "error" ? result.error : null}
+      />
+      <FormNote
+        className="px-1"
+        message={result.status === "ok" ? result.message : null}
+      />
+    </ListSection>
   )
 }
