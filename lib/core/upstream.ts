@@ -761,13 +761,6 @@ export async function forgetOAuthTokens(
   })
 }
 
-async function authHeaders(
-  ctx: VaultContext,
-  server: McpServer,
-): Promise<Record<string, string>> {
-  return (await credential(ctx, server)).headers
-}
-
 /**
  * What PCP sends to authenticate to a server: the headers its secrets go in
  * (the first on the server row, any further ones after it), and the values
@@ -944,6 +937,12 @@ export type UpstreamConnection = {
   provider: PcpOAuthProvider | null
   /** The server's last answer that was not a success, if any. */
   refusal: () => Refusal | undefined
+  /**
+   * What the server's answers must not repeat: its secrets and headers as
+   * sent, and an OAuth server's tokens, the ones it was sent and any the
+   * SDK renewed since.
+   */
+  secrets: () => Promise<string[]>
   close: () => Promise<void>
 }
 
@@ -956,6 +955,34 @@ type Refusal = { status: number; challenge: string | null }
 
 /** The refusal behind an error thrown while connecting. */
 const refusals = new WeakMap<object, Refusal>()
+
+/** The secrets of the connection an error was thrown while opening. */
+const connectSecrets = new WeakMap<object, () => Promise<string[]>>()
+
+/** An OAuth server's tokens as PCP holds them now. */
+async function oauthTokens(
+  provider: PcpOAuthProvider | null,
+): Promise<string[]> {
+  const tokens = provider
+    ? await provider.tokens().catch(() => undefined)
+    : undefined
+  return [tokens?.access_token, tokens?.refresh_token].filter(
+    (value): value is string => typeof value === "string",
+  )
+}
+
+/** The secrets to take out of an error from a server, opened or not. */
+async function failureSecrets(
+  error: unknown,
+  connection: UpstreamConnection | null,
+): Promise<string[]> {
+  const secrets =
+    connection?.secrets ??
+    (error !== null && typeof error === "object"
+      ? connectSecrets.get(error)
+      : undefined)
+  return secrets ? secrets() : []
+}
 
 /**
  * A connected client for one server. The caller closes it. An OAuth server
@@ -974,7 +1001,13 @@ export async function openUpstream(
         })
       : null
 
-  const headers = await authHeaders(ctx, server)
+  const { headers, redact } = await credential(ctx, server)
+  const sent = await oauthTokens(provider)
+  const secrets = async () => [
+    ...redact,
+    ...sent,
+    ...(await oauthTokens(provider)),
+  ]
   const endpoint = new URL(server.url)
   let refusal: Refusal | undefined
   const transport = new StreamableHTTPClientTransport(endpoint, {
@@ -1005,8 +1038,12 @@ export async function openUpstream(
   } catch (error) {
     await transport.close().catch(() => {})
 
-    if (refusal && error !== null && typeof error === "object") {
-      refusals.set(error, refusal)
+    if (error !== null && typeof error === "object") {
+      if (refusal) {
+        refusals.set(error, refusal)
+      }
+
+      connectSecrets.set(error, secrets)
     }
 
     throw error
@@ -1017,6 +1054,7 @@ export async function openUpstream(
     transport,
     provider,
     refusal: () => refusal,
+    secrets,
     close: async () => {
       await client.close().catch(() => {})
     },
@@ -1096,20 +1134,26 @@ export async function syncServerTools(
     const { tools } = await connection.client.listTools(undefined, {
       timeout: CONNECT_TIMEOUT_MS,
     })
+    // Assistants read these words too, so the credential is taken out.
+    const scrub = makeRedactor(await connection.secrets())
     const toolCount = await storeTools(
       server.id,
       tools.map((tool) => ({
         name: tool.name,
-        title: tool.title,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
+        title: tool.title === undefined ? undefined : scrub.text(tool.title),
+        description:
+          tool.description === undefined
+            ? undefined
+            : scrub.text(tool.description),
+        inputSchema: scrub.value(tool.inputSchema) as typeof tool.inputSchema,
         annotations: tool.annotations,
       })),
     )
 
     // The upstream's own description is a fallback for a server the owner
     // has not described yet.
-    const instructions = connection.client.getInstructions()?.trim()
+    const given = connection.client.getInstructions()?.trim()
+    const instructions = given === undefined ? undefined : scrub.text(given)
     if (instructions && !server.description) {
       await db().mcpServer.update({
         where: { id: server.id },
@@ -1122,6 +1166,9 @@ export async function syncServerTools(
     return { status: "ok", message: "", toolCount }
   } catch (error) {
     const result = describeFailure(server, error, connection)
+    result.message = makeRedactor(await failureSecrets(error, connection)).text(
+      result.message,
+    )
     await setServerStatus(server.id, result.status, result.message)
 
     return { ...result, toolCount: 0 }
@@ -1373,14 +1420,20 @@ async function dispatchCall(
 
   try {
     connection = await openUpstream(ctx, server, { publicUrl })
-
-    return await connection.client.callTool(
+    const result = await connection.client.callTool(
       { name: toolName, arguments: resolved },
       { timeout: CALL_TIMEOUT_MS },
     )
+
+    // A server that echoes what it was sent (a debugging tool, an error
+    // quoting the request) must not hand its credential to the assistant.
+    return scrubResult(result, await connection.secrets())
   } catch (error) {
     const failure = describeFailure(server, error, connection)
-    failure.message = makeRedactor(placed).text(failure.message)
+    failure.message = makeRedactor([
+      ...placed,
+      ...(await failureSecrets(error, connection)),
+    ]).text(failure.message)
     await setServerStatus(server.id, failure.status, failure.message)
 
     // "unauthorized" tells the gateway the server needs connecting (or its

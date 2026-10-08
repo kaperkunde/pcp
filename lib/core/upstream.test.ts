@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { NEW_SECRET } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { createMailAccount } from "./mail/accounts"
 import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
 import { oauthRedirectUrl } from "./oauth-client"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
-import { getServer } from "./servers"
+import { createServer, getServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { callServerTool, PcpOAuthProvider, syncServerTools } from "./upstream"
 import { setupVault } from "./vault"
@@ -212,5 +213,112 @@ describe("a JMAP account signed in with OAuth", () => {
     })
     expect(row.status).toBe("auth_required")
     expect(row.statusMessage).toMatch(/needs to be connected/)
+  })
+})
+
+describe("an MCP server that repeats its credential", () => {
+  const KEY = "sk-live-echoed-0123456789"
+  let mcp: TestApi
+
+  beforeEach(async () => {
+    // A stateless server that puts the key it was sent everywhere it can:
+    // its tool list, a tool's answer, and an error's description.
+    mcp = await startTestApi((request, res) => {
+      if (request.method !== "POST") {
+        res.statusCode = 405
+        return res.end()
+      }
+
+      const sent = String(request.headers["x-api-key"])
+      const { id, method, params } = JSON.parse(request.body) as {
+        id?: number
+        method: string
+        params?: { name?: string }
+      }
+      const answer = (result: unknown) =>
+        json(res, 200, { jsonrpc: "2.0", id, result })
+
+      if (id === undefined) {
+        res.statusCode = 202
+        return res.end()
+      }
+
+      if (method === "initialize") {
+        return answer({
+          protocolVersion: "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "echo", version: "1" },
+          instructions: `Signed in with ${sent}.`,
+        })
+      }
+
+      if (method === "tools/list") {
+        return answer({
+          tools: [
+            {
+              name: "whoami",
+              description: `Says who ${sent} is.`,
+              inputSchema: { type: "object", default: { key: sent } },
+            },
+          ],
+        })
+      }
+
+      if (params?.name === "fail") {
+        return json(res, 400, {
+          error: "invalid_request",
+          error_description: `Unknown key: ${sent}`,
+        })
+      }
+
+      return answer({
+        content: [{ type: "text", text: `X-API-Key: ${sent}` }],
+        structuredContent: { headers: { "x-api-key": sent } },
+      })
+    })
+  })
+
+  afterEach(async () => {
+    await mcp.close()
+  })
+
+  async function echoServer() {
+    const { id } = await createServer(ctx, {
+      name: "Echo",
+      url: `${mcp.origin}/mcp`,
+      authType: "header",
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+      authSecretId: NEW_SECRET,
+      authSecretValue: KEY,
+    })
+    return getServer(ctx, id)
+  }
+
+  it("takes it out of the tool list, a tool's answer and an error", async () => {
+    const server = await echoServer()
+
+    expect((await syncServerTools(ctx, server, PUBLIC)).status).toBe("ok")
+    const stored = await db().mcpServer.findUniqueOrThrow({
+      where: { id: server.id },
+      include: { tools: true },
+    })
+    expect(JSON.stringify(stored)).not.toContain(KEY)
+    expect(stored.tools[0]!.description).toBe("Says who [redacted] is.")
+
+    const result = await callServerTool(ctx, server, "whoami", {}, PUBLIC)
+    expect(result.content).toEqual([
+      { type: "text", text: "X-API-Key: [redacted]" },
+    ])
+    expect(result.structuredContent).toEqual({
+      headers: { "x-api-key": "[redacted]" },
+    })
+    // It was sent all the same.
+    expect(mcp.requests.at(-1)!.headers["x-api-key"]).toBe(KEY)
+
+    await expect(
+      callServerTool(ctx, server, "fail", {}, PUBLIC),
+    ).rejects.toThrow(/Unknown key: \[redacted\]/)
+    expect((await getServer(ctx, server.id)).statusMessage).not.toContain(KEY)
   })
 })
