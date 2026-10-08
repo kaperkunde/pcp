@@ -544,7 +544,10 @@ the credential. A body longer than 20,000 characters is kept the same way.
 `send_email` and `create_draft` take kept results as attachments, read before
 anything connects (at most 10, 20 MB together), so an attachment read from one
 account can be sent from another. Delete moves to the
-Trash and nothing deletes for good. Failures: refused credentials mark the
+Trash and nothing deletes for good. Over IMAP a move (and so a delete) is
+refused on a server with neither MOVE nor UIDPLUS: imapflow would copy and
+then expunge, which erases every email in the folder already marked deleted.
+Failures: refused credentials mark the
 account `auth_required` (with OAuth, "needs connecting"), an unreachable
 server `error`; a request the server refuses (no such email or mailbox) is
 an error answer and leaves the account as it is.
