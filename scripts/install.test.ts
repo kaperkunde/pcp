@@ -334,13 +334,16 @@ describe("install.sh with Docker", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain("docker pull example.com/pcp:1.2.3")
     expect(result.calls).toContain(
-      "docker run -d --name pcp --restart unless-stopped -p 8080:3000 -p 80:8080 -p 443:8443 -v vault:/data example.com/pcp:1.2.3",
+      "docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -v vault:/data example.com/pcp:1.2.3",
     )
     expect(result.calls).toContain(
       "curl -fs -o /dev/null --max-time 3 http://127.0.0.1:8080/api/health",
     )
     expect(result.stdout).toContain("http://localhost:8080")
     expect(result.stdout).not.toContain("PCP_HTTPS=1")
+    // The plain-HTTP port answers on this computer only, so it is not offered
+    // as an address for other devices.
+    expect(result.stdout).not.toContain("http://192.168.1.20:8080")
   })
 
   it("remembers the settings for the next run", () => {
@@ -353,7 +356,7 @@ describe("install.sh with Docker", () => {
     const again = machine.run()
     expect(again.status).toBe(0)
     expect(again.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -p 80:8080 -p 443:8443 -v pcp-data:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -v pcp-data:/data ${IMAGE}`,
     )
 
     const without = machine.run([], { PCP_HTTPS: "0" })
@@ -414,7 +417,7 @@ describe("install.sh with Podman", () => {
     const machine = host({ podman: "5.2.2", portStart: 80 })
     expect(machine.run([], { PCP_HTTPS: "1" }).status).toBe(0)
     expect(readFileSync(machine.unit, "utf8")).toContain(
-      "PublishPort=3000:3000\nPublishPort=80:8080\nPublishPort=443:8443\n",
+      "PublishPort=127.0.0.1:3000:3000\nPublishPort=80:8080\nPublishPort=443:8443\n",
     )
   })
 
@@ -657,7 +660,7 @@ describe("install.sh as root", () => {
     mkdirSync(dirname(machine.conf), { recursive: true })
     writeFileSync(machine.conf, text)
   }
-  const HTTPS_RUN = `docker run -d --name pcp --restart unless-stopped -p 8080:3000 -p 80:8080 -p 443:8443 -v pcp-data:/data ${IMAGE}`
+  const HTTPS_RUN = `docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:8080:3000 -p 80:8080 -p 443:8443 -v pcp-data:/data ${IMAGE}`
 
   it("carries the settings of an older install over from HOME, once", () => {
     const machine = host({ docker: "works", uid: 0 })
@@ -685,7 +688,7 @@ describe("install.sh as root", () => {
     const result = machine.run([], { ...user(machine), PCP_PORT: "7000" })
     expect(result.status).toBe(0)
     expect(result.calls).toContain(
-      `docker run -d --name pcp --restart unless-stopped -p 7000:3000 -p 80:8080 -p 443:8443 -v vault:/data ${IMAGE}`,
+      `docker run -d --name pcp --restart unless-stopped -p 127.0.0.1:7000:3000 -p 80:8080 -p 443:8443 -v vault:/data ${IMAGE}`,
     )
     expect(readFileSync(machine.sys.conf, "utf8")).toContain("PCP_PORT=7000\n")
   })

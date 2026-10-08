@@ -279,7 +279,13 @@ Not defended against:
 - Run behind TLS: your own proxy, or PCP's built-in HTTPS (Settings). Most
   OAuth servers require an `https` redirect URL, and the session cookie is
   only marked `Secure` when the request arrived over TLS. Port 3000 stays
-  plain HTTP either way; do not expose it to the internet.
+  plain HTTP either way; do not expose it to the internet. With PCP's own
+  HTTPS on (`PCP_HTTPS=1`, or `docker-compose.https.yaml`), the installer and
+  the compose file publish it on `127.0.0.1` only, because a port Docker
+  publishes skips the host's firewall rules (ufw included). Without PCP's
+  HTTPS it is published on every interface, for your home network; behind a
+  proxy of your own, keep it off the internet yourself (bind it to
+  `127.0.0.1` or firewall it at the provider).
 - With dynamic DNS on, the service's token or password is stored
   **unencrypted** in the database (the `host_setting` table), because PCP uses
   it while nobody is signed in. Someone who reads the data directory can move
