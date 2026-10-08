@@ -1,13 +1,15 @@
 "use client"
 
-import Link from "next/link"
 import { useActionState } from "react"
 
+import { AuthLink } from "@/components/auth-link"
 import { FormError } from "@/components/form-status"
 import { SubmitButton } from "@/components/submit-button"
-import { Card, CardContent } from "@/components/ui/card"
-import { Checkbox, Input } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { Card } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Field } from "@/components/ui/label"
+import { List } from "@/components/ui/list"
+import { SwitchRow } from "@/components/ui/switch"
 import { UsernameField } from "@/components/username-field"
 import { recoverAction, type RecoverResult } from "@/lib/actions/auth"
 import { MIN_PASSWORD_LENGTH } from "@/lib/core/constants"
@@ -19,10 +21,14 @@ export function RecoverForm({ username }: { username: string }) {
   )
 
   return (
-    <Card>
-      <CardContent>
-        <form action={action} className="flex flex-col gap-4">
-          <Field label="Recovery key" htmlFor="recover-key">
+    <div className="flex flex-col gap-6">
+      <form action={action} className="flex flex-col gap-5">
+        <Card>
+          <Field
+            label="Recovery key"
+            htmlFor="recover-key"
+            hint="The one PCP showed you once, when you set it up."
+          >
             <Input
               id="recover-key"
               name="recoveryKey"
@@ -33,7 +39,11 @@ export function RecoverForm({ username }: { username: string }) {
             />
           </Field>
           <UsernameField id="recover-account" value={username} />
-          <Field label="New password" htmlFor="recover-password">
+          <Field
+            label="New password"
+            htmlFor="recover-password"
+            hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}
+          >
             <Input
               id="recover-password"
               name="password"
@@ -53,27 +63,21 @@ export function RecoverForm({ username }: { username: string }) {
               minLength={MIN_PASSWORD_LENGTH}
             />
           </Field>
-          <div className="flex flex-col gap-1.5">
-            <Label className="font-normal">
-              <Checkbox name="revokeTokens" />
-              Also revoke every API token
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              Do this if you think someone else has had your password or a
-              token. Your assistants will need new tokens.
-            </p>
-          </div>
-          <FormError error={state.status === "error" ? state.error : null} />
-          <SubmitButton size="lg" pendingText="Recovering…">
-            Set the new password
-          </SubmitButton>
-        </form>
-        <p className="text-center text-sm text-muted-foreground">
-          <Link href="/login" className="text-primary hover:underline">
-            Back to sign in
-          </Link>
-        </p>
-      </CardContent>
-    </Card>
+        </Card>
+        <List>
+          <SwitchRow
+            id="recover-revoke"
+            name="revokeTokens"
+            label="Also revoke every API token"
+            description="Do this if you think someone else has had your password or a token. Your assistants will need new tokens."
+          />
+        </List>
+        <FormError error={state.status === "error" ? state.error : null} />
+        <SubmitButton size="lg" className="w-full" pendingText="Recovering…">
+          Set the new password
+        </SubmitButton>
+      </form>
+      <AuthLink href="/login">Back to sign in</AuthLink>
+    </div>
   )
 }

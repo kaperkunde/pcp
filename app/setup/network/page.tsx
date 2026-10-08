@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic"
 
 /**
  * The optional step after setup: pcp.gg, or dynamic DNS and HTTPS, for an
- * owner running PCP at home. The same cards are under Settings.
+ * owner running PCP at home. The same forms are rows under Settings › Network.
  */
 export default async function SetupNetworkPage() {
   const ctx = await requireContext()

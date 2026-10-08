@@ -157,3 +157,21 @@ export async function allowAllTools(
     expect(values.every((value) => value === "allowed")).toBe(true)
   }).toPass()
 }
+
+/**
+ * A folded row of the Settings page ("Password", "Touch ID", "Export"),
+ * opened: the row is a disclosure, and its form is not on screen until it
+ * is. Returns the row to look for the form's fields and buttons in.
+ */
+export async function openSettingsRow(page: Page, title: string) {
+  const row = page.locator("details[data-slot=disclosure]").filter({
+    has: page.locator("summary").getByText(title, { exact: true }),
+  })
+
+  if ((await row.getAttribute("open")) === null) {
+    await row.locator("summary").first().click()
+  }
+
+  await expect(row).toHaveAttribute("open", "")
+  return row
+}

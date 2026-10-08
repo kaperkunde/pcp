@@ -1,5 +1,6 @@
 "use client"
 
+import { RotateCcw, Upload } from "lucide-react"
 import Link from "next/link"
 import {
   startTransition,
@@ -13,15 +14,9 @@ import {
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
+import { SettingsItem } from "@/components/settings-item"
 import { SubmitButton } from "@/components/submit-button"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { Checkbox, Input } from "@/components/ui/input"
 import { Field, Label } from "@/components/ui/label"
 import {
@@ -111,87 +106,82 @@ export function ExportCard({ username }: { username: string }) {
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Export</CardTitle>
-        <CardDescription>
-          Everything PCP holds in one file, to keep as a backup or to restore on
-          another PCP: servers, API endpoints, mail accounts, secrets, API
-          tokens, memories and settings. The file is locked with an export
-          password you choose, and the vault inside it stays locked with your
-          PCP password, as it is here. Nothing is decrypted to make it.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        <form onSubmit={choose} aria-label="Export">
-          <fieldset disabled={draft !== null} className="flex flex-col gap-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field
-                label="Export password"
-                htmlFor="export-password"
-                hint={`At least ${MIN_PASSWORD_LENGTH} characters. Not your PCP password: you need it to restore the file, and PCP cannot recover it.`}
-              >
-                <Input
-                  id="export-password"
-                  name="exportPassword"
-                  type="password"
-                  autoComplete="off"
-                  required
-                  minLength={MIN_PASSWORD_LENGTH}
-                />
-              </Field>
-              <Field label="Repeat export password" htmlFor="export-confirm">
-                <Input
-                  id="export-confirm"
-                  name="exportPasswordConfirm"
-                  type="password"
-                  autoComplete="off"
-                  required
-                  minLength={MIN_PASSWORD_LENGTH}
-                />
-              </Field>
-            </div>
-            <FormError error={mismatch} />
-            <FormNote message={draft === null ? note : null} />
-            {draft === null ? (
-              <div>
-                <Button type="submit">Continue</Button>
-              </div>
-            ) : null}
-          </fieldset>
-        </form>
-        {draft !== null ? (
-          <form
-            action={download}
-            className="flex flex-col gap-4 rounded-lg border border-border p-4"
-          >
-            <p className="text-muted-foreground">
-              An export is a lasting copy of your vault, so PCP asks for your
-              password before it makes one.
-            </p>
-            <input type="hidden" name="exportPassword" value={draft} />
-            <input type="hidden" name="exportPasswordConfirm" value={draft} />
-            <OwnerConfirmFields
-              idPrefix="export-owner"
-              username={username}
-              error={error}
-              autoFocus
-            />
-            <FormError error={error} />
-            <div className="flex gap-2">
-              <SubmitButton pendingText="Exporting…">Confirm</SubmitButton>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setDraft(null)}
-              >
-                Back
+    <SettingsItem
+      title="Export"
+      icon={Upload}
+      state="An encrypted copy of everything, under a password you choose"
+      about="Everything PCP holds in one file, to keep as a backup or to restore on another PCP: servers, API endpoints, mail accounts, secrets, API tokens, memories and settings. The file is locked with an export password you choose, and the vault inside it stays locked with your PCP password, as it is here. Nothing is decrypted to make it."
+    >
+      <form onSubmit={choose} aria-label="Export">
+        <fieldset disabled={draft !== null} className="flex flex-col gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              label="Export password"
+              htmlFor="export-password"
+              hint={`At least ${MIN_PASSWORD_LENGTH} characters. Not your PCP password: you need it to restore the file, and PCP cannot recover it.`}
+            >
+              <Input
+                id="export-password"
+                name="exportPassword"
+                type="password"
+                autoComplete="off"
+                required
+                minLength={MIN_PASSWORD_LENGTH}
+              />
+            </Field>
+            <Field label="Repeat export password" htmlFor="export-confirm">
+              <Input
+                id="export-confirm"
+                name="exportPasswordConfirm"
+                type="password"
+                autoComplete="off"
+                required
+                minLength={MIN_PASSWORD_LENGTH}
+              />
+            </Field>
+          </div>
+          <FormError error={mismatch} />
+          <FormNote message={draft === null ? note : null} />
+          {draft === null ? (
+            <div>
+              <Button type="submit" variant="secondary">
+                Continue
               </Button>
             </div>
-          </form>
-        ) : null}
-      </CardContent>
-    </Card>
+          ) : null}
+        </fieldset>
+      </form>
+      {draft !== null ? (
+        <form
+          action={download}
+          className="flex flex-col gap-4 rounded-lg border border-border p-4"
+        >
+          <p className="text-muted-foreground">
+            An export is a lasting copy of your vault, so PCP asks for your
+            password before it makes one.
+          </p>
+          <input type="hidden" name="exportPassword" value={draft} />
+          <input type="hidden" name="exportPasswordConfirm" value={draft} />
+          <OwnerConfirmFields
+            idPrefix="export-owner"
+            username={username}
+            error={error}
+            autoFocus
+          />
+          <FormError error={error} />
+          <div className="flex gap-2">
+            <SubmitButton pendingText="Exporting…">Confirm</SubmitButton>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setDraft(null)}
+            >
+              Back
+            </Button>
+          </div>
+        </form>
+      ) : null}
+    </SettingsItem>
   )
 }
 
@@ -289,142 +279,140 @@ export function RestoreCard({
   const inSettings = mode === "settings"
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{inSettings ? "Restore" : "Restore an export"}</CardTitle>
-        <CardDescription>
-          {inSettings
-            ? "Puts an export in place of everything in this PCP. You see what the file holds before anything changes."
-            : "Everything the export holds becomes this PCP's: its servers, secrets, API tokens, memories and settings. You see what the file holds before anything is written."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        <form onSubmit={check} aria-label="Restore">
-          <fieldset disabled={preview !== null} className="flex flex-col gap-4">
-            <Field
-              label="Export file"
-              htmlFor="restore-file"
-              hint={`A file PCP exported (${EXPORT_FILE_SUFFIX}), up to ${MAX_FILE_MB} MB.`}
-            >
-              <Input
-                id="restore-file"
-                name="file"
-                type="file"
-                accept={EXPORT_FILE_ACCEPT}
-                onChange={chooseFile}
-                required
-              />
-            </Field>
-            <Field label="Export password" htmlFor="restore-export-password">
-              <Input
-                id="restore-export-password"
-                name="exportPassword"
-                type="password"
-                autoComplete="off"
-                value={exportPassword}
-                onChange={(event) =>
-                  setExportPassword(event.currentTarget.value)
-                }
-                required
-              />
-            </Field>
-            {preview === null ? (
-              <>
-                <FormError error={localError ?? serverError} />
-                <div>
-                  <Button type="submit" disabled={pending}>
-                    {pending ? "Checking…" : "Check the export"}
-                  </Button>
-                </div>
-              </>
-            ) : null}
-          </fieldset>
-        </form>
-        {preview !== null ? (
-          <form
-            onSubmit={restore}
-            aria-label="Confirm the restore"
-            className="flex flex-col gap-4 rounded-lg border border-border p-4"
+    <SettingsItem
+      variant={inSettings ? "row" : "card"}
+      title={inSettings ? "Restore" : "Restore an export"}
+      icon={RotateCcw}
+      state="Replaces everything here with an export"
+      about={
+        inSettings
+          ? "Puts an export in place of everything in this PCP. You see what the file holds before anything changes."
+          : "Everything the export holds becomes this PCP's: its servers, secrets, API tokens, memories and settings. You see what the file holds before anything is written."
+      }
+    >
+      <form onSubmit={check} aria-label="Restore">
+        <fieldset disabled={preview !== null} className="flex flex-col gap-4">
+          <Field
+            label="Export file"
+            htmlFor="restore-file"
+            hint={`A file PCP exported (${EXPORT_FILE_SUFFIX}), up to ${MAX_FILE_MB} MB.`}
           >
-            <PreviewList preview={preview} />
-            <ul className="flex list-disc flex-col gap-1 pl-5 text-sm">
-              {inSettings ? (
-                <li>
-                  Everything in this PCP is replaced: servers, API endpoints,
-                  mail accounts, secrets, API tokens, memories and settings.
-                  Export this PCP first if you may want it back.
-                </li>
-              ) : null}
-              <li>
-                Afterwards you sign in with the password of the PCP the export
-                came from, and its recovery key is the one that works.
-                {inSettings
-                  ? " For this PCP's own export, that is what you have now."
-                  : ""}
-              </li>
-              <li>
-                {inSettings
-                  ? "API tokens made here stop working. The exported ones work, so assistants set up with them carry on, except any marked as coming back revoked: a token you revoked or deleted here after the export stays revoked."
-                  : "The exported API tokens work here, so assistants set up with them carry on, except any marked as coming back revoked."}
-              </li>
-            </ul>
-            {preview.host ? (
-              <Label className="items-start font-normal">
-                <Checkbox
-                  name="restoreHostSettings"
-                  defaultChecked
-                  className="mt-0.5"
-                />
-                <span>
-                  Also restore this machine&apos;s settings:{" "}
-                  {hostSettingNames(preview.host)}.{" "}
-                  <span className="text-muted-foreground">
-                    {hostSettingEffects(preview.host)}
-                  </span>
-                </span>
-              </Label>
-            ) : null}
+            <Input
+              id="restore-file"
+              name="file"
+              type="file"
+              accept={EXPORT_FILE_ACCEPT}
+              onChange={chooseFile}
+              required
+            />
+          </Field>
+          <Field label="Export password" htmlFor="restore-export-password">
+            <Input
+              id="restore-export-password"
+              name="exportPassword"
+              type="password"
+              autoComplete="off"
+              value={exportPassword}
+              onChange={(event) => setExportPassword(event.currentTarget.value)}
+              required
+            />
+          </Field>
+          {preview === null ? (
+            <>
+              <FormError error={localError ?? serverError} />
+              <div>
+                <Button type="submit" variant="secondary" disabled={pending}>
+                  {pending ? "Checking…" : "Check the export"}
+                </Button>
+              </div>
+            </>
+          ) : null}
+        </fieldset>
+      </form>
+      {preview !== null ? (
+        <form
+          onSubmit={restore}
+          aria-label="Confirm the restore"
+          className="flex flex-col gap-4 rounded-lg border border-border p-4"
+        >
+          <PreviewList preview={preview} />
+          <ul className="flex list-disc flex-col gap-1 pl-5 text-sm">
             {inSettings ? (
-              <>
-                <Label className="font-normal">
-                  <Checkbox name="replace" required />
-                  Replace everything in this PCP with the export
-                </Label>
-                {/* Not asked for at once: the box above is ticked first. */}
-                <OwnerConfirmFields
-                  idPrefix="restore-owner"
-                  username={username}
-                  error={serverError}
-                  autoPrompt={false}
-                />
-              </>
+              <li>
+                Everything in this PCP is replaced: servers, API endpoints, mail
+                accounts, secrets, API tokens, memories and settings. Export
+                this PCP first if you may want it back.
+              </li>
             ) : null}
-            <FormError error={serverError} />
-            <div className="flex gap-2">
-              <Button
-                type="submit"
-                variant={inSettings ? "destructive" : "default"}
-                disabled={pending}
-              >
-                {pending
-                  ? "Restoring…"
-                  : inSettings
-                    ? "Replace everything"
-                    : "Restore this export"}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={back}
-                disabled={pending}
-              >
-                Back
-              </Button>
-            </div>
-          </form>
-        ) : null}
-      </CardContent>
-    </Card>
+            <li>
+              Afterwards you sign in with the password of the PCP the export
+              came from, and its recovery key is the one that works.
+              {inSettings
+                ? " For this PCP's own export, that is what you have now."
+                : ""}
+            </li>
+            <li>
+              {inSettings
+                ? "API tokens made here stop working. The exported ones work, so assistants set up with them carry on, except any marked as coming back revoked: a token you revoked or deleted here after the export stays revoked."
+                : "The exported API tokens work here, so assistants set up with them carry on, except any marked as coming back revoked."}
+            </li>
+          </ul>
+          {preview.host ? (
+            <Label className="items-start font-normal">
+              <Checkbox
+                name="restoreHostSettings"
+                defaultChecked
+                className="mt-0.5"
+              />
+              <span>
+                Also restore this machine&apos;s settings:{" "}
+                {hostSettingNames(preview.host)}.{" "}
+                <span className="text-muted-foreground">
+                  {hostSettingEffects(preview.host)}
+                </span>
+              </span>
+            </Label>
+          ) : null}
+          {inSettings ? (
+            <>
+              <Label className="font-normal">
+                <Checkbox name="replace" required />
+                Replace everything in this PCP with the export
+              </Label>
+              {/* Not asked for at once: the box above is ticked first. */}
+              <OwnerConfirmFields
+                idPrefix="restore-owner"
+                username={username}
+                error={serverError}
+                autoPrompt={false}
+              />
+            </>
+          ) : null}
+          <FormError error={serverError} />
+          <div className="flex gap-2">
+            <Button
+              type="submit"
+              variant={inSettings ? "destructive" : "default"}
+              disabled={pending}
+            >
+              {pending
+                ? "Restoring…"
+                : inSettings
+                  ? "Replace everything"
+                  : "Restore this export"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={back}
+              disabled={pending}
+            >
+              Back
+            </Button>
+          </div>
+        </form>
+      ) : null}
+    </SettingsItem>
   )
 }
 

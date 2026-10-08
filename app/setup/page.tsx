@@ -1,8 +1,6 @@
 import type { Metadata } from "next"
 import { redirect } from "next/navigation"
 
-import { AuthShell } from "@/components/auth-shell"
-import { RestoreInsteadLink } from "@/components/backup-cards"
 import { SetupForm } from "@/components/setup-form"
 import { isSetUp } from "@/lib/core/vault"
 import { currentSession } from "@/lib/server/session"
@@ -20,19 +18,5 @@ export default async function SetupPage() {
     redirect("/login")
   }
 
-  return (
-    <AuthShell
-      title="Welcome to PCP"
-      intro={
-        <p>
-          Choose the password that will lock your vault. Everything PCP keeps —
-          secrets, connections, tokens — is encrypted with a key only your
-          password can unlock, so the server itself cannot read it.
-        </p>
-      }
-    >
-      <SetupForm alreadySetUp={alreadySetUp} />
-      {alreadySetUp ? null : <RestoreInsteadLink />}
-    </AuthShell>
-  )
+  return <SetupForm alreadySetUp={alreadySetUp} />
 }

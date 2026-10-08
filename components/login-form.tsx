@@ -1,7 +1,6 @@
 "use client"
 
 import { Fingerprint } from "lucide-react"
-import Link from "next/link"
 import {
   startTransition,
   useActionState,
@@ -18,12 +17,15 @@ import {
   useTouchId,
   whenFocused,
 } from "@/components/desktop-bridge"
+import { AuthLink } from "@/components/auth-link"
 import { FormError, FormNote } from "@/components/form-status"
 import { SubmitButton } from "@/components/submit-button"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
-import { Checkbox, Input } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { Card } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Field } from "@/components/ui/label"
+import { List } from "@/components/ui/list"
+import { SwitchRow } from "@/components/ui/switch"
 import { UsernameField } from "@/components/username-field"
 import {
   loginAction,
@@ -96,14 +98,14 @@ export function LoginForm({
   }, [refresh])
 
   return (
-    <Card>
-      <CardContent>
-        {status?.saved && !restored ? (
-          <TouchIdUnlock onRejected={rejected} next={next} />
-        ) : null}
-        <FormNote message={touchIdNote} />
-        <form action={action} className="flex flex-col gap-4">
-          {next ? <input type="hidden" name="next" value={next} /> : null}
+    <div className="flex flex-col gap-6">
+      {status?.saved && !restored ? (
+        <TouchIdUnlock onRejected={rejected} next={next} />
+      ) : null}
+      <FormNote message={touchIdNote} />
+      <form action={action} className="flex flex-col gap-5">
+        {next ? <input type="hidden" name="next" value={next} /> : null}
+        <Card>
           <UsernameField id="login-account" value={username} />
           <Field label="Password" htmlFor="login-password">
             <Input
@@ -115,40 +117,41 @@ export function LoginForm({
               required
             />
           </Field>
-          {status?.available && !status.saved ? (
-            <Label className="font-normal">
-              <Checkbox name="touchId" />
-              Unlock with Touch ID from now on
-            </Label>
-          ) : null}
-          <FormError
-            error={
-              state.status === "error"
-                ? state.error
-                : keyState.status === "error"
-                  ? keyState.error
-                  : null
-            }
-          />
-          <FormNote
-            message={
-              state.status === "ok" && keyState.status !== "error"
-                ? "Turning on Touch ID…"
+        </Card>
+        {status?.available && !status.saved ? (
+          <List>
+            <SwitchRow
+              id="login-touch-id"
+              name="touchId"
+              label="Unlock with Touch ID from now on"
+              description="Your fingerprint is asked for when this page opens."
+            />
+          </List>
+        ) : null}
+        <FormError
+          error={
+            state.status === "error"
+              ? state.error
+              : keyState.status === "error"
+                ? keyState.error
                 : null
-            }
-          />
-          <SubmitButton size="lg" pendingText="Unlocking…">
-            Unlock
-          </SubmitButton>
-        </form>
-        <p className="text-center text-sm text-muted-foreground">
-          Forgot it?{" "}
-          <Link href="/recover" className="text-primary hover:underline">
-            Use your recovery key
-          </Link>
-        </p>
-      </CardContent>
-    </Card>
+          }
+        />
+        <FormNote
+          message={
+            state.status === "ok" && keyState.status !== "error"
+              ? "Turning on Touch ID…"
+              : null
+          }
+        />
+        <SubmitButton size="lg" className="w-full" pendingText="Unlocking…">
+          Unlock
+        </SubmitButton>
+      </form>
+      <AuthLink href="/recover" prompt="Forgot it?">
+        Use your recovery key
+      </AuthLink>
+    </div>
   )
 }
 
@@ -204,10 +207,12 @@ function TouchIdUnlock({
   }, [error, onRejected])
 
   return (
-    <div className="flex flex-col gap-2 border-b border-border pb-4">
+    <div className="flex flex-col gap-3">
       <Button
         type="button"
+        variant="secondary"
         size="lg"
+        className="w-full"
         disabled={asking || pending}
         onClick={() => void unlock()}
       >

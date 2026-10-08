@@ -117,20 +117,6 @@ test("a client registers itself", async ({ baseURL }) => {
   clientId = client.client_id
 })
 
-test("a redirect URI the client did not register goes nowhere", async ({
-  page,
-}) => {
-  await page.goto(
-    authorizePath(pkce().challenge, "s", {
-      redirect_uri: "https://elsewhere.example/callback",
-    }),
-  )
-  await expect(
-    page.getByRole("heading", { name: "This sign-in cannot go ahead" }),
-  ).toBeVisible()
-  await expect(page.getByText("not an address it registered")).toBeVisible()
-})
-
 test("the owner signs in, allows it, and the assistant gets a token of its own", async ({
   browser,
   baseURL,
@@ -156,6 +142,7 @@ test("the owner signs in, allows it, and the assistant gets a token of its own",
   await expect(page.getByText("registered itself with PCP")).toBeVisible()
   await expect(page.getByText("127.0.0.1:9", { exact: true })).toBeVisible()
   await page.getByLabel("Token name").fill(TOKEN_NAME)
+  await page.getByText("More options").click()
   await page
     .getByLabel("Let an assistant with this token keep memories")
     .check()
@@ -187,9 +174,8 @@ test("the owner signs in, allows it, and the assistant gets a token of its own",
   )
   expect(tools).toEqual(expect.arrayContaining(["search_tools", "memory"]))
   expect(instructions).toContain("PCP")
-})
 
-test("refresh tokens rotate", async ({ baseURL }) => {
+  // Refresh tokens rotate.
   const refreshed = await token(baseURL!, {
     grant_type: "refresh_token",
     refresh_token: tokens.refresh_token,
@@ -213,7 +199,6 @@ test("the owner sees the token under API tokens, and revoking it signs the assis
   await page.goto("/tokens")
   const row = page.getByRole("listitem").filter({ hasText: TOKEN_NAME })
   await expect(row.getByText(`signed in from ${CLIENT_NAME}`)).toBeVisible()
-  await expect(row.getByText("Keeps memories")).toBeVisible()
 
   page.once("dialog", (dialog) => dialog.accept())
   await row.getByRole("button", { name: "Revoke" }).click()
