@@ -6,6 +6,8 @@ import { endAllowance } from "@/lib/core/allowances"
 import {
   createApiToken,
   deleteApiToken,
+  requireLiveToken,
+  revivesToken,
   revokeApiToken,
   updateApiToken,
 } from "@/lib/core/api-tokens"
@@ -100,18 +102,37 @@ export async function deleteTokenAction(id: string): Promise<ActionState> {
   return result
 }
 
-/** Name, servers, how PCP asks and expiry of an existing token. */
+/**
+ * Name, servers, how PCP asks and expiry of an existing token. A new expiry
+ * for one that has expired brings it back, so that asks for the owner
+ * (password or Touch ID), as making a token does; the rest takes a session.
+ */
 export async function updateTokenAction(
   _previous: UpdateTokenResult,
   formData: FormData,
 ): Promise<UpdateTokenResult> {
-  const ctx = await requireContext()
+  const session = await requireSession()
   const id = field(formData, "id")
   const expiresIn = field(formData, "expiresIn")
   const days = Number(expiresIn)
+  const expiresAt =
+    expiresIn === "keep"
+      ? undefined
+      : days > 0
+        ? new Date(Date.now() + days * DAY_MS)
+        : null
 
   const result = await guarded(async () => {
-    await updateApiToken(ctx, id, {
+    const reviving = revivesToken(
+      await requireLiveToken(session.ctx, id),
+      expiresAt,
+    )
+
+    if (reviving) {
+      await confirmOwner(session, formData)
+    }
+
+    const input = {
       name: field(formData, "name"),
       allowAllServers: field(formData, "access") !== "selected",
       serverIds: fields(formData, "serverIds"),
@@ -120,13 +141,9 @@ export async function updateTokenAction(
       webFetch: field(formData, "webFetch") === "on",
       runCode: field(formData, "runCode") === "on",
       manageWrappers: field(formData, "manageWrappers") === "on",
-      expiresAt:
-        expiresIn === "keep"
-          ? undefined
-          : days > 0
-            ? new Date(Date.now() + days * DAY_MS)
-            : null,
-    })
+      expiresAt,
+    }
+    await updateApiToken(session.ctx, id, input, { ownerConfirmed: reviving })
 
     return { message: "Saved." }
   })

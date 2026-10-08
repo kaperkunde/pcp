@@ -663,11 +663,12 @@ Someone with the disk has ciphertext and hashes.
 Consequences worth knowing:
 
 - Changing the password re-wraps the key; sessions and API tokens keep
-  working. Using the recovery key signs every browser out, turns Touch ID off
-  and can revoke every API token.
+  working. Using the recovery key signs every browser out, turns Touch ID off,
+  forgets the pinned public address and can revoke every API token.
 - A stolen session cannot make an API token or a recovery key: both ask for
   the password again (a token, in the Mac app, takes Touch ID instead). Letting
-  an app sign in makes a token, so it asks too.
+  an app sign in makes a token, so it asks too, and so does changing PCP's
+  public address, which decides where sign-ins and permission links go.
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
 - An export is the encrypted vault as it is, under an export password of

@@ -21,9 +21,11 @@ import { clientIp } from "@/lib/server/client-ip"
 
 const WINDOW_MS = 15 * 60 * 1000
 const PER_SOURCE = { max: 10, windowMs: WINDOW_MS }
-// Per-address limits trust X-Forwarded-For, which a client reaching PCP
-// without a proxy can set to anything. This one does not: it caps how many
-// guesses the instance takes at all.
+// Per-address limits trust X-Forwarded-For (lib/server/client-ip.ts), which
+// a client reaching PCP without a proxy can set to anything, and so can one
+// behind a proxy that appends to it unless PCP_TRUSTED_PROXIES names that
+// proxy. This one does not: it caps how many guesses the instance takes at
+// all.
 const GLOBAL = { max: 60, windowMs: WINDOW_MS }
 
 export const TOO_MANY_ATTEMPTS =
@@ -118,9 +120,9 @@ export async function confirmPassword(
 }
 
 /**
- * The owner again, before a new API token, an export, a restore or deleting
- * the vault: the
- * password (`password`), or in the Mac app the Touch ID key (`deviceKey`,
+ * The owner again, before a new API token (or a new expiry for an expired
+ * one), a new public address, an export, a restore or deleting the vault:
+ * the password (`password`), or in the Mac app the Touch ID key (`deviceKey`,
  * lib/core/device-keys.ts), which that app hands over only after Touch ID.
  * A new recovery key and a new password take the password itself: they
  * decide who gets in, and Touch ID must not.

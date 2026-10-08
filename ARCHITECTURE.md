@@ -88,16 +88,21 @@ Consequences:
   working.
 - **Revoking an API token** blanks its grant, and deletes the grants of
   whatever an app that signed in for it holds; **signing out** deletes the
-  session's; **recovery** replaces the password grant, deletes every session
-  grant and the Touch ID key (`device`) and, when asked, blanks every API
-  token grant. **Signing out everywhere** deletes the sessions and the Touch
-  ID key, and can blank the API tokens too.
+  session's; **recovery** replaces the password grant, then signs out
+  everywhere. **Signing out everywhere** (`signOutEverywhere`) deletes every
+  session grant and the Touch ID key (`device`), forgets the pinned public
+  URL, and, when asked, blanks every API token grant. The public URL is no
+  grant, but it decides where permission links and PCP's OAuth metadata
+  point, so one a stolen session pinned must not outlive it; pinning or
+  clearing it takes `confirmOwner` too.
 - **A session cannot outlast itself.** Making an API token or a recovery key
   asks for the password again (`lib/server/password-attempts.ts`). A session
   cookie can be copied, so it may use the DEK but not mint a grant that
-  survives the session. In the Mac app the Touch ID key stands in for the
-  password before a new API token (an app's sign-in included), an export or
-  a restore (`confirmOwner`),
+  survives the session. An expired token keeps its grant, so giving it a new
+  expiry (or none) is the same as making one (`revivesToken`). In the Mac app
+  the Touch ID key stands in for the password before a new API token (an
+  app's sign-in included, or a new expiry for an expired one), a new public
+  URL, an export or a restore (`confirmOwner`),
   never before a new recovery key, a new password or another Touch ID key:
   only the password and the recovery key decide who gets in. See "Touch ID
   in the Mac app".
