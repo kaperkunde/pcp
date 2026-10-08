@@ -2,6 +2,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
+import { MAX_CALLS_PER_RUN } from "../code/limits"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { createEndpoint } from "../endpoints"
@@ -394,6 +395,10 @@ describe("calling a wrapper's tool", () => {
       publicUrl: PUBLIC_URL,
     })
     expect(view!.lines.join("\n")).toContain("which may call: things/echo")
+    // An approved run calls an asking tool as often as its program does.
+    expect(view!.lines.join("\n")).toContain(
+      `may call it as often as it does (at most ${MAX_CALLS_PER_RUN} calls in all)`,
+    )
 
     const ran = await decidePermission(ctx, row.id, "allow_once", {
       publicUrl: PUBLIC_URL,

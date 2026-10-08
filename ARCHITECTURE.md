@@ -938,9 +938,10 @@ checkSyntax`), nothing has a character that does not show on screen
   counting as blocked. It is blocked for a token wherever one of its calls
   is, and asks wherever one of them asks. When the owner allows such a call
   (a `call` request like any other; the page names the tools it may call),
-  the program runs with `approved`, so a call that would ask runs once in
-  that run; one that is blocked stays refused, and nothing asks again inside
-  it. A run that was not allowed by the owner never makes a call that asks.
+  the program runs with `approved`, so a tool that would ask runs in that
+  run as often as the program calls it, with the arguments it works out (up
+  to run_code's `MAX_CALLS_PER_RUN`), and the page says so; one that is
+  blocked stays refused, and nothing asks again inside it. A run that was not allowed by the owner never makes a call that asks.
   Always allow writes only the wrapper tool's own level, which the
   strictest-level rule keeps asking while a tool it calls asks.
 - **Secrets** go in only as a placeholder, `{"$secret": "<name>"}`, in a
