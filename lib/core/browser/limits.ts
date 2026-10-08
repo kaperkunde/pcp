@@ -45,8 +45,11 @@ export const MAX_VIEWERS_PER_TAB = 4
 /** One batch of the owner's input, as it is posted. */
 export const MAX_INPUT_BATCH_BYTES = 64 * 1024
 export const MAX_INPUT_EVENTS = 500
-/** Batches of input per session: about 25 a second while the mouse moves. */
-export const INPUT_BATCHES = { max: 200, windowMs: 10_000 }
+/**
+ * Batches of input per session: the live view sends one every 40 ms while
+ * the mouse moves (25 a second), with room to spare.
+ */
+export const INPUT_BATCHES = { max: 300, windowMs: 10_000 }
 /**
  * Input is replayed with the cadence it was made with, at least this far
  * behind real time. Input that arrives late (a slow or uneven link) moves
@@ -57,6 +60,12 @@ export const INPUT_BATCHES = { max: 200, windowMs: 10_000 }
 export const INPUT_REPLAY_DELAY_MS = 60
 export const MAX_INPUT_REPLAY_DELAY_MS = 400
 export const INPUT_RESYNC_MS = 600
+/**
+ * A mouse move Chromium has not acknowledged after this long means it is
+ * behind: further moves are dropped until it catches up (clicks and keys
+ * never are), so the owner's input does not pile up seconds deep.
+ */
+export const MAX_INPUT_BACKLOG_MS = 1_000
 /** Tool calls per token, asked about or not. */
 export const BROWSER_ACTIONS = { max: 300, windowMs: 10 * 60_000 }
 /** What an assistant may say to the owner when it hands a tab over. */

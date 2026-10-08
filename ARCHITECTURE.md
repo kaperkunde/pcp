@@ -1020,7 +1020,15 @@ CAPTCHA reading the movement sees its real cadence. Input that arrives late
 (a slow or uneven link) moves the replay further behind, up to 400 ms, so
 what follows plays at its own pace instead of in a burst, and the delay
 closes up by a millisecond an event while input arrives in time; a batch
-more than 600 ms late starts a new clock. Coordinates are mapped with the frame's own
+more than 600 ms late starts a new clock. Events go out in order without
+waiting for Chromium to acknowledge each: it acknowledges a mouse move only
+with its next frame (about 17 ms), so waiting on every one would replay at
+most sixty moves a second while a mouse reports hundreds, and the replay
+would fall seconds behind. Chromium folds the moves into its frames, as it
+does a real mouse's; should a move still wait a second unacknowledged,
+further moves are dropped until it catches up, never a click or a key. The
+input route answers once a batch is queued, not once it has played, since
+the page sends one batch at a time. Coordinates are mapped with the frame's own
 metadata. Both routes check PCP's origin and the owner's session, as the
 export download does. A WebSocket would answer a little sooner, but needs a
 server of its own around Next; the input's format is the same whatever
@@ -1029,8 +1037,8 @@ carries it.
 **Bounded** (`browser/limits.ts`). Eight tabs per vault, every token's and
 the owner's together; thirty seconds per page load and ten per action; 300
 tool calls per token per ten minutes; four people watching a tab; and the
-owner's input in batches of at most 500 events, 200 batches per session in
-ten seconds. A check that may pass on its own is waited for twenty seconds
+owner's input in batches of at most 500 events, 300 batches per session in
+ten seconds, moves dropped while Chromium is a second behind. A check that may pass on its own is waited for twenty seconds
 (`CHALLENGE_WAIT_MS`). A page read for web_fetch takes 45 seconds at most
 (`SOLVE_TIMEOUT_MS`), two such pages per vault at once (`MAX_SOLVES`), and a
 site whose check passed is remembered for thirty minutes
