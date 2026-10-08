@@ -560,8 +560,12 @@ connect it.
 A token made with "keep memories" (`api_token.keep_memories`, off unless the
 owner turns it on) gets one more tool, `memory`, with the commands of Claude's
 memory tool (view, create, str_replace, insert, delete, rename, over files
-under `/memories`) plus search and every, and a paragraph in the instructions saying
-when to use it. The rules are in `lib/core/memories.ts`. Like endpoint
+under `/memories`) plus search and every, a second one, `read_memory`, with
+only every, view and search, and a paragraph in the instructions saying when
+to use them. `read_memory` and `call_read_only_tool` (call_tool for a tool
+whose stored annotations say `readOnlyHint`) are marked read-only, so a
+client that holds back other tools, as Claude Code's plan mode does, lets
+them through; the token's levels apply to them as to the rest. The rules are in `lib/core/memories.ts`. Like endpoint
 management, they are drawn around the fact that what one assistant writes
 another one reads:
 
