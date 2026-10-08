@@ -16,6 +16,8 @@ import { AddressBlockedError, bareHostname, isPublicAddress } from "./address"
  * front.
  *
  * Neither path follows redirects: both hand the 3xx back to the caller.
+ * checkedFetch can follow them, for an MCP server, by sending each hop again
+ * through the same check.
  */
 
 export type SendOptions = {
@@ -176,4 +178,132 @@ function sendPinned(
     request.on("error", reject)
     request.end(init.body)
   })
+}
+
+/** fetch's shape, as the MCP SDK takes it for its requests. */
+export type FetchLike = (
+  url: string | URL,
+  init?: RequestInit,
+) => Promise<Response>
+
+/** As many redirects as fetch follows before it gives up. */
+const MAX_REDIRECTS = 20
+
+const REDIRECTS = new Set([301, 302, 303, 307, 308])
+
+/** What describes a body: dropped when a redirect turns the request into a GET. */
+const BODY_HEADERS = [
+  "content-type",
+  "content-length",
+  "content-encoding",
+  "content-language",
+  "content-location",
+]
+
+/** What fetch drops when a redirect leaves the origin. */
+const CROSS_ORIGIN_DROPPED = [
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "host",
+]
+
+/** A request body as send takes it: text or bytes, nothing else. */
+function bodyOf(
+  body: RequestInit["body"],
+  headers: Record<string, string>,
+): SendInit["body"] {
+  if (body === undefined || body === null) {
+    return undefined
+  }
+
+  if (typeof body === "string") {
+    headers["content-type"] ??= "text/plain;charset=UTF-8"
+    return body
+  }
+
+  if (body instanceof URLSearchParams) {
+    headers["content-type"] ??=
+      "application/x-www-form-urlencoded;charset=UTF-8"
+    return body.toString()
+  }
+
+  if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+    const view = ArrayBuffer.isView(body)
+      ? new Uint8Array(body.buffer, body.byteOffset, body.byteLength)
+      : new Uint8Array(body)
+
+    // A copy, on an ArrayBuffer of its own.
+    return new Uint8Array(view)
+  }
+
+  throw new TypeError("PCP sends a request body as text or bytes only.")
+}
+
+/**
+ * fetch over send, for the MCP SDK (a server's transport and its OAuth
+ * requests): every request is checked as send checks it. With
+ * `followRedirects` a redirect is followed as fetch follows one (a 303, or a
+ * 301 or 302 after a POST, becomes a GET without its body; leaving the origin
+ * drops the Authorization and Cookie headers), each hop a request of its own
+ * that is checked again, so a redirect cannot lead past the check. Without
+ * it, the 3xx comes back to the caller, as from send.
+ */
+export function checkedFetch(
+  options: SendOptions,
+  { followRedirects = false }: { followRedirects?: boolean } = {},
+): FetchLike {
+  return async (input, init) => {
+    let url = new URL(String(input))
+    let method = (init?.method ?? "GET").toUpperCase()
+    const headers = Object.fromEntries(new Headers(init?.headers))
+    let body = bodyOf(init?.body, headers)
+    const signal = init?.signal ?? undefined
+
+    for (let hops = 0; ; hops++) {
+      const response = await send(
+        url.toString(),
+        { method, headers, body, signal },
+        options,
+      )
+      const location = response.headers.get("location")
+
+      if (
+        !followRedirects ||
+        !REDIRECTS.has(response.status) ||
+        location === null
+      ) {
+        return response
+      }
+
+      await response.body?.cancel().catch(() => {})
+
+      if (hops >= MAX_REDIRECTS) {
+        throw new TypeError("redirect count exceeded")
+      }
+
+      const next = new URL(location, url)
+
+      if (next.protocol !== "http:" && next.protocol !== "https:") {
+        throw new TypeError("a redirect led to an address that is not http(s)")
+      }
+
+      if (
+        (response.status === 303 && method !== "GET" && method !== "HEAD") ||
+        ((response.status === 301 || response.status === 302) &&
+          method === "POST")
+      ) {
+        method = "GET"
+        body = undefined
+
+        for (const name of BODY_HEADERS) delete headers[name]
+      }
+
+      if (next.origin !== url.origin) {
+        for (const name of CROSS_ORIGIN_DROPPED) delete headers[name]
+      }
+
+      url = next
+    }
+  }
 }

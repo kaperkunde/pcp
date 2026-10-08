@@ -991,7 +991,13 @@ describe("adding a server", () => {
         startUrl: `${PUBLIC_URL}/api/servers/${linear.id}/oauth/start`,
       },
     })
-    expect(linear).toMatchObject({ authType: "oauth", oauthScope: "read" })
+    // The address was the assistant's: public ones only, until the owner
+    // allows private addresses on its page.
+    expect(linear).toMatchObject({
+      authType: "oauth",
+      oauthScope: "read",
+      publicOnly: true,
+    })
     // The scoped token reaches the server it asked for.
     expect(
       await db().apiTokenServer.count({

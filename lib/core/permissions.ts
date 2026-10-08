@@ -176,6 +176,11 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   endpoint?: EndpointRegistration
   /** A mail account (JMAP or IMAP) rather than an MCP server or an API. */
   mail?: MailRegistration
+  /**
+   * An MCP server: set when its host is, or resolves to, a private or local
+   * address, for the owner. Missing on requests from before it was looked up.
+   */
+  privateAddress?: string | null
 }
 
 export type PermissionAsk =
@@ -225,6 +230,12 @@ export type PermissionView = {
   tool: string
   title: string
   lines: string[]
+  /**
+   * The lines the owner reads and the assistant is not told: whether a
+   * server's name resolves to an address on their network, which would
+   * otherwise let a proposal map it.
+   */
+  ownerOnly: string[]
   warning: string | null
   /**
    * Everything the request carries, for the page to fold under the lines
@@ -652,6 +663,7 @@ async function summarizeRow(
   full?: ShownText[] | null
   memory?: MemoryShown
   wrapper?: WrapperShown
+  ownerOnly?: string[]
 }> {
   const args = readArgs(ctx, row)
   const asker = `Asked by the token "${row.token.name}"`
@@ -772,6 +784,9 @@ async function summarizeRow(
       const { protocol, smtpUrl, readOnly, mailFrom, checked, privateAddress } =
         input.mail
       const jmap = protocol === "jmap"
+      const flagged = privateAddress
+        ? `${privateAddress} If you agree, PCP signs in there from your own network.`
+        : null
 
       return {
         title: `Add the mail account ${input.name}?`,
@@ -789,11 +804,7 @@ async function summarizeRow(
             : []),
           ...(smtpUrl ? [`SMTP server: ${smtpUrl}`] : []),
           ...(checked ? [`Checked: ${checked}`] : []),
-          ...(privateAddress
-            ? [
-                `${privateAddress} If you agree, PCP signs in there from your own network.`,
-              ]
-            : []),
+          ...(flagged ? [flagged] : []),
           ...(input.authType === "basic" ? [`User name: ${login}`] : []),
           auth,
           ...oauthLines.slice(1),
@@ -805,6 +816,7 @@ async function summarizeRow(
           asker,
         ],
         warning,
+        ownerOnly: flagged ? [flagged] : [],
       }
     }
 
@@ -840,16 +852,22 @@ async function summarizeRow(
       }
     }
 
+    const flagged = input.privateAddress
+      ? `${input.privateAddress} A server an assistant proposes reaches public addresses only: if you agree, it connects once you allow private addresses on its page.`
+      : null
+
     return {
       title: `Add the server ${input.name}?`,
       lines: [
         `Address: ${input.url}`,
+        ...(flagged ? [flagged] : []),
         auth,
         ...oauthLines.slice(1),
         ...(input.description ? [`Description: ${input.description}`] : []),
         asker,
       ],
       warning,
+      ownerOnly: flagged ? [flagged] : [],
     }
   }
 
@@ -991,6 +1009,7 @@ async function toView(
     memory = null,
     wrapper = null,
     full = null,
+    ownerOnly = [],
     ...summary
   } = await summarizeRow(ctx, row, publicUrl)
   const kind = row.kind as PermissionKind
@@ -1014,6 +1033,7 @@ async function toView(
     // Whatever made the lines, nothing in them hides from the owner.
     title: visible(summary.title),
     lines: summary.lines.map((line) => visible(line)),
+    ownerOnly: ownerOnly.map((line) => visible(line)),
     full,
     memory,
     wrapper,
@@ -1154,7 +1174,12 @@ function pendingText(view: PermissionView, detail?: string): string {
         : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
     : ""
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
+  const told = {
+    ...view,
+    lines: view.lines.filter((line) => !view.ownerOnly.includes(line)),
+  }
+
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
 }
 
 /**
@@ -1709,6 +1734,9 @@ async function executeRegister(
             authValueTemplate: asked.authValueTemplate,
             authExtraHeaders: asked.authExtraHeaders,
             ...secretFields(asked, secret.id),
+            // The address is the assistant's: public ones only, until the
+            // owner allows private addresses on the server's page.
+            publicOnly: true,
           })
   } catch (error) {
     // The secret was typed in for this server alone.

@@ -1,8 +1,12 @@
-import dns from "node:dns"
 import { isIP } from "node:net"
 
 import { invalid } from "../errors"
-import { bareHostname, isPublicAddress } from "../openapi/address"
+import {
+  bareHostname,
+  isPublicAddress,
+  lookupAll,
+  type HostLookup,
+} from "../openapi/address"
 import type { SendOptions } from "../openapi/transport"
 
 /**
@@ -86,11 +90,6 @@ export function validateSessionUrl(raw: string): string {
 
   return url.toString()
 }
-
-export type HostLookup = (host: string) => Promise<string[]>
-
-const lookupAll: HostLookup = async (host) =>
-  (await dns.promises.lookup(host, { all: true })).map((entry) => entry.address)
 
 /**
  * Refuses an http:// session URL whose name does not resolve only to

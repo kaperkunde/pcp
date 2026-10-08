@@ -41,10 +41,16 @@ for you: you answer on PCP's own page, signed in. It can only propose a new
 server, API (as OpenAPI text or a schema URL) or mail account, naming a secret
 rather than seeing it; nothing is added until you agree, you are shown the
 address, the tools and the secret first, and a secret PCP does not hold yet is
-typed in by you on that page. It can propose levels for its own tools, but
-only your save on PCP's page changes them. It never receives a stored secret,
-an OAuth token, or another vault's data. Revoking the token ends its access at
-once.
+typed in by you on that page. An MCP server it proposes reaches public
+addresses only: PCP refuses private, loopback and link-local addresses, and
+its own, for every request it makes there, its sign-in and each redirect
+included, checked at the moment of connecting so a rebinding name does not get
+past it, until you allow private addresses on the server's page. A private
+address it proposes, for an MCP server or a mail server, is flagged to you on
+the approval page and not told to the assistant. It can propose levels for its
+own tools, but only your save on PCP's page changes them. It never receives a
+stored secret, an OAuth token, or another vault's data. Revoking the token
+ends its access at once.
 
 **An assistant with an API token and an API endpoint** can call the operations
 the schema lists, with your secret (a header, or a user name and password)
@@ -220,10 +226,15 @@ Not defended against:
   credential, destructive ones included. Use a key with only the access the
   assistant needs, turn on Read-only, and scope the token. Read-only trusts
   the HTTP method: a GET that changes something is the API's doing.
-- **Addresses on your own network.** PCP does not stop a schema URL or a base
-  URL from pointing at a private address; only you can set one, and that is
-  often the point. A host that lets anyone else do it needs an address
-  policy first (see [ARCHITECTURE.md](ARCHITECTURE.md#api-endpoints)).
+- **Addresses on your own network.** PCP does not stop a server address, a
+  schema URL or a base URL you set from pointing at a private address; that
+  is often the point. What an assistant proposes is held to public addresses
+  instead: an MCP server or an API until you allow private ones on its page, a
+  mail account only by your agreeing to it, with a private address flagged
+  when you are asked. Once you allow them, that server or API reaches your
+  network as one you added would. A host that lets anyone else set addresses
+  needs an address policy first (see
+  [ARCHITECTURE.md](ARCHITECTURE.md#api-endpoints)).
 - **Egress through an API an assistant registers.** Once you agree to an API
   and allow its tools, an assistant can have PCP send data it holds to that
   public address, as the arguments of an operation. A prompt injected into the
@@ -286,10 +297,11 @@ Not defended against:
   built from it, are stored unencrypted, like server addresses, names and the
   user name of a login. A copy of the disk shows them. Do not put a key or a
   hostname you would not want seen into a schema you upload.
-- **Endpoints behind an outbound proxy.** Public-only endpoints connect
-  directly so PCP can check the address it connects to. A host that must use
-  a proxy has to allow private addresses on those endpoints, which turns that
-  check off; the proxy's own egress rules are what protect it then.
+- **Endpoints behind an outbound proxy.** Public-only endpoints and MCP
+  servers connect directly so PCP can check the address it connects to. A
+  host that must use a proxy has to allow private addresses on those, which
+  turns that check off; the proxy's own egress rules are what protect it
+  then.
 - **What is in your mail.** An email is someone else's text: one an
   assistant reads can carry instructions meant for it (prompt injection),
   and could ask it to send or forward mail. Keep sending (and the automatic
