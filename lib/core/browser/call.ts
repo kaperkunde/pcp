@@ -5,6 +5,7 @@ import type { McpServer } from "@/lib/generated/prisma/client"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { PcpError } from "../errors"
+import { CHALLENGE_LINE } from "../fetch/challenge"
 import { isPcpSite } from "../fetch/fetch"
 import { htmlToMarkdown, sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
@@ -15,6 +16,7 @@ import { decideSite, loadFetchRules } from "../web-fetch"
 import {
   ACTION_TIMEOUT_MS,
   BROWSER_ACTIONS,
+  CHALLENGE_WAIT_MS,
   DEFAULT_READ_CHARS,
   MAX_SCREENSHOT_BYTES,
   MAX_TABS,
@@ -46,7 +48,9 @@ import { OwnerNeeded, type BrowseAsk } from "./types"
  * be opened (the token's web fetch lines, decided as web_fetch decides
  * them, a new site getting a line of its own), and what the page looks
  * like afterwards. A site that asks, and a hand-over, end in OwnerNeeded,
- * which the gateway turns into a permission request.
+ * which the gateway turns into a permission request. A site's check of its
+ * visitors is not one: the tab waits for it to pass on its own, and the
+ * answer says when it does not, so the assistant can hand the tab over.
  *
  * A token sees and drives only the tabs it opened (and their popups):
  * another token's tab, or the owner's own, is answered as a tab that does
@@ -287,6 +291,30 @@ async function blockedNote(scope: BrowserScope, tab: Tab): Promise<string[]> {
   ]
 }
 
+/**
+ * What an answer leads with while the tab shows a site's check of its
+ * visitors (challenge.ts), once the tab has given it its time: the
+ * assistant decides whether to hand the tab over; nothing asks the owner
+ * on its own.
+ */
+const CHECK_LEAD = `${CHALLENGE_LINE} It did not pass on its own in this tab: call hand_over so the owner can pass it themselves, then take a snapshot.`
+
+function checkLead(tab: Tab): string[] {
+  return tab.documents.challenged() ? [CHECK_LEAD] : []
+}
+
+/**
+ * Gives a site's check the tab shows the time most take to pass on their
+ * own: its script reloads or posts back, and the next document is the
+ * page. The clearance it leaves is a cookie in the vault's profile, saved
+ * with the rest of the sign-ins.
+ */
+async function passCheck(tab: Tab): Promise<void> {
+  if (tab.documents.challenged()) {
+    await tab.documents.pass(CHALLENGE_WAIT_MS)
+  }
+}
+
 /** The tab as an answer: where it is, how to watch it, and its snapshot. */
 async function report(
   scope: BrowserScope,
@@ -294,6 +322,7 @@ async function report(
   { snapshot = true, lead = [] as string[] } = {},
 ): Promise<CallToolResult> {
   const lines = [
+    ...checkLead(tab),
     ...lead,
     `Tab ${tab.id}: ${(await tabTitle(tab)) || "(no title)"}`,
     `Address: ${tab.page.url()}`,
@@ -319,11 +348,12 @@ async function report(
   return text(lines.join("\n"))
 }
 
-/** Waits briefly for what an action started to load. */
+/** Waits briefly for what an action started to load, and for its check. */
 async function settle(tab: Tab): Promise<void> {
   await tab.page
     .waitForLoadState("domcontentloaded", { timeout: 5_000 })
     .catch(() => {})
+  await passCheck(tab)
 }
 
 /** Why a page could not be opened, in words. */
@@ -443,6 +473,7 @@ export async function performNavigate(
       )
     }
 
+    await passCheck(tab)
     await saveVaultProfile(scope.ctx, vault, { force: true })
     return report(scope, tab)
   })
@@ -675,6 +706,7 @@ export async function callBrowserTool(
             timeout: NAVIGATION_TIMEOUT_MS,
           })
           .catch(() => null)
+        await passCheck(current)
         return report(scope, current, {
           lead: went
             ? []
@@ -700,6 +732,7 @@ export async function callBrowserTool(
 
         return text(
           [
+            ...checkLead(current),
             `Tab ${current.id}: ${title ?? "(no title)"}`,
             `Address: ${current.page.url()}`,
             `Characters ${slice.start} to ${slice.end} of ${slice.total}${more}.`,
