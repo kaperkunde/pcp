@@ -143,7 +143,10 @@ function world(): Map<string, Box> {
 
 function fakeImap(
   boxes: Map<string, Box>,
-  { secure = true }: { secure?: boolean } = {},
+  {
+    secure = true,
+    capabilities = ["IMAP4rev1", "MOVE", "UIDPLUS"],
+  }: { secure?: boolean; capabilities?: string[] } = {},
 ): ImapClientLike & {
   calls: string[]
   appended: Array<{ path: string; raw: string; flags?: string[] }>
@@ -175,6 +178,7 @@ function fakeImap(
     calls,
     appended,
     secureConnection: secure,
+    capabilities: new Map(capabilities.map((name) => [name, true])),
     get mailbox() {
       return open ? { path: open, uidValidity: current().uidValidity } : false
     },
@@ -314,13 +318,17 @@ function setup(
     boxes?: Map<string, Box>
     config?: Partial<ImapConfig>
     secure?: boolean
+    capabilities?: string[]
     connect?: ImapDeps["connect"]
     rejected?: string[]
     verify?: () => Promise<unknown>
   } = {},
 ) {
   const boxes = options.boxes ?? world()
-  const imap = fakeImap(boxes, { secure: options.secure })
+  const imap = fakeImap(boxes, {
+    secure: options.secure,
+    capabilities: options.capabilities,
+  })
   const mailed: OutgoingMail[] = []
   const deps: ImapDeps = {
     connect: options.connect ?? (async () => imap),
@@ -641,6 +649,41 @@ describe("changing", () => {
     })
     expect(found.emails).toHaveLength(2)
     expect(imap.calls).toContain('search {"keyword":"invoices"}')
+  })
+
+  it("refuses to move or delete where that would erase other deleted mail", async () => {
+    // Neither MOVE nor UIDPLUS: imapflow would copy, flag and plain EXPUNGE.
+    const { mail, imap, boxes } = setup({ capabilities: ["IMAP4rev1"] })
+    const id = encodeImapId(1, 7n, "INBOX")
+
+    for (const run of [
+      () => mail.moveEmails([id], "Archive/2026"),
+      () => mail.deleteEmails([id]),
+    ]) {
+      expect(await run()).toEqual({
+        done: [],
+        failed: [
+          {
+            id,
+            error: expect.stringMatching(/neither move mail.*erase every/),
+          },
+        ],
+      })
+    }
+
+    expect(imap.calls.some((call) => call.startsWith("move"))).toBe(false)
+    expect(boxes.get("INBOX")!.messages).toHaveLength(3)
+
+    // Either one is enough: MOVE alone, or UIDPLUS for a UID EXPUNGE.
+    for (const capabilities of [
+      ["IMAP4rev1", "MOVE"],
+      ["IMAP4rev1", "UIDPLUS"],
+      ["IMAP4rev2"],
+    ]) {
+      const { mail: ok } = setup({ capabilities })
+
+      expect((await ok.moveEmails([id], "Archive/2026")).failed).toEqual([])
+    }
   })
 
   it("deletes into the Trash only", async () => {

@@ -446,8 +446,10 @@ through: there is no tool that takes a raw JMAP method or IMAP command, so
 every change an assistant makes is one these rules were written for. Which
 ones an account has depends on read-only (the tools that change mail are left
 out, and refused if called anyway), on whether it can send (JMAP: the session
-offers submission; IMAP: the owner gave an SMTP server), and for the automatic
-reply on whether the JMAP session offers `vacationresponse`.
+offers submission; IMAP: the owner gave an SMTP server; `set_vacation_response`
+counts as sending, since the server sends its text to whoever writes in, and
+goes with `send_email`), and for the automatic reply on whether the JMAP
+session offers `vacationresponse`.
 
 `move_email`, `mark_email` and `delete_email` take `id` or `ids` (up to
 `MAX_BULK_EMAILS`): one email answers as it always has, several answer with
@@ -505,7 +507,10 @@ JMAP only) or `oauth` (JMAP only).
 **JMAP** (`mail/jmap.ts`): `url` is the session URL the owner typed. Reading
 the account GETs it with the credential, and the API, download and upload
 addresses it names are accepted only on that URL's origin, so the credential
-goes nowhere the owner did not type; they are kept (`mail_api_url`,
+goes nowhere the owner did not type; the URL is `https://`, or `http://` only
+for a private, loopback or link-local address or a name that resolves only to
+those (`requireEncryptedOrPrivate` when it is saved or proposed, and every
+request again, to the address the socket connects to); they are kept (`mail_api_url`,
 `mail_download_url`, `mail_upload_url`, `mail_account_id`,
 `mail_submission`) and forgotten when
 the address or sign-in changes. Redirects are never followed: PCP names
@@ -542,7 +547,10 @@ the credential. A body longer than 20,000 characters is kept the same way.
 `send_email` and `create_draft` take kept results as attachments, read before
 anything connects (at most 10, 20 MB together), so an attachment read from one
 account can be sent from another. Delete moves to the
-Trash and nothing deletes for good. Failures: refused credentials mark the
+Trash and nothing deletes for good. Over IMAP a move (and so a delete) is
+refused on a server with neither MOVE nor UIDPLUS: imapflow would copy and
+then expunge, which erases every email in the folder already marked deleted.
+Failures: refused credentials mark the
 account `auth_required` (with OAuth, "needs connecting"), an unreachable
 server `error`; a request the server refuses (no such email or mailbox) is
 an error answer and leaves the account as it is.

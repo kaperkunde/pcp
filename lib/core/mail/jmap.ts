@@ -3,9 +3,15 @@ import { randomUUID } from "node:crypto"
 import { asBytes } from "../crypto"
 
 import { describeFetchError, discard, readCapped } from "../openapi/http"
+import { AddressBlockedError } from "../openapi/address"
 import { send } from "../openapi/transport"
 import { PCP_VERSION } from "../version"
-import { onSameOrigin, onSameOriginAbsolute } from "./addresses"
+import {
+  mailSendOptions,
+  onSameOrigin,
+  onSameOriginAbsolute,
+  PLAIN_HTTP_REFUSED,
+} from "./addresses"
 import {
   checkDeletable,
   checkNewParent,
@@ -121,26 +127,36 @@ async function exchange(
     let response: Response
 
     try {
-      response = await send(url, {
-        method: init.method,
-        headers: {
-          accept: init.accept ?? "application/json",
-          "user-agent": USER_AGENT,
-          ...(init.body !== undefined
-            ? {
-                "content-type":
-                  init.contentType ?? "application/json; charset=utf-8",
-              }
-            : {}),
-          ...credential.headers,
+      response = await send(
+        url,
+        {
+          method: init.method,
+          headers: {
+            accept: init.accept ?? "application/json",
+            "user-agent": USER_AGENT,
+            ...(init.body !== undefined
+              ? {
+                  "content-type":
+                    init.contentType ?? "application/json; charset=utf-8",
+                }
+              : {}),
+            ...credential.headers,
+          },
+          body:
+            init.body === undefined || typeof init.body === "string"
+              ? init.body
+              : asBytes(init.body),
+          signal: AbortSignal.timeout(MAIL_CALL_TIMEOUT_MS),
         },
-        body:
-          init.body === undefined || typeof init.body === "string"
-            ? init.body
-            : asBytes(init.body),
-        signal: AbortSignal.timeout(MAIL_CALL_TIMEOUT_MS),
-      })
+        // http:// only to a private address, so an account saved before
+        // that was a rule never sends its credential in the clear.
+        mailSendOptions(url),
+      )
     } catch (error) {
+      if (error instanceof AddressBlockedError) {
+        throw new MailTransportError(PLAIN_HTTP_REFUSED)
+      }
+
       throw new MailTransportError(
         `${where(url)} could not be reached: ${describeFetchError(error, MAIL_CALL_TIMEOUT_MS)}`,
       )

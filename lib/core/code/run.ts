@@ -435,7 +435,7 @@ export async function runProgram(
     const opened = await openResult(scope.ctx, { tokenId: scope.tokenId, id })
 
     if (!opened) {
-      return refuse(missingResultMessage(id))
+      return refuse(missingResultMessage())
     }
 
     if (
