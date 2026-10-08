@@ -288,7 +288,10 @@ so in the summary; the bump itself waits for the request.
   export password: nothing is decrypted to make it, and it never carries a
   session grant or the Touch ID key. A restore replaces the vault whole, in
   one transaction, after the owner has seen what the file holds and
-  confirmed it with their password (or Touch ID). A
+  confirmed it with their password (or Touch ID). It never undoes a
+  revocation: into an existing vault, a token the file has live that the
+  vault revoked or deleted since is written revoked with its grant blanked
+  (`carriedRevocations`), and the preview marks it. A
   migration that adds a column fails `pnpm typecheck` in
   `lib/core/backup-format.ts` until the format carries it, with the column's
   default so older files still restore.

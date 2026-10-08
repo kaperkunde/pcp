@@ -111,6 +111,14 @@ test("restores the file, undoing what came after it", async ({
   await expect(preview).toContainText(OWNER_NAME)
   await expect(preview).toContainText(/\d+ secrets?/)
   await expect(preview).toContainText(/\d+ API tokens?/)
+  // The tokens in the file, by name; none was revoked since, so none is
+  // marked as coming back revoked.
+  const tokens = preview.getByTestId("restore-tokens")
+  await expect(tokens).toContainText(`Before export ${RUN}`)
+  await expect(tokens).not.toContainText(`After export ${RUN}`)
+  await expect(
+    tokens.getByRole("listitem").filter({ hasText: `Before export ${RUN}` }),
+  ).not.toContainText("comes back revoked")
   await expect(
     restoreCard.getByText(/Everything in this PCP is replaced/),
   ).toBeVisible()

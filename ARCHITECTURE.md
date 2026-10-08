@@ -1395,6 +1395,20 @@ with the vault; the action signs them in again when the password they typed
 opens the restored vault (their own export), and otherwise sends them to sign
 in with the exported PCP's password.
 
+**A restore keeps revocations.** A file made before the owner revoked a token
+holds that token live, with a working wrapped key, so writing it as it is
+would bring back an assistant the owner cut off. Into a vault that exists,
+when the file is an export of that same vault (the ids match: a restore keeps
+the vault's id), every token the file has live that the vault being replaced
+has revoked, or no longer has, is written revoked (the vault's `revoked_at`,
+or now for a deleted one) with its grant blanked as revoking blanks it
+(`carriedRevocations`, read inside the transaction before the wipe). The
+preview lists the file's tokens by name and prefix and marks those that
+come back revoked. At setup, or for another PCP's export, the vault knows
+nothing of them and the file is written as it is. A newer export of a vault
+restored here from an older one has tokens this vault never had; they come
+back revoked too, and the owner makes them again.
+
 **Who may.** The export asks for the owner's password again (or Touch ID in
 the Mac app: `confirmOwner`), as making a token does: a copied session
 cookie may use the vault but not walk off with it. The restore, when signed

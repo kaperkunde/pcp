@@ -364,8 +364,8 @@ export function RestoreCard({
               </li>
               <li>
                 {inSettings
-                  ? "API tokens made here stop working; the exported ones work, so assistants set up with them carry on."
-                  : "The exported API tokens work here, so assistants set up with them carry on."}
+                  ? "API tokens made here stop working. The exported ones work, so assistants set up with them carry on, except any marked as coming back revoked: a token you revoked or deleted here after the export stays revoked."
+                  : "The exported API tokens work here, so assistants set up with them carry on, except any marked as coming back revoked."}
               </li>
             </ul>
             {preview.host ? (
@@ -462,6 +462,41 @@ function PreviewList({ preview }: { preview: ExportPreview }) {
       <dd>{preview.publicUrl ?? "not set"}</dd>
       <dt className="text-muted-foreground">Holds</dt>
       <dd>{items.join(", ")}</dd>
+      {preview.tokens.length > 0 ? (
+        <>
+          <dt className="text-muted-foreground">API tokens</dt>
+          <dd>
+            <ul className="flex flex-col gap-1" data-testid="restore-tokens">
+              {preview.tokens.map((token, index) => (
+                <li key={index}>
+                  {token.name}
+                  {token.prefix ? (
+                    <span className="text-muted-foreground">
+                      {" "}
+                      {token.prefix}…
+                    </span>
+                  ) : null}
+                  <span className="text-muted-foreground">
+                    , made <LocalDate value={token.createdAt} />
+                  </span>
+                  {token.status === "works" ? null : (
+                    <span className="font-medium text-destructive">
+                      {" "}
+                      comes back revoked
+                    </span>
+                  )}
+                  {token.status === "revoked_here" ? (
+                    <span className="text-muted-foreground">
+                      {" "}
+                      (revoked or deleted here since this export)
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </dd>
+        </>
+      ) : null}
     </dl>
   )
 }
