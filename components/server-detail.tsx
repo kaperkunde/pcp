@@ -310,7 +310,7 @@ export function ServerDetail({
         </List>
       </ListSection>
 
-      {children}
+      {children ? <div className="flex flex-col gap-8">{children}</div> : null}
 
       {browser ? (
         <ListSection title="Tabs and sign-ins">
@@ -332,7 +332,8 @@ export function ServerDetail({
         description={advancedSummary(server.kind)}
       >
         {endpoint ? <EndpointFacts server={server} /> : null}
-        {settings}
+        {/* Its own box: made on the server page, it is no list item. */}
+        <div className="flex flex-col gap-4">{settings}</div>
       </Disclosure>
 
       <RemoveServer server={server} />

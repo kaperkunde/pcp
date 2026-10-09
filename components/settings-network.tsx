@@ -19,10 +19,10 @@ function howReached(network: NetworkOverview, outside: boolean): string {
 
 /**
  * Settings → Network: one row, "Reachable at <host>", folded unless PCP has
- * something to say about the network (a notice in the bell) or is at an
- * address only the owner's own network reaches. Inside: how to reach PCP
- * from outside, and the rows that set it up: public address, pcp.gg,
- * dynamic DNS, HTTPS. Each row opens in place.
+ * something to say about the network (a notice in the bell). At an address
+ * only the owner's own network reaches, its grey line says so. Inside: how
+ * to reach PCP from outside, and the rows that set it up: public address,
+ * pcp.gg, dynamic DNS, HTTPS. Each row opens in place.
  */
 export function NetworkSection({
   network,
@@ -63,7 +63,7 @@ export function NetworkSection({
               className="bg-tile-browser text-tile-browser-foreground"
             />
           }
-          defaultOpen={notice || outside}
+          defaultOpen={notice}
         >
           {outside ? (
             <OutsideAccessCard address={publicUrl} desktop={desktop} />
