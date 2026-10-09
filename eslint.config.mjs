@@ -72,6 +72,8 @@ const eslintConfig = [
       "lib/generated/**",
       "next-env.d.ts",
       "data/**",
+      // Claude Code's worktrees: other checkouts, each with its own deps.
+      ".claude/**",
       // Playwright output (reports, traces) and captured auth/state.
       "e2e/.artifacts/**",
       "e2e/.auth/**",
