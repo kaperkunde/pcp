@@ -2,6 +2,7 @@
 
 import {
   BookOpen,
+  Globe,
   House,
   KeyRound,
   Lock,
@@ -33,13 +34,26 @@ type NavItem = {
   also?: string[]
 }
 
-/** Where the owner goes every day. DESIGN.md › Navigation. */
-const PRIMARY: NavItem[] = [
-  { href: "/home", label: "Home", icon: House, also: ["/permissions"] },
-  { href: "/servers", label: "Servers", icon: Server, also: ["/browser"] },
-  { href: "/tokens", label: "Assistants", icon: UserRound },
-  { href: "/memories", label: "Memories", icon: BookOpen },
-]
+/**
+ * Where the owner goes every day. DESIGN.md › Navigation. The browser has
+ * an item of its own, below Memories, while it is added and enabled, so its
+ * tabs are one click away; before that its page (where it is added) belongs
+ * to Servers.
+ */
+function primaryItems(browser: boolean): NavItem[] {
+  return [
+    { href: "/home", label: "Home", icon: House, also: ["/permissions"] },
+    {
+      href: "/servers",
+      label: "Servers",
+      icon: Server,
+      also: browser ? undefined : ["/browser"],
+    },
+    { href: "/tokens", label: "Assistants", icon: UserRound },
+    { href: "/memories", label: "Memories", icon: BookOpen },
+    ...(browser ? [{ href: "/browser", label: "Browser", icon: Globe }] : []),
+  ]
+}
 
 /** What is looked at now and then. */
 const SECONDARY: NavItem[] = [
@@ -94,11 +108,14 @@ export function AppSidebar({
   version,
   pending,
   update,
+  browser,
 }: {
   vaultName: string
   version: string
   pending: PendingRequestsState
   update: { version: string } | null
+  /** The browser is added and enabled: it gets an item of its own. */
+  browser: boolean
 }) {
   const pathname = usePathname()
   const { state, refresh } = usePendingRequests(pending)
@@ -135,7 +152,7 @@ export function AppSidebar({
         className="-mx-1 flex gap-0.5 overflow-x-auto px-1 md:mx-0 md:flex-col md:gap-5 md:overflow-visible md:px-0"
       >
         <div className="flex gap-0.5 md:flex-col">
-          {PRIMARY.map((item) => (
+          {primaryItems(browser).map((item) => (
             <NavLink
               key={item.href}
               item={item}

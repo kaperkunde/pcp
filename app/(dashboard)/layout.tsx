@@ -2,6 +2,7 @@ import type { ReactNode } from "react"
 
 import { AppSidebar } from "@/components/app-sidebar"
 import { SiteFooter } from "@/components/site-footer"
+import { findBrowserServer } from "@/lib/core/browser/server"
 import { networkNotices } from "@/lib/core/network/runtime"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { availableUpdate } from "@/lib/core/updates/state"
@@ -23,11 +24,12 @@ export default async function DashboardLayout({
   children: ReactNode
 }) {
   const { ctx } = await requireSession()
-  const [vault, pending, notices, update] = await Promise.all([
+  const [vault, pending, notices, update, browser] = await Promise.all([
     getVault(ctx.vaultId),
     publicUrlFor(ctx).then((publicUrl) => listPendingRequests(ctx, publicUrl)),
     networkNotices(),
     availableUpdate(),
+    findBrowserServer(ctx),
   ])
 
   return (
@@ -36,6 +38,7 @@ export default async function DashboardLayout({
         vaultName={vault.name}
         version={PCP_VERSION}
         update={update}
+        browser={browser?.enabled ?? false}
         pending={{
           total: pending.total,
           requests: pending.requests.map((request) => ({

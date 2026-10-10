@@ -56,16 +56,37 @@ test("the owner adds the browser, and a token that reaches it gets its tools and
   page,
   baseURL,
 }) => {
+  const nav = page.getByRole("navigation", { name: "Main" })
+  const browserItem = nav.getByRole("link", { name: "Browser" })
+
   await page.goto("/browser")
+  // Not added yet: no item of its own, and the page sits under Servers.
+  await expect(browserItem).toHaveCount(0)
+  await expect(nav.getByRole("link", { name: "Servers" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  )
   await page.getByRole("button", { name: "Add the browser" }).click()
   await expect(
     page.getByRole("heading", { name: "For assistants" }),
   ).toBeVisible()
   await expect(page.getByText(/Found at/)).toBeVisible()
 
-  await page.goto("/servers")
+  // Added: the sidebar lists it right below Memories, and its page is it.
+  await expect(browserItem).toHaveAttribute("aria-current", "page")
   await expect(
-    page.getByRole("link", { name: /Browser/ }).first(),
+    nav
+      .getByRole("link", { name: "Memories" })
+      .locator("xpath=following-sibling::a[1]"),
+  ).toHaveText("Browser")
+
+  await page.goto("/servers")
+  await expect(browserItem).not.toHaveAttribute("aria-current", "page")
+  await expect(
+    page
+      .getByRole("main")
+      .getByRole("link", { name: /Browser/ })
+      .first(),
   ).toBeVisible()
 
   token = await createToken(page, TOKEN_NAME)
