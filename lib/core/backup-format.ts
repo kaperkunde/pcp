@@ -18,6 +18,7 @@ import type {
   Vault,
   VaultToolAccess,
   WebFetchRule,
+  WrapperSpec,
 } from "@/lib/generated/prisma/client"
 
 import { asBytes } from "./crypto"
@@ -134,10 +135,16 @@ const ApiTokenRow = z.strictObject({
   keepMemories: z.boolean(),
   webFetch: z.boolean(),
   runCode: z.boolean().default(false),
+  manageWrappers: z.boolean().default(false),
   expiresAt: dateOrNull,
   revokedAt: dateOrNull,
   createdAt: date,
   lastUsedAt: dateOrNull,
+  // A token an assistant got by signing in with OAuth. Its credentials
+  // (oauth_credential) are not exported, as a session's are not: after a
+  // restore the assistant signs in again.
+  oauthClientId: str.nullable().default(null),
+  oauthClientName: str.nullable().default(null),
 })
 
 const ApiTokenServerRow = z.strictObject({ tokenId: id, serverId: id })
@@ -260,6 +267,9 @@ const McpServerRow = z.strictObject({
   mailSubmission: z.boolean().default(false),
   smtpUrl: str.nullable().default(null),
   mailFrom: str.nullable().default(null),
+  // SSH servers, added in 0.3: absent from older exports, which hold none.
+  sshPublicKey: str.nullable().default(null),
+  sshHostKey: str.nullable().default(null),
 })
 
 const ServerAuthHeaderRow = z.strictObject({
@@ -293,6 +303,14 @@ const OpenApiSpecRow = z.strictObject({
   hash: str,
   fetchedAt: date,
   builtWith: str.nullable(),
+})
+
+// Wrappers, added in 0.4: absent from older files.
+const WrapperSpecRow = z.strictObject({
+  serverId: id,
+  definition: str,
+  hash: str,
+  updatedAt: date,
 })
 
 const SettingRow = z.strictObject({ vaultId: id, key: str, value: str })
@@ -353,6 +371,7 @@ export const PayloadSchema = z.strictObject({
     serverAuthHeaders: z.array(ServerAuthHeaderRow),
     tools: z.array(McpToolRow),
     openApiSpecs: z.array(OpenApiSpecRow),
+    wrapperSpecs: z.array(WrapperSpecRow).default([]),
     settings: z.array(SettingRow),
     browserProfiles: z.array(BrowserProfileRow).default([]),
   }),
@@ -364,6 +383,20 @@ export type ExportPayloadJson = z.input<typeof PayloadSchema>
 /** The payload as read: rows ready to be written. */
 export type ExportPayload = z.output<typeof PayloadSchema>
 
+/** An API token in a file, as the owner is shown it before a restore. */
+export type ExportedToken = {
+  name: string
+  /** The first characters of the token; empty for an assistant's OAuth sign-in. */
+  prefix: string
+  createdAt: string
+  /**
+   * Whether it works once restored: "revoked" was revoked when the file was
+   * made, "revoked_here" is revoked or gone in the vault the restore
+   * replaces, so it comes back revoked.
+   */
+  status: "works" | "revoked" | "revoked_here"
+}
+
 /** What the owner is shown before a restore replaces anything. */
 export type ExportPreview = {
   exportedAt: string
@@ -374,6 +407,8 @@ export type ExportPreview = {
     servers: number
     endpoints: number
     mailAccounts: number
+    sshServers: number
+    wrappers: number
     tools: number
     secrets: number
     tokens: number
@@ -383,6 +418,8 @@ export type ExportPreview = {
     /** Sites the browser keeps sign-ins for; 0 without any. */
     browserSites: number
   }
+  /** Every API token in the file, oldest first. */
+  tokens: ExportedToken[]
   /** Null when the file carries no settings of the machine. */
   host: {
     ddns: boolean
@@ -560,10 +597,34 @@ export function checkReferences(payload: ExportPayload): void {
   for (const spec of tables.openApiSpecs) {
     pointsAt(spec.serverId, servers, "a server")
   }
+
+  for (const spec of tables.wrapperSpecs) {
+    pointsAt(spec.serverId, servers, "a server")
+  }
 }
 
-export function previewOf(payload: ExportPayload): ExportPreview {
+/**
+ * `revoked` holds the tokens a restore keeps revoked though the file has
+ * them live (`carriedRevocations` in lib/core/backup.ts).
+ */
+export function previewOf(
+  payload: ExportPayload,
+  revoked: ReadonlyMap<string, Date> = new Map(),
+): ExportPreview {
   const { tables, host } = payload
+  const tokens = [...tables.apiTokens]
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+    .map((row): ExportedToken => ({
+      name: row.name,
+      prefix: row.prefix,
+      createdAt: row.createdAt.toISOString(),
+      status:
+        row.revokedAt !== null
+          ? "revoked"
+          : revoked.has(row.id)
+            ? "revoked_here"
+            : "works",
+    }))
   const ddns = host.find((row) => row.key === DDNS_CONFIG_KEY)
   const tls = host.find((row) => row.key === TLS_CONFIG_KEY)
   const update = host.find((row) => row.key === UPDATE_CONFIG_KEY)
@@ -579,9 +640,11 @@ export function previewOf(payload: ExportPayload): ExportPreview {
       mailAccounts: tables.servers.filter(
         (row) => row.kind === "jmap" || row.kind === "imap",
       ).length,
+      sshServers: tables.servers.filter((row) => row.kind === "ssh").length,
+      wrappers: tables.servers.filter((row) => row.kind === "wrapper").length,
       tools: tables.tools.length,
       secrets: tables.secrets.filter((row) => row.kind === "text").length,
-      tokens: tables.apiTokens.filter((row) => row.revokedAt === null).length,
+      tokens: tokens.filter((token) => token.status === "works").length,
       memories: tables.memories.length,
       webFetchRules: tables.webFetchRules.length,
       pendingRequests: tables.permissionRequests.filter(
@@ -589,6 +652,7 @@ export function previewOf(payload: ExportPayload): ExportPreview {
       ).length,
       browserSites: tables.browserProfiles[0]?.sites ?? 0,
     },
+    tokens,
     host:
       ddns || tls || update
         ? {
@@ -653,6 +717,7 @@ export const FORMAT_COVERS_SCHEMA: {
   >
   tool: Covers<McpTool, z.output<typeof McpToolRow>>
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
+  wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
   setting: Covers<Setting, z.output<typeof SettingRow>>
   browserProfile: Covers<BrowserProfile, z.output<typeof BrowserProfileRow>>
   hostSetting: Covers<HostSetting, z.output<typeof HostSettingRow>>
@@ -671,6 +736,7 @@ export const FORMAT_COVERS_SCHEMA: {
   serverAuthHeader: true,
   tool: true,
   openApiSpec: true,
+  wrapperSpec: true,
   setting: true,
   browserProfile: true,
   hostSetting: true,

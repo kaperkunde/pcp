@@ -5,31 +5,35 @@ import type { McpServer } from "@/lib/generated/prisma/client"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { PcpError } from "../errors"
+import { CHALLENGE_LINE } from "../fetch/challenge"
 import { isPcpSite } from "../fetch/fetch"
 import { htmlToMarkdown, sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
-import { hiddenCharacter } from "../memories"
+import { hiddenCharacter, withoutPresentation } from "../memories"
 import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "../rate-limit"
 import { decideSite, loadFetchRules } from "../web-fetch"
 import {
   ACTION_TIMEOUT_MS,
   BROWSER_ACTIONS,
+  CHALLENGE_WAIT_MS,
   DEFAULT_READ_CHARS,
   MAX_SCREENSHOT_BYTES,
+  MAX_TABS,
   MAX_URL_LENGTH,
   NAVIGATION_TIMEOUT_MS,
 } from "./limits"
 import {
   closeTab,
   ensureBrowser,
-  listTabs,
+  mayOpen,
   openTab,
   recomputePrivate,
   runningBrowser,
   saveVaultProfile,
   setControl,
   tabTitle,
+  tabView,
   touch,
   withVault,
   type Tab,
@@ -44,7 +48,15 @@ import { OwnerNeeded, type BrowseAsk } from "./types"
  * be opened (the token's web fetch lines, decided as web_fetch decides
  * them, a new site getting a line of its own), and what the page looks
  * like afterwards. A site that asks, and a hand-over, end in OwnerNeeded,
- * which the gateway turns into a permission request.
+ * which the gateway turns into a permission request. A site's check of its
+ * visitors is not one: the tab waits for it to pass on its own, and the
+ * answer says when it does not, so the assistant can hand the tab over.
+ *
+ * A token sees and drives only the tabs it opened (and their popups):
+ * another token's tab, or the owner's own, is answered as a tab that does
+ * not exist, so neither its page nor its address reaches the token, and a
+ * site the owner allowed once for a tab stays with the token whose tab it
+ * is. Nor does a token act on a page its lines no longer let it open.
  *
  * Refusals that name a site or an address are tool errors, never thrown
  * PcpErrors: the request log keeps the text of the latter, and which sites
@@ -117,19 +129,64 @@ async function tokenName(tokenId: string): Promise<string> {
   return token?.name ?? "an assistant"
 }
 
-/** Makes the tab follow the calling token's lines, as they are now. */
+/**
+ * The token's own tab by its id: one it opened, or a popup of one. Any
+ * other tab, the owner's own included, is not there for it.
+ */
+function ownTab(
+  vault: VaultBrowser | null | undefined,
+  tokenId: string,
+  tabId: string | null | undefined,
+): Tab | null {
+  const tab = tabId ? vault?.tabs.get(tabId) : undefined
+  return tab && tab.tokenId === tokenId ? tab : null
+}
+
+/** Makes the token's own tab follow its lines, as they are now. */
 async function driveAs(
   vault: VaultBrowser,
   tab: Tab,
-  scope: BrowserScope,
+  scope: Pick<BrowserScope, "ctx" | "tokenId">,
 ): Promise<void> {
   const rules = await loadFetchRules(scope.ctx.vaultId, scope.tokenId)
-  tab.tokenId = scope.tokenId
   tab.rules = rules
   tab.privateAllowed = resolvePrivateAccess(rules)
   tab.lastUsedAt = Date.now()
   vault.lastTabByToken.set(scope.tokenId, tab.id)
   recomputePrivate(vault)
+}
+
+/**
+ * The owner hands a tab they hold to a token (one they checked may use the
+ * browser): it becomes that token's tab, following its lines, and the site
+ * it is at counts as one the owner allowed for the tab, as Allow once does.
+ * Sites allowed for the token it was before were that token's, and go.
+ */
+export async function giveTab(
+  ctx: VaultContext,
+  vault: VaultBrowser,
+  tab: Tab,
+  tokenId: string,
+): Promise<void> {
+  if (tab.tokenId !== tokenId) {
+    tab.allowedHosts.clear()
+    tab.lastBlocked = null
+
+    if (tab.tokenId && vault.lastTabByToken.get(tab.tokenId) === tab.id) {
+      vault.lastTabByToken.delete(tab.tokenId)
+    }
+
+    tab.tokenId = tokenId
+  }
+
+  try {
+    tab.allowedHosts.add(siteKey(new URL(tab.page.url())))
+  } catch {
+    // about:blank and the like have no site.
+  }
+
+  await driveAs(vault, tab, { ctx, tokenId })
+  setControl(tab, "assistant")
 }
 
 /**
@@ -157,19 +214,25 @@ function ownerHolds(tab: Tab): CallToolResult {
   )
 }
 
-/** The tab a call is for: the one named, or the token's current one. */
+/**
+ * The tab a call is for: the one named, or the token's current one, and
+ * only ever one of the token's own.
+ */
 function pickTab(
   vault: VaultBrowser | null,
   tokenId: string,
   tabId: string | undefined,
 ): Tab | CallToolResult {
-  const id = tabId ?? vault?.lastTabByToken.get(tokenId)
-  const tab = id ? vault?.tabs.get(id) : undefined
+  const tab = ownTab(
+    vault,
+    tokenId,
+    tabId ?? vault?.lastTabByToken.get(tokenId),
+  )
 
   if (!tab) {
     return text(
       tabId
-        ? `There is no tab ${tabId}: it was closed, or the browser has closed since (it closes after a while with nothing to do). tabs lists the open ones.`
+        ? `There is no tab ${tabId}: it was closed, or the browser has closed since (it closes after a while with nothing to do). tabs lists this token's open ones.`
         : "This token has no tab open. Open a page with navigate, or tabs with action open.",
       true,
     )
@@ -180,6 +243,32 @@ function pickTab(
 
 function isTab(value: Tab | CallToolResult): value is Tab {
   return "page" in value
+}
+
+/**
+ * Refuses a page the token may not open now: its lines changed since the
+ * tab opened it, or the tab's history holds a page the owner opened there.
+ * The tab can still be sent elsewhere with navigate, or closed.
+ */
+function offLimits(vault: VaultBrowser, tab: Tab): CallToolResult | null {
+  const address = tab.page.url()
+
+  if (mayOpen(vault, tab, address)) {
+    return null
+  }
+
+  let host: string
+
+  try {
+    host = siteKey(new URL(address))
+  } catch {
+    host = "its site"
+  }
+
+  return text(
+    `Tab ${tab.id} shows a page at ${host}, which this token may not open now, so the browser tools leave the page alone. Open another page in the tab with navigate, or close it with tabs.`,
+    true,
+  )
 }
 
 /**
@@ -202,6 +291,30 @@ async function blockedNote(scope: BrowserScope, tab: Tab): Promise<string[]> {
   ]
 }
 
+/**
+ * What an answer leads with while the tab shows a site's check of its
+ * visitors (challenge.ts), once the tab has given it its time: the
+ * assistant decides whether to hand the tab over; nothing asks the owner
+ * on its own.
+ */
+const CHECK_LEAD = `${CHALLENGE_LINE} It did not pass on its own in this tab: call hand_over so the owner can pass it themselves, then take a snapshot.`
+
+function checkLead(tab: Tab): string[] {
+  return tab.documents.challenged() ? [CHECK_LEAD] : []
+}
+
+/**
+ * Gives a site's check the tab shows the time most take to pass on their
+ * own: its script reloads or posts back, and the next document is the
+ * page. The clearance it leaves is a cookie in the vault's profile, saved
+ * with the rest of the sign-ins.
+ */
+async function passCheck(tab: Tab): Promise<void> {
+  if (tab.documents.challenged()) {
+    await tab.documents.pass(CHALLENGE_WAIT_MS)
+  }
+}
+
 /** The tab as an answer: where it is, how to watch it, and its snapshot. */
 async function report(
   scope: BrowserScope,
@@ -209,6 +322,7 @@ async function report(
   { snapshot = true, lead = [] as string[] } = {},
 ): Promise<CallToolResult> {
   const lines = [
+    ...checkLead(tab),
     ...lead,
     `Tab ${tab.id}: ${(await tabTitle(tab)) || "(no title)"}`,
     `Address: ${tab.page.url()}`,
@@ -234,11 +348,12 @@ async function report(
   return text(lines.join("\n"))
 }
 
-/** Waits briefly for what an action started to load. */
+/** Waits briefly for what an action started to load, and for its check. */
 async function settle(tab: Tab): Promise<void> {
   await tab.page
     .waitForLoadState("domcontentloaded", { timeout: 5_000 })
     .catch(() => {})
+  await passCheck(tab)
 }
 
 /** Why a page could not be opened, in words. */
@@ -290,10 +405,24 @@ export async function performNavigate(
   const vault = await ensureBrowser(scope.ctx, { publicUrl: scope.publicUrl })
 
   return withVault(vault, async () => {
-    let tab = ask.tabId ? (vault.tabs.get(ask.tabId) ?? null) : null
+    let tab = ownTab(vault, scope.tokenId, ask.tabId)
 
     if (tab && ownerHas(tab)) {
       return ownerHolds(tab)
+    }
+
+    if (!tab && vault.tabs.size >= MAX_TABS) {
+      // Only how many: the other tabs' pages are not this token's to see.
+      const mine = [...vault.tabs.values()].filter(
+        (open) => open.tokenId === scope.tokenId,
+      ).length
+
+      return text(
+        mine > 0
+          ? `The browser has ${MAX_TABS} tabs open, as many as it keeps. Close one of this token's first (tabs with action close), or open the page in one of them.`
+          : `The browser has ${MAX_TABS} tabs open, as many as it keeps, and none is this token's. The owner can close one on PCP's Browser page.`,
+        true,
+      )
     }
 
     tab ??= await openTab(vault, {
@@ -344,6 +473,7 @@ export async function performNavigate(
       )
     }
 
+    await passCheck(tab)
     await saveVaultProfile(scope.ctx, vault, { force: true })
     return report(scope, tab)
   })
@@ -376,16 +506,24 @@ async function openSite(
     )
   }
 
-  const tab = tabId ? runningBrowser(scope.ctx.vaultId)?.tabs.get(tabId) : null
+  // Another token's tab, or one that is gone, is not there for this token:
+  // the page opens in a new tab of its own.
+  const tab = ownTab(runningBrowser(scope.ctx.vaultId), scope.tokenId, tabId)
+  const inTab = tab?.id ?? null
 
   if (decided.access === "ask" && !tab?.allowedHosts.has(decided.host)) {
     throw new OwnerNeeded({
       kind: "browse",
-      input: { serverId: scope.serverId, tabId, url: url.href, toolName },
+      input: {
+        serverId: scope.serverId,
+        tabId: inTab,
+        url: url.href,
+        toolName,
+      },
     })
   }
 
-  return performNavigate(scope, { tabId, url: url.href })
+  return performNavigate(scope, { tabId: inTab, url: url.href })
 }
 
 async function tabs(
@@ -399,18 +537,23 @@ async function tabs(
   }
 
   if (args.action === "list") {
-    const open = await listTabs(scope.ctx.vaultId)
+    const open = await Promise.all(
+      [...(vault?.tabs.values() ?? [])]
+        .filter((tab) => tab.tokenId === scope.tokenId)
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map(tabView),
+    )
 
     if (open.length === 0) {
       return text(
-        "No tabs are open. The browser starts with the first page opened (tabs with action open, or navigate).",
+        "This token has no tab open. Open a page with navigate, or tabs with action open.",
       )
     }
 
     const current = vault?.lastTabByToken.get(scope.tokenId)
     return text(
       [
-        "Open tabs (the one marked * is this token's current tab):",
+        "This token's open tabs (the one marked * is its current tab):",
         ...open.map(
           (view) =>
             `${view.id === current ? "*" : "-"} ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""} · ${tabLink(scope.publicUrl, view.id)}`,
@@ -436,7 +579,7 @@ async function tabs(
   }
 
   await driveAs(vault!, picked, scope)
-  return report(scope, picked)
+  return offLimits(vault!, picked) ?? report(scope, picked)
 }
 
 async function onTab(
@@ -464,6 +607,12 @@ async function onTab(
 
   return withVault(vault!, async () => {
     await driveAs(vault!, picked, scope)
+    const refused = offLimits(vault!, picked)
+
+    if (refused) {
+      return refused
+    }
+
     let result: CallToolResult
 
     try {
@@ -557,6 +706,7 @@ export async function callBrowserTool(
             timeout: NAVIGATION_TIMEOUT_MS,
           })
           .catch(() => null)
+        await passCheck(current)
         return report(scope, current, {
           lead: went
             ? []
@@ -582,6 +732,7 @@ export async function callBrowserTool(
 
         return text(
           [
+            ...checkLead(current),
             `Tab ${current.id}: ${title ?? "(no title)"}`,
             `Address: ${current.page.url()}`,
             `Characters ${slice.start} to ${slice.end} of ${slice.total}${more}.`,
@@ -716,7 +867,7 @@ export async function callBrowserTool(
       })
     case "hand_over":
       return onTab(scope, tab, spec, async (current) => {
-        const message = (args.message as string).trim()
+        const message = withoutPresentation(args.message as string).trim()
         const hidden = hiddenCharacter(message)
 
         if (hidden) {

@@ -4,6 +4,7 @@ import path from "node:path"
 
 import { resetDb } from "./db"
 import { applyMigrations } from "./migrate"
+import { forgetResourceLimits } from "./resources/state"
 import { forgetSetupState } from "./vault"
 
 /**
@@ -18,12 +19,14 @@ export async function scratchDatabase(): Promise<{
   process.env.PCP_DATA_DIR = dir
   await resetDb()
   forgetSetupState()
+  forgetResourceLimits()
   applyMigrations()
 
   return {
     cleanup: async () => {
       await resetDb()
       forgetSetupState()
+      forgetResourceLimits()
       if (previous === undefined) {
         delete process.env.PCP_DATA_DIR
       } else {

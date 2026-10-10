@@ -56,6 +56,14 @@ const eslintConfig = [
     },
   },
   {
+    // The image's entry point runs Next.js's standalone server.js, which is
+    // CommonJS, after the listen address is picked.
+    files: ["docker/start.cjs"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
     ignores: [
       "node_modules/**",
       ".next/**",
@@ -64,6 +72,8 @@ const eslintConfig = [
       "lib/generated/**",
       "next-env.d.ts",
       "data/**",
+      // Claude Code's worktrees: other checkouts, each with its own deps.
+      ".claude/**",
       // Playwright output (reports, traces) and captured auth/state.
       "e2e/.artifacts/**",
       "e2e/.auth/**",

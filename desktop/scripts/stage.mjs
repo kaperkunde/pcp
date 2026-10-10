@@ -2,7 +2,8 @@
 // the image (the standalone output, the static assets, public/ and the
 // migrations), with better-sqlite3's native binary swapped for one built for
 // Electron's Node. Nothing of the app changes; the wrapper is a second host
-// for the same build.
+// for the same build. The image's entry point (docker/start.cjs) is not
+// staged: it only picks HOSTNAME, which the wrapper sets itself.
 //
 // Chromium, which the Dockerfile installs for the browser, is not staged:
 // the app looks for one on the machine (PCP_BROWSER_EXECUTABLE, or where

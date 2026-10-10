@@ -5,20 +5,16 @@ import { useActionState, useState, useTransition } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
+import { MemoryAlwaysSwitch } from "@/components/memory-always-switch"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import { Input, Textarea } from "@/components/ui/input"
+import { Field } from "@/components/ui/label"
+import { List, ListRow, ListSection } from "@/components/ui/list"
+import { SwitchRow } from "@/components/ui/switch"
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import { Checkbox, Input, Textarea } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
-import {
-  createMemoryAction,
   deleteMemoryAction,
   updateMemoryAction,
   type MemoryActionResult,
@@ -30,47 +26,36 @@ import {
 } from "@/lib/core/constants"
 import type { MemorySummary } from "@/lib/core/memories"
 
+/**
+ * The memories, in two groups: the ones every assistant reads (shared), and
+ * the ones one assistant keeps for itself. Each row shows who wrote it and
+ * whether it is read in every conversation; Edit opens the whole memory.
+ */
 export function MemoriesManager({ memories }: { memories: MemorySummary[] }) {
   const shared = memories.filter((memory) => memory.visibility === "shared")
   const kept = memories.filter((memory) => memory.visibility === "private")
 
   return (
-    <div className="flex flex-col gap-6">
-      <AddMemoryForm />
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            Shared with all your assistants ({shared.length})
-          </CardTitle>
-          <CardDescription>
-            Every assistant whose token can keep memories reads these, at
-            /memories/shared/. You wrote them, or agreed when an assistant asked
-            to share them.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <MemoryList
-            memories={shared}
-            empty="Nothing shared yet. Add a memory above, or agree when an assistant asks to share one."
-          />
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>Kept by one assistant ({kept.length})</CardTitle>
-          <CardDescription>
-            Only the assistant that wrote one reads it, at /memories/. It needs
-            nobody&apos;s say to write them, so look here now and then.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <MemoryList
-            memories={kept}
-            empty="No assistant has kept a memory yet."
-          />
-        </CardContent>
-      </Card>
-    </div>
+    <>
+      <ListSection
+        title={`Shared with all your assistants (${shared.length})`}
+        description="Every assistant whose token can keep memories reads these, at /memories/shared/. You wrote them, or agreed when an assistant asked to share them."
+      >
+        <MemoryList
+          memories={shared}
+          empty="Nothing shared yet. Add a memory, or agree when an assistant asks to share one."
+        />
+      </ListSection>
+      <ListSection
+        title={`Kept by one assistant (${kept.length})`}
+        description="Only the assistant that wrote one reads it, at /memories/. It needs nobody's say to write them, so look here now and then."
+      >
+        <MemoryList
+          memories={kept}
+          empty="No assistant has kept a memory yet."
+        />
+      </ListSection>
+    </>
   )
 }
 
@@ -82,96 +67,19 @@ function MemoryList({
   empty: string
 }) {
   if (memories.length === 0) {
-    return <p className="text-muted-foreground">{empty}</p>
+    return (
+      <Card>
+        <p className="text-muted-foreground">{empty}</p>
+      </Card>
+    )
   }
 
   return (
-    <ul className="flex flex-col divide-y divide-border">
+    <List as="ul">
       {memories.map((memory) => (
         <MemoryRow key={memory.id} memory={memory} />
       ))}
-    </ul>
-  )
-}
-
-function AddMemoryForm() {
-  const [state, action] = useActionState<MemoryActionResult, FormData>(
-    createMemoryAction,
-    { status: "idle" },
-  )
-  // A fresh key after each success empties the form.
-  const formKey = state.status === "ok" ? state.id : "new"
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Add a shared memory</CardTitle>
-        <CardDescription>
-          Something every assistant should know about you: how you like to work,
-          what you are working on, decisions already made.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form key={formKey} action={action} className="flex flex-col gap-4">
-          <Field
-            label="Path"
-            htmlFor="memory-path"
-            hint="Assistants find it at /memories/shared/ followed by this."
-          >
-            <Input
-              id="memory-path"
-              name="path"
-              required
-              maxLength={MAX_MEMORY_PATH}
-              placeholder="preferences.md"
-            />
-          </Field>
-          <Field
-            label="Text"
-            htmlFor="memory-text"
-            hint={`Up to ${MAX_SHARED_MEMORY_CHARS.toLocaleString("en")} characters.`}
-          >
-            <Textarea
-              id="memory-text"
-              name="text"
-              required
-              maxLength={MAX_SHARED_MEMORY_CHARS}
-              className="min-h-24"
-            />
-          </Field>
-          <AlwaysField id="memory-always" defaultChecked={false} />
-          <FormError error={state.status === "error" ? state.error : null} />
-          <div>
-            <SubmitButton pendingText="Saving…">Save memory</SubmitButton>
-          </div>
-        </form>
-      </CardContent>
-    </Card>
-  )
-}
-
-/** Whether a memory is read in every conversation. */
-function AlwaysField({
-  id,
-  defaultChecked,
-}: {
-  id: string
-  defaultChecked: boolean
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label className="font-normal" htmlFor={id}>
-        <Checkbox id={id} name="always" defaultChecked={defaultChecked} />
-        Read in every conversation
-      </Label>
-      <p className="text-xs text-muted-foreground">
-        It comes with PCP&apos;s instructions, so an assistant has it before it
-        does anything, without having to look. Up to{" "}
-        {MAX_SHARED_MEMORY_CHARS.toLocaleString("en")} characters. If an
-        assistant changes one it keeps for itself, it stops being read in every
-        conversation until you tick this again.
-      </p>
-    </div>
+    </List>
   )
 }
 
@@ -221,9 +129,12 @@ function MemoryRow({ memory }: { memory: MemorySummary }) {
   }
 
   return (
-    <li className="flex flex-col gap-2 py-3" data-testid="memory">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
+    <ListRow
+      as="li"
+      data-testid="memory"
+      className="items-start py-3.5"
+      title={
+        <span className="flex flex-wrap items-center gap-2">
           <code className="font-medium break-all">{memory.fullPath}</code>
           {memory.visibility === "shared" ? (
             <Badge>Shared</Badge>
@@ -231,99 +142,110 @@ function MemoryRow({ memory }: { memory: MemorySummary }) {
             <Badge variant="outline">Only {memory.tokenName}</Badge>
           ) : null}
           {memory.always ? (
-            <Badge variant="outline">Every conversation</Badge>
+            <Badge variant="secondary">Every conversation</Badge>
           ) : null}
-        </div>
+        </span>
+      }
+      description={
+        <>
+          Written by <Writer memory={memory} /> · updated{" "}
+          <LocalDate value={memory.updatedAt} />
+          {memory.visibility === "private" &&
+          memory.author === "owner" &&
+          memory.tokenName
+            ? ` · kept for ${memory.tokenName}`
+            : null}
+        </>
+      }
+      trailing={
         <div className="flex gap-1">
           <Button
             variant="ghost"
-            size="xs"
+            size="sm"
             onClick={() => setEditing((value) => !value)}
           >
             {editing ? "Cancel" : "Edit"}
           </Button>
-          <Button variant="ghost" size="xs" disabled={pending} onClick={remove}>
+          <Button
+            variant="destructive"
+            size="sm"
+            disabled={pending}
+            onClick={remove}
+          >
             Delete
           </Button>
         </div>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Written by <Writer memory={memory} /> · updated{" "}
-        <LocalDate value={memory.updatedAt} />
-        {memory.visibility === "private" &&
-        memory.author === "owner" &&
-        memory.tokenName
-          ? ` · kept for ${memory.tokenName}`
-          : null}
-      </p>
-      {editing ? (
-        <form
-          action={action}
-          className="flex flex-col gap-3 rounded-lg border border-border p-3"
-        >
-          <input type="hidden" name="id" value={memory.id} />
-          <Field
-            label="Path"
-            htmlFor={`${id}-path`}
-            hint="Inside /memories/, or /memories/shared/ when shared."
+      }
+    >
+      <div className="order-last flex basis-full flex-col gap-3">
+        {editing ? (
+          <form
+            action={action}
+            className="flex flex-col gap-4 rounded-xl bg-field p-4 ring-1 ring-separator"
           >
-            <Input
-              id={`${id}-path`}
-              name="path"
-              required
-              maxLength={MAX_MEMORY_PATH}
-              defaultValue={memory.path}
-            />
-          </Field>
-          <Field
-            label="Text"
-            htmlFor={`${id}-text`}
-            hint={`Up to ${MAX_SHARED_MEMORY_CHARS.toLocaleString("en")} characters when shared or read in every conversation, ${MAX_MEMORY_CHARS.toLocaleString("en")} otherwise.`}
-          >
-            <Textarea
-              id={`${id}-text`}
-              name="text"
-              required
-              maxLength={MAX_MEMORY_CHARS}
-              defaultValue={memory.text}
-              className="min-h-32"
-            />
-          </Field>
-          <div className="flex flex-col gap-1.5">
-            <Label className="font-normal" htmlFor={`${id}-shared`}>
-              <Checkbox
+            <input type="hidden" name="id" value={memory.id} />
+            <Field
+              label="Path"
+              htmlFor={`${id}-path`}
+              hint="Inside /memories/, or /memories/shared/ when shared."
+            >
+              <Input
+                id={`${id}-path`}
+                name="path"
+                required
+                maxLength={MAX_MEMORY_PATH}
+                defaultValue={memory.path}
+              />
+            </Field>
+            <Field
+              label="Text"
+              htmlFor={`${id}-text`}
+              hint={`Up to ${MAX_SHARED_MEMORY_CHARS.toLocaleString("en")} characters when shared or read in every conversation, ${MAX_MEMORY_CHARS.toLocaleString("en")} otherwise.`}
+            >
+              <Textarea
+                id={`${id}-text`}
+                name="text"
+                required
+                maxLength={MAX_MEMORY_CHARS}
+                defaultValue={memory.text}
+                className="min-h-32"
+              />
+            </Field>
+            <List>
+              <SwitchRow
                 id={`${id}-shared`}
                 name="shared"
+                label="Shared with all your assistants"
+                description={
+                  canBePrivate
+                    ? `Switched off, only ${memory.tokenName ?? "the assistant that wrote it"} reads it.`
+                    : "No assistant's token is behind this one, so it stays shared."
+                }
                 defaultChecked={memory.visibility === "shared"}
                 disabled={!canBePrivate}
               />
-              Shared with all your assistants
-            </Label>
+              <MemoryAlwaysSwitch
+                id={`${id}-always`}
+                defaultChecked={memory.always}
+              />
+            </List>
             {canBePrivate ? null : (
-              // A disabled checkbox is not sent; this keeps it shared.
+              // A disabled switch is not sent; this keeps it shared.
               <input type="hidden" name="shared" value="on" />
             )}
-            <p className="text-xs text-muted-foreground">
-              {canBePrivate
-                ? `Unticked, only ${memory.tokenName ?? "the assistant that wrote it"} reads it.`
-                : "No assistant's token is behind this one, so it stays shared."}
-            </p>
-          </div>
-          <AlwaysField id={`${id}-always`} defaultChecked={memory.always} />
-          <FormError error={state.status === "error" ? state.error : null} />
-          <FormNote message={state.status === "ok" ? state.message : null} />
-          <div>
-            <SubmitButton size="sm" pendingText="Saving…">
-              Save
-            </SubmitButton>
-          </div>
-        </form>
-      ) : (
-        <pre className="max-h-64 overflow-auto rounded-md border border-input bg-muted/40 p-3 text-xs whitespace-pre-wrap break-words">
-          {memory.text}
-        </pre>
-      )}
-      <FormError error={error} />
-    </li>
+            <FormError error={state.status === "error" ? state.error : null} />
+            <FormNote message={state.status === "ok" ? state.message : null} />
+            <div>
+              <SubmitButton pendingText="Saving…">Save</SubmitButton>
+            </div>
+          </form>
+        ) : (
+          <pre className="m-0 max-h-64 overflow-auto rounded-xl bg-field p-3.5 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap ring-1 ring-separator">
+            {memory.text}
+          </pre>
+        )}
+        <FormError error={error} />
+      </div>
+    </ListRow>
   )
 }

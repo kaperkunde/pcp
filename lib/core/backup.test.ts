@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { gunzipSync } from "node:zlib"
 
-import { createApiToken, resolveApiToken } from "./api-tokens"
+import {
+  createApiToken,
+  deleteApiToken,
+  resolveApiToken,
+  revokeApiToken,
+} from "./api-tokens"
 import {
   encodeExport,
   exportFileName,
@@ -28,6 +33,7 @@ import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
 import { UPDATE_CONFIG_KEY, UPDATE_STATUS_KEY } from "./updates/state"
 import { createSecret, deleteSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
+import { saveWrapperByOwner } from "./wrappers/admin"
 import { createSession, resolveSession } from "./sessions"
 import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
@@ -199,7 +205,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 
@@ -299,7 +305,7 @@ describe("restoring", { timeout: 60_000 }, () => {
 
     await restoreExport(
       read,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 
@@ -346,7 +352,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     await db().browserProfile.delete({ where: { vaultId: ctx.vaultId } })
     await restoreExport(
       read,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
     const after = await db().browserProfile.findUniqueOrThrow({
@@ -374,7 +380,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(oldPreview.counts.browserSites).toBe(0)
     await restoreExport(
       oldRead,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
     expect(await db().browserProfile.count()).toBe(0)
@@ -407,7 +413,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     )
     await restoreExport(
       read,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 
@@ -420,6 +426,67 @@ describe("restoring", { timeout: 60_000 }, () => {
       mailSubmission: false,
       smtpUrl: null,
       mailFrom: null,
+    })
+  })
+
+  it("carries a wrapper and what it was approved as, and restores a file from before wrappers", async () => {
+    const { ctx, serverId } = await populate()
+    const { id: wrapperId } = await saveWrapperByOwner(ctx, null, {
+      name: "Simpler",
+      tools: [
+        {
+          name: "first",
+          description: "The first tool, simpler.",
+          inputSchema: { type: "object" },
+          program: "return 1",
+          calls: [
+            `${(await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })).slug}/${(await db().mcpTool.findFirstOrThrow({ where: { serverId } })).name}`,
+          ],
+        },
+      ],
+    })
+    const before = await db().wrapperSpec.findUniqueOrThrow({
+      where: { serverId: wrapperId },
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const { payload: read, preview } = await readExport(file, EXPORT_PASSWORD)
+    expect(preview.counts.wrappers).toBe(1)
+
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().wrapperSpec.findUniqueOrThrow({
+        where: { serverId: wrapperId },
+      }),
+    ).toEqual(before)
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    delete (older.tables as Record<string, unknown>).wrapperSpecs
+    older.tables.servers = older.tables.servers.filter(
+      (row) => row.id !== wrapperId,
+    )
+    older.tables.tools = older.tables.tools.filter(
+      (row) => row.serverId !== wrapperId,
+    )
+    for (const token of older.tables.apiTokens as Record<string, unknown>[]) {
+      delete token.manageWrappers
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+
+    expect(await db().wrapperSpec.count()).toBe(0)
+    expect(await db().apiToken.findFirstOrThrow()).toMatchObject({
+      manageWrappers: false,
     })
   })
 
@@ -436,7 +503,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: true },
     )
 
@@ -449,6 +516,93 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await getHostJson(UPDATE_STATUS_KEY)).toEqual({
       lastCheckedAt: "2026-02-02T00:00:00.000Z",
     })
+  })
+
+  it("keeps a token revoked that was revoked or deleted after the export", async () => {
+    const { ctx, token } = await populate()
+    const before = await createApiToken(ctx, {
+      name: "Revoked before",
+      allowAllServers: true,
+    })
+    await revokeApiToken(ctx, before.id)
+    const revoked = await createApiToken(ctx, {
+      name: "Revoked since",
+      allowAllServers: true,
+    })
+    const deleted = await createApiToken(ctx, {
+      name: "Deleted since",
+      allowAllServers: true,
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    await revokeApiToken(ctx, revoked.id)
+    const revokedAt = (
+      await db().apiToken.findUniqueOrThrow({ where: { id: revoked.id } })
+    ).revokedAt
+    await deleteApiToken(ctx, deleted.id)
+    const later = await createApiToken(ctx, {
+      name: "Made since",
+      allowAllServers: true,
+    })
+
+    const target = { into: "vault", ctx } as const
+    const { payload, preview } = await readExport(file, EXPORT_PASSWORD, target)
+    expect(
+      Object.fromEntries(preview.tokens.map((t) => [t.name, t.status])),
+    ).toEqual({
+      Claude: "works",
+      "Revoked before": "revoked",
+      "Revoked since": "revoked_here",
+      "Deleted since": "revoked_here",
+    })
+    expect(preview.tokens.find((t) => t.name === "Claude")).toMatchObject({
+      prefix: token.slice(0, 12),
+      createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    })
+    expect(preview.counts.tokens).toBe(1)
+
+    await restoreExport(payload, target, { restoreHostSettings: false })
+
+    expect((await resolveApiToken(token))?.tokenName).toBe("Claude")
+    expect(await resolveApiToken(revoked.token)).toBeNull()
+    expect(await resolveApiToken(deleted.token)).toBeNull()
+    expect(await resolveApiToken(before.token)).toBeNull()
+    // Made after the export: not in the file, so gone.
+    expect(await resolveApiToken(later.token)).toBeNull()
+    expect(await db().apiToken.count({ where: { name: "Made since" } })).toBe(0)
+
+    const rows = await db().apiToken.findMany({ include: { grant: true } })
+    const byName = Object.fromEntries(rows.map((row) => [row.name, row]))
+    // Revoked here: when the vault revoked it. Deleted here: revoked now.
+    expect(byName["Revoked since"]?.revokedAt).toEqual(revokedAt)
+    expect(byName["Deleted since"]?.revokedAt).not.toBeNull()
+    expect(byName["Claude"]?.revokedAt).toBeNull()
+
+    // Revoked tokens hold no copy of the key, as when they are revoked.
+    for (const name of ["Revoked before", "Revoked since", "Deleted since"]) {
+      expect(byName[name]?.grant.lookupHash).toBeNull()
+      expect(byName[name]?.grant.wrappedDek.length).toBe(0)
+    }
+    expect(byName["Claude"]?.grant.lookupHash).not.toBeNull()
+    expect(byName["Claude"]?.grant.wrappedDek.length).toBeGreaterThan(0)
+
+    // The same file at setup, where nothing is known of them, is unchanged.
+    const fresh = await readExport(file, EXPORT_PASSWORD)
+    expect(fresh.preview.counts.tokens).toBe(3)
+    await cleanup()
+    ;({ cleanup } = await scratchDatabase())
+    await restoreExport(
+      fresh.payload,
+      { into: "fresh" },
+      { restoreHostSettings: false },
+    )
+    expect((await resolveApiToken(revoked.token))?.tokenName).toBe(
+      "Revoked since",
+    )
+    expect((await resolveApiToken(deleted.token))?.tokenName).toBe(
+      "Deleted since",
+    )
+    expect(await resolveApiToken(before.token)).toBeNull()
   })
 
   it("restores into a PCP not set up yet, which then opens with the exported credentials", async () => {
@@ -468,7 +622,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     await expect(
       restoreExport(
         payload,
-        { into: "vault", vaultId: ctx.vaultId },
+        { into: "vault", ctx },
         { restoreHostSettings: false },
       ),
     ).rejects.toThrow(/gone/)
@@ -505,13 +659,25 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
     await createSecret(second, { name: "eve-secret", value: "eve" })
 
+    // Another PCP's tokens are not this vault's to compare: none comes back
+    // revoked for not being here.
+    expect(
+      (
+        await readExport(file, EXPORT_PASSWORD, {
+          into: "vault",
+          ctx: second,
+        })
+      ).preview.tokens.map((t) => t.status),
+    ).toEqual(["works"])
+
     await restoreExport(
       payload,
-      { into: "vault", vaultId: second.vaultId },
+      { into: "vault", ctx: second },
       { restoreHostSettings: false },
     )
 
     expect(await db().vault.count()).toBe(1)
+    expect((await resolveApiToken(first.token))?.tokenName).toBe("Claude")
     expect((await ownerVault())?.name).toBe("Ada")
     expect(await unlockOwnerVault("eve's own password")).toBeNull()
     expect((await unlockOwnerVault(PASSWORD))?.vaultId).toBe(first.ctx.vaultId)
@@ -534,7 +700,7 @@ describe("restoring", { timeout: 60_000 }, () => {
     const { payload } = await readExport(file, EXPORT_PASSWORD)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: ctx.vaultId },
+      { into: "vault", ctx },
       { restoreHostSettings: false },
     )
 

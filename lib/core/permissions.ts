@@ -22,6 +22,7 @@ import {
   type AccessAsk,
   type AccessLevel,
 } from "./access-requests"
+import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
 import type { SyncResult } from "./catalogue"
 import type { PermissionDecision, PermissionKind } from "./constants"
 import type { VaultContext } from "./context"
@@ -33,6 +34,7 @@ import {
   type EndpointChangeAsk,
   type EndpointRegistration,
 } from "./endpoint-admin"
+import { MAX_CALLS_PER_RUN } from "./code/limits"
 import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
@@ -56,6 +58,7 @@ import {
 } from "./connect"
 import { waitForOwner } from "./owner-wait"
 import {
+  argsInFull,
   canonicalJson,
   decisionsFor,
   isOpen,
@@ -65,7 +68,9 @@ import {
   requestHash,
   storedResultText,
   summaryText,
+  visible,
   type PermissionStatus,
+  type ShownText,
 } from "./permission-rules"
 import type { MailRegistration } from "./register-rules"
 import { summarize } from "./search"
@@ -83,23 +88,33 @@ import {
   type ServerInput,
 } from "./servers"
 import { writeToolAccess } from "./tool-access"
+import { noteOwnerAsked } from "./request-log"
 import { collectHandleIds } from "./result-handles"
 import {
   describeResults,
   keepWholeAnswer,
-  MAX_KEPT_RESULT_CHARS,
   resultKeepers,
   resultNotices,
   resultOpener,
 } from "./tool-results"
 import { finishHandover, performNavigate } from "./browser/call"
+import { RUN_COMMAND, stdinAsText } from "./ssh/tools"
 import { describeBrowseAsk, describeHandoverAsk } from "./browser/describe"
+import type { fetchThroughBrowser } from "./browser/solve"
 import {
   isOwnerNeeded,
   type BrowseAsk,
   type HandoverAsk,
 } from "./browser/types"
+import { resourceLimits } from "./resources/state"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
+import {
+  applyWrapperChange,
+  type WrapperChangeAsk,
+  type WrapperShown,
+} from "./wrappers/admin"
+import { readWrapperOperation } from "./wrappers/definition"
+import type { SecretGrant } from "./wrappers/placeholders"
 import {
   describeFetchAsk,
   privateAllowedFor,
@@ -128,7 +143,8 @@ import {
  *
  * An answer can also settle the tool for the calls after it ("Always
  * allow", "Block"), and for a web request the site ("Always allow this
- * site", "Block this site").
+ * site", "Block this site"), or let them go ahead for a while ("Allow for",
+ * lib/core/allowances.ts) without changing a level.
  */
 
 /** What the gateway knows about the request it is serving. */
@@ -160,6 +176,11 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   endpoint?: EndpointRegistration
   /** A mail account (JMAP or IMAP) rather than an MCP server or an API. */
   mail?: MailRegistration
+  /**
+   * An MCP server: set when its host is, or resolves to, a private or local
+   * address, for the owner. Missing on requests from before it was looked up.
+   */
+  privateAddress?: string | null
 }
 
 export type PermissionAsk =
@@ -172,6 +193,7 @@ export type PermissionAsk =
     } & AnswerShape)
   | { kind: "register"; input: RegisterArgs }
   | { kind: "endpoint_change"; input: EndpointChangeAsk }
+  | { kind: "wrapper_change"; input: WrapperChangeAsk }
   | MemoryAsk
   | AccessAsk
   | { kind: "fetch"; input: FetchArgs }
@@ -184,11 +206,13 @@ export type PermissionExecutor = {
   syncTools: typeof syncServerTools
   /** web_fetch's request; the real one when left out. */
   fetchWeb?: typeof fetchWeb
+  /** web_fetch's read through the browser past a site's check; the real one when left out. */
+  solveWeb?: typeof fetchThroughBrowser
   /** The browser opening a site the owner allowed; the real one when left out. */
   browse?: typeof performNavigate
 }
 
-const defaultExecutor: PermissionExecutor = {
+export const defaultExecutor: PermissionExecutor = {
   callTool: callServerTool,
   syncTools: syncServerTools,
 }
@@ -206,9 +230,23 @@ export type PermissionView = {
   tool: string
   title: string
   lines: string[]
+  /**
+   * The lines the owner reads and the assistant is not told: whether a
+   * server's name resolves to an address on their network, which would
+   * otherwise let a proposal map it.
+   */
+  ownerOnly: string[]
   warning: string | null
+  /**
+   * Everything the request carries, for the page to fold under the lines
+   * when they cut it short or wrote out what is in it; null when they say
+   * it all.
+   */
+  full: ShownText[] | null
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
+  /** A wrapper request's tools and secrets, for the page to show in full. */
+  wrapper: WrapperShown | null
   /** The browser tab a request is about, for the page to show it live. */
   browserTabId: string | null
   url: string
@@ -314,7 +352,7 @@ export async function runCall(
         text: (input) => keepers.text({ ...input, ...context }),
         bytes: (input) => keepers.bytes({ ...input, ...context }),
       },
-      { wholeMax: MAX_KEPT_RESULT_CHARS, links: true },
+      { wholeMax: resourceLimits().textChars, links: true },
     )
 
     return await keepWholeAnswer(
@@ -325,8 +363,14 @@ export async function runCall(
   } catch (error) {
     // A site the owner just saw: a site is asked about only for the address
     // in the call's arguments, so when they allowed the call, they allowed
-    // it for this tab.
-    if (ownerAllowed && isOwnerNeeded(error) && error.ask.kind === "browse") {
+    // it for this tab. Not when the arguments held a kept result: the owner
+    // saw its name, not the address in it, so the site is asked about.
+    if (
+      ownerAllowed &&
+      isOwnerNeeded(error) &&
+      error.ask.kind === "browse" &&
+      collectHandleIds(args).length === 0
+    ) {
       const { tabId, url } = error.ask.input
 
       return (executor.browse ?? performNavigate)(
@@ -399,12 +443,15 @@ export async function runCodeCall(
     decode,
     keep,
     max,
+    secrets,
     executor = defaultExecutor,
   }: {
     publicUrl: string
     tokenId: string
     /** The most characters of JSON the program is handed. */
     max: number
+    /** A wrapper's call: where the owner allowed its secrets to go. */
+    secrets?: SecretGrant
     executor?: PermissionExecutor
   } & AnswerShape,
 ): Promise<CodeCallOutcome> {
@@ -421,6 +468,7 @@ export async function runCodeCall(
       keep: keepers.text,
       keepBytes: keepers.bytes,
       open: resultOpener(ctx, tokenId),
+      ...(secrets ? { secrets } : {}),
     })
 
     return await answerValue(
@@ -481,6 +529,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `endpoint:${ask.input.serverId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "wrapper_change":
+      return {
+        target: `wrapper:${ask.input.serverId ?? ask.input.name}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "fetch":
       return {
         target: `fetch:${ask.input.method} ${ask.input.url}`,
@@ -513,6 +566,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "propose_tool_access"
     case "endpoint_change":
       return "update_endpoint"
+    case "wrapper_change":
+      return `${ask.input.action}_wrapper`
     case "fetch":
       return "web_fetch"
     case "browse":
@@ -605,7 +660,10 @@ async function summarizeRow(
   title: string
   lines: string[]
   warning: string | null
+  full?: ShownText[] | null
   memory?: MemoryShown
+  wrapper?: WrapperShown
+  ownerOnly?: string[]
 }> {
   const args = readArgs(ctx, row)
   const asker = `Asked by the token "${row.token.name}"`
@@ -623,6 +681,17 @@ async function summarizeRow(
     const { shown } = args as EndpointChangeAsk
 
     return { ...shown, lines: [...shown.lines, asker] }
+  }
+
+  if (row.kind === "wrapper_change") {
+    const { shown } = args as WrapperChangeAsk
+
+    return {
+      title: shown.title,
+      lines: [...shown.lines, asker],
+      warning: shown.warning,
+      wrapper: shown,
+    }
   }
 
   if (row.kind === "browse") {
@@ -715,6 +784,9 @@ async function summarizeRow(
       const { protocol, smtpUrl, readOnly, mailFrom, checked, privateAddress } =
         input.mail
       const jmap = protocol === "jmap"
+      const flagged = privateAddress
+        ? `${privateAddress} If you agree, PCP signs in there from your own network.`
+        : null
 
       return {
         title: `Add the mail account ${input.name}?`,
@@ -725,13 +797,14 @@ async function summarizeRow(
               ? "Protocol: IMAP, sending through SMTP"
               : "Protocol: IMAP (it cannot send: no SMTP server was named)",
           jmap ? `Session URL: ${input.url}` : `IMAP server: ${input.url}`,
-          ...(smtpUrl ? [`SMTP server: ${smtpUrl}`] : []),
-          ...(checked ? [`Checked: ${checked}`] : []),
-          ...(privateAddress
+          ...(jmap && input.url.startsWith("http:")
             ? [
-                `${privateAddress} If you agree, PCP signs in there from your own network.`,
+                "Not encrypted: the session URL starts with http://, so your sign-in travels unprotected across your network. Only agree if you trust every device on it.",
               ]
             : []),
+          ...(smtpUrl ? [`SMTP server: ${smtpUrl}`] : []),
+          ...(checked ? [`Checked: ${checked}`] : []),
+          ...(flagged ? [flagged] : []),
           ...(input.authType === "basic" ? [`User name: ${login}`] : []),
           auth,
           ...oauthLines.slice(1),
@@ -743,6 +816,7 @@ async function summarizeRow(
           asker,
         ],
         warning,
+        ownerOnly: flagged ? [flagged] : [],
       }
     }
 
@@ -778,16 +852,22 @@ async function summarizeRow(
       }
     }
 
+    const flagged = input.privateAddress
+      ? `${input.privateAddress} A server an assistant proposes reaches public addresses only: if you agree, it connects once you allow private addresses on its page.`
+      : null
+
     return {
       title: `Add the server ${input.name}?`,
       lines: [
         `Address: ${input.url}`,
+        ...(flagged ? [flagged] : []),
         auth,
         ...oauthLines.slice(1),
         ...(input.description ? [`Description: ${input.description}`] : []),
         asker,
       ],
       warning,
+      ownerOnly: flagged ? [flagged] : [],
     }
   }
 
@@ -811,12 +891,22 @@ async function summarizeRow(
   const about = tool
     ? summarize(tool.descriptionOverride ?? tool.description)
     : ""
+  // Standard input sent as base64 is read as the text it is, when it is.
+  const stdin =
+    row.server?.kind === "ssh" && row.toolName === RUN_COMMAND
+      ? stdinAsText(args)
+      : null
 
   return {
     title: `Allow ${toolLabel(row)}?`,
     lines: [
-      ...(row.server ? [`Server: ${row.server.name} (${row.server.url})`] : []),
+      ...(row.server && row.server.kind !== "wrapper"
+        ? [`Server: ${row.server.name} (${row.server.url})`]
+        : []),
       ...(about ? [`What it does: ${about}`] : []),
+      ...(row.server?.kind === "wrapper"
+        ? await wrapperCallLines(ctx, row.server, tool?.operation ?? null)
+        : []),
       asker,
       ...previewArgs(args),
       ...(await handleLines(ctx, row.tokenId, args)),
@@ -824,7 +914,42 @@ async function summarizeRow(
     warning: destructive
       ? "The server marks this tool as destructive: it can change or delete things for good."
       : null,
+    full: argsInFull(
+      args,
+      stdin === null
+        ? []
+        : [{ label: "stdin_base64, decoded as text", text: visible(stdin) }],
+    ),
   }
+}
+
+/**
+ * What a call to a wrapper's tool does: the program the owner approved runs,
+ * and may call these tools. One that would ask is not asked about again in
+ * this run: the program calls it as often as it does, with the arguments it
+ * works out, up to run_code's limit on calls in one run.
+ */
+async function wrapperCallLines(
+  ctx: VaultContext,
+  server: McpServer,
+  operation: string | null,
+): Promise<string[]> {
+  const { calls, callLevels } = readWrapperOperation(operation)
+  const servers = await db().mcpServer.findMany({
+    where: {
+      vaultId: ctx.vaultId,
+      id: { in: [...new Set(calls.map((call) => call.serverId))] },
+    },
+    select: { id: true, slug: true },
+  })
+  const slugs = new Map(servers.map((entry) => [entry.id, entry.slug]))
+
+  return [
+    `Runs the program you approved for the wrapper ${server.name}, which may call: ${calls.map((call) => `${slugs.get(call.serverId) ?? "(removed server)"}/${call.tool}`).join(", ")}`,
+    callLevels === "approved"
+      ? `Those calls were approved with the wrapper, so they run in this call whatever the token's own levels for them are, as often as the program makes them (at most ${MAX_CALLS_PER_RUN} calls in all), with whatever arguments it works out.`
+      : `Allowing this call lets those calls run in it, as the token's levels allow. Any of them that would ask you first is not asked about again in this run: the program may call it as often as it does (at most ${MAX_CALLS_PER_RUN} calls in all), with whatever arguments it works out.`,
+  ]
 }
 
 const COUNT = new Intl.NumberFormat("en-US")
@@ -882,7 +1007,13 @@ async function toView(
   row: Row,
   publicUrl: string,
 ): Promise<PermissionView> {
-  const { memory = null, ...summary } = await summarizeRow(ctx, row, publicUrl)
+  const {
+    memory = null,
+    wrapper = null,
+    full = null,
+    ownerOnly = [],
+    ...summary
+  } = await summarizeRow(ctx, row, publicUrl)
   const kind = row.kind as PermissionKind
   const status =
     row.status === "pending" && !isOpen(row)
@@ -901,7 +1032,13 @@ async function toView(
     serverKind: row.server?.kind ?? null,
     tool: row.toolName,
     ...summary,
+    // Whatever made the lines, nothing in them hides from the owner.
+    title: visible(summary.title),
+    lines: summary.lines.map((line) => visible(line)),
+    ownerOnly: ownerOnly.map((line) => visible(line)),
+    full,
     memory,
+    wrapper,
     browserTabId: browserTabOf(ctx, row),
     url: permissionUrl(publicUrl, row.id),
     createdAt: row.createdAt,
@@ -940,6 +1077,14 @@ function newSecretOf(
   clientId: string | null
   login: string | null
 } | null {
+  if (row.kind === "wrapper_change") {
+    const { newSecret } = readArgs(ctx, row) as WrapperChangeAsk
+
+    return newSecret
+      ? { name: newSecret, optional: false, clientId: null, login: null }
+      : null
+  }
+
   if (row.kind !== "register") {
     return null
   }
@@ -1031,7 +1176,12 @@ function pendingText(view: PermissionView, detail?: string): string {
         : ` They type the value of the secret "${view.secretToEnter.name}" in there; do not ask them for it here.`
     : ""
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(view)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
+  const told = {
+    ...view,
+    lines: view.lines.filter((line) => !view.ownerOnly.includes(line)),
+  }
+
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
 }
 
 /**
@@ -1092,6 +1242,8 @@ export async function withPermission(
     })
   }
 
+  noteOwnerAsked(id)
+
   const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
   // The assistant hears which tools it named, to check its own patterns;
   // the page shows the owner the same levels in full.
@@ -1120,8 +1272,9 @@ export async function withPermission(
 
 /**
  * The owner's answer on PCP's page. "Always allow" and "Block" also set the
- * tool's level for the token; "Allow once" and "Always allow" run the call,
- * once, however many answers race for it.
+ * tool's level for the token, and "Allow for" lets it run without asking
+ * for `minutes`; every answer that agrees runs the call, once, however many
+ * answers race for it.
  */
 export async function decidePermission(
   ctx: VaultContext,
@@ -1132,6 +1285,7 @@ export async function decidePermission(
     tokenId,
     secretValue,
     always,
+    minutes,
   }: {
     publicUrl: string
     tokenId?: string
@@ -1139,6 +1293,8 @@ export async function decidePermission(
     secretValue?: string
     /** A memory to share: read it in every conversation, ticked on the page. */
     always?: boolean
+    /** "Allow for": how long, one of ALLOW_FOR_MINUTES. */
+    minutes?: number
   },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
@@ -1158,10 +1314,11 @@ export async function decidePermission(
 
   const kind = row.kind as PermissionKind
   // Only a tool call (for the tool) and a web request (for the site) have
-  // "always" and "block": any other answer is about this one request.
+  // "always", "allow_for" and "block": any other answer is about this one
+  // request.
   const settles = kind === "call" || kind === "fetch" || kind === "browse"
   const choice: PermissionDecision = !settles
-    ? decision === "always"
+    ? decision === "always" || decision === "allow_for"
       ? "allow_once"
       : decision === "block"
         ? "decline"
@@ -1171,6 +1328,8 @@ export async function decidePermission(
   if (!decisionsFor(kind).some((offered) => offered.value === choice)) {
     return text("That is not one of the answers to this request.", true)
   }
+
+  const allowFor = choice === "allow_for" ? parseAllowForMinutes(minutes) : null
 
   if (!tokenIsLive(row.token)) {
     return finishUnrun(
@@ -1251,6 +1410,10 @@ export async function decidePermission(
     await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
   } else if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
+  } else if (allowFor && host) {
+    await allowSiteFor(row.tokenId, host, allowFor)
+  } else if (allowFor && row.serverId) {
+    await allowToolFor(row.tokenId, row.serverId, row.toolName, allowFor)
   }
 
   // One winner, however many answers race for it.
@@ -1273,19 +1436,30 @@ export async function decidePermission(
                 readArgs(ctx, row) as EndpointChangeAsk,
               ),
             )
-          : kind === "fetch"
-            ? await executeFetch(ctx, row, publicUrl, executor)
-            : kind === "browse"
-              ? await executeBrowse(ctx, row, publicUrl, executor)
-              : kind === "browser_handover"
-                ? await executeHandover(ctx, row)
-                : await executeRegister(
-                    ctx,
-                    row,
-                    publicUrl,
-                    executor,
-                    secretValue,
-                  )
+          : kind === "wrapper_change"
+            ? text(
+                await applyWrapperChange(
+                  ctx,
+                  readArgs(ctx, row) as WrapperChangeAsk,
+                  {
+                    tokenId: row.tokenId,
+                    ...(secretValue ? { secretValue } : {}),
+                  },
+                ),
+              )
+            : kind === "fetch"
+              ? await executeFetch(ctx, row, publicUrl, executor)
+              : kind === "browse"
+                ? await executeBrowse(ctx, row, publicUrl, executor)
+                : kind === "browser_handover"
+                  ? await executeHandover(ctx, row)
+                  : await executeRegister(
+                      ctx,
+                      row,
+                      publicUrl,
+                      executor,
+                      secretValue,
+                    )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -1343,6 +1517,21 @@ async function executeCall(
     )
   }
 
+  // A wrapper's tool runs its program for the token, the calls it would
+  // ask about included: the owner allowed this call with its arguments.
+  // Imported here: the runner calls back into this file.
+  const wrappers =
+    row.server.kind === "wrapper" ? await import("./wrappers/run") : null
+  const wrapped = wrappers
+    ? wrappers.withWrappers(executor, {
+        ctx,
+        tokenId: row.tokenId,
+        publicUrl,
+        serverIds: await wrappers.tokenServerIds(ctx, row.tokenId),
+        approved: true,
+      })
+    : executor
+
   return runCall(ctx, row.server, row.toolName, readArgs(ctx, row), {
     publicUrl,
     tokenId: row.tokenId,
@@ -1350,7 +1539,7 @@ async function executeCall(
     decode: readStoredFields(row.decode),
     keep: readStoredFields(row.keep),
     ownerAllowed: true,
-    executor,
+    executor: wrapped,
   })
 }
 
@@ -1421,6 +1610,7 @@ async function executeFetch(
   return runFetch(ctx, row.tokenId, readArgs(ctx, row) as FetchArgs, {
     publicUrl,
     fetcher: executor.fetchWeb ?? fetchWeb,
+    solver: executor.solveWeb,
   })
 }
 
@@ -1546,6 +1736,9 @@ async function executeRegister(
             authValueTemplate: asked.authValueTemplate,
             authExtraHeaders: asked.authExtraHeaders,
             ...secretFields(asked, secret.id),
+            // The address is the assistant's: public ones only, until the
+            // owner allows private addresses on the server's page.
+            publicOnly: true,
           })
   } catch (error) {
     // The secret was typed in for this server alone.
@@ -1771,7 +1964,7 @@ export async function listPendingRequests(
 
       return {
         id: row.id,
-        title,
+        title: visible(title),
         tokenName: row.token.name,
         createdAt: row.createdAt,
       }

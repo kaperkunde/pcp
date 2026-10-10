@@ -1,12 +1,19 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { listTokenAllowances } from "./allowances"
 import { createApiToken, resolveApiToken, updateApiToken } from "./api-tokens"
+import { createBrowserServer } from "./browser/server"
+import { NOT_PASSED_LINE } from "./browser/solve"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { CHALLENGE_LINE } from "./fetch/challenge"
+import type { FetchAnswer } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
 import { prepareFetch } from "./fetch/request"
+import { resolveFetchAccess } from "./fetch/rules"
 import { buildInstructions } from "./gateway"
+import { newId } from "./ids"
 import {
   decidePermission,
   getPermissionView,
@@ -20,10 +27,13 @@ import { setupVault } from "./vault"
 import {
   addFetchSite,
   decideFetch,
+  describeFetchAsk,
   listFetchRules,
+  loadFetchRules,
   recordFetch,
   removeFetchSite,
   privateAllowedFor,
+  runFetch,
   setFetchMethod,
   setFetchPrivate,
   setFetchRuleShared,
@@ -41,6 +51,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.unstubAllEnvs()
   await cleanup()
 })
 
@@ -79,7 +90,10 @@ function stub() {
     syncTools: async () => ({ status: "ok", message: "", toolCount: 0 }),
     fetchWeb: async (args) => {
       fetched.push(args)
-      return { content: [{ type: "text", text: `fetched ${args.url}` }] }
+      return {
+        result: { content: [{ type: "text", text: `fetched ${args.url}` }] },
+        challenged: false,
+      }
     },
   }
   return { fetched, executor }
@@ -414,7 +428,10 @@ describe("private addresses", () => {
           allowPrivate: options?.allowPrivate,
           publicUrl: options?.publicUrl,
         })
-        return { content: [{ type: "text", text: "ok" }] }
+        return {
+          result: { content: [{ type: "text", text: "ok" }] },
+          challenged: false,
+        }
       },
     }
     await decideFetch(scope, get("http://printer.lan/"))
@@ -460,6 +477,7 @@ describe("the owner's answer to a request", () => {
     })
     expect(view?.decisions.map((decision) => decision.label)).toEqual([
       "Allow once",
+      "Allow this site for",
       "Always allow this site",
       "Block this site",
       "Not now",
@@ -478,6 +496,63 @@ describe("the owner's answer to a request", () => {
     expect(
       (await decideFetch(scope, get("https://example.com/other"))).access,
     ).toBe("allowed")
+  })
+
+  it("Allow this site for runs it once and lets the site through for that long, changing no level", async () => {
+    const { ctx, scope, tokenId, other } = await setup()
+    const { fetched, executor } = stub()
+    await setFetchMethod(ctx, tokenId, "DELETE", "blocked")
+    const { id } = await ask(scope, get("https://example.com/news"))
+
+    const ran = await decidePermission(
+      ctx,
+      id,
+      "allow_for",
+      { publicUrl: PUBLIC_URL, minutes: 15 },
+      executor,
+    )
+    expect(textOf(ran)).toBe("fetched https://example.com/news")
+    expect(fetched).toHaveLength(1)
+    // The site keeps following the method settings: the allowance is not a level.
+    expect((await sites(ctx, tokenId))["example.com"]?.level).toBe("default")
+    expect(await listTokenAllowances(ctx, tokenId)).toMatchObject([
+      { kind: "site", host: "example.com" },
+    ])
+
+    // Every method that would ask goes ahead; a blocked one stays blocked.
+    expect(
+      (await decideFetch(scope, get("https://example.com/other"))).access,
+    ).toBe("allowed")
+    expect(
+      (
+        await decideFetch(
+          scope,
+          get("https://example.com/form", { method: "POST" }),
+        )
+      ).access,
+    ).toBe("allowed")
+    expect(
+      (
+        await decideFetch(
+          scope,
+          get("https://example.com/item", { method: "DELETE" }),
+        )
+      ).access,
+    ).toBe("blocked")
+    // Only for this token, and only for this site.
+    expect(
+      (await decideFetch(other, get("https://example.com/news"))).access,
+    ).toBe("ask")
+    expect(
+      (await decideFetch(scope, get("https://www.example.com/"))).access,
+    ).toBe("ask")
+
+    // Once the time is up, it asks again.
+    const rules = await loadFetchRules(ctx.vaultId, tokenId)
+    expect(
+      resolveFetchAccess(rules, "example.com", "GET", Date.now() + 16 * 60_000)
+        .access,
+    ).toBe("ask")
   })
 
   it("warns about a request that can change things, and Block this site runs nothing", async () => {
@@ -529,5 +604,306 @@ describe("the owner's answer to a request", () => {
     expect(textOf(answer)).toContain("can no longer fetch web pages")
     expect(fetched).toHaveLength(0)
     expect((await sites(ctx, tokenId))["example.com"]?.level).toBe("default")
+  })
+})
+
+describe("a site's check of its visitors", () => {
+  /** The page, as the network or the browser hands it back. */
+  function page(url: string, source = ""): FetchAnswer {
+    return {
+      result: {
+        content: [
+          {
+            type: "text",
+            text: `URL: ${url}\nStatus: HTTP 200 OK\nType: text/html, as Markdown${source}\n\nthe page`,
+          },
+        ],
+      },
+      challenged: false,
+    }
+  }
+
+  /** The check instead of the page, as fetchWeb answers it. */
+  function checked(url: string, ...lines: string[]): FetchAnswer {
+    return {
+      result: {
+        content: [
+          {
+            type: "text",
+            text: `URL: ${url}\nStatus: HTTP 403 Forbidden\n${[CHALLENGE_LINE, ...lines].join("\n")}\n\nJust a moment...`,
+          },
+        ],
+        isError: true,
+      },
+      challenged: true,
+    }
+  }
+
+  /** The network and the browser, replaced; each records what it was asked. */
+  function fakes({
+    plain = checked,
+    solved = (url: string) => page(url, " (read through PCP's browser)"),
+    available = true,
+    clearance = false,
+  }: {
+    plain?: (url: string) => FetchAnswer
+    solved?: (url: string) => FetchAnswer
+    available?: boolean
+    clearance?: boolean
+  } = {}) {
+    const fetched: FetchArgs[] = []
+    const solvedArgs: FetchArgs[] = []
+
+    return {
+      fetched,
+      solved: solvedArgs,
+      options: {
+        publicUrl: PUBLIC_URL,
+        fetcher: async (args: FetchArgs) => {
+          fetched.push(args)
+          return plain(args.url)
+        },
+        solver: async (_ctx: VaultContext, args: FetchArgs) => {
+          solvedArgs.push(args)
+          return solved(args.url)
+        },
+        available: async () => available,
+        clearance: () => clearance,
+      },
+    }
+  }
+
+  const hints = {
+    handOver:
+      "Open it with browser/navigate and call browser/hand_over so the owner can pass the check themselves.",
+    letToken:
+      "The owner can let this token use PCP's browser, where they can pass such checks.",
+    addBrowser:
+      "The owner can add the browser on PCP's Browser page; PCP then passes such checks for web_fetch.",
+  }
+
+  it("reads the page again through the browser, once, and hands back what it read", async () => {
+    const { ctx, tokenId } = await setup()
+    const { fetched, solved, options } = fakes()
+    const args = get("https://walled.example/page")
+
+    const result = await runFetch(ctx, tokenId, args, options)
+
+    expect(fetched).toEqual([args])
+    expect(solved).toEqual([args])
+    expect(result.isError).toBeUndefined()
+    expect(textOf(result)).toContain("read through PCP's browser")
+    expect(textOf(result)).toContain("the page")
+    expect(textOf(result)).not.toContain(CHALLENGE_LINE)
+  })
+
+  it("leaves a page that came as it is", async () => {
+    const { ctx, tokenId } = await setup()
+    const { fetched, solved, options } = fakes({ plain: page })
+
+    const result = await runFetch(
+      ctx,
+      tokenId,
+      get("https://example.com/"),
+      options,
+    )
+
+    expect(fetched).toHaveLength(1)
+    expect(solved).toHaveLength(0)
+    expect(textOf(result)).toBe(
+      "URL: https://example.com/\nStatus: HTTP 200 OK\nType: text/html, as Markdown\n\nthe page",
+    )
+  })
+
+  it("sends a POST once and never through the browser, and says what the owner can do", async () => {
+    const { ctx, tokenId } = await setup()
+    await createBrowserServer(ctx)
+    const { fetched, solved, options } = fakes()
+
+    const result = await runFetch(
+      ctx,
+      tokenId,
+      get("https://walled.example/form", { method: "POST", body: "a=1" }),
+      options,
+    )
+
+    expect(fetched).toHaveLength(1)
+    expect(solved).toHaveLength(0)
+    expect(result.isError).toBe(true)
+    expect(textOf(result)).toContain(CHALLENGE_LINE)
+    expect(textOf(result)).toContain(hints.handOver)
+  })
+
+  it("adds one hint to a check the browser could not pass either, in the lead", async () => {
+    const { ctx, tokenId } = await setup()
+    await createBrowserServer(ctx)
+    const { fetched, solved, options } = fakes({
+      solved: (url) => checked(url, NOT_PASSED_LINE),
+    })
+
+    const result = await runFetch(
+      ctx,
+      tokenId,
+      get("https://walled.example/"),
+      options,
+    )
+    const [lead, body] = textOf(result).split("\n\n")
+
+    expect(fetched).toHaveLength(1)
+    expect(solved).toHaveLength(1)
+    expect(result.isError).toBe(true)
+    expect(lead!.split("\n")).toEqual([
+      "URL: https://walled.example/",
+      "Status: HTTP 403 Forbidden",
+      CHALLENGE_LINE,
+      NOT_PASSED_LINE,
+      hints.handOver,
+    ])
+    expect(body).toBe("Just a moment...")
+  })
+
+  it("tells a token that reaches the browser to hand the page over, and the others what the owner can do", async () => {
+    const { ctx, tokenId } = await setup()
+    const args = get("https://walled.example/")
+    const run = () =>
+      runFetch(ctx, tokenId, args, fakes({ available: false }).options)
+
+    // No browser yet.
+    expect(textOf(await run())).toContain(hints.addBrowser)
+
+    // The browser, and a token with every server.
+    const { id: browserId } = await createBrowserServer(ctx)
+    expect(textOf(await run())).toContain(hints.handOver)
+
+    // A token with other servers than the browser.
+    const otherId = newId()
+    await db().mcpServer.create({
+      data: {
+        id: otherId,
+        vaultId: ctx.vaultId,
+        name: "Other",
+        slug: "other",
+        url: "https://other.example/mcp",
+      },
+    })
+    await updateApiToken(ctx, tokenId, {
+      name: "Claude",
+      allowAllServers: false,
+      serverIds: [otherId],
+    })
+    expect(textOf(await run())).toContain(hints.letToken)
+
+    // The browser among the token's servers, but disabled.
+    await updateApiToken(ctx, tokenId, {
+      name: "Claude",
+      allowAllServers: false,
+      serverIds: [browserId],
+    })
+    expect(textOf(await run())).toContain(hints.handOver)
+    await db().mcpServer.update({
+      where: { id: browserId },
+      data: { enabled: false },
+    })
+    const told = textOf(await run())
+    expect(told).toContain(hints.letToken)
+    expect(told.match(/The owner can/g)).toHaveLength(1)
+  })
+
+  it("goes to the browser first for a site it passed lately, and falls back to the plain request", async () => {
+    const { ctx, tokenId } = await setup()
+    const args = get("https://walled.example/")
+
+    const first = fakes({ clearance: true })
+    const read = await runFetch(ctx, tokenId, args, first.options)
+    expect(first.solved).toEqual([args])
+    expect(first.fetched).toHaveLength(0)
+    expect(textOf(read)).toContain("read through PCP's browser")
+
+    // The browser no longer gets past the check: the plain request does.
+    const second = fakes({
+      clearance: true,
+      solved: (url) => checked(url, NOT_PASSED_LINE),
+      plain: page,
+    })
+    const fallen = await runFetch(ctx, tokenId, args, second.options)
+    expect(second.solved).toHaveLength(1)
+    expect(second.fetched).toHaveLength(1)
+    expect(fallen.isError).toBeUndefined()
+    expect(textOf(fallen)).not.toContain(CHALLENGE_LINE)
+  })
+
+  it("runs the owner's answer through the browser the executor gives", async () => {
+    const { ctx, scope, tokenId } = await setup()
+    await createBrowserServer(ctx)
+    // Any file that exists stands in for Chromium: the browser itself is
+    // replaced in the executor.
+    vi.stubEnv("PCP_BROWSER_EXECUTABLE", process.execPath)
+    const solved: FetchArgs[] = []
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      fetchWeb: async (args) => checked(args.url),
+      solveWeb: async (_ctx, args) => {
+        solved.push(args)
+        return page(args.url, " (read through PCP's browser)")
+      },
+    }
+    const args = get("https://walled.example/news")
+    await decideFetch(scope, args)
+    await withPermission(scope, { kind: "fetch", input: args })
+    const id = (await db().permissionRequest.findFirstOrThrow()).id
+
+    const ran = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    expect(solved).toEqual([args])
+    expect(ran.isError).toBeUndefined()
+    expect(textOf(ran)).toContain("read through PCP's browser")
+    expect(
+      (await listFetchRules(ctx, tokenId)).sites.find(
+        (site) => site.host === "walled.example",
+      )?.lastFetchedAt,
+    ).toBeInstanceOf(Date)
+  })
+})
+
+describe("what the owner reads about a request", () => {
+  it("says how long a cut header is, and shows every header and the body whole", () => {
+    const long = `Bearer ${"t".repeat(300)}`
+    const body = `${"pet=Rex&".repeat(300)}owner=mallory`
+    const asked = describeFetchAsk(
+      get("https://shop.example/orders", {
+        method: "POST",
+        headers: { "x-long": long, accept: "text/plain" },
+        body,
+      }),
+    )
+
+    expect(asked.lines[2]).toBe(
+      `Headers: x-long (307 characters): ${long.slice(0, 199)}…; accept: text/plain`,
+    )
+    expect(asked.full).toEqual([
+      { label: "Headers", text: `x-long: ${long}\naccept: text/plain` },
+      { label: "Body (2,413 characters)", text: body },
+    ])
+  })
+
+  it("writes out what does not show, and has nothing more to show when nothing was cut", () => {
+    const rlo = String.fromCodePoint(0x202e)
+    const asked = describeFetchAsk(
+      get("https://shop.example/", { headers: { "x-name": `a${rlo}b` } }),
+    )
+
+    expect(asked.lines[2]).toBe("Headers: x-name: a\\u202Eb")
+    expect(asked.full).toEqual([
+      { label: "Headers", text: "x-name: a\\u202Eb" },
+    ])
+    expect(
+      describeFetchAsk(get("https://shop.example/", { body: "pet=Rex" })).full,
+    ).toBeNull()
   })
 })

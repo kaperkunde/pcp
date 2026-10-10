@@ -33,6 +33,11 @@ export type FetchRuleSet = {
   /** null: no line, so private addresses stay blocked. */
   ownPrivate: ToolAccess | null
   sharedPrivate: ToolAccess | null
+  /**
+   * Sites the owner allowed the token for a while (lib/core/allowances.ts),
+   * to when (ms): they lift "ask" to "allowed" until then, and no further.
+   */
+  allowedSites: Map<string, number>
 }
 
 export type FetchDecision = {
@@ -54,6 +59,7 @@ export function emptyRules(): FetchRuleSet {
     sharedSites: new Map(),
     ownPrivate: null,
     sharedPrivate: null,
+    allowedSites: new Map(),
   }
 }
 
@@ -86,9 +92,11 @@ export function isMethodGroup(value: string): value is FetchMethodGroup {
 /**
  * What a site is: the host, with the port when it is not the scheme's own.
  * http and https on one host are one site; a subdomain is a site of its own.
+ * A name's trailing dot ("example.com.") reaches the same host, so it goes.
  */
 export function siteKey(url: URL): string {
-  return url.host.toLowerCase()
+  const host = url.hostname.toLowerCase().replace(/\.$/, "")
+  return url.port ? `${host}:${url.port}` : host
 }
 
 /** A site as the owner types it: example.com, or a whole address. */
@@ -148,6 +156,20 @@ function siteAccess(rules: FetchRuleSet, host: string): ToolAccess | null {
 }
 
 export function resolveFetchAccess(
+  rules: FetchRuleSet,
+  host: string,
+  group: FetchMethodGroup,
+  now = Date.now(),
+): FetchDecision {
+  const decision = resolveLevel(rules, host, group)
+  const until = rules.allowedSites.get(host)
+
+  return decision.access === "ask" && until !== undefined && until > now
+    ? { access: "allowed", by: "site" }
+    : decision
+}
+
+function resolveLevel(
   rules: FetchRuleSet,
   host: string,
   group: FetchMethodGroup,

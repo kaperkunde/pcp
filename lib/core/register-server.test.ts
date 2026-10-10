@@ -23,6 +23,8 @@ let client: Client
 /** What the look at a JMAP address finds; the address it was asked about. */
 let probe: (url: string) => Promise<JmapProbe>
 let probed: string[]
+/** What a name resolves to here; a name not listed does not resolve. */
+let resolves: Record<string, string[]>
 
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
@@ -39,6 +41,14 @@ beforeEach(async () => {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
 
   probed = []
+  resolves = {
+    "mcp.linear.example": ["203.0.114.7"],
+    "mail.example.com": ["203.0.114.8"],
+    "smtp.example.com": ["203.0.114.9"],
+    "mcp.home.example": ["192.168.1.30"],
+    "mail.lan": ["10.0.0.5"],
+    "smtp.lan": ["fd00::25"],
+  }
   probe = async (url) => ({
     checked: `A server answers at ${url} and asks for a sign-in (Basic).`,
     privateAddress: null,
@@ -47,6 +57,15 @@ beforeEach(async () => {
     probeJmap: async (url) => {
       probed.push(url)
       return probe(url)
+    },
+    lookupHost: async (host) => {
+      const found = resolves[host]
+
+      if (!found) {
+        throw new Error(`getaddrinfo ENOTFOUND ${host}`)
+      }
+
+      return found
     },
   }).connect(serverSide)
   client = new Client({ name: "test", version: "1.0.0" })
@@ -204,13 +223,16 @@ describe("proposing a mail account", () => {
       privateAddress:
         "192.168.1.20 is, or resolves to, a private or local address, so PCP did not look at it from here.",
     })
-    await register({
+    const asked = await register({
       kind: "jmap",
       name: "Home mail",
       url: "http://192.168.1.20:8080",
       auth_type: "oauth",
       oauth_scope: "urn:ietf:params:oauth:scope:mail",
     })
+    // The owner's to read, not the assistant's: for a name it would say
+    // what the owner's DNS holds.
+    expect(asked.text).not.toMatch(/private or local/)
 
     const view = await shown()
     expect(view.lines).toEqual(
@@ -222,9 +244,51 @@ describe("proposing a mail account", () => {
       ]),
     )
     expect(view.lines.some((line) => line.startsWith("Checked:"))).toBe(false)
+    // The owner is told the sign-in is not encrypted.
+    expect(view.lines).toContainEqual(
+      expect.stringMatching(
+        /^Not encrypted: the session URL starts with http:/,
+      ),
+    )
+  })
+
+  it("refuses http:// to a public address or a name that is not private, before the owner is asked", async () => {
+    for (const url of [
+      "http://8.8.8.8",
+      "http://mail.example.invalid:8080/.well-known/jmap",
+    ]) {
+      const asked = await register({
+        kind: "jmap",
+        name: "Mail",
+        url,
+        auth_type: "oauth",
+        oauth_scope: "urn:ietf:params:oauth:scope:mail",
+      })
+
+      expect(asked.isError).toBe(true)
+      expect(asked.text).toMatch(/unencrypted.*https:\/\//)
+    }
+
+    expect(probed).toEqual([])
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("does not flag an https session URL as unencrypted", async () => {
+    await register({
+      kind: "jmap",
+      name: "Mail",
+      url: "https://mail.example.com",
+      auth_type: "oauth",
+      oauth_scope: "urn:ietf:params:oauth:scope:mail",
+    })
+
+    expect(
+      (await shown()).lines.some((line) => line.startsWith("Not encrypted")),
+    ).toBe(false)
   })
 
   it("asks for an IMAP account with an SMTP server, read-only if it says so", async () => {
+    await db().permissionRequest.deleteMany()
     await register({
       kind: "imap",
       name: "Work mail",
@@ -361,6 +425,81 @@ describe("proposing a mail account", () => {
   })
 })
 
+describe("an address on the owner's own network", () => {
+  it("flags an MCP server's private address to the owner, and does not tell the assistant", async () => {
+    for (const url of [
+      "http://192.168.1.30:8080/mcp",
+      "https://mcp.home.example/mcp",
+      "http://[::1]:3000/mcp",
+      "http://169.254.169.254/latest",
+    ]) {
+      // shown() reads the newest request; requests made in the same
+      // millisecond would tie.
+      await db().permissionRequest.deleteMany()
+      const asked = await register({ name: "Linear", url })
+      expect(asked.isError, url).toBe(false)
+      // What a name resolves to is not the assistant's to learn: it could
+      // map the owner's network with proposals.
+      expect(asked.text, url).not.toMatch(/private or local/)
+
+      const host = new URL(url).hostname.replace(/^\[|\]$/g, "")
+      expect((await shown()).lines, url).toContainEqual(
+        `${host} is, or resolves to, a private or local address. A server an assistant proposes reaches public addresses only: if you agree, it connects once you allow private addresses on its page.`,
+      )
+    }
+  })
+
+  it("does not flag a name that does not resolve", async () => {
+    await register({ name: "Nowhere", url: "https://nowhere.example/mcp" })
+
+    expect((await shown()).lines.join("\n")).not.toMatch(/private or local/)
+  })
+
+  it("flags the private IMAP and SMTP servers of a proposed mail account", async () => {
+    const asked = await register({
+      kind: "imap",
+      name: "Home mail",
+      url: "mail.lan",
+      smtp_url: "smtp.lan",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Home mail password",
+    })
+
+    expect((await shown()).lines).toContainEqual(
+      "mail.lan and smtp.lan are, or resolve to, private or local addresses. If you agree, PCP signs in there from your own network.",
+    )
+    expect(asked.text).not.toMatch(/private or local/)
+
+    await db().permissionRequest.deleteMany()
+    await register({
+      kind: "imap",
+      name: "Mixed mail",
+      url: "mail.example.com",
+      smtp_url: "smtp.lan",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Mixed mail password",
+    })
+
+    expect((await shown()).lines).toContainEqual(
+      "smtp.lan is, or resolves to, a private or local address. If you agree, PCP signs in there from your own network.",
+    )
+
+    await register({
+      kind: "imap",
+      name: "Work mail",
+      url: "mail.example.com",
+      smtp_url: "smtp.example.com",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Work mail password",
+    })
+
+    expect((await shown()).lines.join("\n")).not.toMatch(/private or local/)
+  })
+})
+
 describe("what register_server has always taken", () => {
   it("asks for an MCP server by its address", async () => {
     const asked = await register({
@@ -374,6 +513,7 @@ describe("what register_server has always taken", () => {
     const view = await shown()
     expect(view.title).toBe("Add the server Linear?")
     expect(view.lines).toContain("Address: https://mcp.linear.example/mcp")
+    expect(view.lines.join("\n")).not.toMatch(/private or local/)
   })
 
   it("asks for an API from its OpenAPI document, with a user name and password if it takes Basic", async () => {

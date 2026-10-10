@@ -299,6 +299,10 @@ export async function copyTokenAccess(
           }),
         ]
       : []),
+    // What the token was allowed for a while goes with the rest of what it
+    // had; the source's were answers to its own requests and stay its own.
+    db().apiTokenToolAllowance.deleteMany({ where: { tokenId: targetId } }),
+    db().apiTokenSiteAllowance.deleteMany({ where: { tokenId: targetId } }),
     db().webFetchRule.deleteMany({ where: { tokenId: targetId } }),
     ...(fetchRules.length > 0
       ? [

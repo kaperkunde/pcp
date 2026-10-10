@@ -2,8 +2,10 @@ import type { Metadata } from "next"
 import Link from "next/link"
 
 import { BrowserTabView } from "@/components/browser-tab-view"
+import { PageColumn } from "@/components/page-column"
 import { PageHeader } from "@/components/page-header"
-import { tabFor } from "@/lib/core/browser/owner"
+import { Card } from "@/components/ui/card"
+import { browserTokens, tabFor } from "@/lib/core/browser/owner"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = {
@@ -12,6 +14,8 @@ export const metadata: Metadata = {
 }
 
 export const dynamic = "force-dynamic"
+
+const BACK = { href: "/browser", label: "Browser" }
 
 /**
  * One browser tab, live: where an assistant's links lead, and where you
@@ -24,38 +28,34 @@ export default async function BrowserTabPage({
 }) {
   const ctx = await requireContext()
   const { id } = await params
-  const tab = await tabFor(ctx, id)
+  const [tab, tokens] = await Promise.all([tabFor(ctx, id), browserTokens(ctx)])
 
   if (!tab) {
     return (
-      <>
-        <PageHeader title="Browser tab" />
-        <p className="text-muted-foreground" role="alert">
-          This tab is closed, or the browser has closed since (it closes after a
-          while with nothing to do). The{" "}
-          <Link href="/browser" className="underline">
-            Browser
-          </Link>{" "}
-          page lists the open ones.
-        </p>
-      </>
+      <PageColumn width="narrow">
+        <PageHeader back={BACK} title="Browser tab" />
+        <Card>
+          <p className="text-muted-foreground" role="alert">
+            This tab is closed, or the browser has closed since (it closes after
+            a while with nothing to do). The{" "}
+            <Link href="/browser" className="text-primary">
+              Browser
+            </Link>{" "}
+            page lists the open ones.
+          </p>
+        </Card>
+      </PageColumn>
     )
   }
 
   return (
     <>
       <PageHeader
+        back={BACK}
         title={tab.title || "Browser tab"}
-        description={
-          <>
-            Opened by {tab.openedBy === "owner" ? "you" : tab.openedBy}.{" "}
-            <Link href="/browser" className="underline">
-              All tabs
-            </Link>
-          </>
-        }
+        description={`Opened by ${tab.openedBy === "owner" ? "you" : tab.openedBy}.`}
       />
-      <BrowserTabView tabId={tab.id} initial={tab} />
+      <BrowserTabView tabId={tab.id} initial={tab} tokens={tokens} />
     </>
   )
 }

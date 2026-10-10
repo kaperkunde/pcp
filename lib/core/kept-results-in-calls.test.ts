@@ -146,7 +146,9 @@ describe("a handle in an endpoint call's arguments", () => {
             tokenId,
           },
         ),
-      ).rejects.toThrow(new RegExp(`No kept result "${id}" for this token`))
+      ).rejects.toThrow(
+        /A kept result named in the arguments is not there for this token/,
+      )
     }
 
     expect(api.requests).toEqual([])
@@ -310,7 +312,9 @@ describe("an upload to an endpoint", () => {
         { body: { photo: { $result: "gone" } } },
         { ...PUBLIC, tokenId },
       ),
-    ).rejects.toThrow(/No kept result "gone" for this token/)
+    ).rejects.toThrow(
+      /A kept result named in the arguments is not there for this token/,
+    )
     expect(api.requests).toEqual([])
   })
 })

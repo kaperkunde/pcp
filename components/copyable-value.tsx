@@ -29,14 +29,14 @@ export function CopyableValue({
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md border border-input bg-muted/40 px-3 py-2">
+    <div className="flex flex-wrap items-center gap-2 rounded-[9px] bg-field py-1.5 pr-1.5 pl-3">
       <code
-        className="min-w-0 flex-1 text-sm break-all text-foreground"
+        className="min-w-0 flex-1 text-[13px] break-all text-foreground"
         data-testid={testId}
       >
         {value}
       </code>
-      <Button type="button" variant="outline" size="sm" onClick={copy}>
+      <Button type="button" variant="secondary" size="sm" onClick={copy}>
         {copied ? (
           <Check className="size-3.5" aria-hidden />
         ) : (

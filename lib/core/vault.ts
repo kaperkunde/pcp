@@ -15,6 +15,7 @@ import {
   unlockWithPassword,
 } from "./keys"
 import { destroyAllSessions } from "./sessions"
+import { SETTING_PUBLIC_URL, setSetting } from "./settings"
 
 /**
  * The vault: one per person. The single-user product has exactly one, made
@@ -23,26 +24,38 @@ import { destroyAllSessions } from "./sessions"
 
 const RECOVERY_PREFIX = "pcp_recovery_"
 
-let knownSetUp = false
+/**
+ * Whether setup has happened, once a check has found the vault. On
+ * globalThis because instrumentation.ts and the Server Actions are bundled
+ * apart: deleting the vault (lib/core/vault-reset.ts) must reach the copy
+ * the update check reads too.
+ */
+const SET_UP = Symbol.for("pcp.setUp")
+
+function setUpHolder(): { [SET_UP]?: boolean } {
+  return globalThis as unknown as { [SET_UP]?: boolean }
+}
 
 /**
- * Whether setup has happened. Once true it stays true (there is no way to
- * delete the vault from the UI), so after the first check this is free.
+ * Whether setup has happened. Once true it stays true until the owner
+ * deletes the vault, so after the first check this is free.
  */
 export async function isSetUp(): Promise<boolean> {
-  if (knownSetUp) {
+  const holder = setUpHolder()
+
+  if (holder[SET_UP]) {
     return true
   }
 
   const count = await db().vault.count()
-  knownSetUp = count > 0
+  holder[SET_UP] = count > 0
 
-  return knownSetUp
+  return holder[SET_UP]
 }
 
-/** Tests: forget the cached answer after wiping the database. */
+/** Forgets the cached answer: after the vault is deleted, and in tests. */
 export function forgetSetupState(): void {
-  knownSetUp = false
+  setUpHolder()[SET_UP] = false
 }
 
 export function validatePassword(password: string): string | null {
@@ -113,7 +126,7 @@ export async function setupVault({
     await tx.keyGrant.create({ data: recoveryGrant })
   })
 
-  knownSetUp = true
+  setUpHolder()[SET_UP] = true
 
   return { vaultId, dek, recoveryKey }
 }
@@ -178,10 +191,35 @@ export async function changePassword(
 }
 
 /**
- * Sets a new password from the recovery key. Every session is signed out and
- * Touch ID is turned off. API tokens hold their own copy of the key and keep
- * working, unless `revokeApiTokens` is set: the choice for someone who
- * thinks another person has had their password or a token.
+ * Ends every session, turns Touch ID off and forgets the pinned public
+ * address. API tokens hold their own copy of the key and keep working,
+ * unless `revokeApiTokens` is set: the choice for someone who thinks another
+ * person has had their password or a token.
+ *
+ * The public address goes too because it decides where permission links,
+ * the MCP address on token pages and PCP's sign-in metadata point: one
+ * pinned from a stolen session would send the next sign-in elsewhere long
+ * after that session is gone. PCP goes back to the address each request
+ * comes in on until the owner pins it again.
+ */
+export async function signOutEverywhere(
+  ctx: VaultContext,
+  { revokeApiTokens = false }: { revokeApiTokens?: boolean } = {},
+): Promise<void> {
+  if (revokeApiTokens) {
+    await revokeAllApiTokens(ctx)
+  }
+
+  await setSetting(ctx, SETTING_PUBLIC_URL, null)
+  // Touch ID signs in, so it goes with the sessions.
+  await removeDeviceKeys(ctx.vaultId)
+  await destroyAllSessions(ctx.vaultId)
+}
+
+/**
+ * Sets a new password from the recovery key, then signs out everywhere
+ * (signOutEverywhere): every session, Touch ID and the pinned public
+ * address, and every API token too when `revokeApiTokens` is set.
  */
 export async function resetPasswordWithRecoveryKey(
   recoveryKey: string,
@@ -206,12 +244,7 @@ export async function resetPasswordWithRecoveryKey(
   const { grant, dek } = unlocked
   const ctx = { vaultId: grant.vaultId, dek }
   await replacePasswordGrant(grant.vaultId, dek, newPassword)
-  await destroyAllSessions(grant.vaultId)
-  await removeDeviceKeys(grant.vaultId)
-
-  if (revokeApiTokens) {
-    await revokeAllApiTokens(ctx)
-  }
+  await signOutEverywhere(ctx, { revokeApiTokens })
 
   return ctx
 }

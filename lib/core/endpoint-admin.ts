@@ -868,7 +868,18 @@ export async function updateEndpointDetails(
     specText: changes.spec,
     fetched: newDocument ? fetched : undefined,
     patches: edits ? patches : undefined,
-    disable: disables,
+    // A new address is never live before the owner turns it on, whatever
+    // the read above said about the endpoint being off.
+    disable: disables || moves,
+    // All of the above was decided on that read, which a download can leave
+    // behind: the change is made only to the endpoint as it was then.
+    unchanged: {
+      url: server.url,
+      enabled: server.enabled,
+      authType: server.authType,
+      publicOnly: server.publicOnly,
+      specUrl: server.specUrl,
+    },
   })
 
   const ignored: string[] = []

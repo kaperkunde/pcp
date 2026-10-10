@@ -1,5 +1,6 @@
 "use client"
 
+import { Fingerprint } from "lucide-react"
 import {
   useActionState,
   useEffect,
@@ -16,14 +17,8 @@ import {
 import { FormError } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { SubmitButton } from "@/components/submit-button"
+import { SettingsItem } from "@/components/settings-item"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import { UsernameField } from "@/components/username-field"
@@ -98,60 +93,61 @@ export function TouchIdCard({
   const here = Boolean(status?.saved && info)
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Touch ID</CardTitle>
-        <CardDescription>
-          Unlock PCP in the Mac app with your fingerprint, and confirm a new API
-          token, an export or a restore with it instead of your password. A new
-          password or recovery key still takes your password. Recovering with
-          the recovery key, or signing out everywhere, turns Touch ID off.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        {info ? (
-          <p className="text-sm">
-            {here
-              ? "On in this app."
-              : status?.available
-                ? "On, but this app no longer holds its key: it was reinstalled, or macOS kept the key from it. Set it up again, or turn it off."
-                : "On in the Mac app."}{" "}
-            <span className="text-muted-foreground">
-              Set up <LocalDate value={info.createdAt} /> · last used{" "}
-              <LocalDate value={info.lastUsedAt} />
-            </span>
-          </p>
-        ) : null}
-        {status?.available && !here ? (
-          <form action={action} className="flex flex-col gap-4">
-            <UsernameField id="touch-id-account" value={username} />
-            <Field label="Your password" htmlFor="touch-id-password">
-              <Input
-                id="touch-id-password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                required
-              />
-            </Field>
-            <FormError error={state.status === "error" ? state.error : error} />
-            <div>
-              <SubmitButton pendingText="Checking…">
-                {info ? "Set up Touch ID again" : "Turn on Touch ID"}
-              </SubmitButton>
-            </div>
-          </form>
-        ) : (
-          <FormError error={error} />
-        )}
-        {info ? (
+    <SettingsItem
+      title="Touch ID"
+      icon={Fingerprint}
+      tint="bg-destructive/15 text-destructive"
+      state={
+        info
+          ? here || !status?.available
+            ? "On"
+            : "On, but this app has lost its key"
+          : "Off"
+      }
+      about="Unlock PCP in the Mac app with your fingerprint, and confirm a new API token, an export, a restore or deleting the vault with it instead of your password. A new password or recovery key still takes your password. Recovering with the recovery key, signing out everywhere or deleting the vault turns Touch ID off."
+    >
+      {info ? (
+        <p className="text-sm">
+          {here
+            ? "On in this app."
+            : status?.available
+              ? "On, but this app no longer holds its key: it was reinstalled, or macOS kept the key from it. Set it up again, or turn it off."
+              : "On in the Mac app."}{" "}
+          <span className="text-muted-foreground">
+            Set up <LocalDate value={info.createdAt} /> · last used{" "}
+            <LocalDate value={info.lastUsedAt} />
+          </span>
+        </p>
+      ) : null}
+      {status?.available && !here ? (
+        <form action={action} className="flex flex-col gap-4">
+          <UsernameField id="touch-id-account" value={username} />
+          <Field label="Your password" htmlFor="touch-id-password">
+            <Input
+              id="touch-id-password"
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              required
+            />
+          </Field>
+          <FormError error={state.status === "error" ? state.error : error} />
           <div>
-            <Button variant="outline" disabled={pending} onClick={turnOff}>
-              Turn off Touch ID
-            </Button>
+            <SubmitButton variant="secondary" pendingText="Checking…">
+              {info ? "Set up Touch ID again" : "Turn on Touch ID"}
+            </SubmitButton>
           </div>
-        ) : null}
-      </CardContent>
-    </Card>
+        </form>
+      ) : (
+        <FormError error={error} />
+      )}
+      {info ? (
+        <div>
+          <Button variant="secondary" disabled={pending} onClick={turnOff}>
+            Turn off Touch ID
+          </Button>
+        </div>
+      ) : null}
+    </SettingsItem>
   )
 }

@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState, useTransition } from "react"
 import { FormError } from "@/components/form-status"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input, Textarea } from "@/components/ui/input"
+import { Input, Select, Textarea } from "@/components/ui/input"
 import {
   backTabAction,
   closeTabAction,
@@ -61,11 +61,14 @@ export function BrowserTabView({
   tabId,
   initial,
   mode = "tab",
+  tokens = [],
 }: {
   tabId: string
   initial: TabView
   /** handover: the owner has the tab until they answer the request below. */
   mode?: "tab" | "handover"
+  /** The tokens Hand back can give the tab to (those that reach the browser). */
+  tokens?: Array<{ id: string; name: string }>
 }) {
   const router = useRouter()
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -77,6 +80,13 @@ export function BrowserTabView({
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pending, startTransition] = useTransition()
+  // Hand back offers the token whose tab it was; a tab you opened that no
+  // token had yet waits for you to choose one.
+  const [handTo, setHandTo] = useState(
+    initial.tokenId && tokens.some((token) => token.id === initial.tokenId)
+      ? initial.tokenId
+      : "",
+  )
 
   const queue = useRef<InputEvent[]>([])
   const sending = useRef(false)
@@ -392,12 +402,12 @@ export function BrowserTabView({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl bg-card p-2">
         {holding ? (
           <>
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
               size="sm"
               disabled={pending}
               onClick={() => act(() => backTabAction(tabId))}
@@ -406,7 +416,7 @@ export function BrowserTabView({
             </Button>
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
               size="sm"
               disabled={pending}
               onClick={() => act(() => reloadTabAction(tabId))}
@@ -436,7 +446,7 @@ export function BrowserTabView({
           </>
         ) : (
           <code
-            className="min-w-0 grow truncate rounded-md border border-border px-2 py-1 text-xs"
+            className="min-w-0 grow truncate rounded-lg bg-field px-3 py-2 text-xs text-muted-foreground"
             data-testid="browser-address"
           >
             {view.url}
@@ -444,14 +454,14 @@ export function BrowserTabView({
         )}
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-1 text-sm">
         <div className="flex flex-wrap items-center gap-2">
           {holding ? (
             <Badge>You have this tab</Badge>
           ) : (
             <Badge variant="secondary">Assistants have this tab</Badge>
           )}
-          <span className="text-muted-foreground">
+          <span className="text-[13px] leading-relaxed text-muted-foreground">
             {status === "connecting"
               ? "Connecting…"
               : status === "lost"
@@ -463,7 +473,9 @@ export function BrowserTabView({
                     : holding
                       ? handover
                         ? "What you do here goes to the page. The assistant waits until you answer below."
-                        : "What you do here goes to the page. Assistants wait until you hand it back."
+                        : view.tokenId === null
+                          ? "What you do here goes to the page. No assistant sees this tab until you hand it to one."
+                          : "What you do here goes to the page. The assistant whose tab it is waits until you hand it back."
                       : "You are watching. Take it over to click and type."}
           </span>
         </div>
@@ -472,7 +484,7 @@ export function BrowserTabView({
             <>
               <Button
                 type="button"
-                variant="outline"
+                variant="secondary"
                 size="sm"
                 className="hidden pointer-coarse:inline-flex"
                 data-testid="browser-keyboard-button"
@@ -482,7 +494,7 @@ export function BrowserTabView({
               </Button>
               <Button
                 type="button"
-                variant="outline"
+                variant="secondary"
                 size="sm"
                 className="hidden pointer-coarse:inline-flex"
                 data-testid="browser-paste-button"
@@ -493,15 +505,42 @@ export function BrowserTabView({
             </>
           ) : null}
           {holding ? (
-            handover ? null : (
-              <Button
-                type="button"
-                size="sm"
-                disabled={pending}
-                onClick={() => act(() => handBackTabAction(tabId), "assistant")}
-              >
-                Hand back
-              </Button>
+            handover ? null : tokens.length === 0 ? (
+              <span className="text-[13px] text-muted-foreground">
+                No token can use the browser yet, so there is no one to hand it
+                to.
+              </span>
+            ) : (
+              <>
+                <Select
+                  aria-label="Hand back to"
+                  className="h-8 w-auto"
+                  value={handTo}
+                  disabled={pending}
+                  onChange={(event) => setHandTo(event.target.value)}
+                >
+                  {handTo === "" ? (
+                    <option value="" disabled>
+                      Choose a token…
+                    </option>
+                  ) : null}
+                  {tokens.map((token) => (
+                    <option key={token.id} value={token.id}>
+                      {token.name}
+                    </option>
+                  ))}
+                </Select>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={pending || handTo === ""}
+                  onClick={() =>
+                    act(() => handBackTabAction(tabId, handTo), "assistant")
+                  }
+                >
+                  Hand back
+                </Button>
+              </>
             )
           ) : (
             <Button
@@ -516,7 +555,7 @@ export function BrowserTabView({
           {mode === "tab" ? (
             <Button
               type="button"
-              variant="outline"
+              variant="plain"
               size="sm"
               disabled={pending || status === "closed"}
               onClick={() => {
@@ -558,7 +597,7 @@ export function BrowserTabView({
             </Button>
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
               size="sm"
               onClick={() => setPasteBox(null)}
             >
@@ -568,7 +607,7 @@ export function BrowserTabView({
         </form>
       ) : null}
 
-      <div className="relative w-full max-w-[1280px] overflow-hidden rounded-md border border-border bg-muted">
+      <div className="relative w-full max-w-[1280px] overflow-hidden rounded-xl bg-card ring-1 ring-separator">
         <canvas
           ref={canvas}
           width={meta?.deviceWidth ?? BROWSER_VIEWPORT.width}

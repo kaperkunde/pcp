@@ -1,12 +1,6 @@
 import type { Metadata, Viewport } from "next"
-import { Inter, JetBrains_Mono } from "next/font/google"
-
-import { SiteFooter } from "@/components/site-footer"
 
 import "./globals.css"
-
-const inter = Inter({ variable: "--font-sans", subsets: ["latin"] })
-const mono = JetBrains_Mono({ variable: "--font-mono", subsets: ["latin"] })
 
 export const metadata: Metadata = {
   title: { default: "PCP", template: "%s · PCP" },
@@ -15,17 +9,19 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 }
 
-export const viewport: Viewport = { themeColor: "#131720" }
+export const viewport: Viewport = { themeColor: "#0f1217" }
 
+/**
+ * The type is the system's own (DESIGN.md), so nothing is downloaded for
+ * it. Each shell, the dashboard's and the narrow one the sign-in pages use,
+ * puts the footer under its own column.
+ */
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${inter.variable} ${mono.variable}`}>
-      <body className="flex min-h-screen flex-col antialiased">
-        {children}
-        <SiteFooter />
-      </body>
+    <html lang="en">
+      <body className="flex min-h-screen flex-col antialiased">{children}</body>
     </html>
   )
 }

@@ -15,6 +15,7 @@ import {
 import { PCP_VERSION } from "@/lib/core/version"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import { desktopUpdater, isDesktopApp } from "@/lib/server/desktop"
+import { hostUpdater } from "@/lib/server/install-kind"
 import { requireContext } from "@/lib/server/session"
 
 /**
@@ -88,24 +89,30 @@ export async function checkForUpdatesAction(): Promise<UpdatesResult> {
 }
 
 /**
- * "Install and restart" in the desktop app: PCP notes the request, and the
- * app (which reads /api/health) downloads the release and restarts into it.
+ * "Install and restart": PCP notes the request, and the desktop app (which
+ * reads /api/health) or the Linux installer's watcher (which reads the file
+ * PCP leaves in its data folder) fetches the release and restarts into it.
  */
 export async function requestInstallAction(): Promise<UpdatesResult> {
   await requireContext()
 
   const result = await guarded(async () => {
-    if (!isDesktopApp() || desktopUpdater() !== "auto") {
+    const desktop = isDesktopApp() && desktopUpdater() === "auto"
+    const installer = !isDesktopApp() && hostUpdater()
+
+    if (!desktop && !installer) {
       throw new PcpError(
         "state",
         "This PCP cannot install updates itself. Follow the steps under How to update this PCP.",
       )
     }
 
-    const request = await requestInstall()
+    const request = await requestInstall(new Date(), { signalHost: installer })
 
     return {
-      message: `The app is downloading v${request.version}. PCP restarts by itself when it is done.`,
+      message: desktop
+        ? `The app is downloading v${request.version}. PCP restarts by itself when it is done.`
+        : `PCP is installing v${request.version}: the installer on this computer fetches it and starts PCP again, which takes a minute or two.`,
     }
   })
 

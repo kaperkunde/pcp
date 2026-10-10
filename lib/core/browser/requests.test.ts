@@ -17,7 +17,8 @@ import {
 } from "../permissions"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
-import { listFetchRules } from "../web-fetch"
+import { resolveFetchAccess } from "../fetch/rules"
+import { listFetchRules, loadFetchRules } from "../web-fetch"
 import { createBrowserServer, findBrowserServer } from "./server"
 import { OwnerNeeded } from "./types"
 
@@ -145,6 +146,7 @@ describe("opening a site the owner has not decided", () => {
     expect(view?.warning).toMatch(/keeps your sign-ins/)
     expect(view?.decisions.map((decision) => decision.label)).toEqual([
       "Allow once",
+      "Allow this site for",
       "Always allow this site",
       "Block this site",
       "Not now",
@@ -173,6 +175,49 @@ describe("opening a site the owner has not decided", () => {
         }),
       ),
     ).toContain("opened https://news.example/today")
+  })
+
+  it("Allow this site for opens it and lets the token's tabs open it for that long", async () => {
+    const run = executor({
+      kind: "browse",
+      input: {
+        serverId: server.id,
+        tabId: null,
+        url: "https://news.example/today",
+        toolName: "navigate",
+      },
+    })
+    const id = idOf(
+      await runCall(
+        ctx,
+        server,
+        "navigate",
+        { url: "https://news.example/today" },
+        { publicUrl: PUBLIC_URL, tokenId, executor: run },
+      ),
+    )
+
+    const answer = await decidePermission(
+      ctx,
+      id,
+      "allow_for",
+      { publicUrl: PUBLIC_URL, minutes: 15 },
+      run,
+    )
+    expect(textOf(answer)).toBe("opened https://news.example/today")
+    const rules = await loadFetchRules(ctx.vaultId, tokenId)
+    expect(resolveFetchAccess(rules, "news.example", "GET").access).toBe(
+      "allowed",
+    )
+    expect(
+      resolveFetchAccess(rules, "news.example", "GET", Date.now() + 16 * 60_000)
+        .access,
+    ).toBe("ask")
+    expect(
+      (await listFetchRules(ctx, tokenId)).sites.find(
+        (site) => site.host === "news.example",
+      )?.level,
+    ).not.toBe("allowed")
   })
 
   it("Block this site opens nothing and blocks it for the token", async () => {

@@ -2,9 +2,12 @@
 
 import { revalidatePath } from "next/cache"
 
+import { endAllowance } from "@/lib/core/allowances"
 import {
   createApiToken,
   deleteApiToken,
+  requireLiveToken,
+  revivesToken,
   revokeApiToken,
   updateApiToken,
 } from "@/lib/core/api-tokens"
@@ -62,6 +65,7 @@ export async function createTokenAction(
       keepMemories: field(formData, "keepMemories") === "on",
       webFetch: field(formData, "webFetch") === "on",
       runCode: field(formData, "runCode") === "on",
+      manageWrappers: field(formData, "manageWrappers") === "on",
       expiresAt:
         days > 0 ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null,
     })
@@ -98,18 +102,37 @@ export async function deleteTokenAction(id: string): Promise<ActionState> {
   return result
 }
 
-/** Name, servers, how PCP asks and expiry of an existing token. */
+/**
+ * Name, servers, how PCP asks and expiry of an existing token. A new expiry
+ * for one that has expired brings it back, so that asks for the owner
+ * (password or Touch ID), as making a token does; the rest takes a session.
+ */
 export async function updateTokenAction(
   _previous: UpdateTokenResult,
   formData: FormData,
 ): Promise<UpdateTokenResult> {
-  const ctx = await requireContext()
+  const session = await requireSession()
   const id = field(formData, "id")
   const expiresIn = field(formData, "expiresIn")
   const days = Number(expiresIn)
+  const expiresAt =
+    expiresIn === "keep"
+      ? undefined
+      : days > 0
+        ? new Date(Date.now() + days * DAY_MS)
+        : null
 
   const result = await guarded(async () => {
-    await updateApiToken(ctx, id, {
+    const reviving = revivesToken(
+      await requireLiveToken(session.ctx, id),
+      expiresAt,
+    )
+
+    if (reviving) {
+      await confirmOwner(session, formData)
+    }
+
+    const input = {
       name: field(formData, "name"),
       allowAllServers: field(formData, "access") !== "selected",
       serverIds: fields(formData, "serverIds"),
@@ -117,13 +140,10 @@ export async function updateTokenAction(
       keepMemories: field(formData, "keepMemories") === "on",
       webFetch: field(formData, "webFetch") === "on",
       runCode: field(formData, "runCode") === "on",
-      expiresAt:
-        expiresIn === "keep"
-          ? undefined
-          : days > 0
-            ? new Date(Date.now() + days * DAY_MS)
-            : null,
-    })
+      manageWrappers: field(formData, "manageWrappers") === "on",
+      expiresAt,
+    }
+    await updateApiToken(session.ctx, id, input, { ownerConfirmed: reviving })
 
     return { message: "Saved." }
   })
@@ -153,6 +173,35 @@ export async function setToolAccessAction(
   })
 
   revalidateToken(tokenId)
+
+  return result
+}
+
+/** "End now" on a tool or site the owner allowed the token for a while. */
+export async function endAllowanceAction(
+  tokenId: string,
+  target:
+    | { kind: "tool"; serverId: string; toolName: string }
+    | { kind: "site"; host: string },
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await endAllowance(
+      ctx,
+      tokenId,
+      target?.kind === "site"
+        ? { kind: "site", host: String(target.host) }
+        : {
+            kind: "tool",
+            serverId: String(target?.serverId),
+            toolName: String(target?.toolName),
+          },
+    )
+    return {}
+  })
+
+  revalidatePath(`/tokens/${tokenId}`)
 
   return result
 }

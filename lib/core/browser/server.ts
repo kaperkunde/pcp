@@ -18,13 +18,14 @@ import { browserTools } from "./tools"
 /**
  * The browser's row in the registry: a server of kind "browser", one per
  * vault, added by the owner. Its tools are fixed (tools.ts), so they are
- * written when it is added and whenever it is checked; checking it is
- * finding Chromium on this machine.
+ * written when it is added, when PCP starts (instrumentation.ts: a newer
+ * version may have changed them) and whenever it is checked; checking it
+ * is finding Chromium on this machine.
  */
 
 export const BROWSER_NAME = "Browser"
 export const BROWSER_DESCRIPTION =
-  "A web browser on the machine PCP runs on, shared by assistants: open pages, read them, click, type and fill in forms, keeping its sign-ins between conversations. The owner decides which sites each token opens, and can watch any tab and take it over."
+  "A web browser on the machine PCP runs on, shared by assistants, each with tabs of its own: open pages, read them, click, type and fill in forms, keeping its sign-ins between conversations. The owner decides which sites each token opens, and can watch any tab and take it over."
 
 export async function findBrowserServer(
   ctx: VaultContext,
@@ -32,6 +33,44 @@ export async function findBrowserServer(
   return db().mcpServer.findFirst({
     where: { vaultId: ctx.vaultId, kind: "browser" },
   })
+}
+
+/**
+ * The vault's browser, enabled, when a token reaches it: the token is the
+ * vault's own, neither revoked nor expired, and has every server or the
+ * browser among its servers (as owner.ts lists the tokens a tab can go
+ * to). For what an answer may tell the token (its tools' names); it
+ * decides nothing.
+ */
+export async function tokenReachesBrowser(
+  ctx: VaultContext,
+  tokenId: string,
+): Promise<McpServer | null> {
+  const server = await findBrowserServer(ctx)
+
+  if (!server?.enabled) {
+    return null
+  }
+
+  const token = await db().apiToken.findFirst({
+    where: {
+      id: tokenId,
+      vaultId: ctx.vaultId,
+      revokedAt: null,
+      AND: [
+        { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+        {
+          OR: [
+            { allowAllServers: true },
+            { servers: { some: { serverId: server.id } } },
+          ],
+        },
+      ],
+    },
+    select: { id: true },
+  })
+
+  return token ? server : null
 }
 
 export async function syncBrowserTools(

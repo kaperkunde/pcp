@@ -19,7 +19,8 @@ import type { PermissionExecutor } from "../permissions"
 import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
-import { keepResult } from "../tool-results"
+import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
+import { keepBytes, keepResult } from "../tool-results"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { MAX_CALLS_PER_RUN } from "./limits"
@@ -31,7 +32,10 @@ import { sandboxLanguages, startSandbox, stopSandbox } from "./sandbox"
 // token's levels for each call, files as handles, kept results, and what
 // the answer says.
 
-vi.mock("../request-log", () => ({ appendRequestLog: vi.fn(async () => {}) }))
+vi.mock("../request-log", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../request-log")>()),
+  appendRequestLog: vi.fn(async () => {}),
+}))
 
 const PUBLIC_URL = "http://localhost:3000"
 const PDF = Buffer.concat([
@@ -271,6 +275,19 @@ describe("a program's calls", () => {
       toolName: "send_postcard",
       tokenId: scope.tokenId,
     })
+
+    // The call and the run that stopped at it are both in the log as asked,
+    // with the request, so the Log page can link it.
+    const lines = logLines()
+    expect(
+      lines.find((line) => line.upstreamTool === "send_postcard"),
+    ).toMatchObject({ tool: "run_code", asked: true, request: request.id })
+    expect(
+      lines.find((line) => line.tool === "run_code" && !line.upstreamTool),
+    ).toMatchObject({ asked: true, request: request.id })
+    expect(
+      lines.find((line) => line.upstreamTool === "archive"),
+    ).not.toHaveProperty("asked")
   })
 
   it("gets a file as a handle, never its bytes, and passes it on as one", async () => {
@@ -323,12 +340,135 @@ describe("a program's calls", () => {
     }
     expect(value.handle).toMatchObject({ type: "text/csv", name: "grace.csv" })
     expect(value.back).toBe("id,to\n0,Grace")
-    expect(value.refused).toContain(`No kept result "${theirs.id}"`)
+    expect(value.refused).toContain(
+      "A kept result named in the arguments is not there for this token",
+    )
+    expect(value.refused).not.toContain(theirs.id)
 
     const row = await db().toolResult.findUniqueOrThrow({
       where: { id: value.handle.$result },
     })
     expect(row).toMatchObject({ tokenId: scope.tokenId, toolName: "run_code" })
+  })
+
+  it("reads a file's bytes only as base64, and keeps bytes sent so", async () => {
+    const { text } = await run(`
+      const scanned = await pcp.call("postcards", "scan_card")
+      let refused
+      try { await pcp.read(scanned.data) } catch (error) { refused = error.message }
+      const base64 = await pcp.read(scanned.data, { as: "base64" })
+      const copy = await pcp.keep(base64.slice(0, 12), { encoding: "base64", name: "head.pdf", type: "application/pdf" })
+      const bytes = await pcp.keep(new Uint8Array([1, 2, 3]))
+      let notBase64
+      try { await pcp.keep("not base64!", { encoding: "base64" }) } catch (error) { notBase64 = error.message }
+      return { refused, same: base64 === ${JSON.stringify(PDF)}, copy, bytes, notBase64 }
+    `)
+
+    const value = returned(text) as {
+      refused: string
+      same: boolean
+      copy: { $result: string; type: string; name: string; size: number }
+      bytes: { $result: string; type: string; size: number }
+      notBase64: string
+    }
+    expect(value.refused).toContain(
+      'read its bytes as base64 instead (as: "base64")',
+    )
+    expect(value.same).toBe(true)
+    expect(value.copy).toMatchObject({
+      type: "application/pdf",
+      name: "head.pdf",
+      size: 9,
+    })
+    expect(value.bytes).toMatchObject({
+      type: "application/octet-stream",
+      size: 3,
+    })
+    expect(value.notBase64).toContain("is not")
+
+    const row = await db().toolResult.findUniqueOrThrow({
+      where: { id: value.copy.$result },
+    })
+    expect(row).toMatchObject({
+      tokenId: scope.tokenId,
+      kind: "bytes",
+      toolName: "run_code",
+    })
+  })
+
+  it("reads a file as large as the owner allows, and no larger", async () => {
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 6 })
+    const bytes = Buffer.alloc(5 * 1024 * 1024, 0xab)
+    const kept = await keepBytes(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "scan_card",
+      bytes,
+      mediaType: "application/pdf",
+      name: "big.pdf",
+    })
+
+    const read = await run(`
+      const bytes = await pcp.read("${kept.id}", { as: "bytes" })
+      return [bytes.length, bytes[0], bytes[bytes.length - 1]]
+    `)
+    // Five megabytes as base64 is past the 4,000,000 characters of before.
+    expect(returned(read.text)).toEqual([bytes.length, 0xab, 0xab])
+
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 2 })
+    const refused = await run(`
+      try { await pcp.read("${kept.id}", { as: "base64" }) } catch (error) { return error.message }
+    `)
+    expect(returned(refused.text)).toContain(
+      "more than a program reads at once",
+    )
+  })
+
+  it("lists the token's servers and the tools it can see, as list_tools does", async () => {
+    const { text } = await run(`
+      const servers = await pcp.tools()
+      const tools = await pcp.tools("postcards")
+      let missing
+      try { await pcp.tools("nowhere") } catch (error) { missing = error.message }
+      return { servers, tools: tools.map((tool) => [tool.name, tool.access]), missing }
+    `)
+
+    expect(returned(text)).toEqual({
+      servers: [
+        {
+          server: "postcards",
+          name: "Postcards",
+          description: "",
+          tools: 5,
+        },
+      ],
+      tools: [
+        ["archive", "allowed"],
+        ["broken", "allowed"],
+        ["list_cards", "allowed"],
+        ["scan_card", "allowed"],
+        ["send_postcard", "ask"],
+      ],
+      missing: "No server called nowhere. Servers: postcards.",
+    })
+    expect(ran).toEqual([])
+  })
+
+  it("says in its description what the program has, and that no sandbox runs", async () => {
+    const { tools } = await client.listTools()
+    const description =
+      tools.find((tool) => tool.name === "run_code")?.description ?? ""
+
+    for (const part of [
+      "crypto.getRandomValues",
+      'as: "base64"',
+      'encoding: "base64"',
+      "pcp.tools()",
+      'keep: ["password"]',
+      "not running on this PCP",
+    ]) {
+      expect(description).toContain(part)
+    }
   })
 
   it("keeps a long returned value as a result, to read or pass on", async () => {
@@ -350,7 +490,9 @@ describe("a program's calls", () => {
       try { await pcp.call("postcards", "archive", { file: { $result: "gone" } }) } catch (error) { return error.message }
     `)
 
-    expect(returned(text)).toContain('No kept result "gone"')
+    expect(returned(text)).toContain(
+      "A kept result named in the arguments is not there for this token",
+    )
     expect(ran).toEqual([])
   })
 

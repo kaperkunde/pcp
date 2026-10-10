@@ -89,6 +89,7 @@ export async function restoreAction(
     const { payload, preview } = await readExport(
       await uploadFrom(formData),
       field(formData, "exportPassword"),
+      { into: "vault", ctx: session.ctx },
     )
 
     if (!confirm) {
@@ -102,7 +103,7 @@ export async function restoreAction(
     await confirmOwner(session, formData)
     await restoreExport(
       payload,
-      { into: "vault", vaultId: session.ctx.vaultId },
+      { into: "vault", ctx: session.ctx },
       { restoreHostSettings },
     )
     restored = true

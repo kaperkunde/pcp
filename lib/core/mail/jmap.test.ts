@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import { createFakeJmap, type FakeJmap } from "./fake-jmap"
-import { fetchJmapSession, jmapRequest, openJmapBackend } from "./jmap"
+import {
+  fetchJmapSession,
+  implicitKey,
+  jmapRequest,
+  openJmapBackend,
+} from "./jmap"
 import {
   MailAuthError,
   MailRequestError,
@@ -45,6 +50,15 @@ async function serve(
   return { fake, origin: api.origin, sessionUrl: `${api.origin}/jmap/session` }
 }
 
+describe("a session over http://", () => {
+  it("is never sent to a public address, the credential included", async () => {
+    // An IP literal is refused before anything connects.
+    await expect(
+      fetchJmapSession("http://8.8.8.8/.well-known/jmap", basic()),
+    ).rejects.toThrow(/unencrypted.*Use an https:\/\/ session URL/)
+  })
+})
+
 function basic(): MailCredential {
   return {
     headers: { Authorization: BASIC },
@@ -74,6 +88,7 @@ describe("the session", () => {
       uploadUrl: `${origin}/jmap/upload/{accountId}`,
       accountId: "acct-1",
       submission: true,
+      vacation: true,
     })
     expect(fake.requests[0]).toMatchObject({
       method: "GET",
@@ -91,6 +106,24 @@ describe("the session", () => {
     const none = await serve({ uploadUrl: null })
     expect(
       (await fetchJmapSession(none.sessionUrl, basic())).uploadUrl,
+    ).toBeNull()
+  })
+
+  it("refuses a template whose scheme has no slashes", async () => {
+    // "https:host/x" is a path on the session URL when resolved against it,
+    // and another host once it is fetched on its own.
+    const first = await serve({
+      uploadUrl: "https:evil.example.com/upload/{accountId}",
+    })
+    expect(
+      (await fetchJmapSession(first.sessionUrl, basic())).uploadUrl,
+    ).toBeNull()
+
+    const second = await serve({
+      uploadUrl: `${new URL(api!.origin).protocol}evil.example.com:8443/{accountId}`,
+    })
+    expect(
+      (await fetchJmapSession(second.sessionUrl, basic())).uploadUrl,
     ).toBeNull()
   })
 
@@ -235,6 +268,36 @@ describe("requests", () => {
     await expect(
       jmapRequest(`${api.origin}/down`, basic(), []),
     ).rejects.toBeInstanceOf(MailTransportError)
+  })
+
+  it("keeps an answer the server adds under a call's id apart from the call's own", async () => {
+    // RFC 8621 7.5: a submission's onSuccessUpdateEmail is answered by an
+    // Email/set of the server's, under the submission's call id, after it.
+    api = await startTestApi((_, res) => {
+      res.setHeader("content-type", "application/json")
+      res.end(
+        JSON.stringify({
+          methodResponses: [
+            ["EmailSubmission/set", { created: { send: { id: "s1" } } }, "s"],
+            ["Email/set", { updated: { e9: null } }, "s"],
+            ["error", { type: "serverFail" }, "s"],
+          ],
+        }),
+      )
+    })
+
+    const answers = await jmapRequest(`${api.origin}/api`, basic(), [
+      ["EmailSubmission/set", {}, "s"],
+    ])
+
+    expect(answers.get("s")).toEqual({ created: { send: { id: "s1" } } })
+    expect(answers.get(implicitKey("s", "Email/set"))).toEqual({
+      updated: { e9: null },
+    })
+    // A failure of the server's own call is not the submission failing.
+    expect(answers.get(implicitKey("s", "error"))).toEqual({
+      type: "serverFail",
+    })
   })
 
   it("says when the server cannot be reached", async () => {
@@ -384,6 +447,72 @@ describe("the mail tools' work", () => {
       text: "Thursday suits me.",
     })
     expect(stored.keywords.$draft).toBeUndefined()
+    // The email it answers is marked answered, as a mail app would.
+    expect(sent.answered).toBe(true)
+    expect(
+      fake.emails.find((email) => email.id === "e1")!.keywords,
+    ).toMatchObject({ $answered: true })
+  })
+
+  it("sends when the server will not move the email to Sent, and says it is left in Drafts", async () => {
+    for (const onSuccessUpdate of ["refuse", "error"] as const) {
+      const { mail, fake } = await backend({ onSuccessUpdate })
+
+      const sent = await mail.sendEmail!({
+        to: [{ name: null, email: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "The engine",
+        text: "Thursday suits me.",
+      })
+
+      expect(fake.sent).toEqual([{ emailId: sent.id, identityId: "ident-1" }])
+      expect(sent.savedTo).toBe("Drafts")
+      // Not a reply: nothing to mark.
+      expect(sent).not.toHaveProperty("answered")
+      await api!.close()
+      api = null
+    }
+  })
+
+  it("says so when the email it answers cannot be marked, and the email still goes", async () => {
+    const fake = createFakeJmap({ authorize: (header) => header === BASIC })
+    api = await startTestApi((request, res) => {
+      // The server refuses only the change that marks the original.
+      if (request.body.includes("keywords/$answered")) {
+        res.setHeader("content-type", "application/json")
+        res.end(
+          JSON.stringify({
+            methodResponses: [
+              ["Email/set", { notUpdated: { e1: { type: "forbidden" } } }, "s"],
+            ],
+          }),
+        )
+        return
+      }
+
+      const answer = fake.handle(request)
+      res.statusCode = answer?.status ?? 404
+      res.setHeader("content-type", answer?.type ?? "text/plain")
+      res.end(answer?.body ?? "")
+    })
+    const session = await fetchJmapSession(
+      `${api.origin}/jmap/session`,
+      basic(),
+    )
+    const mail = openJmapBackend({ ...session, from: null }, basic())
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: "e1",
+    })
+
+    expect(fake.sent).toHaveLength(1)
+    expect(sent).toMatchObject({ savedTo: "Sent", answered: false })
   })
 
   it("uploads each attachment, then sends the email carrying them", async () => {
@@ -472,29 +601,378 @@ describe("the mail tools' work", () => {
     ).rejects.toThrow(/cannot send/)
   })
 
+  it("writes a draft into Drafts, marked as a draft, and submits nothing", async () => {
+    const { mail, fake } = await backend()
+    const pdf = Buffer.from("%PDF-1.7 the plan")
+
+    const draft = await mail.createDraft({
+      to: [{ name: "Charles Babbage", email: "charles@example.com" }],
+      cc: [],
+      bcc: [{ name: null, email: "archive@example.com" }],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: "e1",
+      attachments: [{ name: "plan.pdf", type: "application/pdf", bytes: pdf }],
+    })
+
+    expect(draft).toMatchObject({
+      from: { name: "Ada Lovelace", email: "ada@example.com" },
+      to: [{ name: "Charles Babbage", email: "charles@example.com" }],
+      subject: "Re: The engine",
+      mailboxId: "mb-drafts",
+      mailbox: "Drafts",
+    })
+    expect(draft.messageId).toMatch(/@example\.com$/)
+    // Nothing is sent: no submission was asked for at all.
+    expect(fake.sent).toEqual([])
+    expect(JSON.stringify(fake.requests)).not.toContain("EmailSubmission")
+
+    const stored = fake.emails.find((email) => email.id === draft.id)!
+    expect(stored).toMatchObject({
+      mailboxIds: { "mb-drafts": true },
+      keywords: { $draft: true, $seen: true },
+      bcc: [{ name: null, email: "archive@example.com" }],
+      inReplyTo: ["engine-1@example.com"],
+      references: ["engine-1@example.com"],
+      text: "Thursday suits me.",
+      attachments: [
+        { blobId: "blob-up-1", name: "plan.pdf", type: "application/pdf" },
+      ],
+    })
+    expect(fake.uploads[0]!.content.equals(pdf)).toBe(true)
+    // A draft answers nothing yet.
+    expect(fake.emails.find((email) => email.id === "e1")!.keywords).toEqual({})
+
+    // get_email reads it by the id the answer gave.
+    const read = await mail.getEmail(draft.id!, { bodyBytes: 1000 })
+    expect(read).toMatchObject({
+      subject: "Re: The engine",
+      flags: { draft: true, unread: false },
+      body: { text: "Thursday suits me." },
+    })
+  })
+
+  it("writes a draft to nobody yet, on an account that cannot send", async () => {
+    const { mail, fake, session } = await backend({ submission: false })
+
+    const draft = await mail.createDraft({
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: "Notes",
+      text: "To finish later.",
+    })
+
+    expect(draft).toMatchObject({ from: null, to: [], mailboxId: "mb-drafts" })
+    expect(draft.messageId).toMatch(/@pcp\.invalid$/)
+    expect(fake.emails.find((email) => email.id === draft.id)).toMatchObject({
+      to: [],
+      keywords: { $draft: true, $seen: true },
+    })
+    // Identities belong to submission, which this account does not have.
+    expect(JSON.stringify(fake.requests)).not.toContain("Identity/get")
+
+    // The owner's From address, when they gave one.
+    const from = openJmapBackend(
+      { ...session, from: "ada@example.org" },
+      basic(),
+    )
+    expect(
+      await from.createDraft({
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+      }),
+    ).toMatchObject({ from: { name: null, email: "ada@example.org" } })
+    await expect(
+      from.createDraft({
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+        identity: "ident-1",
+      }),
+    ).rejects.toThrow(/leave identity out/)
+  })
+
+  it("writes no draft when it cannot upload an attachment", async () => {
+    const { mail, fake } = await backend({ uploadUrl: null })
+
+    await expect(
+      mail.createDraft({
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+        attachments: [
+          {
+            name: "a.bin",
+            type: "application/octet-stream",
+            bytes: Buffer.from([1]),
+          },
+        ],
+      }),
+    ).rejects.toThrow(/offers no uploads/)
+    expect(JSON.stringify(fake.requests)).not.toContain("Email/set")
+  })
+
   it("moves, marks, and deletes into the Trash", async () => {
     const { mail, fake } = await backend()
 
-    expect(await mail.moveEmail("e2", "archive")).toEqual({
-      id: "e2",
-      previousId: "e2",
-      mailboxId: "mb-archive",
+    expect(await mail.moveEmails(["e2"], "archive")).toEqual({
+      done: [{ id: "e2", previousId: "e2", mailboxId: "mb-archive" }],
+      failed: [],
     })
     expect(
-      (await mail.markEmail("e1", { read: true, flagged: true })).flags,
+      (await mail.markEmails(["e1"], { read: true, flagged: true })).done[0]!
+        .flags,
     ).toMatchObject({
       unread: false,
       flagged: true,
     })
-    await mail.deleteEmail("e1")
+    await mail.deleteEmails(["e1"])
     expect(fake.emails.find((email) => email.id === "e1")!.mailboxIds).toEqual({
       "mb-trash": true,
     })
-    await expect(mail.moveEmail("nope", "inbox")).rejects.toThrow(
-      /No email with that id/,
+    expect((await mail.moveEmails(["nope"], "inbox")).failed).toEqual([
+      { id: "nope", error: "No email with that id." },
+    ])
+  })
+
+  it("changes several emails in one Email/set, and says which it could not", async () => {
+    const { mail, fake } = await backend()
+    const before = fake.requests.length
+    const moved = await mail.moveEmails(["e1", "e2", "nope", "e1"], "archive")
+
+    expect(moved.done.map((entry) => entry.id)).toEqual(["e1", "e2"])
+    expect(moved.failed).toEqual([
+      { id: "nope", error: "No email with that id." },
+    ])
+    const sets = fake.requests
+      .slice(before)
+      .flatMap(
+        (request) =>
+          (request.body as { methodCalls?: Array<[string, unknown]> } | null)
+            ?.methodCalls ?? [],
+      )
+      .filter(([name]) => name === "Email/set")
+    expect(sets).toHaveLength(1)
+  })
+
+  it("adds and removes keywords, lowercased, and finds emails by them", async () => {
+    const { mail, fake } = await backend()
+
+    await mail.markEmails(["e1", "e3"], {
+      addKeywords: ["Invoices", "a/b~c"],
+      answered: true,
+    })
+    const marked = await mail.markEmails(["e3"], {
+      removeKeywords: ["a/b~c"],
+    })
+
+    expect(marked.done[0]!.keywords).toEqual(["invoices"])
+    expect(fake.emails.find((email) => email.id === "e1")!.keywords).toEqual({
+      invoices: true,
+      "a/b~c": true,
+      $answered: true,
+    })
+    expect(
+      (
+        await mail.searchEmails({ keyword: "Invoices", offset: 0, limit: 10 })
+      ).emails.map((email) => email.id),
+    ).toEqual(["e3", "e1"])
+    expect(
+      (
+        await mail.searchEmails({
+          notKeyword: "invoices",
+          offset: 0,
+          limit: 10,
+        })
+      ).emails.map((email) => email.id),
+    ).toEqual(["e2"])
+  })
+
+  it("searches every mailbox but Trash and Junk", async () => {
+    const { mail, fake } = await backend()
+    fake.emails.find((email) => email.id === "e2")!.mailboxIds = {
+      "mb-archive": true,
+    }
+    fake.emails.find((email) => email.id === "e3")!.mailboxIds = {
+      "mb-trash": true,
+    }
+
+    const found = await mail.searchEmails({
+      allMailboxes: true,
+      offset: 0,
+      limit: 10,
+    })
+
+    expect(found.emails.map((email) => email.id)).toEqual(["e2", "e1"])
+    const query = (
+      fake.requests.at(-1)!.body as {
+        methodCalls: Array<[string, { filter?: unknown }]>
+      }
+    ).methodCalls[0]![1]
+    expect(query.filter).toEqual({ inMailboxOtherThan: ["mb-trash"] })
+  })
+
+  it("lists mailboxes with their paths", async () => {
+    const { mail, fake } = await backend()
+    fake.mailboxes.push(
+      { id: "mb-clients", name: "Clients", role: null, parentId: null },
+      { id: "mb-acme", name: "Acme", role: null, parentId: "mb-clients" },
+    )
+    const boxes = await mail.listMailboxes()
+
+    expect(boxes.find((box) => box.id === "mb-acme")).toMatchObject({
+      name: "Acme",
+      path: "Clients/Acme",
+      parentId: "mb-clients",
+    })
+    expect(boxes.find((box) => box.id === "mb-inbox")!.path).toBe("Inbox")
+    expect(
+      (
+        await mail.searchEmails({
+          mailbox: "clients/acme",
+          offset: 0,
+          limit: 5,
+        })
+      ).emails,
+    ).toEqual([])
+  })
+})
+
+describe("mailboxes", () => {
+  it("creates one, inside another when asked", async () => {
+    const { mail, fake } = await backend()
+    const clients = await mail.createMailbox("Clients")
+    const acme = await mail.createMailbox("Acme", "Clients")
+
+    expect(clients).toMatchObject({ name: "Clients", path: "Clients" })
+    expect(acme).toMatchObject({
+      name: "Acme",
+      path: "Clients/Acme",
+      parentId: clients.id,
+      totalEmails: 0,
+    })
+    expect(fake.mailboxes.map((box) => box.name)).toContain("Acme")
+    await expect(mail.createMailbox("Acme", "Clients")).rejects.toThrow(
+      /did not change the mailbox: invalidProperties/,
     )
   })
 
+  it("renames and moves one, never into itself, and keeps the inbox at the top", async () => {
+    const { mail } = await backend()
+    const clients = await mail.createMailbox("Clients")
+    const old = await mail.createMailbox("Old")
+
+    expect(
+      await mail.renameMailbox("Old", { name: "Past", parent: "Clients" }),
+    ).toMatchObject({ id: old.id, path: "Clients/Past", parentId: clients.id })
+    expect(
+      await mail.renameMailbox("Clients/Past", { parent: null }),
+    ).toMatchObject({ path: "Past", parentId: null })
+
+    await mail.createMailbox("Inner", "Clients")
+    await expect(
+      mail.renameMailbox("Clients", { parent: "Clients/Inner" }),
+    ).rejects.toThrow(/cannot go inside itself/)
+    await expect(
+      mail.renameMailbox("inbox", { parent: "Clients" }),
+    ).rejects.toThrow(/inbox stays at the top/)
+  })
+
+  it("deletes only an empty mailbox, never a role's, and asks the server to keep its mail", async () => {
+    const { mail, fake } = await backend()
+
+    await expect(mail.deleteMailbox("trash")).rejects.toThrow(
+      /trash mailbox; PCP does not delete it/,
+    )
+    await expect(mail.deleteMailbox("Archive")).rejects.toThrow(
+      /archive mailbox/,
+    )
+
+    await mail.createMailbox("Full")
+    await mail.moveEmails(["e2"], "Full")
+    await expect(mail.deleteMailbox("Full")).rejects.toThrow(
+      /holds 1 email; move or delete/,
+    )
+
+    await mail.createMailbox("Parent")
+    await mail.createMailbox("Child", "Parent")
+    await expect(mail.deleteMailbox("Parent")).rejects.toThrow(
+      /mailboxes inside it/,
+    )
+
+    const child = await mail.deleteMailbox("Parent/Child")
+    expect(child.name).toBe("Child")
+    expect(fake.mailboxes.some((box) => box.id === child.id)).toBe(false)
+    const destroy = (
+      fake.requests.at(-1)!.body as {
+        methodCalls: Array<[string, Record<string, unknown>]>
+      }
+    ).methodCalls[0]!
+    expect(destroy).toEqual([
+      "Mailbox/set",
+      {
+        accountId: "acct-1",
+        destroy: [child.id],
+        onDestroyRemoveEmails: false,
+      },
+      "b",
+    ])
+  })
+})
+
+describe("the automatic reply", () => {
+  it("reads and sets it, with dates as UTCDates and null to clear", async () => {
+    const { mail, fake } = await backend()
+
+    expect(await mail.getVacationResponse!()).toEqual({
+      enabled: false,
+      from: null,
+      to: null,
+      subject: null,
+      text: null,
+    })
+    expect(
+      await mail.setVacationResponse!({
+        enabled: true,
+        from: "2026-10-10",
+        to: "2026-10-20T18:00:00Z",
+        text: "Away until the 20th.",
+      }),
+    ).toEqual({
+      enabled: true,
+      from: "2026-10-10T00:00:00Z",
+      to: "2026-10-20T18:00:00Z",
+      subject: null,
+      text: "Away until the 20th.",
+    })
+    await mail.setVacationResponse!({ enabled: false, to: null })
+    expect(fake.vacation).toMatchObject({
+      isEnabled: false,
+      fromDate: "2026-10-10T00:00:00Z",
+      toDate: null,
+      textBody: "Away until the 20th.",
+    })
+  })
+
+  it("says so when the server has none", async () => {
+    const { mail, session } = await backend({ vacation: false })
+
+    expect(session.vacation).toBe(false)
+    await expect(mail.getVacationResponse!()).rejects.toThrow(
+      /VacationResponse\/get failed with unknownMethod/,
+    )
+  })
+})
+
+describe("attachments", () => {
   it("downloads an attachment of any kind, as its bytes", async () => {
     const { mail, fake } = await backend()
 
@@ -531,5 +1009,51 @@ describe("the mail tools' work", () => {
     await expect(
       mail.getAttachment("e2", "blob-csv", { maxBytes: 1000 }),
     ).rejects.toThrow(/no attachment with that id/)
+  })
+
+  it("sends the credential only to the mail server's own origin", async () => {
+    const { fake, session } = await backend()
+
+    for (const template of [
+      "https://evil.example.com/{blobId}",
+      "https:evil.example.com/{blobId}",
+      "/jmap/download/{accountId}/{blobId}/{name}",
+    ]) {
+      const mail = openJmapBackend(
+        { ...session, from: null, downloadUrl: template },
+        basic(),
+      )
+
+      await expect(
+        mail.getAttachment("e1", "blob-csv", { maxBytes: 1000 }),
+      ).rejects.toThrow(/download address is not on the mail server/)
+    }
+
+    const mail = openJmapBackend(
+      {
+        ...session,
+        from: null,
+        uploadUrl: "https:evil.example.com/upload/{accountId}",
+      },
+      basic(),
+    )
+
+    await expect(
+      mail.sendEmail!({
+        to: [{ name: null, email: "x@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "",
+        text: "",
+        attachments: [
+          {
+            name: "a.bin",
+            type: "application/octet-stream",
+            bytes: Buffer.from([1]),
+          },
+        ],
+      }),
+    ).rejects.toThrow(/upload address is not on the mail server/)
+    expect(fake.sent).toEqual([])
   })
 })

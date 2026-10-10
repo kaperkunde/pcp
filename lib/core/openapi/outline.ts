@@ -237,3 +237,22 @@ export function outlineAnswer(
 
   return null
 }
+
+/**
+ * The outline of a plain JSON Schema (a wrapper tool's outputSchema), which
+ * has no OpenAPI document around it; null when it says nothing useful.
+ */
+export function outlineSchema(schema: unknown): string | null {
+  for (const depth of [4, 3, 2, 1]) {
+    const text = outline(schema, schema, depth, {
+      nodes: OUTLINE_MAX_NODES,
+      seen: new Set(),
+    })
+
+    if (text.length <= MAX_OUTLINE_CHARS) {
+      return text === "any" ? null : text
+    }
+  }
+
+  return null
+}

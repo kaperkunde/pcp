@@ -10,7 +10,11 @@ export async function unlock(page: Page, password = OWNER_PASSWORD) {
   await page.goto("/login")
   await page.getByLabel("Password").fill(password)
   await page.getByRole("button", { name: "Unlock" }).click()
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible({
+  await expect(
+    page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Servers" }),
+  ).toBeVisible({
     timeout: 30_000,
   })
 }

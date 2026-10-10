@@ -24,6 +24,7 @@ import {
   Menu,
   nativeImage,
   Notification,
+  session,
   shell,
   Tray,
   utilityProcess,
@@ -34,7 +35,9 @@ import { createRequire } from "node:module"
 import net from "node:net"
 import path from "node:path"
 
+import { moveSessionCookie } from "./cookie-migration.mjs"
 import { lanAddresses, readSettings, writeSettings } from "./settings.mjs"
+import { pcpOrigin } from "./touch-id-store.mjs"
 import { serveTouchId } from "./touch-id.mjs"
 import {
   isNewer,
@@ -42,6 +45,7 @@ import {
   pendingInstall,
   updaterMode,
 } from "./updates.mjs"
+import { permissionAllowed, webUrl } from "./window-policy.mjs"
 
 const APP_ID = "com.kaperkunde.pcp"
 const REPOSITORY_URL = "https://github.com/kaperkunde/pcp"
@@ -148,6 +152,13 @@ async function start() {
 
   if (process.platform !== "darwin") {
     createTray()
+  }
+  try {
+    // The window used to load localhost; its sign-in cookie sits there.
+    await moveSessionCookie(session.defaultSession.cookies, settings.port)
+    await session.defaultSession.cookies.flushStore()
+  } catch (error) {
+    console.error("Could not carry the sign-in over:", error)
   }
   createWindow()
   watchForUpdateRequests()
@@ -317,8 +328,12 @@ function sleep(ms) {
 
 // --- The window -----------------------------------------------------------
 
+// The window loads 127.0.0.1, the address the server binds (also when it
+// accepts other devices), and trusts exactly that origin (touch-id-store.mjs,
+// preload.cjs). "localhost" may resolve to ::1, where another program could
+// answer on the same port.
 function localUrl() {
-  return `http://localhost:${settings.port}/`
+  return `${pcpOrigin(settings.port)}/`
 }
 
 function createWindow() {
@@ -342,13 +357,54 @@ function createWindow() {
     },
   })
 
-  // target=_blank links (the footer, documentation) open in the browser.
-  // Top-level navigation is left alone: an OAuth sign-in leaves for the
-  // provider and comes back to the callback.
+  // target=_blank links (the footer, documentation) open in the browser,
+  // web addresses only: any other scheme would reach whatever program the
+  // system has for it (window-policy.mjs). Nothing opens a second window.
   window.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    const external = webUrl(url)
+    if (external) shell.openExternal(external)
     return { action: "deny" }
   })
+
+  // Top-level navigation stays on the web: an OAuth sign-in leaves for the
+  // provider and comes back to the callback, all of it http or https.
+  // Another scheme, by link or by redirect, goes nowhere.
+  const stayOnTheWeb = (event) => {
+    if (!webUrl(event.url)) event.preventDefault()
+  }
+  window.webContents.on("will-navigate", stayOnTheWeb)
+  window.webContents.on("will-redirect", stayOnTheWeb)
+
+  // Electron grants every permission by default, to every page the window
+  // shows, a provider's sign-in included. Only PCP's own page gets one, and
+  // only what it uses; openExternal (Chromium handing an address it cannot
+  // open to the system) is never granted.
+  const { session } = window.webContents
+  session.setPermissionRequestHandler(
+    (_contents, permission, callback, details) => {
+      callback(
+        permissionAllowed(
+          {
+            permission,
+            url: details?.requestingUrl,
+            isMainFrame: details?.isMainFrame,
+          },
+          settings.port,
+        ),
+      )
+    },
+  )
+  session.setPermissionCheckHandler(
+    (_contents, permission, requestingOrigin, details) =>
+      permissionAllowed(
+        {
+          permission,
+          url: requestingOrigin,
+          isMainFrame: details?.isMainFrame,
+        },
+        settings.port,
+      ),
+  )
 
   // While the server restarts (network access toggled) a load fails; try
   // again rather than show Chromium's error page.

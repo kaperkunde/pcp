@@ -23,10 +23,18 @@ import { db } from "./db"
 import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
-import { isPcpError, PcpError } from "./errors"
+import { invalid, isPcpError, PcpError } from "./errors"
 import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
-import { send } from "./openapi/transport"
+import type { SshIdentity } from "./ssh/client"
+import { callSshTool, syncSshTools } from "./ssh/hosts"
+import {
+  AddressBlockedError,
+  isOwnAddress,
+  isPublicAddress,
+} from "./openapi/address"
+import { makeRedactor } from "./openapi/redact"
+import { checkedFetch } from "./openapi/transport"
 import {
   applyAuthorizeParams,
   applySignInDefaults,
@@ -44,12 +52,22 @@ import {
 import {
   extraAuthHeaders,
   isMailKind,
+  isSshKind,
+  kindNoun,
   renderAuthValue,
   setServerStatus,
 } from "./servers"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
 import { PCP_VERSION } from "./version"
+import { syncWrapperTools } from "./wrappers/catalogue"
+import {
+  findPlaceholders,
+  matchGrant,
+  placeValues,
+  scrubResult,
+  type SecretGrant,
+} from "./wrappers/placeholders"
 
 /**
  * Talking to the servers in the registry: opening a connection with the
@@ -57,7 +75,9 @@ import { PCP_VERSION } from "./version"
  * endpoints (kind "openapi") branch off to lib/core/endpoints.ts, which
  * makes plain HTTP calls with the header this module builds; mail accounts
  * (kinds "jmap" and "imap") to lib/core/mail/accounts.ts, with the header
- * or login this module builds, or an OAuth token it renews.
+ * or login this module builds, or an OAuth token it renews; SSH servers
+ * (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the server,
+ * decrypted here.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -278,6 +298,19 @@ export class PcpOAuthProvider implements OAuthClientProvider {
     if (!this.interactive) {
       throw new UnauthorizedError(
         `${this.server.name} needs to be connected in PCP.`,
+      )
+    }
+
+    // The owner's browser, or the desktop app's window, is sent here, and
+    // the address is whatever the server published: only a web page, as for
+    // an endpoint's sign-in, never a file share or another app's scheme.
+    if (
+      authorizationUrl.protocol !== "https:" &&
+      authorizationUrl.protocol !== "http:"
+    ) {
+      throw new PcpError(
+        "upstream",
+        `${this.server.name}'s sign-in address is not an http:// or https:// address, so PCP does not open it.`,
       )
     }
 
@@ -539,7 +572,7 @@ export async function verifiedEndpointDiscovery(
   try {
     metadata = await discoverAuthorizationServerMetadata(
       fixed.authorizationServerUrl,
-      { fetchFn: oauthFetch(server) },
+      { fetchFn: serverFetch(server) },
     )
   } catch {
     return { discovery: fixed, elsewhere: null }
@@ -566,35 +599,50 @@ export async function verifiedEndpointDiscovery(
 }
 
 /**
- * How PCP talks to an endpoint's authorization server: under the endpoint's
- * address rule, like its calls, since the token address came from a schema.
+ * An address a public-only MCP server may reach: a public one, and never
+ * PCP's own.
+ */
+function publicServerAddress(address: string, port: number): boolean {
+  return isPublicAddress(address) && !isOwnAddress(address, port)
+}
+
+/**
+ * How PCP talks to a server under its address rule: an MCP server's
+ * requests and the OAuth requests of either kind. A public-only server (one
+ * an assistant proposed, until the owner allows private addresses) reaches
+ * public addresses only, checked as the socket connects (see
+ * openapi/transport.ts). An endpoint follows no redirect, like its calls; an
+ * MCP server follows them as fetch does, each hop checked again.
  * Undefined means the SDK's own fetch.
  */
-export function oauthFetch(
+export function serverFetch(
   server: Pick<McpServer, "kind" | "publicOnly">,
 ): FetchLike | undefined {
-  if (server.kind !== "openapi" || !server.publicOnly) {
+  if (!server.publicOnly) {
     return undefined
   }
 
-  return (url, init) => {
-    const body = init?.body
+  if (server.kind === "openapi") {
+    return checkedFetch({ publicOnly: true })
+  }
 
-    return send(
-      String(url),
-      {
-        method: init?.method,
-        headers: Object.fromEntries(new Headers(init?.headers)),
-        body:
-          typeof body === "string"
-            ? body
-            : body instanceof URLSearchParams
-              ? body.toString()
-              : undefined,
-        signal: init?.signal ?? undefined,
-      },
-      { publicOnly: true },
-    )
+  if (server.kind !== "mcp") {
+    return undefined
+  }
+
+  const checked = checkedFetch(
+    { publicOnly: true, addressCheck: publicServerAddress },
+    { followRedirects: true },
+  )
+
+  return async (url, init) => {
+    try {
+      return await checked(url, init)
+    } catch (error) {
+      throw error instanceof AddressBlockedError
+        ? new AddressBlockedError(error.host, error.address, "server")
+        : error
+    }
   }
 }
 
@@ -657,7 +705,7 @@ async function endpointToken(
     const result = await auth(provider, {
       serverUrl: server.url,
       scope: server.oauthScope ?? undefined,
-      fetchFn: oauthFetch(server),
+      fetchFn: serverFetch(server),
     })
 
     if (result !== "AUTHORIZED") {
@@ -731,13 +779,6 @@ export async function forgetOAuthTokens(
       statusMessage: "",
     },
   })
-}
-
-async function authHeaders(
-  ctx: VaultContext,
-  server: McpServer,
-): Promise<Record<string, string>> {
-  return (await credential(ctx, server)).headers
 }
 
 /**
@@ -916,6 +957,12 @@ export type UpstreamConnection = {
   provider: PcpOAuthProvider | null
   /** The server's last answer that was not a success, if any. */
   refusal: () => Refusal | undefined
+  /**
+   * What the server's answers must not repeat: its secrets and headers as
+   * sent, and an OAuth server's tokens, the ones it was sent and any the
+   * SDK renewed since.
+   */
+  secrets: () => Promise<string[]>
   close: () => Promise<void>
 }
 
@@ -928,6 +975,34 @@ type Refusal = { status: number; challenge: string | null }
 
 /** The refusal behind an error thrown while connecting. */
 const refusals = new WeakMap<object, Refusal>()
+
+/** The secrets of the connection an error was thrown while opening. */
+const connectSecrets = new WeakMap<object, () => Promise<string[]>>()
+
+/** An OAuth server's tokens as PCP holds them now. */
+async function oauthTokens(
+  provider: PcpOAuthProvider | null,
+): Promise<string[]> {
+  const tokens = provider
+    ? await provider.tokens().catch(() => undefined)
+    : undefined
+  return [tokens?.access_token, tokens?.refresh_token].filter(
+    (value): value is string => typeof value === "string",
+  )
+}
+
+/** The secrets to take out of an error from a server, opened or not. */
+async function failureSecrets(
+  error: unknown,
+  connection: UpstreamConnection | null,
+): Promise<string[]> {
+  const secrets =
+    connection?.secrets ??
+    (error !== null && typeof error === "object"
+      ? connectSecrets.get(error)
+      : undefined)
+  return secrets ? secrets() : []
+}
 
 /**
  * A connected client for one server. The caller closes it. An OAuth server
@@ -946,8 +1021,17 @@ export async function openUpstream(
         })
       : null
 
-  const headers = await authHeaders(ctx, server)
+  const { headers, redact } = await credential(ctx, server)
+  const sent = await oauthTokens(provider)
+  const secrets = async () => [
+    ...redact,
+    ...sent,
+    ...(await oauthTokens(provider)),
+  ]
   const endpoint = new URL(server.url)
+  // A public-only server's requests, and its OAuth requests (the SDK makes
+  // those through this too), reach public addresses only.
+  const reach = serverFetch(server) ?? fetch
   let refusal: Refusal | undefined
   const transport = new StreamableHTTPClientTransport(endpoint, {
     // Never cached: these are live calls carrying credentials. It also keeps
@@ -956,7 +1040,7 @@ export async function openUpstream(
     requestInit: { headers, cache: "no-store" },
     ...(provider ? { authProvider: provider } : {}),
     fetch: async (url, init) => {
-      const response = await fetch(url, init)
+      const response = await reach(url, init)
 
       // Only the server's own answers: not the sign-in's discovery or token
       // requests, which the SDK reports itself.
@@ -977,8 +1061,12 @@ export async function openUpstream(
   } catch (error) {
     await transport.close().catch(() => {})
 
-    if (refusal && error !== null && typeof error === "object") {
-      refusals.set(error, refusal)
+    if (error !== null && typeof error === "object") {
+      if (refusal) {
+        refusals.set(error, refusal)
+      }
+
+      connectSecrets.set(error, secrets)
     }
 
     throw error
@@ -989,6 +1077,7 @@ export async function openUpstream(
     transport,
     provider,
     refusal: () => refusal,
+    secrets,
     close: async () => {
       await client.close().catch(() => {})
     },
@@ -996,6 +1085,24 @@ export async function openUpstream(
 }
 
 export type { SyncResult }
+
+/**
+ * PCP's private key for an SSH server. Decrypted here, for the one
+ * connection, and handed to the ssh module's client, never further.
+ */
+async function sshIdentity(
+  ctx: VaultContext,
+  server: McpServer,
+): Promise<SshIdentity> {
+  if (!server.authSecretId) {
+    throw new PcpError(
+      "state",
+      `${server.name} has no key of PCP's: make a new one on its page in PCP.`,
+    )
+  }
+
+  return { privateKey: await readSecretValue(ctx, server.authSecretId) }
+}
 
 /**
  * Reads the server's tool list into the catalogue. Tools that disappeared
@@ -1009,7 +1116,10 @@ export async function syncServerTools(
     byOwner = false,
   }: {
     publicUrl: string
-    /** The owner asked for this read (see syncEndpointTools). */
+    /**
+     * The owner asked for this read (see syncEndpointTools). An SSH server's
+     * host key is pinned only by one (see syncSshTools).
+     */
     byOwner?: boolean
   },
 ): Promise<SyncResult> {
@@ -1019,6 +1129,17 @@ export async function syncServerTools(
 
   if (server.kind === "browser") {
     return syncBrowserTools(server)
+  }
+
+  if (server.kind === "wrapper") {
+    return syncWrapperTools(server)
+  }
+
+  if (isSshKind(server.kind)) {
+    return syncSshTools(server, await sshIdentity(ctx, server), {
+      publicUrl,
+      byOwner,
+    })
   }
 
   if (isMailKind(server.kind)) {
@@ -1042,20 +1163,26 @@ export async function syncServerTools(
     const { tools } = await connection.client.listTools(undefined, {
       timeout: CONNECT_TIMEOUT_MS,
     })
+    // Assistants read these words too, so the credential is taken out.
+    const scrub = makeRedactor(await connection.secrets())
     const toolCount = await storeTools(
       server.id,
       tools.map((tool) => ({
         name: tool.name,
-        title: tool.title,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
+        title: tool.title === undefined ? undefined : scrub.text(tool.title),
+        description:
+          tool.description === undefined
+            ? undefined
+            : scrub.text(tool.description),
+        inputSchema: scrub.value(tool.inputSchema) as typeof tool.inputSchema,
         annotations: tool.annotations,
       })),
     )
 
     // The upstream's own description is a fallback for a server the owner
     // has not described yet.
-    const instructions = connection.client.getInstructions()?.trim()
+    const given = connection.client.getInstructions()?.trim()
+    const instructions = given === undefined ? undefined : scrub.text(given)
     if (instructions && !server.description) {
       await db().mcpServer.update({
         where: { id: server.id },
@@ -1068,6 +1195,9 @@ export async function syncServerTools(
     return { status: "ok", message: "", toolCount }
   } catch (error) {
     const result = describeFailure(server, error, connection)
+    result.message = makeRedactor(await failureSecrets(error, connection)).text(
+      result.message,
+    )
     await setServerStatus(server.id, result.status, result.message)
 
     return { ...result, toolCount: 0 }
@@ -1086,19 +1216,33 @@ async function callEndpoint(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl, open }: { publicUrl: string; open?: ResultOpener },
+  {
+    publicUrl,
+    open,
+    placed = [],
+  }: {
+    publicUrl: string
+    open?: ResultOpener
+    /** Secrets a wrapper's call carries in its arguments (placeSecrets). */
+    placed?: string[]
+  },
 ): Promise<CallToolResult> {
   try {
     const { headers, redact } = await credential(ctx, server, { publicUrl })
 
     return await callEndpointTool(server, toolName, args, {
       authHeaders: headers,
-      redact,
+      redact: [...redact, ...placed],
       open,
       ...(server.authType === "oauth"
         ? {
-            renew: async () =>
-              credential(ctx, server, { publicUrl, renew: true }),
+            renew: async () => {
+              const renewed = await credential(ctx, server, {
+                publicUrl,
+                renew: true,
+              })
+              return { ...renewed, redact: [...renewed.redact, ...placed] }
+            },
           }
         : {}),
     })
@@ -1113,33 +1257,128 @@ async function callEndpoint(
   }
 }
 
+export type CallOptions = {
+  publicUrl: string
+  /** The token the call is made for: the browser drives tabs as it. */
+  tokenId?: string
+  /** Keeps a long text whole for read_result (mail bodies, attachments). */
+  keep?: ResultKeeper
+  /** Keeps a file's bytes for the token (a mail attachment read). */
+  keepBytes?: BytesKeeper
+  /**
+   * Opens a result the token kept, for the handles in the arguments
+   * ({"$result": id}): they are replaced by what they stand for before
+   * anything is sent, and an id the token has no result for is refused.
+   */
+  open?: ResultOpener
+  /**
+   * Where a wrapper's call may carry the owner's secrets
+   * (lib/core/wrappers/placeholders.ts): each {"$secret": name} in the
+   * arguments is replaced here, only at a place this names, and the values
+   * are scrubbed from the answer. Without it a placeholder is refused.
+   */
+  secrets?: SecretGrant
+}
+
 export async function callServerTool(
   ctx: VaultContext,
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  {
-    publicUrl,
-    tokenId,
-    keep,
-    keepBytes,
-    open,
-  }: {
-    publicUrl: string
-    /** The token the call is made for: the browser drives tabs as it. */
-    tokenId?: string
-    /** Keeps a long text whole for read_result (mail bodies, attachments). */
-    keep?: ResultKeeper
-    /** Keeps a file's bytes for the token (a mail attachment read). */
-    keepBytes?: BytesKeeper
-    /**
-     * Opens a result the token kept, for the handles in the arguments
-     * ({"$result": id}): they are replaced by what they stand for before
-     * anything is sent, and an id the token has no result for is refused.
-     */
-    open?: ResultOpener
-  },
+  options: CallOptions,
 ): Promise<CallToolResult> {
+  const { args: sent, redact } = await placeSecrets(
+    ctx,
+    server,
+    toolName,
+    args,
+    options.secrets,
+  )
+
+  if (redact.length === 0) {
+    return dispatchCall(ctx, server, toolName, sent, options, [])
+  }
+
+  const scrub = makeRedactor(redact)
+
+  try {
+    return scrubResult(
+      await dispatchCall(ctx, server, toolName, sent, options, redact),
+      redact,
+    )
+  } catch (error) {
+    if (isPcpError(error)) {
+      throw new PcpError(error.code, scrub.text(error.message))
+    }
+
+    throw new PcpError(
+      "upstream",
+      `${server.name} could not be reached: ${scrub.text(error instanceof Error ? error.message : String(error))}`.slice(
+        0,
+        500,
+      ),
+    )
+  }
+}
+
+/**
+ * The arguments with a wrapper's secrets in place, and the values to take
+ * out of what comes back. A placeholder needs a binding the owner approved
+ * for this very argument, on this server as it was when they approved it;
+ * the browser never takes one (a typed value would stay on the page).
+ */
+async function placeSecrets(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  grant: SecretGrant | undefined,
+): Promise<{ args: Record<string, unknown>; redact: string[] }> {
+  const found = findPlaceholders(args)
+
+  if (found.length === 0) {
+    return { args, redact: [] }
+  }
+
+  if (server.kind === "browser" || server.kind === "wrapper") {
+    throw invalid(`A secret cannot go to ${kindNoun(server.kind)}.`)
+  }
+
+  const bindings = matchGrant(found, grant, `${server.slug}/${toolName}`)
+  const values = new Map<string, string>()
+  const redact: string[] = []
+
+  for (const binding of bindings) {
+    if (binding.url !== server.url) {
+      throw invalid(
+        `${server.name}'s address has changed since the owner allowed the secret "${binding.name}" there, so the call was not made.`,
+      )
+    }
+
+    const secret = await readSecretValue(ctx, binding.secretId)
+    const value = renderAuthValue(binding.template, secret)
+    values.set(binding.pointer, value)
+    redact.push(secret, value)
+  }
+
+  return { args: placeValues(args, values), redact }
+}
+
+async function dispatchCall(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  { publicUrl, tokenId, keep, keepBytes, open }: CallOptions,
+  placed: string[],
+): Promise<CallToolResult> {
+  if (server.kind === "wrapper") {
+    throw new PcpError(
+      "state",
+      "A wrapper's tools run through the gateway, for a token.",
+    )
+  }
+
   if (server.kind === "browser") {
     if (!tokenId) {
       throw new PcpError("state", "The browser is used through a token.")
@@ -1154,10 +1393,25 @@ export async function callServerTool(
     )
   }
 
+  if (isSshKind(server.kind)) {
+    // Before anything connects: an unknown id never reaches the server.
+    const resolved = open ? await resolveHandles(args, open) : args
+
+    return callSshTool(server, toolName, resolved, {
+      identity: await sshIdentity(ctx, server),
+      publicUrl,
+      redact: placed,
+    })
+  }
+
   // The endpoint resolves its own handles: an upload's file fields take
   // the kept file's bytes, not its base64.
   if (server.kind === "openapi") {
-    return callEndpoint(ctx, server, toolName, args, { publicUrl, open })
+    return callEndpoint(ctx, server, toolName, args, {
+      publicUrl,
+      open,
+      placed,
+    })
   }
 
   if (isMailKind(server.kind)) {
@@ -1182,7 +1436,7 @@ export async function callServerTool(
     }
 
     return callMailTool(server, toolName, args, {
-      credential: signIn,
+      credential: { ...signIn, redact: [...signIn.redact, ...placed] },
       keep,
       keepBytes,
       open,
@@ -1195,13 +1449,20 @@ export async function callServerTool(
 
   try {
     connection = await openUpstream(ctx, server, { publicUrl })
-
-    return await connection.client.callTool(
+    const result = await connection.client.callTool(
       { name: toolName, arguments: resolved },
       { timeout: CALL_TIMEOUT_MS },
     )
+
+    // A server that echoes what it was sent (a debugging tool, an error
+    // quoting the request) must not hand its credential to the assistant.
+    return scrubResult(result, await connection.secrets())
   } catch (error) {
     const failure = describeFailure(server, error, connection)
+    failure.message = makeRedactor([
+      ...placed,
+      ...(await failureSecrets(error, connection)),
+    ]).text(failure.message)
     await setServerStatus(server.id, failure.status, failure.message)
 
     // "unauthorized" tells the gateway the server needs connecting (or its
@@ -1316,11 +1577,11 @@ export function refusalReason(
 /** What to tell the owner about a server that refused a request. */
 function refusedMessage(server: McpServer, said: string): string {
   if (server.authType === "header") {
-    return `${server.name} refused the secret PCP sent (${said}). Check the secret under Settings, then choose Refresh tools.`
+    return `${server.name} refused the secret PCP sent (${said}). Check the secret under Advanced on its page, then choose Refresh tools.`
   }
 
   if (server.authType !== "oauth") {
-    return `${server.name} refused PCP's request (${said}). It may need a secret or a sign-in: set one under Settings.`
+    return `${server.name} refused PCP's request (${said}). It may need a secret or a sign-in: set one under Advanced on its page.`
   }
 
   // Google's MCP servers are APIs of their own (gmailmcp.googleapis.com

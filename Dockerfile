@@ -50,10 +50,12 @@ WORKDIR /app
 # PCP runs as an unprivileged user, so its own HTTPS listeners use ports
 # above 1024; the compose file maps 80 and 443 onto them. PCP_CONTAINER lets
 # Settings say how a container is updated (lib/server/install-kind.ts).
+# HOSTNAME=:: listens on IPv6 and IPv4, falling back to IPv4 alone on a
+# kernel without IPv6 (docker/start.cjs).
 ENV NODE_ENV=production \
     PCP_CONTAINER=1 \
     PORT=3000 \
-    HOSTNAME=0.0.0.0 \
+    HOSTNAME=:: \
     PCP_DATA_DIR=/data \
     PCP_HTTP_PORT=8080 \
     PCP_HTTPS_PORT=8443
@@ -72,11 +74,17 @@ RUN groupadd --system --gid 1001 nodejs \
 # (scripts/docker.test.ts keeps the two the same). It only runs once the
 # owner adds the browser and a page is opened. An unprivileged container
 # has no user namespaces for Chromium's own sandbox, so it runs without
-# one; PCP's proxy and address checks are not that sandbox's job.
+# one; PCP's proxy and address checks are not that sandbox's job. PCP
+# runs the full Chromium, never Playwright's separate headless shell, so
+# the shell is not downloaded. In the image Chromium runs with windows on
+# a virtual display PCP starts itself (Xvfb, lib/core/browser/display.ts),
+# as a desktop's Chrome does; Playwright's dependencies bring Xvfb, and it
+# is named here so they cannot drop it unnoticed.
 ARG PLAYWRIGHT_VERSION=1.63.0
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PCP_BROWSER_SANDBOX=off
-RUN npx -y --no-update-notifier playwright-core@${PLAYWRIGHT_VERSION} install --with-deps chromium \
+RUN npx -y --no-update-notifier playwright-core@${PLAYWRIGHT_VERSION} install --with-deps --no-shell chromium \
+  && apt-get install -y --no-install-recommends xvfb \
   && chmod -R a+rX /ms-playwright \
   && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache
 
@@ -85,6 +93,7 @@ COPY --from=builder --chown=pcp:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=pcp:nodejs /app/.next/static ./.next/static
 # Applied at boot by instrumentation.ts (lib/core/migrate.ts).
 COPY --from=builder /app/prisma/migrations ./prisma/migrations
+COPY docker/start.cjs ./start.cjs
 
 USER pcp
 
@@ -94,4 +103,4 @@ EXPOSE 3000 8080 8443
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3000/api/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
-CMD ["node", "server.js"]
+CMD ["node", "start.cjs"]

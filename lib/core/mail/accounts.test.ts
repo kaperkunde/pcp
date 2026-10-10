@@ -89,7 +89,7 @@ describe("adding an account", () => {
     const id = await account()
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
 
-    expect(sync).toEqual({ status: "ok", message: "", toolCount: 10 })
+    expect(sync).toEqual({ status: "ok", message: "", toolCount: 16 })
     const row = await getServer(ctx, id)
     expect(row).toMatchObject({
       kind: "jmap",
@@ -102,19 +102,42 @@ describe("adding an account", () => {
     expect(fake.requests[0]!.authorization).toBe(BASIC)
 
     const [summary] = await listServers(ctx)
-    expect(summary).toMatchObject({ kind: "jmap", toolCount: 10 })
+    expect(summary).toMatchObject({ kind: "jmap", toolCount: 16 })
     expect((await listSecrets(ctx))[0]!.usedBy).toEqual([{ id, name: "Mail" }])
     await expect(deleteSecret(ctx, secretId)).rejects.toThrow()
+  })
+
+  it("refuses a session URL over http:// to a public address, on adding and on changing", async () => {
+    await expect(
+      account({ url: "http://8.8.8.8/jmap/session" }),
+    ).rejects.toThrow(/unencrypted/)
+    // A name that does not resolve to a private address is no better.
+    await expect(
+      account({ url: "http://mail.example.invalid/jmap/session" }),
+    ).rejects.toThrow(/unencrypted/)
+
+    const id = await account()
+    await expect(
+      updateMailAccount(ctx, id, {
+        name: "Mail",
+        url: "http://8.8.8.8/jmap/session",
+        readOnly: false,
+        authType: "basic",
+        authUsername: "ada@example.com",
+        authSecretId: secretId,
+      }),
+    ).rejects.toThrow(/unencrypted/)
+    expect((await getServer(ctx, id)).url).toBe(`${api.origin}/jmap/session`)
   })
 
   it("offers a read-only account the reading tools only", async () => {
     const id = await account({ readOnly: true })
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
 
-    expect(sync.toolCount).toBe(6)
-    expect(
-      (await getServer(ctx, id)).tools.map((tool) => tool.name),
-    ).not.toContain("send_email")
+    expect(sync.toolCount).toBe(7)
+    const names = (await getServer(ctx, id)).tools.map((tool) => tool.name)
+    expect(names).not.toContain("send_email")
+    expect(names).not.toContain("create_draft")
   })
 
   it("says when the credentials are refused or the server is gone", async () => {
@@ -440,7 +463,9 @@ describe("calling its tools", () => {
         { to: ["charles@example.com"], subject: "x", text: { $result: "no" } },
         { ...PUBLIC, open },
       ),
-    ).rejects.toThrow(/No kept result "no" for this token/)
+    ).rejects.toThrow(
+      /A kept result named in the arguments is not there for this token/,
+    )
     expect(fake.requests.length).toBe(before)
   })
 
@@ -519,7 +544,7 @@ describe("calling its tools", () => {
     const before = fake.requests.length
 
     await expect(send([{ $result: "gone" }])).rejects.toThrow(
-      /No kept result "gone" for this token/,
+      /A kept result named in the arguments is not there for this token/,
     )
     await expect(
       send(Array.from({ length: 11 }, () => ({ $result: kept.id }))),
@@ -533,6 +558,112 @@ describe("calling its tools", () => {
     await expect(send([{ $result: kept.id }], false)).rejects.toThrow(
       /cannot read them/,
     )
+    expect(fake.requests.length).toBe(before)
+  })
+
+  it("writes a draft in Drafts with an attachment by its handle, and sends nothing", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const keepers = resultKeepers(ctx, tokenId)
+    const options = {
+      ...PUBLIC,
+      keep: keepers.text,
+      keepBytes: keepers.bytes,
+      open: resultOpener(ctx, tokenId),
+    }
+    const read = await callServerTool(
+      ctx,
+      server,
+      "get_attachment",
+      { id: "e1", attachment: "blob-png" },
+      options,
+    )
+    const id = (read.structuredContent as { result: { $result: string } })
+      .result.$result
+
+    const result = await callServerTool(
+      ctx,
+      server,
+      "create_draft",
+      {
+        to: ["Charles Babbage <charles@example.com>"],
+        subject: "The drawing",
+        text: "As promised.",
+        inReplyTo: "e1",
+        attachments: [{ $result: id, name: "engine.png" }],
+      },
+      options,
+    )
+
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({
+      draft: {
+        mailboxId: "mb-drafts",
+        mailbox: "Drafts",
+        to: [{ name: "Charles Babbage", email: "charles@example.com" }],
+      },
+    })
+    expect(fake.sent).toEqual([])
+    const draftId = (result.structuredContent as { draft: { id: string } })
+      .draft.id
+    expect(fake.emails.find((email) => email.id === draftId)).toMatchObject({
+      mailboxIds: { "mb-drafts": true },
+      keywords: { $draft: true, $seen: true },
+      attachments: [
+        expect.objectContaining({ name: "engine.png", type: "image/png" }),
+      ],
+    })
+
+    // A draft to nobody yet is a draft all the same.
+    const bare = await callServerTool(
+      ctx,
+      server,
+      "create_draft",
+      { subject: "Notes", text: "" },
+      options,
+    )
+    expect(bare.structuredContent).toMatchObject({
+      draft: { to: [], mailboxId: "mb-drafts" },
+    })
+    expect(fake.sent).toEqual([])
+  })
+
+  it("refuses a draft's bad arguments and attachments before anything connects", async () => {
+    const server = await ready()
+    const { id: tokenId } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      serverIds: [],
+    })
+    const open = resultOpener(ctx, tokenId)
+    const draft = (args: Record<string, unknown>, withOpen = true) =>
+      callServerTool(ctx, server, "create_draft", args, {
+        ...PUBLIC,
+        ...(withOpen ? { open } : {}),
+      })
+    const before = fake.requests.length
+
+    await expect(
+      draft({ to: ["a@b.c\r\nBcc: x@y.z"], subject: "", text: "" }),
+    ).rejects.toMatchObject({ code: "validation" })
+    await expect(
+      draft({ subject: "", text: "", extra: true }),
+    ).rejects.toMatchObject({ code: "validation" })
+    await expect(
+      draft({ subject: "s", text: "t", attachments: [{ $result: "gone" }] }),
+    ).rejects.toThrow(
+      /A kept result named in the arguments is not there for this token/,
+    )
+    await expect(
+      draft(
+        { subject: "s", text: "t", attachments: [{ $result: "gone" }] },
+        false,
+      ),
+    ).rejects.toThrow(/create_draft's attachments .* cannot read them/)
     expect(fake.requests.length).toBe(before)
   })
 
@@ -557,10 +688,116 @@ describe("calling its tools", () => {
 
   it("refuses writing tools on a read-only account, whatever the catalogue says", async () => {
     const server = await ready({ readOnly: true })
+    const before = fake.requests.length
 
     await expect(
       callServerTool(ctx, server, "delete_email", { id: "e1" }, PUBLIC),
     ).rejects.toMatchObject({ code: "forbidden" })
+    await expect(
+      callServerTool(
+        ctx,
+        server,
+        "create_draft",
+        { subject: "s", text: "t" },
+        PUBLIC,
+      ),
+    ).rejects.toMatchObject({ code: "forbidden" })
+
+    for (const [tool, args] of [
+      ["create_mailbox", { name: "New" }],
+      ["rename_mailbox", { mailbox: "Archive", name: "Old" }],
+      ["delete_mailbox", { mailbox: "Archive" }],
+      ["mark_email", { ids: ["e1"], addKeywords: ["x"] }],
+      ["set_vacation_response", { enabled: true }],
+    ] as const) {
+      await expect(
+        callServerTool(ctx, server, tool, args, PUBLIC),
+      ).rejects.toMatchObject({ code: "forbidden" })
+    }
+
+    expect(fake.requests.length).toBe(before)
+    expect(fake.emails).toHaveLength(3)
+    expect(fake.mailboxes).toHaveLength(5)
+  })
+
+  it("answers one email as it always has, and several with done and failed", async () => {
+    const server = await ready()
+    const one = await callServerTool(
+      ctx,
+      server,
+      "move_email",
+      { id: "e1", mailbox: "archive" },
+      PUBLIC,
+    )
+
+    expect(one.structuredContent).toEqual({
+      id: "e1",
+      previousId: "e1",
+      mailboxId: "mb-archive",
+    })
+
+    const several = await callServerTool(
+      ctx,
+      server,
+      "mark_email",
+      { ids: ["e1", "e2", "gone"], addKeywords: ["Paid"] },
+      PUBLIC,
+    )
+    expect(several.isError).toBeUndefined()
+    const answer = several.structuredContent as {
+      done: Array<{ id: string; keywords: string[] }>
+      failed: unknown[]
+    }
+    expect(answer.done.map((email) => [email.id, email.keywords])).toEqual([
+      ["e1", ["paid"]],
+      ["e2", ["paid"]],
+    ])
+    expect(answer.failed).toEqual([
+      { id: "gone", error: "No email with that id." },
+    ])
+
+    const missing = await callServerTool(
+      ctx,
+      server,
+      "delete_email",
+      { id: "gone" },
+      PUBLIC,
+    )
+    expect(missing.isError).toBe(true)
+    expect(textOf(missing)).toMatch(/No email with that id/)
+  })
+
+  it("makes, moves and removes a mailbox, and sets the automatic reply", async () => {
+    const server = await ready()
+    const call = (tool: string, args: Record<string, unknown>) =>
+      callServerTool(ctx, server, tool, args, PUBLIC)
+
+    const made = await call("create_mailbox", { name: "Clients" })
+    expect(made.structuredContent).toMatchObject({
+      mailbox: { name: "Clients", path: "Clients" },
+    })
+    await call("create_mailbox", { name: "Acme", parent: "Clients" })
+    expect(
+      (await call("rename_mailbox", { mailbox: "Clients/Acme", parent: null }))
+        .structuredContent,
+    ).toMatchObject({ mailbox: { path: "Acme", parentId: null } })
+    expect(
+      (await call("delete_mailbox", { mailbox: "Acme" })).structuredContent,
+    ).toMatchObject({ deleted: { name: "Acme" } })
+
+    const refused = await call("delete_mailbox", { mailbox: "inbox" })
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toMatch(/PCP does not delete it/)
+
+    expect(
+      (
+        await call("set_vacation_response", {
+          enabled: true,
+          text: "Away",
+        })
+      ).structuredContent,
+    ).toMatchObject({ vacationResponse: { enabled: true, text: "Away" } })
+    expect(fake.vacation.isEnabled).toBe(true)
   })
 
   it("answers a request the server refuses as an error, and leaves the account's status alone", async () => {
@@ -609,7 +846,7 @@ describe("calling its tools", () => {
     const instructions = buildInstructions(await loadGatewayServers(scope))
 
     expect(instructions).toContain("MCP servers, APIs and mail accounts")
-    expect(instructions).toContain("- mail: Mail (10 tools)")
+    expect(instructions).toContain("- mail: Mail (16 tools)")
   })
 })
 

@@ -1,7 +1,8 @@
 // The app's side of "Install and restart" on PCP's Settings page. The page
-// cannot reach this wrapper (no IPC, no preload: the window is a plain view of
-// the server), so the server says what the owner asked for in /api/health and
-// the wrapper reads it. These are the pure parts, tested in updates.test.mjs.
+// cannot reach this wrapper for it (its preload carries Touch ID alone: the
+// window is otherwise a plain view of the server), so the server says what the
+// owner asked for in /api/health and the wrapper reads it. These are the pure
+// parts, tested in updates.test.mjs.
 
 /** How long a request stays worth acting on, as the Settings page reckons it. */
 export const INSTALL_REQUEST_FRESH_MS = 15 * 60_000

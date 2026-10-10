@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 
 import { PageHeader } from "@/components/page-header"
+import { SecretAddDialog } from "@/components/secret-add-dialog"
 import { SecretsManager } from "@/components/secrets-manager"
 import { listSecrets } from "@/lib/core/secrets"
 import { requireContext } from "@/lib/server/session"
@@ -16,6 +17,7 @@ export default async function SecretsPage() {
       <PageHeader
         title="Secrets"
         description="The credentials PCP sends to your servers and APIs. They never reach an assistant: the gateway adds them to each upstream call itself."
+        action={<SecretAddDialog />}
       />
       <SecretsManager secrets={secrets} />
     </>

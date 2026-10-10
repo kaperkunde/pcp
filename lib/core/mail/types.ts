@@ -50,11 +50,35 @@ export const MAILBOX_ROLES: readonly MailboxRole[] = [
   "important",
 ]
 
+/** Keywords the flags carry, so keywords leaves them out. */
+const FLAG_KEYWORDS = new Set(["$seen", "$flagged", "$answered", "$draft"])
+
+/**
+ * An email's keywords other than the ones its flags say, lowercased, as
+ * JMAP has them and IMAP flags without a backslash are.
+ */
+export function otherKeywords(names: Iterable<string>): string[] {
+  const out = new Set<string>()
+
+  for (const name of names) {
+    const lower = name.toLowerCase()
+
+    if (!name.startsWith("\\") && !FLAG_KEYWORDS.has(lower)) {
+      out.add(lower)
+    }
+  }
+
+  return [...out].sort()
+}
+
 export type MailboxSummary = {
   /** What the other tools take: a JMAP id, an IMAP path. */
   id: string
   name: string
-  /** IMAP: the full path, with its delimiter; null for JMAP. */
+  /**
+   * The full path: IMAP's with its delimiter, JMAP's the names from the top
+   * joined with "/".
+   */
   path: string | null
   role: MailboxRole | null
   parentId: string | null
@@ -84,6 +108,11 @@ export type MailMessageSummary = {
   /** A short start of the text; empty where the server gives none (IMAP). */
   preview: string
   flags: MailFlags
+  /**
+   * The email's other keywords (labels), lowercased: JMAP keywords and IMAP
+   * flags other than the ones flags carries.
+   */
+  keywords: string[]
   hasAttachments: boolean
   size: number | null
 }
@@ -123,6 +152,8 @@ export type MailIdentity = {
 export type SearchQuery = {
   /** A mailbox id, or a role ("inbox"). */
   mailbox?: string
+  /** Every mailbox but Trash and Junk, instead of one. */
+  allMailboxes?: boolean
   text?: string
   from?: string
   to?: string
@@ -133,6 +164,9 @@ export type SearchQuery = {
   unread?: boolean
   flagged?: boolean
   hasAttachment?: boolean
+  /** A keyword the email has, or does not have. */
+  keyword?: string
+  notKeyword?: string
   offset: number
   limit: number
 }
@@ -142,6 +176,8 @@ export type SearchResult = {
   /** How many match in all, when the server says. */
   total: number | null
   offset: number
+  /** Something the answer leaves out, said in words. */
+  note?: string
 }
 
 export type SendInput = {
@@ -169,6 +205,29 @@ export type SendResult = {
   subject: string
   /** The mailbox the sent copy is in, when there is one. */
   savedTo: string | null
+  /**
+   * With inReplyTo: whether the email it answers is now marked as answered.
+   * False when the server refused that; the email was sent all the same.
+   */
+  answered?: boolean
+}
+
+export type DraftResult = {
+  /**
+   * The draft's id, for get_email. Null when the server does not say what
+   * it is (IMAP without UIDPLUS).
+   */
+  id: string | null
+  messageId: string | null
+  /** Null when the account names no From address to write in. */
+  from: MailAddress | null
+  to: MailAddress[]
+  cc: MailAddress[]
+  bcc: MailAddress[]
+  subject: string
+  /** The Drafts mailbox: its id (a JMAP id, an IMAP path) and name. */
+  mailboxId: string
+  mailbox: string
 }
 
 export type MoveResult = {
@@ -179,6 +238,41 @@ export type MoveResult = {
   id: string | null
   previousId: string
   mailboxId: string
+}
+
+/** What mark_email changes; what is left out stays as it is. */
+export type MarkChange = {
+  read?: boolean
+  flagged?: boolean
+  answered?: boolean
+  /** Keywords, lowercased and checked (tools.ts). */
+  addKeywords?: string[]
+  removeKeywords?: string[]
+}
+
+/**
+ * A change to several emails at once: the ones it was made to, and the
+ * ones it was not, each with why. One email's refusal stops no other.
+ */
+export type BulkResult<T> = {
+  done: T[]
+  failed: Array<{ id: string; error: string }>
+}
+
+/** A mailbox's new name or place; parent null is the top level. */
+export type MailboxChange = {
+  name?: string
+  parent?: string | null
+}
+
+/** JMAP's VacationResponse (RFC 8621 8): the automatic reply. */
+export type VacationResponse = {
+  enabled: boolean
+  /** ISO 8601; null for no bound. */
+  from: string | null
+  to: string | null
+  subject: string | null
+  text: string | null
 }
 
 export type AttachmentContent = {
@@ -202,13 +296,26 @@ export interface MailBackend {
   getThread?(threadId: string): Promise<MailMessageSummary[]>
   listIdentities?(): Promise<MailIdentity[]>
   sendEmail?(input: SendInput): Promise<SendResult>
-  moveEmail(id: string, mailbox: string): Promise<MoveResult>
-  markEmail(
-    id: string,
-    flags: { read?: boolean; flagged?: boolean },
-  ): Promise<MailMessageSummary>
-  /** Moves it to the Trash; never deletes it for good. */
-  deleteEmail(id: string): Promise<MoveResult>
+  /** Writes the email into Drafts, marked as a draft; sends nothing. */
+  createDraft(input: SendInput): Promise<DraftResult>
+  moveEmails(ids: string[], mailbox: string): Promise<BulkResult<MoveResult>>
+  markEmails(
+    ids: string[],
+    change: MarkChange,
+  ): Promise<BulkResult<MailMessageSummary>>
+  /** Moves them to the Trash; never deletes one for good. */
+  deleteEmails(ids: string[]): Promise<BulkResult<MoveResult>>
+  createMailbox(name: string, parent?: string): Promise<MailboxSummary>
+  renameMailbox(mailbox: string, change: MailboxChange): Promise<MailboxSummary>
+  /**
+   * Removes an empty mailbox that has no role and no mailboxes inside it;
+   * never one that holds mail.
+   */
+  deleteMailbox(mailbox: string): Promise<MailboxSummary>
+  getVacationResponse?(): Promise<VacationResponse>
+  setVacationResponse?(
+    change: Partial<VacationResponse> & { enabled: boolean },
+  ): Promise<VacationResponse>
   getAttachment(
     id: string,
     attachment: string,

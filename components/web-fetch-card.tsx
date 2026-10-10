@@ -6,16 +6,15 @@ import { AllTokensCheckbox } from "@/components/all-tokens-checkbox"
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { SubmitButton } from "@/components/submit-button"
+import { LEVEL_OPTIONS } from "@/components/token-tools"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { Checkbox, Input, Select } from "@/components/ui/input"
-import { Field } from "@/components/ui/label"
+import { List, ListSection } from "@/components/ui/list"
+import {
+  SegmentedControl,
+  type SegmentedOption,
+} from "@/components/ui/segmented-control"
+import { SwitchRow } from "@/components/ui/switch"
 import {
   addFetchSiteAction,
   removeFetchSiteAction,
@@ -28,22 +27,24 @@ import {
 import {
   FETCH_METHOD_LABELS,
   FETCH_PRIVATE_LABELS,
-  FETCH_PRIVATE_LEVELS,
   FETCH_SITE_LABELS,
   FETCH_SITE_LEVELS,
   TOOL_ACCESS_LABELS,
-  TOOL_ACCESS_LEVELS,
   type FetchSiteLevel,
   type ToolAccess,
 } from "@/lib/core/constants"
 import type {
   FetchMethodView,
-  FetchPrivateLevel,
   FetchPrivateView,
   FetchSiteView,
   TokenFetchRules,
 } from "@/lib/core/web-fetch"
-import { cn } from "@/lib/utils"
+
+/** A site's level: by its method, or one of the tool levels. */
+const SITE_OPTIONS: ReadonlyArray<SegmentedOption<FetchSiteLevel>> = [
+  { value: "default", label: "By method" },
+  ...(LEVEL_OPTIONS as ReadonlyArray<SegmentedOption<FetchSiteLevel>>),
+]
 
 /**
  * What an assistant with this token may fetch through web_fetch: a level
@@ -68,35 +69,36 @@ export function WebFetchCard({
   browser?: boolean
 }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>
-          {webFetch
-            ? browser
-              ? "Web fetch and the browser"
-              : "Web fetch"
-            : "Browser sites"}
-        </CardTitle>
-        <CardDescription>
+    <ListSection
+      id="web-pages"
+      className="scroll-mt-8"
+      title={
+        webFetch
+          ? browser
+            ? "Web pages and the browser"
+            : "Web pages"
+          : "Browser sites"
+      }
+      description={
+        <>
           {webFetch
             ? "An assistant with this token can fetch web pages through PCP, with none of your secrets, and from your own network only if you allow it below. "
             : "An assistant with this token can open pages in PCP's browser, from your own network only if you allow it below. "}
-          A site&apos;s own setting decides every request to it; a site that
-          uses the method settings gets the level of the request&apos;s method.
-          Each site an assistant reaches for shows up here the first time.
+          A site&apos;s own level decides every request to it; a site set to By
+          method gets the level of the request&apos;s method. Each site an
+          assistant reaches for shows up here the first time.
           {browser
             ? " The browser opens a page where a GET request may go, and asks you first where one would ask."
             : null}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        <section aria-label="Methods" className="flex flex-col gap-2">
-          <h3 className="font-medium">Methods</h3>
-          <p className="text-xs text-muted-foreground">
-            For every site that uses the method settings, including one an
-            assistant has not reached for yet.
-          </p>
-          <ul className="flex flex-col divide-y divide-border">
+        </>
+      }
+    >
+      <div className="flex flex-col gap-5">
+        <Group
+          title="Methods"
+          caption="For every site set to By method, including one an assistant has not reached for yet."
+        >
+          <List as="ul">
             {rules.methods.map((method) => (
               <MethodRow
                 key={method.group}
@@ -105,49 +107,74 @@ export function WebFetchCard({
                 locked={locked}
               />
             ))}
-          </ul>
-        </section>
-        <section aria-label="Private addresses" className="flex flex-col gap-2">
-          <h3 className="font-medium">Private addresses</h3>
-          <PrivateRow
-            tokenId={tokenId}
-            rule={rules.privateAddresses}
-            locked={locked}
-          />
-        </section>
-        <section aria-label="Sites" className="flex flex-col gap-2">
-          <h3 className="font-medium">Sites</h3>
-          {rules.sites.length === 0 ? (
-            <p className="text-muted-foreground">
-              No sites yet. The first time an assistant fetches from one, it
-              shows up here; you can also add one below.
-            </p>
-          ) : (
-            <ul className="flex flex-col divide-y divide-border">
-              {rules.sites.map((site) => (
+          </List>
+        </Group>
+
+        <Group
+          title={`Sites${rules.sites.length > 0 ? ` (${rules.sites.length})` : ""}`}
+        >
+          <List as="ul">
+            {rules.sites.length === 0 ? (
+              <li className="px-4 py-3.5 text-muted-foreground">
+                No sites yet. The first time an assistant reaches for one, it
+                shows up here; you can also add one.
+              </li>
+            ) : (
+              rules.sites.map((site) => (
                 <SiteRow
                   key={site.host}
                   tokenId={tokenId}
                   site={site}
                   locked={locked}
                 />
-              ))}
-            </ul>
-          )}
-          {locked ? null : <AddSiteForm tokenId={tokenId} />}
-        </section>
-      </CardContent>
-    </Card>
+              ))
+            )}
+            {locked ? null : (
+              <li>
+                <AddSiteForm tokenId={tokenId} />
+              </li>
+            )}
+          </List>
+        </Group>
+
+        <Group title="Your own network">
+          <List>
+            <PrivateRow
+              tokenId={tokenId}
+              rule={rules.privateAddresses}
+              locked={locked}
+            />
+          </List>
+        </Group>
+      </div>
+    </ListSection>
   )
 }
 
-function levelClass(level: string) {
-  return cn(
-    "h-8 w-auto",
-    level === "blocked" && "text-destructive",
-    level === "allowed" && "text-primary",
+function Group({
+  title,
+  caption,
+  children,
+}: {
+  title: string
+  caption?: string
+  children: React.ReactNode
+}) {
+  return (
+    <section aria-label={title} className="flex flex-col gap-2">
+      <div className="flex flex-col gap-0.5 px-1">
+        <h3 className="text-sm font-semibold">{title}</h3>
+        {caption ? (
+          <p className="text-xs text-muted-foreground">{caption}</p>
+        ) : null}
+      </div>
+      {children}
+    </section>
   )
 }
+
+const rowClassName =
+  "flex min-h-14 flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5"
 
 function MethodRow({
   tokenId,
@@ -188,33 +215,27 @@ function MethodRow({
   }
 
   return (
-    <li className="flex flex-wrap items-center justify-between gap-2 py-2">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <code className="text-sm">{label}</code>
+    <li className={rowClassName}>
+      <span className="flex min-w-0 flex-1 basis-48 flex-col gap-0.5">
+        <code className="text-[13px]">{label}</code>
         <span className="text-xs text-muted-foreground">{hint}</span>
-      </div>
-      <div className="flex flex-wrap items-center gap-3">
-        <AllTokensCheckbox
-          checked={shown.shared}
-          disabled={locked || pending}
-          label={`All tokens for ${label}`}
-          sharedLevel={method.shared ? TOOL_ACCESS_LABELS[method.shared] : null}
-          onChange={share}
-        />
-        <Select
-          aria-label={`Web fetch ${label}`}
-          value={shown.access}
-          disabled={locked || pending}
-          onChange={(event) => change(event.target.value as ToolAccess)}
-          className={levelClass(shown.access)}
-        >
-          {TOOL_ACCESS_LEVELS.map((level) => (
-            <option key={level} value={level}>
-              {TOOL_ACCESS_LABELS[level]}
-            </option>
-          ))}
-        </Select>
-      </div>
+      </span>
+      <SegmentedControl<ToolAccess>
+        name={`fetch-method:${method.group}`}
+        legend={`Web fetch ${label}`}
+        size="sm"
+        options={LEVEL_OPTIONS}
+        value={shown.access}
+        onValueChange={change}
+        disabled={locked || pending}
+      />
+      <AllTokensCheckbox
+        checked={shown.shared}
+        disabled={locked || pending}
+        label={`All tokens for ${label}`}
+        sharedLevel={method.shared ? TOOL_ACCESS_LABELS[method.shared] : null}
+        onChange={share}
+      />
       <FormError error={error} className="basis-full" />
     </li>
   )
@@ -236,7 +257,9 @@ function PrivateRow({
   })
   const [error, setError] = useState<string | null>(null)
 
-  function change(access: FetchPrivateLevel) {
+  function change(allowed: boolean) {
+    const access = allowed ? "allowed" : "blocked"
+
     startTransition(async () => {
       setShown({ access, shared: false })
       const result = await setFetchPrivateAction(tokenId, access)
@@ -258,36 +281,27 @@ function PrivateRow({
   }
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <p className="min-w-0 basis-80 grow text-xs text-muted-foreground">
-        Loopback, private and link-local addresses: a device at home, a service
-        on this machine. Blocked unless you allow it; an assistant cannot ask
-        for it. PCP&apos;s own address is never reached.
-      </p>
-      <div className="flex flex-wrap items-center gap-3">
-        <AllTokensCheckbox
-          checked={shown.shared}
-          disabled={locked || pending}
-          label="All tokens for private addresses"
-          sharedLevel={rule.shared ? FETCH_PRIVATE_LABELS[rule.shared] : null}
-          onChange={share}
-        />
-        <Select
-          aria-label="Web fetch private addresses"
-          value={shown.access}
-          disabled={locked || pending}
-          onChange={(event) => change(event.target.value as FetchPrivateLevel)}
-          className={levelClass(shown.access)}
-        >
-          {FETCH_PRIVATE_LEVELS.map((level) => (
-            <option key={level} value={level}>
-              {FETCH_PRIVATE_LABELS[level]}
-            </option>
-          ))}
-        </Select>
-      </div>
-      <FormError error={error} className="basis-full" />
-    </div>
+    <>
+      <SwitchRow
+        id={`fetch-private-${tokenId}`}
+        className="flex-wrap"
+        label="Private addresses"
+        description="Loopback, private and link-local addresses: a device at home, a service on this machine. Off unless you turn it on; an assistant cannot ask for it. PCP's own address is never reached."
+        checked={shown.access === "allowed"}
+        disabled={locked || pending}
+        onChange={(event) => change(event.target.checked)}
+        trailing={
+          <AllTokensCheckbox
+            checked={shown.shared}
+            disabled={locked || pending}
+            label="All tokens for private addresses"
+            sharedLevel={rule.shared ? FETCH_PRIVATE_LABELS[rule.shared] : null}
+            onChange={share}
+          />
+        }
+      />
+      {error ? <FormError error={error} className="px-4 py-2" /> : null}
+    </>
   )
 }
 
@@ -345,12 +359,9 @@ function SiteRow({
   }
 
   return (
-    <li
-      className="flex flex-wrap items-center justify-between gap-2 py-2"
-      aria-label={site.host}
-    >
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <code className="text-sm break-all">{site.host}</code>
+    <li className={rowClassName} aria-label={site.host}>
+      <span className="flex min-w-0 flex-1 basis-48 flex-col gap-0.5">
+        <span className="text-[15px] break-all">{site.host}</span>
         <span className="text-xs text-muted-foreground">
           {site.addedBy === "owner" ? "Added by you" : "Added by an assistant"}
           {" · "}
@@ -362,41 +373,35 @@ function SiteRow({
             "not fetched yet"
           )}
         </span>
-      </div>
-      <div className="flex flex-wrap items-center gap-3">
-        <AllTokensCheckbox
-          checked={shown.shared}
-          disabled={locked || pending}
-          label={`All tokens for ${site.host}`}
-          sharedLevel={site.shared ? FETCH_SITE_LABELS[site.shared] : null}
-          onChange={share}
-        />
-        <Select
-          aria-label={`Web fetch ${site.host}`}
-          value={shown.level}
-          disabled={locked || pending}
-          onChange={(event) => change(event.target.value as FetchSiteLevel)}
-          className={levelClass(shown.level)}
+      </span>
+      <SegmentedControl<FetchSiteLevel>
+        name={`fetch-site:${site.host}`}
+        legend={`Web fetch ${site.host}`}
+        size="sm"
+        options={SITE_OPTIONS}
+        value={shown.level}
+        onValueChange={change}
+        disabled={locked || pending}
+      />
+      <AllTokensCheckbox
+        checked={shown.shared}
+        disabled={locked || pending}
+        label={`All tokens for ${site.host}`}
+        sharedLevel={site.shared ? FETCH_SITE_LABELS[site.shared] : null}
+        onChange={share}
+      />
+      {locked ? null : (
+        <Button
+          type="button"
+          variant="plain"
+          size="sm"
+          disabled={pending}
+          onClick={remove}
+          aria-label={`Remove ${site.host}`}
         >
-          {FETCH_SITE_LEVELS.map((level) => (
-            <option key={level} value={level}>
-              {FETCH_SITE_LABELS[level]}
-            </option>
-          ))}
-        </Select>
-        {locked ? null : (
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            disabled={pending}
-            onClick={remove}
-            aria-label={`Remove ${site.host}`}
-          >
-            Remove
-          </Button>
-        )}
-      </div>
+          Remove
+        </Button>
+      )}
       <FormError error={error} className="basis-full" />
     </li>
   )
@@ -409,46 +414,47 @@ function AddSiteForm({ tokenId }: { tokenId: string }) {
   )
 
   return (
-    <form
-      action={action}
-      className="flex flex-col gap-3 rounded-lg border border-border p-3"
-    >
+    <form action={action} className={rowClassName}>
       <input type="hidden" name="tokenId" value={tokenId} />
-      <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-        <Field label="Add a site" htmlFor="fetch-site">
-          <Input
-            id="fetch-site"
-            name="site"
-            required
-            maxLength={300}
-            autoComplete="off"
-            placeholder="example.com"
-          />
-        </Field>
-        <Field label="Level" htmlFor="fetch-site-level">
-          <Select
-            id="fetch-site-level"
-            name="level"
-            defaultValue="allowed"
-            className="w-auto"
-          >
-            {FETCH_SITE_LEVELS.map((level) => (
-              <option key={level} value={level}>
-                {FETCH_SITE_LABELS[level]}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      </div>
-      <label className="flex items-center gap-2 text-sm">
+      <label htmlFor={`fetch-site-${tokenId}`} className="sr-only">
+        Add a site
+      </label>
+      <Input
+        id={`fetch-site-${tokenId}`}
+        name="site"
+        required
+        maxLength={300}
+        autoComplete="off"
+        placeholder="Add a site, like example.com"
+        className="h-9 min-w-0 flex-1 basis-56"
+      />
+      <Select
+        aria-label="Level"
+        name="level"
+        defaultValue="allowed"
+        className="h-9 w-auto text-[13px]"
+      >
+        {FETCH_SITE_LEVELS.map((level) => (
+          <option key={level} value={level}>
+            {FETCH_SITE_LABELS[level]}
+          </option>
+        ))}
+      </Select>
+      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <Checkbox name="shared" />
         For all tokens
       </label>
-      <FormError error={state.status === "error" ? state.error : null} />
-      <FormNote message={state.status === "ok" ? state.message : null} />
-      <div>
-        <SubmitButton pendingText="Adding…">Add site</SubmitButton>
-      </div>
+      <SubmitButton variant="secondary" size="sm" pendingText="Adding…">
+        Add site
+      </SubmitButton>
+      <FormError
+        error={state.status === "error" ? state.error : null}
+        className="basis-full"
+      />
+      <FormNote
+        message={state.status === "ok" ? state.message : null}
+        className="basis-full"
+      />
     </form>
   )
 }

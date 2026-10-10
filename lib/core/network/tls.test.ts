@@ -7,6 +7,8 @@ import { scratchDatabase } from "../test-db"
 import type { DdnsConfig } from "./ddns"
 import { selfSignedCertificate } from "./test-certificate"
 import {
+  challengeOrder,
+  challengeStore,
   checkDns,
   type Issuer,
   needsRenewal,
@@ -142,7 +144,7 @@ describe("a round", () => {
     const calls: string[] = []
     const issue: Issuer = async ({ domain, challenges }) => {
       calls.push(domain)
-      challenges.set("token", "answer")
+      challenges.http.set("token", "answer")
       if (result instanceof Error) throw result
       return selfSignedCertificate(domain)
     }
@@ -160,10 +162,35 @@ describe("a round", () => {
       status,
       now,
       issue,
-      challenges: new Map(),
+      challenges: challengeStore(),
       resolve4,
       ...extra,
     })
+
+  it("tries port 80 first for a name of the owner's, port 443 first for pcp.gg", async () => {
+    const asked: string[][] = []
+    const issue: Issuer = async ({ domain, challengeTypes }) => {
+      asked.push(challengeTypes)
+      return selfSignedCertificate(domain)
+    }
+
+    await round(issue, {}, { now: new Date() })
+    await round(
+      issue,
+      {},
+      {
+        now: new Date(),
+        domain: "alice.pcp.test",
+        config: { ...config, domain: "alice.pcp.test", via: "pcpgg" },
+      },
+    )
+
+    expect(asked).toEqual([
+      ["http-01", "tls-alpn-01"],
+      ["tls-alpn-01", "http-01"],
+    ])
+    expect(challengeOrder({ ...config, via: "pcpgg" })[0]).toBe("tls-alpn-01")
+  })
 
   it("gets a certificate and keeps it readable by PCP alone", async () => {
     const { issue, calls } = issuer("ok")

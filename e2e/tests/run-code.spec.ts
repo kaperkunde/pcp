@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test"
 
 import { PICTURE_PNG, startUpstream, type Upstream } from "../fixtures/upstream"
-import { OWNER_PASSWORD } from "../lib/auth"
 import { callTool, initialize, toolText } from "../lib/mcp"
 import {
   allowAllTools,
-  confirmWithPassword,
+  connectAssistant,
   createToken,
+  expectLevel,
+  setToolLevel,
+  showServerSettings,
   showTools,
 } from "../lib/ui"
 
@@ -65,36 +67,15 @@ test("a token made to run code gets run_code and is told how, and no other", asy
   await page.getByLabel("Save it as (optional)").fill(`Code key ${RUN}`)
   await page.getByRole("button", { name: "Add server" }).click()
   await expect(page.getByText("Tools (5)")).toBeVisible()
+  await showServerSettings(page)
   await page.getByLabel("Short name").fill(SLUG)
   await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
     page.getByRole("status").filter({ hasText: "Saved." }),
   ).toBeVisible()
 
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(TOKEN_NAME)
-  await page
-    .getByLabel(
-      "Let an assistant with this token run code that calls its tools",
-    )
-    .check()
-  await page.getByRole("button", { name: "Create token" }).click()
-  await confirmWithPassword(page, OWNER_PASSWORD)
-  await expect(page.getByText("Your new token")).toBeVisible()
-  token = (await page.getByTestId("new-token").textContent())!
-  await expect(
-    page.getByLabel(
-      "Let an assistant with this token run code that calls its tools",
-    ),
-  ).toBeChecked()
-
-  await page.goto("/tokens")
-  await expect(
-    page
-      .getByRole("listitem")
-      .filter({ hasText: TOKEN_NAME })
-      .getByText("Runs code"),
-  ).toBeVisible()
+  ;({ token } = await connectAssistant(page, TOKEN_NAME, { runCode: true }))
+  await expect(page.getByRole("switch", { name: /^Run code/ })).toBeChecked()
 
   const told = await initialize(baseURL!, token)
   expect(told.tools).toContain("run_code")
@@ -117,14 +98,11 @@ test("a program calls the token's tools and hands back only what it kept", async
     ["send_postcard", "ask"],
     ["echo_auth", "blocked"],
   ] as const) {
-    await page.getByLabel(`Access to ${SLUG}/${tool}`).selectOption(level)
-    await expect(page.getByLabel(`Access to ${SLUG}/${tool}`)).toBeEnabled()
+    await setToolLevel(page, SLUG, tool, level)
   }
   await page.reload()
   await showTools(page, SLUG)
-  await expect(page.getByLabel(`Access to ${SLUG}/echo_auth`)).toHaveValue(
-    "blocked",
-  )
+  await expectLevel(page, `Access to ${SLUG}/echo_auth`, "blocked")
 
   const text = await run(
     baseURL!,

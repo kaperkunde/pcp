@@ -81,16 +81,29 @@ export function forgetDeviceKey(file) {
 }
 
 /**
- * Whether a page is one of PCP's own, as the window shows it: plain http on
- * localhost, at the port the server listens on. Anything else the window
- * reaches (an OAuth provider's sign-in) gets no Touch ID.
+ * The origin the window loads PCP from: plain http on 127.0.0.1, the address
+ * the server binds (it is still that when the server also accepts other
+ * devices). Never the name "localhost": Chromium may resolve it to ::1
+ * first, where another program could listen on the same port and be shown as
+ * PCP, with the sign-in cookie and the Touch ID key.
+ *
+ * @param {number} port
+ */
+export function pcpOrigin(port) {
+  return `http://127.0.0.1:${port}`
+}
+
+/**
+ * Whether a page is one of PCP's own, as the window shows it: that origin,
+ * exactly. Anything else the window reaches (an OAuth provider's sign-in)
+ * gets no Touch ID.
  *
  * @param {string} url
  * @param {number} port
  */
 export function isPcpPage(url, port) {
   try {
-    return new URL(url).origin === `http://localhost:${port}`
+    return new URL(url).origin === pcpOrigin(port)
   } catch {
     return false
   }

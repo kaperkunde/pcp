@@ -79,6 +79,26 @@ describe("the browser's proxy", () => {
     expect(api.requests[0]!.url).toBe("/page")
   })
 
+  it("tells the check which name the browser asked for", async () => {
+    api = await startTestApi((_, res) => res.end("hello"))
+    const port = new URL(api.origin).port
+    const names: string[] = []
+    // Refused, so nothing is dialed: only the names are of interest here.
+    proxy = await startBrowserProxy({
+      check: (_address, _port, host) => {
+        names.push(host)
+        return "private"
+      },
+    })
+
+    expect((await viaProxy(`http://LocalHost:${port}/page`)).status).toBe(403)
+    expect(await tunnel(`[::1]:${port}`)).toBe("HTTP/1.1 403 Forbidden")
+
+    expect(names[0]).toBe("localhost")
+    expect(names.at(-1)).toBe("::1")
+    expect(api.requests).toHaveLength(0)
+  })
+
   it("refuses, before connecting, what the check refuses, and remembers why", async () => {
     api = await startTestApi((_, res) => res.end("secret"))
     const verdict: AddressVerdict = "private"

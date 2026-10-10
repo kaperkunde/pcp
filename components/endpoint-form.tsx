@@ -2,8 +2,16 @@
 
 import { useActionState, useState } from "react"
 
-import { FormError, FormNote } from "@/components/form-status"
 import { BasicAuthFields } from "@/components/basic-auth-fields"
+import {
+  ChoiceField,
+  FormFooter,
+  FormSection,
+  MoreOptions,
+  NameFields,
+  ServerFormFrame,
+  SwitchGroup,
+} from "@/components/server-form-parts"
 import {
   HeaderAuthFields,
   type ExtraHeaderValues,
@@ -14,10 +22,10 @@ import {
   OAuthClientFields,
   type OAuthClientValues,
 } from "@/components/oauth-client-fields"
-import { SubmitButton } from "@/components/submit-button"
-import { Card, CardContent } from "@/components/ui/card"
-import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { Button } from "@/components/ui/button"
+import { Input, Textarea } from "@/components/ui/input"
+import { Field } from "@/components/ui/label"
+import { SwitchRow } from "@/components/ui/switch"
 import {
   createEndpointAction,
   updateEndpointAction,
@@ -29,6 +37,8 @@ import {
   MAX_SPEC_BYTES,
   SPEC_FILE_ACCEPT,
 } from "@/lib/core/constants"
+
+type AuthType = "none" | "header" | "basic" | "oauth"
 
 export type EndpointFormValues = {
   id?: string
@@ -50,7 +60,7 @@ export type EndpointFormValues = {
   readOnly: boolean
   /** Refuse private, local and link-local addresses. */
   publicOnly: boolean
-  authType: "none" | "header" | "basic" | "oauth"
+  authType: AuthType
   authUsername: string
   authHeaderName: string
   authValueTemplate: string
@@ -58,6 +68,10 @@ export type EndpointFormValues = {
   authExtraHeaders: ExtraHeaderValues[]
 } & OAuthClientValues
 
+/**
+ * A new endpoint starts read-only: the safe choice, and the one most owners
+ * want from an API they are trying out. The form says how to widen it.
+ */
 export const EMPTY_ENDPOINT: EndpointFormValues = {
   name: "",
   description: "",
@@ -65,7 +79,7 @@ export const EMPTY_ENDPOINT: EndpointFormValues = {
   specUrl: "",
   patches: "",
   baseUrl: "",
-  readOnly: false,
+  readOnly: true,
   publicOnly: false,
   authType: "none",
   authUsername: "",
@@ -79,12 +93,29 @@ export const EMPTY_ENDPOINT: EndpointFormValues = {
   oauthAuthorizeParams: "",
 }
 
+const SIGN_IN: ReadonlyArray<{ value: AuthType; label: string }> = [
+  { value: "none", label: "None" },
+  { value: "header", label: "Secret in a header" },
+  { value: "basic", label: "User name and password" },
+  { value: "oauth", label: "OAuth" },
+]
+
+const SIGN_IN_HINT: Record<AuthType, string> = {
+  none: "The API is open: PCP sends no credential with its calls.",
+  header: "An API key or token, sent in a header with every call.",
+  basic: "HTTP Basic authentication, sent with every call.",
+  oauth:
+    "You sign in with your account, as the schema says; PCP keeps the token and renews it.",
+}
+
 /**
  * Add or edit an API endpoint: an API described by an OpenAPI schema, read
- * from a URL or an uploaded file. Text fields are held in state because
- * React resets an uncontrolled form after every action, a refused one
- * included, and a schema that does not read is the likeliest refusal; a
- * chosen file cannot be kept, only the rest.
+ * from a URL or an uploaded file. Adding, the schema, name and sign-in come
+ * first and the rest is under "More options"; editing, the form sits in the
+ * endpoint page's "Advanced" and shows everything. Text fields are held in
+ * state because React resets an uncontrolled form after every action, a
+ * refused one included, and a schema that does not read is the likeliest
+ * refusal; a chosen file cannot be kept, only the rest.
  */
 export function EndpointForm({
   initial,
@@ -113,88 +144,218 @@ export function EndpointForm({
   const [readOnly, setReadOnly] = useState(initial.readOnly)
   const [publicOnly, setPublicOnly] = useState(initial.publicOnly)
   const [authType, setAuthType] = useState(initial.authType)
+  // Open from the start when something in it is set; never closed under
+  // the owner's typing.
+  const [moreOpen] = useState(() =>
+    Boolean(initial.baseUrl || initial.patches || initial.publicOnly),
+  )
 
-  return (
-    <Card>
-      <CardContent>
-        <form action={action} className="flex flex-col gap-4">
-          {editing ? (
-            <input type="hidden" name="id" value={initial.id} />
-          ) : null}
+  const schemaField =
+    specSource === "url" ? (
+      <Field
+        label="Schema URL"
+        htmlFor={`${prefix}-spec-url`}
+        hint="Where the OpenAPI document lives, e.g. https://api.example.com/openapi.json. PCP downloads it now and again whenever you re-read it."
+      >
+        <Input
+          id={`${prefix}-spec-url`}
+          name="specUrl"
+          type="url"
+          value={specUrl}
+          onChange={(event) => setSpecUrl(event.target.value)}
+          required
+          spellCheck={false}
+          className="font-mono"
+          placeholder="https://"
+        />
+      </Field>
+    ) : (
+      <Field
+        label="Schema file"
+        htmlFor={`${prefix}-spec-file`}
+        hint={`OpenAPI 3 as JSON or YAML, up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.${editing ? " Choose a file to replace the stored schema; leave it empty to keep it." : ""}`}
+      >
+        <Input
+          id={`${prefix}-spec-file`}
+          name="specFile"
+          type="file"
+          accept={SPEC_FILE_ACCEPT}
+          required={!editing || initial.specSource !== "upload"}
+          className="py-2"
+        />
+      </Field>
+    )
 
-          <Field label="Name" htmlFor={`${prefix}-name`}>
-            <Input
-              id={`${prefix}-name`}
-              name="name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              required
-              maxLength={80}
-              placeholder="Petstore"
-            />
-          </Field>
-
-          {editing ? (
-            <Field
-              label="Short name"
-              htmlFor={`${prefix}-slug`}
-              hint="How an assistant refers to this endpoint in tool calls (endpoint/tool). Lowercase letters, digits and dashes."
-            >
-              <Input
-                id={`${prefix}-slug`}
-                name="slug"
-                value={slug}
-                onChange={(event) => setSlug(event.target.value)}
-                pattern="[a-z0-9-]+"
-                maxLength={40}
-              />
-            </Field>
-          ) : null}
-
-          <Field
-            label="Description"
-            htmlFor={`${prefix}-description`}
-            hint="What this API is for, in a sentence or two. An assistant reads this to decide where to look for a tool; PCP fills it from the schema when you leave it empty."
+  const editsField = (
+    <Field
+      label="Edits (optional)"
+      htmlFor={`${prefix}-patches`}
+      hint={
+        <>
+          Changes PCP makes to the schema before it builds the tools, and makes
+          again whenever the schema is read: a{" "}
+          <a
+            className="text-primary hover:underline"
+            href="https://datatracker.ietf.org/doc/html/rfc6902"
+            target="_blank"
+            rel="noreferrer"
           >
-            <Textarea
-              id={`${prefix}-description`}
-              name="description"
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              maxLength={1000}
-              placeholder="Pet store inventory: list, add and remove pets."
-            />
-          </Field>
+            JSON Patch
+          </a>
+          , such as{" "}
+          <code>{'[{"op": "remove", "path": "/paths/~1login"}]'}</code>. Leave
+          it empty for none.
+        </>
+      }
+    >
+      <Textarea
+        id={`${prefix}-patches`}
+        name="patches"
+        value={patches}
+        onChange={(event) => setPatches(event.target.value)}
+        rows={patches ? Math.min(16, patches.split("\n").length) : 2}
+        spellCheck={false}
+        className="font-mono text-xs md:text-xs"
+        placeholder="[]"
+      />
+    </Field>
+  )
 
-          <fieldset className="flex flex-col gap-3">
-            <legend className="mb-2 text-sm font-medium">Schema</legend>
-            <div className="flex flex-wrap gap-x-6 gap-y-2">
-              <Label className="font-normal">
-                <input
-                  type="radio"
-                  name="specSource"
-                  value="url"
-                  className="accent-primary"
-                  checked={specSource === "url"}
-                  onChange={() => setSpecSource("url")}
-                />
-                From a URL
-              </Label>
-              <Label className="font-normal">
-                <input
-                  type="radio"
-                  name="specSource"
-                  value="upload"
-                  className="accent-primary"
-                  checked={specSource === "upload"}
-                  onChange={() => setSpecSource("upload")}
-                />
-                Upload a file
-              </Label>
-            </div>
+  const baseUrlField = (
+    <Field
+      label="Base URL (optional)"
+      htmlFor={`${prefix}-base-url`}
+      hint={
+        editing ? (
+          <>
+            Requests go to <code>{initial.currentBaseUrl}</code>. Leave this
+            empty to keep that. PCP only sends a secret to an address you typed
+            here, or to the origin the schema was downloaded from, so attaching
+            one to an address that came from the schema means typing it to
+            confirm.
+          </>
+        ) : (
+          "Where the API lives. Leave it empty to use the address in the schema, unless you attach a secret or sign in with OAuth: then enter it, so PCP knows where you mean it to go. Once saved, PCP keeps this address even if the schema changes."
+        )
+      }
+    >
+      <Input
+        id={`${prefix}-base-url`}
+        name="baseUrl"
+        type="url"
+        value={baseUrl}
+        onChange={(event) => setBaseUrl(event.target.value)}
+        spellCheck={false}
+        className="font-mono"
+        placeholder="https://api.example.com/v1"
+      />
+    </Field>
+  )
 
-            {editing ? (
-              <p className="text-xs text-muted-foreground">
+  const readOnlyRow = (
+    <SwitchRow
+      id={`${prefix}-read-only`}
+      name="readOnly"
+      label="Read-only"
+      description={
+        editing
+          ? "Only operations that read (GET) become tools, so nothing an assistant calls here can change data."
+          : "Only operations that read (GET) become tools, so nothing an assistant calls here can change data. Recommended; turn it off to include the ones that change data."
+      }
+      checked={readOnly}
+      onChange={(event) => setReadOnly(event.target.checked)}
+    />
+  )
+
+  const publicOnlyRow = (
+    <SwitchRow
+      id={`${prefix}-public-only`}
+      name="publicOnly"
+      label="Public addresses only"
+      description="Refuse private, local and link-local addresses, for the schema and for every call. On for endpoints an assistant registers; turn it off only for an API on your own network that you trust this endpoint to reach, or when this machine can only reach the internet through a proxy."
+      checked={publicOnly}
+      onChange={(event) => setPublicOnly(event.target.checked)}
+    />
+  )
+
+  const signIn = (
+    <>
+      <ChoiceField
+        label="Sign-in"
+        name="authType"
+        options={SIGN_IN}
+        value={authType}
+        onValueChange={setAuthType}
+        hint={SIGN_IN_HINT[authType]}
+      />
+      {authType === "header" ? (
+        <HeaderAuthFields
+          prefix={prefix}
+          secrets={secrets}
+          initial={initial}
+          foldHeader={!editing}
+        />
+      ) : null}
+      {authType === "basic" ? (
+        <BasicAuthFields prefix={prefix} secrets={secrets} initial={initial} />
+      ) : null}
+      {authType === "oauth" ? (
+        <OAuthClientFields
+          prefix={prefix}
+          secrets={secrets}
+          initial={initial}
+          redirectUrl={redirectUrl}
+          foldClient={!editing}
+          scopeHint="Leave empty to ask for the scopes the operations PCP offers need, as the schema says."
+          intro={
+            <>
+              PCP signs in where the schema&apos;s oauth2 flow (an authorization
+              code flow) says, renews the token itself, and sends it to the base
+              URL with every call. After saving, choose{" "}
+              <strong className="text-foreground">Connect</strong> on the
+              endpoint&apos;s page. PCP registers itself with a provider that
+              allows it; most want a client you create in their developer
+              settings with this redirect URI, its client ID and secret entered
+              here:
+            </>
+          }
+        />
+      ) : null}
+    </>
+  )
+
+  if (editing) {
+    return (
+      <ServerFormFrame editing action={action}>
+        <input type="hidden" name="id" value={initial.id} />
+        <FormSection>
+          <NameFields
+            prefix={prefix}
+            editing
+            name={name}
+            onNameChange={setName}
+            slug={slug}
+            onSlugChange={setSlug}
+            description={description}
+            onDescriptionChange={setDescription}
+            namePlaceholder="Petstore"
+            descriptionHint="What this API is for, in a sentence or two. An assistant reads this to decide where to look for a tool; PCP fills it from the schema when you leave it empty."
+            slugHint="How an assistant refers to this endpoint in tool calls (endpoint/tool). Lowercase letters, digits and dashes."
+          />
+        </FormSection>
+
+        <FormSection>
+          <ChoiceField
+            label="Schema"
+            name="specSource"
+            options={[
+              { value: "url", label: "From a URL" },
+              { value: "upload", label: "Upload a file" },
+            ]}
+            value={specSource}
+            onValueChange={setSpecSource}
+            hint={
+              <>
                 {initial.specSource === "url" ? (
                   <>
                     Read from <code>{initial.specUrl}</code>
@@ -212,205 +373,82 @@ export function EndpointForm({
                   </>
                 ) : null}
                 . Saving rebuilds the tools from PCP&apos;s copy of the schema.
-              </p>
-            ) : null}
-
-            {specSource === "url" ? (
-              <Field
-                label="Schema URL"
-                htmlFor={`${prefix}-spec-url`}
-                hint="Where the OpenAPI document lives, e.g. https://api.example.com/openapi.json. PCP downloads it now and again whenever you re-read it."
-              >
-                <Input
-                  id={`${prefix}-spec-url`}
-                  name="specUrl"
-                  type="url"
-                  value={specUrl}
-                  onChange={(event) => setSpecUrl(event.target.value)}
-                  required
-                  placeholder="https://"
-                />
-              </Field>
-            ) : (
-              <Field
-                label="Schema file"
-                htmlFor={`${prefix}-spec-file`}
-                hint={`OpenAPI 3 as JSON or YAML, up to ${MAX_SPEC_BYTES / 1024 / 1024} MB.${editing ? " Choose a file to replace the stored schema; leave it empty to keep it." : ""}`}
-              >
-                <Input
-                  id={`${prefix}-spec-file`}
-                  name="specFile"
-                  type="file"
-                  accept={SPEC_FILE_ACCEPT}
-                  required={!editing || initial.specSource !== "upload"}
-                />
-              </Field>
-            )}
-            <Field
-              label="Edits (optional)"
-              htmlFor={`${prefix}-patches`}
-              hint={
-                <>
-                  Changes PCP makes to the schema before it builds the tools,
-                  and makes again whenever the schema is read: a{" "}
-                  <a
-                    className="underline"
-                    href="https://datatracker.ietf.org/doc/html/rfc6902"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    JSON Patch
-                  </a>
-                  , such as{" "}
-                  <code>{'[{"op": "remove", "path": "/paths/~1login"}]'}</code>.
-                  Leave it empty for none.
-                </>
-              }
-            >
-              <Textarea
-                id={`${prefix}-patches`}
-                name="patches"
-                value={patches}
-                onChange={(event) => setPatches(event.target.value)}
-                rows={patches ? Math.min(16, patches.split("\n").length) : 2}
-                spellCheck={false}
-                className="font-mono text-xs"
-                placeholder="[]"
-              />
-            </Field>
-          </fieldset>
-
-          <Field
-            label="Base URL (optional)"
-            htmlFor={`${prefix}-base-url`}
-            hint={
-              editing ? (
-                <>
-                  Requests go to <code>{initial.currentBaseUrl}</code>. Leave
-                  this empty to keep that. PCP only sends a secret to an address
-                  you typed here, or to the origin the schema was downloaded
-                  from, so attaching one to an address that came from the schema
-                  means typing it to confirm.
-                </>
-              ) : (
-                "Where the API lives. Leave it empty to use the address in the schema, unless you attach a secret or sign in with OAuth: then enter it, so PCP knows where you mean it to go. Once saved, PCP keeps this address even if the schema changes."
-              )
+              </>
             }
-          >
-            <Input
-              id={`${prefix}-base-url`}
-              name="baseUrl"
-              type="url"
-              value={baseUrl}
-              onChange={(event) => setBaseUrl(event.target.value)}
-              placeholder="https://api.example.com/v1"
-            />
-          </Field>
+          />
+          {schemaField}
+          {editsField}
+        </FormSection>
 
-          <div className="flex flex-col gap-1.5">
-            <Label className="font-normal" htmlFor={`${prefix}-read-only`}>
-              <Checkbox
-                id={`${prefix}-read-only`}
-                name="readOnly"
-                checked={readOnly}
-                onChange={(event) => setReadOnly(event.target.checked)}
-              />
-              Read-only
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              Only operations that read (GET) become tools, so nothing an
-              assistant calls here can change data.
-            </p>
-          </div>
+        <FormSection>{baseUrlField}</FormSection>
 
-          <div className="flex flex-col gap-1.5">
-            <Label className="font-normal" htmlFor={`${prefix}-public-only`}>
-              <Checkbox
-                id={`${prefix}-public-only`}
-                name="publicOnly"
-                checked={publicOnly}
-                onChange={(event) => setPublicOnly(event.target.checked)}
-              />
-              Public addresses only
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              Refuse private, local and link-local addresses, for the schema and
-              for every call. On for endpoints an assistant registers; turn it
-              off only for an API on your own network that you trust this
-              endpoint to reach, or when this machine can only reach the
-              internet through a proxy.
-            </p>
-          </div>
+        <FormSection>{signIn}</FormSection>
 
-          <Field label="Authentication" htmlFor={`${prefix}-auth`}>
-            <Select
-              id={`${prefix}-auth`}
-              name="authType"
-              value={authType}
-              onChange={(event) =>
-                setAuthType(
-                  event.target.value as EndpointFormValues["authType"],
-                )
-              }
-            >
-              <option value="none">None — the API is open</option>
-              <option value="header">
-                Secret in a header — an API key or token
-              </option>
-              <option value="basic">
-                User name and password — HTTP Basic authentication
-              </option>
-              <option value="oauth">
-                OAuth — sign in with your account, as the schema says
-              </option>
-            </Select>
-          </Field>
+        <SwitchGroup>
+          {readOnlyRow}
+          {publicOnlyRow}
+        </SwitchGroup>
 
-          {authType === "header" ? (
-            <HeaderAuthFields
-              prefix={prefix}
-              secrets={secrets}
-              initial={initial}
-            />
-          ) : null}
+        <FormFooter
+          editing
+          state={state}
+          submitLabel="Save changes"
+          pendingText="Saving…"
+        />
+      </ServerFormFrame>
+    )
+  }
 
-          {authType === "basic" ? (
-            <BasicAuthFields
-              prefix={prefix}
-              secrets={secrets}
-              initial={initial}
-            />
-          ) : null}
+  return (
+    <ServerFormFrame editing={false} action={action}>
+      <input type="hidden" name="specSource" value={specSource} />
+      <div className="flex flex-col items-start gap-1.5">
+        <div className="w-full">{schemaField}</div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="-ml-3"
+          onClick={() => setSpecSource(specSource === "url" ? "upload" : "url")}
+        >
+          {specSource === "url" ? "Upload a file instead" : "Use a URL instead"}
+        </Button>
+      </div>
 
-          {authType === "oauth" ? (
-            <OAuthClientFields
-              prefix={prefix}
-              secrets={secrets}
-              initial={initial}
-              redirectUrl={redirectUrl}
-              scopeHint="Leave empty to ask for the scopes the operations PCP offers need, as the schema says."
-              intro={
-                <>
-                  PCP signs in where the schema&apos;s oauth2 flow (an
-                  authorization code flow) says, renews the token itself, and
-                  sends it to the base URL with every call. After saving, choose{" "}
-                  <strong>Connect</strong> on the endpoint&apos;s page. Most
-                  providers want a client you create in their developer settings
-                  with this redirect URI; enter its client ID and secret here:
-                </>
-              }
-            />
-          ) : null}
+      <NameFields
+        prefix={prefix}
+        editing={false}
+        name={name}
+        onNameChange={setName}
+        slug={slug}
+        onSlugChange={setSlug}
+        description={description}
+        onDescriptionChange={setDescription}
+        namePlaceholder="Petstore"
+        descriptionPlaceholder="Pet store inventory: list, add and remove pets."
+        descriptionHint="What this API is for, in a sentence or two. An assistant reads this to decide where to look for a tool; PCP fills it from the schema when you leave it empty."
+        slugHint=""
+      />
 
-          <FormError error={state.status === "error" ? state.error : null} />
-          <FormNote message={state.status === "ok" ? state.message : null} />
-          <div>
-            <SubmitButton pendingText={editing ? "Saving…" : "Reading schema…"}>
-              {editing ? "Save changes" : "Add endpoint"}
-            </SubmitButton>
-          </div>
-        </form>
-      </CardContent>
-    </Card>
+      <FormSection>{signIn}</FormSection>
+
+      <SwitchGroup>{readOnlyRow}</SwitchGroup>
+
+      <MoreOptions
+        description="Base URL, edits to the schema, public addresses only."
+        defaultOpen={moreOpen}
+      >
+        {baseUrlField}
+        {editsField}
+        <SwitchGroup>{publicOnlyRow}</SwitchGroup>
+      </MoreOptions>
+
+      <FormFooter
+        editing={false}
+        state={state}
+        submitLabel="Add endpoint"
+        pendingText="Reading schema…"
+      />
+    </ServerFormFrame>
   )
 }

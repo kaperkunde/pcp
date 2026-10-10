@@ -1,10 +1,22 @@
+import { isIP } from "node:net"
+
 import { invalid } from "../errors"
+import {
+  bareHostname,
+  isPublicAddress,
+  lookupAll,
+  type HostLookup,
+} from "../openapi/address"
+import type { SendOptions } from "../openapi/transport"
 
 /**
  * The addresses a mail account has: a JMAP session URL, an IMAP server and
  * an SMTP server. All are the owner's to type, and none may carry a user
  * name or password (those belong in a secret). Mail never goes in the
- * clear: imap:// and smtp:// mean STARTTLS, which PCP insists on.
+ * clear: imap:// and smtp:// mean STARTTLS, which PCP insists on, and a JMAP
+ * session URL is https:// unless the server is on the owner's own network
+ * (a private, loopback or link-local address, or a name that resolves only
+ * to those).
  */
 
 export type MailServerAddress = {
@@ -12,6 +24,31 @@ export type MailServerAddress = {
   port: number
   /** TLS from the first byte (imaps, smtps); otherwise STARTTLS. */
   secure: boolean
+}
+
+/** Why a session URL over http:// was refused. */
+export const PLAIN_HTTP_REFUSED =
+  "The session URL uses http://, which sends the sign-in unencrypted. PCP allows that only for a server on your own network (a private, loopback or link-local address, or a name that resolves only to those). Use an https:// session URL."
+
+/** A private, loopback or link-local IP address; false for a name. */
+function isPrivateAddress(address: string): boolean {
+  return (
+    isIP(address.replace(/^\[|\]$/g, "")) !== 0 && !isPublicAddress(address)
+  )
+}
+
+/**
+ * How a request to a mail server is sent: over http:// only to a private
+ * address, checked on the address the socket connects to, so a name that
+ * answers with a public one to a check and a private one to the connection
+ * cannot get through. https:// goes as it always did.
+ */
+export function mailSendOptions(
+  url: string,
+): Pick<SendOptions, "publicOnly" | "addressCheck"> {
+  return new URL(url).protocol === "http:"
+    ? { publicOnly: true, addressCheck: (address) => isPrivateAddress(address) }
+    : {}
 }
 
 export function validateSessionUrl(raw: string): string {
@@ -27,8 +64,18 @@ export function validateSessionUrl(raw: string): string {
 
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw invalid(
-      "The session URL must start with https:// (or http:// on a private network).",
+      "The session URL must start with https:// (or http:// on your own network).",
     )
+  }
+
+  // An IP address needs no lookup. A name is looked up in
+  // requireEncryptedOrPrivate, which every place that takes a URL calls.
+  if (url.protocol === "http:") {
+    const host = bareHostname(url)
+
+    if (isIP(host) !== 0 && !isPrivateAddress(host)) {
+      throw invalid(PLAIN_HTTP_REFUSED)
+    }
   }
 
   if (url.username || url.password) {
@@ -42,6 +89,46 @@ export function validateSessionUrl(raw: string): string {
   }
 
   return url.toString()
+}
+
+/**
+ * Refuses an http:// session URL whose name does not resolve only to
+ * private, loopback or link-local addresses. A URL that passed
+ * validateSessionUrl is https:// or an IP address already; this is the
+ * lookup for a name. The connection checks again (mailSendOptions), because
+ * a name can answer differently later.
+ */
+export async function requireEncryptedOrPrivate(
+  sessionUrl: string,
+  lookup: HostLookup = lookupAll,
+): Promise<void> {
+  const url = new URL(sessionUrl)
+
+  if (url.protocol !== "http:") {
+    return
+  }
+
+  const host = bareHostname(url)
+
+  if (isIP(host) !== 0) {
+    if (!isPrivateAddress(host)) {
+      throw invalid(PLAIN_HTTP_REFUSED)
+    }
+
+    return
+  }
+
+  let addresses: string[]
+
+  try {
+    addresses = await lookup(host)
+  } catch {
+    addresses = []
+  }
+
+  if (addresses.length === 0 || !addresses.every(isPrivateAddress)) {
+    throw invalid(PLAIN_HTTP_REFUSED)
+  }
 }
 
 /**
@@ -190,21 +277,50 @@ export function onSameOrigin(named: string, typed: string): string | null {
   }
 }
 
+/**
+ * A finished address, parsed with no base, accepted only when it is absolute
+ * and on the typed origin; the string returned is the one to fetch. Parsing
+ * it the way fetch will is the point: a form like "https:host/x" resolves
+ * against a base as a path on it, and alone as another host. Null otherwise.
+ */
+export function onSameOriginAbsolute(
+  named: string,
+  typed: string,
+): string | null {
+  try {
+    const url = new URL(named)
+
+    if (url.origin !== new URL(typed).origin || url.username || url.password) {
+      return null
+    }
+
+    url.hash = ""
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
 const ADDRESS = /^[^\s@<>()",;:\\[\]]+@[^\s@<>()",;:\\[\]]+$/
 
 /**
  * One recipient as an assistant writes it: "ada@example.com" or
  * "Ada Lovelace <ada@example.com>". Nothing that could start a header of
- * its own gets through.
+ * its own gets through. A refusal names the address by `where` ("Recipient 2
+ * in to"), never by its text: the request log keeps these messages, and not
+ * what an assistant sent.
  */
-export function parseRecipient(raw: string): {
+export function parseRecipient(
+  raw: string,
+  where = "The address",
+): {
   name: string | null
   email: string
 } {
   const value = raw.trim()
 
   if (/[\u0000-\u001f\u007f]/.test(value)) {
-    throw invalid("An address cannot have line breaks or control characters.")
+    throw invalid(`${where} cannot have line breaks or control characters.`)
   }
 
   const named = /^(.*?)\s*<([^<>]+)>$/.exec(value)
@@ -212,12 +328,12 @@ export function parseRecipient(raw: string): {
   const name = named ? named[1]!.trim().replace(/^"(.*)"$/, "$1") || null : null
 
   if (!ADDRESS.test(email) || email.length > 320) {
-    throw invalid(`${raw.slice(0, 100)} is not an email address.`)
+    throw invalid(`${where} is not an email address.`)
   }
 
   if (name && (name.length > 200 || /[<>"]/.test(name))) {
     throw invalid(
-      `The name in ${raw.slice(0, 100)} cannot have <, > or quotes.`,
+      `The name in ${where.toLowerCase()} cannot have <, > or quotes, and is at most 200 characters.`,
     )
   }
 

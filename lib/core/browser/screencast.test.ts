@@ -5,8 +5,8 @@ import type { Tab } from "./runtime"
 import { subscribeScreencast, viewerCount, type Frame } from "./screencast"
 
 // One screencast per tab, shared: the first viewer starts it, the last one
-// stops it, every frame is acknowledged, and a viewer who joins late gets
-// the latest frame at once.
+// stops it, a frame is acknowledged once a viewer took it, and a viewer who
+// joins late gets the latest frame at once.
 
 function fakeTab() {
   const sent: string[] = []
@@ -46,14 +46,23 @@ describe("the live view's screencast", () => {
     const first: Frame[] = []
     const second: Frame[] = []
 
-    const stopFirst = await subscribeScreencast(tab, (frame) =>
+    const firstViewer = await subscribeScreencast(tab, (frame) =>
       first.push(frame),
     )
     emit("frame-1")
-    const stopSecond = await subscribeScreencast(tab, (frame) =>
+    const ack = () =>
+      sent.filter((method) => method === "Page.screencastFrameAck").length
+    // Chromium waits until a viewer has sent the frame on.
+    expect(ack()).toBe(0)
+    firstViewer!.took()
+    expect(ack()).toBe(1)
+
+    const secondViewer = await subscribeScreencast(tab, (frame) =>
       second.push(frame),
     )
     emit("frame-2")
+    secondViewer!.took()
+    firstViewer!.took()
 
     expect(first.map((frame) => frame.data)).toEqual(["frame-1", "frame-2"])
     // The late viewer starts from the latest frame.
@@ -61,13 +70,12 @@ describe("the live view's screencast", () => {
     expect(
       sent.filter((method) => method === "Page.startScreencast"),
     ).toHaveLength(1)
-    expect(
-      sent.filter((method) => method === "Page.screencastFrameAck"),
-    ).toHaveLength(2)
+    // Once per frame, whoever took it first.
+    expect(ack()).toBe(2)
 
-    stopFirst!()
+    firstViewer!.stop()
     expect(sent).not.toContain("Page.stopScreencast")
-    stopSecond!()
+    secondViewer!.stop()
     await Promise.resolve()
     expect(sent).toContain("Page.stopScreencast")
     expect(viewerCount(tab)).toBe(0)

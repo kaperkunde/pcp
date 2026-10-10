@@ -1,14 +1,26 @@
+import {
+  Client,
+  StreamableHTTPClientTransport,
+} from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { NEW_SECRET } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { createMailAccount } from "./mail/accounts"
 import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
 import { oauthRedirectUrl } from "./oauth-client"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
-import { getServer } from "./servers"
+import { checkedFetch } from "./openapi/transport"
+import { createServer, getServer, updateServer } from "./servers"
 import { scratchDatabase } from "./test-db"
-import { callServerTool, PcpOAuthProvider, syncServerTools } from "./upstream"
+import {
+  callServerTool,
+  PCP_CLIENT_INFO,
+  PcpOAuthProvider,
+  serverFetch,
+  syncServerTools,
+} from "./upstream"
 import { setupVault } from "./vault"
 
 // The bearer token PCP sends to a server it calls itself (a JMAP mail
@@ -107,7 +119,7 @@ describe("a JMAP account signed in with OAuth", () => {
 
     expect(await syncServerTools(ctx, server, PUBLIC)).toMatchObject({
       status: "ok",
-      toolCount: 10,
+      toolCount: 16,
     })
     expect(fake.requests[0]!.authorization).toBe("Bearer at-1")
     expect(tokenRequests).toHaveLength(0)
@@ -212,5 +224,246 @@ describe("a JMAP account signed in with OAuth", () => {
     })
     expect(row.status).toBe("auth_required")
     expect(row.statusMessage).toMatch(/needs to be connected/)
+  })
+})
+
+describe("an MCP server that repeats its credential", () => {
+  const KEY = "sk-live-echoed-0123456789"
+  let mcp: TestApi
+
+  beforeEach(async () => {
+    // A stateless server that puts the key it was sent everywhere it can:
+    // its tool list, a tool's answer, and an error's description.
+    mcp = await startTestApi((request, res) => {
+      if (request.method !== "POST") {
+        res.statusCode = 405
+        return res.end()
+      }
+
+      const sent = String(request.headers["x-api-key"])
+      const { id, method, params } = JSON.parse(request.body) as {
+        id?: number
+        method: string
+        params?: { name?: string }
+      }
+      const answer = (result: unknown) =>
+        json(res, 200, { jsonrpc: "2.0", id, result })
+
+      if (id === undefined) {
+        res.statusCode = 202
+        return res.end()
+      }
+
+      if (method === "initialize") {
+        return answer({
+          protocolVersion: "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "echo", version: "1" },
+          instructions: `Signed in with ${sent}.`,
+        })
+      }
+
+      if (method === "tools/list") {
+        return answer({
+          tools: [
+            {
+              name: "whoami",
+              description: `Says who ${sent} is.`,
+              inputSchema: { type: "object", default: { key: sent } },
+            },
+          ],
+        })
+      }
+
+      if (params?.name === "fail") {
+        return json(res, 400, {
+          error: "invalid_request",
+          error_description: `Unknown key: ${sent}`,
+        })
+      }
+
+      return answer({
+        content: [{ type: "text", text: `X-API-Key: ${sent}` }],
+        structuredContent: { headers: { "x-api-key": sent } },
+      })
+    })
+  })
+
+  afterEach(async () => {
+    await mcp.close()
+  })
+
+  async function echoServer() {
+    const { id } = await createServer(ctx, {
+      name: "Echo",
+      url: `${mcp.origin}/mcp`,
+      authType: "header",
+      authHeaderName: "X-API-Key",
+      authValueTemplate: "{{secret}}",
+      authSecretId: NEW_SECRET,
+      authSecretValue: KEY,
+    })
+    return getServer(ctx, id)
+  }
+
+  it("takes it out of the tool list, a tool's answer and an error", async () => {
+    const server = await echoServer()
+
+    expect((await syncServerTools(ctx, server, PUBLIC)).status).toBe("ok")
+    const stored = await db().mcpServer.findUniqueOrThrow({
+      where: { id: server.id },
+      include: { tools: true },
+    })
+    expect(JSON.stringify(stored)).not.toContain(KEY)
+    expect(stored.tools[0]!.description).toBe("Says who [redacted] is.")
+
+    const result = await callServerTool(ctx, server, "whoami", {}, PUBLIC)
+    expect(result.content).toEqual([
+      { type: "text", text: "X-API-Key: [redacted]" },
+    ])
+    expect(result.structuredContent).toEqual({
+      headers: { "x-api-key": "[redacted]" },
+    })
+    // It was sent all the same.
+    expect(mcp.requests.at(-1)!.headers["x-api-key"]).toBe(KEY)
+
+    await expect(
+      callServerTool(ctx, server, "fail", {}, PUBLIC),
+    ).rejects.toThrow(/Unknown key: \[redacted\]/)
+    expect((await getServer(ctx, server.id)).statusMessage).not.toContain(KEY)
+  })
+})
+
+describe("an MCP server limited to public addresses", () => {
+  let mcp: TestApi
+
+  beforeEach(async () => {
+    // A stateless server with one tool; /old sends a client on to /mcp.
+    mcp = await startTestApi((request, res) => {
+      if (request.url === "/old") {
+        res.statusCode = 307
+        res.setHeader("location", "/mcp")
+        return res.end()
+      }
+
+      if (request.method !== "POST") {
+        res.statusCode = 405
+        return res.end()
+      }
+
+      const { id, method } = JSON.parse(request.body) as {
+        id?: number
+        method: string
+      }
+      const answer = (result: unknown) =>
+        json(res, 200, { jsonrpc: "2.0", id, result })
+
+      if (id === undefined) {
+        res.statusCode = 202
+        return res.end()
+      }
+
+      if (method === "initialize") {
+        return answer({
+          protocolVersion: "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "local", version: "1" },
+        })
+      }
+
+      return answer({
+        tools: [{ name: "ping", inputSchema: { type: "object" } }],
+      })
+    })
+  })
+
+  afterEach(async () => {
+    await mcp.close()
+  })
+
+  async function localServer(publicOnly?: boolean) {
+    const { id } = await createServer(ctx, {
+      name: "Local",
+      url: `${mcp.origin}/mcp`,
+      authType: "none",
+      ...(publicOnly === undefined ? {} : { publicOnly }),
+    })
+    return getServer(ctx, id)
+  }
+
+  it("refuses a private address before anything is sent", async () => {
+    const server = await localServer(true)
+
+    const result = await syncServerTools(ctx, server, PUBLIC)
+    expect(result.status).toBe("error")
+    expect(result.message).toMatch(
+      /127\.0\.0\.1 is, or resolves to, a private or local address, and this server only reaches public ones/,
+    )
+    expect(mcp.requests).toHaveLength(0)
+  })
+
+  it("refuses a name that resolves to one, and the cloud metadata address", async () => {
+    const port = new URL(mcp.origin).port
+    const reach = serverFetch({ kind: "mcp", publicOnly: true })!
+
+    for (const url of [
+      `http://localhost:${port}/mcp`,
+      "http://169.254.169.254/latest/meta-data/",
+      "http://[::1]:3000/mcp",
+    ]) {
+      await expect(reach(url, { method: "POST" }), url).rejects.toThrow(
+        /only reaches public ones/,
+      )
+    }
+    expect(mcp.requests).toHaveLength(0)
+  })
+
+  it("reaches it once the owner allows private addresses", async () => {
+    const server = await localServer(true)
+    const { reconnect } = await updateServer(ctx, server.id, {
+      name: server.name,
+      url: server.url,
+      authType: "none",
+      publicOnly: false,
+    })
+
+    // Allowing them can change what the server's tools are.
+    expect(reconnect).toBe(true)
+    const allowed = await getServer(ctx, server.id)
+    expect(allowed.publicOnly).toBe(false)
+    expect(await syncServerTools(ctx, allowed, PUBLIC)).toMatchObject({
+      status: "ok",
+      toolCount: 1,
+    })
+  })
+
+  it("is not set on a server the owner adds", async () => {
+    const server = await localServer()
+
+    expect(server.publicOnly).toBe(false)
+    expect((await syncServerTools(ctx, server, PUBLIC)).status).toBe("ok")
+    expect(serverFetch(server)).toBeUndefined()
+  })
+
+  it("speaks MCP through the checked fetch, following a redirect", async () => {
+    // The address check is replaced so the local server can be reached;
+    // what is under test is that the SDK works over the checked requests.
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`${mcp.origin}/old`),
+      {
+        fetch: checkedFetch(
+          { publicOnly: true, addressCheck: () => true },
+          { followRedirects: true },
+        ),
+      },
+    )
+    const client = new Client(PCP_CLIENT_INFO)
+
+    await client.connect(transport)
+    const { tools } = await client.listTools()
+    await client.close()
+
+    expect(tools.map((tool) => tool.name)).toEqual(["ping"])
+    expect(mcp.requests.some((request) => request.url === "/mcp")).toBe(true)
   })
 })

@@ -2,7 +2,14 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type { WebFetchRule } from "@/lib/generated/prisma/client"
 
+import { loadSiteAllowances } from "./allowances"
 import { requireLiveToken, requireToken } from "./api-tokens"
+import { findBrowserServer, tokenReachesBrowser } from "./browser/server"
+import {
+  fetchThroughBrowser,
+  hasClearance,
+  solverAvailable,
+} from "./browser/solve"
 import {
   FETCH_METHOD_GROUPS,
   TOOL_ACCESS_LEVELS,
@@ -14,7 +21,13 @@ import type { VaultContext } from "./context"
 import { db } from "./db"
 import { invalid, notFound } from "./errors"
 import { newId } from "./ids"
-import { fetchWeb, type FetchOptions } from "./fetch/fetch"
+import { visible, type ShownText } from "./permission-rules"
+import {
+  fetchWeb,
+  withNote,
+  type FetchAnswer,
+  type FetchOptions,
+} from "./fetch/fetch"
 import { MAX_FETCH_RULES } from "./fetch/limits"
 import type { FetchArgs } from "./fetch/request"
 import {
@@ -131,11 +144,17 @@ function toRuleSet(rows: WebFetchRule[]): FetchRuleSet {
   return rules
 }
 
+/** The token's lines and the ones for all tokens, with its sites allowed for now. */
 export async function loadFetchRules(
   vaultId: string,
   tokenId: string,
 ): Promise<FetchRuleSet> {
-  return toRuleSet(await ruleRows(vaultId, tokenId))
+  const [rows, allowedSites] = await Promise.all([
+    ruleRows(vaultId, tokenId),
+    loadSiteAllowances(tokenId),
+  ])
+
+  return { ...toRuleSet(rows), allowedSites }
 }
 
 /** The site a request goes to. */
@@ -304,6 +323,13 @@ export async function writeSiteAccess(
  * Runs an allowed request and notes that the site was fetched. Whether it
  * may reach private addresses is read as it runs, so an answer the owner
  * gives later follows the token's line as it is then.
+ *
+ * A site that answers a GET with its check of its visitors
+ * (fetch/challenge.ts) is read again through the vault's browser
+ * (browser/solve.ts) where the owner added one and Chromium is there; a
+ * site the browser passed lately is read through it first, and the plain
+ * request is the fallback. Any other request is sent once. An answer that
+ * is still the check ends with one line on what the owner can do.
  */
 export async function runFetch(
   ctx: VaultContext,
@@ -312,20 +338,69 @@ export async function runFetch(
   {
     publicUrl,
     fetcher = fetchWeb,
+    solver = fetchThroughBrowser,
+    available = solverAvailable,
+    clearance = hasClearance,
   }: {
     publicUrl: string
-    fetcher?: (
-      args: FetchArgs,
-      options?: FetchOptions,
-    ) => Promise<CallToolResult>
+    fetcher?: (args: FetchArgs, options?: FetchOptions) => Promise<FetchAnswer>
+    /** The read through the browser; the real one when left out. */
+    solver?: typeof fetchThroughBrowser
+    /** Whether the browser can read pages here. */
+    available?: typeof solverAvailable
+    /** Whether the browser passed the site's check lately. */
+    clearance?: typeof hasClearance
   },
 ): Promise<CallToolResult> {
-  const result = await fetcher(args, {
+  const host = fetchHostOf(args)
+  const options = {
     allowPrivate: await privateAllowedFor(ctx.vaultId, tokenId),
     publicUrl,
-  })
-  await recordFetch(ctx.vaultId, tokenId, fetchHostOf(args))
+  }
+  // Whether the browser can read the page is asked only when it would:
+  // most sites never check, and the answer can mean loading Playwright.
+  const reading = args.method === "GET"
+  let answer: FetchAnswer
+
+  if (reading && clearance(ctx.vaultId, host) && (await available(ctx))) {
+    answer = await solver(ctx, args, options)
+
+    if (answer.challenged) {
+      answer = await fetcher(args, options)
+    }
+  } else {
+    answer = await fetcher(args, options)
+
+    if (answer.challenged && reading && (await available(ctx))) {
+      answer = await solver(ctx, args, options)
+    }
+  }
+
+  const result = answer.challenged
+    ? withNote(answer.result, await checkHint(ctx, tokenId))
+    : answer.result
+
+  await recordFetch(ctx.vaultId, tokenId, host)
   return result
+}
+
+/**
+ * What an assistant can do about a check web_fetch did not get past: hand
+ * the page to the owner in the browser where the token has it, or tell
+ * them what would let PCP pass such checks.
+ */
+async function checkHint(ctx: VaultContext, tokenId: string): Promise<string> {
+  const reached = await tokenReachesBrowser(ctx, tokenId)
+
+  if (reached) {
+    return `Open it with ${reached.slug}/navigate and call ${reached.slug}/hand_over so the owner can pass the check themselves.`
+  }
+
+  if (await findBrowserServer(ctx)) {
+    return "The owner can let this token use PCP's browser, where they can pass such checks."
+  }
+
+  return "The owner can add the browser on PCP's Browser page; PCP then passes such checks for web_fetch."
 }
 
 const CHANGING_METHODS_WARNING =
@@ -339,12 +414,21 @@ export function describeFetchAsk(
   title: string
   lines: string[]
   warning: string | null
+  full: ShownText[] | null
 } {
   const host = fetchHostOf(args)
   const reading = args.method === "GET" || args.method === "HEAD"
-  const headers = Object.entries(args.headers)
+  const headers = Object.entries(args.headers).map(([name, value]) => ({
+    name,
+    value,
+    shown: visible(value, { oneLine: true }),
+  }))
   const body = args.body ?? ""
   const clipped = body.length > 2000 ? `${body.slice(0, 1999)}…` : body
+  // Anything cut or written out above is there whole, below the lines.
+  const cut =
+    headers.some(({ value, shown }) => value.length > 200 || shown !== value) ||
+    clipped !== body
 
   return {
     title: reading
@@ -355,7 +439,7 @@ export function describeFetchAsk(
       `Method: ${args.method}`,
       ...(headers.length > 0
         ? [
-            `Headers: ${headers.map(([name, value]) => `${name}: ${value.length > 200 ? `${value.slice(0, 199)}…` : value}`).join("; ")}`,
+            `Headers: ${headers.map(({ name, value, shown }) => (value.length > 200 ? `${name} (${value.length.toLocaleString("en")} characters): ${visible(value.slice(0, 199), { oneLine: true })}…` : `${name}: ${shown}`)).join("; ")}`,
           ]
         : []),
       ...(body
@@ -368,6 +452,28 @@ export function describeFetchAsk(
     warning: reading
       ? null
       : `A ${args.method} request ${CHANGING_METHODS_WARNING}`,
+    full: cut
+      ? [
+          ...(headers.length > 0
+            ? [
+                {
+                  label: "Headers",
+                  text: headers
+                    .map(({ name, shown }) => `${name}: ${shown}`)
+                    .join("\n"),
+                },
+              ]
+            : []),
+          ...(body
+            ? [
+                {
+                  label: `Body (${body.length.toLocaleString("en")} characters)`,
+                  text: visible(body),
+                },
+              ]
+            : []),
+        ]
+      : null,
   }
 }
 

@@ -156,6 +156,10 @@ describe("completeSessionUrl", () => {
     )
   })
 
+  it("refuses http:// to a public address, as the owner's form does", () => {
+    expect(() => completeSessionUrl("http://8.8.8.8")).toThrow(/unencrypted/)
+  })
+
   it("refuses what the owner's own form refuses", () => {
     expect(() => completeSessionUrl("")).toThrow(/session URL/)
     expect(() => completeSessionUrl("ftp://mail.example.com")).toThrow(

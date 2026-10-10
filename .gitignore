@@ -47,3 +47,6 @@ next-env.d.ts
 /.claude/launch.json
 /.claude/worktrees/
 /.claude/settings.local.json
+
+# Python bytecode (the sandbox tests compile sandbox/*.py)
+__pycache__/

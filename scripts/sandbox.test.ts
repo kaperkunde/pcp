@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
@@ -82,5 +83,91 @@ describe("docker-compose.sandbox.yaml", () => {
       read("sandbox/runner.py").match(/PROTOCOL = (\d+)/)![1]
 
     expect(runnerProtocol).toBe(pcpProtocol)
+  })
+})
+
+// The launcher's `clean` removes what a program leaves in the container's IPC
+// namespace, which a process dying does not. The test makes its objects in an
+// IPC namespace of its own (`unshare`), so removing "the program's" objects
+// never reaches anything of the machine it runs on.
+
+function canUnshare(): boolean {
+  try {
+    execFileSync(
+      "unshare",
+      ["--user", "--map-root-user", "--ipc", "python3", "-c", "import ctypes"],
+      { stdio: "ignore" },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+const IPC_SCRIPT = `
+import ctypes, os, sys
+sys.path.insert(0, sys.argv[1])
+import launcher
+
+libc = ctypes.CDLL(None, use_errno=True)
+IPC_CREAT = 0o1000
+made = {
+    "shm": libc.shmget(0, 4096, IPC_CREAT | 0o600),
+    "sem": libc.semget(0, 1, IPC_CREAT | 0o600),
+    "msg": libc.msgget(0, IPC_CREAT | 0o600),
+}
+assert all(i >= 0 for i in made.values()), made
+
+
+def listed():
+    found = {}
+    for table, column, _ in launcher.SYSV:
+        with open(table) as lines:
+            header = lines.readline().split()
+            ids = {int(line.split()[header.index(column)]) for line in lines}
+        found[table.rsplit("/", 1)[1]] = ids
+    return found
+
+
+def left():
+    now = listed()
+    return sorted(kind for kind, i in made.items() if i in now[kind])
+
+
+assert left() == ["msg", "sem", "shm"], left()
+launcher.PROGRAM_UID = 12345
+launcher.remove_sysv_ipc()
+assert left() == ["msg", "sem", "shm"], "removed another user's: %s" % left()
+launcher.PROGRAM_UID = os.getuid()
+launcher.remove_sysv_ipc()
+assert left() == [], "left behind: %s" % left()
+print("ok")
+`
+
+describe("sandbox/launcher.py", () => {
+  it.skipIf(!canUnshare())(
+    "removes the program user's System V shared memory, semaphores and message queues",
+    () => {
+      const out = execFileSync(
+        "unshare",
+        [
+          "--user",
+          "--map-root-user",
+          "--ipc",
+          "python3",
+          "-c",
+          IPC_SCRIPT,
+          path.join(root, "sandbox"),
+        ],
+        { encoding: "utf8" },
+      )
+      expect(out.trim()).toBe("ok")
+    },
+  )
+
+  it("cleans the POSIX message queues and the System V objects", () => {
+    const launcher = read("sandbox/launcher.py")
+    expect(launcher).toMatch(/SCRATCH = \[[^\]]*"\/dev\/mqueue"/)
+    expect(launcher).toMatch(/remove_sysv_ipc\(\)\n\n\ndef main/)
   })
 })

@@ -1,5 +1,8 @@
 {
   "permissions": {
-    "allow": ["mcp__PCP_-_Personal_MCP_Toolbox"]
+    "allow": [
+      "mcp__PCP_-_Personal_MCP_Toolbox",
+      "mcp__claude_ai_PCP_-_Personal_MCP_Toolbox"
+    ]
   }
 }

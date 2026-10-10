@@ -1,3 +1,5 @@
+import { cookies } from "next/headers"
+
 import {
   getTab,
   runningBrowser,
@@ -5,15 +7,23 @@ import {
   tabView,
   touch,
 } from "@/lib/core/browser/runtime"
-import { subscribeScreencast } from "@/lib/core/browser/screencast"
+import {
+  subscribeScreencast,
+  type Frame,
+  type ScreencastSubscription,
+} from "@/lib/core/browser/screencast"
+import { resolveSession } from "@/lib/core/sessions"
 import { isSameOrigin } from "@/lib/server/same-origin"
-import { currentSession } from "@/lib/server/session"
+import { currentSession, SESSION_COOKIE } from "@/lib/server/session"
 
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
 
 /** How often the tab's address, title and who drives it are sent again. */
 const STATE_EVERY_MS = 1_500
+
+/** Every how many of those the session is looked up again. */
+const SESSION_EVERY_TICKS = 4
 
 /**
  * The live view of a browser tab, for the signed-in owner: server-sent
@@ -22,6 +32,10 @@ const STATE_EVERY_MS = 1_500
  * it goes. A route handler, not a Server Action: an action answers once,
  * and this answers for as long as the page watches. Like the export
  * download, it checks for itself that the request came from PCP's own page.
+ *
+ * The session is looked up again every few seconds, from the cookie the
+ * stream was opened with: signing out (everywhere, or this session alone)
+ * ends the stream instead of leaving it open until the owner closes the page.
  *
  * Watching keeps the browser from closing as idle, and when the owner
  * stops watching, what they did in the tab is saved with their key.
@@ -42,6 +56,8 @@ export async function GET(
 
   const { id } = await params
   const { ctx } = session
+  // `currentSession` is cached for the request; the later look-ups ask anew.
+  const cookie = (await cookies()).get(SESSION_COOKIE)?.value
   const tab = getTab(ctx.vaultId, id)
 
   if (!tab) {
@@ -49,74 +65,125 @@ export async function GET(
   }
 
   const encoder = new TextEncoder()
-  let stop: (() => void) | null = null
+  // What waits to be sent, newest only: a connection slower than the
+  // screencast (through pcp.gg over a home upload) skips frames instead of
+  // piling them up here. The stream asks for the next piece (`pull`) only
+  // once the last one is on its way, so nothing queues past one event.
+  let tabState: unknown = null
+  let frame: Frame | null = null
+  let ending: { event: string; data: unknown } | null = null
+  let done = false
+  let wake: (() => void) | null = null
+  let subscription: ScreencastSubscription | null = null
+  let ticker: ReturnType<typeof setInterval> | null = null
+  let ticks = 0
+  let checking = false
+  const notify = () => {
+    wake?.()
+    wake = null
+  }
+  const end = (event: string, data: unknown) => {
+    ending ??= { event, data }
+    notify()
+  }
+  const finish = () => {
+    if (done) return
+    done = true
+    if (ticker) clearInterval(ticker)
+    subscription?.stop()
+    notify()
+    const vault = runningBrowser(ctx.vaultId)
+    if (vault) {
+      void saveVaultProfile(ctx, vault).catch(() => {})
+    }
+  }
+  const event = (name: string, data: unknown) =>
+    encoder.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`)
 
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let open = true
-      const send = (event: string, data: unknown) => {
-        if (!open) return
-        try {
-          controller.enqueue(
-            encoder.encode(
-              `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
-            ),
-          )
-        } catch {
-          finish()
-        }
-      }
-      const finish = () => {
-        if (!open) return
-        open = false
-        stop?.()
-        try {
-          controller.close()
-        } catch {
-          // Already closed by the reader.
-        }
-        const vault = runningBrowser(ctx.vaultId)
-        if (vault) {
-          void saveVaultProfile(ctx, vault).catch(() => {})
-        }
-      }
-
-      send("tab", await tabView(tab))
-      const unsubscribe = await subscribeScreencast(tab, (frame) => {
+    async start() {
+      tabState = await tabView(tab)
+      subscription = await subscribeScreencast(tab, (next) => {
         touch(ctx.vaultId)
-        send("frame", frame)
+        frame = next
+        notify()
       })
 
-      if (!unsubscribe) {
-        send("full", {
-          message:
-            "This tab already has as many people watching as it can show.",
-        })
-        finish()
+      // Gone while this was starting.
+      if (done) {
+        subscription?.stop()
         return
       }
 
-      const ticker = setInterval(() => {
+      if (!subscription) {
+        end("full", {
+          message:
+            "This tab already has as many people watching as it can show.",
+        })
+        return
+      }
+
+      ticker = setInterval(() => {
         if (tab.page.isClosed()) {
-          send("closed", {})
-          finish()
+          end("closed", {})
           return
         }
-        void tabView(tab).then((view) => send("tab", view))
+        ticks += 1
+        if (ticks % SESSION_EVERY_TICKS === 0 && !checking) {
+          checking = true
+          void resolveSession(cookie)
+            .then((now) => {
+              if (now?.sessionId !== session.sessionId) {
+                end("closed", { signedOut: true })
+              }
+            })
+            // A look-up that fails proves nothing; the next one decides.
+            .catch(() => {})
+            .finally(() => {
+              checking = false
+            })
+        }
+        void tabView(tab).then((view) => {
+          tabState = view
+          notify()
+        })
       }, STATE_EVERY_MS)
-
-      stop = () => {
-        clearInterval(ticker)
-        unsubscribe()
-      }
-      tab.page.once("close", () => {
-        send("closed", {})
-        finish()
-      })
+      tab.page.once("close", () => end("closed", {}))
       request.signal.addEventListener("abort", finish)
+
+      if (request.signal.aborted) {
+        finish()
+      }
+    },
+    async pull(controller) {
+      while (!done && !ending && tabState === null && frame === null) {
+        await new Promise<void>((resolve) => {
+          wake = resolve
+        })
+      }
+
+      if (done || ending) {
+        if (ending && !done) {
+          controller.enqueue(event(ending.event, ending.data))
+        }
+        finish()
+        controller.close()
+        return
+      }
+
+      if (tabState !== null) {
+        controller.enqueue(event("tab", tabState))
+        tabState = null
+        return
+      }
+
+      controller.enqueue(event("frame", frame))
+      frame = null
+      // Chromium may paint the next one.
+      subscription?.took()
     },
     cancel() {
-      stop?.()
+      finish()
     },
   })
 

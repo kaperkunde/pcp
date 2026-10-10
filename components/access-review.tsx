@@ -3,9 +3,21 @@
 import { useMemo, useState, useTransition } from "react"
 
 import { FormError } from "@/components/form-status"
+import {
+  DECISION_BUTTON,
+  PermissionActions,
+  QUIET_DECISION,
+} from "@/components/permission-actions"
+import { PermissionOutcome } from "@/components/permission-outcome"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Checkbox, Select } from "@/components/ui/input"
+import { Select } from "@/components/ui/input"
+import { List, ListRow } from "@/components/ui/list"
+import {
+  SegmentedControl,
+  type SegmentedOption,
+} from "@/components/ui/segmented-control"
+import { Switch } from "@/components/ui/switch"
 import {
   decidePermissionAction,
   saveAccessRequestAction,
@@ -120,15 +132,11 @@ export function AccessReview({
 
   if (done) {
     return (
-      <p
-        className={cn(
-          "whitespace-pre-wrap break-words",
-          done.isError && "text-destructive",
-        )}
-        data-testid="permission-outcome"
-      >
-        {done.message}
-      </p>
+      <PermissionOutcome
+        outcome={done.message}
+        outcomeIsError={done.isError}
+        tone={done.isError ? "error" : "ok"}
+      />
     )
   }
 
@@ -147,15 +155,15 @@ export function AccessReview({
     .filter((entry) => entry.tools.length > 0)
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p role="status" data-testid="access-summary">
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <p role="status" data-testid="access-summary" className="font-medium">
           {changes.length === 0
             ? "Saving now changes nothing."
             : `Saving changes ${changes.length} tool${changes.length === 1 ? "" : "s"}: ${summary(changes.map((change) => change.access))}.`}
         </p>
-        <label className="flex items-center gap-2 text-muted-foreground">
-          <Checkbox
+        <label className="flex cursor-pointer items-center gap-2.5 text-muted-foreground">
+          <Switch
             checked={onlyChanges}
             onChange={(event) => setOnlyChanges(event.target.checked)}
           />
@@ -180,31 +188,49 @@ export function AccessReview({
         ))
       )}
       <FormError error={error} />
-      <div className="flex flex-wrap gap-2">
-        <Button type="button" size="sm" disabled={pending} onClick={save}>
-          {pending ? "Working…" : "Save changes"}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={pending}
-          onClick={decline}
-        >
-          Not now
-        </Button>
-        {edited ? (
+      <PermissionActions
+        note="Nothing changes until you save. Then tell the assistant you have."
+        others={[
+          <Button
+            key="decline"
+            type="button"
+            size="lg"
+            variant="secondary"
+            className={DECISION_BUTTON}
+            disabled={pending}
+            onClick={decline}
+          >
+            Not now
+          </Button>,
+        ]}
+        primary={
           <Button
             type="button"
-            size="sm"
-            variant="ghost"
+            size="lg"
+            className={DECISION_BUTTON}
             disabled={pending}
-            onClick={() => setChosen(initial)}
+            onClick={save}
           >
-            Back to the proposal
+            {pending ? "Working…" : "Save changes"}
           </Button>
-        ) : null}
-      </div>
+        }
+        quiet={
+          edited
+            ? [
+                <Button
+                  key="reset"
+                  type="button"
+                  variant="plain"
+                  className={QUIET_DECISION}
+                  disabled={pending}
+                  onClick={() => setChosen(initial)}
+                >
+                  Back to the proposal
+                </Button>,
+              ]
+            : []
+        }
+      />
     </div>
   )
 }
@@ -228,9 +254,9 @@ function ServerLevels({
 
   return (
     <section aria-label={server.name} className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{server.name}</span>
+          <h3 className="text-[15px] font-semibold">{server.name}</h3>
           <code className="text-xs text-muted-foreground">{server.slug}</code>
           {server.enabled ? null : (
             <Badge variant="outline">Switched off</Badge>
@@ -241,14 +267,14 @@ function ServerLevels({
             aria-label={`All shown tools on ${server.slug}`}
             value={bulk}
             onChange={(event) => setBulk(event.target.value as ToolAccess)}
-            className="h-8 w-auto"
+            className="h-8 w-auto text-[13px]"
           >
             <AccessOptions />
           </Select>
           <Button
             type="button"
-            variant="outline"
-            size="xs"
+            variant="secondary"
+            size="sm"
             disabled={disabled}
             onClick={() =>
               onChange(
@@ -262,7 +288,7 @@ function ServerLevels({
           </Button>
         </div>
       </div>
-      <ul className="flex flex-col gap-1">
+      <List as="ul">
         {tools.map((tool) => {
           const key = keyOf(server.id, tool.name)
           const value = chosen[key] ?? tool.access
@@ -270,54 +296,56 @@ function ServerLevels({
           const asked = proposed[key]
 
           return (
-            <li
+            <ListRow
+              as="li"
               key={tool.name}
               data-changed={changed ? "true" : undefined}
               className={cn(
-                "flex flex-wrap items-center justify-between gap-2 rounded-lg px-2 py-1.5",
-                changed && "bg-primary/10 ring-1 ring-primary/30",
+                changed && "bg-primary/10 ring-1 ring-primary/30 ring-inset",
               )}
-            >
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <code className="text-sm break-all">{tool.name}</code>
-                {tool.title ? (
-                  <span className="text-xs text-muted-foreground">
-                    {tool.title}
-                  </span>
-                ) : null}
-                {changed ? (
-                  <Badge variant="warning">
-                    Now: {TOOL_ACCESS_LABELS[tool.access]}
-                  </Badge>
-                ) : null}
-                {asked && asked !== value ? (
-                  <Badge variant="outline">
-                    Proposed: {TOOL_ACCESS_LABELS[asked]}
-                  </Badge>
-                ) : null}
-              </div>
-              <Select
-                aria-label={`Access to ${server.slug}/${tool.name}`}
-                value={value}
-                disabled={disabled}
-                onChange={(event) =>
-                  onChange([key], event.target.value as ToolAccess)
-                }
-                className={cn(
-                  "h-8 w-auto",
-                  value === "blocked" && "text-destructive",
-                  value === "allowed" && "text-primary",
-                )}
-              >
-                <AccessOptions />
-              </Select>
-            </li>
+              title={
+                <span className="flex flex-wrap items-center gap-2">
+                  <code className="text-sm break-all">{tool.name}</code>
+                  {changed ? (
+                    <Badge variant="warning">
+                      Now: {TOOL_ACCESS_LABELS[tool.access]}
+                    </Badge>
+                  ) : null}
+                  {asked && asked !== value ? (
+                    <Badge variant="outline">
+                      Proposed: {TOOL_ACCESS_LABELS[asked]}
+                    </Badge>
+                  ) : null}
+                </span>
+              }
+              description={tool.title || undefined}
+              trailing={
+                <SegmentedControl
+                  name={`level-${key}`}
+                  legend={`Access to ${server.slug}/${tool.name}`}
+                  size="sm"
+                  options={LEVEL_OPTIONS}
+                  value={value}
+                  disabled={disabled}
+                  onValueChange={(access) => onChange([key], access)}
+                />
+              }
+            />
           )
         })}
-      </ul>
+      </List>
     </section>
   )
 }
+
+const LEVEL_OPTIONS: SegmentedOption<ToolAccess>[] = TOOL_ACCESS_LEVELS.map(
+  (level) => ({
+    value: level,
+    label: TOOL_ACCESS_LABELS[level],
+    tone:
+      level === "allowed" ? "allow" : level === "blocked" ? "block" : undefined,
+  }),
+)
 
 function AccessOptions() {
   return TOOL_ACCESS_LEVELS.map((level) => (

@@ -46,6 +46,7 @@ function inputFrom(formData: FormData): ServerInput {
     oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,
     oauthScope: field(formData, "oauthScope") || null,
     oauthAuthorizeParams: field(formData, "oauthAuthorizeParams") || null,
+    publicOnly: field(formData, "publicOnly") === "on",
   }
 }
 
@@ -183,9 +184,11 @@ export async function refreshToolsAction(
 
     return {
       message:
-        sync.status === "ok"
-          ? `Found ${toolCount(sync.toolCount)}.`
-          : sync.message,
+        sync.status !== "ok"
+          ? sync.message
+          : server.kind === "ssh"
+            ? "PCP signed in."
+            : `Found ${toolCount(sync.toolCount)}.`,
     }
   })
 
