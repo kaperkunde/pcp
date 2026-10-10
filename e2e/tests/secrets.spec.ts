@@ -1,14 +1,15 @@
 import { expect, test } from "@playwright/test"
 
-import { addSecret } from "../lib/ui"
+import { acceptNextDialog, addSecret } from "../lib/ui"
 
-// The secret store from the owner's side: add, reveal, rotate, delete.
-test.describe.configure({ mode: "serial" })
-
+// The secret store from the owner's side: a value is hidden until the owner
+// asks for it, and the secret can be renamed, rotated and deleted.
 const RUN = Date.now().toString(36)
 const NAME = `Postcard key ${RUN}`
 
-test("adds a secret and reveals it", async ({ page }) => {
+test("a secret is hidden until revealed, refuses a duplicate name, and can be rotated, renamed and deleted", async ({
+  page,
+}) => {
   await addSecret(page, {
     name: NAME,
     value: "pk_live_hunter2",
@@ -24,21 +25,19 @@ test("adds a secret and reveals it", async ({ page }) => {
   await expect(row.getByText("pk_live_hunter2")).toBeVisible()
   await row.getByRole("button", { name: "Hide" }).click()
   await expect(row.getByText("pk_live_hunter2")).toHaveCount(0)
-})
 
-test("refuses a duplicate name", async ({ page }) => {
-  await page.goto("/secrets")
-  await page.getByLabel("Name", { exact: true }).fill(NAME)
-  await page.getByLabel("Value").fill("another")
-  await page.getByRole("button", { name: "Save secret" }).click()
-  await expect(page.locator("p[role=alert]")).toHaveText(/already exists/)
-})
+  // A second secret under the same name is refused, and the sheet stays open.
+  await page.getByRole("button", { name: "Add a secret" }).click()
+  const dialog = page.getByRole("dialog", { name: "Add a secret" })
+  await dialog.getByLabel("Name", { exact: true }).fill(NAME)
+  await dialog.getByLabel("Value").fill("another")
+  await dialog.getByRole("button", { name: "Save secret" }).click()
+  await expect(dialog.getByRole("alert")).toHaveText(/already exists/)
+  await dialog.getByRole("button", { name: "Cancel" }).click()
+  await expect(dialog).toBeHidden()
 
-test("rotates the value and renames it", async ({ page }) => {
-  await page.goto("/secrets")
-  const row = page.getByRole("listitem").filter({ hasText: NAME })
   await row.getByRole("button", { name: "Edit" }).click()
-  await row.getByLabel("Name").fill(`${NAME} v2`)
+  await row.getByLabel("Name", { exact: true }).fill(`${NAME} v2`)
   await row.getByLabel("New value").fill("pk_live_rotated")
   await row.getByRole("button", { name: "Save" }).click()
 
@@ -46,12 +45,8 @@ test("rotates the value and renames it", async ({ page }) => {
   await expect(renamed).toBeVisible()
   await renamed.getByRole("button", { name: "Reveal" }).click()
   await expect(renamed.getByText("pk_live_rotated")).toBeVisible()
-})
 
-test("deletes it", async ({ page }) => {
-  await page.goto("/secrets")
-  const row = page.getByRole("listitem").filter({ hasText: `${NAME} v2` })
-  page.once("dialog", (dialog) => dialog.accept())
-  await row.getByRole("button", { name: "Delete" }).click()
-  await expect(row).toHaveCount(0)
+  acceptNextDialog(page)
+  await renamed.getByRole("button", { name: "Delete" }).click()
+  await expect(renamed).toHaveCount(0)
 })

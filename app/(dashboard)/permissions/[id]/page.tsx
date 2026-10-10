@@ -1,20 +1,35 @@
+import {
+  BookOpen,
+  ChevronLeft,
+  Globe,
+  Server,
+  SlidersHorizontal,
+  TriangleAlert,
+} from "lucide-react"
 import type { Metadata } from "next"
 import Link from "next/link"
 
 import { AccessReview } from "@/components/access-review"
 import { BrowserTabView } from "@/components/browser-tab-view"
-import { LocalDate } from "@/components/local-date"
+import { RelativeDate } from "@/components/local-date"
+import { MemoryReview } from "@/components/memory-review"
 import { PageHeader } from "@/components/page-header"
+import { PageColumn } from "@/components/page-column"
 import { PermissionDecision } from "@/components/permission-decision"
-import { Badge } from "@/components/ui/badge"
+import { PermissionLines } from "@/components/permission-lines"
+import { PermissionOutcome } from "@/components/permission-outcome"
 import { buttonVariants } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card } from "@/components/ui/card"
+import { IconTile } from "@/components/ui/icon-tile"
+import { ShownInFull } from "@/components/shown-in-full"
 import { WrapperReview } from "@/components/wrapper-review"
-import type { MemoryShown } from "@/lib/core/memories"
 import { tabFor } from "@/lib/core/browser/owner"
 import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
+import type { PermissionView } from "@/lib/core/permissions"
+import type { ServerKind } from "@/lib/core/servers"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
+import { cn } from "@/lib/utils"
 
 export const metadata: Metadata = {
   title: "Permission",
@@ -40,6 +55,14 @@ const ACCESS_STATUS: Record<string, string> = {
   expired: "This expired without an answer, so no tool's level changed.",
 }
 
+const STATUS_TONE: Record<string, "ok" | "warning" | "error" | "off"> = {
+  executed: "ok",
+  running: "warning",
+  failed: "error",
+  declined: "off",
+  expired: "off",
+}
+
 /**
  * Where an assistant sends you to answer something it asked PCP for
  * (lib/core/permissions.ts): when its app cannot show the question itself,
@@ -58,12 +81,12 @@ export default async function PermissionPage({
 
   if (!view) {
     return (
-      <>
+      <PageColumn width="narrow">
         <PageHeader title="Permission" />
         <p className="text-muted-foreground" role="alert">
           There is no request waiting for you at this link.
         </p>
-      </>
+      </PageColumn>
     )
   }
 
@@ -84,271 +107,264 @@ export default async function PermissionPage({
     view.kind === "browser_handover" && pending && view.browserTabId
       ? await tabFor(ctx, view.browserTabId)
       : null
+  // A live tab, a long list of levels or a wrapper's programs want room.
+  const roomy = Boolean(
+    handedTab || (access && pending) || view.wrapper !== null,
+  )
 
   return (
-    <>
-      <PageHeader
-        title={pending ? "An assistant is asking" : "Permission"}
-        description={
-          <>
-            Asked through the token{" "}
-            <Link href={`/tokens/${view.tokenId}`} className="underline">
+    <PageColumn width={roomy ? "wide" : "narrow"}>
+      <Link
+        href="/home"
+        className="-mb-4 -ml-1 inline-flex items-center gap-0.5 self-start text-sm text-primary hover:text-accent-foreground"
+      >
+        <ChevronLeft aria-hidden className="size-4" />
+        Home
+      </Link>
+      <Card
+        className={cn(
+          "mx-auto w-full gap-6 rounded-[18px] p-5 sm:p-8",
+          pending && "ring-1 ring-warning/25",
+          !roomy && "max-w-[720px]",
+        )}
+      >
+        <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
+          <span
+            aria-hidden
+            className="flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-foreground"
+          >
+            {view.tokenName.slice(0, 1).toUpperCase()}
+          </span>
+          <span className="min-w-0">
+            <Link
+              href={`/tokens/${view.tokenId}`}
+              className="font-semibold text-foreground break-words hover:text-primary"
+            >
               {view.tokenName}
             </Link>{" "}
-            on <LocalDate value={view.createdAt} />.
-            {pending
-              ? access
-                ? " Nothing changes until you save."
-                : " Nothing runs until you answer."
-              : null}
+            {pending ? "is asking" : "asked"} ·{" "}
+            <RelativeDate value={view.createdAt} />
+          </span>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <RequestTile view={view} />
+          <h1 className="min-w-0 text-[22px] leading-tight font-bold tracking-[-0.015em] break-words sm:text-[26px]">
+            {view.title}
+          </h1>
+        </div>
+
+        {view.memory ? (
+          <MemoryReview memory={view.memory} asking={view.kind} />
+        ) : (
+          <PermissionLines lines={view.lines} />
+        )}
+        {view.full ? <ShownInFull parts={view.full} /> : null}
+        {view.warning && view.memory ? (
+          // The text is what to check; the warning says what to look for,
+          // under it, without drawing the eye away from it.
+          <p
+            className="border-l-2 border-separator pl-3 text-sm text-muted-foreground"
+            role="note"
+          >
+            {view.warning}
+          </p>
+        ) : view.warning ? (
+          <p
+            className="flex items-start gap-3 rounded-xl bg-warning/10 p-4 ring-1 ring-warning/30"
+            role="note"
+          >
+            <TriangleAlert
+              aria-hidden
+              className="mt-0.5 size-4 shrink-0 text-warning"
+            />
+            <span className="min-w-0 break-words">{view.warning}</span>
+          </p>
+        ) : null}
+        {view.wrapper ? <WrapperReview shown={view.wrapper} /> : null}
+        {pending && proposal ? (
+          <>
+            <p className="text-muted-foreground">
+              The assistant&apos;s levels are filled in below and every change
+              is marked. Change any of them, then save; you can change them
+              again on the token&apos;s page.
+              {proposal.gone > 0
+                ? ` ${proposal.gone} of the proposed tools are no longer on this token and are left out.`
+                : null}
+            </p>
+            <AccessReview
+              id={view.id}
+              servers={proposal.servers}
+              proposed={proposal.proposed}
+            />
           </>
-        }
-      />
-      <Card
-        className={
-          handedTab
-            ? "max-w-6xl"
-            : (access && pending) || view.wrapper
-              ? "max-w-4xl"
-              : "max-w-2xl"
-        }
-      >
-        <CardHeader>
-          <CardTitle className="break-words">{view.title}</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          {view.memory ? (
-            <MemoryText memory={view.memory} asking={view.kind} />
-          ) : (
-            <ul className="flex list-disc flex-col gap-1 pl-5 break-words whitespace-pre-wrap">
-              {view.lines.map((line, index) => (
-                <li key={index}>{line}</li>
-              ))}
-            </ul>
-          )}
-          {view.warning && view.memory ? (
-            // The text is what to check; the warning says what to look for,
-            // under it, without drawing the eye away from it.
-            <p
-              className="border-l-2 pl-3 text-sm text-muted-foreground"
-              role="note"
-            >
-              {view.warning}
-            </p>
-          ) : view.warning ? (
-            <p
-              className="rounded-md border border-destructive/50 p-3"
-              role="note"
-            >
-              {view.warning}
-            </p>
-          ) : null}
-          {view.wrapper ? <WrapperReview shown={view.wrapper} /> : null}
-          {pending && proposal ? (
-            <>
-              <p className="text-muted-foreground">
-                The assistant&apos;s levels are filled in below and every change
-                is marked. Change any of them, then save; you can change them
-                again on the token&apos;s page.
-                {proposal.gone > 0
-                  ? ` ${proposal.gone} of the proposed tools are no longer on this token and are left out.`
-                  : null}
-              </p>
-              <AccessReview
-                id={view.id}
-                servers={proposal.servers}
-                proposed={proposal.proposed}
+        ) : pending ? (
+          <>
+            <PendingNote view={view} handedTab={handedTab !== null} />
+            {handedTab ? (
+              <BrowserTabView
+                tabId={handedTab.id}
+                initial={handedTab}
+                mode="handover"
               />
-            </>
-          ) : pending ? (
-            <>
-              {view.kind === "call" ? (
-                <p className="text-muted-foreground">
-                  Always allow and Block also decide the calls after this one;
-                  Allow for lets them run without asking you until that time is
-                  up. You can change that on the token&apos;s page.
-                  {view.serverKind === "browser" &&
-                  (view.tool === "navigate" || view.tool === "tabs")
-                    ? " Allowing it also lets the tab open the site it names, unless you blocked that site for this token, and keep to its pages while the tab is open; other sites are asked about on their own."
-                    : null}
-                </p>
-              ) : view.kind === "fetch" ? (
-                <p className="text-muted-foreground">
-                  Always allow this site and Block this site also decide this
-                  token&apos;s later requests to the site, and Allow this site
-                  for lets them through without asking until that time is up.{" "}
-                  <Link href={`/tokens/${view.tokenId}`} className="underline">
-                    The token&apos;s page
-                  </Link>{" "}
-                  lists every site it reached for, and its method settings.
-                </p>
-              ) : view.kind === "browse" ? (
-                <p className="text-muted-foreground">
-                  Allow once lets this tab open the site&apos;s pages while it
-                  is open. Allow this site for, Always allow this site and Block
-                  this site decide for the token, in the browser and in web
-                  fetch, as on{" "}
-                  <Link href={`/tokens/${view.tokenId}`} className="underline">
-                    the token&apos;s page
-                  </Link>
-                  .
-                </p>
-              ) : view.kind === "browser_handover" && handedTab ? (
-                <>
-                  <BrowserTabView
-                    tabId={handedTab.id}
-                    initial={handedTab}
-                    mode="handover"
-                  />
-                  <p className="text-muted-foreground">
-                    Do what the assistant asks in the tab above, then say Done.
-                    It is yours until you answer.
-                  </p>
-                </>
-              ) : view.kind === "browser_handover" ? (
-                <p className="text-muted-foreground">
-                  {view.browserTabId ? (
-                    <>
-                      <Link
-                        href={`/browser/tabs/${view.browserTabId}`}
-                        className="underline"
-                      >
-                        Open the tab
-                      </Link>
-                      , do what the assistant asks there, then come back and say
-                      Done.
-                    </>
-                  ) : (
-                    "Do what the assistant asks in the tab, then say Done."
-                  )}{" "}
-                  The tab is yours until you answer.
-                </p>
-              ) : view.kind === "memory_share" ? (
-                <p className="text-sm text-muted-foreground">
-                  Kept for this assistant only, it is saved where only the
-                  assistant that asked reads it. You can read, edit and delete
-                  every memory under{" "}
-                  <Link href="/memories" className="underline">
-                    Memories
-                  </Link>
-                  .
-                </p>
-              ) : null}
-              <PermissionDecision
-                id={view.id}
-                decisions={view.decisions}
-                secret={view.secretToEnter}
-                every={
-                  view.kind === "memory_share" && view.memory
-                    ? { asked: view.memory.always }
-                    : null
-                }
-              />
-            </>
-          ) : (
-            <div
-              className="flex flex-col gap-2"
-              data-testid="permission-outcome"
+            ) : null}
+            <PermissionDecision
+              id={view.id}
+              decisions={view.decisions}
+              secret={view.secretToEnter}
+              every={
+                view.kind === "memory_share" && view.memory
+                  ? { asked: view.memory.always }
+                  : null
+              }
+            />
+          </>
+        ) : (
+          <PermissionOutcome
+            status={
+              memory && showOutcome
+                ? null
+                : ((access ? ACCESS_STATUS : STATUS)[view.status] ??
+                  view.status)
+            }
+            tone={STATUS_TONE[view.status] ?? "off"}
+            outcome={showOutcome ? view.outcome : null}
+            outcomeIsError={view.outcomeIsError}
+            tell={view.status !== "expired"}
+          />
+        )}
+        {view.connect ? (
+          <div className="flex flex-wrap items-center gap-3">
+            {/* A plain anchor, not next/link: the route redirects to the
+                server's sign-in page, which must be a full page load. */}
+            <a
+              href={`/api/servers/${view.connect.serverId}/oauth/start`}
+              className={buttonVariants({ size: "sm" })}
             >
-              {memory && showOutcome ? null : (
-                <p>
-                  {(access ? ACCESS_STATUS : STATUS)[view.status] ??
-                    view.status}
-                </p>
-              )}
-              {showOutcome ? (
-                <p
-                  className={
-                    view.outcomeIsError
-                      ? "whitespace-pre-wrap break-words text-destructive"
-                      : "whitespace-pre-wrap break-words text-muted-foreground"
-                  }
-                >
-                  {view.outcome}
-                </p>
-              ) : null}
-              {view.status === "expired" ? null : (
-                <p className="text-muted-foreground">
-                  Tell the assistant that asked that you answered, and it
-                  carries on.
-                </p>
-              )}
-            </div>
-          )}
-          {view.connect ? (
-            <div className="flex flex-wrap items-center gap-3">
-              {/* A plain anchor, not next/link: the route redirects to the
-                  server's sign-in page, which must be a full page load. */}
-              <a
-                href={`/api/servers/${view.connect.serverId}/oauth/start`}
-                className={buttonVariants({ size: "sm" })}
-              >
-                Connect {view.connect.name}
-              </a>
-              <span className="text-muted-foreground">
-                {view.connect.name} needs you to sign in before it can be used.
-              </span>
-            </div>
-          ) : null}
-        </CardContent>
+              Connect {view.connect.name}
+            </a>
+            <span className="text-muted-foreground">
+              {view.connect.name} needs you to sign in before it can be used.
+            </span>
+          </div>
+        ) : null}
       </Card>
-    </>
+    </PageColumn>
   )
 }
 
-/**
- * The memory a request is about, set apart so it is the first thing read:
- * the path above it, and the text it replaces, when it changes, above that.
- */
-function MemoryText({
-  memory,
-  asking,
-}: {
-  memory: MemoryShown
-  asking: string
-}) {
-  const text = "whitespace-pre-wrap break-words"
+/** The tile before the title: the server's kind, or what the request is about. */
+function RequestTile({ view }: { view: PermissionView }) {
+  const tile = "max-sm:size-11 max-sm:rounded-xl"
 
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-        <code className="break-all">{memory.path}</code>
-        {memory.newPath ? (
-          <>
-            <span aria-hidden>→</span>
-            <span className="sr-only">moves to</span>
-            <code className="break-all">{memory.newPath}</code>
-          </>
-        ) : null}
-        {memory.always && asking !== "memory_share" ? (
-          <Badge variant="secondary">Read in every conversation</Badge>
-        ) : null}
-      </div>
-      {memory.before !== null ? (
-        <figure className="flex flex-col gap-1">
-          <figcaption className="text-xs font-medium text-muted-foreground">
-            Now
-          </figcaption>
-          <blockquote
-            className={`${text} rounded-md border border-dashed p-3 text-sm text-muted-foreground`}
-          >
-            {memory.before}
-          </blockquote>
-        </figure>
-      ) : null}
-      <figure className="flex flex-col gap-1">
-        {memory.before !== null ? (
-          <figcaption className="text-xs font-medium text-muted-foreground">
-            After the change
-          </figcaption>
-        ) : null}
-        <blockquote
-          className={`${text} rounded-md border-2 border-primary/30 bg-muted/60 p-4 text-base leading-relaxed`}
-          data-testid="memory-text"
-        >
-          {memory.text}
-        </blockquote>
-      </figure>
-    </div>
-  )
+  if (view.serverKind) {
+    return (
+      <IconTile
+        size="lg"
+        kind={view.serverKind as ServerKind}
+        className={tile}
+      />
+    )
+  }
+
+  switch (view.kind) {
+    case "memory_share":
+    case "memory_change":
+      return <IconTile size="lg" icon={BookOpen} className={tile} />
+    case "access":
+      return <IconTile size="lg" icon={SlidersHorizontal} className={tile} />
+    case "fetch":
+    case "browse":
+    case "browser_handover":
+      return <IconTile size="lg" icon={Globe} className={tile} />
+    default:
+      return <IconTile size="lg" icon={Server} className={tile} />
+  }
+}
+
+/** What the answers do, in the owner's words, before the buttons. */
+function PendingNote({
+  view,
+  handedTab,
+}: {
+  view: PermissionView
+  handedTab: boolean
+}) {
+  const note = "text-[13px] leading-relaxed text-muted-foreground"
+
+  switch (view.kind) {
+    case "call":
+      return (
+        <p className={note}>
+          Always allow and Block also decide the calls after this one; Allow for
+          lets them run without asking you until that time is up. You can change
+          that on the token&apos;s page.
+          {view.serverKind === "browser" &&
+          (view.tool === "navigate" || view.tool === "tabs")
+            ? " Allowing it also lets the tab open the site it names, unless you blocked that site for this token, and keep to its pages while the tab is open; other sites are asked about on their own."
+            : null}
+        </p>
+      )
+    case "fetch":
+      return (
+        <p className={note}>
+          Always allow this site and Block this site also decide this
+          token&apos;s later requests to the site, and Allow this site for lets
+          them through without asking until that time is up.{" "}
+          <Link href={`/tokens/${view.tokenId}`} className="underline">
+            The token&apos;s page
+          </Link>{" "}
+          lists every site it reached for, and its method settings.
+        </p>
+      )
+    case "browse":
+      return (
+        <p className={note}>
+          Allow once lets this tab open the site&apos;s pages while it is open.
+          Allow this site for, Always allow this site and Block this site decide
+          for the token, in the browser and in web fetch, as on{" "}
+          <Link href={`/tokens/${view.tokenId}`} className="underline">
+            the token&apos;s page
+          </Link>
+          .
+        </p>
+      )
+    case "browser_handover":
+      return handedTab ? (
+        <p className={note}>
+          Do what the assistant asks in the tab below, then say Done. It is
+          yours until you answer.
+        </p>
+      ) : (
+        <p className={note}>
+          {view.browserTabId ? (
+            <>
+              <Link
+                href={`/browser/tabs/${view.browserTabId}`}
+                className="underline"
+              >
+                Open the tab
+              </Link>
+              , do what the assistant asks there, then come back and say Done.
+            </>
+          ) : (
+            "Do what the assistant asks in the tab, then say Done."
+          )}{" "}
+          The tab is yours until you answer.
+        </p>
+      )
+    case "memory_share":
+      return (
+        <p className={note}>
+          Kept for this assistant only, it is saved where only the assistant
+          that asked reads it. You can read, edit and delete every memory under{" "}
+          <Link href="/memories" className="underline">
+            Memories
+          </Link>
+          .
+        </p>
+      )
+    default:
+      return null
+  }
 }

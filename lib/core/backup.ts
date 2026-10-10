@@ -2,6 +2,7 @@ import { gunzipSync, gzipSync } from "node:zlib"
 
 import type { HostSetting, Prisma } from "@/lib/generated/prisma/client"
 
+import { blankGrant } from "./api-tokens"
 import {
   checkReferences,
   EnvelopeSchema,
@@ -57,7 +58,9 @@ import { PCP_VERSION } from "./version"
  *
  * A restore replaces: the vault it is aimed at (or the empty database of a
  * PCP not set up yet) is wiped and the file's rows written in its place, in
- * one transaction. Sessions are not in a file and do not survive one.
+ * one transaction. Sessions are not in a file and do not survive one, and a
+ * token the vault revoked or deleted since the file was made stays revoked:
+ * a restore never brings an assistant back that the owner cut off.
  */
 
 const NOT_AN_EXPORT = "That is not a PCP export."
@@ -71,6 +74,65 @@ export type RestoreTarget =
   | { into: "fresh" }
   /** A signed-in owner's vault, replaced whole. */
   | { into: "vault"; ctx: VaultContext }
+
+type TokenState = { id: string; revokedAt: Date | null }
+
+/**
+ * The tokens of the vault a restore replaces, when the file is an export of
+ * that same vault (a restore keeps the vault's id, so an older export of it
+ * is the one case where this vault knows what happened to the file's tokens
+ * since). Null for a restore at setup, or of another PCP's export, where it
+ * knows nothing.
+ */
+async function replacedTokens(
+  client: Pick<Prisma.TransactionClient, "apiToken">,
+  payload: ExportPayload,
+  target: RestoreTarget,
+): Promise<TokenState[] | null> {
+  if (target.into !== "vault" || payload.vault.id !== target.ctx.vaultId) {
+    return null
+  }
+
+  return client.apiToken.findMany({
+    where: { vaultId: target.ctx.vaultId },
+    select: { id: true, revokedAt: true },
+  })
+}
+
+/**
+ * The tokens a restore keeps revoked though the file has them live, and
+ * when they were revoked: those the vault being replaced revoked since the
+ * export, and those it no longer has (deleted). Writing the file as it is
+ * would bring such a token back with a working key, undoing a revocation
+ * the owner made to cut an assistant off.
+ */
+export function carriedRevocations(
+  payload: ExportPayload,
+  replacing: TokenState[] | null,
+  now = new Date(),
+): Map<string, Date> {
+  const carried = new Map<string, Date>()
+
+  if (!replacing) {
+    return carried
+  }
+
+  const here = new Map(replacing.map((token) => [token.id, token.revokedAt]))
+
+  for (const token of payload.tables.apiTokens) {
+    if (token.revokedAt !== null) {
+      continue
+    }
+
+    const revokedAt = here.has(token.id) ? here.get(token.id) : now
+
+    if (revokedAt) {
+      carried.set(token.id, revokedAt)
+    }
+  }
+
+  return carried
+}
 
 export function exportFileName(at: Date): string {
   return `pcp-export-${at.toISOString().slice(0, 10)}${EXPORT_FILE_SUFFIX}`
@@ -199,11 +261,13 @@ export async function encodeExport(
 
 /**
  * Opens an export file: the rows it holds, checked, and what to tell the
- * owner about them. Every way it can fail is a message for the owner.
+ * owner about them. Every way it can fail is a message for the owner. The
+ * target says which tokens the preview shows as coming back revoked.
  */
 export async function readExport(
   file: Buffer,
   exportPassword: string,
+  target: RestoreTarget = { into: "fresh" },
 ): Promise<{ payload: ExportPayload; preview: ExportPreview }> {
   if (file.length > MAX_EXPORT_FILE_BYTES) {
     throw invalid(
@@ -279,7 +343,12 @@ export async function readExport(
 
   checkReferences(parsed.data)
 
-  return { payload: parsed.data, preview: previewOf(parsed.data) }
+  const carried = carriedRevocations(
+    parsed.data,
+    await replacedTokens(db(), parsed.data, target),
+  )
+
+  return { payload: parsed.data, preview: previewOf(parsed.data, carried) }
 }
 
 function parseJson(buffer: Buffer, orElse: string): unknown {
@@ -295,7 +364,9 @@ function parseJson(buffer: Buffer, orElse: string): unknown {
  * target is wiped table by table (never relying on cascades alone), then
  * the rows go in, parents before children. The host's network settings are
  * replaced only when asked; the status rows describing this machine go
- * either way, since the settings they describe may be new.
+ * either way, since the settings they describe may be new. A token the
+ * replaced vault revoked or deleted after the file was made is written
+ * revoked, with its key blanked as revoking does (`carriedRevocations`).
  */
 export async function restoreExport(
   payload: ExportPayload,
@@ -324,6 +395,8 @@ async function writeExport(
   try {
     await db().$transaction(
       async (tx) => {
+        let carried = new Map<string, Date>()
+
         if (target.into === "fresh") {
           if ((await tx.vault.count()) > 0) {
             throw new PcpError("state", "PCP is already set up.")
@@ -338,6 +411,11 @@ async function writeExport(
             throw new PcpError("state", "The vault to replace is gone.")
           }
 
+          // Read before the wipe takes the answer away.
+          carried = carriedRevocations(
+            payload,
+            await replacedTokens(tx, payload, target),
+          )
           await wipeVault(tx, target.ctx.vaultId)
         }
 
@@ -359,13 +437,23 @@ async function writeExport(
           await tx.hostSetting.createMany({ data: host })
         }
 
+        // A revoked token has no key: its grant is blanked the way revoking
+        // blanks it, whether it was revoked before the export or since.
+        const apiTokens = tables.apiTokens.map((token) =>
+          carried.has(token.id)
+            ? { ...token, revokedAt: carried.get(token.id)! }
+            : token,
+        )
+        const revokedGrants = new Set(
+          apiTokens.filter((token) => token.revokedAt).map((t) => t.grantId),
+        )
+        const keyGrants = tables.keyGrants.map((grant) =>
+          revokedGrants.has(grant.id) ? { ...grant, ...blankGrant() } : grant,
+        )
+
         await tx.vault.create({ data: vault })
-        await inChunks(tables.keyGrants, (data) =>
-          tx.keyGrant.createMany({ data }),
-        )
-        await inChunks(tables.apiTokens, (data) =>
-          tx.apiToken.createMany({ data }),
-        )
+        await inChunks(keyGrants, (data) => tx.keyGrant.createMany({ data }))
+        await inChunks(apiTokens, (data) => tx.apiToken.createMany({ data }))
         await inChunks(tables.secrets, (data) => tx.secret.createMany({ data }))
         await inChunks(tables.servers, (data) =>
           tx.mcpServer.createMany({ data }),

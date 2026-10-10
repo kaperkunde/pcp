@@ -2,7 +2,8 @@
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the key-files
 table, and [ARCHITECTURE.md](ARCHITECTURE.md) for the encryption and tenancy
-model. This file is the conventions that are easy to get wrong.
+model, and [DESIGN.md](DESIGN.md) for how the owner's pages look and where
+things go on them. This file is the conventions that are easy to get wrong.
 
 ## Before pushing
 
@@ -123,8 +124,11 @@ so in the summary; the bump itself waits for the request.
   `SshIdentity`; the owner puts its public half in `authorized_keys`. The
   host key is pinned the first time a key exchange finishes (after `ssh2`'s
   `handshake` event, never from `hostVerifier`, which runs before the
-  signature is checked), and any other key is refused until the owner
-  forgets it; a new address forgets it too. The protocol is `ssh2`'s, pure
+  signature is checked) in a check the owner started (`byOwner` on
+  `syncServerTools`), and any other key is refused until the owner
+  forgets it; a new address forgets it too. An assistant's call or the
+  gateway's re-read never pins one and never connects to a server with
+  none: it answers with a link to the server's page. The protocol is `ssh2`'s, pure
   JavaScript (its native parts stay out of `allowBuilds`), narrowed to the
   algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
   `run_command` (`ssh/tools.ts`), its arguments checked before anything
@@ -285,7 +289,10 @@ so in the summary; the bump itself waits for the request.
   export password: nothing is decrypted to make it, and it never carries a
   session grant or the Touch ID key. A restore replaces the vault whole, in
   one transaction, after the owner has seen what the file holds and
-  confirmed it with their password (or Touch ID). A
+  confirmed it with their password (or Touch ID). It never undoes a
+  revocation: into an existing vault, a token the file has live that the
+  vault revoked or deleted since is written revoked with its grant blanked
+  (`carriedRevocations`), and the preview marks it. A
   migration that adds a column fails `pnpm typecheck` in
   `lib/core/backup-format.ts` until the format carries it, with the column's
   default so older files still restore.
@@ -310,7 +317,8 @@ so in the summary; the bump itself waits for the request.
   at most one, an export never carries it, and recovery, signing out
   everywhere and a restore remove it. It stands in for the password to
   unlock and in `confirmOwner` (a new API token or an app's sign-in, an
-  export, a restore, deleting the vault),
+  export, a restore, deleting the vault, the public address, a new expiry
+  for an expired API token),
   never for a new password, a new recovery key or another Touch ID key:
   only the password and the recovery key decide who gets in. A new place
   that accepts it goes through `confirmOwner`, with a test.
@@ -320,7 +328,11 @@ so in the summary; the bump itself waits for the request.
   from it), and runs no timer and no request while the owner has it off; it
   asks nothing before setup. It tells the owner how to update for the way PCP
   was installed; in a container or a checkout PCP never pulls, builds or
-  restarts itself.
+  restarts itself. Install and restart in the Linux installer's container is
+  a file in the data folder (`updates/host-signal.ts`: an id and a time,
+  nothing of the vault) that the installer's `watch` reads through `exec` and
+  checks as untrusted input before it runs its own `update`; PCP never
+  addresses the host.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` and `PCP_DESKTOP_UPDATER` (`lib/server/desktop.ts`), for

@@ -41,10 +41,16 @@ for you: you answer on PCP's own page, signed in. It can only propose a new
 server, API (as OpenAPI text or a schema URL) or mail account, naming a secret
 rather than seeing it; nothing is added until you agree, you are shown the
 address, the tools and the secret first, and a secret PCP does not hold yet is
-typed in by you on that page. It can propose levels for its own tools, but
-only your save on PCP's page changes them. It never receives a stored secret,
-an OAuth token, or another vault's data. Revoking the token ends its access at
-once.
+typed in by you on that page. An MCP server it proposes reaches public
+addresses only: PCP refuses private, loopback and link-local addresses, and
+its own, for every request it makes there, its sign-in and each redirect
+included, checked at the moment of connecting so a rebinding name does not get
+past it, until you allow private addresses on the server's page. A private
+address it proposes, for an MCP server or a mail server, is flagged to you on
+the approval page and not told to the assistant. It can propose levels for its
+own tools, but only your save on PCP's page changes them. It never receives a
+stored secret, an OAuth token, or another vault's data. Revoking the token
+ends its access at once.
 
 **An assistant with an API token and an API endpoint** can call the operations
 the schema lists, with your secret (a header, or a user name and password)
@@ -68,7 +74,10 @@ server), send as you, with attachments from its own kept results, move, flag,
 label and delete into the Trash, create, rename and move folders, delete an
 empty one, and (JMAP) turn the automatic reply on or off. Nothing deletes mail
 for good (a folder that holds mail, or the inbox, Trash and the other special
-ones, is never deleted), and sending cannot be undone, so leave `send_email` on Ask you first unless you mean otherwise.
+ones, is never deleted), and sending cannot be undone, so leave `send_email`
+and `set_vacation_response` (the automatic reply, which makes the server send
+text an assistant wrote to anyone who writes in) on Ask you first unless you
+mean otherwise. An account that cannot send has neither.
 `create_draft` only writes into Drafts and sends nothing, so you can allow it
 on its own and send what it wrote yourself.
 It never receives the password or token: PCP signs in itself and removes
@@ -76,7 +85,8 @@ both from every answer. It can propose a mail account, naming its password
 or token and never holding it: nothing is added until you agree on PCP's page,
 where you type the value in or connect it, and a private address it proposes is
 flagged there. It cannot change an account. Over JMAP,
-PCP sends the credential only to the session URL's origin and never follows
+PCP sends the credential only to the session URL's origin, over https:// (http://
+only to a server on your own network), and never follows
 a redirect; over IMAP and SMTP, only over an encrypted connection.
 
 **An assistant with a token that may manage endpoints** can read an API
@@ -136,14 +146,20 @@ browser; **Forget all sites** signs it out of everything.
 
 **Someone with your session cookie but not your password** can use PCP as you
 while the session lasts (30 days from sign-in). They cannot make an API token
-(nor let an app sign in, which makes one), a new recovery key, a Touch ID key
-or an export, because each asks for the password again, so they cannot keep a way in once the session ends. **Sign out
-everywhere** (Settings) ends every session and can revoke every API token with
-it; recovery can do the same. Rotate any secret they could have seen.
+(nor let an app sign in, which makes one, or give an expired token a new
+expiry, which brings it back), a new recovery key, a Touch ID key
+or an export, because each asks for the password again, so they cannot keep a way in once the session ends. Nor can
+they change PCP's public address, which decides where sign-ins, permission
+links and the address you give assistants point: that asks for the password
+(or Touch ID) too. **Sign out everywhere** (Settings) ends every session, turns
+Touch ID off, forgets the pinned public address and can revoke every API token
+with it; recovery does the same. Pin the public address again afterwards if
+you had set one, and rotate any secret they could have seen.
 
 **Touch ID in the Mac app** unlocks PCP, and confirms a new API token (an
-app's sign-in included), an export, a restore or deleting the vault, with
-your fingerprint. It is a key of its own that PCP
+app's sign-in included, or a new expiry for an expired one), a new public
+address, an export, a restore or
+deleting the vault, with your fingerprint. It is a key of its own that PCP
 makes once you have typed your password, not your password. A release built
 with PCP's provisioning profile keeps it in a keychain item that macOS itself
 opens only for your fingerprint, on this Mac only; otherwise the app keeps it
@@ -174,7 +190,12 @@ and export passwords are counted the same way, each on its own, and Touch ID
 has a budget of its own rather than spending the password's. scrypt makes
 each guess expensive. The address is the one the proxy in front of PCP
 reports (`X-Forwarded-For`), which a client reaching port 3000 directly can
-set to anything; the 60 for the whole instance holds either way. The counts
+set to anything; the 60 for the whole instance holds either way. PCP takes
+the left-most address in that header, which behind a proxy that appends to
+it (most do) is whatever the client sent: set `PCP_TRUSTED_PROXIES` to your
+proxies' addresses, and PCP reads the header from the right, past them and
+loopback, to the client they saw (see
+[docs/self-hosting.md](docs/self-hosting.md#i-already-have-a-proxy)). The counts
 are kept in memory, so a restart starts them again.
 
 Not defended against:
@@ -205,10 +226,15 @@ Not defended against:
   credential, destructive ones included. Use a key with only the access the
   assistant needs, turn on Read-only, and scope the token. Read-only trusts
   the HTTP method: a GET that changes something is the API's doing.
-- **Addresses on your own network.** PCP does not stop a schema URL or a base
-  URL from pointing at a private address; only you can set one, and that is
-  often the point. A host that lets anyone else do it needs an address
-  policy first (see [ARCHITECTURE.md](ARCHITECTURE.md#api-endpoints)).
+- **Addresses on your own network.** PCP does not stop a server address, a
+  schema URL or a base URL you set from pointing at a private address; that
+  is often the point. What an assistant proposes is held to public addresses
+  instead: an MCP server or an API until you allow private ones on its page, a
+  mail account only by your agreeing to it, with a private address flagged
+  when you are asked. Once you allow them, that server or API reaches your
+  network as one you added would. A host that lets anyone else set addresses
+  needs an address policy first (see
+  [ARCHITECTURE.md](ARCHITECTURE.md#api-endpoints)).
 - **Egress through an API an assistant registers.** Once you agree to an API
   and allow its tools, an assistant can have PCP send data it holds to that
   public address, as the arguments of an operation. A prompt injected into the
@@ -228,11 +254,8 @@ Not defended against:
 - **Pages the browser opens.** A page is someone else's text, and an
   assistant reading it can be steered by it, while it acts as you where the
   browser is signed in. Keep its tools at Ask you first where a click could
-  cost something. In the Docker image Chromium runs without its own sandbox
-  (an unprivileged container gives it none to use), so a flaw in Chromium
-  that a page exploits runs as PCP's user in the container, with PCP's data
-  directory and a network without PCP's proxy in reach; keep the image
-  current. Chromium installed from the Browser page (the desktop app, a
+  cost something. In the Docker image Chromium has no sandbox of its own
+  (see the next entries). Chromium installed from the Browser page (the desktop app, a
   checkout) comes from the addresses Playwright pins for it, over HTTPS,
   with no checksum of PCP's own.
 - **Programs an assistant runs.** A token you let run code can call every
@@ -248,6 +271,25 @@ Not defended against:
   system and no capabilities but changing user, as a user that cannot reach
   PCP's socket; a flaw in the kernel or the container runtime would be what
   let it out, so keep the host updated too.
+- **Chromium without its own sandbox.** In the Docker image Chromium runs
+  without the sandbox it normally puts around its page-rendering processes
+  (`PCP_BROWSER_SANDBOX=off` in the Dockerfile: an unprivileged container has
+  no user namespaces to build one from). Elsewhere PCP tries the sandbox and,
+  where the machine cannot give one (running as root, an unprivileged
+  container), starts Chromium without it and says nothing. So a flaw in
+  Chromium that a page exploits is not contained by Chromium: it runs as
+  PCP's own user in PCP's container, with the data directory (the vault's
+  ciphertext, the request log, host settings, TLS keys) and the container's
+  network, loopback and PCP's own port included, in reach. PCP's proxy and
+  address checks do not hold against code running in the renderer. What
+  limits it: the browser is off until you add it on the Browser page, and
+  Chromium starts only when a page is opened (by an assistant you let use
+  its tools, by you, or by web fetch reading past a Cloudflare check when the
+  browser is added), and stops after fifteen minutes idle. Keep the image
+  current (its Chromium is the version its Playwright pins, so it moves with
+  the image), do not add the browser if you do not use it, and keep its
+  tools at Ask you first, with sites you do not know blocked or asked
+  about.
 - **Site names on disk.** The sites a token reached, with when, are stored
   unencrypted, like server addresses, so the token's page can list them. A
   copy of the disk shows them.
@@ -255,15 +297,16 @@ Not defended against:
   built from it, are stored unencrypted, like server addresses, names and the
   user name of a login. A copy of the disk shows them. Do not put a key or a
   hostname you would not want seen into a schema you upload.
-- **Endpoints behind an outbound proxy.** Public-only endpoints connect
-  directly so PCP can check the address it connects to. A host that must use
-  a proxy has to allow private addresses on those endpoints, which turns that
-  check off; the proxy's own egress rules are what protect it then.
+- **Endpoints behind an outbound proxy.** Public-only endpoints and MCP
+  servers connect directly so PCP can check the address it connects to. A
+  host that must use a proxy has to allow private addresses on those, which
+  turns that check off; the proxy's own egress rules are what protect it
+  then.
 - **What is in your mail.** An email is someone else's text: one an
   assistant reads can carry instructions meant for it (prompt injection),
-  and could ask it to send or forward mail. Keep sending on Ask you first,
-  or make the account read-only, for an assistant that reads mail from
-  strangers.
+  and could ask it to send or forward mail. Keep sending (and the automatic
+  reply) on Ask you first, or make the account read-only, for an assistant
+  that reads mail from strangers.
 - **Mail servers with certificates your system does not trust.** PCP checks
   the certificate of every JMAP, IMAP and SMTP server and refuses one it
   cannot verify, a self-signed one included.
@@ -279,13 +322,38 @@ Not defended against:
 - Run behind TLS: your own proxy, or PCP's built-in HTTPS (Settings). Most
   OAuth servers require an `https` redirect URL, and the session cookie is
   only marked `Secure` when the request arrived over TLS. Port 3000 stays
-  plain HTTP either way; do not expose it to the internet.
+  plain HTTP either way; do not expose it to the internet. With PCP's own
+  HTTPS on (`PCP_HTTPS=1`, or `docker-compose.https.yaml`), the installer and
+  the compose file publish it on `127.0.0.1` only, because a port Docker
+  publishes skips the host's firewall rules (ufw included). Without PCP's
+  HTTPS it is published on every interface, for your home network; behind a
+  proxy of your own, keep it off the internet yourself (bind it to
+  `127.0.0.1` or firewall it at the provider).
 - With dynamic DNS on, the service's token or password is stored
   **unencrypted** in the database (the `host_setting` table), because PCP uses
   it while nobody is signed in. Someone who reads the data directory can move
   your DNS name. With HTTPS on, the certificate's private key and the ACME
   account key are files under `tls/` in the data directory (mode 0600). Treat
   backups of the data volume accordingly.
+- A pcp.gg connection key is stored the same way: **unencrypted** in the
+  `host_setting` table (`pcpgg.config`), because PCP stays connected while
+  nobody is signed in. Whoever holds it can connect as your name and take it
+  over: pcp.gg sends them the name's traffic instead of PCP. It is never in an
+  export and never sent back to the browser, but it is in the data
+  directory and in any copy of it, like the dynamic DNS token above.
+- What pcp.gg can and cannot see. TLS for a pcp.gg name ends in your PCP, with
+  a certificate PCP gets for it from Let's Encrypt, so the relay carries
+  bytes it cannot read: it sees the name, sizes, timing and the clients'
+  addresses, not the requests or the answers. But pcp.gg runs the DNS zone
+  for the name and receives all of its traffic, so it could itself obtain a
+  certificate for your name (Let's Encrypt validates by DNS or by the
+  traffic pcp.gg carries) and stand in for PCP without your knowing. Using
+  pcp.gg means trusting it not to. If you do not extend that trust, use your
+  own name and router, or a proxy of your own.
+- Every client reaches PCP through the pcp.gg tunnel from `127.0.0.1`, so
+  PCP's limit on sign-in tries per address (above) counts all of them as one:
+  someone guessing at your name spends the same tries as you do. The 60 tries
+  for the whole instance hold either way.
 - PCP's own HTTPS listeners face the internet directly and overwrite any
   `X-Forwarded-*` header a client sends.
 - The desktop app's own port (3000) answers this computer only
@@ -308,6 +376,14 @@ Not defended against:
   daily update (`PCP_AUTO_UPDATE=1`, by its own timer or Podman's) starts PCP
   again from whatever image is published as `ghcr.io/kaperkunde/pcp:latest`,
   with no step for you to look first.
+- **Install and restart** under the Linux installer does the same when you
+  choose it: PCP writes the request (an id and a time, nothing else) in its
+  data folder, and the installer's watcher on the host reads it through
+  `docker exec` every 30 seconds and runs its own update. PCP gets no Docker
+  socket and no way to reach the host. The watcher reads the file as
+  untrusted, so even a PCP that was taken over could do no more than have
+  the published image pulled again, at most once every five minutes.
+  `PCP_UPDATE_BUTTON=0` turns it off.
 - The desktop app installs an update only when you choose **Install and
   restart**, downloading it from PCP's GitHub releases over HTTPS. On a Mac,
   the updater takes only an app signed with the same Developer ID; the

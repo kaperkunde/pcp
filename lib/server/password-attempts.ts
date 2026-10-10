@@ -21,33 +21,49 @@ import { clientIp } from "@/lib/server/client-ip"
 
 const WINDOW_MS = 15 * 60 * 1000
 const PER_SOURCE = { max: 10, windowMs: WINDOW_MS }
-// Per-address limits trust X-Forwarded-For, which a client reaching PCP
-// without a proxy can set to anything. This one does not: it caps how many
-// guesses the instance takes at all.
+// Per-address limits trust X-Forwarded-For (lib/server/client-ip.ts), which
+// a client reaching PCP without a proxy can set to anything, and so can one
+// behind a proxy that appends to it unless PCP_TRUSTED_PROXIES names that
+// proxy. This one does not: it caps how many guesses the instance takes at
+// all.
 const GLOBAL = { max: 60, windowMs: WINDOW_MS }
 
 export const TOO_MANY_ATTEMPTS =
   "Too many attempts. Wait a few minutes and try again."
 
+type SignInKind = "password" | "recovery-key" | "export" | "touch-id"
+type SessionKind = "password" | "touch-id" | "export"
+
+// One place builds each pair of keys, for the check and for the refund
+// alike: a refund under a key nothing counted would give back nothing.
+async function signInKeys(kind: SignInKind): Promise<[string, string]> {
+  return [`${kind}:${await clientIp()}`, `${kind}:*`]
+}
+
+function sessionKeys(kind: SessionKind, sessionId: string): [string, string] {
+  return [`${kind}:session:${sessionId}`, `${kind}:*`]
+}
+
+function within([own, all]: [string, string]): boolean {
+  return checkRateLimit(own, PER_SOURCE) && checkRateLimit(all, GLOBAL)
+}
+
+function refund([own, all]: [string, string]): void {
+  refundRateLimit(own)
+  refundRateLimit(all)
+}
+
 /**
  * A password, recovery key or export password typed on a signed-out page,
  * or the Mac app's Touch ID key, per address.
  */
-export async function withinSignInLimits(
-  kind: "password" | "recovery-key" | "export" | "touch-id",
-): Promise<boolean> {
-  return (
-    checkRateLimit(`${kind}:${await clientIp()}`, PER_SOURCE) &&
-    checkRateLimit(`${kind}:*`, GLOBAL)
-  )
+export async function withinSignInLimits(kind: SignInKind): Promise<boolean> {
+  return within(await signInKeys(kind))
 }
 
 /** A sign-in of `kind` was right: its try was no guess. */
-export async function forgiveSignInTry(
-  kind: "password" | "recovery-key" | "export" | "touch-id",
-): Promise<void> {
-  refundRateLimit(`${kind}:${await clientIp()}`)
-  refundRateLimit(`${kind}:*`)
+export async function forgiveSignInTry(kind: SignInKind): Promise<void> {
+  refund(await signInKeys(kind))
 }
 
 /**
@@ -56,10 +72,7 @@ export async function forgiveSignInTry(
  * instance-wide cap as sign-in.
  */
 export function withinSessionLimits(sessionId: string): boolean {
-  return (
-    checkRateLimit(`password:session:${sessionId}`, PER_SOURCE) &&
-    checkRateLimit("password:*", GLOBAL)
-  )
+  return within(sessionKeys("password", sessionId))
 }
 
 /**
@@ -69,10 +82,7 @@ export function withinSessionLimits(sessionId: string): boolean {
  * goes unlimited: a budget of its own, per session and for the instance.
  */
 export function withinTouchIdLimits(sessionId: string): boolean {
-  return (
-    checkRateLimit(`touch-id:session:${sessionId}`, PER_SOURCE) &&
-    checkRateLimit("touch-id:*", GLOBAL)
-  )
+  return within(sessionKeys("touch-id", sessionId))
 }
 
 /** The password (or the Touch ID key) inside a session was right. */
@@ -80,8 +90,7 @@ export function forgiveSessionTry(
   sessionId: string,
   kind: "password" | "touch-id" = "password",
 ): void {
-  refundRateLimit(`${kind}:session:${sessionId}`)
-  refundRateLimit(`${kind}:*`)
+  refund(sessionKeys(kind, sessionId))
 }
 
 /**
@@ -90,10 +99,7 @@ export function forgiveSessionTry(
  * checking a file does not use up the owner's own tries.
  */
 export function withinExportLimits(sessionId: string): boolean {
-  return (
-    checkRateLimit(`export:session:${sessionId}`, PER_SOURCE) &&
-    checkRateLimit("export:*", GLOBAL)
-  )
+  return within(sessionKeys("export", sessionId))
 }
 
 /**
@@ -114,9 +120,9 @@ export async function confirmPassword(
 }
 
 /**
- * The owner again, before a new API token, an export, a restore or deleting
- * the vault: the
- * password (`password`), or in the Mac app the Touch ID key (`deviceKey`,
+ * The owner again, before a new API token (or a new expiry for an expired
+ * one), a new public address, an export, a restore or deleting the vault:
+ * the password (`password`), or in the Mac app the Touch ID key (`deviceKey`,
  * lib/core/device-keys.ts), which that app hands over only after Touch ID.
  * A new recovery key and a new password take the password itself: they
  * decide who gets in, and Touch ID must not.

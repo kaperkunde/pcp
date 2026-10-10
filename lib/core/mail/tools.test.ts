@@ -64,6 +64,39 @@ describe("mailTools", () => {
     ])
   })
 
+  it("counts the automatic reply as sending: left out where the account cannot send", () => {
+    const options = {
+      kind: "jmap",
+      readOnly: false,
+      canVacation: true,
+    } as const
+
+    expect(names({ ...options, canSend: false })).not.toContain(
+      "set_vacation_response",
+    )
+    // Reading it sends nothing.
+    expect(names({ ...options, canSend: false })).toContain(
+      "get_vacation_response",
+    )
+    expect(names({ ...options, canSend: true })).toContain(
+      "set_vacation_response",
+    )
+
+    const set = mailTools({ ...options, canSend: true }).find(
+      (tool) => tool.name === "set_vacation_response",
+    )!
+    expect(set.annotations).toMatchObject({
+      readOnlyHint: false,
+      openWorldHint: true,
+    })
+    expect(set.description).toMatch(/sends this text to whoever writes/)
+    expect(mailToolSpec("set_vacation_response")).toMatchObject({
+      writes: true,
+      sends: true,
+    })
+    expect(mailToolSpec("get_vacation_response")!.sends).toBeUndefined()
+  })
+
   it("leaves out what IMAP has no use for, and sending without SMTP", () => {
     expect(names({ kind: "imap", readOnly: false, canSend: false })).toEqual([
       "list_mailboxes",

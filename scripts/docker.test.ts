@@ -70,3 +70,32 @@ describe("the Docker image's listen address", () => {
     expect(listenHost("192.168.1.2", false)).toBe("192.168.1.2")
   })
 })
+
+// Port 3000 is plain HTTP. With PCP's own HTTPS on, it is published on
+// 127.0.0.1 only: a published port skips the host's firewall (ufw), and the
+// session cookie is not Secure over http. install.sh does the same
+// (install.test.ts).
+describe("the compose files' ports", () => {
+  it("publish 3000 on every interface without HTTPS", () => {
+    const compose = readFileSync(path.join(root, "docker-compose.yaml"), "utf8")
+
+    expect(compose).toMatch(/^\s+- "3000:3000"$/m)
+    expect(compose).not.toContain("127.0.0.1")
+  })
+
+  it("publish 3000 on 127.0.0.1 only, beside 80 and 443, with HTTPS", () => {
+    const https = readFileSync(
+      path.join(root, "docker-compose.https.yaml"),
+      "utf8",
+    )
+    const ports = https.match(/^\s+ports: !override\n((?:\s+- ".*"\n?)+)/m)?.[1]
+
+    // !override: a plain list would be added to the base file's 3000:3000.
+    expect(ports?.match(/"(.*)"/g)).toEqual([
+      '"127.0.0.1:3000:3000"',
+      '"80:8080"',
+      '"443:8443"',
+    ])
+    expect(https).not.toMatch(/"3000:3000"/)
+  })
+})

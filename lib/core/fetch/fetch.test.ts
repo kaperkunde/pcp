@@ -8,7 +8,7 @@ import {
   type TestApi,
 } from "../openapi/test-api"
 import { CHALLENGE_LINE } from "./challenge"
-import { fetchWeb, withNote } from "./fetch"
+import { fetchWeb, isPcpSite, withNote } from "./fetch"
 import { MAX_FETCH_RESPONSE_BYTES } from "./limits"
 import { prepareFetch, type FetchInput } from "./request"
 
@@ -39,6 +39,20 @@ async function fetchFrom(input: Omit<FetchInput, "url"> & { path: string }) {
   )
   return result
 }
+
+describe("PCP's own site", () => {
+  it("is PCP's public address, whatever the case or a trailing dot", () => {
+    const own = "https://pcp.example.com"
+
+    expect(isPcpSite(new URL("https://pcp.example.com/x"), own)).toBe(true)
+    expect(isPcpSite(new URL("https://PCP.example.com./x"), own)).toBe(true)
+    expect(isPcpSite(new URL("http://pcp.example.com./"), own)).toBe(true)
+    expect(isPcpSite(new URL("https://example.com/"), own)).toBe(false)
+    expect(isPcpSite(new URL("https://pcp.example.com/"), undefined)).toBe(
+      false,
+    )
+  })
+})
 
 describe("fetching a page", () => {
   it("returns HTML as Markdown with the address, status and length in front", async () => {

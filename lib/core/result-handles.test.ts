@@ -176,7 +176,11 @@ describe("resolveHandles", () => {
     )
 
     await expect(refused).rejects.toThrow(
-      /No kept result "gone" for this token/,
+      /A kept result named in the arguments is not there for this token/,
+    )
+    // The log keeps this message; the id is the assistant's argument.
+    await refused.catch((error) =>
+      expect((error as Error).message).not.toContain("gone"),
     )
     await refused.catch((error) => expect(isPcpError(error)).toBe(true))
   })

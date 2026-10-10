@@ -42,6 +42,14 @@ describe("sites", () => {
     expect(siteKey(new URL("https://www.example.com/"))).toBe("www.example.com")
   })
 
+  it("is one site with or without a name's trailing dot", () => {
+    expect(siteKey(new URL("https://Example.com./a"))).toBe("example.com")
+    expect(siteKey(new URL("https://example.com.:8443/"))).toBe(
+      "example.com:8443",
+    )
+    expect(normalizeSite("example.com.")).toBe("example.com")
+  })
+
   it("reads what the owner types as a site", () => {
     expect(normalizeSite("example.com")).toBe("example.com")
     expect(normalizeSite(" https://Docs.Example.com/guide ")).toBe(

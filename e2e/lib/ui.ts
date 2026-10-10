@@ -2,7 +2,10 @@ import { expect, type Page } from "@playwright/test"
 
 import { OWNER_PASSWORD } from "./auth"
 
-/** Adds a text secret through the Secrets page. */
+/**
+ * Adds a text secret through the Secrets page: "Add a secret" opens a sheet
+ * with the form, which closes once the secret is saved.
+ */
 export async function addSecret(
   page: Page,
   {
@@ -12,68 +15,51 @@ export async function addSecret(
   }: { name: string; value: string; description?: string },
 ) {
   await page.goto("/secrets")
-  await page.getByLabel("Name", { exact: true }).fill(name)
+  await page.getByRole("button", { name: "Add a secret" }).click()
+  const dialog = page.getByRole("dialog", { name: "Add a secret" })
+  await dialog.getByLabel("Name", { exact: true }).fill(name)
   if (description) {
-    await page.getByLabel("Description (optional)").fill(description)
+    await dialog.getByLabel("Description (optional)").fill(description)
   }
-  await page.getByLabel("Value").fill(value)
-  await page.getByRole("button", { name: "Save secret" }).click()
+  await dialog.getByLabel("Value").fill(value)
+  await dialog.getByRole("button", { name: "Save secret" }).click()
+  await expect(dialog).toBeHidden()
   await expect(
     page.getByRole("listitem").filter({ hasText: name }).first(),
   ).toBeVisible()
 }
 
 /**
- * Creates an API token for every server and returns it. Creating one opens
- * its own page, with the token shown once at the top.
+ * Creates an API token for every server and returns it, through the
+ * "Connect an assistant" sheet on Assistants. It ends on the token's own
+ * page. connectAssistant (below) takes the options.
  */
 export async function createToken(
   page: Page,
   name: string,
   password = OWNER_PASSWORD,
 ): Promise<string> {
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(name)
-  await page.getByRole("button", { name: "Create token" }).click()
-  await confirmWithPassword(page, password)
-  await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
-  await expect(page.getByRole("heading", { name })).toBeVisible()
-  await expect(page.getByText("Your new token")).toBeVisible()
-  const token = await page.getByTestId("new-token").textContent()
-  expect(token).toMatch(/^pcp_/)
-  return token!
+  return (await connectAssistant(page, name, {}, password)).token
 }
 
 /**
  * Creates an API token for every server that may also fetch web pages, and
- * returns it with its id. Creating one opens its own page.
+ * returns it with its id. It ends on the token's own page.
  */
 export async function createFetchingToken(
   page: Page,
   name: string,
   password = OWNER_PASSWORD,
 ): Promise<{ token: string; id: string }> {
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(name)
-  await page
-    .getByLabel("Let an assistant with this token fetch web pages")
-    .check()
-  await page.getByRole("button", { name: "Create token" }).click()
-  await confirmWithPassword(page, password)
-  await expect(page.getByText("Your new token")).toBeVisible()
-  await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
-
-  return {
-    token: (await page.getByTestId("new-token").textContent())!,
-    id: page.url().split("/").pop()!,
-  }
+  return connectAssistant(page, name, { webFetch: true }, password)
 }
 
 /**
- * Answers the token form's password step. The form that asks holds the
- * account and the password and nothing else a password manager would fill:
- * anything more and Safari takes it for a sign-up and offers to generate a
- * new password instead of filling the saved one.
+ * Answers a password step (a new API token, an export, an app signing in).
+ * The form that asks holds the account and the password and nothing else a
+ * password manager would fill: anything more and Safari takes it for a
+ * sign-up and offers to generate a new password instead of filling the
+ * saved one. It is sent with its own submit button, whatever its words.
  */
 export async function confirmWithPassword(page: Page, password: string) {
   const field = page.getByLabel("Your password")
@@ -91,14 +77,22 @@ export async function confirmWithPassword(page: Page, password: string) {
   await expect(page.getByLabel("Account")).not.toHaveValue("")
 
   await field.fill(password)
-  await page.getByRole("button", { name: "Confirm" }).click()
+  await page
+    .locator("form")
+    .filter({ has: field })
+    .locator('button[type="submit"]')
+    .click()
 }
 
-/** Opens a token's page from the token list; returns the token's id. */
+/** Opens a token's page from Assistants; returns the token's id. */
 export async function openToken(page: Page, name: string): Promise<string> {
   await page.goto("/tokens")
-  await page.getByRole("link", { name, exact: true }).click()
+  await page
+    .getByRole("link")
+    .filter({ has: page.getByText(name, { exact: true }) })
+    .click()
   await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
+  await expect(page.getByRole("heading", { name, level: 1 })).toBeVisible()
   return page.url().split("/").pop()!
 }
 
@@ -114,8 +108,8 @@ export async function showServerTools(page: Page) {
 }
 
 /**
- * Unfolds a server's tools on a token's page: each server shows only a
- * count of its tools until it is opened.
+ * Unfolds a server's tools on a token's page (or its Advanced page): each
+ * server shows only how many it may run until it is opened.
  */
 export async function showTools(page: Page, slug: string) {
   const toggle = page
@@ -129,7 +123,8 @@ export async function showTools(page: Page, slug: string) {
 
 /**
  * Lets a token run every tool on one server without asking the owner
- * first (tools ask by default).
+ * first (tools ask by default). Ends on the token's page with the server's
+ * tools unfolded.
  */
 export async function allowAllTools(
   page: Page,
@@ -137,23 +132,278 @@ export async function allowAllTools(
   slug: string,
 ) {
   await openToken(page, tokenName)
+  page.once("dialog", (dialog) => dialog.accept())
   await page
     .getByLabel(`All tools on ${slug}`, { exact: true })
     .selectOption("allowed")
-  await page
-    .getByRole("button", { name: `Set all tools on ${slug}`, exact: true })
-    .click()
   await showTools(page, slug)
 
   // Slugs are lower-case letters, digits and dashes: safe in a pattern.
-  const tools = page.getByRole("combobox", {
+  const levels = page.getByRole("group", {
     name: new RegExp(`^Access to ${slug}/`),
   })
   await expect(async () => {
-    const values = await tools.evaluateAll((selects) =>
-      selects.map((select) => (select as HTMLSelectElement).value),
+    const allowed = await levels.evaluateAll((groups) =>
+      groups.map(
+        (group) =>
+          group.querySelector<HTMLInputElement>('input[value="allowed"]')
+            ?.checked === true,
+      ),
     )
-    expect(values.length).toBeGreaterThan(0)
-    expect(values.every((value) => value === "allowed")).toBe(true)
+    expect(allowed.length).toBeGreaterThan(0)
+    expect(allowed.every(Boolean)).toBe(true)
   }).toPass()
+}
+
+// ---- The owner's answers to requests (permissions, memories) ----------------
+
+/** The permission link in an assistant's result text, and the request's id. */
+export function permissionFrom(text: string): { path: string; id: string } {
+  const id = text.match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(id, text).toBeTruthy()
+  return { path: `/permissions/${id}`, id: id! }
+}
+
+/** Accepts the next confirm() the page shows (Delete, Copy access…). */
+export function acceptNextDialog(page: Page) {
+  page.once("dialog", (dialog) => void dialog.accept())
+}
+
+/** The bell in the sidebar that lists what waits for the owner. */
+export function bell(page: Page) {
+  return page.getByRole("button", { name: /waiting for you/ })
+}
+
+/** Opens the bell and follows the request whose title matches. */
+export async function openRequestFromBell(page: Page, title: RegExp | string) {
+  await expect(bell(page)).toBeVisible()
+  await bell(page).click()
+  await page.getByRole("menuitem", { name: title }).click()
+}
+
+/** The group of levels for one tool on an assistant's proposal. */
+export function proposedLevel(page: Page, slug: string, tool: string) {
+  return page.getByRole("group", { name: `Access to ${slug}/${tool}` })
+}
+
+/**
+ * Picks a level on an assistant's proposal for its token's tools: each
+ * tool's choice is a group named "Access to <slug>/<tool>" of radio buttons.
+ */
+export async function chooseProposedLevel(
+  page: Page,
+  slug: string,
+  tool: string,
+  level: "Allowed" | "Ask you first" | "Blocked",
+) {
+  await proposedLevel(page, slug, tool)
+    .getByRole("radio", { name: level, exact: true })
+    .check()
+}
+
+/** What a new token may do besides running tools, and what it reaches. */
+export type TokenOptions = {
+  /** Server names it reaches; every server when left out. */
+  servers?: string[]
+  keepMemories?: boolean
+  webFetch?: boolean
+  runCode?: boolean
+  manageEndpoints?: boolean
+  manageWrappers?: boolean
+}
+
+/** The switches under More options in the connect sheet. */
+const OPTION_LABELS = {
+  keepMemories: "Keep memories",
+  webFetch: "Read web pages",
+  runCode: "Run code",
+  manageEndpoints: "Manage API endpoints",
+  manageWrappers: "Propose wrappers",
+} as const
+
+/**
+ * Fills the connect sheet's first step (name, servers, options) and goes on
+ * to the password step, which is left to the caller.
+ */
+export async function startConnecting(
+  page: Page,
+  name: string,
+  options: TokenOptions = {},
+) {
+  await page.goto("/tokens")
+  await page.getByRole("button", { name: "Connect an assistant" }).click()
+  const sheet = page.getByRole("dialog")
+  // A token to paste, as Claude Code takes it (a Claude app signs in at PCP
+  // instead: oauth-server.spec.ts).
+  await sheet.getByText("Claude Code", { exact: true }).click()
+  await sheet.getByLabel("Name", { exact: true }).fill(name)
+
+  if (options.servers) {
+    await sheet.getByText("Only some", { exact: true }).click()
+    for (const server of options.servers) {
+      await sheet.getByLabel(server).check()
+    }
+  }
+
+  const switches = (
+    Object.keys(OPTION_LABELS) as Array<keyof typeof OPTION_LABELS>
+  ).filter((option) => options[option])
+  if (switches.length > 0) {
+    await sheet.getByText("More options", { exact: true }).click()
+    for (const option of switches) {
+      // Anchored: a row's name runs on into its caption.
+      await sheet
+        .getByRole("switch", { name: new RegExp(`^${OPTION_LABELS[option]}`) })
+        .check()
+    }
+  }
+
+  await sheet.getByRole("button", { name: "Continue" }).click()
+}
+
+/**
+ * Connects an assistant through the sheet: the first step, the password,
+ * the token shown once (returned with its id), then Done, which opens the
+ * token's page.
+ */
+export async function connectAssistant(
+  page: Page,
+  name: string,
+  options: TokenOptions = {},
+  password = OWNER_PASSWORD,
+): Promise<{ token: string; id: string }> {
+  await startConnecting(page, name, options)
+  await confirmWithPassword(page, password)
+  const shown = page.getByTestId("new-token")
+  await expect(shown).toHaveText(/^pcp_/)
+  const token = (await shown.textContent())!
+  await page.getByRole("button", { name: "Done" }).click()
+  await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
+  await expect(page.getByRole("heading", { name, level: 1 })).toBeVisible()
+  return { token, id: page.url().split("/").pop()! }
+}
+
+/** Opens a token's Advanced page (expiry, All tokens, web fetch, proposing). */
+export async function openTokenAdvanced(page: Page, tokenId: string) {
+  await page.goto(`/tokens/${tokenId}/advanced`)
+  await expect(
+    page.getByRole("heading", { name: "Advanced", level: 1 }),
+  ).toBeVisible()
+}
+
+/** The words on each level's segment. */
+const LEVEL_WORDS = {
+  default: "By method",
+  allowed: "Allow",
+  ask: "Ask",
+  blocked: "Block",
+} as const
+
+type Level = keyof typeof LEVEL_WORDS
+
+/**
+ * Picks a level in one of the token pages' segmented controls, named by its
+ * legend ("Access to <slug>/<tool>", "Web fetch <site or method>"), and
+ * waits for it to be saved.
+ */
+export async function chooseLevel(page: Page, legend: string, level: Level) {
+  const group = page.getByRole("group", { name: legend, exact: true })
+  const radio = group.getByRole("radio", {
+    name: LEVEL_WORDS[level],
+    exact: true,
+  })
+  await radio.check()
+  await expect(radio).toBeEnabled()
+  await expect(radio).toBeChecked()
+}
+
+/** Checks the level a segmented control shows. */
+export async function expectLevel(page: Page, legend: string, level: Level) {
+  await expect(
+    page
+      .getByRole("group", { name: legend, exact: true })
+      .getByRole("radio", { name: LEVEL_WORDS[level], exact: true }),
+  ).toBeChecked()
+}
+
+/** A tool's level on the token's page, for one token. */
+export async function setToolLevel(
+  page: Page,
+  slug: string,
+  tool: string,
+  level: Exclude<Level, "default">,
+) {
+  await showTools(page, slug)
+  await chooseLevel(page, `Access to ${slug}/${tool}`, level)
+}
+
+/**
+ * Turns private addresses (web fetch and the browser) on or off for a
+ * token, on its Advanced page, and waits for it to be saved.
+ */
+export async function setPrivateAddresses(page: Page, allowed: boolean) {
+  const toggle = page.getByRole("switch", { name: /^Private addresses/ })
+  await toggle.setChecked(allowed)
+  await expect(toggle).toBeEnabled()
+  await expect(toggle).toBeChecked({ checked: allowed })
+}
+
+/**
+ * A folded row of the Settings page ("Password", "Touch ID", "Export"),
+ * opened: the row is a disclosure, and its form is not on screen until it
+ * is. Returns the row to look for the form's fields and buttons in.
+ */
+export async function openSettingsRow(page: Page, title: string) {
+  const row = page.locator("details[data-slot=disclosure]").filter({
+    has: page.locator("summary").getByText(title, { exact: true }),
+  })
+
+  if ((await row.getAttribute("open")) === null) {
+    await row.locator("summary").first().click()
+  }
+
+  await expect(row).toHaveAttribute("open", "")
+  return row
+}
+
+/**
+ * Unfolds Advanced on a server's page: its settings form (name, short name,
+ * address, sign-in) lives there, folded until asked for.
+ */
+export async function showServerSettings(page: Page) {
+  const advanced = page
+    .locator("details")
+    .filter({ has: page.locator("summary", { hasText: /^Advanced/ }) })
+    .first()
+  if (!(await advanced.evaluate((element) => element.hasAttribute("open")))) {
+    await advanced.locator("summary").first().click()
+  }
+  await expect(advanced).toHaveAttribute("open", "")
+}
+
+/**
+ * Goes to a kind's add page through the Servers page's Add menu: "MCP
+ * server", "API endpoint", "Mail account", "SSH server", "Wrapper".
+ */
+export async function addServerFromMenu(page: Page, kind: string) {
+  await page.goto("/servers")
+  await page.getByRole("button", { name: "Add", exact: true }).click()
+  await page.getByRole("menuitem", { name: new RegExp(`^${kind}`) }).click()
+}
+
+/** Chooses one option of a SegmentedControl by its label. */
+export async function chooseSegment(page: Page, label: string) {
+  const radio = page.getByRole("radio", { name: label, exact: true })
+  await radio.check()
+  await expect(radio).toBeChecked()
+}
+
+/** Opens "More options" on an add form. */
+export async function openMoreOptions(page: Page) {
+  const more = page.locator("details", {
+    has: page.locator("summary", { hasText: /^More options/ }),
+  })
+  if ((await more.getAttribute("open")) === null) {
+    await more.locator("summary").click()
+  }
 }

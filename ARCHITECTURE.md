@@ -88,16 +88,21 @@ Consequences:
   working.
 - **Revoking an API token** blanks its grant, and deletes the grants of
   whatever an app that signed in for it holds; **signing out** deletes the
-  session's; **recovery** replaces the password grant, deletes every session
-  grant and the Touch ID key (`device`) and, when asked, blanks every API
-  token grant. **Signing out everywhere** deletes the sessions and the Touch
-  ID key, and can blank the API tokens too.
+  session's; **recovery** replaces the password grant, then signs out
+  everywhere. **Signing out everywhere** (`signOutEverywhere`) deletes every
+  session grant and the Touch ID key (`device`), forgets the pinned public
+  URL, and, when asked, blanks every API token grant. The public URL is no
+  grant, but it decides where permission links and PCP's OAuth metadata
+  point, so one a stolen session pinned must not outlive it; pinning or
+  clearing it takes `confirmOwner` too.
 - **A session cannot outlast itself.** Making an API token or a recovery key
   asks for the password again (`lib/server/password-attempts.ts`). A session
   cookie can be copied, so it may use the DEK but not mint a grant that
-  survives the session. In the Mac app the Touch ID key stands in for the
-  password before a new API token (an app's sign-in included), an export or
-  a restore (`confirmOwner`),
+  survives the session. An expired token keeps its grant, so giving it a new
+  expiry (or none) is the same as making one (`revivesToken`). In the Mac app
+  the Touch ID key stands in for the password before a new API token (an
+  app's sign-in included, or a new expiry for an expired one), a new public
+  URL, an export or a restore (`confirmOwner`),
   never before a new recovery key, a new password or another Touch ID key:
   only the password and the recovery key decide who gets in. See "Touch ID
   in the Mac app".
@@ -293,11 +298,14 @@ with a link to connect it. The token is redacted from what the API answers, like
 secret, and the `Authorization` header is never one of an operation's
 arguments.
 
-Private addresses are allowed, as they are for MCP servers: only the owner
-sets a schema URL or base URL, and a self-hosted PCP often talks to services
-on its own network. A multi-tenant host must add an address policy before it
-lets anyone else set one: resolve the name, refuse loopback, private,
-link-local and metadata ranges, and connect to the address it checked.
+Private addresses are allowed, as they are for MCP servers the owner adds:
+only the owner sets a schema URL or base URL, and a self-hosted PCP often
+talks to services on its own network. What an assistant proposes, an
+endpoint or an MCP server, is public-only (below) until the owner allows
+private addresses on its page. A multi-tenant host must add an address policy
+before it lets anyone else set one: resolve the name, refuse loopback,
+private, link-local and metadata ranges, and connect to the address it
+checked.
 
 ## Registering and managing endpoints through the gateway
 
@@ -446,8 +454,10 @@ through: there is no tool that takes a raw JMAP method or IMAP command, so
 every change an assistant makes is one these rules were written for. Which
 ones an account has depends on read-only (the tools that change mail are left
 out, and refused if called anyway), on whether it can send (JMAP: the session
-offers submission; IMAP: the owner gave an SMTP server), and for the automatic
-reply on whether the JMAP session offers `vacationresponse`.
+offers submission; IMAP: the owner gave an SMTP server; `set_vacation_response`
+counts as sending, since the server sends its text to whoever writes in, and
+goes with `send_email`), and for the automatic reply on whether the JMAP
+session offers `vacationresponse`.
 
 `move_email`, `mark_email` and `delete_email` take `id` or `ids` (up to
 `MAX_BULK_EMAILS`): one email answers as it always has, several answer with
@@ -493,7 +503,12 @@ asked (`mail/probe.ts`): a GET with no credential, public addresses only and
 no redirect followed. A wrong address is refused at once, with where a
 redirect pointed; a private or local address is not looked at, and the owner
 is told so, because only they should send credentials into their own network.
-IMAP is not looked at (a connection without a login shows little).
+IMAP is not looked at (a connection without a login shows little), but the
+names of its IMAP and SMTP servers are resolved (`openapi/address.ts:
+privateHostsNote`) and one on a private or local address is flagged to the
+owner the same way. That line is the owner's alone (`PermissionView.ownerOnly`):
+the assistant's copy of the request leaves it out, so proposals cannot be used
+to learn what the owner's DNS holds.
 
 `upstream.ts` builds the credential and hands it to `mail/accounts.ts` as a
 `MailCredential`: the `Authorization` header for JMAP, the login for IMAP and
@@ -505,7 +520,10 @@ JMAP only) or `oauth` (JMAP only).
 **JMAP** (`mail/jmap.ts`): `url` is the session URL the owner typed. Reading
 the account GETs it with the credential, and the API, download and upload
 addresses it names are accepted only on that URL's origin, so the credential
-goes nowhere the owner did not type; they are kept (`mail_api_url`,
+goes nowhere the owner did not type; the URL is `https://`, or `http://` only
+for a private, loopback or link-local address or a name that resolves only to
+those (`requireEncryptedOrPrivate` when it is saved or proposed, and every
+request again, to the address the socket connects to); they are kept (`mail_api_url`,
 `mail_download_url`, `mail_upload_url`, `mail_account_id`,
 `mail_submission`) and forgotten when
 the address or sign-in changes. Redirects are never followed: PCP names
@@ -542,7 +560,10 @@ the credential. A body longer than 20,000 characters is kept the same way.
 `send_email` and `create_draft` take kept results as attachments, read before
 anything connects (at most 10, 20 MB together), so an attachment read from one
 account can be sent from another. Delete moves to the
-Trash and nothing deletes for good. Failures: refused credentials mark the
+Trash and nothing deletes for good. Over IMAP a move (and so a delete) is
+refused on a server with neither MOVE nor UIDPLUS: imapflow would copy and
+then expunge, which erases every email in the folder already marked deleted.
+Failures: refused credentials mark the
 account `auth_required` (with OAuth, "needs connecting"), an unreachable
 server `error`; a request the server refuses (no such email or mailbox) is
 an error answer and leaves the account as it is.
@@ -566,7 +587,9 @@ forwarding, no agent, no file transfer. Only the owner adds one, on the
 Servers page; `register_server` has no kind for it, because a shell on a
 machine is more than an assistant should be able to ask for in a sentence.
 `run_command` asks the owner first by default like every tool, and the
-permission page shows the command in full.
+permission page shows the command and its standard input in full (under Show
+everything when the lines cut them short), with `stdin_base64` read as text
+too when it is UTF-8; a kept result's handle is described, not shown.
 
 The protocol is `ssh2`'s (`lib/core/ssh/client.ts`), in pure JavaScript: pnpm
 does not build its optional native parts (it is not in `allowBuilds`), so the
@@ -584,11 +607,15 @@ exchange (the Terrapin countermeasure) to any offer.
   the owner to put in the login's `authorized_keys`. PCP signs in with that
   key alone: no password, no keyboard-interactive, no agent. The owner can
   have PCP make a new key; deleting the server deletes the key.
-- **The host key**, pinned on first use. The first connection that finishes
-  a key exchange stores the key the server proved it holds
-  (`ssh_host_key`), whether or not signing in then works, so it is usually
-  pinned when the owner adds the server, and the page shows its fingerprint
-  to compare with the server's own. `ssh2` asks `hostVerifier` before it
+- **The host key**, pinned on first use, by the owner. The first connection
+  the owner started (adding the server, **Check sign-in**, forgetting the
+  key) that finishes a key exchange stores the key the server proved it
+  holds (`ssh_host_key`), whether or not signing in then works, so it is
+  usually pinned when the owner adds the server, and the page shows its
+  fingerprint to compare with the server's own. A call an assistant makes,
+  or the gateway reading the tools again, never pins a key and does not
+  connect while there is none: whoever answered first would otherwise be
+  the key every later call trusts. It answers with the server's page. `ssh2` asks `hostVerifier` before it
   checks the server's signature, so the key is kept only after the
   `handshake` event, never from inside the verifier. From then on any other
   key is refused before signing in; the owner can forget the pinned key
@@ -638,11 +665,16 @@ another one reads:
   `decideMemoryAsk` re-reads the memory and writes only if it is still what
   the owner was shown. The owner writes, moves and deletes memories freely on
   the Memories page.
-- **What the owner reads is all there is.** Text with characters that do not
-  show on screen (controls other than tab and newline, format characters such
-  as zero-width spaces, direction overrides and tag characters, private-use,
-  blank fillers, variation selectors that can carry bytes) is refused, and a
-  shared memory is at most 2,000 characters, so it can be read whole.
+- **What the owner reads is all there is.** Text or a path with characters
+  that do not show on screen (controls other than tab and newline, format
+  characters such as zero-width spaces, direction overrides and tag
+  characters, private-use, and every Unicode Default_Ignorable code point:
+  blank fillers such as the Hangul ones that count as letters, variation
+  selectors that can carry bytes) is refused, and a shared memory is at most
+  2,000 characters, so it can be read whole. The emoji presentation
+  selectors (U+FE0E, U+FE0F) are the one exception: text loses them when it
+  arrives, before the owner is asked, so what they approve is what is
+  written; a request answered later is checked as stored, never changed.
 - **The instructions name shared memories by path, and carry the ones read
   in every conversation whole.** The memory paragraph follows the protocol
   Claude's own memory tool adds to the system prompt (look at `/memories`
@@ -870,7 +902,9 @@ under the program's job. PCP hands it to the bridge as it would QuickJS's,
 so a shell program has exactly a JavaScript program's rights; a request for
 any other job is ignored. A stop from the bridge, an abort or the time limit
 makes the runner kill every process of the program's user and remove every
-file it owns, so nothing of one program, which may be another token's, is
+file it owns, and every System V shared memory segment, semaphore set and
+message queue and POSIX message queue it made (they outlive their processes),
+so nothing of one program, which may be another token's, is
 left for the next. What the program prints, stdout and stderr together,
 comes back with its exit status. `run_code` offers a `language` argument only
 while a runner is connected, so a token on an install without the sandbox
@@ -902,7 +936,10 @@ it in its arguments. `lib/core/wrappers/` holds it:
   not blocked from), none is a wrapper's (wrappers do not nest), every
   program compiles (QuickJS with `compileOnly`, `code/quickjs.ts
 checkSyntax`), nothing has a character that does not show on screen
-  (`hiddenCharacter`, as for shared memories), and the sizes in
+  (`hiddenCharacter`, as for shared memories: the name, descriptions and
+  titles lose their emoji presentation selectors first; a program, a
+  schema, a secret's argument pointer and template refuse them too), and
+  the sizes in
   `wrappers/limits.ts` hold (a program is 20,000 characters at most, for the
   owner to read). The catalogue's rows for the wrapper's tools are built
   from it (`catalogue.ts`); the row's `operation` carries the calls and
@@ -926,9 +963,10 @@ checkSyntax`), nothing has a character that does not show on screen
   counting as blocked. It is blocked for a token wherever one of its calls
   is, and asks wherever one of them asks. When the owner allows such a call
   (a `call` request like any other; the page names the tools it may call),
-  the program runs with `approved`, so a call that would ask runs once in
-  that run; one that is blocked stays refused, and nothing asks again inside
-  it. A run that was not allowed by the owner never makes a call that asks.
+  the program runs with `approved`, so a tool that would ask runs in that
+  run as often as the program calls it, with the arguments it works out (up
+  to run_code's `MAX_CALLS_PER_RUN`), and the page says so; one that is
+  blocked stays refused, and nothing asks again inside it. A run that was not allowed by the owner never makes a call that asks.
   Always allow writes only the wrapper tool's own level, which the
   strictest-level rule keeps asking while a tool it calls asks.
 - **Secrets** go in only as a placeholder, `{"$secret": "<name>"}`, in a
@@ -1002,7 +1040,10 @@ as it starts. It starts without `--enable-automation`, with
 with service workers blocked (one could answer a navigation without the
 network, around the gate). Chromium's own sandbox is used where the machine
 gives one and dropped where it cannot (root, or an unprivileged container;
-the Docker image says so with `PCP_BROWSER_SANDBOX=off`).
+the Docker image says so with `PCP_BROWSER_SANDBOX=off`). Without it a
+renderer exploit runs as PCP's user with the data directory in reach, and the
+automatic fallback tells no one; SECURITY.md lists that as not defended
+against.
 
 **The virtual display** (`display.ts`). In the container image
 (`PCP_CONTAINER=1`), or on another Linux machine with
@@ -1015,7 +1056,12 @@ its cookie, kept in a private folder and handed to Chromium alone, so
 another program on the machine cannot watch the browser or type into it.
 WebGL there is Chromium's software renderer, as headless uses by itself
 (`--enable-unsafe-swiftshader`; without it a windowed Chromium with no
-graphics card has no WebGL at all). An Xvfb that does not start leaves the
+graphics card has no WebGL at all). Chromium's RenderDocument is off there:
+with it (Chromium 153) a script that runs while a new document loads often
+reads the window as 0 by 0 at 0,0 until the window's place reaches it, which
+no desktop's Chrome shows. Chromium keeps only the last `--disable-features`
+it is given, so PCP's list carries Playwright's own too, and a test checks it
+against the playwright-core installed. An Xvfb that does not start leaves the
 browser headless; `PCP_BROWSER_DISPLAY=headless` asks for that. The desktop
 app never uses it: it starts no child process, and runs on a real screen.
 
@@ -1278,7 +1324,7 @@ app keeps and hands over only after Touch ID.
     ID prompt (`systemPreferences.promptTouchID`). A checkout, a fork, or a
     release built without the profile works this way.
 - **How a page reaches it.** The window's preload (`desktop/preload.cjs`)
-  gives PCP's own pages, and only those (plain http on localhost),
+  gives PCP's own pages, and only those (plain http on 127.0.0.1),
   `window.pcpDesktop.touchId`: `status`, `unlock`, `save`, `forget`. The
   main process (`desktop/touch-id.mjs`) checks again that the call comes
   from the window's main frame at the app's own address and port, shows the
@@ -1381,6 +1427,20 @@ a different PCP version built, as boot does. The owner's own session goes
 with the vault; the action signs them in again when the password they typed
 opens the restored vault (their own export), and otherwise sends them to sign
 in with the exported PCP's password.
+
+**A restore keeps revocations.** A file made before the owner revoked a token
+holds that token live, with a working wrapped key, so writing it as it is
+would bring back an assistant the owner cut off. Into a vault that exists,
+when the file is an export of that same vault (the ids match: a restore keeps
+the vault's id), every token the file has live that the vault being replaced
+has revoked, or no longer has, is written revoked (the vault's `revoked_at`,
+or now for a deleted one) with its grant blanked as revoking blanks it
+(`carriedRevocations`, read inside the transaction before the wipe). The
+preview lists the file's tokens by name and prefix and marks those that
+come back revoked. At setup, or for another PCP's export, the vault knows
+nothing of them and the file is written as it is. A newer export of a vault
+restored here from an older one has tokens this vault never had; they come
+back revoked too, and the owner makes them again.
 
 **Who may.** The export asks for the owner's password again (or Touch ID in
 the Mac app: `confirmOwner`), as making a token does: a copied session
@@ -1486,7 +1546,10 @@ inside Let's Encrypt's limits on failed validations (at most two a try, with
 the second challenge); "Try again now" skips
 the wait. A DNS lookup first warns, without blocking, when the name does not
 point at this network. Port 3000 keeps serving plain
-HTTP for the local network. In the desktop app the two ports stay 80 and 443
+HTTP for the local network; in a container started with HTTPS on
+(`PCP_HTTPS=1`, `docker-compose.https.yaml`) it is published on 127.0.0.1
+only, since a published port skips the host's firewall. In the desktop app
+the two ports stay 80 and 443
 (macOS and Windows let an ordinary program use them), and they listen on
 every interface even while the app keeps port 3000 to this computer: a
 router's forward needs exactly that (with a pcp.gg name they listen on
@@ -1593,6 +1656,21 @@ label; otherwise a systemd timer runs a copy of the installer with `update`,
 which pulls the image and starts PCP again only when the image changed. The
 installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
+
+**The Linux installer also installs it when the owner asks** (on unless
+`PCP_UPDATE_BUTTON=0`, and only for the `latest` tag). It passes
+`PCP_HOST_UPDATER=1` into the container, so Settings shows **Install and
+restart**, and sets up `pcp-update-request.timer`, which runs the copy of the
+installer with `watch` every 30 seconds. The button records the request in
+`update.status` as the app's does, and also writes `install-request` in the
+data folder (`updates/host-signal.ts`): the request's id and when it was made,
+one line, nothing of the vault. `watch` reads it with `docker exec` /
+`podman exec` and treats it as untrusted: only a well-formed id and time,
+fifteen minutes old at most, one it has not answered, and no more than one
+every five minutes. It notes the id before it runs `update`, so a failed
+install is not retried. The new PCP clears the request and the file at boot.
+The host reads the container; PCP never addresses the host and has no Docker
+socket.
 
 ## Cleanup and the log
 
@@ -1735,7 +1813,13 @@ The authorization response carries `iss` (RFC 9207).
 Redirect URIs are https, http to this computer, or an app's private-use
 scheme, and are matched exactly. Until the client and its redirect URI check
 out, the page tells the owner what is wrong and sends nothing back; after
-that, a bad request goes back to the client as an OAuth error.
+that, a bad request goes back to the client as an OAuth error. It goes back
+on its own only to a client the owner let in before and that still has a
+live token from it (`errorGoesBack`): anyone can register a client or
+publish a document with any redirect URI, so for any other one PCP would be
+an open redirector (RFC 9700 §4.11.2). The page shows that error instead,
+with the app's name and host and a plain "Return to …" link to the URI with
+the error, which the owner follows or not.
 
 **The owner's page** (`/oauth/authorize`) needs the owner signed in: a
 locked PCP sends them to `/login`, which goes on to the sign-in page and
@@ -1910,6 +1994,15 @@ request still waiting, `listPendingRequests`, and links to each); `decidePermiss
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
 
+The page shows a call's arguments one line each, and a long value is cut
+there, saying how long it is; Show everything under the lines has each
+argument whole, which is what runs when the owner allows it
+(`argsInFull` in `permission-rules.ts`; web fetch's headers and body the
+same way). Both write out what does not show on screen (`\u202E`), and a
+line writes out a value's newlines too (`visible`), so nothing an assistant
+sends can turn the text around, hide in it or pass for a line of the page's
+own.
+
 "Allow for" (15 minutes, an hour or eight hours, `ALLOW_FOR_MINUTES`) writes
 no level: it leaves an allowance (`lib/core/allowances.ts`,
 `api_token_tool_allowance` and `api_token_site_allowance`), the token, the
@@ -1991,5 +2084,17 @@ request is an API endpoint instead: the gateway has
 `endpoint-admin.ts: prepareRegistration` read the document before asking (so the owner is only asked about something that
 works, and sees its address, tool count and operations), and
 `executeRegister` creates it from the same text with
-`createApprovedEndpoint`: on, public addresses only. Requests are deleted at
-boot a week after they expire.
+`createApprovedEndpoint`: on, public addresses only. An MCP server is made
+public-only too (`mcp_server.public_only`, as for an endpoint): every request
+PCP makes for it, the MCP transport's and its OAuth discovery, registration
+and token requests, goes through `upstream.ts: serverFetch`, which sends it
+over `openapi/transport.ts` with the address checked as the socket connects,
+refusing private, loopback, link-local and PCP's own addresses. It follows
+redirects as fetch does (`checkedFetch`), each hop a request of its own that
+is checked again, so a redirect cannot lead past the check. The owner clears
+it under "Public addresses only" on the server's form, for a server on their
+own network; a server the owner adds is not public-only unless they tick it.
+Before the owner is asked, the server's host is resolved and a private or
+local one is flagged on the approval page (an owner-only line, as for a mail
+account), saying it connects only once they allow private addresses.
+Requests are deleted at boot a week after they expire.

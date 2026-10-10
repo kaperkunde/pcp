@@ -4,6 +4,7 @@ import type { ReactNode } from "react"
 
 import { CopyableValue } from "@/components/copyable-value"
 import type { SecretOption } from "@/components/header-auth-fields"
+import { Disclosure } from "@/components/ui/disclosure"
 import { Input, Select } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 
@@ -15,9 +16,13 @@ export type OAuthClientValues = {
 }
 
 /**
- * The OAuth part of the server and endpoint forms: the redirect URI to give
- * the provider, the owner's client (its secret chosen from theirs or typed
- * in, saved as a new one), the scope and extra sign-in parameters.
+ * The OAuth part of the server, endpoint and mail forms: the redirect URI
+ * to give the provider, the owner's client (its secret chosen from theirs
+ * or typed in, saved as a new one), the scope and extra sign-in parameters.
+ *
+ * With `foldClient` the client, scope and parameters sit under a fold that
+ * says when they are needed (most providers let PCP register itself); it
+ * opens by itself when any of them is set.
  */
 export function OAuthClientFields({
   prefix,
@@ -26,6 +31,7 @@ export function OAuthClientFields({
   redirectUrl,
   intro,
   scopeHint,
+  foldClient = false,
 }: {
   prefix: string
   secrets: SecretOption[]
@@ -33,11 +39,10 @@ export function OAuthClientFields({
   redirectUrl: string
   intro: ReactNode
   scopeHint: string
+  foldClient?: boolean
 }) {
-  return (
-    <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
-      <p className="text-muted-foreground">{intro}</p>
-      <CopyableValue value={redirectUrl} testId="oauth-redirect-url" />
+  const clientFields = (
+    <>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Client ID (optional)" htmlFor={`${prefix}-client-id`}>
           <Input
@@ -45,6 +50,7 @@ export function OAuthClientFields({
             name="oauthClientId"
             defaultValue={initial.oauthClientId}
             autoComplete="off"
+            spellCheck={false}
           />
         </Field>
         <Field
@@ -88,6 +94,7 @@ export function OAuthClientFields({
           name="oauthScope"
           defaultValue={initial.oauthScope}
           autoComplete="off"
+          spellCheck={false}
         />
       </Field>
       <Field
@@ -101,8 +108,35 @@ export function OAuthClientFields({
           defaultValue={initial.oauthAuthorizeParams}
           autoComplete="off"
           spellCheck={false}
+          className="font-mono"
         />
       </Field>
+    </>
+  )
+
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-[13px] leading-relaxed text-muted-foreground">
+        {intro}
+      </p>
+      <CopyableValue value={redirectUrl} testId="oauth-redirect-url" />
+      {foldClient ? (
+        <Disclosure
+          title="Your own client, scope and sign-in parameters"
+          description="Only for a provider that lets no app register itself, or that wants a scope or extra parameters."
+          defaultOpen={Boolean(
+            initial.oauthClientId ||
+            initial.oauthClientSecretId ||
+            initial.oauthScope ||
+            initial.oauthAuthorizeParams,
+          )}
+          className="rounded-[10px] border border-input bg-field"
+        >
+          {clientFields}
+        </Disclosure>
+      ) : (
+        clientFields
+      )}
     </div>
   )
 }

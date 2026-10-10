@@ -25,7 +25,7 @@ export default async function LoginPage({
   const next = returnPath(query.next)
 
   if (await currentSession()) {
-    redirect(next ?? "/servers")
+    redirect(next ?? "/home")
   }
 
   const vault = await ownerVault()

@@ -1,6 +1,7 @@
 import "server-only"
 
 import { OAuthError } from "@/lib/core/oauth-server/errors"
+import { readCapped } from "@/lib/core/openapi/http"
 import { checkRateLimit } from "@/lib/core/rate-limit"
 import { clientIp } from "@/lib/server/client-ip"
 
@@ -94,14 +95,22 @@ export async function oauthRateLimit(
 }
 
 async function cappedText(request: Request, maxBytes: number): Promise<string> {
-  const declared = Number(request.headers.get("content-length") ?? "0")
-  const text = declared > maxBytes ? null : await request.text()
+  const declared = request.headers.get("content-length")
+  const tooLarge = new OAuthError(
+    "invalid_request",
+    "The request body is too large.",
+  )
 
-  if (text === null || Buffer.byteLength(text) > maxBytes) {
-    throw new OAuthError("invalid_request", "The request body is too large.")
-  }
+  // A length that is no count is refused. The header is only a way to refuse
+  // early: a chunked body has none, so what is read is counted up to the cap.
+  if (declared !== null && !/^\d+$/.test(declared)) throw tooLarge
+  if (Number(declared ?? "0") > maxBytes) throw tooLarge
 
-  return text
+  const { bytes, truncated } = await readCapped(request, maxBytes)
+
+  if (truncated) throw tooLarge
+
+  return new TextDecoder().decode(bytes)
 }
 
 /**

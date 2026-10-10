@@ -1,3 +1,5 @@
+import { cookies } from "next/headers"
+
 import {
   getTab,
   runningBrowser,
@@ -10,14 +12,18 @@ import {
   type Frame,
   type ScreencastSubscription,
 } from "@/lib/core/browser/screencast"
+import { resolveSession } from "@/lib/core/sessions"
 import { isSameOrigin } from "@/lib/server/same-origin"
-import { currentSession } from "@/lib/server/session"
+import { currentSession, SESSION_COOKIE } from "@/lib/server/session"
 
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
 
 /** How often the tab's address, title and who drives it are sent again. */
 const STATE_EVERY_MS = 1_500
+
+/** Every how many of those the session is looked up again. */
+const SESSION_EVERY_TICKS = 4
 
 /**
  * The live view of a browser tab, for the signed-in owner: server-sent
@@ -26,6 +32,10 @@ const STATE_EVERY_MS = 1_500
  * it goes. A route handler, not a Server Action: an action answers once,
  * and this answers for as long as the page watches. Like the export
  * download, it checks for itself that the request came from PCP's own page.
+ *
+ * The session is looked up again every few seconds, from the cookie the
+ * stream was opened with: signing out (everywhere, or this session alone)
+ * ends the stream instead of leaving it open until the owner closes the page.
  *
  * Watching keeps the browser from closing as idle, and when the owner
  * stops watching, what they did in the tab is saved with their key.
@@ -46,6 +56,8 @@ export async function GET(
 
   const { id } = await params
   const { ctx } = session
+  // `currentSession` is cached for the request; the later look-ups ask anew.
+  const cookie = (await cookies()).get(SESSION_COOKIE)?.value
   const tab = getTab(ctx.vaultId, id)
 
   if (!tab) {
@@ -64,6 +76,8 @@ export async function GET(
   let wake: (() => void) | null = null
   let subscription: ScreencastSubscription | null = null
   let ticker: ReturnType<typeof setInterval> | null = null
+  let ticks = 0
+  let checking = false
   const notify = () => {
     wake?.()
     wake = null
@@ -113,6 +127,21 @@ export async function GET(
         if (tab.page.isClosed()) {
           end("closed", {})
           return
+        }
+        ticks += 1
+        if (ticks % SESSION_EVERY_TICKS === 0 && !checking) {
+          checking = true
+          void resolveSession(cookie)
+            .then((now) => {
+              if (now?.sessionId !== session.sessionId) {
+                end("closed", { signedOut: true })
+              }
+            })
+            // A look-up that fails proves nothing; the next one decides.
+            .catch(() => {})
+            .finally(() => {
+              checking = false
+            })
         }
         void tabView(tab).then((view) => {
           tabState = view

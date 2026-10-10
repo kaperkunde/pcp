@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { executeCall } from "./call"
 import { fetchSpec } from "./fetch-spec"
 import { json, startTestApi, type TestApi } from "./test-api"
-import { send } from "./transport"
+import { checkedFetch, send } from "./transport"
 
 let api: TestApi | null = null
 
@@ -263,5 +263,115 @@ describe("what a refusal tells an assistant", () => {
       /^localhost is, or resolves to, a private or local address/,
     )
     expect(failure!.message).not.toMatch(/127\.0\.0\.1|::1/)
+  })
+})
+
+describe("a checked fetch that follows redirects (an MCP server's)", () => {
+  let target: TestApi | null = null
+
+  afterEach(async () => {
+    await target?.close()
+    target = null
+  })
+
+  /** The check, passing only the given test server's port. */
+  const only = (origin: string) => ({
+    publicOnly: true,
+    addressCheck: (_: string, port: number) =>
+      port === Number(new URL(origin).port),
+  })
+
+  it("checks every hop, so a redirect cannot lead to an address the check refuses", async () => {
+    target = await startTestApi((_, res) => res.end("inside"))
+    api = await startTestApi((_, res) => {
+      res.statusCode = 302
+      res.setHeader("location", `${target!.origin}/admin`)
+      res.end()
+    })
+
+    const reach = checkedFetch(only(api.origin), { followRedirects: true })
+
+    await expect(reach(`${api.origin}/mcp`)).rejects.toThrow(
+      /private or local address/,
+    )
+    expect(api.requests).toHaveLength(1)
+    expect(target.requests).toHaveLength(0)
+  })
+
+  it("follows a redirect as fetch does: a 303 turns a POST into a GET, and leaving the origin drops Authorization", async () => {
+    target = await startTestApi((_, res) => res.end("there"))
+    api = await startTestApi((_, res) => {
+      res.statusCode = 303
+      res.setHeader("location", `${target!.origin}/next`)
+      res.end()
+    })
+
+    const reach = checkedFetch(
+      { publicOnly: true, addressCheck: () => true },
+      { followRedirects: true },
+    )
+    const response = await reach(`${api.origin}/mcp`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer at",
+        "x-api-key": "key",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ hello: 1 }),
+    })
+
+    expect(await response.text()).toBe("there")
+    expect(api.requests[0]).toMatchObject({ method: "POST" })
+    expect(api.requests[0]!.headers.authorization).toBe("Bearer at")
+    expect(target.requests[0]).toMatchObject({
+      method: "GET",
+      url: "/next",
+      body: "",
+    })
+    expect(target.requests[0]!.headers.authorization).toBeUndefined()
+    expect(target.requests[0]!.headers["content-type"]).toBeUndefined()
+    // fetch keeps any other header, and so does this.
+    expect(target.requests[0]!.headers["x-api-key"]).toBe("key")
+  })
+
+  it("keeps the method and body through a 307, on the same origin", async () => {
+    api = await startTestApi((request, res) => {
+      if (request.url === "/old") {
+        res.statusCode = 307
+        res.setHeader("location", "/new")
+        return res.end()
+      }
+
+      res.end(request.body)
+    })
+
+    const reach = checkedFetch(only(api.origin), { followRedirects: true })
+    const response = await reach(`${api.origin}/old`, {
+      method: "POST",
+      headers: { authorization: "Bearer at" },
+      body: "payload",
+    })
+
+    expect(await response.text()).toBe("payload")
+    expect(api.requests[1]).toMatchObject({ method: "POST", url: "/new" })
+    expect(api.requests[1]!.headers.authorization).toBe("Bearer at")
+  })
+
+  it("gives up on a loop, and hands a redirect back when it does not follow", async () => {
+    api = await startTestApi((_, res) => {
+      res.statusCode = 302
+      res.setHeader("location", "/again")
+      res.end()
+    })
+
+    await expect(
+      checkedFetch(only(api.origin), { followRedirects: true })(
+        `${api.origin}/x`,
+      ),
+    ).rejects.toThrow(/redirect count exceeded/)
+    expect(api.requests).toHaveLength(21)
+
+    const response = await checkedFetch(only(api.origin))(`${api.origin}/x`)
+    expect(response.status).toBe(302)
   })
 })

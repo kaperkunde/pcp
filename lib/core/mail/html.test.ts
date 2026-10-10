@@ -57,4 +57,15 @@ describe("htmlToText", () => {
     htmlToText("<".repeat(200_000))
     expect(Date.now() - started).toBeLessThan(2_000)
   })
+
+  it("does not cost the text again for every open link", () => {
+    const html =
+      "<a href=http://x>".repeat(5_000) +
+      "word ".repeat(380_000) +
+      "</a>".repeat(5_000)
+    const started = Date.now()
+    const { text } = htmlToText(html)
+    expect(Date.now() - started).toBeLessThan(3_000)
+    expect(text.startsWith("word word")).toBe(true)
+  })
 })

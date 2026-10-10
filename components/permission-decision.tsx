@@ -3,9 +3,17 @@
 import { useState, useTransition } from "react"
 
 import { FormError } from "@/components/form-status"
+import {
+  DECISION_BUTTON,
+  PermissionActions,
+  QUIET_DECISION,
+} from "@/components/permission-actions"
+import { PermissionOutcome } from "@/components/permission-outcome"
 import { Button } from "@/components/ui/button"
-import { Checkbox, Input, Select } from "@/components/ui/input"
-import { Field, Label } from "@/components/ui/label"
+import { Input, Select } from "@/components/ui/input"
+import { Field } from "@/components/ui/label"
+import { List } from "@/components/ui/list"
+import { SwitchRow } from "@/components/ui/switch"
 import { decidePermissionAction } from "@/lib/actions/permissions"
 import {
   ALLOW_FOR_MINUTES,
@@ -13,14 +21,20 @@ import {
   allowForLabel,
   type PermissionDecision as Decision,
 } from "@/lib/core/constants"
-import { cn } from "@/lib/utils"
 
 /** The answers that carry out the request, rather than turn it down. */
 const AGREES: Decision[] = ["allow_once", "allow_for", "always"]
 
+/** Answers that settle more than this one request, or throw it away: quiet. */
+const QUIET: Decision[] = ["block", "discard"]
+
 /**
  * The owner's buttons for something an assistant asked for. Answering runs
  * the call there and then; the page around it re-renders with the outcome.
+ *
+ * The main yes ("Allow once", or the kind's own) is the one teal button, last
+ * at the right; the refusal and the answers that settle later calls are
+ * grey buttons before it; Block and Discard are quiet text under them.
  *
  * A new server that sends a secret PCP does not hold yet asks for its value
  * here, the one place it is typed in (`secret`); with `exists`, a secret of
@@ -28,8 +42,8 @@ const AGREES: Decision[] = ["allow_once", "allow_for", "always"]
  * `clientId` it is that OAuth client's secret, which may be left empty
  * (`optional`) for a client without one.
  *
- * A memory to share offers a toggle for reading it in every conversation
- * (`every`), ticked when the assistant asked for that; it holds whether the
+ * A memory to share offers a switch for reading it in every conversation
+ * (`every`), on when the assistant asked for that; it holds whether the
  * owner shares the memory or keeps it for that assistant.
  *
  * "Allow for" comes with how long, chosen beside its button.
@@ -103,25 +117,38 @@ export function PermissionDecision({
 
   if (done) {
     return (
-      <div className="flex flex-col gap-2">
-        <p
-          className={cn(
-            "whitespace-pre-wrap break-words",
-            done.isError && "text-destructive",
-          )}
-          data-testid="permission-outcome"
-        >
-          {done.message}
-        </p>
-        <p className="text-muted-foreground">
-          Tell the assistant that asked that you answered, and it carries on.
-        </p>
-      </div>
+      <PermissionOutcome
+        outcome={done.message}
+        outcomeIsError={done.isError}
+        tone={done.isError ? "error" : "ok"}
+      />
     )
   }
 
+  function labelOf(decision: { value: Decision; label: string }): string {
+    return pending && chosen === decision.value
+      ? "Working…"
+      : decision.value === "allow_for"
+        ? `${decision.label} ${allowForLabel(minutes)}`
+        : decision.label
+  }
+
+  const primary = decisions.find((decision) => decision.value === "allow_once")
+  const allowFor = decisions.find((decision) => decision.value === "allow_for")
+  // The grey buttons, refusal first: Not now, Always allow.
+  const order: Decision[] = ["decline", "always"]
+  const others = decisions
+    .filter(
+      (decision) =>
+        decision !== primary &&
+        decision !== allowFor &&
+        !QUIET.includes(decision.value),
+    )
+    .sort((a, b) => order.indexOf(a.value) - order.indexOf(b.value))
+  const quiet = decisions.filter((decision) => QUIET.includes(decision.value))
+
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-5">
       {secret ? (
         <Field
           label={
@@ -153,59 +180,58 @@ export function PermissionDecision({
         </Field>
       ) : null}
       {every ? (
-        <div className="flex flex-col gap-1.5">
-          <Label className="font-normal" htmlFor={`permission-${id}-always`}>
-            <Checkbox
-              id={`permission-${id}-always`}
-              checked={always}
-              onChange={(event) => setAlways(event.target.checked)}
-              disabled={pending}
-            />
-            Read in every conversation
-          </Label>
-          <p className="text-xs text-muted-foreground">
-            {every.asked ? "The assistant asked for this. " : null}
-            It comes with PCP&apos;s instructions, as your own words, so an
-            assistant follows it from its first reply: every assistant if you
-            share it, only this one if you keep it for this assistant.
-          </p>
-        </div>
+        <List>
+          <SwitchRow
+            id={`permission-${id}-always`}
+            label="Read in every conversation"
+            description={
+              <>
+                {every.asked ? "The assistant asked for this. " : null}
+                It comes with PCP&apos;s instructions, as your own words, so an
+                assistant follows it from its first reply: every assistant if
+                you share it, only this one if you keep it for this assistant.
+              </>
+            }
+            checked={always}
+            onChange={(event) => setAlways(event.target.checked)}
+            disabled={pending}
+          />
+        </List>
       ) : null}
       <FormError error={error} />
-      <div className="flex flex-wrap gap-2">
-        {decisions.map((decision, index) => {
-          const button = (
-            <Button
-              key={decision.value}
-              type="button"
-              size="sm"
-              variant={
-                decision.value === "block" || decision.value === "discard"
-                  ? "destructive"
-                  : index === 0
-                    ? "default"
-                    : "outline"
-              }
-              disabled={pending}
-              onClick={() => decide(decision.value)}
-            >
-              {pending && chosen === decision.value
-                ? "Working…"
-                : decision.value === "allow_for"
-                  ? `${decision.label} ${allowForLabel(minutes)}`
-                  : decision.label}
-            </Button>
-          )
-
-          return decision.value === "allow_for" ? (
-            <div key={decision.value} className="flex items-center gap-1">
-              {button}
+      <PermissionActions
+        note="Nothing runs until you answer. Then tell the assistant you have."
+        others={others.map((decision) => (
+          <Button
+            key={decision.value}
+            type="button"
+            size="lg"
+            variant="secondary"
+            className={DECISION_BUTTON}
+            disabled={pending}
+            onClick={() => decide(decision.value)}
+          >
+            {labelOf(decision)}
+          </Button>
+        ))}
+        beside={
+          allowFor ? (
+            <div className="flex gap-2 sm:items-center">
+              <Button
+                type="button"
+                variant="secondary"
+                className="flex-1 sm:flex-none"
+                disabled={pending}
+                onClick={() => decide(allowFor.value)}
+              >
+                {labelOf(allowFor)}
+              </Button>
               <Select
                 aria-label="How long"
                 value={String(minutes)}
                 onChange={(event) => setMinutes(Number(event.target.value))}
                 disabled={pending}
-                className="h-7 w-auto py-0 text-[0.8rem]"
+                className="h-9 w-auto"
               >
                 {ALLOW_FOR_MINUTES.map((option) => (
                   <option key={option} value={option}>
@@ -214,11 +240,34 @@ export function PermissionDecision({
                 ))}
               </Select>
             </div>
-          ) : (
-            button
-          )
-        })}
-      </div>
+          ) : undefined
+        }
+        primary={
+          primary ? (
+            <Button
+              type="button"
+              size="lg"
+              className={DECISION_BUTTON}
+              disabled={pending}
+              onClick={() => decide(primary.value)}
+            >
+              {labelOf(primary)}
+            </Button>
+          ) : undefined
+        }
+        quiet={quiet.map((decision) => (
+          <Button
+            key={decision.value}
+            type="button"
+            variant="plain"
+            className={QUIET_DECISION}
+            disabled={pending}
+            onClick={() => decide(decision.value)}
+          >
+            {labelOf(decision)}
+          </Button>
+        ))}
+      />
     </div>
   )
 }

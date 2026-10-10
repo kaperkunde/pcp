@@ -11,11 +11,13 @@ directories:
   buildResources: build
 files:
   - main.mjs
+  - cookie-migration.mjs
   - settings.mjs
   - touch-id.mjs
   - touch-id-store.mjs
   - preload.cjs
   - updates.mjs
+  - window-policy.mjs
   - package.json
 extraResources:
   - from: server

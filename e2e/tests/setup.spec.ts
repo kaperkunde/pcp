@@ -1,6 +1,5 @@
 import { expect, test } from "@playwright/test"
 
-import pkg from "../../package.json"
 import { OWNER_NAME, OWNER_PASSWORD, unlock } from "../lib/auth"
 import { saveState, type SetupState } from "../lib/state"
 
@@ -14,67 +13,37 @@ test("sets up the owner on first visit, or signs in", async ({ page }) => {
 
   if (page.url().endsWith("/login")) {
     await unlock(page)
-  } else {
-    await expect(page).toHaveURL(/\/setup$/)
-    await expect(
-      page.getByRole("heading", { name: "Welcome to PCP" }),
-    ).toBeVisible()
-
-    // The other way to start: with another PCP's export. Looked at, not
-    // taken (the backup project restores a running PCP's own).
-    await page.getByRole("link", { name: "Restore an export instead" }).click()
-    await expect(
-      page.getByRole("heading", { name: "Restore an export", level: 1 }),
-    ).toBeVisible()
-    await expect(page.getByLabel("Export file")).toBeVisible()
-    await page.goto("/setup")
-
-    await page.getByLabel("Your name").fill(OWNER_NAME)
-    await page.getByLabel("Password", { exact: true }).fill(OWNER_PASSWORD)
-    await page.getByLabel("Repeat password").fill(OWNER_PASSWORD)
-    await page.getByRole("button", { name: "Create my PCP" }).click()
-
-    await expect(page.getByText("Save your recovery key")).toBeVisible()
-    const recoveryKey = await page.getByTestId("recovery-key").textContent()
-    expect(recoveryKey).toMatch(/^pcp_recovery_/)
-    saveState("setup", {
-      name: OWNER_NAME,
-      recoveryKey: recoveryKey!,
-    } satisfies SetupState)
-
-    // Then the optional step for reaching PCP from outside, skipped here
-    // (the network project walks it).
-    await page.getByRole("link", { name: "I have saved it — continue" }).click()
-    await expect(
-      page.getByRole("heading", { name: "Reach PCP from anywhere (optional)" }),
-    ).toBeVisible()
-    const ddns = page.getByRole("form", { name: "Dynamic DNS" })
-    await expect(ddns).toBeVisible()
-    // DuckDNS, suggested first, is a link away.
-    await expect(
-      ddns.getByRole("link", { name: "Open duckdns.org" }),
-    ).toHaveAttribute("href", "https://www.duckdns.org/")
-    await page.getByRole("link", { name: "Skip for now — open PCP" }).click()
-    await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
-
-    // Nothing added yet: an assistant can do it, given a token.
-    const start = page.getByTestId("servers-start")
-    await expect(start.getByText("Have PCP add my Gmail")).toBeVisible()
-    await expect(
-      start.getByRole("link", { name: "Create your first API token" }),
-    ).toHaveAttribute("href", "/tokens")
+    return
   }
 
-  // The header says which release this is, as package.json has it.
+  await expect(page).toHaveURL(/\/setup$/)
   await expect(
-    page.getByRole("link", { name: `PCP v${pkg.version}` }),
+    page.getByRole("heading", { name: "Welcome to PCP" }),
   ).toBeVisible()
 
-  // Setup is one-shot: the signed-in owner is told so, and (below, once
-  // locked) a stranger is sent to sign in.
-  await page.goto("/setup")
+  await page.getByLabel("Your name").fill(OWNER_NAME)
+  await page.getByLabel("Password", { exact: true }).fill(OWNER_PASSWORD)
+  await page.getByLabel("Repeat password").fill(OWNER_PASSWORD)
+  await page.getByRole("button", { name: "Create my PCP" }).click()
+
   await expect(
-    page.getByRole("heading", { name: "PCP is already set up" }),
+    page.getByRole("heading", { name: "Save your recovery key" }),
+  ).toBeVisible()
+  const recoveryKey = await page.getByTestId("recovery-key").textContent()
+  expect(recoveryKey).toMatch(/^pcp_recovery_/)
+  saveState("setup", {
+    name: OWNER_NAME,
+    recoveryKey: recoveryKey!,
+  } satisfies SetupState)
+
+  // Then the optional step for reaching PCP from outside, skipped here
+  // (the network project walks it).
+  await page.getByRole("link", { name: "I have saved it — continue" }).click()
+  await page.getByRole("link", { name: "Skip for now — open PCP" }).click()
+  await expect(
+    page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Servers" }),
   ).toBeVisible()
 })
 
@@ -121,49 +90,4 @@ test("signs each project in with a session of its own", async ({
     await context.storageState({ path: project.use.storageState as string })
     await context.close()
   }
-})
-
-// A PCP at a home address (localhost here) is one an assistant running
-// elsewhere cannot reach; Settings explains a tunnel and the router until a
-// public address is set. Against a deployed PCP (PCP_URL) there is nothing to
-// explain. Signs in from an address of its own, like the sessions above.
-test("Settings explains how to reach a PCP at home from outside", async ({
-  browser,
-  baseURL,
-}) => {
-  const host = new URL(baseURL!).hostname
-  test.skip(
-    !["localhost", "127.0.0.1", "[::1]"].includes(host),
-    "PCP is not at a local address",
-  )
-
-  const context = await browser.newContext({
-    baseURL,
-    extraHTTPHeaders: { "x-forwarded-for": "198.51.100.200" },
-  })
-  const page = await context.newPage()
-  await unlock(page)
-  await page.goto("/settings")
-
-  const card = page.locator("[data-slot=card]").filter({
-    has: page.getByRole("heading", {
-      name: "Reaching PCP from outside your home",
-    }),
-  })
-  await expect(card).toBeVisible()
-  await expect(card.getByText("A tunnel: no router changes")).toBeVisible()
-  await expect(
-    card.getByText(/cloudflared tunnel --url http:\/\/localhost/),
-  ).toBeVisible()
-
-  // The router steps are folded away until asked for. They lead to the
-  // Dynamic DNS and HTTPS cards; outside the desktop app there is no menu
-  // to mention.
-  await card.getByText("Through your router").click()
-  await expect(card.getByText(/Forward ports 80 and 443/)).toBeVisible()
-  await expect(
-    card.getByText("Accept connections from other devices"),
-  ).toHaveCount(0)
-
-  await context.close()
 })

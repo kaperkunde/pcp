@@ -8,8 +8,16 @@
 # on them inside the container until HTTPS is on. Leave this file out if
 # another program on this computer already uses ports 80 and 443 — a proxy
 # of your own, say — and let that proxy handle HTTPS instead.
+#
+# Port 3000 is plain HTTP, so with HTTPS on it answers on this computer only
+# (127.0.0.1): a published port skips the host's firewall (Docker's rules
+# come before ufw's). From another device, reach it with an SSH tunnel
+# (ssh -L 3000:127.0.0.1:3000 you@this-computer) until HTTPS works. `!override`
+# replaces the list in docker-compose.yaml instead of adding to it, and needs
+# Docker Compose 2.24 or newer.
 services:
   pcp:
-    ports:
+    ports: !override
+      - "127.0.0.1:3000:3000"
       - "80:8080"
       - "443:8443"

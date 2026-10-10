@@ -68,17 +68,16 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       PCP_DATA_DIR: E2E_DATA_DIR,
-      // The network project turns HTTPS on: its listeners on high ports, a
-      // Let's Encrypt where nothing answers, and no public address lookup
-      // leaving the machine.
+      // Host settings (HTTPS, pcp.gg, the update check) are covered by unit
+      // tests, not by a project. If a spec ever reaches them, they stay on
+      // this machine: listeners on high ports, a Let's Encrypt where nothing
+      // answers, no public address lookup, no GitHub, no pcp.gg.
       PCP_HTTP_PORT: String(E2E_EDGE_HTTP_PORT),
       PCP_HTTPS_PORT: String(E2E_EDGE_HTTPS_PORT),
       PCP_ACME_DIRECTORY: "http://127.0.0.1:9/directory",
       PCP_PUBLIC_IP_URL: "http://127.0.0.1:9/ip",
-      // The update check asks the fake upstream (the updates project starts
-      // it on this port), never GitHub.
+      // The update check asks a port nothing answers on, never GitHub.
       PCP_RELEASES_URL: E2E_RELEASES_URL,
-      // The pcpgg project's copy of pcp.gg, never pcp.gg itself.
       PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
     },
   },
@@ -106,7 +105,8 @@ export default defineConfig({
       use: signedIn("gateway"),
     },
     {
-      // Connecting an OAuth upstream through the browser, then using it.
+      // The Servers page's Add menu, and an OAuth upstream added from it:
+      // connected through the browser, used, then disconnected.
       name: "oauth",
       testMatch: /(^|\/)oauth\.spec\.ts$/,
       dependencies: ["setup"],
@@ -124,34 +124,34 @@ export default defineConfig({
     {
       // An API that signs in with OAuth: proposed by an assistant with the
       // owner's client ID, the client secret typed in on the approval page,
-      // connected, and called with the token; and at a provider that lets
-      // apps register themselves, with no client at all.
+      // connected, and called with the token, which the assistant never
+      // sees.
       name: "endpoint-oauth",
       testMatch: /endpoint-oauth\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("endpoint-oauth"),
     },
     {
-      // An OAuth upstream that lets no app register itself: the owner's own
-      // client, its redirect URI, and extra sign-in parameters.
+      // An OAuth upstream that lets no app register itself: its redirect URI
+      // on the add form, and the owner's own client connecting it.
       name: "oauth-client",
       testMatch: /oauth-client\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("oauth-client"),
     },
     {
-      // An API described by an OpenAPI schema: added from a URL and from a
-      // file, its operations found and called through the gateway.
+      // An API described by an OpenAPI schema: added from a URL with a
+      // secret, its operations found and called through the gateway; one an
+      // assistant proposes, and what it may change once the owner's.
       name: "endpoints",
       testMatch: /endpoints\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("endpoints"),
     },
     {
-      // A mail account: JMAP with an app password and with OAuth, read-only,
-      // a refused password, an unreachable IMAP server; its tools called
-      // through the gateway; and accounts an assistant proposes, which the
-      // owner agrees to on PCP's page.
+      // A mail account: JMAP with an app password, its tools called through
+      // the gateway, a read-only one that cannot send, and one an assistant
+      // proposes, whose password the owner types in on PCP's page.
       name: "mail",
       testMatch: /mail\.spec\.ts/,
       dependencies: ["setup"],
@@ -168,60 +168,35 @@ export default defineConfig({
     },
     {
       // Per-token tool access and the owner's permission: the link (also for
-      // a client that offers prompts and panels), copying access, and servers
-      // an assistant proposes.
+      // a client that offers prompts and panels), Block, copying access,
+      // tool levels and servers an assistant proposes.
       name: "permissions",
       testMatch: /permissions\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("permissions"),
     },
     {
-      // A token that keeps memories: its own notes, sharing one through the
-      // owner's permission, and the Memories tab.
+      // A token that keeps memories: sharing one through the owner's
+      // permission, and what is read in every conversation.
       name: "memories",
       testMatch: /memories\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("memories"),
     },
     {
-      // Dynamic DNS through the fake upstream's update URL, a refused login
-      // stopping it; HTTPS turned on, port 80 open, the failure explained;
-      // both turned off.
-      name: "network",
-      testMatch: /network\.spec\.ts/,
+      // APIs an assistant proposes with more than a bearer token: HTTP Basic
+      // with the password typed in on the approval page, and a key and a
+      // secret key in two headers; each sent by PCP, and kept from the
+      // assistant.
+      name: "endpoint-credentials",
+      testMatch: /endpoint-credentials\.spec\.ts/,
       dependencies: ["setup"],
-      use: signedIn("network"),
-    },
-    {
-      // pcp.gg against a copy of its relay: a key it refuses (the card and
-      // the bell), a key it takes (online at the name, HTTPS for it turned
-      // on and, with no Let's Encrypt to answer, off again), disconnected.
-      name: "pcpgg",
-      testMatch: /pcpgg\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("pcpgg"),
-    },
-    {
-      // An API that wants HTTP Basic authentication: a user name and a
-      // password typed into the form, or proposed by an assistant and typed
-      // in on the approval page; the login sent, and kept from the assistant.
-      name: "endpoint-basic",
-      testMatch: /endpoint-basic\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("endpoint-basic"),
-    },
-    {
-      // An API whose credential is a key and a secret key in two headers:
-      // added by the owner, called through /mcp, proposed by an assistant.
-      name: "secret-headers",
-      testMatch: /secret-headers\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("secret-headers"),
+      use: signedIn("endpoint-credentials"),
     },
     {
       // A token that fetches web pages: the tool and its instructions, a new
-      // site asking first and listed on the token's page, method and site
-      // levels, All tokens, and public addresses only.
+      // site asking first and listed on the token's Advanced page, and
+      // public addresses only until the owner allows private ones.
       name: "web-fetch",
       testMatch: /web-fetch\.spec\.ts/,
       dependencies: ["setup"],
@@ -241,8 +216,7 @@ export default defineConfig({
       // Wrappers: a token that may propose them gets their tools; a wrapper
       // over a tool that wants its key as an argument, approved with the key
       // typed in on the request's page; its tool puts the key in and the
-      // answer shows it redacted; the tool it replaces leaves search until
-      // the owner brings it back.
+      // answer shows it redacted; the tool it replaces leaves search.
       name: "wrappers",
       testMatch: /wrappers\.spec\.ts/,
       dependencies: ["setup"],
@@ -251,28 +225,15 @@ export default defineConfig({
     {
       // The browser: added by the owner, its tools and instructions, a new
       // site asking first, refs to act on a page, a link to another site
-      // stopped, the live view with a click on it, hand_over on the
-      // request's page, a site behind a Cloudflare check (waited for when
-      // it passes on its own, left to hand_over when it does not, and read
-      // through the browser by web_fetch), and the sign-ins kept across a
-      // restart and forgotten.
+      // stopped, and the sign-ins kept across a restart and forgotten.
       name: "browser",
       testMatch: /browser\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("browser"),
     },
     {
-      // The update check: Check now against the fake upstream's release, the
-      // header's notice and the Settings card, the daily check off and on
-      // (Settings and the setup step), and how this PCP is updated.
-      name: "updates",
-      testMatch: /updates\.spec\.ts/,
-      dependencies: ["setup"],
-      use: signedIn("updates"),
-    },
-    {
-      // The Log page (a token's calls by tool and outcome, the filters, the
-      // token's own link) and Settings → Cleanup.
+      // The Log page: a token's calls by tool and outcome, never what they
+      // sent.
       name: "log",
       testMatch: /log\.spec\.ts/,
       dependencies: ["setup"],

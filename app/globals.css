@@ -15,6 +15,7 @@
   --color-border: var(--border);
   --color-destructive: var(--destructive);
   --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
   --color-success: var(--success);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
@@ -28,38 +29,82 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+  --color-sidebar: var(--sidebar);
+  --color-field: var(--field);
+  --color-separator: var(--separator);
+  --color-row-hover: var(--row-hover);
+  --color-tile-mcp: var(--tile-mcp);
+  --color-tile-mcp-foreground: var(--tile-mcp-foreground);
+  --color-tile-api: var(--tile-api);
+  --color-tile-api-foreground: var(--tile-api-foreground);
+  --color-tile-mail: var(--tile-mail);
+  --color-tile-mail-foreground: var(--tile-mail-foreground);
+  --color-tile-browser: var(--tile-browser);
+  --color-tile-browser-foreground: var(--tile-browser-foreground);
+  --color-tile-ssh: var(--tile-ssh);
+  --color-tile-ssh-foreground: var(--tile-ssh-foreground);
+  --color-tile-wrapper: var(--tile-wrapper);
+  --color-tile-wrapper-foreground: var(--tile-wrapper-foreground);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-xl: calc(var(--radius) * 1.33);
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* The palette, type and spacing are written down in DESIGN.md. */
 :root {
+  color-scheme: dark;
+
+  /* The system's own type, as on a Mac: no web font to download. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+    system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
   /* Dark only: a control panel that is open in a side window. */
-  --background: #131720;
-  --foreground: #e6e9ef;
-  --card: #1c2230;
-  --card-foreground: #e6e9ef;
-  --popover: #1c2230;
-  --popover-foreground: #e6e9ef;
+  --background: #0f1217;
+  --foreground: #e8eaee;
+  --sidebar: #14181e;
+  --card: #181c23;
+  --card-foreground: #e8eaee;
+  --popover: #20252e;
+  --popover-foreground: #e8eaee;
+  --field: #11151b;
   --primary: #5ed3c3;
-  --primary-foreground: #0d1117;
-  --secondary: #2a3242;
-  --secondary-foreground: #f1f3f8;
-  --muted: #232a38;
-  --muted-foreground: #97a1b3;
-  --accent: #1f3a3a;
-  --accent-foreground: #b5efe6;
-  --destructive: oklch(0.72 0.19 22);
-  --warning: oklch(0.8 0.14 80);
+  --primary-foreground: #0b1014;
+  --secondary: #262c37;
+  --secondary-foreground: #e8eaee;
+  --muted: #232933;
+  --muted-foreground: #9aa3b2;
+  --accent: #1c3532;
+  --accent-foreground: #8fe4d8;
+  --destructive: #ff8a8a;
+  --warning: #f5b544;
+  --warning-foreground: #1a1306;
   --success: #5ed3c3;
-  --border: color-mix(in srgb, #e6e9ef 14%, transparent);
-  --input: color-mix(in srgb, #e6e9ef 16%, transparent);
+  --separator: color-mix(in srgb, #ffffff 6.5%, transparent);
+  --row-hover: #1d222a;
+  --border: color-mix(in srgb, #ffffff 9%, transparent);
+  --input: color-mix(in srgb, #ffffff 12%, transparent);
   --ring: #5ed3c3;
-  --radius: 0.5rem;
+  --radius: 0.5625rem;
+
+  /* One tint per kind of server, for its icon tile. */
+  --tile-mcp: #24303f;
+  --tile-mcp-foreground: #9cc3ff;
+  --tile-api: #3a2f22;
+  --tile-api-foreground: #ffc58a;
+  --tile-mail: #33263b;
+  --tile-mail-foreground: #e0a8ff;
+  --tile-browser: #1f3437;
+  --tile-browser-foreground: #8fe4d8;
+  --tile-ssh: #2a2f3a;
+  --tile-ssh-foreground: #d6dbe3;
+  --tile-wrapper: #23332a;
+  --tile-wrapper-foreground: #a6e3b8;
 }
 
 @layer base {
@@ -76,11 +121,18 @@
   h2,
   h3,
   h4 {
-    @apply font-medium tracking-[-0.015em] text-foreground;
+    @apply font-semibold tracking-[-0.015em] text-foreground;
   }
   code,
   kbd,
   pre {
     @apply font-mono;
+  }
+  /* A disclosure's own marker is drawn by the component instead. */
+  summary {
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
   }
 }

@@ -5,7 +5,9 @@ import {
   parsePcpggInput,
   PCPGG_CONFIG_KEY,
   PCPGG_STATUS_KEY,
+  pcpggDomain,
   pcpggKeyHint,
+  pcpggNames,
   readPcpggKey,
 } from "./pcpgg"
 
@@ -70,5 +72,39 @@ describe("the key", () => {
     const exported: readonly string[] = EXPORTED_HOST_KEYS
     expect(exported).not.toContain(PCPGG_CONFIG_KEY)
     expect(exported).not.toContain(PCPGG_STATUS_KEY)
+  })
+})
+
+describe("the names pcp.gg gives", () => {
+  const relay = "wss://tunnel.pcp.gg/v1/connect"
+
+  it("are under the relay's own domain", () => {
+    expect(pcpggDomain(relay)).toBe("pcp.gg")
+    expect(pcpggDomain("wss://pcp.gg/v1/connect")).toBe("pcp.gg")
+    expect(pcpggDomain("ws://127.0.0.1:8080/v1/connect")).toBe("pcp.test")
+    expect(pcpggDomain("ws://[::1]:8080/v1/connect")).toBe("pcp.test")
+    expect(pcpggDomain("ws://203.0.113.5/v1/connect")).toBeNull()
+  })
+
+  it("are taken only when well formed and under that domain", () => {
+    expect(pcpggNames(["Alice.PCP.gg."], relay)).toEqual(["alice.pcp.gg"])
+    expect(
+      pcpggNames(
+        [
+          "../../tls",
+          "alice.pcp.gg/../../x",
+          "evil.example.com",
+          "evilpcp.gg",
+          "pcp.gg",
+          "alice.pcp.gg\r\nlocation: https://evil.example.com",
+          "203.0.113.5",
+          "bob.pcp.gg",
+        ],
+        relay,
+      ),
+    ).toEqual(["bob.pcp.gg"])
+    expect(pcpggNames(["alice.pcp.gg"], "ws://203.0.113.5/v1/connect")).toEqual(
+      [],
+    )
   })
 })

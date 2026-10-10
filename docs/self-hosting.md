@@ -50,7 +50,10 @@ curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | PC
 It finds Docker or Podman, downloads PCP (a minute or two), starts it so that
 it comes back after a reboot, and prints the address to open. `PCP_HTTPS=1`
 opens ports 80 and 443 for PCP's own HTTPS. Nothing answers on them until you
-turn HTTPS on. If you only want PCP on your own network, or something else on
+turn HTTPS on. It also keeps port 3000, which is plain HTTP, on this computer
+only (`127.0.0.1`): Docker's published ports skip the firewall (ufw
+included), so on a server that would put PCP's sign-in on the internet
+unencrypted. If you only want PCP on your own network, or something else on
 this computer already uses those ports, leave it out. The installer remembers
 the choice, so the same line later updates PCP without changing it. Podman
 without root may not open ports 80 and 443 until the system allows it; the
@@ -85,8 +88,10 @@ docker compose -f docker-compose.yaml -f docker-compose.https.yaml up -d
 
 The first start builds PCP, which takes a few minutes (longer on a Raspberry
 Pi); `docker compose pull` first fetches the published image instead. The
-second file opens ports 80 and 443, like `PCP_HTTPS=1` above; leave it out
-for `docker compose up -d`.
+second file opens ports 80 and 443, and keeps port 3000 on this computer
+only, like `PCP_HTTPS=1` above; leave it out for `docker compose up -d`, which
+publishes port 3000 on every interface. (The second file needs Docker Compose
+2.24 or newer.)
 
 **Shell and Python programs (optional).** An assistant whose token you let
 run code (**Let an assistant with this token run code that calls its
@@ -106,6 +111,14 @@ Name the same files whenever you run `docker compose` for PCP afterwards.
 Open `http://<this computer's address>:3000` in a browser, for example
 `http://192.168.1.20:3000` (`hostname -I` prints the address on Linux). On
 that computer itself, `http://localhost:3000` works.
+
+If you started PCP with `PCP_HTTPS=1` (or the HTTPS compose file), port 3000
+answers on that computer only. On a server, reach it with an SSH tunnel from
+your own computer, and open `http://localhost:3000` there:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 you@your-server
+```
 
 1. Choose your name and a password. The password encrypts everything PCP
    stores, so make it a good one.
@@ -180,7 +193,7 @@ Your router has to send traffic from the internet to the computer running PCP.
    pointing at it.
 
 Do **not** forward port 3000. It is plain HTTP and only meant for your own
-network.
+network (with `PCP_HTTPS=1` it answers on the computer running PCP only).
 
 ### 4c. Turn on HTTPS
 
@@ -204,7 +217,9 @@ should see PCP's sign-in page with the padlock in the address bar.
 
 Some routers do not let a computer at home reach the home's own name. If the
 name works from your phone but not from your laptop on Wi-Fi, that is why.
-Use `http://<this computer's address>:3000` at home.
+Use `http://localhost:3000` on the computer running PCP, or an SSH tunnel to
+its port 3000 from another computer at home (step 3): with HTTPS on, port
+3000 answers on that computer only.
 
 ## 5. Connect an assistant
 
@@ -224,10 +239,13 @@ permissions.
 **Updating.** PCP tells you when a new release is out: a note in its header,
 and **Settings → Updates** with the release notes and the command for your
 install. (It asks GitHub once a day, which sees your address and PCP's
-version; you can turn that off there.) Run the install line again: it
-fetches the new release and restarts PCP with the settings it remembered.
-From a checkout, in the `pcp` folder, with the same `-f` files you started
-it with:
+version; you can turn that off there.) If you used the install line, choose
+**Install and restart** there: within half a minute the installer on this
+computer fetches the new release and starts PCP again with the settings it
+remembered, and the page is back a minute or two later. Running the install
+line again does the same. (An install from before this button existed gets it
+after one more run of the install line.) From a checkout, in the `pcp`
+folder, with the same `-f` files you started it with:
 
 ```bash
 git pull
@@ -256,6 +274,14 @@ of the installer, kept in `~/.local/share/pcp/install.sh`; as root, in
 change what root runs. `PCP_AUTO_UPDATE=0` takes it away again:
 `pcp-update.timer` and the copy, or under Podman the auto-update label on
 PCP's unit (Podman's timer stays on, since other containers may use it).
+
+**Install and restart** works through a second timer, `pcp-update-request.timer`,
+which runs a copy of the installer every 30 seconds. It looks into the
+container for a request PCP leaves in its data folder when you press the
+button, and if there is a fresh one, it updates PCP as the line above would.
+PCP itself never talks to Docker or Podman. Without a systemd session the
+installer prints its crontab line too. `PCP_UPDATE_BUTTON=0` takes the timer
+and the button away; a pinned `PCP_VERSION` has no button.
 
 **Backing up.** **Settings → Export** writes everything PCP holds to one
 file, locked with an export password you choose. **Settings → Restore** (or
@@ -377,7 +403,18 @@ off the internet: PCP believes those headers from whoever sends them. If PCP
 guesses its public address wrong, pin it under **Settings → Public
 address**.
 
+PCP counts the left-most `X-Forwarded-For` address. A proxy that replaces
+the header puts the client's address there; most append to it instead
+(nginx's `$proxy_add_x_forwarded_for`, Caddy, Traefik), and then the
+left-most is whatever the client sent. For those, set `PCP_TRUSTED_PROXIES`
+to your proxies' addresses (IP addresses and CIDR ranges, comma-separated,
+such as `PCP_TRUSTED_PROXIES=172.16.0.0/12` for proxies on a Docker
+network): PCP then reads the header from the right, past those addresses
+and loopback, and counts the first one that is not yours. It is off unless
+you set it, and it still needs port 3000 to be reachable from your proxies
+alone.
+
 PCP needs no environment variables. The optional ones (`PCP_DATA_DIR`,
 `PORT`, `PCP_HTTP_PORT`, `PCP_HTTPS_PORT`, `PCP_ACME_DIRECTORY`,
-`PCP_PUBLIC_IP_URL`, `PCP_PCPGG_RELAY_URL`) are listed in [`.env.example`](../.env.example), for a
+`PCP_PUBLIC_IP_URL`, `PCP_PCPGG_RELAY_URL`, `PCP_TRUSTED_PROXIES`) are listed in [`.env.example`](../.env.example), for a
 checkout or a deployment of your own; the installer does not pass them on.

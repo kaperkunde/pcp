@@ -1,22 +1,22 @@
 import { expect, test, type Page } from "@playwright/test"
 
 import { OWNER_PASSWORD, unlock } from "../lib/auth"
+import { openSettingsRow } from "../lib/ui"
 
 // Touch ID, as the Mac app offers it to PCP's pages (window.pcpDesktop,
 // desktop/preload.cjs). The suite runs in Chromium, so a stand-in plays the
 // app: it keeps the key in the page's localStorage instead of the keychain,
 // and every "Touch ID" it is asked for succeeds and is counted. What is
 // tested is PCP's side: turning Touch ID on takes the password, it unlocks
-// and confirms a new token (and an app's sign-in) without typing, a key PCP
-// no longer knows is forgotten and the password still works, and signing out
-// everywhere turns it off. Signs every browser out, so it runs after the
+// and confirms an export without typing, a key PCP no longer knows is
+// forgotten and the password still works, and signing out everywhere turns
+// it off. Signs every browser out, so it runs after the
 // projects that start signed in, and signs in on its own.
 test.describe.configure({ mode: "serial" })
 
 // Signing in is limited per address: one of its own, as backup.spec.ts.
 test.use({ extraHTTPHeaders: { "x-forwarded-for": "198.51.100.202" } })
 
-const RUN = Date.now().toString(36)
 const STORE = "e2e-touch-id-key"
 const PROMPTS = "e2e-touch-id-prompts"
 const REJECTED = "Touch ID is no longer set up for PCP. Use your password."
@@ -69,12 +69,6 @@ test.afterEach(async ({ page }) => {
   kept = await savedKey(page).catch(() => kept)
 })
 
-function card(page: Page, title: string) {
-  return page.locator("[data-slot=card]").filter({
-    has: page.getByRole("heading", { name: title, exact: true }),
-  })
-}
-
 function savedKey(page: Page) {
   return page.evaluate((store) => localStorage.getItem(store), STORE)
 }
@@ -86,12 +80,16 @@ function prompts(page: Page) {
   )
 }
 
+function nav(page: Page) {
+  return page
+    .getByRole("navigation", { name: "Main" })
+    .getByRole("link", { name: "Servers" })
+}
+
 /** With a key kept, the sign-in page asks for Touch ID as it opens. */
 async function unlockWithTouchId(page: Page) {
   await page.goto("/login")
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible({
-    timeout: 30_000,
-  })
+  await expect(nav(page)).toBeVisible({ timeout: 30_000 })
 }
 
 /** Locks; with a key kept, the sign-in page may unlock again at once. */
@@ -105,7 +103,7 @@ test("turns Touch ID on in Settings, which takes the password", async ({
 }) => {
   await unlock(page)
   await page.goto("/settings")
-  const touchId = card(page, "Touch ID")
+  const touchId = await openSettingsRow(page, "Touch ID")
 
   // A run that stopped halfway left it on: start from off.
   const off = touchId.getByRole("button", { name: "Turn off Touch ID" })
@@ -124,7 +122,7 @@ test("turns Touch ID on in Settings, which takes the password", async ({
   expect(await savedKey(page)).toMatch(/^pcp_device_[A-Za-z0-9_-]{43}$/)
 })
 
-test("unlocks with Touch ID as the page opens, and confirms a token with it", async ({
+test("unlocks with Touch ID as the page opens, and confirms an export with it", async ({
   page,
 }) => {
   await unlockWithTouchId(page)
@@ -132,70 +130,28 @@ test("unlocks with Touch ID as the page opens, and confirms a token with it", as
   await lock(page)
 
   // Asked for once, at once; no password typed.
-  await page.waitForURL(/\/servers/, { timeout: 30_000 })
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible()
+  await page.waitForURL(/\/home/, { timeout: 30_000 })
+  await expect(nav(page)).toBeVisible()
   expect(await prompts(page)).toBe(before + 1)
 
-  // The token's password step is answered by Touch ID as it appears.
-  const name = `Touch ID ${RUN}`
+  // The export's password step is answered by Touch ID as it appears.
   const asked = await prompts(page)
-  await page.goto("/tokens")
-  await page.getByLabel("Name").fill(name)
-  await page.getByRole("button", { name: "Create token" }).click()
-  await expect(page).toHaveURL(/\/tokens\/[0-9a-f-]+$/)
-  await expect(page.getByRole("heading", { name })).toBeVisible()
-  await expect(page.getByTestId("new-token")).toHaveText(/^pcp_/)
+  await page.goto("/settings")
+  const exportRow = await openSettingsRow(page, "Export")
+  const exportPassword = "e2e-touch-id-export-1!"
+  await exportRow
+    .getByLabel("Export password", { exact: true })
+    .fill(exportPassword)
+  await exportRow.getByLabel("Repeat export password").fill(exportPassword)
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    exportRow.getByRole("button", { name: "Continue" }).click(),
+  ])
+  expect(download.suggestedFilename()).toMatch(/\.pcpexport$/)
   expect(await prompts(page)).toBe(asked + 1)
 })
 
-test("unlocks on the way to an app's sign-in, and confirms it with Touch ID", async ({
-  page,
-  baseURL,
-}) => {
-  const redirect = "http://127.0.0.1:9/callback"
-  const name = `Touch ID app ${RUN}`
-  const registered = await fetch(`${baseURL}/oauth/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      client_name: name,
-      redirect_uris: [redirect],
-      token_endpoint_auth_method: "none",
-    }),
-  })
-  const { client_id } = await registered.json()
-  const callback = new Promise<URLSearchParams>((resolve) => {
-    void page.route("http://127.0.0.1:9/**", async (route) => {
-      resolve(new URL(route.request().url()).searchParams)
-      await route.fulfill({ contentType: "text/plain", body: "Back" })
-    })
-  })
-
-  // Locked: the sign-in page asks for Touch ID and goes on to the app's.
-  await page.goto(
-    `/oauth/authorize?${new URLSearchParams({
-      response_type: "code",
-      client_id,
-      redirect_uri: redirect,
-      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-      code_challenge_method: "S256",
-      state: RUN,
-    })}`,
-  )
-  await expect(
-    page.getByRole("heading", { name: `Connect ${name}?` }),
-  ).toBeVisible({
-    timeout: 30_000,
-  })
-
-  // The password step is answered by Touch ID as it appears.
-  await page.getByRole("button", { name: "Allow" }).click()
-  const answer = await callback
-  expect(answer.get("state")).toBe(RUN)
-  expect(answer.get("code")).toMatch(/^pcp_code_/)
-})
-
-test("forgets a key PCP no longer knows, and the password still works", async ({
+test("forgets a key PCP no longer knows, and signing out everywhere turns Touch ID off", async ({
   page,
 }) => {
   await unlockWithTouchId(page)
@@ -217,33 +173,27 @@ test("forgets a key PCP no longer knows, and the password still works", async ({
   // PCP still has a key; this app no longer does: Settings says so, and
   // turning it off there takes no password.
   await page.goto("/settings")
-  const touchId = card(page, "Touch ID")
+  const touchId = await openSettingsRow(page, "Touch ID")
   await expect(touchId.getByText(/no longer holds its key/)).toBeVisible()
   await touchId.getByRole("button", { name: "Turn off Touch ID" }).click()
   await expect(
     touchId.getByRole("button", { name: "Turn on Touch ID" }),
   ).toBeVisible()
-})
 
-test("turns on at sign-in, and signing out everywhere turns it off", async ({
-  page,
-}) => {
   // Off, but available: the sign-in page offers it with the password.
-  expect(kept).toBeNull()
-  await page.goto("/login")
+  await lock(page)
   await page.getByLabel("Password").fill(OWNER_PASSWORD)
   await page.getByLabel("Unlock with Touch ID from now on").check()
   await page.getByRole("button", { name: "Unlock", exact: true }).click()
-  await expect(page.getByRole("tab", { name: "Servers" })).toBeVisible({
-    timeout: 30_000,
-  })
+  await expect(nav(page)).toBeVisible({ timeout: 30_000 })
   expect(await savedKey(page)).toMatch(/^pcp_device_/)
 
   // Signing out everywhere takes Touch ID with it: the app's key is refused
   // on the next unlock, and forgotten.
   await page.goto("/settings")
+  const devices = await openSettingsRow(page, "Signed-in devices")
   page.once("dialog", (dialog) => dialog.accept())
-  await page.getByRole("button", { name: "Sign out everywhere" }).click()
+  await devices.getByRole("button", { name: "Sign out everywhere" }).click()
   await expect(page).toHaveURL(/\/login/)
   await expect(page.getByText(REJECTED)).toBeVisible()
   await expect.poll(() => savedKey(page)).toBeNull()

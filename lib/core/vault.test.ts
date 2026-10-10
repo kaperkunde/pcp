@@ -20,6 +20,7 @@ import {
 } from "./secrets"
 import { createServer, getServer, listServers, updateServer } from "./servers"
 import { createSession, destroySession, resolveSession } from "./sessions"
+import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
 import {
   changePassword,
@@ -27,6 +28,7 @@ import {
   resetPasswordWithRecoveryKey,
   rotateRecoveryKey,
   setupVault,
+  signOutEverywhere,
   unlockOwnerVault,
   verifyPassword,
 } from "./vault"
@@ -135,6 +137,19 @@ describe("setup and sign-in", () => {
     expect(await resolveApiToken(token)).not.toBeNull()
   })
 
+  it("forgets the pinned public address when recovering", async () => {
+    const { vaultId, dek, recoveryKey } = await setupVault({
+      name: "Ada",
+      password: PASSWORD,
+    })
+    const ctx = { vaultId, dek }
+    await setSetting(ctx, SETTING_PUBLIC_URL, "https://elsewhere.example")
+
+    await resetPasswordWithRecoveryKey(recoveryKey, "another long password")
+
+    expect(await getSetting(ctx, SETTING_PUBLIC_URL)).toBeNull()
+  })
+
   it("can revoke every API token while recovering", async () => {
     const { vaultId, dek, recoveryKey } = await setupVault({
       name: "Ada",
@@ -149,6 +164,28 @@ describe("setup and sign-in", () => {
       revokeApiTokens: true,
     })
 
+    expect(await resolveApiToken(token)).toBeNull()
+  })
+})
+
+describe("signing out everywhere", () => {
+  it("ends every session and forgets the pinned public address", async () => {
+    const ctx = await setupVault({ name: "Ada", password: PASSWORD })
+    const { cookieValue } = await createSession(ctx)
+    const { token } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: true,
+    })
+    // Pinned from a stolen session, it would send the next sign-in there.
+    await setSetting(ctx, SETTING_PUBLIC_URL, "https://elsewhere.example")
+
+    await signOutEverywhere(ctx)
+
+    expect(await resolveSession(cookieValue)).toBeNull()
+    expect(await getSetting(ctx, SETTING_PUBLIC_URL)).toBeNull()
+    expect(await resolveApiToken(token)).not.toBeNull()
+
+    await signOutEverywhere(ctx, { revokeApiTokens: true })
     expect(await resolveApiToken(token)).toBeNull()
   })
 })

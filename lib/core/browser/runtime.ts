@@ -20,6 +20,7 @@ import { isOwnAddress, isPublicAddress } from "../openapi/address"
 import { watchDocuments, type DocumentWatch } from "./challenge"
 import {
   acquireDisplay,
+  displaySwitches,
   wantsVirtualDisplay,
   type VirtualDisplay,
 } from "./display"
@@ -314,10 +315,7 @@ async function launch(
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
       "--disable-blink-features=AutomationControlled",
-      // A display with no graphics card: WebGL on Chromium's software
-      // renderer, which headless uses by itself. Without it a windowed
-      // Chromium there has no WebGL at all.
-      ...(display ? ["--enable-unsafe-swiftshader"] : []),
+      ...(display ? displaySwitches() : []),
       "--disable-dev-shm-usage",
       // UDP would go around the proxy: no QUIC, and WebRTC only through it.
       "--disable-quic",

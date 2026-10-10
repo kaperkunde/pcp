@@ -42,10 +42,11 @@ import { parseRunCommand, RUN_COMMAND, sshTools } from "./tools"
  * PCP signs in with a key of its own, never a password: an Ed25519 key made
  * for each server, kept as a managed secret that only upstream.ts decrypts,
  * whose public half the owner adds to the login's authorized_keys. The
- * server's host key is pinned the first time PCP finishes a key exchange
- * with it, and shown to the owner; another key is refused until they forget
- * the pinned one. Nothing here reads the private key: upstream.ts hands in
- * an SshIdentity.
+ * server's host key is pinned the first time the owner has PCP check the
+ * server and a key exchange finishes, and shown to them; another key is
+ * refused until they forget the pinned one. An assistant's call never pins
+ * one, and never connects to a server with none. Nothing here reads the
+ * private key: upstream.ts hands in an SshIdentity.
  */
 
 export const DEFAULT_SSH_PORT = 22
@@ -337,7 +338,9 @@ export function sshTarget(server: McpServer): SshTarget {
 /**
  * Pins the host key a connection proved, the first time there is one. Only
  * while the row still has no key and the same address, so a key seen for
- * an address the owner has since changed is not kept for the new one.
+ * an address the owner has since changed is not kept for the new one. Only
+ * a connection the owner started uses it: whoever answers first on an
+ * address would otherwise be the key every later call trusts.
  */
 function pinner(server: McpServer) {
   return async (seen: HostSeen) => {
@@ -355,6 +358,11 @@ function pinner(server: McpServer) {
 /** The server's page in PCP, where its key and host key are. */
 function pageOf(server: McpServer, publicUrl: string): string {
   return `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`
+}
+
+/** Why PCP does not connect to a server whose host key the owner never pinned. */
+function unpinnedMessage(server: McpServer, publicUrl: string): string {
+  return `PCP has not pinned ${server.name}'s host key yet, so it does not connect: only the owner pins a key, by checking the server on its page and comparing the fingerprint with the server's own.\n${pageOf(server, publicUrl)}`
 }
 
 function seconds(ms: number): string {
@@ -395,13 +403,15 @@ async function fail(
 }
 
 /**
- * Stores the server's tool and checks that PCP can sign in, pinning the
- * host key on the first connection.
+ * Stores the server's tool and checks that PCP can sign in. When the owner
+ * started the check, the host key is pinned on the first connection. When
+ * not (the gateway reading the tools again for an assistant), a server with
+ * no pinned key is not connected to, and its status is left as it is.
  */
 export async function syncSshTools(
   server: McpServer,
   identity: SshIdentity,
-  { publicUrl }: { publicUrl: string },
+  { publicUrl, byOwner = false }: { publicUrl: string; byOwner?: boolean },
 ): Promise<SyncResult> {
   const target = sshTarget(server)
   const toolCount = await storeTools(
@@ -409,8 +419,16 @@ export async function syncSshTools(
     sshTools({ host: target.host, username: target.username }),
   )
 
+  if (!byOwner && !target.hostKey) {
+    return {
+      status: "error",
+      message: unpinnedMessage(server, publicUrl),
+      toolCount,
+    }
+  }
+
   try {
-    await sshCheck(target, identity, pinner(server))
+    await sshCheck(target, identity, byOwner ? pinner(server) : async () => {})
     await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
     return { status: "ok", message: "", toolCount }
   } catch (error) {
@@ -433,7 +451,8 @@ export async function syncSshTools(
 
 /**
  * Runs a call to the server's tool. The arguments are checked before
- * anything connects; what the command writes is passed on as it is, with
+ * anything connects, and a server whose host key the owner has not pinned
+ * is not connected to; what the command writes is passed on as it is, with
  * anything in `redact` (a wrapper's secret placed in the call) taken out.
  */
 export async function callSshTool(
@@ -455,10 +474,16 @@ export async function callSshTool(
   }
 
   const call = parseRunCommand(args)
+  const target = sshTarget(server)
+
+  // The first key to answer is trusted only when the owner has seen it.
+  if (!target.hostKey) {
+    return errorToolResult(unpinnedMessage(server, publicUrl), { redact })
+  }
 
   try {
     const result = await sshExec(
-      sshTarget(server),
+      target,
       identity,
       {
         command: call.command,
@@ -466,7 +491,8 @@ export async function callSshTool(
         timeoutMs: call.timeoutMs,
         maxOutputBytes: MAX_OUTPUT_BYTES,
       },
-      pinner(server),
+      // The key is pinned already; a call never pins another.
+      async () => {},
     )
 
     if (server.status !== "ok") {

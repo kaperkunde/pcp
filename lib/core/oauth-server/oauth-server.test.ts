@@ -17,7 +17,10 @@ import { setupVault } from "../vault"
 import {
   approveAuthorization,
   checkAuthorizationRequest,
+  consentQuery,
   denyAuthorization,
+  errorGoesBack,
+  recheckAuthorization,
   tokensForClient,
   type AuthorizationParams,
   type AuthorizationRequest,
@@ -350,6 +353,41 @@ describe("the authorization request", () => {
     expect(check.kind === "redirect" && check.url).toContain(
       "error=unsupported_response_type",
     )
+  })
+
+  it("sends an error back on its own only to an app the owner let in before", async () => {
+    const clientId = await publicClient("Anyone at all")
+    const { challenge } = pkce()
+    const check = await checkAuthorizationRequest(
+      params(clientId, challenge, { code_challenge_method: "plain" }),
+      PUBLIC_URL,
+    )
+
+    // What the page shows instead: who asked, where the link goes, and why.
+    expect(check).toMatchObject({
+      kind: "redirect",
+      client: {
+        id: clientId,
+        name: "Anyone at all",
+        host: "assistant.example",
+      },
+      returnHost: "assistant.example",
+      description: expect.stringContaining("PKCE is required"),
+    })
+
+    // Anyone can register, so a client nobody let in is not sent to.
+    expect(await errorGoesBack(ctx, clientId)).toBe(false)
+    expect(
+      await errorGoesBack(ctx, "https://assistant.example/client.json"),
+    ).toBe(false)
+
+    // Let in once, with a token that is still live, it is.
+    const { tokenId } = await approve(clientId, challenge)
+    expect(await errorGoesBack(ctx, clientId)).toBe(true)
+
+    // Revoked, the owner no longer stands behind it.
+    await revokeApiToken(ctx, tokenId)
+    expect(await errorGoesBack(ctx, clientId)).toBe(false)
   })
 })
 
@@ -762,6 +800,70 @@ describe("client metadata documents", () => {
       PUBLIC_URL,
     )
     expect(await resolveAccessToken(tokens.access_token)).not.toBeNull()
+  })
+
+  it("binds the approval to the return address and app the owner was shown", async () => {
+    const { challenge } = pkce()
+    const query = params(DOCUMENT_URL, challenge)
+    delete query.redirect_uri
+
+    const shown = await checkAuthorizationRequest(
+      query,
+      PUBLIC_URL,
+      serving(JSON.stringify(document)),
+    )
+    expect(shown.kind).toBe("ok")
+    const request = (shown as { request: AuthorizationRequest }).request
+    expect(request.redirectUri).toBe("https://claude.ai/api/mcp/auth_callback")
+
+    // The form carries the resolved address, and marks a client sent itself
+    // are replaced by what the page saw.
+    const carried = consentQuery({ ...query, pcp_seen_name: "Mine" }, request)
+    expect(new URLSearchParams(carried).get("redirect_uri")).toBe(
+      request.redirectUri,
+    )
+
+    const same = await recheckAuthorization(
+      carried,
+      PUBLIC_URL,
+      serving(JSON.stringify(document)),
+    )
+    expect(same.kind).toBe("ok")
+
+    // The document now lists another address only: the one carried is not
+    // registered any more.
+    const moved = serving(
+      JSON.stringify({
+        ...document,
+        redirect_uris: ["https://evil.example/callback"],
+      }),
+    )
+    const redirected = await recheckAuthorization(carried, PUBLIC_URL, moved)
+    expect(redirected.kind).toBe("show")
+
+    // The same address under another name is not the app they were shown.
+    const renamed = await recheckAuthorization(
+      carried,
+      PUBLIC_URL,
+      serving(JSON.stringify({ ...document, client_name: "Someone else" })),
+    )
+    expect(renamed).toMatchObject({
+      kind: "show",
+      message: expect.stringContaining("Start connecting it again"),
+    })
+
+    // A query that never came through the page carries no marks.
+    const bare = await recheckAuthorization(
+      new URLSearchParams(
+        Object.entries({
+          ...query,
+          redirect_uri: request.redirectUri,
+        }) as [string, string][],
+      ).toString(),
+      PUBLIC_URL,
+      serving(JSON.stringify(document)),
+    )
+    expect(bare.kind).toBe("show")
   })
 
   it("refuses a document that is not the client's own, public, small and JSON", async () => {

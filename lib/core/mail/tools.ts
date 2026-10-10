@@ -67,7 +67,7 @@ type MailToolSpec = {
   kinds: readonly MailKind[]
   /** Changes mail: absent on a read-only account, and refused there. */
   writes: boolean
-  /** Only when the account can send. */
+  /** Sends text to others: only when the account can send. */
   sends?: boolean
   /** Only when the server offers an automatic reply (JMAP). */
   vacation?: boolean
@@ -519,7 +519,7 @@ const SPECS: readonly MailToolSpec[] = [
     name: "set_vacation_response",
     title: "Set the automatic reply",
     description:
-      "Turns the account's automatic reply (out of office) on or off, and sets what it says and between which dates it answers. What you leave out stays as it is; null clears it. The server answers incoming mail with it while it is on.",
+      "Turns the account's automatic reply (out of office) on or off, and sets what it says and between which dates it answers. What you leave out stays as it is; null clears it. While it is on, the server sends this text to whoever writes to the account, and that cannot be undone.",
     args: () =>
       z.strictObject({
         enabled: z.boolean().describe("Whether the automatic reply is on."),
@@ -552,6 +552,9 @@ const SPECS: readonly MailToolSpec[] = [
     },
     kinds: ["jmap"],
     writes: true,
+    // The server sends the text to anyone who writes in: sending, as far as
+    // the owner's levels and a read-only account go.
+    sends: true,
     vacation: true,
   },
 ]
@@ -616,12 +619,15 @@ export function parseMailArgs(
   return parsed.data as Record<string, unknown>
 }
 
-/** Recipients as parsed addresses. */
+/** Recipients as parsed addresses; `field` (to, cc, bcc) names them in a refusal. */
 export function parseRecipients(
   values: unknown,
+  field: string,
 ): Array<{ name: string | null; email: string }> {
   return Array.isArray(values)
-    ? values.map((value) => parseRecipient(String(value)))
+    ? values.map((value, index) =>
+        parseRecipient(String(value), `Recipient ${index + 1} in ${field}`),
+      )
     : []
 }
 

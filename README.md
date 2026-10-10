@@ -86,7 +86,7 @@ on its own, what it has to ask you about first, and what it cannot touch.
      `curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh`
    - **From a checkout**, run
      `git clone https://github.com/kaperkunde/pcp.git && cd pcp && docker compose up -d`
-2. **Open http://localhost:3000** (the app opens its own window on it; on a
+2. **Open http://localhost:3000** (the app opens its own window, at 127.0.0.1; on a
    server, use the address the installer prints). Pick your name and a
    password, and store the **recovery key** you are shown in a password
    manager: it is shown once, and nothing else resets a password.
@@ -167,10 +167,12 @@ Fedora Atomic systems come with Podman), pulls the published image
 (`ghcr.io/kaperkunde/pcp`) and keeps PCP running on port 3000 across reboots:
 as a container Docker restarts, or as a systemd unit under Podman. It never
 runs `sudo` or installs Docker for you; when neither is usable, it prints what
-to run. Run the same line again to update PCP, or once with
-`PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`) to have it update PCP by
-itself once a day. The top of [`install.sh`](install.sh) lists its settings
-(`PCP_PORT`, `PCP_HTTPS`, `PCP_AUTO_UPDATE` and a few more); it remembers
+to run. Run the same line again to update PCP, or choose **Install and
+restart** under **Settings → Updates** when PCP says a new version is out.
+Run it once with `PCP_AUTO_UPDATE=1` (`… | PCP_AUTO_UPDATE=1 sh`) to have it
+update PCP by itself once a day. The top of [`install.sh`](install.sh) lists its settings
+(`PCP_PORT`, `PCP_HTTPS`, `PCP_AUTO_UPDATE`, `PCP_UPDATE_BUTTON` and a few
+more); it remembers
 them in `~/.config/pcp/install.conf` (`/etc/pcp/install.conf` as root), so a
 later run keeps them.
 `… | sh -s -- uninstall` removes PCP and keeps your data.
@@ -184,7 +186,8 @@ docker compose up -d
 ```
 
 Open http://localhost:3000 (the installer also prints the address other
-devices on your network use). The first visit shows the setup page, and the
+devices on your network use, unless it was run with `PCP_HTTPS=1`, which
+keeps port 3000 on that computer only). The first visit shows the setup page, and the
 first person to open it becomes the owner: pick your name and a password.
 You will be shown a **recovery key** once — store it in a password manager.
 There is no password reset without it, because there is nothing on the
@@ -205,6 +208,12 @@ require an `https` redirect URL, and the session cookie is only marked
   # or, from a checkout:
   docker compose -f docker-compose.yaml -f docker-compose.https.yaml up -d
   ```
+
+  With HTTPS on, port 3000 (plain HTTP) is published on `127.0.0.1` only,
+  so the host's firewall cannot be bypassed by it; set PCP up from that
+  computer, or through an SSH tunnel (`ssh -L 3000:127.0.0.1:3000 you@server`
+  and http://localhost:3000). Without HTTPS it stays on every interface,
+  for your home network.
 
 - **Your own proxy** (Caddy, Traefik, nginx, Coolify) in front of port 3000,
   passing `X-Forwarded-Proto`. Leave both settings off; they are off until
@@ -232,12 +241,14 @@ start it.
 PCP asks GitHub once a day which release is the latest, and says so in its
 header when a newer one is out. **Settings → Updates** shows what it found,
 with the release notes, and says how to update the PCP you are looking at:
-the app, the container or a checkout. GitHub sees this PCP's address and
-version, nothing else. Turn the daily check off there (or in the step after
-setup) and PCP asks only when you choose **Check now**. In a container or a
-checkout PCP never pulls, builds or restarts itself; only the installer's
-daily update (`PCP_AUTO_UPDATE=1`, above) does that for a container, and the
-page says when it is on.
+the app, the container or a checkout. The Mac and Windows app and the Linux
+installer can install it from there (**Install and restart**). GitHub sees this
+PCP's address and version, nothing else. Turn the daily check off there (or in
+the step after setup) and PCP asks only when you choose **Check now**. In a
+container or a checkout PCP never pulls, builds or restarts itself; only the
+installer does that for a container, when you press **Install and restart**
+or with its daily update (`PCP_AUTO_UPDATE=1`, above), and the page says
+which.
 
 ### Cleanup
 
@@ -289,7 +300,7 @@ To remove PCP itself:
   The uninstaller keeps your vault in `%APPDATA%\PCP`; delete that folder to
   remove it too.
 - **Linux, from the installer**: run it with `uninstall`. It removes the
-  container, the systemd unit under Podman, the daily update timer and its
+  container, the systemd unit under Podman, its update timers and its
   settings file, and keeps the `pcp-data` volume, your vault:
 
   ```bash
@@ -298,8 +309,8 @@ To remove PCP itself:
   docker image rm ghcr.io/kaperkunde/pcp # the image (podman image rm …)
   ```
 
-  If the installer gave you a crontab line to update PCP (on a machine
-  without a systemd session), remove it with `crontab -e`.
+  If the installer gave you crontab lines to update PCP (on a machine
+  without a systemd session), remove them with `crontab -e`.
 
 - **From a checkout with `docker compose`**: `docker compose down` stops and
   removes PCP and keeps the vault; `docker compose down -v` deletes the
@@ -349,7 +360,8 @@ To remove PCP itself:
    offers it, so it stays signed in). Or add one over **IMAP**, with an SMTP
    server to send through if it should send. Passwords and tokens are secrets
    you pick, and mail only travels encrypted (TLS, or STARTTLS on `imap://` and
-   `smtp://`). Every account offers the same tools: list mailboxes, search one
+   `smtp://`; a JMAP session URL is `https://`, or `http://` for a server on
+   your own network only). Every account offers the same tools: list mailboxes, search one
    mailbox or all of them, read an email or an attachment (a text one as text,
    any other as a handle), move, flag, label (keywords) and delete into the
    Trash (never for good), many emails in one call, write a draft and send,
@@ -357,6 +369,8 @@ To remove PCP itself:
    identities and the automatic reply (out of office) on JMAP. A draft (`create_draft`) goes into
    the account's Drafts and is sent by nobody but you, so you can allow
    drafting and keep sending on **Ask you first**; it needs no SMTP server.
+   The automatic reply counts as sending (the server sends the text to whoever
+   writes in), so an account that cannot send has no tool to set it.
    **Read-only** offers only the tools that read. An
    assistant can propose an account too, with `register_server`: you see the
    server, the user name and how PCP signs in, type the app password on that
@@ -653,11 +667,12 @@ Someone with the disk has ciphertext and hashes.
 Consequences worth knowing:
 
 - Changing the password re-wraps the key; sessions and API tokens keep
-  working. Using the recovery key signs every browser out, turns Touch ID off
-  and can revoke every API token.
+  working. Using the recovery key signs every browser out, turns Touch ID off,
+  forgets the pinned public address and can revoke every API token.
 - A stolen session cannot make an API token or a recovery key: both ask for
   the password again (a token, in the Mac app, takes Touch ID instead). Letting
-  an app sign in makes a token, so it asks too.
+  an app sign in makes a token, so it asks too, and so does changing PCP's
+  public address, which decides where sign-ins and permission links go.
 - Losing the password **and** the recovery key loses the data. That is the
   design, not a bug.
 - An export is the encrypted vault as it is, under an export password of

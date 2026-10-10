@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
+import { createRequire } from "node:module"
 import net from "node:net"
 
 import {
@@ -18,6 +19,8 @@ import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import {
   acquireDisplay,
+  displaySwitches,
+  PLAYWRIGHT_DISABLED_FEATURES,
   runningDisplay,
   setXvfbCommand,
   wantsVirtualDisplay,
@@ -67,6 +70,33 @@ describe("whether the browser uses a virtual display", () => {
     vi.stubEnv("PCP_BROWSER_DISPLAY", "virtual")
     vi.stubEnv("PCP_DESKTOP", "1")
     expect(wantsVirtualDisplay()).toBe(false)
+  })
+})
+
+describe("Chromium's switches on the virtual display", () => {
+  it("carry the features Playwright turns off, since Chromium keeps only the last list", () => {
+    const bundle = readFileSync(
+      createRequire(import.meta.url).resolve("playwright-core/lib/coreBundle"),
+      "utf8",
+    )
+    const list = bundle.match(/disabledFeatures = \[([^\]]*)\]/)?.[1]
+    expect(list).toBeDefined()
+
+    const playwrights = list!
+      .split("\n")
+      .map((line) => line.replace(/\/\/.*$/, ""))
+      .flatMap((line) => [...line.matchAll(/"([^"]+)"/g)].map((m) => m[1]))
+
+    expect(playwrights.length).toBeGreaterThan(0)
+    expect([...PLAYWRIGHT_DISABLED_FEATURES]).toEqual(playwrights)
+
+    const switches = displaySwitches()
+    const disable = switches.filter((s) => s.startsWith("--disable-features="))
+    expect(disable).toHaveLength(1)
+    expect(disable[0]!.slice("--disable-features=".length).split(",")).toEqual([
+      ...playwrights,
+      "RenderDocument",
+    ])
   })
 })
 
@@ -222,6 +252,15 @@ document.title = JSON.stringify({
       expect(seen.window[1]).toBeGreaterThan(seen.window[3]!)
       expect(seen.screen).toEqual([1920, 1080])
       expect(seen.webgl).toBeTruthy()
+
+      // Every document sees the window as its script runs, not only the
+      // first: a new document once read 0 by 0 until the window reached it.
+      for (let n = 1; n <= 6; n++) {
+        await tab.page.goto(`${api.origin}/${n}`)
+        const again = JSON.parse(await tab.page.title()) as typeof seen
+        expect(again.window[0]).toBeGreaterThan(again.window[2]!)
+        expect(again.window[1]).toBeGreaterThan(again.window[3]!)
+      }
 
       await closeAllBrowsers()
       expect(await stopped()).toBe(true)

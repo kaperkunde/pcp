@@ -9,6 +9,7 @@ import { Button, ButtonLink } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input, Select } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
+import { List, ListRow } from "@/components/ui/list"
 import {
   activityLog,
   readActivityQuery,
@@ -74,7 +75,7 @@ export default async function LogPage({
 
       <Form
         action="/log"
-        className="grid gap-4 sm:grid-cols-[1fr_1fr_1.5fr_auto] sm:items-end"
+        className="grid gap-4 rounded-xl bg-card p-4 sm:grid-cols-[1fr_1fr_1.5fr_auto] sm:items-end"
         aria-label="Filter the log"
       >
         <Field label="Token" htmlFor="log-token">
@@ -115,7 +116,7 @@ export default async function LogPage({
           />
         </Field>
         <div className="flex gap-2">
-          <Button type="submit" variant="outline">
+          <Button type="submit" variant="secondary">
             Filter
           </Button>
           {filtered ? (
@@ -137,21 +138,21 @@ export default async function LogPage({
           </p>
         </Card>
       ) : (
-        <ul className="flex flex-col divide-y divide-border rounded-xl bg-card ring-1 ring-foreground/10">
+        <List as="ul">
           {entries.map((entry) => (
             <LogLine key={entry.id} entry={entry} />
           ))}
-        </ul>
+        </List>
       )}
 
       <div className="flex flex-wrap items-center gap-2">
         {query.cursor ? (
-          <ButtonLink href={href(query)} variant="outline" size="sm">
+          <ButtonLink href={href(query)} variant="secondary" size="sm">
             Newest
           </ButtonLink>
         ) : null}
         {next ? (
-          <ButtonLink href={href(query, next)} variant="outline" size="sm">
+          <ButtonLink href={href(query, next)} variant="secondary" size="sm">
             Older
           </ButtonLink>
         ) : null}
@@ -162,37 +163,41 @@ export default async function LogPage({
 
 function LogLine({ entry }: { entry: ActivityEntry }) {
   return (
-    <li
-      className="flex flex-col gap-1 px-4 py-3 text-sm"
+    <ListRow
+      as="li"
       data-testid="log-line"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
+      className="py-3"
+      title={
+        <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
           <code className="font-medium">{entry.tool}</code>
           {entry.server ? (
-            <code className="text-muted-foreground">
+            <code className="text-[13px] text-muted-foreground">
               {entry.server}
               {entry.upstreamTool ? `/${entry.upstreamTool}` : ""}
             </code>
           ) : null}
-        </div>
-        <Outcome entry={entry} />
-      </div>
-      <p className="text-xs text-muted-foreground">
-        <LocalDate value={entry.ts} /> ·{" "}
-        {entry.tokenName ? (
-          <Link href={`/tokens/${entry.tokenId}`} className={LINK}>
-            {entry.tokenName}
-          </Link>
-        ) : (
-          "a deleted token"
-        )}{" "}
-        · {entry.ms.toLocaleString("en")} ms
-      </p>
-      {entry.outcome === "error" && entry.error ? (
-        <p className="text-xs text-destructive">{entry.error}</p>
-      ) : null}
-    </li>
+        </span>
+      }
+      description={
+        <>
+          <span className="block">
+            <LocalDate value={entry.ts} /> ·{" "}
+            {entry.tokenName ? (
+              <Link href={`/tokens/${entry.tokenId}`} className={LINK}>
+                {entry.tokenName}
+              </Link>
+            ) : (
+              "a deleted token"
+            )}{" "}
+            · {entry.ms.toLocaleString("en")} ms
+          </span>
+          {entry.outcome === "error" && entry.error ? (
+            <span className="mt-0.5 block text-destructive">{entry.error}</span>
+          ) : null}
+        </>
+      }
+      trailing={<Outcome entry={entry} />}
+    />
   )
 }
 

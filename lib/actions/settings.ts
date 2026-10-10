@@ -3,16 +3,19 @@
 import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
-import { revokeAllApiTokens } from "@/lib/core/api-tokens"
 import { createDeviceKey, removeDeviceKeys } from "@/lib/core/device-keys"
 import { invalid } from "@/lib/core/errors"
-import { destroyAllSessions } from "@/lib/core/sessions"
 import {
   normalizePublicUrl,
   SETTING_PUBLIC_URL,
   setSetting,
 } from "@/lib/core/settings"
-import { changePassword, rotateRecoveryKey } from "@/lib/core/vault"
+import {
+  changePassword,
+  rotateRecoveryKey,
+  signOutEverywhere,
+  validatePassword,
+} from "@/lib/core/vault"
 import { deleteVault } from "@/lib/core/vault-reset"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import {
@@ -33,15 +36,24 @@ export type SettingsResult = ActionState<{
   recoveryKey?: string
 }>
 
+/**
+ * Pins the public address, or clears it, once the owner has confirmed it is
+ * them (password or Touch ID). It decides where permission links, the MCP
+ * address on token pages and PCP's sign-in metadata point, so a copied
+ * session must not be able to move it.
+ */
 export async function setPublicUrlAction(
   _previous: SettingsResult,
   formData: FormData,
 ): Promise<SettingsResult> {
-  const ctx = await requireContext()
+  const session = await requireSession()
 
   const result = await guarded(async () => {
+    // A mistyped address is no guess at the password: refused before a
+    // try is spent on it.
     const url = normalizePublicUrl(field(formData, "publicUrl"))
-    await setSetting(ctx, SETTING_PUBLIC_URL, url || null)
+    await confirmOwner(session, formData)
+    await setSetting(session.ctx, SETTING_PUBLIC_URL, url || null)
 
     return {
       message: url
@@ -64,6 +76,14 @@ export async function changePasswordAction(
 
   if (password !== field(formData, "confirm")) {
     return { status: "error", error: "The new passwords do not match." }
+  }
+
+  // A new password that would be refused is no guess at the current one:
+  // say so before a try is spent on it.
+  const weak = validatePassword(password)
+
+  if (weak) {
+    return { status: "error", error: weak }
   }
 
   // Checking the current password is a guess like any other.
@@ -132,13 +152,9 @@ export async function signOutEverywhereAction(
 ): Promise<void> {
   const ctx = await requireContext()
 
-  if (field(formData, "revokeTokens") === "on") {
-    await revokeAllApiTokens(ctx)
-  }
-
-  // Touch ID signs in, so it goes with the sessions.
-  await removeDeviceKeys(ctx.vaultId)
-  await destroyAllSessions(ctx.vaultId)
+  await signOutEverywhere(ctx, {
+    revokeApiTokens: field(formData, "revokeTokens") === "on",
+  })
   await clearSessionCookie()
   redirect("/login")
 }
