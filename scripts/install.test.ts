@@ -35,6 +35,7 @@ const TOOLS = [
   "dirname",
   "mkdir",
   "mv",
+  "readlink",
   "rm",
   "rmdir",
   "sleep",
@@ -82,6 +83,8 @@ type Host = {
   image?: string
   /** What PCP left in /data/install-request; absent when there is no file. */
   signal?: string
+  /** What `timedatectl show -p Timezone --value` answers; no such program when absent. */
+  timedatectl?: string
 }
 
 const roots: string[] = []
@@ -115,6 +118,7 @@ function host({
   compose = false,
   image,
   signal,
+  timedatectl,
 }: Host = {}) {
   const root = mkdtempSync(join(tmpdir(), "pcp-install-"))
   roots.push(root)
@@ -199,6 +203,9 @@ esac`,
   answer("id", `case "$1" in -u) echo ${uid} ;; -un) echo pat ;; esac`)
   answer("hostname", 'echo "192.168.1.20 10.0.0.5"')
   answer("sysctl", `echo ${portStart}`)
+  if (timedatectl !== undefined) {
+    answer("timedatectl", `echo "${timedatectl}"`)
+  }
 
   return {
     unit: join(home, ".config", "containers", "systemd", "pcp.container"),
@@ -237,6 +244,9 @@ esac`,
         "pcp-update-request.timer",
       ),
       handled: join(sys, "var", "lib", "pcp", "install-request"),
+      /** Where the script looks for the host's time zone. */
+      timezone: join(sys, "etc", "timezone"),
+      localtime: join(sys, "etc", "localtime"),
     },
     run(args: string[] = [], env: Record<string, string> = {}) {
       writeFileSync(log, "")
@@ -1000,5 +1010,205 @@ describe("install.sh installing when PCP asks", () => {
     })
     expect(result.status).toBe(2)
     expect(result.stderr).toContain("PCP_UPDATE_BUTTON must be 0 or 1")
+  })
+})
+
+// The browser PCP runs shows sites the container's time zone and language, so
+// the installer hands over the host's. Both end up on a command line or in a
+// unit file, so only plain names get through.
+describe("install.sh passing on the host's time zone and language", () => {
+  const BERLIN = { TZ: "Europe/Berlin", LANG: "de_DE.UTF-8" }
+  const runLine = (...env: string[]) =>
+    `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=1${env
+      .map((entry) => ` -e ${entry}`)
+      .join("")} -v pcp-data:/data ${IMAGE}`
+  const put = (file: string, text: string) => {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, text)
+  }
+  const leaks = (calls: string[]) => calls.join("\n").includes("TZ=")
+
+  it("adds -e TZ and -e LANG to docker run, after the updater's and before the volume", () => {
+    const result = host({ docker: "works" }).run([], BERLIN)
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      runLine("TZ=Europe/Berlin", "LANG=de_DE.UTF-8"),
+    )
+  })
+
+  it("passes on the one it knows", () => {
+    const machine = host({ docker: "works" })
+    expect(machine.run([], { TZ: "UTC" }).calls).toContain(runLine("TZ=UTC"))
+    expect(machine.run([], { LANG: "de_DE.UTF-8" }).calls).toContain(
+      runLine("LANG=de_DE.UTF-8"),
+    )
+  })
+
+  it("puts them after the settings it already passes", () => {
+    const result = host({ docker: "works" }).run([], {
+      ...BERLIN,
+      PCP_AUTO_UPDATE: "1",
+    })
+    expect(result.calls).toContain(
+      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_AUTO_UPDATE=1 -e PCP_HOST_UPDATER=1 -e TZ=Europe/Berlin -e LANG=de_DE.UTF-8 -v pcp-data:/data ${IMAGE}`,
+    )
+  })
+
+  it("does the same for a plain podman run", () => {
+    const result = host({ podman: "4.3.1" }).run([], BERLIN)
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      `podman ${runLine("TZ=Europe/Berlin", "LANG=de_DE.UTF-8").slice("docker ".length)}`,
+    )
+  })
+
+  it("writes them into the Quadlet unit, in the same order", () => {
+    const machine = host({ podman: "5.2.2" })
+    expect(machine.run([], BERLIN).status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toBe(
+      UNIT.replace(
+        "Environment=PCP_HOST_UPDATER=1\n",
+        "Environment=PCP_HOST_UPDATER=1\nEnvironment=TZ=Europe/Berlin\nEnvironment=LANG=de_DE.UTF-8\n",
+      ),
+    )
+  })
+
+  it("puts them after the auto-update label in the unit", () => {
+    const machine = host({ podman: "5.2.2" })
+    expect(machine.run([], { ...BERLIN, PCP_AUTO_UPDATE: "1" }).status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toContain(
+      "Environment=PCP_AUTO_UPDATE=1\nLabel=io.containers.autoupdate=registry\nEnvironment=PCP_HOST_UPDATER=1\nEnvironment=TZ=Europe/Berlin\nEnvironment=LANG=de_DE.UTF-8\n\n[Service]",
+    )
+  })
+
+  it("passes nothing when the host has neither, as before", () => {
+    const docker = host({ docker: "works" }).run()
+    expect(docker.calls).toContain(`docker ${RUN}`)
+    expect(leaks(docker.calls)).toBe(false)
+
+    const machine = host({ podman: "5.2.2" })
+    expect(machine.run().status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toBe(UNIT)
+  })
+
+  it("passes them again when an update starts PCP from a new image", () => {
+    const machine = host({ docker: "works" })
+    expect(machine.run().status).toBe(0)
+    const result = machine.run(["update"], BERLIN)
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      runLine("TZ=Europe/Berlin", "LANG=de_DE.UTF-8"),
+    )
+  })
+
+  describe("the time zone", () => {
+    it("is read from etc/timezone when TZ is not set", () => {
+      const machine = host({ docker: "works" })
+      put(machine.sys.timezone, "Europe/Berlin\n")
+      const result = machine.run()
+      expect(result.status).toBe(0)
+      expect(result.calls).toContain(runLine("TZ=Europe/Berlin"))
+    })
+
+    it("is TZ when that is set, before anything on disk", () => {
+      const machine = host({ docker: "works", timedatectl: "Asia/Tokyo" })
+      put(machine.sys.timezone, "Europe/Rome\n")
+      expect(machine.run([], { TZ: "America/New_York" }).calls).toContain(
+        runLine("TZ=America/New_York"),
+      )
+    })
+
+    it("is timedatectl's answer before etc/timezone", () => {
+      const machine = host({ docker: "works", timedatectl: "Asia/Tokyo" })
+      put(machine.sys.timezone, "Europe/Rome\n")
+      expect(machine.run().calls).toContain(runLine("TZ=Asia/Tokyo"))
+    })
+
+    it("passes over timedatectl saying it does not know", () => {
+      const machine = host({ docker: "works", timedatectl: "n/a" })
+      put(machine.sys.timezone, "Europe/Rome\n")
+      expect(machine.run().calls).toContain(runLine("TZ=Europe/Rome"))
+    })
+
+    it("is where etc/localtime points, with the path through zoneinfo/ cut off", () => {
+      const machine = host({ docker: "works" })
+      mkdirSync(dirname(machine.sys.localtime), { recursive: true })
+      symlinkSync("../usr/share/zoneinfo/Europe/Paris", machine.sys.localtime)
+      expect(machine.run().calls).toContain(runLine("TZ=Europe/Paris"))
+    })
+
+    it("is not a link that points somewhere other than zoneinfo", () => {
+      const machine = host({ docker: "works" })
+      mkdirSync(dirname(machine.sys.localtime), { recursive: true })
+      symlinkSync("/usr/share/elsewhere/Paris", machine.sys.localtime)
+      const result = machine.run()
+      expect(result.calls).toContain(`docker ${RUN}`)
+      expect(leaks(result.calls)).toBe(false)
+    })
+
+    it("goes on to the next place when TZ is not a zone name", () => {
+      const machine = host({ docker: "works" })
+      put(machine.sys.timezone, "Europe/Rome\n")
+      expect(machine.run([], { TZ: "Europe/Berlin Evil" }).calls).toContain(
+        runLine("TZ=Europe/Rome"),
+      )
+    })
+
+    it.each([
+      ["a space", "Europe/Berlin Evil"],
+      ["a newline", "Europe/Berlin\n-v /:/host"],
+      ["a second setting", "Europe/Berlin\nEnvironment=X=1"],
+      ["a shell expansion", "$(id)"],
+      ["a quote", 'Europe/"Berlin'],
+      ["a percent sign", "Europe/%H"],
+      ["a leading colon", ":Europe/Berlin"],
+      ["a leading slash", "/etc/passwd"],
+      ["a parent directory", "Europe/../../etc/passwd"],
+      ["a POSIX rule", "CET-1CEST,M3.5.0,M10.5.0/3"],
+    ])("is dropped when TZ has %s", (_, value) => {
+      const docker = host({ docker: "works" }).run([], { TZ: value })
+      expect(docker.status).toBe(0)
+      expect(docker.calls).toContain(`docker ${RUN}`)
+      expect(leaks(docker.calls)).toBe(false)
+
+      const machine = host({ podman: "5.2.2" })
+      expect(machine.run([], { TZ: value }).status).toBe(0)
+      expect(readFileSync(machine.unit, "utf8")).toBe(UNIT)
+    })
+
+    it("is dropped when etc/timezone holds more than a name", () => {
+      const machine = host({ docker: "works" })
+      put(machine.sys.timezone, "Europe/Berlin\n-v /:/host\n")
+      const result = machine.run()
+      expect(result.calls).toContain(`docker ${RUN}`)
+      expect(leaks(result.calls)).toBe(false)
+    })
+  })
+
+  describe("the language", () => {
+    it.each([
+      ["a space", "de DE"],
+      ["a newline", "de_DE.UTF-8\n-v /:/host"],
+      ["a second setting", "de_DE.UTF-8\nEnvironment=X=1"],
+      ["a shell expansion", "$(id)"],
+      ["a semicolon", "de_DE;x"],
+      ["a percent sign", "de_%H"],
+    ])("is dropped when LANG has %s", (_, value) => {
+      const docker = host({ docker: "works" }).run([], { LANG: value })
+      expect(docker.status).toBe(0)
+      expect(docker.calls).toContain(`docker ${RUN}`)
+
+      const machine = host({ podman: "5.2.2" })
+      expect(machine.run([], { LANG: value }).status).toBe(0)
+      expect(readFileSync(machine.unit, "utf8")).toBe(UNIT)
+    })
+
+    it("keeps the one that is good when the other is dropped", () => {
+      const result = host({ docker: "works" }).run([], {
+        TZ: "Europe/Berlin Evil",
+        LANG: "de_DE@euro",
+      })
+      expect(result.calls).toContain(runLine("LANG=de_DE@euro"))
+    })
   })
 })

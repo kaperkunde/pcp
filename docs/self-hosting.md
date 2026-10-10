@@ -416,5 +416,22 @@ alone.
 
 PCP needs no environment variables. The optional ones (`PCP_DATA_DIR`,
 `PORT`, `PCP_HTTP_PORT`, `PCP_HTTPS_PORT`, `PCP_ACME_DIRECTORY`,
-`PCP_PUBLIC_IP_URL`, `PCP_PCPGG_RELAY_URL`, `PCP_TRUSTED_PROXIES`) are listed in [`.env.example`](../.env.example), for a
-checkout or a deployment of your own; the installer does not pass them on.
+`PCP_PUBLIC_IP_URL`, `PCP_PCPGG_RELAY_URL`, `PCP_TRUSTED_PROXIES`, `TZ`,
+`LANG`) are listed in [`.env.example`](../.env.example), for a checkout or a
+deployment of your own. The installer passes on only two of them, `TZ` and
+`LANG`, described next.
+
+**Time zone and language.** The time zone and language the browser reports to
+a site are the container's. A container with neither shows UTC and `en-US`,
+which a site can read as a bot when your address is in Germany. The installer
+therefore starts PCP with this computer's: `TZ` from the environment of the
+command, else from `timedatectl`, `/etc/timezone` or where `/etc/localtime`
+points, and `LANG` from the environment. It remembers neither and looks again on every run, so a
+changed zone follows the next time it runs. An update that a timer starts
+(the daily one, or "Install and restart") has the timer's environment, not
+your shell's: it still finds the zone from the computer, but may find no
+`LANG`, and run by hand with `LANG` set the installer puts it back. A value
+that is not a plain name is left out. To set them yourself, put them before
+`sh` like the other settings (`TZ=Europe/Berlin LANG=de_DE.UTF-8`). With
+Docker Compose or a platform of your own, set `TZ` and `LANG` there; the
+commented `environment:` block in `docker-compose.yaml` shows how.
