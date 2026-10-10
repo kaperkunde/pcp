@@ -244,14 +244,14 @@ export function BrowserManager({
 
       <ListSection
         title="Chromium"
-        footer="The browser is Chromium, run without a window on this machine. It starts with the first page opened and closes after fifteen minutes with nothing happening."
+        footer="The browser is Chromium. Where PCP can start a virtual screen for it (in the container), it runs with a window on that screen, as on a desktop; anywhere else it runs without a window. It starts with the first page opened and closes after fifteen minutes with nothing happening."
       >
         <List>
           {chromium.path ? (
             <ListRow
               title={
                 status.running
-                  ? `Running, with ${status.tabs} ${status.tabs === 1 ? "tab" : "tabs"}${status.sandbox === false ? ", without Chromium's own sandbox (this machine does not provide one)" : ""}.`
+                  ? `Running, with ${status.tabs} ${status.tabs === 1 ? "tab" : "tabs"}${windowNote(status.display, chromium.display)}${status.sandbox === false ? ", without Chromium's own sandbox (this machine does not provide one)" : ""}.`
                   : "Not running."
               }
               description={
@@ -337,6 +337,24 @@ export function BrowserManager({
 
 function isInstalling(install: BrowserOverview["chromium"]["install"]) {
   return install.stage === "downloading" || install.stage === "unpacking"
+}
+
+/**
+ * What the running browser says about its window: on the virtual display,
+ * or without one, and why when the display was wanted and did not start.
+ */
+function windowNote(
+  running: BrowserOverview["status"]["display"],
+  wanted: BrowserOverview["chromium"]["display"],
+): string {
+  if (running === "virtual") return ", with a window on a virtual display"
+  if (running === "headless") {
+    return wanted === "virtual"
+      ? ", without a window (the virtual display did not start)"
+      : ", without a window"
+  }
+
+  return ""
 }
 
 function megabytes(bytes: number): string {

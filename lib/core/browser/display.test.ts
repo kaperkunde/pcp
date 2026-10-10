@@ -26,7 +26,12 @@ import {
   wantsVirtualDisplay,
 } from "./display"
 import { chromiumExecutable } from "./executable"
-import { closeAllBrowsers, ensureBrowser, openTab } from "./runtime"
+import {
+  browserStatus,
+  closeAllBrowsers,
+  ensureBrowser,
+  openTab,
+} from "./runtime"
 
 // The virtual display a server's browser runs on, against the machine's own
 // Xvfb. Skipped where there is none (`apt install xvfb`).
@@ -76,7 +81,7 @@ describe("whether the browser uses a virtual display", () => {
 describe("Chromium's switches on the virtual display", () => {
   it("carry the features Playwright turns off, since Chromium keeps only the last list", () => {
     const bundle = readFileSync(
-      createRequire(import.meta.url).resolve("playwright-core/lib/coreBundle"),
+      createRequire(import.meta.url).resolve("patchright-core/lib/coreBundle"),
       "utf8",
     )
     const list = bundle.match(/disabledFeatures = \[([^\]]*)\]/)?.[1]
@@ -208,8 +213,25 @@ describe.skipIf(!xvfb || !executable)(
         name: "Ada",
         password: "correct horse battery staple",
       })
-      api = await startTestApi((_, res) => {
+      api = await startTestApi((request, res) => {
         res.setHeader("content-type", "text/html; charset=utf-8")
+
+        // The client hints are asked for in a promise: the title is set once
+        // it settles.
+        if (request.url?.startsWith("/hints")) {
+          return res.end(`<!doctype html><title>?</title><script>
+navigator.userAgentData
+  .getHighEntropyValues(["platformVersion", "architecture"])
+  .then((high) => {
+    document.title = JSON.stringify({
+      userAgent: navigator.userAgent,
+      platformVersion: high.platformVersion,
+      architecture: high.architecture,
+    })
+  })
+</script>`)
+        }
+
         res.end(`<!doctype html><title>?</title><script>
 const gl = document.createElement("canvas").getContext("webgl")
 document.title = JSON.stringify({
@@ -233,6 +255,7 @@ document.title = JSON.stringify({
 
       const vault = await ensureBrowser(ctx)
       expect(vault.display).toBe(runningDisplay()?.display)
+      expect(browserStatus(ctx.vaultId).display).toBe("virtual")
 
       const tab = await openTab(vault, {
         openedBy: "owner",
@@ -266,6 +289,35 @@ document.title = JSON.stringify({
       expect(await stopped()).toBe(true)
     })
 
+    it("keeps Chromium's own user agent and client hints, which a replaced one blanks", async () => {
+      vi.stubEnv("PCP_BROWSER_DISPLAY", "virtual")
+      vi.stubEnv("PCP_DESKTOP", "")
+
+      const vault = await ensureBrowser(ctx)
+      const tab = await openTab(vault, {
+        openedBy: "owner",
+        tokenId: null,
+        rules: null,
+        privateAllowed: true,
+      })
+      await tab.page.goto(`${api.origin}/hints`)
+      await vi.waitFor(async () => {
+        expect(await tab.page.title()).not.toBe("?")
+      })
+      const seen = JSON.parse(await tab.page.title()) as {
+        userAgent: string
+        platformVersion: string
+        architecture: string
+      }
+
+      expect(seen.userAgent).toContain("Chrome/")
+      expect(seen.userAgent).not.toContain("Headless")
+      // Playwright builds the hints of a replaced user agent from the string,
+      // with no platform version; Chromium's own always has one.
+      expect(seen.platformVersion).not.toBe("")
+      expect(seen.architecture).not.toBe("")
+    })
+
     it("is headless where no display is wanted", async () => {
       vi.stubEnv("PCP_BROWSER_DISPLAY", "headless")
 
@@ -273,6 +325,7 @@ document.title = JSON.stringify({
 
       expect(vault.display).toBeNull()
       expect(runningDisplay()).toBeNull()
+      expect(browserStatus(ctx.vaultId).display).toBe("headless")
     })
   },
 )

@@ -1057,7 +1057,7 @@ proposed for and called like any server, and a long snapshot is kept for
 `read_result` by `runCall` like any long answer.
 
 **What runs** (`runtime.ts`). One Chromium per vault, driven by
-`playwright-core`, started on the first page opened (by an assistant or the
+`patchright-core`, started on the first page opened (by an assistant or the
 owner) and closed after fifteen minutes with no tool call, no input and
 nobody watching. It runs headless, or in the container image with windows
 on a virtual display (below). The registry is on `globalThis`, as the network's is,
@@ -1070,10 +1070,22 @@ private temporary folder of its own, removed once it has closed: its crash
 reporter keeps its database there, and without a folder it can write to
 (a system user with no home, as the Docker image runs as) Chromium can abort
 as it starts. It starts without `--enable-automation`, with
-`--disable-blink-features=AutomationControlled`, a desktop user agent without
-"Headless", the host's locale and time zone and a 1280 by 800 viewport, and
-with service workers blocked (one could answer a navigation without the
-network, around the gate). Chromium's own sandbox is used where the machine
+`--disable-blink-features=AutomationControlled`, and with
+`--disable-popup-blocking` and `--disable-back-forward-cache`, which
+patchright-core leaves out (script-opened popups reach the gate, and a back
+navigation always loads a document, so the check watch sees its response).
+Its user agent is a desktop one without "Headless" when headless, and
+Chromium's own, with its complete client hints, when there is a window (on
+the virtual display or in the desktop app); headless, its `platformVersion`
+hint stays blank. The locale and time zone are the container process's
+(`LANG` and `TZ`, which the installer passes in from the host; Compose users
+set them), and the viewport is 1280 by 800. Service workers are refused, not
+by an option (a service worker could answer a navigation without the network,
+around the gate): the gate refuses a service worker's script request itself
+(one marked `Service-Worker: script`), so registration fails, and no script is
+injected into the page to overwrite `navigator.serviceWorker.register` (which
+a page could see is not native, and go around through the prototype).
+Chromium's own sandbox is used where the machine
 gives one and dropped where it cannot (root, or an unprivileged container;
 the Docker image says so with `PCP_BROWSER_SANDBOX=off`). Without it a
 renderer exploit runs as PCP's user with the data directory in reach, and the
@@ -1095,8 +1107,8 @@ graphics card has no WebGL at all). Chromium's RenderDocument is off there:
 with it (Chromium 153) a script that runs while a new document loads often
 reads the window as 0 by 0 at 0,0 until the window's place reaches it, which
 no desktop's Chrome shows. Chromium keeps only the last `--disable-features`
-it is given, so PCP's list carries Playwright's own too, and a test checks it
-against the playwright-core installed. An Xvfb that does not start leaves the
+it is given, so PCP's list carries the driver's own too, and a test checks it
+against the patchright-core installed. An Xvfb that does not start leaves the
 browser headless; `PCP_BROWSER_DISPLAY=headless` asks for that. The desktop
 app never uses it: it starts no child process, and runs on a real screen.
 
@@ -1113,17 +1125,20 @@ that the check did not pass on its own in this tab and that `hand_over` is
 how the owner passes it themselves; so does every later answer about the tab
 (a snapshot, `read_page`, `wait_for`). The assistant decides: nothing asks the
 owner automatically. A clearance cookie a passed check sets lands in the
-vault's profile, as any cookie does. PCP adds no stealth scripts and uses no
-patched Playwright, so some tells remain: WebGL is SwiftShader (software
-rendering), headless the window is exactly the viewport (Playwright sizes it
-so, and Chromium's `--window-size` does not change that; on the virtual
-display it is not), Playwright's automation protocol leaves traces a page can
-look for, and a server's datacenter address is not a person's at home. A
+vault's profile, as any cookie does. PCP adds no stealth scripts. It drives Chromium
+with `patchright-core`, which does not turn on the DevTools `Runtime` domain in
+every frame as stock Playwright does, so those page-level traces are not left
+for a check in a cross-origin iframe (Cloudflare Turnstile's, for one) to find.
+Some tells remain: WebGL is SwiftShader (software rendering), headless the
+window is exactly the viewport (Playwright sizes it so, and Chromium's
+`--window-size` does not change that; on the virtual display it is not),
+`screen.availHeight` equals the screen height, and a home address that reaches
+the page through a container's network may not look like a person's. A
 click sent through the DevTools protocol into a cross-site frame (a
 Turnstile checkbox) carried the frame's own coordinates as its screen
 position up to about Chromium 141, which a check could tell from a mouse;
-the Chromium that PCP's Playwright drives (153) reports a mouse's. The strictest checks may still want a person,
-which is what `hand_over` is for.
+the Chromium that `patchright-core` drives (153) reports a mouse's. The
+strictest checks may still want a person, which is what `hand_over` is for.
 
 **The sign-ins** (`profile.ts`). The context starts from the vault's
 `browser_profile`: Playwright's storage state (cookies, local storage,
@@ -1245,7 +1260,9 @@ to a second route, each event with the time it happened. They are replayed
 through the DevTools protocol (`Input.dispatchMouseEvent` and
 `dispatchKeyEvent`, which Chromium treats as a device's input: trusted
 events), each at its own time plus a delay and stamped with it, so a
-CAPTCHA reading the movement sees its real cadence. Input that arrives late
+CAPTCHA reading the movement sees its real cadence. Presses carry `force` 0.5
+while a button is down, and so do the moves made with one down, as a real
+mouse reports it (`PointerEvent.pressure`). Input that arrives late
 (a slow or uneven link) moves the replay further behind, up to 400 ms, so
 what follows plays at its own pace instead of in a burst, and the delay
 closes up by a millisecond an event while input arrives in time; a batch
@@ -1292,11 +1309,12 @@ site whose check passed is remembered for thirty minutes
 
 **Chromium on the machine** (`executable.ts`, `install.ts`).
 `PCP_BROWSER_EXECUTABLE`, then PCP's own install, then Playwright's own
-variable and install location. The Docker image installs Playwright's
-Chromium, the version `playwright-core` drives; the desktop app stages none.
+variable and install location. The Docker image installs Chromium with
+`patchright-core`'s CLI, at the version `patchright-core` drives; the desktop
+app stages none.
 Where none is found, the Browser page's **Install Chromium** downloads the
-build `playwright-core` drives from the addresses Playwright pins for it
-(read from `playwright-core/lib/coreBundle`'s registry, never from a
+build `patchright-core` drives from the addresses Playwright pins for it
+(read from `patchright-core/lib/coreBundle`'s registry, never from a
 request), unpacks it with Playwright's own unzip into
 `browsers/chromium-<revision>/` under the data folder, makes it executable
 and writes Playwright's `INSTALLATION_COMPLETE` marker last, under a
@@ -1305,7 +1323,7 @@ installer downloads in a child process, and the desktop app's `runAsNode`
 fuse is off, so it could not start one. The download is capped in size, in
 time, and in time without a byte (`limits.ts`); one install runs at a time,
 and the page follows its progress. The install is looked for by the
-revision `playwright-core` drives, so after an update to a newer one the
+revision `patchright-core` drives, so after an update to a newer one the
 page offers to install that, which removes the older build. Nothing runs
 until the owner clicks.
 

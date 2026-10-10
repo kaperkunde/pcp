@@ -228,7 +228,8 @@ so in the summary; the bump itself waits for the request.
   through its proxy (`proxy.ts`), which checks the address it dials as web
   fetch does, and every page a tab's main frame opens passes the gate in
   `runtime.ts`: the driving token's web fetch site lines, a site the owner
-  allowed for that tab, or the owner's own control; PCP's own site never. No
+  allowed for that tab, or the owner's own control; PCP's own site never. Service
+  workers are refused at that gate, not by a browser option. No
   tool runs JavaScript, reads or sets cookies or storage, or downloads. A
   refusal that names a site is a tool error, never a thrown `PcpError` (the
   request log keeps those). The owner's input enters through the DevTools
@@ -243,7 +244,7 @@ so in the summary; the bump itself waits for the request.
   passes on its own; one that does not is the owner's, through `hand_over`,
   and nothing asks them by itself. Pages read for web_fetch are not tabs. The
   limits go in `browser/limits.ts`; the Dockerfile's Chromium is the version
-  `playwright-core` drives (`scripts/docker.test.ts`). Chromium is installed
+  `patchright-core` drives (`scripts/docker.test.ts`). Chromium is installed
   only by the owner's click (`browser/install.ts`), only from the addresses
   Playwright pins for that version, in PCP's process: never with a child
   process, which the desktop app's fuses forbid.

@@ -97,6 +97,34 @@ describe("replaying the owner's input", () => {
     })
   })
 
+  it("gives a press and a drag the half pressure of a real mouse, and a move or release none", async () => {
+    const { tab, sent } = fakeTab()
+
+    await dispatchInput(
+      tab,
+      parse({
+        seq: 0,
+        events: [
+          { type: "move", t: 2000, x: 10, y: 20 },
+          { type: "down", t: 2010, x: 10, y: 20, button: "left", buttons: 1 },
+          { type: "move", t: 2020, x: 14, y: 22, buttons: 1 },
+          { type: "up", t: 2030, x: 14, y: 22, button: "left" },
+          { type: "move", t: 2040, x: 18, y: 22 },
+        ],
+      }),
+    )
+
+    // What a page reads as PointerEvent.pressure: 0 for a hover, 0.5 while a
+    // button is down. A release carries none, as Playwright's own mouse sends.
+    expect(sent.map((call) => [call.params.type, call.params.force])).toEqual([
+      ["mouseMoved", 0],
+      ["mousePressed", 0.5],
+      ["mouseMoved", 0.5],
+      ["mouseReleased", undefined],
+      ["mouseMoved", 0],
+    ])
+  })
+
   it("starts a new clock for input that arrives long after it was made", async () => {
     const { tab, sent } = fakeTab()
 

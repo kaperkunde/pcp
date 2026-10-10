@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 
-import type { BrowserContext } from "playwright-core"
+import type { BrowserContext } from "patchright-core"
 
 import type { VaultContext } from "../context"
 import { asBytes, decryptString, encryptString } from "../crypto"

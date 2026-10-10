@@ -29,7 +29,7 @@ function firstThere(
 
 async function playwrightDefault(): Promise<string | null> {
   try {
-    const { chromium } = await import("playwright-core")
+    const { chromium } = await import("patchright-core")
     return chromium.executablePath()
   } catch {
     return null

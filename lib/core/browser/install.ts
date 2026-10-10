@@ -13,7 +13,7 @@ import {
 
 /**
  * Chromium for a machine that has none, the desktop app's above all:
- * the build this version of playwright-core drives, downloaded from the
+ * the build this version of patchright-core drives, downloaded from the
  * addresses Playwright pins for it and unpacked under PCP's data folder
  * (`browsers/chromium-<revision>/`), in this process. Playwright's own
  * installer downloads in a child process, which the desktop app cannot
@@ -22,7 +22,7 @@ import {
  *
  * The owner's click starts it and nothing else: no address comes from a
  * request, and nothing runs (no timer, no request) until then. A newer
- * playwright-core drives a newer build, which is looked for in its own
+ * patchright-core drives a newer build, which is looked for in its own
  * folder; installing it removes the older ones.
  */
 
@@ -78,10 +78,10 @@ function installer(): Installer {
   return holder[INSTALLER]
 }
 
-/** The Chromium build playwright-core drives, as Playwright publishes it. */
+/** The Chromium build patchright-core drives, as Playwright publishes it. */
 export async function chromiumBuild(): Promise<ChromiumBuild | null> {
   try {
-    const { registry } = await import("playwright-core/lib/coreBundle")
+    const { registry } = await import("patchright-core/lib/coreBundle")
     const found = registry.registry.findExecutable("chromium")
     const full = found?.executablePath()
 
@@ -244,7 +244,7 @@ async function install(self: Installer, options: InstallOptions) {
 }
 
 async function extractZip(zipPath: string, dir: string): Promise<void> {
-  const { utils } = await import("playwright-core/lib/coreBundle")
+  const { utils } = await import("patchright-core/lib/coreBundle")
   await utils.extractZip(zipPath, { dir })
 }
 

@@ -106,6 +106,9 @@ async function dispatch(
         y: clamp(event.y, VIEWPORT.height),
         button: pressedButton(event.buttons),
         buttons: event.buttons,
+        // A real mouse reports half pressure while a button is down; the
+        // protocol's default is none, which a page reads as pressure 0.
+        force: event.buttons ? 0.5 : 0,
         modifiers: event.modifiers,
         timestamp,
       })
@@ -119,6 +122,9 @@ async function dispatch(
         button: event.button,
         buttons: event.buttons,
         clickCount: event.clickCount,
+        // As a press, not a release (which has none), as Playwright's own
+        // mouse sends them.
+        ...(event.type === "down" ? { force: 0.5 } : {}),
         modifiers: event.modifiers,
         timestamp,
       })

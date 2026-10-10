@@ -174,7 +174,8 @@ update PCP by itself once a day. The top of [`install.sh`](install.sh) lists its
 (`PCP_PORT`, `PCP_HTTPS`, `PCP_AUTO_UPDATE`, `PCP_UPDATE_BUTTON` and a few
 more); it remembers
 them in `~/.config/pcp/install.conf` (`/etc/pcp/install.conf` as root), so a
-later run keeps them.
+later run keeps them. The installer also passes the host's `TZ` and `LANG`
+into the container, which the browser takes as its time zone and locale.
 `… | sh -s -- uninstall` removes PCP and keeps your data.
 
 From a checkout, `docker compose` does the same with the file in it:
@@ -720,7 +721,7 @@ pnpm test:e2e        # Playwright, against a fresh e2e database
 Next.js 15 (App Router, Server Actions), React 19, TypeScript, Tailwind CSS 4
 with shadcn/ui primitives, Prisma 7 on SQLite (`better-sqlite3`), the
 `@modelcontextprotocol` v2 SDK for both the gateway and the upstream client,
-QuickJS in WebAssembly for `run_code`, `playwright-core` driving Chromium for
+QuickJS in WebAssembly for `run_code`, `patchright-core` driving Chromium for
 the browser, Electron for the desktop apps, Vitest, Playwright, pnpm.
 
 ## Licence
