@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState, useTransition } from "react"
 import { FormError } from "@/components/form-status"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { Input, Textarea } from "@/components/ui/input"
 import {
   backTabAction,
   closeTabAction,
@@ -15,6 +15,13 @@ import {
   reloadTabAction,
   takeOverTabAction,
 } from "@/lib/actions/browser"
+import {
+  boxEdit,
+  editEvents,
+  isNamedKey,
+  keyPress,
+  KEYBOARD_BOX_MAX,
+} from "@/lib/browser-keyboard"
 import { BROWSER_INPUT_EVERY_MS, BROWSER_VIEWPORT } from "@/lib/core/constants"
 import type { InputEvent } from "@/lib/core/browser/input-protocol"
 import type { FrameMetadata } from "@/lib/core/browser/screencast"
@@ -27,6 +34,12 @@ import type { ActionState } from "@/lib/server/action-state"
  * taken it over, their mouse and keyboard sent back in batches with each
  * event's own time, so the page sees them at the pace they were made. Used
  * on a tab's page and on an assistant's hand-over request.
+ *
+ * A canvas cannot take a phone's on-screen keyboard, nor a long press to
+ * paste. So the view also keeps a hidden text box: the Keyboard button
+ * focuses it, and what the keyboard does to it goes to the page (see
+ * `lib/browser-keyboard.ts`). Paste reads the clipboard, or, where the
+ * browser will not give it, takes the text in a box you can paste into.
  */
 
 type Status = "connecting" | "live" | "lost" | "closed" | "full"
@@ -70,6 +83,16 @@ export function BrowserTabView({
   const seq = useRef(0)
   const lastDown = useRef({ t: -1e9, x: 0, y: 0, count: 0 })
   const metaRef = useRef<FrameMetadata | null>(null)
+  // The hidden text box a phone's keyboard types into: what it held after
+  // the last edit, whether a word is being composed, and the named keys
+  // whose keydown went to the page (so their keyup does too).
+  const box = useRef<HTMLTextAreaElement>(null)
+  const boxText = useRef("")
+  const composing = useRef(false)
+  const held = useRef(new Set<string>())
+  // The keyboard was up when a finger came down on the picture: it stays.
+  const typing = useRef(false)
+  const [pasteBox, setPasteBox] = useState<string | null>(null)
   // Right after you take a tab over or hand it back, the stream may still
   // send its state from before: what you chose holds for a moment.
   const pinned = useRef<{ control: TabView["control"]; until: number } | null>(
@@ -203,6 +226,19 @@ export function BrowserTabView({
     return () => clearInterval(timer)
   }, [holding, flush])
 
+  // Everything made so far is sent, and answered, before the tab changes
+  // hands: what the page refuses once it is not yours would be lost.
+  const drain = useCallback(async () => {
+    for (
+      let turns = 0;
+      turns < 50 && (queue.current.length > 0 || sending.current);
+      turns += 1
+    ) {
+      if (sending.current) await new Promise((r) => setTimeout(r, 20))
+      else await flush()
+    }
+  }, [flush])
+
   const point = (event: { clientX: number; clientY: number }) => {
     const target = canvas.current!
     const rect = target.getBoundingClientRect()
@@ -221,6 +257,81 @@ export function BrowserTabView({
   const push = (event: InputEvent) => {
     if (holding) queue.current.push(event)
   }
+
+  const pushAll = (events: InputEvent[]) => {
+    for (const event of events) push(event)
+  }
+
+  const emptyBox = () => {
+    if (box.current) box.current.value = ""
+    boxText.current = ""
+    composing.current = false
+  }
+
+  // Up comes the keyboard, and again if it was put away with the back
+  // button, which leaves the box focused.
+  function openKeyboard() {
+    const target = box.current
+    if (!target) return
+    emptyBox()
+    target.blur()
+    target.focus()
+  }
+
+  async function paste() {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text) {
+        push({
+          type: "text",
+          t: performance.now(),
+          text: text.slice(0, 10_000),
+        })
+        setError(null)
+      } else {
+        setError("The clipboard holds no text.")
+      }
+    } catch {
+      // No clipboard on a page that is not secure, or you said no.
+      setPasteBox((current) => current ?? "")
+    }
+  }
+
+  function sendPasted() {
+    const text = (pasteBox ?? "").slice(0, 10_000)
+    if (text) push({ type: "text", t: performance.now(), text })
+    setPasteBox(null)
+  }
+
+  // What the keyboard does to the box that a text edit does not carry: a
+  // line break, and a delete with nothing left in the box to delete.
+  useEffect(() => {
+    const target = box.current
+    if (!target || !holding) return
+
+    const onBeforeInput = (event: globalThis.InputEvent) => {
+      if (event.isComposing) return
+
+      if (
+        event.inputType === "insertLineBreak" ||
+        event.inputType === "insertParagraph"
+      ) {
+        event.preventDefault()
+        pushAll(keyPress(event.timeStamp, "Enter"))
+      } else if (
+        event.inputType === "deleteContentBackward" &&
+        boxText.current === ""
+      ) {
+        event.preventDefault()
+        pushAll(keyPress(event.timeStamp, "Backspace"))
+      }
+    }
+
+    target.addEventListener("beforeinput", onBeforeInput)
+    return () => target.removeEventListener("beforeinput", onBeforeInput)
+    // pushAll reads refs and `holding`, which is a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holding])
 
   // A wheel listener that may prevent the page behind from scrolling.
   useEffect(() => {
@@ -247,12 +358,19 @@ export function BrowserTabView({
   }, [holding])
 
   function act(run: () => Promise<ActionState>, control?: TabView["control"]) {
-    if (control) {
-      pinned.current = { control, until: Date.now() + 3_000 }
-      setView((current) => ({ ...current, control }))
+    const choose = (chosen: TabView["control"]) => {
+      pinned.current = { control: chosen, until: Date.now() + 3_000 }
+      setView((current) => ({ ...current, control: chosen }))
     }
 
+    if (control === "owner") choose(control)
+
     startTransition(async () => {
+      if (control === "assistant") {
+        await drain()
+        choose(control)
+      }
+
       const result = await run()
       setError(result.status === "error" ? result.error : null)
 
@@ -351,6 +469,30 @@ export function BrowserTabView({
         </div>
         <div className="flex flex-wrap gap-2">
           {holding ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="hidden pointer-coarse:inline-flex"
+                data-testid="browser-keyboard-button"
+                onClick={openKeyboard}
+              >
+                Keyboard
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="hidden pointer-coarse:inline-flex"
+                data-testid="browser-paste-button"
+                onClick={() => void paste()}
+              >
+                Paste
+              </Button>
+            </>
+          ) : null}
+          {holding ? (
             handover ? null : (
               <Button
                 type="button"
@@ -391,6 +533,41 @@ export function BrowserTabView({
 
       <FormError error={error} />
 
+      {holding && pasteBox !== null ? (
+        <form
+          className="flex flex-col gap-2"
+          onSubmit={(event) => {
+            event.preventDefault()
+            sendPasted()
+          }}
+        >
+          <label htmlFor="browser-paste-text" className="text-sm">
+            This browser will not hand over the clipboard. Paste the text here
+            and send it to the page.
+          </label>
+          <Textarea
+            id="browser-paste-text"
+            value={pasteBox}
+            maxLength={10_000}
+            autoFocus
+            onChange={(event) => setPasteBox(event.target.value)}
+          />
+          <div className="flex gap-2">
+            <Button type="submit" size="sm" disabled={pasteBox === ""}>
+              Send to the page
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setPasteBox(null)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </form>
+      ) : null}
+
       <div className="relative w-full max-w-[1280px] overflow-hidden rounded-md border border-border bg-muted">
         <canvas
           ref={canvas}
@@ -405,6 +582,12 @@ export function BrowserTabView({
             aspectRatio: `${meta?.deviceWidth ?? BROWSER_VIEWPORT.width} / ${meta?.deviceHeight ?? BROWSER_VIEWPORT.height}`,
           }}
           onContextMenu={(event) => event.preventDefault()}
+          onMouseDown={(event) => {
+            // A tap on the picture must not take the focus from the keyboard.
+            if (holding && document.activeElement === box.current) {
+              event.preventDefault()
+            }
+          }}
           onPointerMove={(event) => {
             if (!holding) return
             const native = event.nativeEvent
@@ -422,7 +605,15 @@ export function BrowserTabView({
           }}
           onPointerDown={(event) => {
             if (!holding) return
-            event.currentTarget.focus()
+            typing.current = document.activeElement === box.current
+
+            if (typing.current) {
+              // What the box holds is about the field before this tap.
+              emptyBox()
+            } else {
+              event.currentTarget.focus()
+            }
+
             event.currentTarget.setPointerCapture(event.pointerId)
             const at = point(event)
             const last = lastDown.current
@@ -444,6 +635,7 @@ export function BrowserTabView({
           }}
           onPointerUp={(event) => {
             if (!holding) return
+            if (typing.current) box.current?.focus()
             push({
               type: "up",
               t: event.timeStamp,
@@ -502,6 +694,106 @@ export function BrowserTabView({
               })
           }}
         />
+        {holding ? (
+          <textarea
+            ref={box}
+            rows={1}
+            aria-label="Keyboard for the page"
+            data-testid="browser-keyboard"
+            autoCapitalize="off"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            // 16px keeps iOS from zooming in when the box is focused.
+            style={{ fontSize: 16 }}
+            className="pointer-events-none absolute bottom-0 left-0 h-px w-px resize-none overflow-hidden border-0 p-0 opacity-0 outline-none"
+            onCompositionStart={() => {
+              composing.current = true
+            }}
+            onCompositionEnd={() => {
+              composing.current = false
+            }}
+            onInput={(event) => {
+              const target = event.currentTarget
+              pushAll(
+                editEvents(
+                  event.timeStamp,
+                  boxEdit(boxText.current, target.value),
+                ),
+              )
+              boxText.current = target.value
+
+              // Between words, a box that has grown is emptied.
+              if (
+                !composing.current &&
+                [...target.value].length > KEYBOARD_BOX_MAX
+              ) {
+                emptyBox()
+              }
+            }}
+            onKeyDown={(event) => {
+              const native = event.nativeEvent
+              const shortcut = event.ctrlKey || event.metaKey
+              // Left to the browser, which then fires a paste event.
+              if (shortcut && event.key.toLowerCase() === "v") return
+
+              // Backspace with something in the box to take back is an edit
+              // of the box like any other, and keeps the box in step.
+              if (
+                event.key === "Backspace" &&
+                !shortcut &&
+                boxText.current !== ""
+              )
+                return
+
+              // Keys by name, and shortcuts, go as the keys they are; the
+              // letters a keyboard types arrive as edits of the box.
+              if (
+                !shortcut &&
+                !isNamedKey({
+                  key: event.key,
+                  keyCode: event.keyCode,
+                  isComposing: native.isComposing,
+                })
+              )
+                return
+
+              event.preventDefault()
+              held.current.add(event.key)
+              push({
+                type: "keydown",
+                t: event.timeStamp,
+                key: event.key,
+                code: event.code,
+                keyCode: event.keyCode,
+                modifiers: MODIFIERS(event),
+                repeat: event.repeat,
+              })
+            }}
+            onKeyUp={(event) => {
+              if (!held.current.delete(event.key)) return
+              event.preventDefault()
+              push({
+                type: "keyup",
+                t: event.timeStamp,
+                key: event.key,
+                code: event.code,
+                keyCode: event.keyCode,
+                modifiers: MODIFIERS(event),
+              })
+            }}
+            onPaste={(event) => {
+              event.preventDefault()
+              const text = event.clipboardData.getData("text")
+              if (text)
+                push({
+                  type: "text",
+                  t: event.timeStamp,
+                  text: text.slice(0, 10_000),
+                })
+            }}
+          />
+        ) : null}
         {frames === 0 && status !== "closed" ? (
           <p className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
             Waiting for the first picture…

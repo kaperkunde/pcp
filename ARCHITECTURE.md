@@ -828,6 +828,23 @@ export download does. A WebSocket would answer a little sooner, but needs a
 server of its own around Next; the input's format is the same whatever
 carries it.
 
+A canvas takes no on-screen keyboard and no long press to paste, so on a
+phone (`pointer: coarse`) the view also has a **Keyboard** and a **Paste**
+button. Keyboard focuses a hidden text box beside the canvas. A soft keyboard
+does not press keys: it composes, corrects and deletes words in the box, so
+what goes to the page is the difference between the box before and after
+each edit (`lib/browser-keyboard.ts`): Backspace for each letter taken out,
+then a key for one letter or a `text` event for more. Keys with a name
+(Enter, arrows, Tab) and shortcuts go as the keys they are, and Backspace
+with an empty box to delete from does too. Nothing new reaches the server:
+it is the same input events, so the limits on a batch are the same. Paste
+reads the clipboard in the browser, and sends it as a `text` event; where the
+browser will not hand it over (a page that is not secure, or you said no) a
+box takes the text to paste into instead. Hand back sends what is still
+queued, and waits for the answer, before the tab changes hands: input the
+page refuses once the tab is not the owner's would be lost, and on a slow
+connection the last keys are still on their way.
+
 **Chromium on the machine** (`executable.ts`, `install.ts`).
 `PCP_BROWSER_EXECUTABLE`, then PCP's own install, then Playwright's own
 variable and install location. The Docker image installs Playwright's

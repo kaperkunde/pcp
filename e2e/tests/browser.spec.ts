@@ -9,9 +9,9 @@ import { allowAllTools, createToken } from "../lib/ui"
 // owner; the assistant reads and acts on the page by refs; a link to
 // another site stops; the tab's page shows it live, and a click there
 // reaches the page as a person's; hand_over waits for the owner on the
-// request's page; the sign-ins outlast the browser and are forgotten on
-// request. The fake upstream is on 127.0.0.1, so the token is allowed
-// private addresses first.
+// request's page; a phone's keyboard and paste reach the page; the
+// sign-ins outlast the browser and are forgotten on request. The fake
+// upstream is on 127.0.0.1, so the token is allowed private addresses first.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -199,6 +199,108 @@ test("hand_over waits for the owner on the request's page, with the tab live", a
   const checked = await callTool(baseURL!, token, "check_permission", { id })
   expect(toolText(checked)).toContain(`The owner is done in tab ${tabId}`)
   expect(toolText(await browse(baseURL!, "snapshot"))).toContain(`Tab ${tabId}`)
+})
+
+// A phone has no keyboard of its own to press keys on a picture: the
+// Keyboard button brings up the hidden box, whose edits and the clipboard
+// reach the page. (pointer: coarse) is what shows the buttons.
+test.describe("on a phone", () => {
+  test.use({
+    viewport: { width: 412, height: 915 },
+    hasTouch: true,
+    isMobile: true,
+  })
+
+  async function takeOver(page: Page) {
+    await page.goto(`/browser/tabs/${tabId}`)
+    const frame = page.getByTestId("browser-frame")
+    await expect(async () => {
+      expect(Number(await frame.getAttribute("data-frames"))).toBeGreaterThan(0)
+    }).toPass()
+    await page.getByRole("button", { name: "Take over" }).click()
+    await expect(page.getByText("You have this tab")).toBeVisible()
+  }
+
+  async function greeting(baseURL: string): Promise<string> {
+    const form = await browse(baseURL, "snapshot")
+    await browse(baseURL, "click", {
+      ref: refOf(toolText(form), /button "Say hello"/),
+    })
+    await expect(async () => {
+      expect(toolText(await browse(baseURL, "snapshot"))).toContain("Hello,")
+    }).toPass()
+    return toolText(await browse(baseURL, "snapshot"))
+  }
+
+  test("the keyboard button brings up a box whose edits type into the page", async ({
+    page,
+    baseURL,
+  }) => {
+    const opened = await browse(baseURL!, "navigate", {
+      url: `${upstream.browserUrl}/form`,
+    })
+    await browse(baseURL!, "click", {
+      ref: refOf(toolText(opened), /textbox "Name"/),
+    })
+
+    await takeOver(page)
+    await page.getByTestId("browser-keyboard-button").click()
+    const box = page.getByTestId("browser-keyboard")
+    await expect(box).toBeFocused()
+
+    // A word typed, a letter taken back and another put in its place: what
+    // the keyboard does to the box, not keys pressed on the picture.
+    await box.pressSequentially("Adx")
+    await box.press("Backspace")
+    await box.pressSequentially("a")
+    await page.getByRole("button", { name: "Hand back" }).click()
+    await expect(page.getByText("Assistants have this tab")).toBeVisible()
+
+    expect(await greeting(baseURL!)).toContain("Hello, Ada")
+  })
+
+  test("paste sends the clipboard to the page, or takes it in a box where the browser will not give it", async ({
+    page,
+    baseURL,
+    context,
+  }) => {
+    const opened = await browse(baseURL!, "navigate", {
+      url: `${upstream.browserUrl}/form`,
+    })
+    await browse(baseURL!, "click", {
+      ref: refOf(toolText(opened), /textbox "Name"/),
+    })
+
+    await takeOver(page)
+
+    // Where the browser refuses the clipboard, the text goes in a box.
+    await page.evaluate(() => {
+      Object.defineProperty(navigator.clipboard, "readText", {
+        configurable: true,
+        value: () => Promise.reject(new DOMException("No", "NotAllowedError")),
+      })
+    })
+    await page.getByTestId("browser-paste-button").click()
+    const pasted = page.getByLabel(/will not hand over the clipboard/)
+    await expect(pasted).toBeVisible()
+    await pasted.fill("Grace")
+    await page.getByRole("button", { name: "Send to the page" }).click()
+    await expect(pasted).toBeHidden()
+
+    // Where it gives it, the button pastes it.
+    await page.evaluate(() =>
+      Reflect.deleteProperty(navigator.clipboard, "readText"),
+    )
+    await context.grantPermissions(["clipboard-read", "clipboard-write"])
+    await page.evaluate(() => navigator.clipboard.writeText(" Hopper"))
+    await page.getByTestId("browser-paste-button").click()
+    await expect(pasted).toBeHidden()
+
+    await page.getByRole("button", { name: "Hand back" }).click()
+    await expect(page.getByText("Assistants have this tab")).toBeVisible()
+
+    expect(await greeting(baseURL!)).toContain("Hello, Grace Hopper")
+  })
 })
 
 test("the sign-ins outlast the browser, and are gone once forgotten", async ({
