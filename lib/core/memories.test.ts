@@ -12,6 +12,7 @@ import {
   checkText,
   createMemory,
   decideMemoryAsk,
+  deleteMemories,
   deleteMemory,
   describeMemoryAsk,
   hiddenCharacter,
@@ -19,6 +20,7 @@ import {
   listMemories,
   normalizePath,
   runMemoryCommand,
+  setMemoriesAccess,
   updateMemory,
   withoutPresentation,
   type MemoryAsk,
@@ -632,6 +634,262 @@ describe("the owner's edits", () => {
 
     const [memory] = await listMemories(ctx)
     expect(memory).toMatchObject({ tokenId: null, text: "Kept." })
+  })
+})
+
+describe("the owner's changes to many memories at once", () => {
+  async function kept(scope: MemoryScope, path: string, text = "A note.") {
+    said(await run(scope, { command: "create", path, file_text: text }))
+    return (await listMemories(ctx)).find(
+      (item) => item.fullPath === path && item.tokenId === scope.tokenId,
+    )!
+  }
+
+  async function ids(...paths: string[]) {
+    const all = await listMemories(ctx)
+    return paths.map((path) => all.find((item) => item.fullPath === path)!.id)
+  }
+
+  it("deletes the ones picked and leaves the rest", async () => {
+    await kept(alice, "/memories/a.md")
+    await kept(alice, "/memories/b.md")
+    await kept(bob, "/memories/c.md")
+    await createMemory(ctx, { path: "d.md", text: "Shared." })
+
+    const [a, b, d] = await ids(
+      "/memories/a.md",
+      "/memories/b.md",
+      "/memories/shared/d.md",
+    )
+
+    // Listed twice, or already gone, is no reason to keep the rest.
+    expect(await deleteMemories(ctx, [a, b, a, "gone"])).toEqual({ deleted: 2 })
+    expect((await listMemories(ctx)).map((item) => item.fullPath)).toEqual([
+      "/memories/shared/d.md",
+      "/memories/c.md",
+    ])
+
+    await expect(deleteMemories(ctx, [a, b])).rejects.toThrow(/gone already/)
+    await expect(deleteMemories(ctx, [])).rejects.toThrow(/at least one/)
+    await expect(deleteMemories(ctx, [d, ""])).rejects.toThrow(/Pick/)
+    expect(await listMemories(ctx)).toHaveLength(2)
+  })
+
+  it("gives them to one token, which alone reads them from then on", async () => {
+    const mine = await kept(alice, "/memories/mine.md", "Alice wrote this.")
+    await createMemory(ctx, { path: "units.md", text: "Metric." })
+    await kept(bob, "/memories/bobs.md", "Bob's own.")
+    await db().memory.update({
+      where: { id: mine.id },
+      data: { always: true },
+    })
+
+    const [alices, units, bobs] = await ids(
+      "/memories/mine.md",
+      "/memories/shared/units.md",
+      "/memories/bobs.md",
+    )
+    const outcome = await setMemoriesAccess(ctx, [alices, units, bobs], {
+      to: "token",
+      tokenId: bob.tokenId,
+    })
+
+    // Bob's own was there already; the other two moved, one of them marked.
+    expect(outcome).toEqual({ changed: 2, unchanged: 1, unmarked: 1 })
+    expect(
+      said(await run(bob, { command: "view", path: "/memories/mine.md" })),
+    ).toContain("Alice wrote this.")
+    expect(
+      said(await run(bob, { command: "view", path: "/memories/units.md" })),
+    ).toContain("Metric.")
+    await expect(
+      run(alice, { command: "view", path: "/memories/mine.md" }),
+    ).rejects.toThrow(/no memory/)
+    await expect(
+      run(alice, { command: "view", path: "/memories/shared/units.md" }),
+    ).rejects.toThrow(/no memory/)
+
+    const after = await listMemories(ctx)
+    const byPath = (path: string) =>
+      after.find((item) => item.fullPath === path)!
+    // The owner handed Alice's words to Bob, so they are the owner's now.
+    expect(byPath("/memories/mine.md")).toMatchObject({
+      visibility: "private",
+      tokenId: bob.tokenId,
+      author: "owner",
+      always: false,
+    })
+    expect(byPath("/memories/units.md")).toMatchObject({
+      tokenId: bob.tokenId,
+      author: "owner",
+    })
+    // Not moved, not changed.
+    expect(byPath("/memories/bobs.md")).toMatchObject({ author: "assistant" })
+  })
+
+  it("gives them to all tokens, which then read them as shared", async () => {
+    const a = await kept(alice, "/memories/a.md", "From Alice.")
+    await kept(bob, "/memories/b.md", "From Bob.")
+    await createMemory(ctx, { path: "c.md", text: "Already shared." })
+    await db().memory.update({ where: { id: a.id }, data: { always: true } })
+
+    const outcome = await setMemoriesAccess(
+      ctx,
+      await ids("/memories/a.md", "/memories/b.md", "/memories/shared/c.md"),
+      { to: "all" },
+    )
+
+    expect(outcome).toEqual({ changed: 2, unchanged: 1, unmarked: 1 })
+    expect(
+      said(await run(bob, { command: "view", path: "/memories/shared/a.md" })),
+    ).toContain('written by the assistant using the token "Alice"')
+    expect(
+      said(
+        await run(alice, { command: "view", path: "/memories/shared/b.md" }),
+      ),
+    ).toContain("From Bob.")
+    // Words and writer stay; what the owner chose for Alice alone does not.
+    expect(
+      (await listMemories(ctx)).find((item) => item.id === a.id),
+    ).toMatchObject({
+      visibility: "shared",
+      author: "assistant",
+      always: false,
+    })
+    expect(await instructionMemories(ctx, bob.tokenId)).toMatchObject({
+      always: [],
+    })
+  })
+
+  it("leaves a memory read in every conversation alone when its readers stay the same", async () => {
+    const voice = await kept(alice, "/memories/voice.md", "Short.")
+    await db().memory.update({
+      where: { id: voice.id },
+      data: { always: true },
+    })
+
+    expect(
+      await setMemoriesAccess(ctx, [voice.id], {
+        to: "token",
+        tokenId: alice.tokenId,
+      }),
+    ).toEqual({ changed: 0, unchanged: 1, unmarked: 0 })
+    expect((await listMemories(ctx))[0]).toMatchObject({
+      always: true,
+      author: "assistant",
+    })
+  })
+
+  it("changes nothing when a path would be taken, and says which", async () => {
+    const a = await kept(alice, "/memories/notes.md", "Alice's.")
+    const b = await kept(bob, "/memories/notes.md", "Bob's.")
+    const { token } = await createApiToken(ctx, {
+      name: "Carol",
+      allowAllServers: true,
+      keepMemories: true,
+    })
+    const carol = (await resolveApiToken(token))!
+
+    // Two that would meet in the same place.
+    for (const access of [
+      { to: "all" } as const,
+      { to: "token", tokenId: carol.tokenId } as const,
+    ]) {
+      await expect(
+        setMemoriesAccess(ctx, [a.id, b.id], access),
+      ).rejects.toThrow(/Nothing was changed: .*notes\.md would be taken/)
+    }
+
+    // One that meets another already there.
+    await createMemory(ctx, { path: "notes.md", text: "Shared." })
+    await expect(setMemoriesAccess(ctx, [a.id], { to: "all" })).rejects.toThrow(
+      /\/memories\/shared\/notes\.md would be taken/,
+    )
+
+    expect(
+      (await listMemories(ctx)).map((item) => [item.fullPath, item.tokenId]),
+    ).toEqual([
+      ["/memories/shared/notes.md", null],
+      ["/memories/notes.md", alice.tokenId],
+      ["/memories/notes.md", bob.tokenId],
+    ])
+
+    // One alone fits in a place of its own, and then the other meets it.
+    await setMemoriesAccess(ctx, [b.id], {
+      to: "token",
+      tokenId: carol.tokenId,
+    })
+    expect(
+      (await listMemories(ctx)).find((item) => item.id === b.id),
+    ).toMatchObject({ tokenId: carol.tokenId })
+    await expect(
+      setMemoriesAccess(ctx, [a.id], { to: "token", tokenId: carol.tokenId }),
+    ).rejects.toThrow(/\/memories\/notes\.md would be taken/)
+  })
+
+  it("refuses one too long to share, by name, before changing anything", async () => {
+    const short = await kept(alice, "/memories/short.md")
+    const long = await kept(alice, "/memories/long.md", "x".repeat(2_001))
+
+    await expect(
+      setMemoriesAccess(ctx, [short.id, long.id], { to: "all" }),
+    ).rejects.toThrow(
+      /Nothing was changed: \/memories\/long\.md cannot be shared/,
+    )
+    expect((await listMemories(ctx)).map((item) => item.visibility)).toEqual([
+      "private",
+      "private",
+    ])
+
+    // One assistant alone may read it: that has no such limit.
+    await setMemoriesAccess(ctx, [long.id], {
+      to: "token",
+      tokenId: bob.tokenId,
+    })
+  })
+
+  it("gives them only to a token that is alive and keeps memories", async () => {
+    const note = await kept(alice, "/memories/note.md")
+    const plain = await createApiToken(ctx, {
+      name: "Plain",
+      allowAllServers: true,
+    })
+    const old = await createApiToken(ctx, {
+      name: "Old",
+      allowAllServers: true,
+      keepMemories: true,
+    })
+    await db().apiToken.update({
+      where: { id: old.id },
+      data: { revokedAt: new Date() },
+    })
+
+    await expect(
+      setMemoriesAccess(ctx, [note.id], { to: "token", tokenId: "nobody" }),
+    ).rejects.toThrow(/token was not found/)
+    await expect(
+      setMemoriesAccess(ctx, [note.id], {
+        to: "token",
+        tokenId: plain.id,
+      }),
+    ).rejects.toThrow(/cannot keep memories/)
+    await expect(
+      setMemoriesAccess(ctx, [note.id], {
+        to: "token",
+        tokenId: old.id,
+      }),
+    ).rejects.toThrow(/revoked or expired/)
+    await expect(setMemoriesAccess(ctx, [], { to: "all" })).rejects.toThrow(
+      /at least one/,
+    )
+    await expect(
+      setMemoriesAccess(ctx, ["gone"], { to: "all" }),
+    ).rejects.toThrow(/gone already/)
+
+    expect((await listMemories(ctx))[0]).toMatchObject({
+      tokenId: alice.tokenId,
+      author: "assistant",
+    })
   })
 })
 

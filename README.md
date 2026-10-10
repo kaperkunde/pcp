@@ -540,7 +540,13 @@ its text comes with PCP's instructions, so an assistant has it before it does
 anything rather than when it thinks to look; a shared one reaches every
 assistant, one an assistant keeps reaches only that one. If an assistant
 changes one it keeps, it is no longer read in every conversation until you
-tick it again. Memories are encrypted like everything else.
+tick it again. To change many at once, tick them (each has a box, each list
+and the top of the page have a **Select all**) and choose who reads them: **All
+tokens** shares them, **Only** a token keeps them for that token alone (it must
+be one that keeps memories), and **Delete selected** deletes them. Nothing is
+changed if a path would be taken where they go. A memory that changes hands
+loses its mark to be read in every conversation, since you chose that for its
+old readers. Memories are encrypted like everything else.
 
 A token made with **Let an assistant with this token fetch web pages** gets a
 `web_fetch` tool, like the web fetch Claude has: it takes an address and

@@ -664,7 +664,16 @@ another one reads:
   assistant only** (saved privately), or **Discard it**. On a yes,
   `decideMemoryAsk` re-reads the memory and writes only if it is still what
   the owner was shown. The owner writes, moves and deletes memories freely on
-  the Memories page.
+  the Memories page, one at a time or picked together: `setMemoriesAccess`
+  gives the picked memories to all tokens (`visibility = shared`) or to one
+  token that is alive and keeps memories (`private`, `token_id` set to it), and
+  `deleteMemories` deletes them. Only the audience changes, so nothing is
+  re-encrypted. It is one transaction, checked first against the vault as it
+  would be after the change (a path taken, a text too long to share), so it
+  makes every change or none. A memory read in every conversation stops being
+  when its readers change, since the owner marked it for the old ones. One an
+  assistant wrote, given to a token that did not write it, becomes the owner's
+  (`author`), as `token_id` then names its reader, not its writer.
 - **What the owner reads is all there is.** Text or a path with characters
   that do not show on screen (controls other than tab and newline, format
   characters such as zero-width spaces, direction overrides and tag
