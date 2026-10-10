@@ -38,9 +38,14 @@ function inputFrom(formData: FormData): WrapperInput {
 
   const { tools, secrets } = parsed as Record<string, unknown>
 
+  const callLevels = field(formData, "callLevels")
+
   return {
     name: field(formData, "name"),
     description: field(formData, "description"),
+    ...(callLevels === "token" || callLevels === "approved"
+      ? { callLevels }
+      : {}),
     tools: (Array.isArray(tools) ? tools : []) as WrapperInput["tools"],
     secrets: (Array.isArray(secrets) ? secrets : []) as NonNullable<
       WrapperInput["secrets"]

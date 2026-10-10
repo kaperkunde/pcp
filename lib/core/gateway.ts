@@ -214,7 +214,7 @@ const CODE_INSTRUCTIONS =
   "This token can also run code with run_code: a JavaScript program (an async function's body) that calls the owner's tools with await pcp.call(server, tool, args) and works on what they answer, so a large answer can be filtered, joined or passed from one tool to another without passing through you; console.log prints and return hands back a value. Each call follows this token's levels as call_tool does: one the owner has not allowed yet stops the program with their link, handed over as a tool's is. Files come back as handles, {\"$result\": …}, to pass on as they are; with keep, so does a secret one tool makes for another, unread by you or the program. The program reaches nothing else: no network, no files, no timers."
 
 const WRAPPER_INSTRUCTIONS =
-  'This token can also propose wrappers with create_wrapper: a server whose tools are short JavaScript programs over the owner\'s other tools, for a cleaner way to use a server (fewer arguments, several calls made one, an answer cut to what matters, a secret put where an API wants it, as {"$secret": "<name>"} in a call, where the owner allowed it). Each tool calls only the tools it lists, at the calling token\'s levels, and can stand in for them in search. The owner reads every program and decides; get_wrapper reads one, update_wrapper and delete_wrapper propose changes.'
+  'This token can also propose wrappers with create_wrapper: a server whose tools are short JavaScript programs over the owner\'s other tools, for a cleaner way to use a server (fewer arguments, several calls made one, an answer cut to what matters, a secret put where an API wants it, as {"$secret": "<name>"} in a call, where the owner allowed it). Each tool calls only the tools it lists, and can stand in for them in search; it can declare the shape of its answer (outputSchema). By default the calls it lists run on the owner\'s approval of the wrapper, so a token needs a level only for the wrapper\'s tool and the server behind it can be hidden from search; callLevels "token" holds them to the calling token\'s own levels instead. The owner reads every program and decides; get_wrapper reads one, update_wrapper and delete_wrapper propose changes.'
 
 const MANAGE_INSTRUCTIONS =
   "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one. A change to an endpoint you registered switches it off until the owner enables it again. Once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs: you can turn read-only on, and ask them to fix its schema with edits or better tool descriptions, which they answer in PCP. You cannot change a credential."
@@ -1999,6 +1999,12 @@ export function buildGatewayServer(
         .describe(
           'JSON Schema of its arguments: {"type": "object", "properties": {…}, "required": […]}. Keep it to what a caller needs to say.',
         ),
+      outputSchema: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe(
+          'JSON Schema of what the program returns, e.g. {"type": "object", "properties": {"unread": {"type": "number"}}, "required": ["unread"]}. describe_tool shows it as "returns", and a return that does not fit is an error, so the answer is what you said it would be. Types, required, properties, additionalProperties, items, enum, const, anyOf, oneOf and allOf are checked; $ref is not followed. Leave it out to say nothing.',
+        ),
       annotations: z
         .object({
           readOnlyHint: hint("It only reads."),
@@ -2029,6 +2035,12 @@ export function buildGatewayServer(
           "Tools among calls this one stands in for: once the owner agrees they are left out of search_tools and list_tools for every assistant (still callable by name), so assistants find this one instead.",
         ),
     })
+    const callLevels = z
+      .enum(["approved", "token"])
+      .optional()
+      .describe(
+        "\"approved\" (the default for a new wrapper): the calls its tools list run on the owner's approval of the wrapper, whatever a token's own levels for them are, so a token needs a level only for the wrapper's tool. \"token\": they follow the calling token's own levels, so the wrapper reaches no further than the token does. The owner is shown which.",
+      )
     const secretBinding = z.object({
       secret: z
         .string()
@@ -2068,7 +2080,7 @@ export function buildGatewayServer(
       {
         title: "Read a wrapper",
         description:
-          "A wrapper's tools as the owner approved them: each one's description, input schema, program, the tools it calls and replaces, and where a secret goes in (by the secret's name, never its value). Read it before update_wrapper.",
+          "A wrapper's tools as the owner approved them: each one's description, input and output schema, program, the tools it calls and replaces, whose levels its calls follow (callLevels), and where a secret goes in (by the secret's name, never its value). Read it before update_wrapper.",
         inputSchema: z.object({
           wrapper: z
             .string()
@@ -2097,7 +2109,7 @@ export function buildGatewayServer(
         title: "Propose a wrapper",
         description: [
           `Propose a wrapper: a new server whose tools are short JavaScript programs over the owner's other tools, so that a messy or long-winded server gets a few clean tools of your design (fewer arguments, defaults filled in, several calls made one, an answer cut to what matters, a secret put where an API wants it in its arguments). Up to ${MAX_WRAPPER_TOOLS} tools, each with a name, a description, an input schema, a program and the tools it calls; and up to ${MAX_SECRET_BINDINGS} places a secret goes.`,
-          "Each tool's program runs like run_code's, with its arguments as args, and calls only the tools listed in its calls, at the calling token's own levels: a wrapper never reaches what a token could not, and is blocked for a token wherever one of its calls is. Try the program with run_code first, where you can.",
+          "Each tool's program runs like run_code's, with its arguments as args, and calls only the tools listed in its calls. With callLevels \"approved\" (the default) those calls were approved with the wrapper, so a token needs a level only for the wrapper's tool and the tools it replaces can stay hidden; with \"token\" they follow the calling token's own levels. You can only name tools you may use yourself. Give a tool an outputSchema to fix the shape of its answer. Try the program with run_code first, where you can.",
           "Nothing is made yet: the owner is shown every program, schema, call and secret in full on PCP's page and decides. End your reply with the link, and call check_permission once they say they have answered.",
         ].join("\n\n"),
         inputSchema: z.object({
@@ -2117,6 +2129,7 @@ export function buildGatewayServer(
             ),
           tools: z.array(wrapperTool).min(1).max(MAX_WRAPPER_TOOLS),
           secrets: z.array(secretBinding).max(MAX_SECRET_BINDINGS).optional(),
+          callLevels,
         }),
         annotations: {
           readOnlyHint: false,
@@ -2144,7 +2157,7 @@ export function buildGatewayServer(
       {
         title: "Propose a change to a wrapper",
         description:
-          "Propose a change to a wrapper: its name, its description, tools added or replaced whole (by name), tools removed, or where secrets go (the whole list, replacing it). Read it with get_wrapper first. The owner is shown every new or changed program in full, before and after, and decides on PCP's page; nothing changes until they do, and then only if the wrapper is as it was when they were asked. End your reply with the link, and call check_permission once they say they have answered.",
+          "Propose a change to a wrapper: its name, its description, tools added or replaced whole (by name), tools removed, where secrets go (the whole list, replacing it), or whose levels its calls follow (callLevels). Read it with get_wrapper first. The owner is shown every new or changed program in full, before and after, and decides on PCP's page; nothing changes until they do, and then only if the wrapper is as it was when they were asked. End your reply with the link, and call check_permission once they say they have answered.",
         inputSchema: z.object({
           wrapper: z
             .string()
@@ -2166,6 +2179,7 @@ export function buildGatewayServer(
             .describe(
               "Every place a secret goes, replacing the ones it has; [] takes them all out.",
             ),
+          callLevels,
         }),
         annotations: {
           readOnlyHint: false,

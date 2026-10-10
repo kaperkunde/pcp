@@ -928,8 +928,11 @@ it in its arguments. `lib/core/wrappers/` holds it:
 
 - **The definition** (`definition.ts`, the `wrapper_spec` row beside the
   server, like an endpoint's schema) is each tool's name, description,
-  input schema, hints, program, the tools its program `calls`, and the ones
-  it `replaces`; and the wrapper's secret bindings. Other tools are named by
+  input schema, optionally an output schema, hints, program, the tools its
+  program `calls`, and the ones it `replaces`; and the wrapper's secret
+  bindings and `callLevels` (below). The output schema, `callLevels` "approved"
+  and nothing else new are stored only when set, so a definition written
+  before them reads, and hashes, as it always did. Other tools are named by
   server id, never by short name, so a server added later under the same
   short name inherits nothing. `resolveDefinition` checks a proposed one
   whole: every tool named exists (for an assistant, is one of its own it is
@@ -948,16 +951,39 @@ checkSyntax`), nothing has a character that does not show on screen
   `code/run.ts runProgram` runs the program in a fresh QuickJS instance,
   with the caller's arguments handed in as text and parsed inside the engine
   as `args`, and logs each of its calls under `wrapper`. Its `pcp.call`
-  reaches only the tools listed in that tool's `calls`, at the calling
-  token's own levels, through `runCodeCall` like a run_code call; a call to
-  anything else is an error the program sees. The arguments are checked
-  against the tool's schema at the top level first. What it returns is the
-  tool's answer (a string as it is, anything else as JSON), shaped by
-  `runCall` as any tool's is. Gateway calls and the owner's allowed requests
+  reaches only the tools listed in that tool's `calls`, through
+  `runCodeCall` like a run_code call (at the calling token's own levels, or on
+  the owner's approval: Levels, below); a call to anything else is an error
+  the program sees. The arguments are checked against the tool's schema at
+  the top level first. What it returns is the tool's answer (a string as it
+  is, anything else as JSON), shaped by `runCall` as any tool's is. When the
+  tool has an `outputSchema`, the return is checked against it first
+  (`schema-check.ts`: type, enum, const, required, properties,
+  additionalProperties, items, anyOf, oneOf and allOf, bounded in values and
+  depth; formats and ranges are not checked, and no schema is compiled to
+  code); one that does not fit is an error naming where, not passed on.
+  `describe_tool` shows the schema as an outline under `returns`
+  (`openapi/outline.ts outlineSchema`), and the owner reads it in full on
+  the request. A `$ref` is refused when it is saved, not followed. Gateway calls and the owner's allowed requests
   run with `withWrappers(executor)`, which sends a wrapper's tool to its
   program and every other call to the executor underneath, so a program's
   own calls can never reach a wrapper.
-- **Levels.** A wrapper's tool never reaches what the token could not:
+- **Levels.** A definition's `callLevels` says whose levels the calls inside
+  its tools follow, and the owner is shown which on every request. A new
+  wrapper is **"approved"** unless it asks for "token": the owner's approval
+  of the wrapper is the level for the calls its tools list, so
+  `loadGatewayServers` gives a tool its own level alone, and `innerCall`
+  (`run.ts`) finds the target among the vault's servers rather than the
+  token's, skips the token's levels for it, and refuses only a server that is
+  switched off or a tool the wrapper does not list. A token needs a level for
+  the wrapper's tool and nothing for the server behind it, which is how a
+  wrapper replaces a server that is then hidden from search; the request
+  says the wrapper lets any token with a level for its tool make those calls.
+  Secrets, the request log, kept results and the token's rate limits are
+  unchanged. A definition without `callLevels` is **"token"**, as every
+  wrapper was before it existed, and an assistant's update keeps the mode
+  unless it names one. In "token" mode a wrapper's tool never reaches what
+  the token could not:
   `loadGatewayServers` (`gateway-servers.ts`) gives it the strictest of its
   own level and of every tool it calls, a tool outside the token's servers
   counting as blocked. It is blocked for a token wherever one of its calls

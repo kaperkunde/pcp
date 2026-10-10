@@ -934,7 +934,7 @@ async function wrapperCallLines(
   server: McpServer,
   operation: string | null,
 ): Promise<string[]> {
-  const { calls } = readWrapperOperation(operation)
+  const { calls, callLevels } = readWrapperOperation(operation)
   const servers = await db().mcpServer.findMany({
     where: {
       vaultId: ctx.vaultId,
@@ -946,7 +946,9 @@ async function wrapperCallLines(
 
   return [
     `Runs the program you approved for the wrapper ${server.name}, which may call: ${calls.map((call) => `${slugs.get(call.serverId) ?? "(removed server)"}/${call.tool}`).join(", ")}`,
-    `Allowing this call lets those calls run in it, as the token's levels allow. Any of them that would ask you first is not asked about again in this run: the program may call it as often as it does (at most ${MAX_CALLS_PER_RUN} calls in all), with whatever arguments it works out.`,
+    callLevels === "approved"
+      ? `Those calls were approved with the wrapper, so they run in this call whatever the token's own levels for them are, as often as the program makes them (at most ${MAX_CALLS_PER_RUN} calls in all), with whatever arguments it works out.`
+      : `Allowing this call lets those calls run in it, as the token's levels allow. Any of them that would ask you first is not asked about again in this run: the program may call it as often as it does (at most ${MAX_CALLS_PER_RUN} calls in all), with whatever arguments it works out.`,
   ]
 }
 

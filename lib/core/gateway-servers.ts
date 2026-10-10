@@ -49,11 +49,13 @@ const STRICTNESS: Record<ToolAccess, number> = {
  * levels, with "ask" lifted to "allowed" where the owner allowed the tool
  * for a while (lib/core/allowances.ts) and that time has not run out.
  *
- * A wrapper's tool never reaches further than the token does: its level is
- * the strictest of its own and of every tool it calls (one the token cannot
- * reach counts as blocked), so a wrapper is blocked wherever one of its
- * calls is, and asks wherever one of them asks. The tools a wrapper's tool
- * replaces are hidden from search while that tool is not blocked.
+ * A wrapper's tool by default never reaches further than the token does: its
+ * level is the strictest of its own and of every tool it calls (one the token
+ * cannot reach counts as blocked), so a wrapper is blocked wherever one of
+ * its calls is, and asks wherever one of them asks. A wrapper the owner
+ * approved with its calls ("approved", lib/core/wrappers/definition.ts) has
+ * its own level only. The tools a wrapper's tool replaces are hidden from
+ * search while that tool is not blocked.
  */
 export async function loadGatewayServers(
   scope: Pick<GatewayScope, "ctx" | "tokenId" | "serverIds"> &
@@ -141,10 +143,13 @@ async function applyWrappers(
       const op = opOf.get(accessKey(wrapper.id, tool.name)) ?? {
         calls: [{ serverId: "", tool: "" }],
         replaces: [],
+        callLevels: "token" as const,
       }
       let access = tool.access
 
-      for (const call of op.calls) {
+      // A wrapper on the owner's approval is held to its own level alone:
+      // the calls it lists were approved with it.
+      for (const call of op.callLevels === "approved" ? [] : op.calls) {
         const inner =
           levels.get(accessKey(call.serverId, call.tool)) ?? "blocked"
 

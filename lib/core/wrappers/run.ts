@@ -23,6 +23,7 @@ import {
 } from "./definition"
 import { WRAPPER_RUN_TIMEOUT_MS } from "./limits"
 import type { SecretGrant } from "./placeholders"
+import { checkValue } from "./schema-check"
 
 /**
  * A call to a wrapper's tool: its program, run as run_code's are (one
@@ -31,9 +32,13 @@ import type { SecretGrant } from "./placeholders"
  *
  * - only the tools the owner approved for this wrapper tool (`calls`), and
  *   never a wrapper's, so wrappers do not nest;
- * - at the calling token's own levels: a blocked tool is refused, and one
- *   that asks runs only in a call the owner allowed with its arguments in
- *   front of them (`approved`), never otherwise;
+ * - at the calling token's own levels (`callLevels` "token", what a wrapper
+ *   is unless it says otherwise): a blocked tool is refused, and one that
+ *   asks runs only in a call the owner allowed with its arguments in front
+ *   of them (`approved`), never otherwise. With `callLevels` "approved" the
+ *   owner's approval of the wrapper is the level: the listed calls run
+ *   whatever the token's own levels for them are, and the token needs only a
+ *   level for the wrapper's tool;
  * - a secret only as {"$secret": name}, where a binding the owner approved
  *   names that tool and argument; the value is put in by upstream.ts and
  *   taken out of the answer before the program sees it.
@@ -198,7 +203,10 @@ async function callWrapperTool(
     return text(`${server.slug}/${toolName}: ${problem}`, true)
   }
 
-  const servers = env.servers ?? (await loadGatewayServers(env))
+  const servers =
+    definition.callLevels === "approved"
+      ? []
+      : (env.servers ?? (await loadGatewayServers(env)))
   const label = `${server.slug}/${toolName}`
   const run = await runProgram(
     env,
@@ -228,7 +236,12 @@ async function callWrapperTool(
 
   if (result.kind === "done") {
     if (result.returned === null) {
-      return text(`${label} finished and returned nothing.`)
+      return tool.outputSchema
+        ? text(
+            `${label} returned nothing, but its outputSchema describes an answer.`,
+            true,
+          )
+        : text(`${label} finished and returned nothing.`)
     }
 
     let value: unknown
@@ -237,6 +250,17 @@ async function callWrapperTool(
       value = JSON.parse(result.returned)
     } catch {
       value = result.returned
+    }
+
+    const mismatch = tool.outputSchema
+      ? checkValue(tool.outputSchema, value)
+      : null
+
+    if (mismatch) {
+      return text(
+        `${label} returned something its outputSchema does not allow. ${mismatch}`,
+        true,
+      )
     }
 
     return text(typeof value === "string" ? value : result.returned)
@@ -265,9 +289,16 @@ async function innerCall(
     args,
     ...shape
   }: Parameters<Parameters<typeof runProgram>[2]["call"]>[0],
-  definition: Pick<WrapperDefinition, "secrets">,
+  definition: Pick<WrapperDefinition, "secrets" | "callLevels">,
 ): Promise<CodeCallOutcome> {
-  const target = servers.find((entry) => entry.slug === slug)
+  // On the owner's approval the calls are the wrapper's own: any enabled
+  // server of the vault, whether or not this token reaches it.
+  const onApproval = definition.callLevels === "approved"
+  const target: McpServer | undefined = onApproval
+    ? ((await db().mcpServer.findFirst({
+        where: { vaultId: env.ctx.vaultId, slug },
+      })) ?? undefined)
+    : servers.find((entry) => entry.slug === slug)
   const declared =
     target &&
     tool.calls.some((call) => call.serverId === target.id && call.tool === name)
@@ -279,19 +310,30 @@ async function innerCall(
     }
   }
 
-  const level = target.tools.find((entry) => entry.name === name)?.access
-
-  if (level === undefined || level === "blocked") {
-    return {
-      ok: false,
-      error: `${slug}/${name} is blocked for this token, so ${tool.name} cannot call it.`,
+  if (onApproval) {
+    if (!target.enabled) {
+      return {
+        ok: false,
+        error: `${slug} is switched off in PCP, so ${tool.name} cannot call ${slug}/${name}.`,
+      }
     }
-  }
+  } else {
+    const level = (target as GatewayServer).tools.find(
+      (entry) => entry.name === name,
+    )?.access
 
-  if (level === "ask" && !env.approved) {
-    return {
-      ok: false,
-      error: `${slug}/${name} asks the owner first for this token. Call the wrapper's tool again: it asks the owner for the whole call.`,
+    if (level === undefined || level === "blocked") {
+      return {
+        ok: false,
+        error: `${slug}/${name} is blocked for this token, so ${tool.name} cannot call it.`,
+      }
+    }
+
+    if (level === "ask" && !env.approved) {
+      return {
+        ok: false,
+        error: `${slug}/${name} asks the owner first for this token. Call the wrapper's tool again: it asks the owner for the whole call.`,
+      }
     }
   }
 

@@ -32,3 +32,9 @@ export const WRAPPER_RUN_TIMEOUT_MS = 2 * 60_000
 export const MAX_PLACEHOLDER_DEPTH = 64
 /** Values one call's arguments may have, looked through for placeholders. */
 export const MAX_PLACEHOLDER_NODES = 10_000
+/** Values one answer may have, looked through against an output schema. */
+export const MAX_OUTPUT_CHECK_NODES = 100_000
+/** How deep an answer may nest and still be checked against its schema. */
+export const MAX_OUTPUT_CHECK_DEPTH = 32
+/** Schema nodes looked through for a reference an output schema may not have. */
+export const MAX_OUTPUT_SCHEMA_NODES = 20_000

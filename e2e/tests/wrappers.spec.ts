@@ -93,6 +93,7 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
           properties: { text: { type: "string" } },
           required: ["text"],
         },
+        outputSchema: { type: "string" },
         program: `return await pcp.call("${SLUG}", "keyed_echo", { api_key: { $secret: "${KEY_NAME}" }, text: args.text })`,
         calls: [`${SLUG}/keyed_echo`],
         replaces: [`${SLUG}/keyed_echo`],
@@ -110,6 +111,11 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
   await expect(page.getByText(`Add the wrapper ${WRAPPER_NAME}?`)).toBeVisible()
   // The program in full, and where the key goes, before anything is agreed.
   await expect(page.getByText(`api_key: { $secret:`)).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Returns" })).toBeVisible()
+  // Calls run on the owner's approval by default, and the request says so.
+  await expect(page.getByRole("note")).toContainText(
+    `whatever its own levels for ${SLUG}/keyed_echo are`,
+  )
   await expect(page.getByRole("note")).toContainText(
     `your secret "${KEY_NAME}"`,
   )
@@ -137,6 +143,11 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
 
   // New tools ask first, a wrapper's too.
   await allowAllTools(page, TOKEN_NAME, WRAPPER_SLUG)
+  const described = await callTool(baseURL!, token, "describe_tool", {
+    server: WRAPPER_SLUG,
+    tool: "lookup",
+  })
+  expect(toolText(described)).toContain('"returns": "string"')
   const answer = await callTool(baseURL!, token, "call_tool", {
     server: WRAPPER_SLUG,
     tool: "lookup",
