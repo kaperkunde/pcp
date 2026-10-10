@@ -7,13 +7,14 @@ import {
   FormSection,
   ServerFormFrame,
 } from "@/components/server-form-parts"
-import { Input, Textarea } from "@/components/ui/input"
+import { Input, Select, Textarea } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
   createWrapperAction,
   updateWrapperAction,
 } from "@/lib/actions/wrappers"
+import type { CallLevels } from "@/lib/core/wrappers/definition"
 import { cn } from "@/lib/utils"
 
 export type WrapperFormValues = {
@@ -21,6 +22,8 @@ export type WrapperFormValues = {
   name: string
   slug?: string
   description: string
+  /** Whose levels the calls inside its tools follow. */
+  callLevels: CallLevels
   /** { tools, secrets } as JSON text, other tools by server/tool. */
   definition: string
 }
@@ -53,6 +56,7 @@ export const EXAMPLE_DEFINITION = JSON.stringify(
 export const EMPTY_WRAPPER: WrapperFormValues = {
   name: "",
   description: "",
+  callLevels: "approved",
   definition: EXAMPLE_DEFINITION,
 }
 
@@ -128,6 +132,20 @@ export function WrapperForm({
 
       <FormSection>
         <Field
+          label="Calls inside its tools run"
+          htmlFor={`${prefix}-call-levels`}
+          hint="On your approval: the tools a wrapper tool lists run whatever a token's own levels for them are, so a token needs a level only for the wrapper's tool and the tools it replaces can stay hidden. At each token's own levels: the wrapper reaches no further than the token does."
+        >
+          <Select
+            id={`${prefix}-call-levels`}
+            name="callLevels"
+            defaultValue={initial.callLevels}
+          >
+            <option value="approved">On your approval of the wrapper</option>
+            <option value="token">At each token&apos;s own levels</option>
+          </Select>
+        </Field>
+        <Field
           label="Tools and secrets"
           htmlFor={`${prefix}-definition`}
           hint="JSON, in the shape an assistant's create_wrapper takes. PCP checks every tool it names and every program when you save."
@@ -160,11 +178,13 @@ function DefinitionGuide({ secretNames }: { secretNames: string[] }) {
       <dt className="font-mono text-foreground">tools</dt>
       <dd className="m-0">
         Each has a <code>name</code>, a <code>description</code>, an{" "}
-        <code>inputSchema</code>, a <code>program</code> (the body of an async
-        function: <code>args</code> holds its arguments,{" "}
-        <code>await pcp.call(server, tool, args)</code> calls a tool),{" "}
-        <code>calls</code> (every tool the program calls, as server/tool) and{" "}
-        <code>replaces</code> (tools among calls left out of search).
+        <code>inputSchema</code>, optionally an <code>outputSchema</code> (the
+        shape of what the program returns, checked on every call), a{" "}
+        <code>program</code> (the body of an async function: <code>args</code>{" "}
+        holds its arguments, <code>await pcp.call(server, tool, args)</code>{" "}
+        calls a tool), <code>calls</code> (every tool the program calls, as
+        server/tool) and <code>replaces</code> (tools among calls left out of
+        search).
       </dd>
       <dt className="font-mono text-foreground">secrets</dt>
       <dd className="m-0">

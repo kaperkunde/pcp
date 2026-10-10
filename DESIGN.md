@@ -28,7 +28,8 @@ Copy (the words) follows CLAUDE.md › Copy.
 
 The sidebar (`components/app-sidebar.tsx`) has two groups:
 
-- **Every day:** Home, Servers, Assistants, Memories.
+- **Every day:** Home, Servers, Assistants, Memories, and Browser below
+  Memories while the browser is added and enabled.
 - **Now and then:** Secrets, Log, Settings.
 
 At the bottom: the update notice, the owner's name and **Lock**. The bell
@@ -37,8 +38,11 @@ narrow window (under 768px) the sidebar becomes a bar across the top with
 the items in one scrolling row.
 
 A page under another (a server's page under Servers) has a back link above
-its title, not an entry in the sidebar. The browser belongs to Servers (it
-is a server); its page highlights Servers.
+its title, not an entry in the sidebar. The browser is the exception once
+it is added and enabled: its tabs (who opened them, who has them) are worth
+one click, so it has an item of its own and its page and its tabs' pages
+highlight Browser. Before that it is only a kind of server: the page where
+it is added highlights Servers and links back to them.
 
 "Assistants" is the menu's name for API tokens: each assistant connects
 with a token of its own. Inside the pages the thing is still called an "API

@@ -143,13 +143,16 @@ async function newestRequest() {
 async function approvedWrapper(
   tool: typeof ECHO_TOOL & {
     annotations?: Record<string, boolean>
+    outputSchema?: Record<string, unknown>
   } = ECHO_TOOL,
+  extra: Record<string, unknown> = {},
 ) {
   const asked = await call("create_wrapper", {
     name: "Lookup",
     description: "Things, simpler.",
     tools: [tool],
     secrets: [{ secret: "Things key", tool: "things/echo", argument: "/key" }],
+    ...extra,
   })
   expect(asked.text).toContain("Not done yet")
   const row = await newestRequest()
@@ -377,7 +380,7 @@ describe("calling a wrapper's tool", () => {
   })
 
   it("asks while a tool it calls asks, and runs it once the owner allows the call", async () => {
-    const wrapper = await approvedWrapper()
+    const wrapper = await approvedWrapper(ECHO_TOOL, { callLevels: "token" })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
     await writeToolAccess(scope.tokenId, endpointId, "echo", "ask")
 
@@ -410,7 +413,7 @@ describe("calling a wrapper's tool", () => {
   })
 
   it("is blocked for a token wherever a tool it calls is", async () => {
-    const wrapper = await approvedWrapper()
+    const wrapper = await approvedWrapper(ECHO_TOOL, { callLevels: "token" })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
     await writeToolAccess(scope.tokenId, endpointId, "echo", "blocked")
 
@@ -699,5 +702,273 @@ describe("calling a wrapper's tool as read-only", () => {
     const refused = await call("call_read_only_tool", args)
     expect(refused.isError).toBe(true)
     expect(refused.text).toContain("not marked read-only")
+  })
+})
+
+const SHAPE = {
+  type: "object",
+  properties: { got: { type: "string" } },
+  required: ["got"],
+  additionalProperties: false,
+}
+
+describe("a tool's output schema", () => {
+  it("shows the owner the shape, outlines it for assistants and passes an answer that fits", async () => {
+    await call("create_wrapper", {
+      name: "Lookup",
+      tools: [{ ...ECHO_TOOL, outputSchema: SHAPE }],
+      secrets: [
+        { secret: "Things key", tool: "things/echo", argument: "/key" },
+      ],
+    })
+    const row = await newestRequest()
+    const view = await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(view!.wrapper!.tools[0]!.outputSchema).toContain('"got"')
+    await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      secretValue: KEY,
+    })
+
+    const wrapper = await db().mcpServer.findFirstOrThrow({
+      where: { kind: "wrapper" },
+    })
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const described = await call("describe_tool", {
+      server: "lookup",
+      tool: "lookup",
+    })
+    expect(described.text).toContain('"returns": "{got: string}"')
+
+    const read = await call("get_wrapper", { wrapper: "lookup" })
+    expect(read.text).toContain('"outputSchema"')
+
+    const result = await call("call_tool", {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "hello" },
+    })
+    expect(result.isError).toBe(false)
+    expect(result.text).toContain("q=hello")
+  })
+
+  it("makes an answer that does not fit an error, naming where", async () => {
+    const wrapper = await approvedWrapper({
+      ...ECHO_TOOL,
+      outputSchema: {
+        type: "object",
+        properties: { got: { type: "number" } },
+      },
+    })
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const result = await call("call_tool", {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "hello" },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain("outputSchema does not allow")
+    expect(result.text).toContain('"/got" is string')
+    expect(result.text).not.toContain(KEY)
+  })
+
+  it("is an error when the program returns nothing but the tool declares an answer", async () => {
+    const wrapper = await approvedWrapper({
+      ...ECHO_TOOL,
+      program: "await 1",
+      outputSchema: SHAPE,
+    })
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const result = await call("call_tool", {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "hello" },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain("returned nothing")
+  })
+
+  it("refuses a schema that is not a schema, or follows a reference", async () => {
+    for (const outputSchema of [
+      [],
+      {},
+      "object",
+      { type: "object", properties: { a: { $ref: "#/$defs/a" } } },
+    ]) {
+      const result = await call("create_wrapper", {
+        name: "Lookup",
+        tools: [{ ...ECHO_TOOL, outputSchema }],
+      })
+
+      expect(result.isError, JSON.stringify(outputSchema)).toBe(true)
+    }
+
+    const ref = await call("create_wrapper", {
+      name: "Lookup",
+      tools: [
+        {
+          ...ECHO_TOOL,
+          outputSchema: {
+            type: "object",
+            properties: { a: { $ref: "#/$defs/a" } },
+          },
+        },
+      ],
+    })
+    expect(ref.text).toContain("$ref")
+    expect(await db().mcpServer.count({ where: { kind: "wrapper" } })).toBe(0)
+  })
+
+  it("is stored only when a tool declares one, so older definitions read as they were", async () => {
+    await approvedWrapper(ECHO_TOOL, { callLevels: "token" })
+    const spec = await db().wrapperSpec.findFirstOrThrow()
+    const stored = JSON.parse(spec.definition) as {
+      tools: Array<Record<string, unknown>>
+    } & Record<string, unknown>
+
+    expect("outputSchema" in stored.tools[0]!).toBe(false)
+    expect("callLevels" in stored).toBe(false)
+  })
+})
+
+describe("whose levels a wrapper's calls follow", () => {
+  it("runs on the owner's approval by default, whatever the token's levels for its calls", async () => {
+    const wrapper = await approvedWrapper()
+    expect(
+      JSON.parse((await db().wrapperSpec.findFirstOrThrow()).definition),
+    ).toMatchObject({ callLevels: "approved" })
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    // Asking and blocked for the token do not reach the wrapper's calls.
+    for (const level of ["ask", "blocked"] as const) {
+      await writeToolAccess(scope.tokenId, endpointId, "echo", level)
+      const result = await call("call_tool", {
+        server: "lookup",
+        tool: "lookup",
+        arguments: { word: level },
+      })
+
+      expect(result.isError, result.text).toBe(false)
+      expect(result.text).toContain(`q=${level}`)
+    }
+
+    const described = await call("describe_tool", {
+      server: "lookup",
+      tool: "lookup",
+    })
+    expect(described.text).toContain('"access": "allowed"')
+  })
+
+  it("needs the token to reach the wrapper only, not the server behind it", async () => {
+    const wrapper = await approvedWrapper()
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    scope = { ...scope, serverIds: [wrapper.id] }
+
+    const listed = await call("list_tools", { server: "things" })
+    expect(listed.isError).toBe(true)
+
+    const result = await call("call_tool", {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "hidden" },
+    })
+    expect(result.isError, result.text).toBe(false)
+    expect(result.text).toContain("q=hidden")
+  })
+
+  it("still allows only the calls a tool lists, and a server that is switched on", async () => {
+    const wrapper = await approvedWrapper({
+      ...ECHO_TOOL,
+      program: 'return await pcp.call("things", "count", {})',
+    })
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const unlisted = await call("call_tool", {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "x" },
+    })
+    expect(unlisted.isError).toBe(true)
+    expect(unlisted.text).toContain("things/count is not one of them")
+
+    await db().mcpServer.update({
+      where: { id: endpointId },
+      data: { enabled: false },
+    })
+    const off = await call("call_tool", {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "x" },
+    })
+    expect(off.isError).toBe(true)
+    expect(api.requests).toHaveLength(0)
+  })
+
+  it("tells the owner which calls a token can make through it, and says so on the request", async () => {
+    await call("create_wrapper", { name: "Lookup", tools: [ECHO_TOOL] })
+    const view = await getPermissionView(ctx, (await newestRequest()).id, {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(view!.wrapper!.callLevels).toBe("approved")
+    expect(view!.warning).toContain(
+      "whatever its own levels for things/echo are",
+    )
+    expect(view!.lines.join("\n")).toContain("approved here")
+
+    const token = await call("create_wrapper", {
+      name: "Narrow",
+      callLevels: "token",
+      tools: [ECHO_TOOL],
+    })
+    expect(token.text).toContain("Not done yet")
+    const narrow = await getPermissionView(ctx, (await newestRequest()).id, {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(narrow!.wrapper!.callLevels).toBe("token")
+    expect(narrow!.warning).toBeNull()
+  })
+
+  it("keeps the mode on a change, and shows a change of it", async () => {
+    await approvedWrapper(ECHO_TOOL, { callLevels: "token" })
+
+    await call("update_wrapper", {
+      wrapper: "lookup",
+      description: "Changed.",
+    })
+    const kept = await getPermissionView(ctx, (await newestRequest()).id, {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(kept!.wrapper!.callLevels).toBe("token")
+
+    await call("update_wrapper", { wrapper: "lookup", callLevels: "approved" })
+    const changed = await getPermissionView(ctx, (await newestRequest()).id, {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(changed!.wrapper!.callLevels).toBe("approved")
+    expect(changed!.lines.join("\n")).toContain(
+      "now follow your approval of the wrapper",
+    )
+    expect(changed!.warning).toContain("things/echo")
+
+    const read = await call("get_wrapper", { wrapper: "lookup" })
+    expect(read.text).toContain('"callLevels": "token"')
+  })
+
+  it("refuses a mode that is neither", async () => {
+    const result = await call("create_wrapper", {
+      name: "Lookup",
+      callLevels: "anything",
+      tools: [ECHO_TOOL],
+    })
+
+    expect(result.isError).toBe(true)
+    expect(await db().mcpServer.count({ where: { kind: "wrapper" } })).toBe(0)
   })
 })

@@ -8,6 +8,7 @@ import { SECRET_PLACEHOLDER } from "../constants"
 import { db } from "../db"
 import { invalid } from "../errors"
 import { hiddenCharacter, withoutPresentation } from "../memories"
+import { outlineSchema } from "../openapi/outline"
 import { parsePointer } from "../openapi/patch"
 import { canonicalJson } from "../permission-rules"
 import { findTextSecretByName, validateSecretName } from "../secrets"
@@ -24,6 +25,7 @@ import {
   MAX_WRAPPER_SCHEMA_CHARS,
   MAX_WRAPPER_TOOLS,
 } from "./limits"
+import { hasReference } from "./schema-check"
 
 /**
  * What a wrapper is: its tools, each a program over the vault's other tools
@@ -50,6 +52,12 @@ export type WrapperTool = {
   description: string
   /** JSON Schema of the arguments, an object. */
   inputSchema: Record<string, unknown>
+  /**
+   * JSON Schema of what the program returns, when it declares one: a return
+   * that does not fit is an error to the caller. Left out when there is none,
+   * so a definition without one is stored (and hashed) as it always was.
+   */
+  outputSchema?: Record<string, unknown>
   annotations: WrapperAnnotations | null
   /** The body of an async function; its arguments are `args`. */
   program: string
@@ -76,10 +84,24 @@ export type SecretBinding = {
   url: string
 }
 
+/**
+ * Whose levels the calls inside a wrapper's tools follow. "token": the
+ * calling token's own for each tool called, so a wrapper reaches no further
+ * than the token does. "approved": none of them: the owner approved exactly
+ * the calls a tool lists, and a token's level for the wrapper's tool is all
+ * it needs.
+ */
+export type CallLevels = "approved" | "token"
+
 export type WrapperDefinition = {
   version: 1
   tools: WrapperTool[]
   secrets: SecretBinding[]
+  /**
+   * Only "approved" is stored: a definition without it follows the token's
+   * levels, as every wrapper did before the setting existed.
+   */
+  callLevels?: "approved"
 }
 
 /** A tool as an assistant or the owner sends it: other tools as server/tool. */
@@ -88,6 +110,7 @@ export type WrapperToolInput = {
   title?: string | null
   description: string
   inputSchema: unknown
+  outputSchema?: unknown
   annotations?: WrapperAnnotations | null
   program: string
   calls: string[]
@@ -106,6 +129,8 @@ export type WrapperInput = {
   description?: string
   tools: WrapperToolInput[]
   secrets?: SecretBindingInput[]
+  /** Left out: "approved" for a new wrapper. */
+  callLevels?: CallLevels
 }
 
 const TOOL_NAME = /^[A-Za-z0-9_.-]{1,64}$/
@@ -126,6 +151,7 @@ const storedSchema = z.object({
       title: z.string().nullable(),
       description: z.string(),
       inputSchema: z.record(z.string(), z.unknown()),
+      outputSchema: z.record(z.string(), z.unknown()).optional(),
       annotations: z
         .object({
           readOnlyHint: z.boolean().optional(),
@@ -150,6 +176,7 @@ const storedSchema = z.object({
       url: z.string(),
     }),
   ),
+  callLevels: z.literal("approved").optional(),
 })
 
 /** A stored definition, checked as it is read. */
@@ -170,23 +197,40 @@ export function catalogueTools(definition: WrapperDefinition): CatalogueTool[] {
     description: tool.description,
     inputSchema: tool.inputSchema,
     annotations: tool.annotations ?? undefined,
-    operation: JSON.stringify({ calls: tool.calls, replaces: tool.replaces }),
+    operation: JSON.stringify({
+      calls: tool.calls,
+      replaces: tool.replaces,
+      ...(definition.callLevels ? { callLevels: definition.callLevels } : {}),
+    }),
+    ...(tool.outputSchema ? { output: outlineSchema(tool.outputSchema) } : {}),
   }))
 }
 
-/** A wrapper tool's catalogue row's calls and replaced tools. */
+/**
+ * A wrapper tool's catalogue row's calls and replaced tools, and whose levels
+ * its calls follow.
+ */
 export function readWrapperOperation(json: string | null): {
   calls: ToolRef[]
   replaces: ToolRef[]
+  callLevels: CallLevels
 } {
   try {
     const parsed = z
-      .object({ calls: z.array(refSchema), replaces: z.array(refSchema) })
+      .object({
+        calls: z.array(refSchema),
+        replaces: z.array(refSchema),
+        callLevels: z.literal("approved").optional(),
+      })
       .parse(JSON.parse(json ?? ""))
-    return parsed
+    return { ...parsed, callLevels: parsed.callLevels ?? "token" }
   } catch {
     // A row that does not say counts as calling something unknown: blocked.
-    return { calls: [{ serverId: "", tool: "" }], replaces: [] }
+    return {
+      calls: [{ serverId: "", tool: "" }],
+      replaces: [],
+      callLevels: "token",
+    }
   }
 }
 
@@ -263,6 +307,14 @@ export async function resolveDefinition(
   })
   visible(name, "The name")
   visible(description, "The description")
+
+  const callLevels: CallLevels = input.callLevels ?? "approved"
+
+  if (callLevels !== "approved" && callLevels !== "token") {
+    throw invalid(
+      'callLevels is "approved" (the calls its tools list run on your approval of the wrapper) or "token" (at the calling token\'s own levels).',
+    )
+  }
 
   if (!Array.isArray(input.tools) || input.tools.length === 0) {
     throw invalid("A wrapper has at least one tool.")
@@ -413,6 +465,40 @@ export async function resolveDefinition(
 
     visible(schemaText, `${what}'s inputSchema`)
 
+    let outputSchema: Record<string, unknown> | undefined
+
+    if (tool.outputSchema !== undefined && tool.outputSchema !== null) {
+      const declared = tool.outputSchema
+
+      if (
+        typeof declared !== "object" ||
+        Array.isArray(declared) ||
+        Object.keys(declared).length === 0
+      ) {
+        throw invalid(
+          `${what}'s outputSchema is a JSON Schema for what the program returns, like {"type": "object", "properties": {…}}; leave it out to say nothing.`,
+        )
+      }
+
+      const outputText = JSON.stringify(declared)
+
+      if (outputText.length > MAX_WRAPPER_SCHEMA_CHARS) {
+        throw invalid(
+          `${what}'s outputSchema is longer than ${MAX_WRAPPER_SCHEMA_CHARS.toLocaleString("en")} characters of JSON.`,
+        )
+      }
+
+      visible(outputText, `${what}'s outputSchema`)
+
+      if (hasReference(declared)) {
+        throw invalid(
+          `${what}'s outputSchema has a $ref, which is not followed: write the shape out where it is used.`,
+        )
+      }
+
+      outputSchema = declared as Record<string, unknown>
+    }
+
     let annotations: WrapperAnnotations | null = null
 
     if (tool.annotations) {
@@ -499,6 +585,7 @@ export async function resolveDefinition(
       title,
       description: toolDescription,
       inputSchema: schema as Record<string, unknown>,
+      ...(outputSchema ? { outputSchema } : {}),
       annotations,
       program,
       calls,
@@ -614,7 +701,12 @@ export async function resolveDefinition(
   return {
     name,
     description,
-    definition: { version: 1, tools: resolvedTools, secrets },
+    definition: {
+      version: 1,
+      tools: resolvedTools,
+      secrets,
+      ...(callLevels === "approved" ? { callLevels } : {}),
+    },
     newSecret,
   }
 }

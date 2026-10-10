@@ -186,6 +186,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `sandbox/`                           | The sandbox container: its runner and the `pcp` command       |
 | `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input     |
 | `components/browser-tab-view.tsx`    | The live view: frames on a canvas, timed input sent back      |
+| `lib/browser-keyboard.ts`            | A phone's keyboard as input: edits of a hidden box into keys  |
 | `lib/core/catalogue.ts`              | Writing a server's tool list into the catalogue               |
 | `lib/core/search.ts`, `gateway.ts`   | Ranking tools; the MCP server the gateway serves              |
 | `lib/core/tool-access.ts`            | Tool levels per token and for all tokens; copying them        |

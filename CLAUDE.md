@@ -206,7 +206,13 @@ so in the summary; the bump itself waits for the request.
   tools its definition lists for it, never a wrapper's, at the calling
   token's own levels; a wrapper's tool comes out at the strictest of its
   own level and those of the tools it calls (`gateway-servers.ts`), and a
-  call that asks runs only in a call the owner allowed (`approved`). A
+  call that asks runs only in a call the owner allowed (`approved`); that is
+  `callLevels` "token". With `callLevels` "approved", the default for a new
+  wrapper, the owner's approval of the wrapper is the level for the calls it
+  lists (a tool has its own level only, `innerCall` takes the target from
+  the vault), and every request says which calls any token can make through
+  it. A tool's `outputSchema` is checked on every return
+  (`wrappers/schema-check.ts`, no compiled schemas, no `$ref`). A
   secret goes in only as `{"$secret": name}` where a binding the owner
   approved names that tool (by server id), argument and address: matched
   and written in `upstream.ts`, scrubbed from the answer, errors and status

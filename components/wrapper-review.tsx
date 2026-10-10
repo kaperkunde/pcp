@@ -161,6 +161,16 @@ function ToolReview({ tool }: { tool: WrapperShownTool }) {
         </Part>
       )}
 
+      {tool.status === "removed" || !tool.outputSchema ? null : (
+        <Part label="Returns">
+          <Code>{tool.outputSchema}</Code>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            PCP checks every answer against this shape. One that does not fit is
+            an error to the caller, not passed on.
+          </p>
+        </Part>
+      )}
+
       <Part label="Calls">
         <Chips names={tool.calls} />
       </Part>

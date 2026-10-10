@@ -99,6 +99,7 @@ export default async function ServerPage({
         name: wrapper.name,
         slug: wrapper.slug,
         description: wrapper.description,
+        callLevels: wrapper.callLevels,
         definition: JSON.stringify(
           { tools: wrapper.tools, secrets: wrapper.secrets },
           null,

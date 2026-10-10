@@ -14,6 +14,7 @@ import {
   definitionHash,
   readDefinition,
   resolveDefinition,
+  type CallLevels,
   type Reach,
   type WrapperDefinition,
   type WrapperInput,
@@ -39,6 +40,8 @@ export type WrapperShownTool = {
   title: string | null
   description: string
   inputSchema: string
+  /** What the program returns, when the tool declares it. */
+  outputSchema: string | null
   annotations: string | null
   program: string
   /** The program before, when it changed. */
@@ -63,6 +66,8 @@ export type WrapperShown = {
   title: string
   lines: string[]
   warning: string | null
+  /** Whose levels the calls inside its tools follow, once this is made. */
+  callLevels: CallLevels
   tools: WrapperShownTool[]
   secrets: WrapperShownSecret[]
 }
@@ -88,6 +93,7 @@ export type WrapperView = {
   slug: string
   description: string
   enabled: boolean
+  callLevels: CallLevels
   tools: Array<
     Omit<WrapperToolInput, "calls" | "replaces"> & {
       calls: string[]
@@ -138,6 +144,7 @@ async function toInput(
       title: tool.title,
       description: tool.description,
       inputSchema: tool.inputSchema,
+      ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
       annotations: tool.annotations,
       program: tool.program,
       calls: tool.calls.map((call) => ref(call.serverId, call.tool)),
@@ -187,6 +194,7 @@ export async function getWrapper(
     slug: server.slug,
     description: server.description,
     enabled: server.enabled,
+    callLevels: definition.callLevels ?? "token",
     ...(await toInput(ctx, definition)),
   }
 }
@@ -244,6 +252,7 @@ async function describe(
       title: tool.title ?? null,
       description: tool.description,
       inputSchema: prettySchema(tool.inputSchema),
+      outputSchema: tool.outputSchema ? prettySchema(tool.outputSchema) : null,
       annotations: tool.annotations ? JSON.stringify(tool.annotations) : null,
       program: tool.program,
       previousProgram: old && old.program !== tool.program ? old.program : null,
@@ -260,6 +269,7 @@ async function describe(
         title: old.title ?? null,
         description: old.description,
         inputSchema: prettySchema(old.inputSchema),
+        outputSchema: old.outputSchema ? prettySchema(old.outputSchema) : null,
         annotations: old.annotations ? JSON.stringify(old.annotations) : null,
         program: old.program,
         previousProgram: null,
@@ -320,11 +330,29 @@ async function describe(
                 `Left out of search for every assistant, as the wrapper stands in for them (still callable): ${replaced.join(", ")}`,
               ]
             : []),
-          "Each tool runs its program in PCP, with the arguments it is called with, and calls only the tools listed for it, at the calling token's own levels.",
+          ...(action === "update" &&
+          (before?.callLevels ?? "token") !== (after?.callLevels ?? "token")
+            ? [
+                `The calls inside its tools now follow ${after?.callLevels === "approved" ? "your approval of the wrapper (they were at each token's own levels)" : "each token's own levels (they followed your approval of the wrapper)"}.`,
+              ]
+            : []),
+          after?.callLevels === "approved"
+            ? "Each tool runs its program in PCP, with the arguments it is called with, and calls only the tools listed for it. Those calls are approved here: they run whatever a token's own level for them is, so a token needs only a level for the wrapper's tool."
+            : "Each tool runs its program in PCP, with the arguments it is called with, and calls only the tools listed for it, at the calling token's own levels.",
         ]),
   ]
+  const approvedCalls =
+    action !== "delete" && after?.callLevels === "approved"
+      ? [
+          ...new Set(
+            tools.flatMap((tool) =>
+              tool.status === "removed" ? [] : tool.calls,
+            ),
+          ),
+        ]
+      : []
 
-  const warning =
+  const secretWarning =
     secrets.length > 0
       ? `PCP will put ${secrets
           .map(
@@ -335,8 +363,24 @@ async function describe(
             "; ",
           )}. The programs never see it and PCP takes it out of what that tool answers, but what the tool does with it is up to the tool: allow it only where that argument is meant for a credential.`
       : null
+  const warning =
+    [
+      approvedCalls.length > 0
+        ? `Any token you let use these tools can make these calls through them, whatever its own levels for ${approvedCalls.join(", ")} are.`
+        : null,
+      secretWarning,
+    ]
+      .filter((part) => part !== null)
+      .join(" ") || null
 
-  return { title, lines, warning, tools, secrets }
+  return {
+    title,
+    lines,
+    warning,
+    callLevels: after?.callLevels ?? "token",
+    tools,
+    secrets,
+  }
 }
 
 /**
@@ -383,6 +427,8 @@ export type WrapperChanges = {
   removeTools?: string[]
   /** Every place a secret goes, replacing the ones it has. */
   secrets?: SecretBindingInput[]
+  /** Whose levels the calls inside its tools follow; kept when left out. */
+  callLevels?: CallLevels
 }
 
 export async function proposeWrapperChange(
@@ -417,6 +463,7 @@ export async function proposeWrapperChange(
       description: changes.description ?? server.description,
       tools,
       secrets: changes.secrets ?? current.secrets,
+      callLevels: changes.callLevels ?? definition.callLevels ?? "token",
     },
     {
       reach: reachOf(servers),
