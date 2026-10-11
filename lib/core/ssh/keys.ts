@@ -16,10 +16,25 @@ export type OwnKey = {
   publicKey: string
 }
 
-/** An Ed25519 key for one server, with a comment that names it. */
+/**
+ * An Ed25519 key for one server, with a comment that names it. ssh2's
+ * generator writes a key whose public half starts with a zero byte (one in
+ * 256) a byte short, and then cannot read it: such a key is made again.
+ */
 export function generateOwnKey(comment: string): OwnKey {
-  const pair = utils.generateKeyPairSync("ed25519", { comment })
-  return { privateKey: pair.private, publicKey: pair.public.trim() }
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const pair = utils.generateKeyPairSync("ed25519", { comment })
+    const key = { privateKey: pair.private, publicKey: pair.public.trim() }
+
+    if (
+      !(utils.parseKey(key.privateKey) instanceof Error) &&
+      !(utils.parseKey(key.publicKey) instanceof Error)
+    ) {
+      return key
+    }
+  }
+
+  throw new Error("PCP could not make an SSH key it can read.")
 }
 
 /** The key type a wire-format key blob starts with. */

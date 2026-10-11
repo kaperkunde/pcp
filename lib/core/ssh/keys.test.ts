@@ -16,6 +16,20 @@ describe("PCP's own key", () => {
   })
 })
 
+describe("PCP's own key, every time", () => {
+  it("is always one ssh2 can read back", () => {
+    // ssh2's generator drops a leading zero byte of an Ed25519 key, which
+    // one key in 256 has, and then cannot read the key it wrote. 2000 keys
+    // meet such a one all but always.
+    for (let n = 0; n < 2000; n++) {
+      const key = generateOwnKey("pcp-test")
+
+      expect(utils.parseKey(key.privateKey)).not.toBeInstanceOf(Error)
+      expect(utils.parseKey(key.publicKey)).not.toBeInstanceOf(Error)
+    }
+  })
+})
+
 describe("host keys", () => {
   it("are stored as type and base64, fingerprinted as ssh-keygen does", () => {
     const parsed = utils.parseKey(generateOwnKey("host").publicKey)
