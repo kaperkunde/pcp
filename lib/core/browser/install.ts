@@ -80,28 +80,32 @@ function installer(): Installer {
 
 /** The Chromium build patchright-core drives, as Playwright publishes it. */
 export async function chromiumBuild(): Promise<ChromiumBuild | null> {
-  try {
-    const { registry } = await import("patchright-core/lib/coreBundle")
-    const found = registry.registry.findExecutable("chromium")
-    const full = found?.executablePath()
+  return lookUpBuild().catch(() => null)
+}
 
-    if (
-      !found?.directory ||
-      !full ||
-      !found.revision ||
-      !/^[\w.-]+$/.test(found.revision) ||
-      found.downloadURLs.length === 0
-    ) {
-      return null
-    }
+/**
+ * chromiumBuild, but a patchright-core that does not load throws instead of
+ * passing for a system Playwright has no build for: the install says which.
+ */
+async function lookUpBuild(): Promise<ChromiumBuild | null> {
+  const { registry } = await import("patchright-core/lib/coreBundle")
+  const found = registry.registry.findExecutable("chromium")
+  const full = found?.executablePath()
 
-    return {
-      revision: found.revision,
-      urls: [...found.downloadURLs],
-      executable: path.relative(found.directory, full),
-    }
-  } catch {
+  if (
+    !found?.directory ||
+    !full ||
+    !found.revision ||
+    !/^[\w.-]+$/.test(found.revision) ||
+    found.downloadURLs.length === 0
+  ) {
     return null
+  }
+
+  return {
+    revision: found.revision,
+    urls: [...found.downloadURLs],
+    executable: path.relative(found.directory, full),
   }
 }
 
@@ -189,7 +193,13 @@ export function installChromium(
 }
 
 async function install(self: Installer, options: InstallOptions) {
-  const build = options.build ?? (await chromiumBuild())
+  const build =
+    options.build ??
+    (await lookUpBuild().catch((error: unknown) => {
+      throw new Error(
+        `PCP could not load Playwright's list of Chromium builds: ${reasonOf(error).split("\n")[0]}`,
+      )
+    }))
 
   if (!build) {
     throw new Error(

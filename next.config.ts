@@ -1,8 +1,34 @@
+import { realpathSync } from "fs"
+import { createRequire } from "module"
 import type { NextConfig } from "next"
 import path from "path"
 import { fileURLToPath } from "url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+/**
+ * patchright-core's browsers.json, by its real path: through pnpm's
+ * node_modules/patchright-core link, the tracing would copy it into a folder
+ * of that name, which then holds nothing else.
+ */
+export const patchrightBrowsersJson =
+  "./" +
+  path
+    .relative(
+      __dirname,
+      path.join(
+        path.dirname(
+          realpathSync(
+            createRequire(import.meta.url).resolve(
+              "patchright-core/package.json",
+            ),
+          ),
+        ),
+        "browsers.json",
+      ),
+    )
+    .split(path.sep)
+    .join("/")
 
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -31,6 +57,13 @@ const nextConfig: NextConfig = {
     "node-cron",
     "ssh2",
   ],
+  // patchright-core reads its list of browser builds with a path it works
+  // out at runtime, which the file tracing cannot follow; without the file,
+  // every import of it throws and the browser never starts
+  // (scripts/standalone.test.ts).
+  outputFileTracingIncludes: {
+    "/**": [patchrightBrowsersJson],
+  },
   experimental: {
     // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) and an export
     // file to restore (up to MAX_EXPORT_FILE_BYTES, 64 MB) travel in a
