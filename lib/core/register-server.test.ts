@@ -47,6 +47,8 @@ beforeEach(async () => {
     "smtp.example.com": ["203.0.114.9"],
     "mcp.home.example": ["192.168.1.30"],
     "mail.lan": ["10.0.0.5"],
+    "caldav.icloud.com": ["17.248.1.1"],
+    "radicale.lan": ["192.168.1.40"],
     "smtp.lan": ["fd00::25"],
   }
   probe = async (url) => ({
@@ -107,24 +109,27 @@ const PETS = JSON.stringify({
 })
 
 describe("what an assistant is told", () => {
-  it("names mail accounts in the instructions, with and without servers", () => {
+  it("names mail and calendar accounts in the instructions, with and without servers", () => {
     for (const told of [
       buildInstructions([]),
       buildInstructions([
         { slug: "mail", name: "Mail", description: "", tools: [] } as never,
       ]),
     ]) {
-      expect(told).toContain("mail accounts")
+      expect(told).toContain("mail and calendar accounts")
       expect(told).toMatch(
         /mail account \(JMAP, or IMAP with SMTP\)|mail account over JMAP or IMAP/,
       )
+      expect(told).toMatch(/calendar account (over CalDAV|\(CalDAV)/)
     }
 
     expect(
       buildInstructions([
         { slug: "mail", name: "Mail", description: "", tools: [] } as never,
       ]),
-    ).toContain("never an API written around its mail server")
+    ).toContain(
+      "A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers",
+    )
   })
 
   it("describes the tool so a mailbox is a mail account and the authentication is a choice", async () => {
@@ -135,12 +140,23 @@ describe("what an assistant is told", () => {
       { enum?: string[]; description?: string }
     >
 
-    expect(tool.title).toBe("Add a server, an API or a mail account")
+    expect(tool.title).toBe(
+      "Add a server, an API, a mail or a calendar account",
+    )
     expect(tool.description).toContain(
       "A mailbox is always a mail account (jmap or imap), never an API you write around its mail server",
     )
     expect(tool.description).toContain("PCP finds out itself")
-    expect(properties.kind?.enum).toEqual(["mcp", "api", "jmap", "imap"])
+    expect(tool.description).toContain(
+      "Calendars and reminders are always a calendar account (caldav), never an API",
+    )
+    expect(properties.kind?.enum).toEqual([
+      "mcp",
+      "api",
+      "jmap",
+      "imap",
+      "caldav",
+    ])
     expect(properties.auth_type?.enum).toEqual([
       "none",
       "header",
@@ -421,6 +437,81 @@ describe("proposing a mail account", () => {
       text: expect.stringMatching(/The secret's name:/),
     })
 
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+})
+
+describe("proposing a calendar account", () => {
+  it("asks for an iCloud account with the app-specific password typed in on PCP, and makes nothing yet", async () => {
+    const asked = await register({
+      kind: "caldav",
+      name: "iCloud",
+      url: "caldav.icloud.com",
+      auth_type: "basic",
+      username: "ada@icloud.com",
+      secret: "iCloud app password",
+    })
+
+    expect(asked.isError).toBe(false)
+    expect(asked.text).toContain("Not done yet")
+
+    const view = await shown()
+    expect(view.title).toBe("Add the calendar account iCloud?")
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "CalDAV server: https://caldav.icloud.com/",
+        "User name: ada@icloud.com",
+        'Authentication: user name and password; the password is saved as a new secret "iCloud app password", and you enter it here when you agree',
+        expect.stringMatching(/^Can change things: .*invite nobody/),
+      ]),
+    )
+    expect(view.warning).toMatch(/to this calendar server/)
+    expect(view.secretToEnter).toMatchObject({
+      name: "iCloud app password",
+      login: "ada@icloud.com",
+    })
+    expect(await db().mcpServer.count()).toBe(0)
+    expect(await db().secret.count()).toBe(0)
+  })
+
+  it("says read-only, and flags a server on the owner's network to them alone", async () => {
+    const asked = await register({
+      kind: "caldav",
+      name: "Radicale",
+      url: "https://radicale.lan/ada/",
+      auth_type: "basic",
+      username: "ada",
+      secret: "Radicale password",
+      read_only: true,
+    })
+
+    const view = await shown()
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "Read-only: only the tools that read calendars and reminders",
+        "radicale.lan is, or resolves to, a private or local address. If you agree, PCP signs in there from your own network.",
+      ]),
+    )
+    expect(asked.text).not.toContain("private")
+  })
+
+  it("is refused over http:// to a public address, or without a sign-in", async () => {
+    expect(
+      await register({
+        kind: "caldav",
+        name: "Cal",
+        url: "http://caldav.icloud.com/",
+        auth_type: "basic",
+        username: "ada",
+        secret: "pw",
+      }),
+    ).toMatchObject({
+      isError: true,
+      text: expect.stringMatching(/unencrypted/),
+    })
+    expect(
+      await register({ kind: "caldav", name: "Cal", url: "caldav.icloud.com" }),
+    ).toMatchObject({ isError: true, text: expect.stringMatching(/signs in/) })
     expect(await db().permissionRequest.count()).toBe(0)
   })
 })

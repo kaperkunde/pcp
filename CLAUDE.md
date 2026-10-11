@@ -118,6 +118,24 @@ so in the summary; the bump itself waits for the request.
   `mail/tools.ts`, for both protocols where they allow, with its arguments
   checked before anything connects, and is left out of a read-only account
   and refused there if called anyway.
+- Calendar accounts (`lib/core/caldav/`) never read a secret either:
+  `upstream.ts` hands in a `DavCredential` (Basic, a bearer header, or an
+  OAuth bearer from `credential()`). The sign-in goes only to the typed origin,
+  or over `https://` to a host under the typed host's own domain
+  (`acceptedAddress`, for iCloud's `p<n>-caldav.icloud.com`), public addresses
+  only there; `http://` only to the owner's own network. Redirects are
+  followed only while finding the home, on the same origin. A change reads the
+  object and writes it back with its ETag (`If-Match`; a new one
+  `If-None-Match: *`), changing only what it was asked to, so another app's
+  properties stay. Times are turned into instants by PCP (`zones.ts`), never
+  through ical.js's global zone registry; what PCP writes names an IANA zone
+  with a VTIMEZONE. The tools (`caldav/tools.ts`) are a fixed set, their
+  arguments checked before anything connects, left out of a read-only account
+  and refused there if called anyway; none takes WebDAV or raw iCalendar, and
+  none adds attendees (the server would invite them). An assistant adds an
+  account only through `register_server` (kind `caldav`), a permission request
+  like a mail account's; only the owner changes one. Add a test for each new
+  tool or argument (`caldav/accounts.test.ts`, against `fake-caldav.ts`).
 - SSH servers (`lib/core/ssh/`) sign in with PCP's own key, never a
   password: an Ed25519 key made in PCP per server, a managed `ssh_key` secret
   decrypted only in `upstream.ts`, which hands the ssh module an
@@ -398,7 +416,9 @@ The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
 OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
 signs in to is a "mail account"; a machine PCP runs commands on is an "SSH
-server" ("SSH servers" in the UI); a server whose tools are programs over the
+server" ("SSH servers" in the UI); calendars and reminders PCP reaches over
+CalDAV are a "calendar account" ("Calendar accounts" in the UI); a server
+whose tools are programs over the
 others is a "wrapper" ("Wrappers" in the UI); a note an
 assistant keeps between conversations is a "memory", "shared" when every
 assistant reads it; what web_fetch reaches is a "site" (a host), and a level

@@ -41,6 +41,8 @@
     "better-sqlite3": "^12.6.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "fast-xml-parser": "^5.11.2",
+    "ical.js": "2.2.1",
     "imapflow": "^2.2.2",
     "lucide-react": "^1.48.0",
     "next": "15.5.27",

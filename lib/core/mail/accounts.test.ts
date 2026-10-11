@@ -845,7 +845,9 @@ describe("calling its tools", () => {
     }
     const instructions = buildInstructions(await loadGatewayServers(scope))
 
-    expect(instructions).toContain("MCP servers, APIs and mail accounts")
+    expect(instructions).toContain(
+      "MCP servers, APIs, mail and calendar accounts",
+    )
     expect(instructions).toContain("- mail: Mail (16 tools)")
   })
 })

@@ -39,6 +39,7 @@ import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
 import { newId } from "./ids"
+import { createCalendarAccount } from "./caldav/accounts"
 import { createMailAccount } from "./mail/accounts"
 import {
   decideMemoryAsk,
@@ -72,7 +73,7 @@ import {
   type PermissionStatus,
   type ShownText,
 } from "./permission-rules"
-import type { MailRegistration } from "./register-rules"
+import type { CalendarRegistration, MailRegistration } from "./register-rules"
 import { summarize } from "./search"
 import {
   createSecretNamedAfter,
@@ -176,6 +177,8 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   endpoint?: EndpointRegistration
   /** A mail account (JMAP or IMAP) rather than an MCP server or an API. */
   mail?: MailRegistration
+  /** A calendar account (CalDAV). */
+  calendar?: CalendarRegistration
   /**
    * An MCP server: set when its host is, or resolves to, a private or local
    * address, for the owner. Missing on requests from before it was looked up.
@@ -640,9 +643,9 @@ function registerOAuthLines(input: RegisterArgs, publicUrl: string): string[] {
       : []),
     ...(input.oauthClientId
       ? [`Redirect URI your client needs: ${oauthRedirectUrl(publicUrl)}`]
-      : input.mail
+      : input.mail || input.calendar
         ? [
-            "Sign-in: PCP finds where the mail server signs you in when you connect it, and registers itself there if the server allows it; otherwise its page asks you for an OAuth client",
+            `Sign-in: PCP finds where the ${input.mail ? "mail" : "calendar"} server signs you in when you connect it, and registers itself there if the server allows it; otherwise its page asks you for an OAuth client`,
           ]
         : input.endpoint
           ? [
@@ -749,7 +752,7 @@ async function summarizeRow(
       .map((name) => `"${name}"`)
       .join(" and ")
     const login = input.authUsername ?? "?"
-    const mailAuth = Boolean(input.mail)
+    const mailAuth = Boolean(input.mail || input.calendar)
     const auth =
       input.authType === "basic" && input.newSecretName
         ? mailAuth
@@ -770,13 +773,18 @@ async function summarizeRow(
                 : input.authType === "oauth"
                   ? oauthLines[0]!
                   : "Authentication: none"
-    const where = mailAuth ? "this mail server" : "this address"
+    const where = input.mail
+      ? "this mail server"
+      : input.calendar
+        ? "this calendar server"
+        : "this address"
     const warning =
       input.authType === "basic"
         ? `PCP will send the user name ${login} and the secret "${input.secretName ?? "?"}" to ${where} with every call. Only add it if you trust the address.`
         : input.authType === "header"
           ? `PCP will send the ${extras.length > 0 ? "secrets" : "secret"} ${secrets} to ${where} with every call. Only add it if you trust the address.`
-          : input.authType === "oauth" && (input.endpoint || input.mail)
+          : input.authType === "oauth" &&
+              (input.endpoint || input.mail || input.calendar)
             ? `PCP will send your OAuth token for this account to ${where} with every call. Only add it if you trust the address${input.endpoint ? " and the sign-in addresses" : ""}.`
             : null
 
@@ -812,6 +820,36 @@ async function summarizeRow(
             ? "Read-only: only the tools that read mail"
             : "Can change things: its tools may send as you where the server allows it, move and flag mail, and delete into the Trash (never for good)",
           ...(mailFrom ? [`From address: ${mailFrom}`] : []),
+          ...(input.description ? [`Description: ${input.description}`] : []),
+          asker,
+        ],
+        warning,
+        ownerOnly: flagged ? [flagged] : [],
+      }
+    }
+
+    if (input.calendar) {
+      const { readOnly, privateAddress } = input.calendar
+      const flagged = privateAddress
+        ? `${privateAddress} If you agree, PCP signs in there from your own network.`
+        : null
+
+      return {
+        title: `Add the calendar account ${input.name}?`,
+        lines: [
+          `CalDAV server: ${input.url}`,
+          ...(input.url.startsWith("http:")
+            ? [
+                "Not encrypted: the address starts with http://, so your sign-in travels unprotected across your network. Only agree if you trust every device on it.",
+              ]
+            : []),
+          ...(flagged ? [flagged] : []),
+          ...(input.authType === "basic" ? [`User name: ${login}`] : []),
+          auth,
+          ...oauthLines.slice(1),
+          readOnly
+            ? "Read-only: only the tools that read calendars and reminders"
+            : "Can change things: its tools may add, change, move and delete events and reminders, and make calendars; they invite nobody",
           ...(input.description ? [`Description: ${input.description}`] : []),
           asker,
         ],
@@ -1669,7 +1707,7 @@ async function secretForRegister(
         ? `Client secret for the OAuth client ${asked.oauthClientId ?? "?"}.`
         : asked.authType === "basic"
           ? `The password for ${asked.authUsername ?? "?"} at ${asked.name}.`
-          : asked.mail
+          : asked.mail || asked.calendar
             ? `Sent to ${asked.name} as a bearer token.`
             : `Sent to ${asked.name} in the ${asked.authHeaderName || "Authorization"} header.`,
   })
@@ -1727,19 +1765,29 @@ async function executeRegister(
             authUsername: asked.authUsername ?? null,
             ...secretFields(asked, secret.id),
           })
-        : await createServer(ctx, {
-            name: asked.name,
-            url: asked.url,
-            description: asked.description,
-            authType: asked.authType,
-            authHeaderName: asked.authHeaderName,
-            authValueTemplate: asked.authValueTemplate,
-            authExtraHeaders: asked.authExtraHeaders,
-            ...secretFields(asked, secret.id),
-            // The address is the assistant's: public ones only, until the
-            // owner allows private addresses on the server's page.
-            publicOnly: true,
-          })
+        : asked.calendar
+          ? await createCalendarAccount(ctx, {
+              name: asked.name,
+              description: asked.description,
+              url: asked.url,
+              readOnly: asked.calendar.readOnly,
+              authType: asked.authType as "basic" | "header" | "oauth",
+              authUsername: asked.authUsername ?? null,
+              ...secretFields(asked, secret.id),
+            })
+          : await createServer(ctx, {
+              name: asked.name,
+              url: asked.url,
+              description: asked.description,
+              authType: asked.authType,
+              authHeaderName: asked.authHeaderName,
+              authValueTemplate: asked.authValueTemplate,
+              authExtraHeaders: asked.authExtraHeaders,
+              ...secretFields(asked, secret.id),
+              // The address is the assistant's: public ones only, until the
+              // owner allows private addresses on the server's page.
+              publicOnly: true,
+            })
   } catch (error) {
     // The secret was typed in for this server alone.
     if (secret.saved) {

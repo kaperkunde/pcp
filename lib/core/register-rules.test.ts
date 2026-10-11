@@ -260,11 +260,64 @@ describe("checkRegisterShape", () => {
       )
     })
 
-    it("keeps read_only for an API or a mail account", () => {
+    it("keeps read_only for an API, a mail or a calendar account", () => {
       expect(check("mcp", { ...mcp, read_only: true })).toMatch(
-        /read_only is for an API.*or a mail account/,
+        /read_only is for an API.*a mail account.*or a calendar account/,
       )
       expect(check("api", { ...api, read_only: false })).toBeNull()
     })
+  })
+})
+
+describe("a calendar account", () => {
+  const caldav = { url: "caldav.icloud.com" }
+  const basic = {
+    auth_type: "basic" as const,
+    username: "ada@icloud.com",
+    secret: "iCloud app password",
+  }
+
+  it("is the kind named, and needs its server", () => {
+    expect(resolveKind({ kind: "caldav" })).toBe("caldav")
+    expect(checkRegisterShape("caldav", { ...basic })).toMatch(
+      /needs its CalDAV server in url, like caldav\.icloud\.com/,
+    )
+  })
+
+  it("signs in with a login, a bearer token or OAuth, and may be read-only", () => {
+    expect(checkRegisterShape("caldav", { ...caldav, ...basic })).toBeNull()
+    expect(
+      checkRegisterShape("caldav", { ...caldav, ...basic, read_only: true }),
+    ).toBeNull()
+    expect(
+      checkRegisterShape("caldav", {
+        ...caldav,
+        auth_type: "header",
+        secret: "Calendar token",
+      }),
+    ).toBeNull()
+    expect(
+      checkRegisterShape("caldav", { ...caldav, auth_type: "oauth" }),
+    ).toBeNull()
+  })
+
+  it("is refused without a sign-in, with a header of its own, or with mail's arguments", () => {
+    expect(checkRegisterShape("caldav", caldav)).toMatch(
+      /signs in: pass auth_type basic .*app-specific password/,
+    )
+    expect(
+      checkRegisterShape("caldav", {
+        ...caldav,
+        auth_type: "header",
+        secret: "token",
+        header_name: "X-Token",
+      }),
+    ).toMatch(/Authorization: Bearer/)
+    expect(
+      checkRegisterShape("caldav", { ...caldav, ...basic, smtp_url: "x" }),
+    ).toMatch(/smtp_url is for kind imap/)
+    expect(
+      checkRegisterShape("caldav", { ...caldav, ...basic, mail_from: "a@b.c" }),
+    ).toMatch(/mail_from is for kind jmap or imap/)
   })
 })

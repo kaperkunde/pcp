@@ -26,6 +26,7 @@ import {
   type PermissionExecutor,
   type RegisterArgs,
 } from "./permissions"
+import { createFakeCalDav } from "./caldav/fake-caldav"
 import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
 import { startTestApi, type TestApi } from "./openapi/test-api"
 import { createSecret, revealSecret } from "./secrets"
@@ -2051,6 +2052,67 @@ describe("an API with a user name and password", () => {
       url: "https://api.example.com/v1",
       publicOnly: true,
     })
+  })
+})
+
+describe("a calendar account an assistant proposes", () => {
+  const PASSWORD = "abcd-efgh-ijkl-mnop"
+  const BASIC = `Basic ${Buffer.from(`ada@icloud.com:${PASSWORD}`).toString("base64")}`
+
+  it("is added with the typed password once the owner agrees, with its tools read", async () => {
+    const fake = createFakeCalDav({
+      base: "/dav",
+      authorize: (header) => header === BASIC,
+    })
+    fake.addCalendar({ id: "home", name: "Home", components: ["VEVENT"] })
+    const api = await startTestApi((request, res) => {
+      const answer = fake.handle(request)
+      res.statusCode = answer?.status ?? 404
+      res.end(answer?.body ?? "")
+    })
+
+    try {
+      const { ctx, scope } = await setup()
+      await withPermission(scope, {
+        kind: "register",
+        input: {
+          name: "iCloud",
+          description: "",
+          url: `${api.origin}/dav/`,
+          authType: "basic",
+          authUsername: "ada@icloud.com",
+          authSecretId: null,
+          secretName: "iCloud app password",
+          newSecretName: "iCloud app password",
+          oauthScope: null,
+          calendar: { readOnly: false, privateAddress: null },
+        },
+      })
+      expect(fake.requests).toHaveLength(0)
+
+      const added = await decidePermission(
+        ctx,
+        await onlyRequestId(),
+        "allow_once",
+        { publicUrl: PUBLIC_URL, secretValue: PASSWORD },
+        { callTool: callServerTool, syncTools: syncServerTools },
+      )
+
+      expect(textOf(added)).toMatch(/Added iCloud as "icloud" with 13 tools/)
+      expect(textOf(added)).not.toContain(PASSWORD)
+      const account = await db().mcpServer.findFirstOrThrow({
+        where: { name: "iCloud" },
+      })
+      expect(account).toMatchObject({
+        kind: "caldav",
+        authUsername: "ada@icloud.com",
+        status: "ok",
+        davHomeUrl: `${api.origin}/dav/123456/calendars/`,
+      })
+      expect(fake.requests[0]!.authorization).toBe(BASIC)
+    } finally {
+      await api.close()
+    }
   })
 })
 

@@ -24,6 +24,7 @@ import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { invalid, isPcpError, PcpError } from "./errors"
+import { callCalendarTool, syncCalendarTools } from "./caldav/accounts"
 import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
 import type { SshIdentity } from "./ssh/client"
@@ -51,6 +52,7 @@ import {
 } from "./secrets"
 import {
   extraAuthHeaders,
+  isCalendarKind,
   isMailKind,
   isSshKind,
   kindNoun,
@@ -75,9 +77,10 @@ import {
  * endpoints (kind "openapi") branch off to lib/core/endpoints.ts, which
  * makes plain HTTP calls with the header this module builds; mail accounts
  * (kinds "jmap" and "imap") to lib/core/mail/accounts.ts, with the header
- * or login this module builds, or an OAuth token it renews; SSH servers
- * (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the server,
- * decrypted here.
+ * or login this module builds, or an OAuth token it renews; calendar
+ * accounts (kind "caldav") to lib/core/caldav/accounts.ts, the same way;
+ * SSH servers (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the
+ * server, decrypted here.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -812,10 +815,12 @@ async function credential(
   }
 
   // An MCP server's OAuth token is the SDK transport's to send; an API
-  // endpoint's and a mail account's, PCP's own.
+  // endpoint's, a mail account's and a calendar account's, PCP's own.
   if (
     server.authType === "oauth" &&
-    (server.kind === "openapi" || isMailKind(server.kind))
+    (server.kind === "openapi" ||
+      isMailKind(server.kind) ||
+      isCalendarKind(server.kind))
   ) {
     const token = await endpointToken(ctx, server, {
       publicUrl: publicUrl ?? "",
@@ -912,9 +917,9 @@ async function basicCredential(
 }
 
 /**
- * What a mail account signs in with: its login, its bearer token, or the
- * OAuth token PCP holds for it, renewed by onUnauthorized when the server
- * refuses it (null then means the owner has to connect it again).
+ * What a mail or calendar account signs in with: its login, its bearer
+ * token, or the OAuth token PCP holds for it, renewed by onUnauthorized when
+ * the server refuses it (null then means the owner has to connect it again).
  */
 async function mailCredential(
   ctx: VaultContext,
@@ -1142,7 +1147,7 @@ export async function syncServerTools(
     })
   }
 
-  if (isMailKind(server.kind)) {
+  if (isMailKind(server.kind) || isCalendarKind(server.kind)) {
     let signIn: MailCredential
 
     try {
@@ -1153,7 +1158,9 @@ export async function syncServerTools(
       return { ...result, toolCount: 0 }
     }
 
-    return syncMailTools(server, signIn)
+    return isCalendarKind(server.kind)
+      ? syncCalendarTools(server, signIn)
+      : syncMailTools(server, signIn)
   }
 
   let connection: UpstreamConnection | null = null
@@ -1414,7 +1421,7 @@ async function dispatchCall(
     })
   }
 
-  if (isMailKind(server.kind)) {
+  if (isMailKind(server.kind) || isCalendarKind(server.kind)) {
     let signIn: MailCredential
 
     try {
@@ -1432,6 +1439,16 @@ async function dispatchCall(
           ? "unauthorized"
           : "upstream",
         failure.message,
+      )
+    }
+
+    if (isCalendarKind(server.kind)) {
+      // Nothing a calendar tool takes is a file: a handle stands for its text.
+      return callCalendarTool(
+        server,
+        toolName,
+        open ? await resolveHandles(args, open) : args,
+        { credential: { ...signIn, redact: [...signIn.redact, ...placed] } },
       )
     }
 

@@ -23,6 +23,7 @@ lib/server/          Next-specific glue: cookies, request headers, public URL
 lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   openapi/           OpenAPI schema → tools and call plans; building and sending the request
   mail/              Mail accounts: JMAP and IMAP/SMTP behind one set of mail tools
+  caldav/            Calendar accounts: calendars and reminders over CalDAV
   fetch/             web_fetch: the request, the page, which level applies
   code/              run_code: QuickJS, the bridge to the tools, the sandbox's socket
   browser/           The headless Chromium: runtime and gate, proxy, profile, tools, install
@@ -577,6 +578,110 @@ in `upstream.ts`, as an OAuth API endpoint's does (`endpointToken`): renewed a
 minute before it runs out, and once more when the server refuses it. When that
 fails the account needs connecting, and the gateway answers with the link to
 connect it.
+
+## Calendar accounts
+
+A calendar account is a server row of kind `caldav` with a fixed set of tools
+(`lib/core/caldav/tools.ts`), shaped around what an assistant is asked to do
+rather than around WebDAV: `list_calendars`, `list_events`, `get_event`,
+`find_free_time`, `create_event`, `update_event`, `delete_event`,
+`list_reminders`, `create_reminder`, `update_reminder`, `complete_reminder`,
+`delete_reminder` and `create_calendar`. No tool takes a WebDAV method or
+raw iCalendar, and none adds attendees: a server that schedules (iCloud does)
+would email them invitations. Read-only leaves out the tools that change
+anything, and refuses them if called anyway. `mcp_tool.operation` is null; a
+call is dispatched by name. Only the owner changes an account; an assistant
+can propose one through `register_server` (kind `caldav`).
+
+**Finding the calendars** (`caldav/client.ts`): `url` is what the owner
+typed, a CalDAV server (`https://caldav.icloud.com`) or a home on it. PCP
+asks it for `calendar-home-set`, or for the `current-user-principal` and then
+the principal's home (RFC 4791 6.2.1, RFC 5397); a server root that answers
+404 or 405 is asked at `/.well-known/caldav` (RFC 6764). Redirects are
+followed only there, on the same origin, at most three; any other is named
+for the owner to enter instead. The home is kept (`dav_home_url`), found again
+when the address or sign-in changes, and once more when it answers 404. Every
+address a server names (the principal, the home, an object's href) is taken
+only on the typed origin, or over `https://` on a host under the typed host's
+own domain (`caldav/addresses.ts: acceptedAddress`): iCloud answers at
+`caldav.icloud.com` and keeps each account's calendars on
+`p<n>-caldav.icloud.com`. A typed host with no domain to share (two labels, or
+right under a country's second level, as `example.co.uk`) allows its own
+origin only, and a home on another host is reached on public addresses only.
+`http://` is for a server on the owner's own network only, checked when the
+address is saved or proposed and on every request, as a JMAP session URL is.
+
+**Reading**: the calendars are one PROPFIND (depth 1) on the home: their
+names, what each holds (`supported-calendar-component-set`: events, reminders
+or both), color and order (Apple's), time zone and whether this sign-in may
+write (`current-user-privilege-set`). Events between two times are a
+calendar-query REPORT with a time range; reminders one for VTODO, asking the
+server for the open ones (no COMPLETED) and for all of them when it does not
+take that filter. Answers are capped (8 MB a REPORT, 1 MB an object) and read
+as untrusted XML (`caldav/xml.ts`: fast-xml-parser, no document type,
+character references decoded once, as iCloud writes `&#13;`). One calendar
+that cannot be searched is listed under `skipped`; the others still answer.
+
+**Time** (`caldav/zones.ts`, `caldav/ical.ts`): iCalendar writes most times
+as a wall clock in a named zone, and a recurring event repeats in that wall
+clock across summer time. ical.js parses the objects and steps through
+recurrence rules in wall time; PCP turns wall times into instants itself, an
+IANA TZID through Node's Intl database (also behind a prefix such as
+`/mozilla.org/…/Europe/Berlin`), any other (an Exchange name) through the
+VTIMEZONE the object carries, never through ical.js's global registry, so one
+server's VTIMEZONE never changes how another account's times read. A floating
+time or a date is read in the calendar's time zone, else the `timezone`
+argument, else the machine's. A series expands with its EXDATEs taken out and
+its exceptions (RECURRENCE-ID) in place of the occurrences they change, an
+UNTIL in UTC bounded by its instant, at most `MAX_RECURRENCE_STEPS` steps.
+Each occurrence of a series carries `occurrence`, its original start (a date,
+or a UTC instant), which the tools take back to change or delete that one
+alone. Answers give times in ISO 8601 with their offset, an all-day event as
+dates with its last day inclusive.
+
+**Writing** (`caldav/compose.ts`): a new event or reminder is a calendar object
+of its own (`<UUID>.ics`), PUT with `If-None-Match: *`; a change reads the
+object, changes it and PUTs it back with `If-Match` and the ETag read, so a
+change made in between is never overwritten (412 is an error answer saying to
+read it again); a delete sends the ETag too. A change is made to the object as
+the server sent it, so what PCP does not know about (attendees, another app's
+properties, attachments) stays. Times PCP writes are in an IANA zone with a
+VTIMEZONE made from the same database (yearly rules where the zone follows
+one, its changes year by year otherwise), or dates for all-day values; an
+UNTIL is a UTC time for a timed series. One occurrence changed (`scope`
+"this") becomes an exception; a new start for one occurrence said for the
+whole series ("all") moves every occurrence by as much; `recurrence: null`
+ends a series with its exceptions. Deleting one occurrence is an EXDATE.
+Moving to another calendar writes the copy first and deletes the original
+after, so a failure in between leaves two, never none. Completing a repeating
+reminder moves its due date (and its alert) on to the next occurrence and
+keeps it open, as Apple's Reminders does. `create_calendar` is MKCALENDAR in
+the home with one component.
+
+**iCloud**: an app-specific password (the Apple ID's own is refused, and the
+account's status says so), `https://caldav.icloud.com` as the address. iCloud
+serves over CalDAV only the reminder lists it keeps as tasks; lists upgraded
+in Apple's Reminders app since iOS 13 are not there, and the tools say so when
+an account has no reminder list.
+
+`upstream.ts` builds the credential (`DavCredential`, the same shape as a
+mail account's): Basic for a login, a bearer header, or an OAuth token from
+`credential()`, renewed once when the server refuses it. Nothing under
+`caldav/` reads a secret, and every answer is scrubbed of the credential.
+Failures: refused credentials mark the account `auth_required` (with OAuth,
+needs connecting), an unreachable server `error`; a request the server refuses
+(no such event, a read-only calendar, a changed object) is an error answer and
+leaves the account as it is.
+
+**Proposing one** is `register_server` with kind `caldav`, a `url`
+(`caldav.icloud.com` alone means `https://` and the root), `read_only` and an
+`auth_type` (basic, header or oauth, never none; no header of its own). It is
+a permission request like any new server: `summarizeRow` shows the owner the
+address, the user name, how PCP signs in and whether it can change things; a
+password PCP does not hold yet is typed in on the approval page; and
+`executeRegister` creates the account with `createCalendarAccount` and finds
+its calendars. Nothing connects before the owner agrees; a host on a private
+or local address is flagged to the owner alone, as for IMAP.
 
 ## SSH servers
 

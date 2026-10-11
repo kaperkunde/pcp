@@ -25,7 +25,8 @@ import {
  * The registry of servers a vault can reach, and how each one is
  * authenticated to. A server is an MCP server, an API endpoint (kind
  * "openapi", lib/core/endpoints.ts), a mail account (kinds "jmap" and
- * "imap", lib/core/mail/) or an SSH server (kind "ssh", lib/core/ssh/).
+ * "imap", lib/core/mail/), a calendar account (kind "caldav",
+ * lib/core/caldav/) or an SSH server (kind "ssh", lib/core/ssh/).
  * Talking to them is lib/core/upstream.ts.
  */
 
@@ -39,7 +40,7 @@ export type AuthType = "none" | "header" | "oauth" | "basic"
 export type StoredAuthType = AuthType | "key"
 
 export type ServerKind =
-  "mcp" | "openapi" | "jmap" | "imap" | "ssh" | "browser" | "wrapper"
+  "mcp" | "openapi" | "jmap" | "imap" | "caldav" | "ssh" | "browser" | "wrapper"
 
 export type MailKind = Extract<ServerKind, "jmap" | "imap">
 
@@ -48,6 +49,7 @@ const SERVER_KINDS: readonly ServerKind[] = [
   "openapi",
   "jmap",
   "imap",
+  "caldav",
   "ssh",
   "browser",
   "wrapper",
@@ -80,6 +82,11 @@ export function isMailKind(kind: string): kind is MailKind {
   return kind === "jmap" || kind === "imap"
 }
 
+/** A calendar account: calendars and reminders over CalDAV. */
+export function isCalendarKind(kind: string): kind is "caldav" {
+  return kind === "caldav"
+}
+
 /** A server PCP runs commands on over SSH. */
 export function isSshKind(kind: string): kind is "ssh" {
   return kind === "ssh"
@@ -93,6 +100,8 @@ export function kindNoun(kind: string): string {
     case "jmap":
     case "imap":
       return "a mail account"
+    case "caldav":
+      return "a calendar account"
     case "ssh":
       return "an SSH server"
     case "browser":

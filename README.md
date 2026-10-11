@@ -56,6 +56,11 @@ on its own, what it has to ask you about first, and what it cannot touch.
   Fastmail, Cyrus) or IMAP with SMTP, or let an assistant propose one for you
   to agree to, and an assistant can search, read, file, draft and send its
   mail, with the same tools whichever protocol it speaks.
+- **Calendars and reminders, iCloud's included.** Add a calendar account over
+  CalDAV (iCloud with an app-specific password, Fastmail, Nextcloud) and an
+  assistant can see what is on when, find free time, schedule, move and
+  change events (one occurrence of a repeating one, or the series), and keep
+  reminders, with the same tools for every account.
 - **Commands over SSH, with a key.** Add an SSH server, put the key PCP makes
   for it in the login's `authorized_keys`, and an assistant can run commands
   there, each one shown to you first unless you allow it. No passwords; PCP
@@ -100,7 +105,7 @@ on its own, what it has to ask you about first, and what it cannot touch.
      --header "Authorization: Bearer pcp_…"
    ```
 
-Then add the servers, APIs and mail accounts you use under **Servers**, or
+Then add the servers, APIs, mail and calendar accounts you use under **Servers**, or
 ask the assistant to find one and propose it to you. The sections below have
 the details, and how to reach PCP from outside your home.
 
@@ -279,7 +284,7 @@ machine's memory, or kept results more than the disk.
 ### Starting over or uninstalling
 
 **Settings → Delete vault** deletes everything PCP holds (servers, API
-endpoints, mail accounts, secrets, API tokens, memories, the browser's
+endpoints, mail and calendar accounts, secrets, API tokens, memories, the browser's
 sign-ins, the request log, your password and recovery key) once you tick the
 box and confirm with your password or Touch ID. PCP is then back at its setup
 page. This machine's settings (pcp.gg, Dynamic DNS, HTTPS, updates, cleanup,
@@ -377,7 +382,28 @@ To remove PCP itself:
    server, the user name and how PCP signs in, type the app password on that
    page (it never passes through the assistant) or connect it with OAuth, and
    nothing exists until you agree.
-5. **SSH servers.** Add one with its host, port and the login PCP uses. PCP
+5. **Calendar accounts.** Add one under **Servers → Add → Calendar account**:
+   **iCloud** (`https://caldav.icloud.com`, your Apple ID and an
+   [app-specific password](https://support.apple.com/102654), never your Apple
+   ID password), **Fastmail**, or any other CalDAV server (Nextcloud,
+   Radicale, Baïkal) by its address, signing in with a user name and password,
+   a bearer token or OAuth. The password can be typed into the form, where it
+   is saved under Secrets. PCP finds the calendars itself and sends your
+   sign-in only to that host and, over `https://`, others of its domain (iCloud
+   keeps each account's calendars on `p<n>-caldav.icloud.com`). Every account
+   offers the same tools: list calendars and reminder lists, list events
+   between two times (each occurrence of a repeating event on its own, in its
+   own time zone across summer time), read one, find free time within working
+   hours, create, change, move to another calendar and delete events (one
+   occurrence, or the whole series), list, create, change and complete
+   reminders (a repeating one moves on to its next due date), and make a new
+   calendar or reminder list. Changes are written only over the copy PCP read
+   (ETags), so nothing made in between is overwritten, and no tool invites
+   anyone. **Read-only** offers only the tools that read. iCloud serves over
+   CalDAV only the reminder lists it keeps as tasks: lists upgraded in Apple's
+   Reminders app stay there. An assistant can propose an account with
+   `register_server` (kind `caldav`), as for a mail account.
+6. **SSH servers.** Add one with its host, port and the login PCP uses. PCP
    makes a key of its own for the server and shows it on the server's page:
    put it in that login's `~/.ssh/authorized_keys` and choose **Check
    sign-in**. PCP never uses a password. It pins the server's host key the
@@ -386,7 +412,7 @@ To remove PCP itself:
    `run_command`, runs a command and returns the exit code, standard output
    and standard error; leave it on **Ask you first** and you see each command
    before it runs. Only you add SSH servers; an assistant cannot propose one.
-6. **API tokens.** Create a token per assistant or machine; PCP asks for your
+7. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password (or Touch ID in the Mac app) to make one. A token can reach every
    server and endpoint or only the ones you pick, and can expire. Revoking it
    destroys its copy of the vault key. A token's page sets each tool to
@@ -394,7 +420,7 @@ To remove PCP itself:
    at once, or copies all of it from another token. Tick **All tokens** beside a
    level to make it the one every token follows; a token's own level still wins
    over it.
-7. **Connect an assistant** to `https://<your-pcp>/mcp`, in one of two ways.
+8. **Connect an assistant** to `https://<your-pcp>/mcp`, in one of two ways.
 
    **With a token.** Give it the token as a bearer token. For Claude Code:
 
@@ -423,18 +449,18 @@ To remove PCP itself:
 The assistant then sees a short description of the servers behind the token
 and these tools:
 
-| Tool                  | What it does                                                                                                                                                      |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                                                                            |
-| `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                          |
-| `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                      |
-| `call_tool`           | Runs it, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer (some parts only, base64 decoded, parts as handles).             |
-| `call_read_only_tool` | `call_tool` for a tool its server marks read-only (an API's GET, a mail search, an MCP tool with `readOnlyHint`); anything else is refused.                       |
-| `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                         |
-| `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                   |
-| `read_result`         | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                              |
-| `register_server`     | Proposes a new MCP server, an API from an OpenAPI 3 schema, or a mail account (JMAP or IMAP), with no auth, a secret by name, a user name and password, or OAuth. |
-| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                       |
+| Tool                  | What it does                                                                                                                                                                                  |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                                                                                                        |
+| `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                                                      |
+| `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                                                  |
+| `call_tool`           | Runs it, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer (some parts only, base64 decoded, parts as handles).                                         |
+| `call_read_only_tool` | `call_tool` for a tool its server marks read-only (an API's GET, a mail search, an MCP tool with `readOnlyHint`); anything else is refused.                                                   |
+| `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                                                     |
+| `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                                               |
+| `read_result`         | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                                                          |
+| `register_server`     | Proposes a new MCP server, an API from an OpenAPI 3 schema, a mail account (JMAP or IMAP) or a calendar account (CalDAV), with no auth, a secret by name, a user name and password, or OAuth. |
+| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                   |
 
 Options on a token's page, each off until you tick it, add more tools,
 described further down:
@@ -480,7 +506,7 @@ eight hours) lets the calls after it run without asking until that time is up,
 and **Not now** runs nothing. What you allowed for a while is listed on the
 token's page under **Allowed for now**, where **End now** takes it back; it
 changes none of the token's settings and never lifts a block. A
-server, API or mail account an assistant proposes is only added once you
+server, API, mail or calendar account an assistant proposes is only added once you
 agree; an OAuth one is then connected from a link to its page in PCP, where
 PCP registers itself with the provider if the provider lets apps do that.
 

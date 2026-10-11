@@ -13,6 +13,10 @@ import {
 } from "@modelcontextprotocol/server"
 import { z } from "zod"
 
+import {
+  createFakeCalDav,
+  type FakeCalDav,
+} from "../../lib/core/caldav/fake-caldav"
 import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
 
 /**
@@ -86,6 +90,10 @@ import { createFakeJmap, type FakeJmap } from "../../lib/core/mail/fake-jmap"
  *   password (Basic). `/oauth/jmap/*` is the same behind the OAuth
  *   authorization server above; `tokenLifetime.seconds` sets how long the
  *   tokens it hands out last, and `tokenRequests` records each grant.
+ * - `/caldav/*` — a CalDAV server shaped like iCloud's
+ *   (lib/core/caldav/fake-caldav.ts) for calendar accounts, signing in
+ *   ada@icloud.com with `expectedToken` as the app password (Basic), with a
+ *   Home calendar, a read-only Holidays one and a Reminders list.
  * - `/releases/latest` — GitHub's latest release, as PCP's update check asks
  *   for it (PCP_RELEASES_URL in playwright.config.ts, on the fixed port
  *   `startUpstream({ port })` takes). It answers `releases.latest` and
@@ -159,6 +167,9 @@ export type Upstream = {
   /** The JMAP servers' mail, what they sent and every request they saw. */
   jmap: FakeJmap
   oauthJmap: FakeJmap
+  /** The CalDAV server's address, and its calendars and requests. */
+  caldavUrl: string
+  caldav: FakeCalDav
   /** How long the tokens /token hands out last; tests shorten it. */
   tokenLifetime: { seconds: number }
   /** Every grant /token was asked for, in order. */
@@ -768,6 +779,32 @@ export async function startUpstream({
       return Boolean(token && issuedTokens.has(token))
     },
   })
+  const caldav = createFakeCalDav({
+    base: "/caldav",
+    authorize: (header) =>
+      header ===
+      `Basic ${Buffer.from(`ada@icloud.com:${expectedToken}`).toString("base64")}`,
+  })
+  caldav.addCalendar({
+    id: "home",
+    name: "Home",
+    components: ["VEVENT"],
+    timezone: "Europe/Amsterdam",
+    order: 1,
+  })
+  caldav.addCalendar({
+    id: "holidays",
+    name: "Holidays",
+    components: ["VEVENT"],
+    readOnly: true,
+    order: 2,
+  })
+  caldav.addCalendar({
+    id: "tasks",
+    name: "Reminders",
+    components: ["VTODO"],
+    order: 3,
+  })
   let origin = ""
 
   // The Authorization header of the request being served, read by the
@@ -1167,6 +1204,26 @@ export async function startUpstream({
         })
       }
 
+      const calendarAnswer = caldav.handle({
+        method: req.method ?? "GET",
+        url: req.url ?? "/",
+        headers: req.headers,
+        body,
+      })
+
+      if (calendarAnswer) {
+        res.statusCode = calendarAnswer.status
+
+        for (const [name, value] of Object.entries(
+          calendarAnswer.headers ?? {},
+        )) {
+          res.setHeader(name, value)
+        }
+
+        res.setHeader("content-type", calendarAnswer.type ?? "text/plain")
+        return res.end(calendarAnswer.body ?? "")
+      }
+
       for (const fake of [jmap, oauthJmap]) {
         const answer = fake.handle({
           method: req.method ?? "GET",
@@ -1331,6 +1388,8 @@ export async function startUpstream({
     oauthJmapSessionUrl: `${origin}/oauth/jmap/session`,
     jmap,
     oauthJmap,
+    caldavUrl: `${origin}/caldav/`,
+    caldav,
     tokenLifetime,
     tokenRequests,
     expectedToken,

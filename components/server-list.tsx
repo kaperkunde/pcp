@@ -24,7 +24,8 @@ export type ServerListItem = Pick<
   | "toolCount"
 >
 
-type Filter = "all" | "mcp" | "api" | "mail" | "ssh" | "wrapper" | "browser"
+type Filter =
+  "all" | "mcp" | "api" | "mail" | "calendar" | "ssh" | "wrapper" | "browser"
 
 const FILTERS: Array<{
   value: Exclude<Filter, "all">
@@ -34,6 +35,7 @@ const FILTERS: Array<{
   { value: "mcp", label: "MCP", kinds: ["mcp"] },
   { value: "api", label: "APIs", kinds: ["openapi"] },
   { value: "mail", label: "Mail", kinds: ["jmap", "imap"] },
+  { value: "calendar", label: "Calendars", kinds: ["caldav"] },
   { value: "ssh", label: "SSH", kinds: ["ssh"] },
   { value: "wrapper", label: "Wrappers", kinds: ["wrapper"] },
   { value: "browser", label: "Browser", kinds: ["browser"] },
@@ -100,7 +102,8 @@ function ServerRow({ server }: { server: ServerListItem }) {
     server.readOnly &&
     (server.kind === "openapi" ||
       server.kind === "jmap" ||
-      server.kind === "imap")
+      server.kind === "imap" ||
+      server.kind === "caldav")
 
   return (
     <ListRow
