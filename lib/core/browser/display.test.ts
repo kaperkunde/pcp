@@ -300,21 +300,35 @@ document.title = JSON.stringify({
         rules: null,
         privateAllowed: true,
       })
-      await tab.page.goto(`${api.origin}/hints`)
-      await vi.waitFor(async () => {
-        expect(await tab.page.title()).not.toBe("?")
-      })
-      const seen = JSON.parse(await tab.page.title()) as {
-        userAgent: string
-        platformVersion: string
-        architecture: string
+      const hints = async (page: typeof tab.page) => {
+        await page.goto(`${api.origin}/hints`)
+        await vi.waitFor(async () => {
+          expect(await page.title()).not.toBe("?")
+        })
+        return JSON.parse(await page.title()) as {
+          userAgent: string
+          platformVersion: string
+          architecture: string
+        }
       }
+      const seen = await hints(tab.page)
+      // What the same Chromium says in a context PCP set nothing on, its
+      // page answered here rather than through the vault's proxy.
+      const plain = await vault.browser.newContext()
+      const page = await (await fetch(`${api.origin}/hints`)).text()
+      await plain.route("**/*", (route) =>
+        route.fulfill({ contentType: "text/html", body: page }),
+      )
+      const own = await hints(await plain.newPage()).finally(() =>
+        plain.close(),
+      )
 
       expect(seen.userAgent).toContain("Chrome/")
       expect(seen.userAgent).not.toContain("Headless")
       // Playwright builds the hints of a replaced user agent from the string,
-      // with no platform version; Chromium's own always has one.
-      expect(seen.platformVersion).not.toBe("")
+      // with no platform version (Chromium 141 has one on Linux; 153 reports
+      // none there itself), so the tab's must be Chromium's own.
+      expect(seen).toEqual(own)
       expect(seen.architecture).not.toBe("")
     })
 
