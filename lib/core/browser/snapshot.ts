@@ -1,4 +1,4 @@
-import type { Locator, Page } from "playwright-core"
+import type { Locator, Page } from "patchright-core"
 
 import { ACTION_TIMEOUT_MS, MAX_FIND_MATCHES } from "./limits"
 

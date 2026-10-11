@@ -160,3 +160,114 @@ test("a memory the owner writes and marks comes with the instructions", async ({
     `<memory path="/memories/shared/${voice}">\nSpeak like a pirate.\n</memory>`,
   )
 })
+
+test("the owner picks several memories, gives them to one token or to all, and deletes them together", async ({
+  page,
+  baseURL,
+}) => {
+  const OTHER_NAME = `Memory reader ${RUN}`
+  const one = `/memories/e2e-${RUN}-bulk/one.md`
+  const two = `/memories/e2e-${RUN}-bulk/two.md`
+  const sharedOne = `/memories/shared/e2e-${RUN}-bulk/one.md`
+  const sharedTwo = `/memories/shared/e2e-${RUN}-bulk/two.md`
+  const bar = page.getByTestId("memories-bulk")
+  const pick = (path: string) =>
+    page.getByLabel(`Select ${path}`, { exact: true })
+  const access = page.getByLabel("Who reads the selected memories")
+
+  // A second token that keeps memories, to give some to.
+  const other = (
+    await connectAssistant(page, OTHER_NAME, { keepMemories: true })
+  ).token
+
+  for (const [path, text] of [
+    [one, "First of two."],
+    [two, "Second of two."],
+  ]) {
+    const saved = await callTool(baseURL!, token, "memory", {
+      command: "create",
+      path,
+      file_text: text,
+    })
+    expect(toolText(saved)).toBe(`Saved ${path}.`)
+  }
+
+  await page.goto("/memories")
+  await expect(bar.getByText("None selected")).toBeVisible()
+  await expect(bar.getByRole("button", { name: "Give access" })).toBeDisabled()
+  await expect(
+    bar.getByRole("button", { name: "Delete selected" }),
+  ).toBeDisabled()
+
+  // Select all ticks every memory on the page, and unticking clears them.
+  const rows = await page.getByTestId("memory").count()
+  const everything = page.getByLabel("Select all", { exact: true })
+  await everything.check()
+  await expect(bar.getByText(`${rows} selected`)).toBeVisible()
+  await everything.uncheck()
+  await expect(bar.getByText("None selected")).toBeVisible()
+
+  // To one token: only it reads them afterwards.
+  page.once("dialog", (dialog) => dialog.accept())
+  await pick(one).check()
+  await pick(two).check()
+  await expect(bar.getByText("2 selected")).toBeVisible()
+  await access.selectOption({ label: `Only ${OTHER_NAME}` })
+  await bar.getByRole("button", { name: "Give access" }).click()
+  await expect(bar.getByRole("status")).toContainText(
+    "Changed who reads 2 memories.",
+  )
+  await expect(bar.getByText("None selected")).toBeVisible()
+  await expect(
+    page
+      .getByTestId("memory")
+      .filter({ hasText: one })
+      .getByText(`Only ${OTHER_NAME}`),
+  ).toBeVisible()
+
+  const theirs = await callTool(baseURL!, other, "memory", {
+    command: "view",
+    path: one,
+  })
+  expect(toolText(theirs)).toContain("First of two.")
+  const gone = await callTool(baseURL!, token, "memory", {
+    command: "view",
+    path: one,
+  })
+  expect(gone.body.result?.isError).toBe(true)
+
+  // To all tokens: shared, so the first token reads them again.
+  page.once("dialog", (dialog) => dialog.accept())
+  await pick(one).check()
+  await pick(two).check()
+  await access.selectOption({ label: "All tokens (shared)" })
+  await bar.getByRole("button", { name: "Give access" }).click()
+  await expect(bar.getByRole("status")).toContainText(
+    "Changed who reads 2 memories.",
+  )
+  await expect(
+    page.getByTestId("memory").filter({ hasText: sharedOne }),
+  ).toBeVisible()
+  const shared = await callTool(baseURL!, token, "memory", {
+    command: "view",
+    path: sharedTwo,
+  })
+  expect(toolText(shared)).toContain("Second of two.")
+
+  // Delete them together; nothing else on the page goes.
+  page.once("dialog", (dialog) => dialog.accept())
+  await pick(sharedOne).check()
+  await pick(sharedTwo).check()
+  await bar.getByRole("button", { name: "Delete selected" }).click()
+  await expect(bar.getByRole("status")).toContainText("Deleted 2 memories.")
+  await expect(
+    page.getByTestId("memory").filter({ hasText: `e2e-${RUN}-bulk` }),
+  ).toHaveCount(0)
+  await expect(page.getByTestId("memory")).toHaveCount(rows - 2)
+
+  const deleted = await callTool(baseURL!, other, "memory", {
+    command: "view",
+    path: sharedOne,
+  })
+  expect(deleted.body.result?.isError).toBe(true)
+})

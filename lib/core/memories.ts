@@ -1408,3 +1408,199 @@ export async function deleteMemory(
     throw notFound("That memory")
   }
 }
+
+/** None of the memories a bulk change names is in the vault any more. */
+function gone(): PcpError {
+  return new PcpError(
+    "not_found",
+    "Those memories are gone already. Reload the page.",
+  )
+}
+
+/** The ids of a bulk change, checked: some, distinct, no more than a vault holds. */
+function pickedIds(ids: string[]): string[] {
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string" || !id)) {
+    throw invalid("Pick the memories first.")
+  }
+
+  const distinct = [...new Set(ids)]
+
+  if (distinct.length === 0) {
+    throw invalid("Pick at least one memory first.")
+  }
+
+  if (distinct.length > MAX_MEMORIES) {
+    throw invalid(`A vault keeps at most ${MAX_MEMORIES} memories.`)
+  }
+
+  return distinct
+}
+
+/**
+ * The owner deletes several memories at once. Ones that are gone already (the
+ * page was open while an assistant deleted them) are no reason to keep the
+ * rest; nothing outside the vault is touched.
+ */
+export async function deleteMemories(
+  ctx: VaultContext,
+  ids: string[],
+): Promise<{ deleted: number }> {
+  const { count } = await db().memory.deleteMany({
+    where: { id: { in: pickedIds(ids) }, vaultId: ctx.vaultId },
+  })
+
+  if (count === 0) {
+    throw gone()
+  }
+
+  return { deleted: count }
+}
+
+/** Who reads a memory after the owner's change: every token, or one. */
+export type MemoryAccess = { to: "all" } | { to: "token"; tokenId: string }
+
+/**
+ * The owner gives several memories to one token (only it reads them) or to
+ * all tokens (shared), in one transaction: either every change is made or
+ * none is, and a path that would be taken says which.
+ *
+ * Only the audience changes, never the words, so nothing is re-encrypted.
+ * What the owner chose for the old readers is not carried over to new ones:
+ * a memory read in every conversation stops being when its readers change,
+ * until the owner ticks it again. A memory an assistant wrote, given to a
+ * token that did not write it, becomes the owner's: they read it and put it
+ * in front of that assistant, and no token is left that wrote it. Memories
+ * that are already where they are asked to go are left alone.
+ */
+export async function setMemoriesAccess(
+  ctx: VaultContext,
+  ids: string[],
+  access: MemoryAccess,
+): Promise<{
+  changed: number
+  unchanged: number
+  /** Changed ones that were read in every conversation and no longer are. */
+  unmarked: number
+}> {
+  const picked = new Set(pickedIds(ids))
+
+  if (access.to === "token") {
+    const token = await db().apiToken.findFirst({
+      where: { id: access.tokenId, vaultId: ctx.vaultId },
+    })
+
+    if (!token) {
+      throw notFound("That token")
+    }
+
+    if (
+      token.revokedAt !== null ||
+      (token.expiresAt !== null && token.expiresAt.getTime() < Date.now())
+    ) {
+      throw invalid(
+        `The token ${token.name} is revoked or expired, so it reads nothing.`,
+      )
+    }
+
+    if (!token.keepMemories) {
+      throw invalid(
+        `The token ${token.name} cannot keep memories, so it would never read these. Turn that on for the token first.`,
+      )
+    }
+  }
+
+  const entries = await load(ctx)
+  const chosen = entries.filter((entry) => picked.has(entry.id))
+
+  if (chosen.length === 0) {
+    throw gone()
+  }
+
+  const shared = access.to === "all"
+  const target = access.to === "token" ? access.tokenId : null
+  const moving = chosen.filter((entry) =>
+    shared
+      ? entry.visibility !== "shared"
+      : entry.visibility !== "private" || entry.tokenId !== target,
+  )
+
+  // What each moved memory is after the change, to check paths against the
+  // vault as it would then be, the other moved ones included.
+  const after = new Map(
+    moving.map((entry) => [
+      entry.id,
+      {
+        visibility: (shared ? "shared" : "private") as MemoryVisibility,
+        tokenId: shared ? entry.tokenId : target,
+      },
+    ]),
+  )
+  const future = entries.map((entry) => ({
+    ...entry,
+    ...after.get(entry.id),
+  }))
+  const clashes = [
+    ...new Set(
+      moving.flatMap((entry) => {
+        const now = after.get(entry.id)!
+
+        return future.some(
+          (other) =>
+            other.id !== entry.id &&
+            same(other, now.visibility, entry.path) &&
+            (now.visibility === "shared" || other.tokenId === now.tokenId),
+        )
+          ? [toolPath(now.visibility, entry.path)]
+          : []
+      }),
+    ),
+  ]
+
+  if (clashes.length > 0) {
+    const shown = clashes.slice(0, 5).join(", ")
+    const more = clashes.length > 5 ? ` and ${clashes.length - 5} more` : ""
+
+    throw new PcpError(
+      "conflict",
+      `Nothing was changed: ${shown}${more} would be taken there. Rename one, or leave it out.`,
+    )
+  }
+
+  if (shared) {
+    for (const entry of moving) {
+      try {
+        checkText(entry.text, "shared")
+      } catch (error) {
+        throw invalid(
+          `Nothing was changed: ${toolPath("private", entry.path)} cannot be shared. ${error instanceof PcpError ? error.message : ""}`.trim(),
+        )
+      }
+    }
+  }
+
+  await db().$transaction(
+    moving.map((entry) => {
+      const now = after.get(entry.id)!
+
+      return db().memory.update({
+        where: { id: entry.id },
+        data: {
+          visibility: now.visibility,
+          tokenId: now.tokenId,
+          always: false,
+          ...(!shared &&
+          entry.tokenId !== target &&
+          entry.author === "assistant"
+            ? { author: "owner" }
+            : {}),
+        },
+      })
+    }),
+  )
+
+  return {
+    changed: moving.length,
+    unchanged: chosen.length - moving.length,
+    unmarked: moving.filter((entry) => entry.always).length,
+  }
+}

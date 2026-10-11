@@ -391,7 +391,8 @@ model McpServer {
   /// mcp: the Streamable HTTP endpoint. openapi: the API's base URL, which
   /// every operation's path is appended to. jmap: the session URL. imap:
   /// imaps://host:port, or imap://host:port for STARTTLS. ssh:
-  /// ssh://host:port. browser: the fixed "pcp:browser", which no request is
+  /// ssh://host:port. caldav: the CalDAV server PCP finds the calendars
+  /// from (https://caldav.icloud.com/). browser: the fixed "pcp:browser", which no request is
   /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise.
   url         String
   enabled     Boolean @default(true)
@@ -442,12 +443,14 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  /// mcp | openapi | jmap | imap | ssh | browser | wrapper. An openapi
+  /// mcp | openapi | jmap | imap | ssh | caldav | browser | wrapper. An openapi
   /// server is an HTTP API described by an OpenAPI schema; its tools are the
   /// schema's operations and PCP calls them directly (lib/core/endpoints.ts).
   /// jmap and imap are mail accounts with a fixed set of mail tools
   /// (lib/core/mail/); ssh is a server PCP runs commands on over SSH
-  /// (lib/core/ssh/); browser is the vault's headless browser, with its own
+  /// (lib/core/ssh/); caldav is a calendar account, calendars and reminders
+  /// over CalDAV with a fixed set of tools (lib/core/caldav/); browser is
+  /// the vault's headless browser, with its own
   /// (lib/core/browser/). A wrapper's tools are programs the owner approved
   /// that call the vault's other tools (lib/core/wrappers/).
   kind       String  @default("mcp")
@@ -456,7 +459,7 @@ model McpServer {
   /// openapi: the schema's address, when it came from one.
   specUrl    String? @map("spec_url")
   /// openapi: offer GET operations only. jmap/imap: offer the tools that
-  /// read mail only.
+  /// read mail only. caldav: the tools that read calendars and reminders.
   readOnly   Boolean @default(false) @map("read_only")
   /// openapi: refuse private, loopback and link-local addresses, for the
   /// schema download and for every call. Set on endpoints an assistant
@@ -493,6 +496,13 @@ model McpServer {
   /// completed a key exchange with it. Another key is refused until the
   /// owner forgets this one (lib/core/ssh/hosts.ts).
   sshHostKey     String? @map("ssh_host_key")
+
+  /// caldav: the calendar home (RFC 4791 6.2.1) the server named when PCP
+  /// last found it from url, where the calendars and reminder lists are.
+  /// Taken only on url's origin, or over https:// on a host in the same
+  /// domain (iCloud's p<n>-caldav.icloud.com); forgotten when the address
+  /// or sign-in changes.
+  davHomeUrl     String? @map("dav_home_url")
 
   tools              McpTool[]
   tokens             ApiTokenServer[]

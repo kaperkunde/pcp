@@ -84,6 +84,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.unstubAllEnvs()
   await closeAllBrowsers()
   await api.close()
   await elsewhere.close()
@@ -119,6 +120,39 @@ async function otherToken() {
       }),
   }
 }
+
+/** What `PCP_BROWSER_DISPLAY=virtual` asks for: Linux is the only place. */
+const WANTS_VIRTUAL = process.platform === "linux" ? "virtual" : "headless"
+
+describe("the browser overview", () => {
+  it("says which mode is wanted on this machine, and none is running", async () => {
+    vi.stubEnv("PCP_DESKTOP", "")
+    vi.stubEnv("PCP_CONTAINER", "")
+
+    for (const [setting, wanted] of [
+      ["virtual", WANTS_VIRTUAL],
+      ["headless", "headless"],
+      ["auto", "headless"],
+    ] as const) {
+      vi.stubEnv("PCP_BROWSER_DISPLAY", setting)
+      const overview = await browserOverview(ctx)
+      expect(overview.chromium.display, setting).toBe(wanted)
+      expect(overview.status, setting).toMatchObject({
+        running: false,
+        display: null,
+      })
+    }
+
+    // In the container image a window on a virtual display is the default.
+    vi.stubEnv("PCP_CONTAINER", "1")
+    expect((await browserOverview(ctx)).chromium.display).toBe(WANTS_VIRTUAL)
+
+    // The desktop app runs on a real screen and starts none.
+    vi.stubEnv("PCP_DESKTOP", "1")
+    vi.stubEnv("PCP_BROWSER_DISPLAY", "virtual")
+    expect((await browserOverview(ctx)).chromium.display).toBe("headless")
+  })
+})
 
 describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
   it("opens a tab of their own, which no assistant sees until they hand it to one", async () => {
@@ -342,6 +376,9 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
   })
 
   it("shows the tabs and the sign-ins, and forgets them all", async () => {
+    // Pinned to headless so the test needs no virtual display.
+    vi.stubEnv("PCP_BROWSER_DISPLAY", "headless")
+
     await openOwnerTab(ctx, {
       url: `${api.origin}/login`,
       publicUrl: PUBLIC_URL,
@@ -349,18 +386,39 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
 
     const overview = await browserOverview(ctx)
     expect(overview.server).toMatchObject({ id: server.id, enabled: true })
-    expect(overview.status).toMatchObject({ running: true, tabs: 1 })
+    expect(overview.status).toMatchObject({
+      running: true,
+      tabs: 1,
+      display: "headless",
+    })
     expect(overview.tabs).toHaveLength(1)
     expect(overview.profile).toMatchObject({ cookies: 1 })
     expect(overview.chromium).toMatchObject({
       path: executable,
       install: { stage: "idle" },
+      display: "headless",
     })
 
     await forgetSites(ctx)
     const after = await browserOverview(ctx)
-    expect(after.status.running).toBe(false)
+    expect(after.status).toMatchObject({ running: false, display: null })
     expect(after.profile).toBeNull()
+  })
+
+  it("keeps how the browser runs apart from the mode wanted on this machine", async () => {
+    vi.stubEnv("PCP_DESKTOP", "")
+    vi.stubEnv("PCP_BROWSER_DISPLAY", "headless")
+    await openOwnerTab(ctx, { url: `${api.origin}/`, publicUrl: PUBLIC_URL })
+
+    // Wanting a window on a virtual display changes what the page
+    // describes, not the browser that is already running.
+    vi.stubEnv("PCP_BROWSER_DISPLAY", "virtual")
+    const overview = await browserOverview(ctx)
+    expect(overview.chromium.display).toBe(WANTS_VIRTUAL)
+    expect(overview.status).toMatchObject({
+      running: true,
+      display: "headless",
+    })
   })
 
   it("gives Chromium a folder of its own outside the user's home, gone once it closes", async () => {

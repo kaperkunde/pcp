@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
 import { BrowserDescribeForm } from "@/components/browser-describe-form"
+import { CalendarAccountForm } from "@/components/calendar-account-form"
 import { EndpointForm } from "@/components/endpoint-form"
 import { MailAccountForm } from "@/components/mail-account-form"
 import { PageColumn } from "@/components/page-column"
@@ -121,6 +122,29 @@ export default async function ServerPage({
         port: String(ssh.port),
         username: ssh.username,
       }}
+    />
+  ) : kind === "caldav" ? (
+    <CalendarAccountForm
+      initial={{
+        id: server.id,
+        name: server.name,
+        slug: server.slug,
+        description: server.description,
+        url: server.url,
+        readOnly: server.readOnly,
+        authType:
+          server.authType === "header" || server.authType === "oauth"
+            ? server.authType
+            : "basic",
+        authUsername: server.authUsername ?? "",
+        authSecretId: server.authSecretId ?? "",
+        oauthClientId: server.oauthClientId ?? "",
+        oauthClientSecretId: server.oauthClientSecretId ?? "",
+        oauthScope: server.oauthScope ?? "",
+        oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+      }}
+      secrets={secrets}
+      redirectUrl={redirectUrl}
     />
   ) : mail ? (
     <MailAccountForm

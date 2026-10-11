@@ -2,9 +2,12 @@ import { readFileSync } from "node:fs"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
 
-// The Chromium in the Docker image is the build the app's playwright-core
+// The Chromium in the Docker image is the build the app's patchright-core
 // drives: Playwright pins one Chromium per version, and another may not
-// speak the same protocol.
+// speak the same protocol. patchright-core follows Playwright's releases
+// number for number, and @playwright/test (the e2e suite, and CI's
+// Chromium) stays on the same one, so a bump of either is a bump of both
+// and of the Dockerfile.
 
 const root = path.resolve(__dirname, "..")
 
@@ -19,7 +22,7 @@ describe("the Docker image's Chromium", () => {
     }
     const installed = dockerfile.match(/ARG PLAYWRIGHT_VERSION=(\S+)/)?.[1]
 
-    expect(installed).toBe(pkg.dependencies["playwright-core"])
+    expect(installed).toBe(pkg.dependencies["patchright-core"])
     expect(pkg.devDependencies["@playwright/test"]).toContain(installed)
   })
 
@@ -37,7 +40,7 @@ describe("the Docker image's Chromium", () => {
     const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
 
     expect(dockerfile).toMatch(
-      /playwright-core@\$\{PLAYWRIGHT_VERSION\} install --with-deps --no-shell chromium/,
+      /patchright-core@\$\{PLAYWRIGHT_VERSION\} install --with-deps --no-shell chromium/,
     )
   })
 })

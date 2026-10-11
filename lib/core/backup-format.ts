@@ -270,6 +270,9 @@ const McpServerRow = z.strictObject({
   // SSH servers, added in 0.3: absent from older exports, which hold none.
   sshPublicKey: str.nullable().default(null),
   sshHostKey: str.nullable().default(null),
+  // Calendar accounts (kind caldav), added in 0.4: absent from older
+  // exports, which hold none.
+  davHomeUrl: str.nullable().default(null),
 })
 
 const ServerAuthHeaderRow = z.strictObject({
@@ -408,6 +411,7 @@ export type ExportPreview = {
     endpoints: number
     mailAccounts: number
     sshServers: number
+    calendarAccounts: number
     wrappers: number
     tools: number
     secrets: number
@@ -641,6 +645,8 @@ export function previewOf(
         (row) => row.kind === "jmap" || row.kind === "imap",
       ).length,
       sshServers: tables.servers.filter((row) => row.kind === "ssh").length,
+      calendarAccounts: tables.servers.filter((row) => row.kind === "caldav")
+        .length,
       wrappers: tables.servers.filter((row) => row.kind === "wrapper").length,
       tools: tables.tools.length,
       secrets: tables.secrets.filter((row) => row.kind === "text").length,

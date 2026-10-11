@@ -54,7 +54,9 @@ test("deletes the vault after the box and the password, and starts over", async 
   await page.getByLabel("Password", { exact: true }).fill(OWNER_PASSWORD)
   await page.getByLabel("Repeat password").fill(OWNER_PASSWORD)
   await page.getByRole("button", { name: "Create my PCP" }).click()
-  await expect(page.getByText("Save your recovery key")).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Save your recovery key" }),
+  ).toBeVisible()
   const recoveryKey = await page.getByTestId("recovery-key").textContent()
   expect(recoveryKey).toMatch(/^pcp_recovery_/)
   saveState("setup", {

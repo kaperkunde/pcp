@@ -39,6 +39,8 @@ function about(kind: ServerKind): string {
     case "jmap":
     case "imap":
       return "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
+    case "caldav":
+      return "What an assistant can find with search_tools: the same calendar and reminder tools for every account, less the ones that change things on a read-only account."
     case "ssh":
       return "What an assistant can find with search_tools: run_command, one command per call. Leave it at ask, and you see each command before it runs."
     case "browser":
@@ -57,6 +59,8 @@ function none(kind: ServerKind): string {
     case "jmap":
     case "imap":
       return "No tools yet: PCP offers them once it has signed in. Check the settings under Advanced, then check the account again, or connect it."
+    case "caldav":
+      return "No tools yet: PCP offers them once it has signed in and found your calendars. Check the settings under Advanced, then check the account again."
     case "ssh":
       return "No tools yet: check the sign-in again."
     case "browser":

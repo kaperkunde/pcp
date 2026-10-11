@@ -1,4 +1,4 @@
-import type { Page, Response } from "playwright-core"
+import type { Page, Response } from "patchright-core"
 
 import { isChallenge } from "../fetch/challenge"
 

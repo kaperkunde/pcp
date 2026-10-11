@@ -1,4 +1,4 @@
-import type { BrowserContext } from "playwright-core"
+import type { BrowserContext } from "patchright-core"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import type { VaultContext } from "../context"

@@ -27,6 +27,13 @@ services:
       - "3000:3000"
     volumes:
       - pcp-data:/data
+    # Optional. The time zone and language of the browser PCP runs follow the
+    # container's, which has neither and so shows sites UTC and en-US, however
+    # far from that you are. install.sh passes the host's on; here, set yours
+    # (the zone as in /usr/share/zoneinfo, the language as in `echo $LANG`):
+    # environment:
+    #   TZ: Europe/Berlin
+    #   LANG: de_DE.UTF-8
 
 volumes:
   pcp-data:

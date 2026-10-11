@@ -1,5 +1,6 @@
 import {
   Braces,
+  CalendarDays,
   Globe,
   Layers,
   Mail,
@@ -34,6 +35,11 @@ const KINDS: Record<
     icon: Mail,
     className: "bg-tile-mail text-tile-mail-foreground",
     label: "Mail account",
+  },
+  caldav: {
+    icon: CalendarDays,
+    className: "bg-tile-calendar text-tile-calendar-foreground",
+    label: "Calendar account",
   },
   browser: {
     icon: Globe,

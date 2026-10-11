@@ -144,7 +144,7 @@ Two kinds, held to different bars:
   worth pinning down, not by default.
 - **E2E tests** (`e2e/`) for the happy paths a person actually walks: setup,
   secrets, adding a server and calling it through the gateway, OAuth, API
-  endpoints, mail accounts, permission requests, memories, web fetch,
+  endpoints, mail accounts, calendar accounts, permission requests, memories, web fetch,
   run_code, the browser, updates, Touch ID, recovery, export and restore.
   One project per spec; `e2e/README.md` has the mechanics.
 
@@ -172,6 +172,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/answers.ts`                | Shaping an answer: fields, decode, handles, preview           |
 | `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
 | `lib/core/mail/`                     | Mail accounts: JMAP and IMAP/SMTP behind one set of tools     |
+| `lib/core/caldav/`                   | Calendar accounts: CalDAV, iCalendar, time zones, the tools   |
 | `lib/core/ssh/`                      | SSH servers: PCP's key, the pinned host key, `run_command`    |
 | `lib/core/register-rules.ts`         | What register_server accepts for each kind                    |
 | `lib/core/tool-results.ts`           | Kept answers and files, encrypted; `read_result`, handles     |

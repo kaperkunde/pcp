@@ -103,8 +103,8 @@ Use a `Card` for what is not rows: a form, a block of text, a code sample.
 - **Menu** (`components/ui/menu.tsx`) for a button's list of choices: the
   bell, Add on Servers.
 - **IconTile** (`components/ui/icon-tile.tsx`): a server's kind picks its
-  tint and symbol (MCP blue, API orange, mail purple, browser teal, SSH
-  grey, wrapper green), so kinds tell apart in a list at a glance.
+  tint and symbol (MCP blue, API orange, mail purple, calendar red, browser
+  teal, SSH grey, wrapper green), so kinds tell apart in a list at a glance.
 - **Badge**: a short state beside a name ("Read-only", "Changes data").
   `solid-warning` only for what needs the owner now ("Sign in again").
   `CountBadge` for counts waiting; `StatusDot` before a status line.
@@ -139,7 +139,7 @@ Reuse these before writing a new one; each settles a question once.
 - **A server's form** (`components/server-form-parts.tsx`): the frame,
   sections, name and short name, a choice field (segmented or select),
   switch groups, More options and the footer, shared by the MCP server,
-  endpoint, mail, SSH and wrapper forms. On an add page it is a card with
+  endpoint, mail, calendar, SSH and wrapper forms. On an add page it is a card with
   More options; under a server's Advanced it is drawn flat, every setting
   in view.
 - **A setting that opens in place** (`components/settings-item.tsx`): a

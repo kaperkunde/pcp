@@ -1,7 +1,7 @@
 import { STATUS_CODES } from "node:http"
 
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import type { Page } from "playwright-core"
+import type { Page } from "patchright-core"
 
 import type { VaultContext } from "../context"
 import { PcpError } from "../errors"

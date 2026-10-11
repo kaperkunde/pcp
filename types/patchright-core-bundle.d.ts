@@ -1,7 +1,7 @@
-// playwright-core publishes lib/coreBundle (allowed by its exports map)
+// patchright-core publishes lib/coreBundle (allowed by its exports map)
 // without types. Only what lib/core/browser/install.ts uses: where
 // Playwright downloads the Chromium this version drives from, and its unzip.
-declare module "playwright-core/lib/coreBundle" {
+declare module "patchright-core/lib/coreBundle" {
   type Executable = {
     /** Where Playwright itself would install it. */
     directory?: string

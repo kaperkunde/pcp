@@ -69,9 +69,9 @@ export function serverStatus({
     }
   }
 
-  // A mail account is checked by signing in: its password can be refused,
-  // or, with OAuth, its sign-in can need renewing in PCP.
-  if (kind === "jmap" || kind === "imap") {
+  // A mail or calendar account is checked by signing in: its password can be
+  // refused, or, with OAuth, its sign-in can need renewing in PCP.
+  if (kind === "jmap" || kind === "imap" || kind === "caldav") {
     if (status === "client_required") return warning("Needs an OAuth client")
     if (!connected || (oauth && status === "auth_required")) {
       return warning("Needs connecting")

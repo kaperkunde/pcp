@@ -82,6 +82,10 @@ import { MAX_PATCH_OPERATIONS } from "./openapi/limits"
 import type { SchemaProblem } from "./openapi/lint"
 import { checkRateLimit } from "./rate-limit"
 import { appendRequestLog, withLogNote } from "./request-log"
+import {
+  requireEncryptedOrPrivate as requireCalDavEncryptedOrPrivate,
+  validateCalDavUrl,
+} from "./caldav/addresses"
 import { canRereadTools, type SyncResult } from "./catalogue"
 import {
   completeSessionUrl,
@@ -362,7 +366,7 @@ export function buildInstructions(
   if (servers.length === 0) {
     return [
       ...memoryLead(memories),
-      "PCP is a gateway to the owner's MCP servers, APIs and mail accounts, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, an API from its OpenAPI document, or a mail account over JMAP or IMAP).",
+      "PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, an API from its OpenAPI document, a mail account over JMAP or IMAP, or a calendar account over CalDAV).",
       ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
       ...memoryInstructions(memories),
       ...(webFetch ? [FETCH_INSTRUCTIONS] : []),
@@ -382,8 +386,8 @@ export function buildInstructions(
 
   return [
     ...memoryLead(memories),
-    "PCP is a gateway to the owner's MCP servers, APIs and mail accounts. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it (call_read_only_tool for one describe_tool marks read-only); list_tools names every tool on one server. Refer to tools as server/tool.",
-    'The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, or a mail account (JMAP, or IMAP with SMTP). A mailbox is always a mail account, never an API written around its mail server. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP\'s page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.',
+    "PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema, then call_tool to run it (call_read_only_tool for one describe_tool marks read-only); list_tools names every tool on one server. Refer to tools as server/tool.",
+    "The owner decides per tool what you may run. A tool they have not allowed yet answers \"Not done yet\" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.",
     'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email or create_draft attachment, and PCP puts the value there, so it never has to pass through you.',
     "Servers:",
     ...lines,
@@ -1286,13 +1290,14 @@ export function buildGatewayServer(
   server.registerTool(
     "register_server",
     {
-      title: "Add a server, an API or a mail account",
+      title: "Add a server, an API, a mail or a calendar account",
       description: [
         "Propose something new for PCP to reach; the owner must agree on PCP's page before it is added, and nothing exists until they do.",
-        "Choose what it is with kind. mcp: an MCP server, by its address in url. api: a REST API, by its OpenAPI 3 document, as text (openapi_schema) or by the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. jmap: a mailbox on a JMAP server (Stalwart, Fastmail, Cyrus), by the server's address in url. imap: a mailbox over IMAP, by its server in url, with smtp_url to send through. Left out, kind is api when you pass openapi_schema or openapi_url, and mcp otherwise. An SSH server cannot be proposed: the owner adds one on PCP's Servers page.",
+        "Choose what it is with kind. mcp: an MCP server, by its address in url. api: a REST API, by its OpenAPI 3 document, as text (openapi_schema) or by the public address of the document (openapi_url), which PCP downloads now so the owner sees what it adds. jmap: a mailbox on a JMAP server (Stalwart, Fastmail, Cyrus), by the server's address in url. imap: a mailbox over IMAP, by its server in url, with smtp_url to send through. caldav: calendars and reminders over CalDAV (iCloud, Fastmail, Nextcloud, Radicale), by the CalDAV server in url (caldav.icloud.com for iCloud). Left out, kind is api when you pass openapi_schema or openapi_url, and mcp otherwise. An SSH server cannot be proposed: the owner adds one on PCP's Servers page.",
         "A mailbox is always a mail account (jmap or imap), never an API you write around its mail server: PCP signs in to a mail account itself, over an encrypted connection, and gives every account the same tools (list mailboxes, search, read emails and text attachments, move, flag, delete into the Trash, send; conversations and identities on JMAP).",
+        "Calendars and reminders are always a calendar account (caldav), never an API: PCP finds the calendars itself and gives every account the same tools (list calendars, list and read events with each occurrence of a repeating one, find free time, create, change, move and delete events, and list, create, change and complete reminders). For iCloud the owner signs in with their Apple ID as username and an app-specific password (made at appleid.apple.com) as the secret, never their Apple ID password.",
         "For an API, PCP turns each operation into a tool and makes the HTTP calls itself; a header parameter an operation declares becomes one of its arguments, except the headers that carry secrets and the ones PCP sets itself (Authorization, Content-Type, Accept and the like), which are left out. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation.",
-        "Authentication, in auth_type: none (an open API or MCP server; not for a mail account). header: a secret in a header, such as an API key or token. basic: a user name (username) and a password, which PCP sends as HTTP Basic authentication (an API that takes it, a JMAP app password, an IMAP login; not for an MCP server). oauth: the owner signs in once they agree (an MCP server, a JMAP account, or an API whose OpenAPI document declares an oauth2 security scheme with an authorizationCode flow: authorizationUrl and tokenUrl, added with spec_patches when the document lacks it); PCP renews the token itself.",
+        "Authentication, in auth_type: none (an open API or MCP server; not for a mail account). header: a secret in a header, such as an API key or token. basic: a user name (username) and a password, which PCP sends as HTTP Basic authentication (an API that takes it, a JMAP app password, an IMAP login, a CalDAV login such as iCloud's app-specific password; not for an MCP server). oauth: the owner signs in once they agree (an MCP server, a JMAP or CalDAV account, or an API whose OpenAPI document declares an oauth2 security scheme with an authorizationCode flow: authorizationUrl and tokenUrl, added with spec_patches when the document lacks it); PCP renews the token itself.",
         "A secret is named in secret, by its NAME: one the owner stored in PCP, or a name for a new one, whose value the owner types in on PCP's page when they agree (that request can only be answered there). A credential in several header parts (a key and a secret key, as an OpenAPI security requirement naming several apiKey schemes asks) goes in extra_headers, each part a secret the owner stored. Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.",
         "For oauth, PCP finds out itself, when the owner connects, whether the provider lets it register as a client, and registers when it does. Pass client_id only for a provider that lets no app register itself (Google, Microsoft, Spotify and most large providers): the ID of a client the owner created in the provider's developer settings with PCP's redirect URI, and the owner enters its client secret on PCP's page. Not supported: OpenID Connect discovery without an authorizationCode flow, the implicit, password and client-credentials flows, and keys sent in the query string.",
       ].join("\n\n"),
@@ -1305,16 +1310,16 @@ export function buildGatewayServer(
             'What to call it, e.g. "Linear", "Pet store API" or "Personal mail".',
           ),
         kind: z
-          .enum(["mcp", "api", "jmap", "imap"])
+          .enum(["mcp", "api", "jmap", "imap", "caldav"])
           .optional()
           .describe(
-            "What it is: mcp (an MCP server), api (a REST API from an OpenAPI document), jmap (a mailbox on a JMAP server) or imap (a mailbox over IMAP, with SMTP to send). Left out: api when openapi_schema or openapi_url is passed, mcp otherwise. A mailbox is always jmap or imap, never an api.",
+            "What it is: mcp (an MCP server), api (a REST API from an OpenAPI document), jmap (a mailbox on a JMAP server), imap (a mailbox over IMAP, with SMTP to send) or caldav (calendars and reminders over CalDAV, such as iCloud's). Left out: api when openapi_schema or openapi_url is passed, mcp otherwise. A mailbox is always jmap or imap, and a calendar caldav, never an api.",
           ),
         url: z
           .string()
           .optional()
           .describe(
-            "mcp: the MCP endpoint, like https://mcp.example.com/mcp. api: the base URL requests go to, like https://api.example.com/v1; leave it out to use the server the schema names, unless a secret or a password is sent, then it is required. jmap: the mail server, like https://mail.example.com (PCP finds the session at /.well-known/jmap), or the full session URL; PCP checks now that something answers there. imap: the IMAP server, like mail.example.com, imaps://mail.example.com:993, or imap://mail.example.com:143 for STARTTLS.",
+            "mcp: the MCP endpoint, like https://mcp.example.com/mcp. api: the base URL requests go to, like https://api.example.com/v1; leave it out to use the server the schema names, unless a secret or a password is sent, then it is required. jmap: the mail server, like https://mail.example.com (PCP finds the session at /.well-known/jmap), or the full session URL; PCP checks now that something answers there. imap: the IMAP server, like mail.example.com, imaps://mail.example.com:993, or imap://mail.example.com:143 for STARTTLS. caldav: the CalDAV server, like caldav.icloud.com, caldav.fastmail.com, or https://cloud.example.com/remote.php/dav; PCP finds the calendars there when the owner agrees.",
           ),
         openapi_schema: z
           .string()
@@ -1337,7 +1342,7 @@ export function buildGatewayServer(
           .boolean()
           .optional()
           .describe(
-            "For kind api: offer only the GET operations as tools. For jmap and imap: offer only the tools that read mail (no sending, moving, flagging or deleting).",
+            "For kind api: offer only the GET operations as tools. For jmap and imap: offer only the tools that read mail (no sending, moving, flagging or deleting). For caldav: offer only the tools that read calendars and reminders.",
           ),
         description: z
           .string()
@@ -1348,7 +1353,7 @@ export function buildGatewayServer(
           .enum(["none", "header", "basic", "oauth"])
           .optional()
           .describe(
-            "none (the default; not for a mail account); header (sends a secret the owner stored in PCP: an API key or token, or a mail account's bearer token); basic (a user name in username and a password named in secret, sent as HTTP Basic authentication: an API, a JMAP app password, an IMAP login; not for an MCP server); or oauth (the owner signs in after agreeing: an MCP server, a JMAP account, or an API whose document has an oauth2 authorizationCode flow).",
+            "none (the default; not for a mail or calendar account); header (sends a secret the owner stored in PCP: an API key or token, or a mail or calendar account's bearer token); basic (a user name in username and a password named in secret, sent as HTTP Basic authentication: an API, a JMAP app password, an IMAP login, a CalDAV login such as an iCloud app-specific password; not for an MCP server); or oauth (the owner signs in after agreeing: an MCP server, a JMAP or CalDAV account, or an API whose document has an oauth2 authorizationCode flow).",
           ),
         secret: z
           .string()
@@ -1361,7 +1366,7 @@ export function buildGatewayServer(
           .max(320)
           .optional()
           .describe(
-            "For basic: the user name the password goes with. For a mail account that is usually the mailbox address (ada@example.com). Not a secret.",
+            "For basic: the user name the password goes with. For a mail account that is usually the mailbox address (ada@example.com); for iCloud's calendars, the Apple ID. Not a secret.",
           ),
         smtp_url: z
           .string()
@@ -1723,6 +1728,37 @@ export function buildGatewayServer(
               mailFrom,
               checked: probe?.checked ?? null,
               privateAddress: probe?.privateAddress ?? privateHosts,
+            },
+          }
+        } else if (kind === "caldav") {
+          if (
+            !checkRateLimit(
+              `endpoint-register:${scope.tokenId}`,
+              ENDPOINT_CHANGES,
+            )
+          ) {
+            return failure(
+              "That is a lot of registrations in a short time. Wait a few minutes.",
+            )
+          }
+
+          const url = validateCalDavUrl(args.url!)
+          // http:// only for a server on the owner's own network.
+          await requireCalDavEncryptedOrPrivate(url)
+
+          input = {
+            ...common,
+            name: args.name.trim(),
+            url,
+            oauthScope,
+            calendar: {
+              readOnly: args.read_only === true,
+              // Nothing connects before the owner agrees; they are told
+              // when the server is on a private network.
+              privateAddress: await privateHostsNote(
+                [bareHostname(new URL(url))],
+                lookupHost,
+              ),
             },
           }
         } else {

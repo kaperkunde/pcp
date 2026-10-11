@@ -7,7 +7,7 @@ import type { AuthType } from "./servers"
  * that made the call: they say what to pass instead.
  */
 
-export type RegisterKind = "mcp" | "api" | "jmap" | "imap"
+export type RegisterKind = "mcp" | "api" | "jmap" | "imap" | "caldav"
 
 export type MailProtocol = Extract<RegisterKind, "jmap" | "imap">
 
@@ -21,6 +21,13 @@ export type MailRegistration = {
   /** jmap: what an unauthenticated look at the session URL found. */
   checked: string | null
   /** Set when the address is private or local and was not looked at. */
+  privateAddress: string | null
+}
+
+/** A calendar account as an assistant proposed it, beside RegisterArgs' url. */
+export type CalendarRegistration = {
+  readOnly: boolean
+  /** Set when the address is private or local, for the owner. */
   privateAddress: string | null
 }
 
@@ -71,12 +78,15 @@ const NOUN: Record<RegisterKind, string> = {
   api: "an API",
   jmap: "a JMAP mail account",
   imap: "an IMAP mail account",
+  caldav: "a calendar account",
 }
 
 const MISSING_URL: Record<Exclude<RegisterKind, "api">, string> = {
-  mcp: "An MCP server needs its address in url. To add an API instead, pass its OpenAPI document in openapi_schema, or its address in openapi_url; for a mailbox, pass kind jmap or imap.",
+  mcp: "An MCP server needs its address in url. To add an API instead, pass its OpenAPI document in openapi_schema, or its address in openapi_url; for a mailbox, pass kind jmap or imap; for calendars and reminders, kind caldav.",
   jmap: "A JMAP mail account needs its server in url, like https://mail.example.com (PCP finds the session at /.well-known/jmap), or the full session URL.",
   imap: "An IMAP mail account needs its server in url, like mail.example.com, imaps://mail.example.com:993, or imap://mail.example.com:143 for STARTTLS.",
+  caldav:
+    "A calendar account needs its CalDAV server in url, like caldav.icloud.com (iCloud), caldav.fastmail.com, or a Nextcloud's https://cloud.example.com/remote.php/dav.",
 }
 
 /**
@@ -109,7 +119,7 @@ export function checkRegisterShape(
   }
 
   if (args.read_only !== undefined && kind === "mcp") {
-    return "read_only is for an API (openapi_schema or openapi_url) or a mail account (kind jmap or imap)."
+    return "read_only is for an API (openapi_schema or openapi_url), a mail account (kind jmap or imap) or a calendar account (kind caldav)."
   }
 
   if (args.smtp_url !== undefined && kind !== "imap") {
@@ -138,13 +148,27 @@ export function checkRegisterShape(
     }
   }
 
+  if (kind === "caldav") {
+    if (
+      args.header_name !== undefined ||
+      args.value_template !== undefined ||
+      (args.extra_headers?.length ?? 0) > 0
+    ) {
+      return "A calendar account's bearer token is sent as Authorization: Bearer <token>; leave header_name, value_template and extra_headers out."
+    }
+
+    if (authType === "none") {
+      return "A calendar account signs in: pass auth_type basic (a user name and an app password: for iCloud, the Apple ID and an app-specific password), header (a bearer token) or oauth."
+    }
+  }
+
   if (args.username !== undefined && authType !== "basic") {
     return "username is for auth_type basic."
   }
 
   if (authType === "basic") {
     if (kind === "mcp") {
-      return "An MCP server sends a secret in a header or signs in with OAuth. Basic authentication, a user name and a password, is for an API or a mail account."
+      return "An MCP server sends a secret in a header or signs in with OAuth. Basic authentication, a user name and a password, is for an API, a mail account or a calendar account."
     }
 
     if (!args.username?.trim()) {

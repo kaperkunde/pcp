@@ -70,7 +70,7 @@ RUN groupadd --system --gid 1001 nodejs \
   && chmod 0770 /run/pcp-sandbox
 
 # The browser (lib/core/browser/): Playwright's build of Chromium and the
-# libraries it needs, the version the app's playwright-core drives
+# libraries it needs, the version the app's patchright-core drives
 # (scripts/docker.test.ts keeps the two the same). It only runs once the
 # owner adds the browser and a page is opened. An unprivileged container
 # has no user namespaces for Chromium's own sandbox, so it runs without
@@ -83,7 +83,7 @@ RUN groupadd --system --gid 1001 nodejs \
 ARG PLAYWRIGHT_VERSION=1.63.0
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PCP_BROWSER_SANDBOX=off
-RUN npx -y --no-update-notifier playwright-core@${PLAYWRIGHT_VERSION} install --with-deps --no-shell chromium \
+RUN npx -y --no-update-notifier patchright-core@${PLAYWRIGHT_VERSION} install --with-deps --no-shell chromium \
   && apt-get install -y --no-install-recommends xvfb \
   && chmod -R a+rX /ms-playwright \
   && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache

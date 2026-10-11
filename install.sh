@@ -35,6 +35,12 @@
 #   PCP_VERSION=latest                the image tag
 #   PCP_IMAGE=ghcr.io/kaperkunde/pcp  the image
 #
+# PCP's browser shows sites the time zone and language of the container, so
+# the container is started with this computer's: TZ from the environment,
+# else from timedatectl, /etc/timezone or /etc/localtime, and LANG from the
+# environment. Neither is remembered; each run looks again. One that is not
+# there, or is not a plain name, is left out.
+#
 # It never runs sudo and never installs Docker or Podman itself: when neither
 # is usable, it prints what to run. POSIX sh, so it runs under dash too.
 #
@@ -371,6 +377,55 @@ check_privileged_ports() {
     "then run this installer again."
 }
 
+# --- The host's time zone and language --------------------------------------
+
+# The browser PCP runs takes its time zone and language from the container's
+# TZ and LANG, so a container that has neither shows a site UTC and en-US
+# behind a home address, which bot checks read as a mismatch. The values end
+# up on a command line and in a unit file, so they are checked first: nothing
+# but the characters of a zone name or a locale name gets through.
+
+# True for something that looks like an IANA zone name (Europe/Berlin, UTC,
+# Etc/GMT+1): it starts with a letter and holds only letters, digits and
+# _ + . / -, and "n/a" is what timedatectl says when it does not know.
+zone_ok() {
+  case "$1" in
+    '' | n/a | [!A-Za-z]* | *[!A-Za-z0-9_+./-]* | *..*) return 1 ;;
+  esac
+  return 0
+}
+
+# The host's zone, or nothing: $TZ, then timedatectl, then /etc/timezone,
+# then where /etc/localtime points. A candidate that is not a zone name is
+# passed over for the next one.
+host_timezone() {
+  zone=${TZ:-}
+  if ! zone_ok "$zone" && has timedatectl; then
+    zone=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+  fi
+  if ! zone_ok "$zone" && [ -r "${PCP_ROOT_PREFIX:-}/etc/timezone" ]; then
+    zone=$(cat "${PCP_ROOT_PREFIX:-}/etc/timezone" 2>/dev/null || true)
+  fi
+  if ! zone_ok "$zone" && has readlink; then
+    link=$(readlink "${PCP_ROOT_PREFIX:-}/etc/localtime" 2>/dev/null || true)
+    case "$link" in
+      *zoneinfo/*) zone=${link#*zoneinfo/} ;;
+      *) zone= ;;
+    esac
+  fi
+  if zone_ok "$zone"; then
+    printf '%s\n' "$zone"
+  fi
+}
+
+# The host's language ($LANG, as en_US.UTF-8), or nothing.
+host_lang() {
+  case "${LANG:-}" in
+    '' | *[!A-Za-z0-9_.@-]*) ;;
+    *) printf '%s\n' "$LANG" ;;
+  esac
+}
+
 # --- Install ----------------------------------------------------------------
 
 pull_image() {
@@ -410,6 +465,13 @@ install_container() {
   if [ "$WATCH" = 1 ]; then
     set -- "$@" -e PCP_HOST_UPDATER=1
   fi
+  # The browser's time zone and language follow the container's.
+  if [ -n "$HOST_TZ" ]; then
+    set -- "$@" -e "TZ=$HOST_TZ"
+  fi
+  if [ -n "$HOST_LANG" ]; then
+    set -- "$@" -e "LANG=$HOST_LANG"
+  fi
   "$RUNTIME" run "$@" -v "$PCP_DATA_VOLUME:/data" "$IMAGE" >/dev/null || start_failed "$LOGS"
   MODE=container
 }
@@ -435,6 +497,12 @@ write_unit() {
     fi
     if [ "$WATCH" = 1 ]; then
       printf 'Environment=PCP_HOST_UPDATER=1\n'
+    fi
+    if [ -n "$HOST_TZ" ]; then
+      printf 'Environment=TZ=%s\n' "$HOST_TZ"
+    fi
+    if [ -n "$HOST_LANG" ]; then
+      printf 'Environment=LANG=%s\n' "$HOST_LANG"
     fi
     printf '\n'
     printf '[Service]\nRestart=always\n\n'
@@ -761,6 +829,8 @@ summary() {
 install() {
   check_compose_install
   check_privileged_ports
+  HOST_TZ=$(host_timezone)
+  HOST_LANG=$(host_lang)
   if [ "$RUNTIME" = docker ]; then
     install_container
   else

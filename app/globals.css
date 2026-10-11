@@ -39,6 +39,8 @@
   --color-tile-api-foreground: var(--tile-api-foreground);
   --color-tile-mail: var(--tile-mail);
   --color-tile-mail-foreground: var(--tile-mail-foreground);
+  --color-tile-calendar: var(--tile-calendar);
+  --color-tile-calendar-foreground: var(--tile-calendar-foreground);
   --color-tile-browser: var(--tile-browser);
   --color-tile-browser-foreground: var(--tile-browser-foreground);
   --color-tile-ssh: var(--tile-ssh);
@@ -99,6 +101,8 @@
   --tile-api-foreground: #ffc58a;
   --tile-mail: #33263b;
   --tile-mail-foreground: #e0a8ff;
+  --tile-calendar: #3b2526;
+  --tile-calendar-foreground: #ffa8a3;
   --tile-browser: #1f3437;
   --tile-browser-foreground: #8fe4d8;
   --tile-ssh: #2a2f3a;

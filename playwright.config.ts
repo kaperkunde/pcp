@@ -158,6 +158,16 @@ export default defineConfig({
       use: signedIn("mail"),
     },
     {
+      // A calendar account: CalDAV shaped like iCloud's, with an app password
+      // typed into the form; events, free time and reminders through the
+      // gateway; and one an assistant proposes, whose password the owner
+      // types in on PCP's page.
+      name: "calendar",
+      testMatch: /calendar\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("calendar"),
+    },
+    {
       // An SSH server: added in PCP, PCP's key put in authorized_keys, the
       // host key pinned; a command an assistant asks for, shown to the owner
       // first; and a server that later shows another host key.

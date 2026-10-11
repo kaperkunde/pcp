@@ -39,6 +39,12 @@ const CHOICES: Array<{
     caption: "JMAP, or IMAP with SMTP",
   },
   {
+    kind: "caldav",
+    href: "/servers/calendars/new",
+    title: "Calendar account",
+    caption: "iCloud and other CalDAV calendars and reminders",
+  },
+  {
     kind: "ssh",
     href: "/servers/ssh/new",
     title: "SSH server",

@@ -250,7 +250,7 @@ describe("installChromium", () => {
 })
 
 describe("chromiumBuild", () => {
-  it("reads the build playwright-core drives from Playwright's own list", async () => {
+  it("reads the build patchright-core drives from Playwright's own list", async () => {
     const current = await chromiumBuild()
 
     expect(current).not.toBeNull()

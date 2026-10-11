@@ -56,10 +56,10 @@ function state(): DisplayState {
 
 /**
  * The features Playwright turns off in every Chromium it launches
- * (chromiumSwitches.ts in playwright-core). Chromium keeps only the last
+ * (chromiumSwitches.ts in patchright-core). Chromium keeps only the last
  * --disable-features it is given, so a list of PCP's own has to carry
  * Playwright's too; display.test.ts checks this one against the
- * playwright-core installed.
+ * patchright-core installed.
  */
 export const PLAYWRIGHT_DISABLED_FEATURES = [
   "AvoidUnnecessaryBeforeUnloadCheckSync",

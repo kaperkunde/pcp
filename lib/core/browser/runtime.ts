@@ -10,7 +10,7 @@ import type {
   CDPSession,
   Dialog,
   Page,
-} from "playwright-core"
+} from "patchright-core"
 
 import type { VaultContext } from "../context"
 import { PcpError } from "../errors"
@@ -294,7 +294,7 @@ async function launch(
   scratchDir: string,
   display: VirtualDisplay | null,
 ): Promise<Browser> {
-  const { chromium } = await import("playwright-core")
+  const { chromium } = await import("patchright-core")
 
   return chromium.launch({
     executablePath,
@@ -316,6 +316,13 @@ async function launch(
     args: [
       "--disable-blink-features=AutomationControlled",
       ...(display ? displaySwitches() : []),
+      // Two of Playwright's own switches that patchright-core leaves out and
+      // PCP relies on: a page's script may open a window without a click
+      // (the gate decides what loads in it), and a step back loads a
+      // document again (the gate and the check watch see it), rather than
+      // coming from the back-forward cache.
+      "--disable-popup-blocking",
+      "--disable-back-forward-cache",
       "--disable-dev-shm-usage",
       // UDP would go around the proxy: no QUIC, and WebRTC only through it.
       "--disable-quic",
@@ -331,8 +338,22 @@ async function launch(
  * What every context starts with, the vault's and web_fetch's alike: a
  * desktop Chrome's user agent without "Headless", a screen larger than the
  * viewport as a desktop's is, the host's locale and time zone.
+ *
+ * With a window (headless is false) the browser keeps its own user agent:
+ * overriding it makes Playwright send client hints built from the string,
+ * with an empty platform version, which Chromium's own never has. Headless
+ * the user agent says "HeadlessChrome" and has to be replaced.
+ *
+ * Service workers are not an option here: a service worker can answer a
+ * navigation without the network, around the gate, and the gate refuses
+ * their scripts itself (isServiceWorkerScript). Playwright's own "block"
+ * overwrote navigator.serviceWorker.register in every frame, which a page
+ * can tell from the real one and go around through the prototype.
  */
-function contextOptions(browser: Browser): BrowserContextOptions {
+function contextOptions(
+  browser: Browser,
+  { headless }: { headless: boolean },
+): BrowserContextOptions {
   const major = browser.version().split(".")[0] ?? "141"
   const { locale, timeZone } = Intl.DateTimeFormat().resolvedOptions()
 
@@ -340,13 +361,14 @@ function contextOptions(browser: Browser): BrowserContextOptions {
     viewport: { ...VIEWPORT },
     screen: { ...SCREEN },
     deviceScaleFactor: 1,
-    userAgent: `Mozilla/5.0 (${platformToken()}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
+    ...(headless
+      ? {
+          userAgent: `Mozilla/5.0 (${platformToken()}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
+        }
+      : {}),
     locale,
     timezoneId: timeZone,
     acceptDownloads: false,
-    // A service worker can answer a navigation without the network, which
-    // would go around the gate.
-    serviceWorkers: "block",
   }
 }
 
@@ -458,7 +480,7 @@ async function start(
   })
 
   const context = await browser.newContext({
-    ...contextOptions(browser),
+    ...contextOptions(browser, { headless: display === null }),
     storageState: (await loadProfile(ctx)) ?? undefined,
   })
 
@@ -633,11 +655,27 @@ export function mayOpen(vault: VaultBrowser, tab: Tab, url: string): boolean {
   )
 }
 
-/** What the gate is handed: a document request, paused before it is sent. */
+/** What the gate is handed: a request, paused before it is sent. */
 type PausedDocument = {
   requestId: string
   frameId?: string
-  request: { url: string }
+  resourceType?: string
+  request: { url: string; headers?: Record<string, string> }
+}
+
+/**
+ * Whether a request is a service worker's script being fetched, which a
+ * browser marks with "Service-Worker: script" (the header's name is any
+ * case here: the protocol hands headers over as sent).
+ */
+export function isServiceWorkerScript(
+  headers: Record<string, string> | undefined,
+): boolean {
+  return Object.entries(headers ?? {}).some(
+    ([name, value]) =>
+      name.toLowerCase() === "service-worker" &&
+      value.trim().toLowerCase() === "script",
+  )
 }
 
 /** Whether a request goes out, and a popup to close once it is answered. */
@@ -726,6 +764,11 @@ async function judge(
  * and on before the first page exists, so it holds for a popup from its
  * very first request, before Playwright has reported the popup to PCP.
  * Until the vault's state exists it refuses everything, as the proxy does.
+ *
+ * It also sees the requests of type Other, only to refuse a service
+ * worker's script (isServiceWorkerScript): the registration then fails as
+ * it does where the network refuses, and nothing in the page is changed.
+ * Every other such request goes on at once, ahead of the verdicts.
  */
 async function startGate(
   browser: Browser,
@@ -734,6 +777,18 @@ async function startGate(
   const gate = await browser.newBrowserCDPSession()
 
   gate.on("Fetch.requestPaused", (event) => {
+    if (event.resourceType !== "Document") {
+      void (
+        isServiceWorkerScript(event.request.headers)
+          ? gate.send("Fetch.failRequest", {
+              requestId: event.requestId,
+              errorReason: "BlockedByClient",
+            })
+          : gate.send("Fetch.continueRequest", { requestId: event.requestId })
+      ).catch(() => {})
+      return
+    }
+
     const vault = current()
 
     void (vault ? judge(vault, gate, event) : Promise.resolve({ allow: false }))
@@ -761,6 +816,7 @@ async function startGate(
   await gate.send("Fetch.enable", {
     patterns: [
       { urlPattern: "*", resourceType: "Document", requestStage: "Request" },
+      { urlPattern: "*", resourceType: "Other", requestStage: "Request" },
     ],
   })
 }
@@ -893,7 +949,9 @@ export function solveMayOpen(
 
 function fetchContext(vault: VaultBrowser): Promise<BrowserContext> {
   vault.fetchContext ??= vault.browser
-    .newContext(contextOptions(vault.browser))
+    .newContext(
+      contextOptions(vault.browser, { headless: vault.display === null }),
+    )
     .then((context) => {
       // A page read for web_fetch opens no windows: the gate refuses what a
       // popup would load, and the window is closed.
@@ -1032,6 +1090,12 @@ export type BrowserStatus = {
   sandbox: boolean | null
   tabs: number
   startedAt: string | null
+  /**
+   * How it runs: with windows on the virtual display, or headless (also
+   * where the display was wanted and did not start). Null when it is not
+   * running.
+   */
+  display: "virtual" | "headless" | null
 }
 
 export function browserStatus(vaultId: string): BrowserStatus {
@@ -1042,5 +1106,6 @@ export function browserStatus(vaultId: string): BrowserStatus {
     sandbox: vault?.sandbox ?? null,
     tabs: vault?.tabs.size ?? 0,
     startedAt: vault ? new Date(vault.startedAt).toISOString() : null,
+    display: vault ? (vault.display === null ? "headless" : "virtual") : null,
   }
 }

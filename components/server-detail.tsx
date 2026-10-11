@@ -89,6 +89,7 @@ export function ServerDetail({
 }: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
   const mail = server.kind === "jmap" || server.kind === "imap"
+  const calendar = server.kind === "caldav"
   const browser = server.kind === "browser"
   const wrapper = server.kind === "wrapper"
   const ssh = server.kind === "ssh"
@@ -127,7 +128,7 @@ export function ServerDetail({
   const canRefresh = !wrapper && (!endpoint || server.specSource === "url")
   const refreshLabel = endpoint
     ? "Re-read schema"
-    : mail
+    : mail || calendar
       ? "Check account"
       : ssh
         ? "Check sign-in"
@@ -158,7 +159,7 @@ export function ServerDetail({
             <span>
               {tools.length} {tools.length === 1 ? "tool" : "tools"}
             </span>
-            {(endpoint || mail) && server.readOnly ? (
+            {(endpoint || mail || calendar) && server.readOnly ? (
               <Badge variant="secondary">Read-only</Badge>
             ) : null}
             {/* An endpoint says so under Advanced, with its other facts. */}
@@ -348,6 +349,8 @@ function advancedSummary(kind: ServerKind): string {
     case "jmap":
     case "imap":
       return "Addresses, sign-in, sender, read-only, name"
+    case "caldav":
+      return "Address, sign-in, read-only, name"
     case "ssh":
       return "Host, port, login, name"
     case "wrapper":
@@ -492,13 +495,15 @@ function RemoveServer({ server }: { server: ServerDetailProps["server"] }) {
       ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."
       : server.kind === "jmap" || server.kind === "imap"
         ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your mail stays on the server, and secrets you added stay."
-        : server.kind === "ssh"
-          ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too."
-          : server.kind === "browser"
-            ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
-            : server.kind === "wrapper"
-              ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
-              : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."
+        : server.kind === "caldav"
+          ? "Takes the account out of PCP, with its tool list and any OAuth tokens PCP holds for it. Your calendars and reminders stay on the server, and secrets you added stay."
+          : server.kind === "ssh"
+            ? "Takes the server out of PCP and deletes PCP's key for it. Nothing on the server changes: take the key out of authorized_keys there too."
+            : server.kind === "browser"
+              ? "Takes the browser away from assistants and closes its tabs. The sign-ins it keeps stay until you forget them on the Browser page."
+              : server.kind === "wrapper"
+                ? "Deletes the wrapper and its tools. The tools it stands in for show in search again; secrets you added stay."
+                : "Deletes the server, its tool list and any OAuth tokens PCP holds for it. Secrets you added stay."
 
   return (
     <div className="flex flex-col items-center gap-1.5 pt-2 text-center">

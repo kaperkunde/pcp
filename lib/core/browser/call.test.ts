@@ -66,6 +66,34 @@ const DOORS = `<!doctype html><title>Doors</title>
 <a href="/walled">Passes</a>
 <a href="/walled-forever">Stays</a>`
 
+/** A page that tries to register a service worker two ways, then says how. */
+const WORKERS = `<!doctype html><title>Workers</title>
+<pre><code id="seen">pending</code></pre>
+<script>
+const out = {}
+const attempt = async (name, register) => {
+  try {
+    await register()
+    out[name] = "registered"
+  } catch {
+    out[name] = "refused"
+  }
+}
+Promise.all([
+  attempt("instance", () => navigator.serviceWorker.register("/sw.js?a")),
+  attempt("prototype", () =>
+    ServiceWorkerContainer.prototype.register.call(
+      navigator.serviceWorker,
+      "/sw.js?b",
+    ),
+  ),
+]).then(async () => {
+  out.registrations = (await navigator.serviceWorker.getRegistrations()).length
+  out.native = /\\[native code\\]/.test(navigator.serviceWorker.register.toString())
+  document.getElementById("seen").textContent = JSON.stringify(out)
+})
+</script>`
+
 /** What a page's own script can tell of the browser that shows it. */
 const FINGERPRINT = `<!doctype html><title>Fingerprint</title>
 <pre><code id="seen"></code></pre>
@@ -150,6 +178,15 @@ setTimeout(() => window.open("/page"), 300)
 
     if (request.url.startsWith("/fingerprint")) {
       return res.end(FINGERPRINT)
+    }
+
+    if (request.url.startsWith("/workers")) {
+      return res.end(WORKERS)
+    }
+
+    if (request.url.startsWith("/sw.js")) {
+      res.setHeader("content-type", "text/javascript")
+      return res.end("self.addEventListener('fetch', () => {})")
     }
 
     if (request.url.startsWith("/doors")) {
@@ -640,6 +677,35 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     expect(sent.headers["user-agent"]).not.toContain("Headless")
     expect(sent.headers["sec-ch-ua"]).toContain("Chromium")
     expect(sent.headers["sec-ch-ua"]).not.toContain("Headless")
+  })
+
+  it("refuses a service worker at the gate and leaves the page's own functions alone", async () => {
+    await allowApi()
+
+    await call("navigate", { url: `${api.origin}/workers` })
+
+    let seen: Record<string, unknown> = {}
+    await vi.waitFor(
+      async () => {
+        const read = textOf(await call("read_page", {}))
+        expect(read).not.toContain("pending")
+        seen = JSON.parse(read.match(/```\w*\n([\s\S]*?)\n```/)![1]!)
+      },
+      { timeout: 10_000 },
+    )
+
+    // Through the instance and through the prototype, which a script that
+    // replaced navigator.serviceWorker.register would not stop.
+    expect(seen).toEqual({
+      instance: "refused",
+      prototype: "refused",
+      registrations: 0,
+      native: true,
+    })
+    // Nothing reached the network: the gate failed the request.
+    expect(
+      api.requests.some((request) => request.headers["service-worker"]),
+    ).toBe(false)
   })
 })
 

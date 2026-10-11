@@ -6,6 +6,7 @@ import { isPcpSite } from "../fetch/fetch"
 import { resolvePrivateAccess } from "../fetch/rules"
 import { loadSharedFetchRules } from "../web-fetch"
 import { giveTab, pageUrl } from "./call"
+import { wantsVirtualDisplay } from "./display"
 import { chromiumExecutable } from "./executable"
 import {
   chromiumInstallState,
@@ -286,6 +287,12 @@ export type BrowserOverview = {
     outdated: boolean
     install: InstallState
     platform: NodeJS.Platform
+    /**
+     * How the browser is wanted to run on this machine: with a window on a
+     * virtual display, or headless. What is running is `status.display`,
+     * which differs when the display did not start.
+     */
+    display: "virtual" | "headless"
   }
   status: BrowserStatus
   profile: ProfileSummary | null
@@ -314,6 +321,7 @@ export async function browserOverview(
       outdated: outdated && !installed,
       install: chromiumInstallState(),
       platform: process.platform,
+      display: wantsVirtualDisplay() ? "virtual" : "headless",
     },
     status: browserStatus(ctx.vaultId),
     profile,
