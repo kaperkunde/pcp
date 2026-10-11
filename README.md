@@ -657,7 +657,8 @@ desktop apps do not add it; JavaScript works everywhere.
 server like any other, with tools to open a page (`navigate`, `back`, `tabs`),
 read it (`snapshot`, which names each element with a ref; `read_page`; `find`;
 `screenshot`), act on it (`click`, `type`, `select_option`, `press_key`,
-`scroll`, `wait_for`, `handle_dialog`) and `hand_over` a tab to you. It is
+`scroll`, `wait_for`, `handle_dialog`), move files (`upload_file`,
+`download`) and `hand_over` a tab to you. It is
 Chromium without a window on PCP's machine, with up to eight tabs, started with
 the first page and closed after fifteen idle minutes. The Docker image includes
 it; elsewhere (the desktop app, a checkout), **Install Chromium** on the Browser
@@ -676,6 +677,12 @@ a page alone once its lines no longer let it open the site.
 The browser keeps its cookies, local storage and IndexedDB, encrypted in your
 vault, so a sign-in lasts between conversations; an assistant acts as you
 where you signed in, but no tool hands back a cookie or runs a script.
+Files go in and out as results PCP keeps for the token for a day, encrypted,
+never as files on the machine: `download` keeps the file a page offers (a
+download nobody asked for is refused) and `upload_file` puts kept ones, a
+download or a mail attachment, into a page's file field, so a run_code
+program can take an invoice from an email and upload it without its bytes
+passing through the assistant.
 **Forget all sites** signs it out of everything. Every answer names the tab
 and a link to it in PCP, where you watch it live and **Take over**: your
 mouse and keyboard go to the page, with the timing you made them, and the

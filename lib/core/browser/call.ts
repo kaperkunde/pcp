@@ -4,22 +4,35 @@ import type { McpServer } from "@/lib/generated/prisma/client"
 
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { PcpError } from "../errors"
+import { invalid, PcpError } from "../errors"
 import { CHALLENGE_LINE } from "../fetch/challenge"
 import { isPcpSite } from "../fetch/fetch"
 import { htmlToMarkdown, sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
+import { bareType } from "../media-types"
 import { hiddenCharacter, withoutPresentation } from "../memories"
 import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "../rate-limit"
+import { loadResourceLimits } from "../resources/state"
+import { missingResultMessage, resolveHandles } from "../result-handles"
+import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
 import { decideSite, loadFetchRules } from "../web-fetch"
+import {
+  catchDownload,
+  downloadType,
+  offeredName,
+  tabOwnsFrame,
+} from "./downloads"
 import {
   ACTION_TIMEOUT_MS,
   BROWSER_ACTIONS,
   CHALLENGE_WAIT_MS,
   DEFAULT_READ_CHARS,
+  DOWNLOAD_START_MS,
+  DOWNLOAD_TIMEOUT_MS,
   MAX_SCREENSHOT_BYTES,
   MAX_TABS,
+  MAX_UPLOAD_BYTES,
   MAX_URL_LENGTH,
   NAVIGATION_TIMEOUT_MS,
 } from "./limits"
@@ -304,6 +317,21 @@ function checkLead(tab: Tab): string[] {
 }
 
 /**
+ * A file the page offered while no download call waited: refused, and said
+ * once, so the assistant can take it with download.
+ */
+function offeredLead(tab: Tab): string[] {
+  const name = tab.offeredFile
+  tab.offeredFile = null
+
+  return name
+    ? [
+        `The page offered a file to download (${offeredName(name)}), which the browser keeps only through download: call download with the ref you clicked, or the file's address, to keep it.`,
+      ]
+    : []
+}
+
+/**
  * Gives a site's check the tab shows the time most take to pass on their
  * own: its script reloads or posts back, and the next document is the
  * page. The clearance it leaves is a cookie in the vault's profile, saved
@@ -323,6 +351,7 @@ async function report(
 ): Promise<CallToolResult> {
   const lines = [
     ...checkLead(tab),
+    ...offeredLead(tab),
     ...lead,
     `Tab ${tab.id}: ${(await tabTitle(tab)) || "(no title)"}`,
     `Address: ${tab.page.url()}`,
@@ -370,6 +399,11 @@ function navigationFailure(
     return `${host} redirected to ${tab.lastBlocked}, which this token may not open yet, so the browser stopped. Call navigate with an address there to ask the owner.`
   }
 
+  if (/Download is starting/.test(firstLine(error))) {
+    tab.offeredFile = null
+    return `${host} answered with a file to download, not a page, so the tab stayed where it was. Call download with that address to keep the file.`
+  }
+
   const refusal = vault.proxy.refusal(url.hostname, since)
 
   if (refusal === "own") {
@@ -381,6 +415,33 @@ function navigationFailure(
   }
 
   return `${host} could not be opened: ${firstLine(error)}`
+}
+
+/** A new, blank tab of the token's, if the browser has room for one. */
+async function newTab(
+  scope: BrowserScope,
+  vault: VaultBrowser,
+): Promise<Tab | CallToolResult> {
+  if (vault.tabs.size >= MAX_TABS) {
+    // Only how many: the other tabs' pages are not this token's to see.
+    const mine = [...vault.tabs.values()].filter(
+      (open) => open.tokenId === scope.tokenId,
+    ).length
+
+    return text(
+      mine > 0
+        ? `The browser has ${MAX_TABS} tabs open, as many as it keeps. Close one of this token's first (tabs with action close), or open the page in one of them.`
+        : `The browser has ${MAX_TABS} tabs open, as many as it keeps, and none is this token's. The owner can close one on PCP's Browser page.`,
+      true,
+    )
+  }
+
+  return openTab(vault, {
+    openedBy: await tokenName(scope.tokenId),
+    tokenId: scope.tokenId,
+    rules: null,
+    privateAllowed: false,
+  })
 }
 
 /**
@@ -411,26 +472,16 @@ export async function performNavigate(
       return ownerHolds(tab)
     }
 
-    if (!tab && vault.tabs.size >= MAX_TABS) {
-      // Only how many: the other tabs' pages are not this token's to see.
-      const mine = [...vault.tabs.values()].filter(
-        (open) => open.tokenId === scope.tokenId,
-      ).length
+    if (!tab) {
+      const opened = await newTab(scope, vault)
 
-      return text(
-        mine > 0
-          ? `The browser has ${MAX_TABS} tabs open, as many as it keeps. Close one of this token's first (tabs with action close), or open the page in one of them.`
-          : `The browser has ${MAX_TABS} tabs open, as many as it keeps, and none is this token's. The owner can close one on PCP's Browser page.`,
-        true,
-      )
+      if (!isTab(opened)) {
+        return opened
+      }
+
+      tab = opened
     }
 
-    tab ??= await openTab(vault, {
-      openedBy: await tokenName(scope.tokenId),
-      tokenId: scope.tokenId,
-      rules: null,
-      privateAllowed: false,
-    })
     await driveAs(vault, tab, scope)
 
     if (allowedByOwner) {
@@ -640,6 +691,258 @@ function staleRef(ref: string): CallToolResult {
   )
 }
 
+type Upload = { name: string; mimeType: string; buffer: Buffer }
+
+/**
+ * upload_file's files, read as bytes from the token's kept results before
+ * the page is touched: an unknown id puts nothing into it.
+ */
+async function keptUploads(
+  list: Array<{ $result: string; name?: string; type?: string }>,
+  open: ResultOpener | undefined,
+): Promise<Upload[]> {
+  if (!open) {
+    throw invalid(
+      "upload_file's files are results PCP kept for this token, and this call cannot read them.",
+    )
+  }
+
+  const uploads: Upload[] = []
+  let total = 0
+
+  for (const entry of list) {
+    const opened = await open(entry.$result)
+
+    if (!opened) {
+      throw invalid(missingResultMessage())
+    }
+
+    const buffer = opened.bytes()
+    total += buffer.length
+
+    if (total > MAX_UPLOAD_BYTES) {
+      throw invalid(
+        `The files come to more than ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB, more than the browser puts into a page in one call.`,
+      )
+    }
+
+    uploads.push({
+      name:
+        entry.name ??
+        opened.name ??
+        (opened.kind === "text" ? "text.txt" : "file"),
+      mimeType: entry.type ?? bareType(opened.mediaType),
+      buffer,
+    })
+  }
+
+  return uploads
+}
+
+/**
+ * Puts files into a file field: the field itself, or, for a button that
+ * opens the page's file picker, the picker (which never opens a window:
+ * runtime.ts catches every one).
+ */
+async function uploadFiles(
+  scope: BrowserScope,
+  tab: Tab,
+  ref: string,
+  uploads: Upload[],
+): Promise<CallToolResult> {
+  const target = await resolveRef(tab.page, ref)
+
+  if (!target) {
+    return staleRef(ref)
+  }
+
+  try {
+    await target.setInputFiles(uploads, { timeout: ACTION_TIMEOUT_MS })
+  } catch (error) {
+    if (!/not an HTMLInputElement/i.test(firstLine(error))) {
+      throw error
+    }
+
+    const chooser = await Promise.all([
+      tab.page.waitForEvent("filechooser", { timeout: ACTION_TIMEOUT_MS }),
+      target.click({ timeout: ACTION_TIMEOUT_MS }),
+    ])
+      .then(([opened]) => opened)
+      .catch(() => null)
+
+    if (!chooser) {
+      return text(
+        `${ref} is not a file field, and clicking it opened no file picker. Give the ref of the field, or of the button that opens its picker.`,
+        true,
+      )
+    }
+
+    if (uploads.length > 1 && !chooser.isMultiple()) {
+      return text("That field takes one file; give it one.", true)
+    }
+
+    await chooser.setFiles(uploads, { timeout: ACTION_TIMEOUT_MS })
+  }
+
+  await settle(tab)
+  return report(scope, tab, {
+    lead: [
+      `Chose ${uploads.map((upload) => offeredName(upload.name)).join(", ")} in ${ref}. The page has them; it sends them as it would for a person, usually when its form is sent.`,
+    ],
+  })
+}
+
+/**
+ * download: a click (ref) or an address (url) that starts a download in
+ * the tab, and the file kept for the token. The file comes only from the
+ * tab (or a popup of it), from an address the tab may open; it is read and
+ * gone from the machine before this answers (downloads.ts).
+ */
+async function downloadFile(
+  scope: BrowserScope,
+  vault: VaultBrowser,
+  tab: Tab,
+  args: { ref?: string; url?: string },
+  keepBytes: BytesKeeper | undefined,
+): Promise<CallToolResult> {
+  if (!keepBytes) {
+    return text(
+      "A download is kept as a result for the token, which this call cannot make.",
+      true,
+    )
+  }
+
+  let start: () => Promise<number | void>
+
+  if (args.url) {
+    const url = pageUrl(args.url)
+
+    if (isPcpSite(url, scope.publicUrl)) {
+      return text(
+        `${url.host} is PCP's own address, which the browser never opens.`,
+        true,
+      )
+    }
+
+    if (!mayOpen(vault, tab, url.href)) {
+      return text(
+        `Tab ${tab.id} may not open ${siteKey(url)} now, so nothing was downloaded. Call navigate with the address to ask the owner; once they allow it, call download with it again.`,
+        true,
+      )
+    }
+
+    start = async () => {
+      const since = Date.now()
+
+      try {
+        await tab.page.goto(url.href, {
+          waitUntil: "domcontentloaded",
+          timeout: NAVIGATION_TIMEOUT_MS,
+        })
+      } catch (error) {
+        if (/Download is starting/.test(firstLine(error))) {
+          return
+        }
+
+        throw new Error(navigationFailure(vault, tab, url, error, since))
+      }
+
+      // A page opened rather than a file: a download it starts on its own
+      // has a moment.
+      return 1_000
+    }
+  } else {
+    const ref = args.ref!
+    const target = await resolveRef(tab.page, ref)
+
+    if (!target) {
+      return staleRef(ref)
+    }
+
+    start = () => target.click({ timeout: ACTION_TIMEOUT_MS })
+  }
+
+  const { fileBytes } = await loadResourceLimits()
+  const caught = await catchDownload(vault.downloads, {
+    tabSession: tab.cdp,
+    judge: async (frameId, address) =>
+      !(await tabOwnsFrame(vault.downloads, tab, frameId))
+        ? "other"
+        : mayOpen(vault, tab, address)
+          ? "take"
+          : "refuse",
+    start,
+    maxBytes: fileBytes,
+  })
+  const failed = (lead: string) =>
+    report(scope, tab, { lead: [lead], snapshot: false }).then((result) => ({
+      ...result,
+      isError: true,
+    }))
+
+  switch (caught.kind) {
+    case "none":
+      await settle(tab)
+      return report(scope, tab, {
+        lead: [
+          args.url
+            ? "That address opened a page, not a file, and nothing started a download. The tab shows the page now."
+            : `Nothing started a download within ${DOWNLOAD_START_MS / 1000} seconds of the click. Take a snapshot to see what it did.`,
+        ],
+      }).then((result) => ({ ...result, isError: true }))
+    case "refused": {
+      let host = "another site"
+
+      try {
+        host = siteKey(new URL(caught.url))
+        await decideSite(scope, host, "GET").catch(() => null)
+      } catch {
+        // Only http(s) addresses are ever refused.
+      }
+
+      return failed(
+        `The download came from ${host}, which this token may not open yet, so it was stopped. Call navigate with its address to ask the owner; once they allow it, call download again.`,
+      )
+    }
+    case "too_large":
+      return failed(
+        `${offeredName(caught.name)} is larger than PCP keeps of one file (${fileBytes.toLocaleString("en")} bytes), so the download was stopped. The owner can raise that in PCP's settings, under Resources.`,
+      )
+    case "timeout":
+      return failed(
+        `${offeredName(caught.name)} did not finish downloading within ${DOWNLOAD_TIMEOUT_MS / 60_000} minutes, so it was stopped.`,
+      )
+    case "failed":
+      return failed(
+        `The download of ${offeredName(caught.name)} failed: the site broke it off, or Chromium could not save it.`,
+      )
+  }
+
+  const kept = await keepBytes({
+    bytes: caught.bytes,
+    mediaType: downloadType(caught.name, caught.bytes),
+    name: caught.name,
+    serverId: scope.serverId,
+    toolName: "download",
+  })
+  const from = /^https?:/i.test(caught.url)
+    ? caught.url.slice(0, MAX_URL_LENGTH)
+    : null
+
+  return text(
+    JSON.stringify(
+      {
+        tab: tab.id,
+        file: handleOf(kept),
+        ...(from ? { from } : {}),
+        note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants a file (upload_file's files, send_email's or create_draft's attachments, a field that takes base64), or read it with read_result.`,
+      },
+      null,
+      2,
+    ),
+  )
+}
+
 async function screenshotOf(tab: Tab): Promise<Buffer> {
   for (const quality of [70, 50, 35, 20]) {
     const picture = await tab.page.screenshot({
@@ -665,7 +968,23 @@ export async function callBrowserTool(
   server: Pick<McpServer, "id" | "name">,
   toolName: string,
   rawArgs: Record<string, unknown>,
-  { tokenId, publicUrl }: { tokenId: string; publicUrl: string },
+  {
+    tokenId,
+    publicUrl,
+    open,
+    keepBytes,
+  }: {
+    tokenId: string
+    publicUrl: string
+    /**
+     * Opens a result the token kept: a handle in the arguments is replaced
+     * by what it stands for (a text to type), and upload_file's files are
+     * read as bytes.
+     */
+    open?: ResultOpener
+    /** Keeps a file for the token: what download takes. */
+    keepBytes?: BytesKeeper
+  },
 ): Promise<CallToolResult> {
   const spec = browserToolSpec(toolName)
 
@@ -676,7 +995,11 @@ export async function callBrowserTool(
     )
   }
 
-  const args = parseBrowserArgs(spec, rawArgs)
+  // Before the browser is touched: an unknown id never reaches a page.
+  const args = parseBrowserArgs(
+    spec,
+    open ? await resolveHandles(rawArgs, open, { skip: ["files"] }) : rawArgs,
+  )
 
   if (!checkRateLimit(`browser:${tokenId}`, BROWSER_ACTIONS)) {
     return text(
@@ -794,6 +1117,39 @@ export async function callBrowserTool(
         await settle(current)
         return report(scope, current)
       })
+    case "upload_file": {
+      const uploads = await keptUploads(
+        args.files as Array<{ $result: string; name?: string; type?: string }>,
+        open,
+      )
+      return onTab(scope, tab, spec, (current) =>
+        uploadFiles(scope, current, args.ref as string, uploads),
+      )
+    }
+    case "download":
+      // An address needs no page first: a token with no tab gets a blank
+      // one, which follows its lines as any tab of its does.
+      if (args.url && !tab) {
+        const vault = await ensureBrowser(ctx, { publicUrl })
+
+        if (!ownTab(vault, tokenId, vault.lastTabByToken.get(tokenId))) {
+          const opened = await withVault(vault, () => newTab(scope, vault))
+
+          if (!isTab(opened)) {
+            return opened
+          }
+        }
+      }
+
+      return onTab(scope, tab, spec, (current, vault) =>
+        downloadFile(
+          scope,
+          vault,
+          current,
+          args as { ref?: string; url?: string },
+          keepBytes,
+        ),
+      )
     case "scroll":
       return onTab(scope, tab, spec, async (current) => {
         if (args.ref) {

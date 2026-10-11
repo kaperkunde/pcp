@@ -159,8 +159,8 @@ so in the summary; the bump itself waits for the request.
   `lib/core/tool-results.ts`: text or bytes, encrypted with
   `tool_result:<id>`, readable by the token whose call produced them, gone
   after a day, never logged and never exported. A handle (`{"$result": id}`)
-  in a call's arguments is replaced only in `upstream.ts`, `endpoints.ts`
-  and `mail/accounts.ts` (`lib/core/result-handles.ts`), with the token's own
+  in a call's arguments is replaced only in `upstream.ts`, `endpoints.ts`,
+  `mail/accounts.ts` and `browser/call.ts` (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
   never the content.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:
@@ -248,7 +248,14 @@ so in the summary; the bump itself waits for the request.
   `runtime.ts`: the driving token's web fetch site lines, a site the owner
   allowed for that tab, or the owner's own control; PCP's own site never. Service
   workers are refused at that gate, not by a browser option. No
-  tool runs JavaScript, reads or sets cookies or storage, or downloads. A
+  tool runs JavaScript or reads or sets cookies or storage. Files cross only
+  as the token's kept results, never a path on the machine: Chromium refuses
+  every download but while `download` waits for one (`downloads.ts`, on a
+  DevTools session of PCP's own), which takes the first from its tab or a
+  popup of it at an address the tab may open, cancels every other and one
+  past the largest file, and reads and removes the file before answering;
+  `upload_file` reads kept results as bytes, and no file chooser ever opens
+  a window. A
   refusal that names a site is a tool error, never a thrown `PcpError` (the
   request log keeps those). The owner's input enters through the DevTools
   protocol with each event's own time (`input.ts`), never as page script.

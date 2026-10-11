@@ -1306,14 +1306,41 @@ Hosts are never logged.
 
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
-`select_option`, `scroll`, `wait_for`, `screenshot`, `handle_dialog` and
-`hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
+`select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
+`download`, `handle_dialog` and `hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
 with refs), the page as Markdown (`htmlToMarkdown`, read from the live
 page), a screenshot of the viewport, and the tab's address, title and the
 link to it in PCP. It acts by ref (click, type, select), by key or by
-scroll. It never gets a cookie or storage, never runs JavaScript, never
-downloads a file. A refusal that names a site or an address is a tool
+scroll. It never gets a cookie or storage and never runs JavaScript. A
+refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
+
+**Files** (`downloads.ts`, `call.ts`). A file crosses the browser only as a
+result kept for the token (see Long answers and kept results): never a path on the
+machine, and its bytes never pass through the assistant. `upload_file` names
+kept results by handle (`{"$result": id}`, with a name and type of its own if
+it likes), reads them as bytes before the page is touched, and hands them to
+the file field, or to the file chooser a button opens, as a person choosing
+them would; the page sends them only as it would then. Every tab catches its
+file chooser, so none ever opens a window on the machine.
+
+Playwright makes the vault's context with downloads off, and Chromium refuses
+every download but while a `download` call waits for one. The call lets the
+context save downloads into a folder in the browser's scratch folder, on a
+DevTools session of PCP's own (Playwright's download objects can read nothing
+in a context made with downloads off), clicks the ref or opens the address,
+and takes the first download its tab, a frame in it, or a popup of it starts,
+from an address the tab may open (`mayOpen`; a page's own blob or data file
+is the page's). Every other download is cancelled as it begins, and the one
+taken is cancelled once Chromium says it is larger than PCP keeps of one file
+or slower than `DOWNLOAD_TIMEOUT_MS`. Its bytes are read and the file removed
+before the call answers; it is kept, encrypted, as the token's result, and
+the answer is its handle, so a run_code program can pass a download, or a
+mail attachment, on to `upload_file` or `send_email`. A download a page
+starts while no call waits is refused by Chromium and only said in the tab's
+next answer, by the name the page gave, so the assistant can take it with
+`download`. An address given to `download` must be at a site the tab may
+open already; `navigate` is what asks the owner.
 
 **Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
 `tokenId`; a popup is its opener's) or that the owner last handed it to,
