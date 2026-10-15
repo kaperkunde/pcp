@@ -8,12 +8,18 @@ import { Switch, SwitchRow } from "@/components/ui/switch"
  * updateTokenAction and the sign-in consent.
  */
 export type TokenOption =
-  "keepMemories" | "webFetch" | "runCode" | "manageEndpoints" | "manageWrappers"
+  | "keepMemories"
+  | "webFetch"
+  | "runCode"
+  | "shareFiles"
+  | "manageEndpoints"
+  | "manageWrappers"
 
 export const TOKEN_OPTION_NAMES: readonly TokenOption[] = [
   "keepMemories",
   "webFetch",
   "runCode",
+  "shareFiles",
   "manageEndpoints",
   "manageWrappers",
 ]
@@ -49,6 +55,14 @@ export const TOKEN_OPTIONS: Record<
     ask: "Let an assistant with this token run code that calls its tools",
     detail:
       "It gets a run_code tool: a short JavaScript program, run inside PCP, that calls this token's tools and filters or passes on what they answer, so large answers never have to pass through the assistant. Every call follows the token's levels: a tool that asks you first stops the program until you answer, and a blocked tool stays blocked. The program reaches nothing else: no network, no files, and never your secrets.",
+  },
+  shareFiles: {
+    label: "Move files by link",
+    caption:
+      "Links its own computer downloads a kept file from, or uploads one to. Each works for an hour.",
+    ask: "Let an assistant with this token move files to and from its own computer by link",
+    detail:
+      "It gets share_result and receive_file: a link its own computer (a sandbox, a terminal) downloads a file PCP keeps for it from, such as a browser download or a mail attachment, or uploads a file to, which it can then attach or upload through its tools. The file's bytes never pass through the assistant. Each link is for one file and this token alone, works for an hour, and whoever has the link can use it in that time.",
   },
   manageEndpoints: {
     label: "Manage API endpoints",

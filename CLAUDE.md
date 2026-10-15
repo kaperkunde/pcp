@@ -162,7 +162,14 @@ so in the summary; the bump itself waits for the request.
   in a call's arguments is replaced only in `upstream.ts`, `endpoints.ts`,
   `mail/accounts.ts` and `browser/call.ts` (`lib/core/result-handles.ts`), with the token's own
   results, before anything is sent; a waiting request stores the handle,
-  never the content.
+  never the content. File links (`lib/core/file-links.ts`, only for a token
+  with `shareFiles`) move one kept file to or from the assistant's own
+  computer: the link's secret is the credential for that file alone, stored
+  only as its hash, the file encrypted under a key derived from it (an
+  upload's key also wrapped under the vault's, so it becomes a kept result
+  only when the token uses its handle); an hour, a few downloads or one
+  upload, its token live, every use in the request log, never exported, and
+  pruned by the cleanup. Nothing else serves a kept result over HTTP.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:
   tool, server, upstream tool, time, outcome, and the permission request an
   ask made. Never arguments, results, sites or a secret; the Log page
@@ -304,7 +311,9 @@ so in the summary; the bump itself waits for the request.
   the desktop app only, also carries the version and the owner's install
   request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
-  origin itself, `lib/server/same-origin.ts`), and the browser's live view
+  origin itself, `lib/server/same-origin.ts`), file links
+  (`app/api/files/[secret]/`: curl from an assistant's own computer, the
+  link's secret its only credential), and the browser's live view
   (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
   owner's input, which an action cannot carry; the same origin check and
   session).

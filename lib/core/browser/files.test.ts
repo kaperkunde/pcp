@@ -18,6 +18,7 @@ import type { McpServer } from "@/lib/generated/prisma/client"
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { downloadByLink, uploadByLink } from "../file-links"
 import { buildGatewayServer, loadGatewayServers } from "../gateway"
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import {
@@ -449,6 +450,105 @@ return { file: got.file, sent: sent.includes("Thank you") }
         expect(post.body).toContain(
           'name="statement"; filename="invoice-42.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4',
         )
+      } finally {
+        await client.close()
+      }
+    })
+
+    it("moves a file between the browser and the assistant's own computer by link", async () => {
+      const { token } = await createApiToken(ctx, {
+        name: "Mover",
+        allowAllServers: true,
+        shareFiles: true,
+      })
+      const scope = {
+        ...(await resolveApiToken(token))!,
+        publicUrl: PUBLIC_URL,
+      }
+      await setFetchSite(
+        ctx,
+        scope.tokenId,
+        new URL(api.origin).host,
+        "allowed",
+      )
+      await setFetchPrivate(ctx, scope.tokenId, "allowed")
+
+      for (const tool of browserTools()) {
+        await writeToolAccess(scope.tokenId, server.id, tool.name, "allowed")
+      }
+
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+      await buildGatewayServer(scope, await loadGatewayServers(scope)).connect(
+        serverSide,
+      )
+      const client = new Client({ name: "test", version: "1.0.0" })
+      await client.connect(clientSide)
+      const answer = (result: unknown) => {
+        const parts = (result as { content: Array<{ text?: string }> }).content
+        return parts.map((part) => part.text ?? "").join("\n")
+      }
+      const browser = (tool: string, args: Record<string, unknown>) =>
+        client.callTool({
+          name: "call_tool",
+          arguments: { server: "browser", tool, arguments: args },
+        })
+      /** The secret at the end of a link, as the route takes it. */
+      const secretOf = (url: string) => url.split("/").pop()!
+
+      try {
+        // In: a file from the assistant's computer, into the page's form.
+        const receive = JSON.parse(
+          answer(
+            await client.callTool({
+              name: "receive_file",
+              arguments: { name: "scan.pdf" },
+            }),
+          ),
+        ) as { url: string; result: { $result: string } }
+        const sentByCurl = await uploadByLink(
+          secretOf(receive.url),
+          (async function* () {
+            yield PDF
+          })(),
+          { contentType: null, contentLength: PDF.length },
+        )
+        expect(sentByCurl).toMatchObject({ ok: true, size: PDF.length })
+
+        const form = answer(
+          await browser("navigate", { url: `${api.origin}/form` }),
+        )
+        const ref = (name: string) =>
+          form
+            .split("\n")
+            .find((line) => line.includes(`"${name}"`))!
+            .match(/ref=(e\d+)/)![1]!
+        const chose = await browser("upload_file", {
+          ref: ref("Statement"),
+          files: [receive.result],
+        })
+        expect(chose.isError, answer(chose)).toBeFalsy()
+        await browser("click", { ref: ref("Send") })
+        const post = api.requests.find((request) => request.method === "POST")!
+        expect(post.body).toContain(
+          'name="statement"; filename="scan.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4',
+        )
+
+        // Out: a file the browser downloaded, onto the assistant's computer.
+        const got = JSON.parse(
+          answer(await browser("download", { url: `${api.origin}/invoice` })),
+        ) as { file: { $result: string }; note: string }
+        expect(got.note).toContain("share_result")
+        const shared = JSON.parse(
+          answer(
+            await client.callTool({
+              name: "share_result",
+              arguments: { id: got.file.$result },
+            }),
+          ),
+        ) as { url: string; name: string; curl: string }
+        expect(shared.name).toBe("invoice-42.pdf")
+        const fetched = await downloadByLink(secretOf(shared.url))
+        expect(fetched.ok && fetched.bytes.equals(PDF)).toBe(true)
       } finally {
         await client.close()
       }

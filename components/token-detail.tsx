@@ -212,7 +212,7 @@ export function TokenReachForm({
   return (
     <TokenSettingsForm
       token={token}
-      shows={["scope", "keepMemories", "webFetch", "runCode"]}
+      shows={["scope", "keepMemories", "webFetch", "runCode", "shareFiles"]}
       locked={locked}
       className="gap-8"
     >
@@ -256,6 +256,11 @@ export function TokenReachForm({
             option="runCode"
             id="token-code"
             defaultChecked={token.runCode}
+          />
+          <TokenOptionRow
+            option="shareFiles"
+            id="token-files"
+            defaultChecked={token.shareFiles}
           />
         </List>
       </ListSection>

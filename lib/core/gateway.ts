@@ -37,6 +37,7 @@ import {
 } from "./endpoint-admin"
 import { MAX_FIELDS, readFields } from "./answers"
 import { isPcpError } from "./errors"
+import { receiveFile, shareResult } from "./file-links"
 import {
   DEFAULT_FETCH_LENGTH,
   MAX_FETCH_BODY_BYTES,
@@ -217,6 +218,9 @@ export const BROWSER_INSTRUCTIONS = (slug: string) =>
 const CODE_INSTRUCTIONS =
   "This token can also run code with run_code: a JavaScript program (an async function's body) that calls the owner's tools with await pcp.call(server, tool, args) and works on what they answer, so a large answer can be filtered, joined or passed from one tool to another without passing through you; console.log prints and return hands back a value. Each call follows this token's levels as call_tool does: one the owner has not allowed yet stops the program with their link, handed over as a tool's is. Files come back as handles, {\"$result\": …}, to pass on as they are; with keep, so does a secret one tool makes for another, unread by you or the program. The program reaches nothing else: no network, no files, no timers."
 
+const FILES_INSTRUCTIONS =
+  "This token can also move files between PCP and your own computer (a sandbox or terminal you run commands in) by link, so a file's bytes never pass through you: share_result gives a link to download a file PCP keeps for you (a browser download, a mail attachment, any handle {\"$result\": …}) with curl, and receive_file gives a link to send a file to with curl -T, and the handle it becomes, to pass to upload_file, send_email's attachments or any tool that takes a file. A link is for one file, works for an hour, and anyone holding it can use it: run it, do not repeat it to the owner or put it anywhere else."
+
 const WRAPPER_INSTRUCTIONS =
   'This token can also propose wrappers with create_wrapper: a server whose tools are short JavaScript programs over the owner\'s other tools, for a cleaner way to use a server (fewer arguments, several calls made one, an answer cut to what matters, a secret put where an API wants it, as {"$secret": "<name>"} in a call, where the owner allowed it). Each tool calls only the tools it lists, and can stand in for them in search; it can declare the shape of its answer (outputSchema). By default the calls it lists run on the owner\'s approval of the wrapper, so a token needs a level only for the wrapper\'s tool and the server behind it can be hidden from search; callLevels "token" holds them to the calling token\'s own levels instead. The owner reads every program and decides; get_wrapper reads one, update_wrapper and delete_wrapper propose changes.'
 
@@ -354,9 +358,11 @@ export function buildInstructions(
     webFetch = false,
     runCode = false,
     manageWrappers = false,
+    shareFiles = false,
   }: {
     manageEndpoints?: boolean
     manageWrappers?: boolean
+    shareFiles?: boolean
     /** What to say about memories, for a token that keeps them. */
     memories?: InstructionMemories | null
     webFetch?: boolean
@@ -371,6 +377,7 @@ export function buildInstructions(
       ...memoryInstructions(memories),
       ...(webFetch ? [FETCH_INSTRUCTIONS] : []),
       ...(runCode ? [CODE_INSTRUCTIONS] : []),
+      ...(shareFiles ? [FILES_INSTRUCTIONS] : []),
       ...(manageWrappers ? [WRAPPER_INSTRUCTIONS] : []),
     ].join("\n")
   }
@@ -396,6 +403,7 @@ export function buildInstructions(
     ...memoryInstructions(memories),
     ...(webFetch ? [FETCH_INSTRUCTIONS] : []),
     ...(runCode ? [CODE_INSTRUCTIONS] : []),
+    ...(shareFiles ? [FILES_INSTRUCTIONS] : []),
     ...(manageWrappers ? [WRAPPER_INSTRUCTIONS] : []),
   ].join("\n")
 }
@@ -453,6 +461,18 @@ function withLead(lead: string, result: CallToolResult): CallToolResult {
  * only says that the tool failed.
  */
 const authored = new WeakSet<CallToolResult>()
+
+/** A value as an answer's JSON text. */
+function jsonText(value: unknown): CallToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] }
+}
+
+/** A word a POSIX shell takes as it is: single-quoted unless plain. */
+function shellWord(value: string): string {
+  return /^[\w.\/:@%+=,-]+$/.test(value)
+    ? value
+    : `'${value.replace(/'/g, "'\\''")}'`
+}
 
 function failure(value: string): CallToolResult {
   const result: CallToolResult = {
@@ -573,6 +593,7 @@ export function buildGatewayServer(
         webFetch: scope.webFetch,
         runCode: scope.runCode,
         manageWrappers: scope.manageWrappers,
+        shareFiles: scope.shareFiles,
       }),
     },
   )
@@ -1252,7 +1273,7 @@ export function buildGatewayServer(
             content: [
               {
                 type: "text",
-                text: `[result ${slice.id}: ${slice.name ?? "binary data"}, ${slice.mediaType}, ${slice.total} bytes, readable until ${until}] PCP does not show binary data. To hand it to another tool, pass {"$result": "${slice.id}"} where that tool wants a string (it becomes base64), or as an attachment where the tool takes them.`,
+                text: `[result ${slice.id}: ${slice.name ?? "binary data"}, ${slice.mediaType}, ${slice.total} bytes, readable until ${until}] PCP does not show binary data. To hand it to another tool, pass {"$result": "${slice.id}"} where that tool wants a string (it becomes base64), or as an attachment where the tool takes them.${scope.shareFiles ? " To get it onto your own computer, call share_result and download the link with curl." : ""}`,
               },
             ],
           }
@@ -1286,6 +1307,118 @@ export function buildGatewayServer(
       },
     ),
   )
+
+  // Only for a token the owner made with "move files by link": links its own
+  // computer fetches a kept result from, or sends a file to, with curl
+  // (lib/core/file-links.ts, app/api/files/).
+  if (scope.shareFiles) {
+    server.registerTool(
+      "share_result",
+      {
+        title: "Download a kept file by link",
+        description:
+          'A link your own computer (a sandbox or terminal you run commands in) downloads a file or text PCP keeps for you from, so its bytes never pass through you: a handle\'s {"$result": id} from any answer (a browser download, a mail attachment, a long answer). Answers with the link and a curl command to run. The link works for an hour, for a few downloads; anyone holding it can use it, so run it rather than passing it on.',
+        inputSchema: z.object({
+          id: z
+            .string()
+            .min(1)
+            .max(64)
+            .describe("The kept result's id: a handle's $result."),
+        }),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      logged("share_result", () => ({}), { quiet: true })(
+        async (args: { id: string }) => {
+          let link: Awaited<ReturnType<typeof shareResult>>
+
+          try {
+            link = await shareResult(scope.ctx, {
+              tokenId: scope.tokenId,
+              id: args.id,
+              publicUrl: scope.publicUrl,
+            })
+          } catch (error) {
+            if (isPcpError(error) && error.code === "not_found") {
+              return failure(
+                "No result with that id for this token, or it has expired (results are kept for a day). Call the tool that made it again for a fresh one.",
+              )
+            }
+
+            throw error
+          }
+
+          return jsonText({
+            url: link.url,
+            name: link.name,
+            type: link.mediaType,
+            size: link.size,
+            expiresAt: link.expiresAt.toISOString(),
+            downloads: link.maxUses,
+            curl: `curl -fsSL -o ${shellWord(link.name ?? "file")} ${shellWord(link.url)}`,
+          })
+        },
+      ),
+    )
+
+    server.registerTool(
+      "receive_file",
+      {
+        title: "Send a file to PCP by link",
+        description:
+          'A link your own computer (a sandbox or terminal you run commands in) sends one file to with curl, so its bytes never pass through you, and the handle {"$result": id} the file is kept under once it arrived: pass it to upload_file, as a send_email attachment, or to any tool that takes a file. Answers with the link, the handle and a curl command to run. The link takes one file within an hour; what arrived is kept for a day.',
+        inputSchema: z.object({
+          name: z
+            .string()
+            .min(1)
+            .max(255)
+            .regex(/^[^\u0000-\u001f\u007f/\\]+$/, {
+              message: "A file name, without a path or control characters.",
+            })
+            .optional()
+            .describe("The file's name, as tools will send it on."),
+          type: z
+            .string()
+            .max(200)
+            .regex(/^[\w.+-]+\/[\w.+-]+$/, {
+              message: "A media type, like application/pdf.",
+            })
+            .optional()
+            .describe(
+              "Its media type; by default what the upload says, or its name and first bytes.",
+            ),
+        }),
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      logged("receive_file", () => ({}), { quiet: true })(
+        async (args: { name?: string; type?: string }) => {
+          const link = await receiveFile(scope.ctx, {
+            tokenId: scope.tokenId,
+            publicUrl: scope.publicUrl,
+            name: args.name ?? null,
+            type: args.type ?? null,
+          })
+
+          return jsonText({
+            url: link.url,
+            result: { $result: link.resultId },
+            expiresAt: link.expiresAt.toISOString(),
+            curl: `curl -fsS -T ${shellWord(args.name ?? "FILE")} ${shellWord(link.url)}`,
+            note: `Send the file (curl -T, or --data-binary @file), then pass {"$result": "${link.resultId}"} where a tool wants it. Until the file has arrived, the handle names nothing.`,
+          })
+        },
+      ),
+    )
+  }
 
   server.registerTool(
     "register_server",

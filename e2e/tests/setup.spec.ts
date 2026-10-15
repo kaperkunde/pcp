@@ -80,6 +80,9 @@ test("signs each project in with a session of its own", async ({
       (project) => typeof project.use.storageState === "string",
     )
   expect(projects.length).toBeGreaterThan(0)
+  // An unlock runs the password's key derivation: a few seconds each, on a
+  // dev server that may still be compiling the page.
+  test.setTimeout(60_000 + projects.length * 5_000)
 
   for (const [index, project] of projects.entries()) {
     const context = await browser.newContext({

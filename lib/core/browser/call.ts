@@ -9,7 +9,7 @@ import { CHALLENGE_LINE } from "../fetch/challenge"
 import { isPcpSite } from "../fetch/fetch"
 import { htmlToMarkdown, sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
-import { bareType } from "../media-types"
+import { bareType, fileMediaType } from "../media-types"
 import { hiddenCharacter, withoutPresentation } from "../memories"
 import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "../rate-limit"
@@ -17,12 +17,7 @@ import { loadResourceLimits } from "../resources/state"
 import { missingResultMessage, resolveHandles } from "../result-handles"
 import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
 import { decideSite, loadFetchRules } from "../web-fetch"
-import {
-  catchDownload,
-  downloadType,
-  offeredName,
-  tabOwnsFrame,
-} from "./downloads"
+import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
 import {
   ACTION_TIMEOUT_MS,
   BROWSER_ACTIONS,
@@ -920,7 +915,7 @@ async function downloadFile(
 
   const kept = await keepBytes({
     bytes: caught.bytes,
-    mediaType: downloadType(caught.name, caught.bytes),
+    mediaType: fileMediaType(caught.name, caught.bytes),
     name: caught.name,
     serverId: scope.serverId,
     toolName: "download",
@@ -935,7 +930,7 @@ async function downloadFile(
         tab: tab.id,
         file: handleOf(kept),
         ...(from ? { from } : {}),
-        note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants a file (upload_file's files, send_email's or create_draft's attachments, a field that takes base64), or read it with read_result.`,
+        note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants a file (upload_file's files, send_email's or create_draft's attachments, a field that takes base64), read it with read_result, or get it onto your own computer with share_result's link where this token has it.`,
       },
       null,
       2,

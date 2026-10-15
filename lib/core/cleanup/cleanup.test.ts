@@ -7,6 +7,7 @@ import { createApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { databaseFile, logDir } from "../data-dir"
 import { db } from "../db"
+import { FILE_LINK_TTL_MS, receiveFile, shareResult } from "../file-links"
 import { getHostJson, setHostJson } from "../host-settings"
 import { pruneOAuthStates } from "../oauth"
 import {
@@ -161,6 +162,32 @@ describe("a run", () => {
     expect(statSync(databaseFile()).size).toBeLessThan(
       before - 30 * 1024 * 1024,
     )
+  })
+
+  it("removes file links past their hour with the kept results", async () => {
+    const now = new Date()
+    const kept = await keepResult(ctx, {
+      tokenId,
+      serverId: null,
+      toolName: "t",
+      mediaType: "text/plain",
+      text: "a file",
+    })
+    const link = { tokenId, publicUrl: "https://pcp.example" }
+    await shareResult(ctx, { ...link, id: kept.id })
+    await receiveFile(ctx, link)
+    // A link made an hour and a minute ago.
+    await receiveFile(
+      ctx,
+      link,
+      new Date(now.getTime() - FILE_LINK_TTL_MS - 60_000),
+    )
+
+    const status = await runCleanup("owner", now)
+
+    expect(status.removed?.results).toBe(1)
+    expect(await db().fileLink.count()).toBe(2)
+    expect(await db().toolResult.count()).toBe(1)
   })
 
   it("removes kept results past their day and the days of log not kept, and says so", async () => {
