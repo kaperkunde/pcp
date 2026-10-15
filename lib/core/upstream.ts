@@ -1391,13 +1391,14 @@ async function dispatchCall(
       throw new PcpError("state", "The browser is used through a token.")
     }
 
-    return callBrowserTool(
-      ctx,
-      server,
-      toolName,
-      open ? await resolveHandles(args, open) : args,
-      { tokenId, publicUrl },
-    )
+    // The browser resolves its own handles: upload_file's files are read
+    // as bytes, not as base64.
+    return callBrowserTool(ctx, server, toolName, args, {
+      tokenId,
+      publicUrl,
+      open,
+      keepBytes,
+    })
   }
 
   if (isSshKind(server.kind)) {

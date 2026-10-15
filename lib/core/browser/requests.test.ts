@@ -74,7 +74,7 @@ function executor(needs: OwnerNeeded["ask"]): PermissionExecutor & {
     callTool: async () => {
       throw new OwnerNeeded(needs)
     },
-    syncTools: async () => ({ status: "ok", message: "", toolCount: 15 }),
+    syncTools: async () => ({ status: "ok", message: "", toolCount: 17 }),
     browse: async (_scope, ask) => {
       opened.push(ask)
       return { content: [{ type: "text", text: `opened ${ask.url}` }] }
@@ -97,7 +97,7 @@ describe("the browser in the registry and the instructions", () => {
       slug: "browser",
     })
     expect(await db().mcpTool.count({ where: { serverId: server.id } })).toBe(
-      15,
+      17,
     )
 
     const scope = { ...(await resolveApiTokenFor()), publicUrl: PUBLIC_URL }

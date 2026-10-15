@@ -7,6 +7,7 @@ import {
   MAX_HANDOVER_MESSAGE,
   MAX_READ_CHARS,
   MAX_TYPE_CHARS,
+  MAX_UPLOAD_FILES,
   MAX_URL_LENGTH,
   MAX_WAIT_MS,
 } from "./limits"
@@ -17,8 +18,11 @@ import { REF_PATTERN } from "./snapshot"
  * assistant needs to open pages, read them and act on them, and to hand a
  * tab to the owner. Shaped after the tools browser agents share (Playwright
  * MCP, Claude in Chrome), without what would hand an assistant the owner's
- * sign-ins: no JavaScript, no cookies or storage, no downloads. Arguments
- * are checked here, before the browser is touched.
+ * sign-ins: no JavaScript, no cookies or storage. Files move in and out as
+ * results PCP keeps for the token (tool-results.ts): upload_file puts kept
+ * ones into a page, download keeps the one a page offers; no path on the
+ * machine is ever named. Arguments are checked here, before the browser is
+ * touched.
  */
 
 export type BrowserToolName =
@@ -32,9 +36,11 @@ export type BrowserToolName =
   | "type"
   | "press_key"
   | "select_option"
+  | "upload_file"
   | "scroll"
   | "wait_for"
   | "screenshot"
+  | "download"
   | "handle_dialog"
   | "hand_over"
 
@@ -70,6 +76,34 @@ const url = z
   .min(1)
   .max(MAX_URL_LENGTH)
   .describe("The full address: https://example.com/page.")
+
+/** A file PCP kept for this token, as a handle names it. */
+const keptFile = z.strictObject({
+  $result: z
+    .string()
+    .min(1)
+    .max(64)
+    .describe("A kept result's id, from its handle."),
+  name: z
+    .string()
+    .min(1)
+    .max(255)
+    .regex(/^[^\u0000-\u001f\u007f/\\]+$/, {
+      message: "A file name, without a path or control characters.",
+    })
+    .optional()
+    .describe(
+      "The file's name as the page sees it; the kept result's own by default.",
+    ),
+  type: z
+    .string()
+    .max(200)
+    .regex(/^[\w.+-]+\/[\w.+-]+$/, {
+      message: "A media type, like application/pdf.",
+    })
+    .optional()
+    .describe("Its media type; the kept result's own by default."),
+})
 
 const READS: Annotations = {
   readOnlyHint: true,
@@ -218,6 +252,19 @@ const SPECS: readonly BrowserToolSpec[] = [
     changes: true,
   },
   {
+    name: "upload_file",
+    title: "Choose files to upload",
+    description:
+      "Puts files into a file field (by ref: the field, or the button that opens its file picker), as a person choosing them would; the form is sent only as it would be then, usually by clicking its button. Each file is a result PCP kept for this token, named by its handle ({\"$result\": id}: from download, a mail attachment, or run_code's keep), with a name and type of your own if you like; its bytes never pass through you. Answers with the page's snapshot.",
+    args: z.strictObject({
+      tab,
+      ref,
+      files: z.array(keptFile).min(1).max(MAX_UPLOAD_FILES),
+    }),
+    annotations: ACTS,
+    changes: true,
+  },
+  {
     name: "scroll",
     title: "Scroll",
     description:
@@ -259,6 +306,19 @@ const SPECS: readonly BrowserToolSpec[] = [
     args: z.strictObject({ tab }),
     annotations: READS,
     changes: false,
+  },
+  {
+    name: "download",
+    title: "Download a file",
+    description:
+      "Keeps the file a page offers for download: clicks the element (ref) that starts it, or opens its address (url, in this token's current tab or a new one, at a site the tab may open now: navigate asks the owner for another), and waits for it. Answers with a handle to the file ({\"$result\": id}), kept for this token for a day: pass it where a tool wants a file (upload_file's files, send_email's attachments, a field that takes base64), or read it with read_result. A file larger than PCP keeps of one is stopped.",
+    args: z
+      .strictObject({ tab, ref: ref.optional(), url: url.optional() })
+      .refine((value) => !!value.ref !== !!value.url, {
+        message: "Give a ref or a url, one of them.",
+      }),
+    annotations: ACTS,
+    changes: true,
   },
   {
     name: "handle_dialog",

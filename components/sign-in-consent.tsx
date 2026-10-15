@@ -11,6 +11,7 @@ import { OwnerConfirmFields } from "@/components/owner-confirm-fields"
 import { ManageWrappersField } from "@/components/manage-wrappers-field"
 import { RunCodeField } from "@/components/run-code-field"
 import { ServerScopeFields } from "@/components/server-scope-fields"
+import { TokenOptionField } from "@/components/token-options"
 import { SubmitButton } from "@/components/submit-button"
 import { WebFetchField } from "@/components/web-fetch-field"
 import { Button } from "@/components/ui/button"
@@ -187,12 +188,13 @@ export function SignInConsent({
               </ListSection>
               <Disclosure
                 title="More options"
-                description="Memories, web pages, running code, API endpoints, wrappers"
+                description="Memories, web pages, running code, files, API endpoints, wrappers"
               >
                 <ManageEndpointsField id="consent-manage" />
                 <KeepMemoriesField id="consent-memories" />
                 <WebFetchField id="consent-fetch" />
                 <RunCodeField id="consent-code" />
+                <TokenOptionField option="shareFiles" id="consent-files" />
                 <ManageWrappersField id="consent-wrappers" />
               </Disclosure>
             </>

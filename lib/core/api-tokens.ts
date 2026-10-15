@@ -39,6 +39,8 @@ export type ApiTokenSummary = {
   runCode: boolean
   /** May propose wrappers (create_wrapper and its kin). */
   manageWrappers: boolean
+  /** May move files to and from its own computer by link (share_result). */
+  shareFiles: boolean
   servers: Array<{ id: string; name: string }>
   expiresAt: Date | null
   revokedAt: Date | null
@@ -64,6 +66,8 @@ export type TokenInput = {
   runCode?: boolean
   /** Left alone on an update when undefined. */
   manageWrappers?: boolean
+  /** Left alone on an update when undefined. */
+  shareFiles?: boolean
   expiresAt?: Date | null
 }
 
@@ -83,6 +87,8 @@ export type ResolvedToken = {
   runCode: boolean
   /** May read wrappers and propose new ones and changes (get_wrapper, …). */
   manageWrappers: boolean
+  /** May move files to and from its own computer by link (share_result, receive_file). */
+  shareFiles: boolean
 }
 
 function summaryInclude(now: Date) {
@@ -108,6 +114,7 @@ type SummaryRow = {
   webFetch: boolean
   runCode: boolean
   manageWrappers: boolean
+  shareFiles: boolean
   expiresAt: Date | null
   revokedAt: Date | null
   createdAt: Date
@@ -129,6 +136,7 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     webFetch: row.webFetch,
     runCode: row.runCode,
     manageWrappers: row.manageWrappers,
+    shareFiles: row.shareFiles,
     servers: row.servers.map((link) => link.server),
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
@@ -283,6 +291,7 @@ export async function createApiToken(
       webFetch: input.webFetch ?? false,
       runCode: input.runCode ?? false,
       manageWrappers: input.manageWrappers ?? false,
+      shareFiles: input.shareFiles ?? false,
       expiresAt: input.expiresAt ?? null,
       servers: { create: serverIds.map((serverId) => ({ serverId })) },
     },
@@ -329,6 +338,7 @@ export async function createOAuthApiToken(
         webFetch: input.webFetch ?? false,
         runCode: input.runCode ?? false,
         manageWrappers: input.manageWrappers ?? false,
+        shareFiles: input.shareFiles ?? false,
         expiresAt: input.expiresAt ?? null,
         oauthClientId: input.clientId,
         oauthClientName: input.clientName,
@@ -378,6 +388,9 @@ export async function updateApiToken(
         ...(input.runCode !== undefined ? { runCode: input.runCode } : {}),
         ...(input.manageWrappers !== undefined
           ? { manageWrappers: input.manageWrappers }
+          : {}),
+        ...(input.shareFiles !== undefined
+          ? { shareFiles: input.shareFiles }
           : {}),
         ...(input.expiresAt !== undefined
           ? { expiresAt: input.expiresAt }
@@ -463,6 +476,7 @@ export async function liveToken(
     webFetch: record.webFetch,
     runCode: record.runCode,
     manageWrappers: record.manageWrappers,
+    shareFiles: record.shareFiles,
   }
 }
 

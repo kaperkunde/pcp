@@ -20,9 +20,11 @@ describe("the browser's tools", () => {
       "type",
       "press_key",
       "select_option",
+      "upload_file",
       "scroll",
       "wait_for",
       "screenshot",
+      "download",
       "handle_dialog",
       "hand_over",
     ])
@@ -59,6 +61,8 @@ describe("the browser's tools", () => {
       "type",
       "press_key",
       "select_option",
+      "upload_file",
+      "download",
       "handle_dialog",
     ])
   })
@@ -67,7 +71,57 @@ describe("the browser's tools", () => {
     const names = browserTools()
       .map((tool) => tool.name)
       .join(" ")
-    expect(names).not.toMatch(/evaluate|script|cookie|storage|download/)
+    expect(names).not.toMatch(/evaluate|script|cookie|storage/)
+  })
+
+  it("move files only as kept results, never by a path", () => {
+    const parse = (name: string, args: unknown) =>
+      parseBrowserArgs(browserToolSpec(name)!, args)
+
+    expect(
+      parse("upload_file", {
+        ref: "e3",
+        files: [
+          { $result: "r1" },
+          { $result: "r2", name: "a.pdf", type: "application/pdf" },
+        ],
+      }),
+    ).toEqual({
+      ref: "e3",
+      files: [
+        { $result: "r1" },
+        { $result: "r2", name: "a.pdf", type: "application/pdf" },
+      ],
+    })
+    expect(() => parse("upload_file", { ref: "e3", files: [] })).toThrow()
+    expect(() =>
+      parse("upload_file", { ref: "e3", files: ["/etc/passwd"] }),
+    ).toThrow()
+    expect(() =>
+      parse("upload_file", { ref: "e3", files: [{ path: "/etc/passwd" }] }),
+    ).toThrow()
+    expect(() =>
+      parse("upload_file", {
+        ref: "e3",
+        files: [{ $result: "r1", name: "../../etc/passwd" }],
+      }),
+    ).toThrow(/without a path/)
+    expect(() =>
+      parse("upload_file", {
+        ref: "e3",
+        files: Array.from({ length: 21 }, () => ({ $result: "r1" })),
+      }),
+    ).toThrow()
+
+    expect(parse("download", { ref: "e4" })).toEqual({ ref: "e4" })
+    expect(parse("download", { url: "https://example.com/a.pdf" })).toEqual({
+      url: "https://example.com/a.pdf",
+    })
+    expect(() => parse("download", {})).toThrow(/one of them/)
+    expect(() =>
+      parse("download", { ref: "e4", url: "https://example.com/a.pdf" }),
+    ).toThrow(/one of them/)
+    expect(() => parse("download", { ref: "e4", path: "/tmp/x" })).toThrow()
   })
 
   it("check their arguments", () => {

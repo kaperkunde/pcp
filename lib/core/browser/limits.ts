@@ -107,3 +107,19 @@ export const CLEARANCE_MEMORY_MS = 30 * 60_000
 export const MAX_CHROMIUM_DOWNLOAD_BYTES = 512 * 1024 * 1024
 export const CHROMIUM_DOWNLOAD_TIMEOUT_MS = 30 * 60_000
 export const CHROMIUM_DOWNLOAD_STALL_MS = 60_000
+/**
+ * Files upload_file puts into a page in one call, and their bytes together:
+ * Playwright hands a file to the page as bytes up to 50 MB in all, and
+ * refuses more (it would need the file on disk, which the browser does not
+ * keep). Each is a kept result, so also no larger than PCP keeps of one.
+ */
+export const MAX_UPLOAD_FILES = 20
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+/**
+ * A download (downloads.ts): after the click or the address, how long the
+ * page has to start one, and how long it then has to finish. Its size is
+ * what PCP keeps of one file (resourceLimits()), and one larger is stopped
+ * as soon as Chromium says so.
+ */
+export const DOWNLOAD_START_MS = 10_000
+export const DOWNLOAD_TIMEOUT_MS = 120_000

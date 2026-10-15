@@ -15,6 +15,7 @@ app/                 Routes and pages (Next.js App Router)
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
   api/export/…       The export download (a file needs Content-Disposition)
+  api/files/…        File links: an assistant's own computer downloads or sends one file
   api/health/…       The health check; in the desktop app, the version and an install request
   api/browser/…      A browser tab's live view: its pictures out, the owner's input in
 components/          React components; forms call Server Actions
@@ -1306,14 +1307,43 @@ Hosts are never logged.
 
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
-`select_option`, `scroll`, `wait_for`, `screenshot`, `handle_dialog` and
-`hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
+`select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
+`download`, `handle_dialog` and `hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
 with refs), the page as Markdown (`htmlToMarkdown`, read from the live
 page), a screenshot of the viewport, and the tab's address, title and the
 link to it in PCP. It acts by ref (click, type, select), by key or by
-scroll. It never gets a cookie or storage, never runs JavaScript, never
-downloads a file. A refusal that names a site or an address is a tool
+scroll. It never gets a cookie or storage and never runs JavaScript. A
+refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
+
+**Files** (`downloads.ts`, `call.ts`). A file crosses the browser only as a
+result kept for the token (see Long answers and kept results): never a path on the
+machine, and its bytes never pass through the assistant. `upload_file` names
+kept results by handle (`{"$result": id}`, with a name and type of its own if
+it likes), reads them as bytes before the page is touched, and hands them to
+the file field, or to the file chooser a button opens, as a person choosing
+them would; the page sends them only as it would then. Every tab catches its
+file chooser, so none ever opens a window on the machine.
+
+Playwright makes the vault's context with downloads off, and Chromium refuses
+every download but while a `download` call waits for one. The call lets the
+context save downloads into a folder in the browser's scratch folder, on a
+DevTools session of PCP's own (Playwright's download objects can read nothing
+in a context made with downloads off), clicks the ref or opens the address,
+and takes the first download its tab, a frame in it, or a popup of it starts,
+from an address the tab may open (`mayOpen`; a page's own blob or data file
+is the page's). Every other download is cancelled as it begins, and the one
+taken is cancelled once Chromium says it is larger than PCP keeps of one file
+or slower than `DOWNLOAD_TIMEOUT_MS`. Its bytes are read and the file removed
+before the call answers; it is kept, encrypted, as the token's result, and
+the answer is its handle, so a run_code program can pass a download, or a
+mail attachment, on to `upload_file` or `send_email`, and a token that moves
+files by link can fetch it to its own computer (`share_result`), or send one
+from there for `upload_file` (`receive_file`; see File links). A download a page
+starts while no call waits is refused by Chromium and only said in the tab's
+next answer, by the name the page gave, so the assistant can take it with
+`download`. An address given to `download` must be at a site the tab may
+open already; `navigate` is what asks the owner.
 
 **Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
 `tokenId`; a popup is its opener's) or that the owner last handed it to,
@@ -2134,6 +2164,35 @@ refused by name before anything is sent, and the gateway checks the ids
 before it asks the owner. A request
 waiting for the owner stores the handle, never the content, and its page
 shows each one's name, type, size and the tool that kept it.
+
+**File links** (`lib/core/file-links.ts`, `app/api/files/[secret]/`) move a
+kept file between PCP and the assistant's own computer (a sandbox or a
+terminal it runs commands in), so a file's bytes never pass through the
+model: handles keep them out of its answers, and a link keeps them out of
+the commands it writes. Only a token the owner made with **Move files by
+link** (`api_token.share_files`, off by default) gets the two tools:
+`share_result` makes a download link for one of its kept results, and
+`receive_file` an upload link plus the handle the file will be kept under.
+The assistant runs curl with the link; nothing else signs the request.
+
+The link's secret (256 bits, base64url) is the credential for that one file
+and nothing more. `file_link` stores its SHA-256, and the file encrypted
+under a key derived from the secret and the row's id (HKDF, `file_link:<id>`
+as associated data), so serving a download needs no vault key and the row
+alone opens nothing. An upload's key is also wrapped under the vault's data
+key (`file_link_key:<id>`): the file that arrives is held under the link's
+key until the token, which holds the vault's key, first uses its handle
+(`openResult`, `describeResults`), and is then written to `tool_result`
+under the id the handle has named from the start, in a transaction that
+deletes the link. A link works for an hour (never past the result a download
+serves), a download for five fetches and an upload for one file within the
+largest-file limit; an upload that arrived waits a day, as a kept result
+would. It works only while its token is live and still has the switch.
+Each use is a request-log line (`file_link/download`, `file_link/upload`),
+the route is rate-limited per address, and a download is served as an
+attachment with `nosniff` and a `sandbox` CSP, so nothing in it runs under
+PCP's address. Links are not exported, are wiped with the vault, go with
+their token, and the cleanup removes them with the kept results.
 
 ## Tool access and the owner's permission
 

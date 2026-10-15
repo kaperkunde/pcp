@@ -94,6 +94,7 @@ test("the owner adds the browser, and a token that reaches it gets its tools and
 
   const { instructions } = await initialize(baseURL!, token)
   expect(instructions).toContain("browser/hand_over")
+  expect(instructions).toContain("browser/upload_file")
 
   await allowAllTools(page, TOKEN_NAME, "browser")
   // The browser follows the token's web fetch sites, on its Advanced page;

@@ -177,6 +177,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/register-rules.ts`         | What register_server accepts for each kind                    |
 | `lib/core/tool-results.ts`           | Kept answers and files, encrypted; `read_result`, handles     |
 | `lib/core/result-handles.ts`         | Handles in a call's arguments, replaced before sending        |
+| `lib/core/file-links.ts`             | Links an assistant's own computer moves a kept file by        |
 | `lib/core/media-types.ts`            | Text types, charsets, and a file's type from its first bytes  |
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
@@ -214,6 +215,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `app/oauth/`, `app/.well-known/`     | PCP's OAuth server: sign-in page, token, register, discovery  |
 | `app/api/servers/[id]/oauth/`        | OAuth start; the per-server callback older clients use        |
 | `app/api/export/route.ts`            | The export download (a file needs `Content-Disposition`)      |
+| `app/api/files/[secret]/route.ts`    | A file link: GET downloads, PUT sends (`file-links.ts`)       |
 | `app/api/health/route.ts`            | Health check; in the app, the version and an install request  |
 | `e2e/fixtures/upstream.ts`           | The fake MCP, OAuth, REST and JMAP servers the e2e suite uses |
 | `app/manifest.ts`, `public/icons/`   | The manifest and icon set; `assets/icon.png` is the master    |

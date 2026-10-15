@@ -223,6 +223,15 @@ export default defineConfig({
       use: signedIn("run-code"),
     },
     {
+      // File links: a token that may move files by link gets share_result
+      // and receive_file; a file PUT to one link is downloaded from another,
+      // as a file, a few times and then no more.
+      name: "file-links",
+      testMatch: /file-links\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("file-links"),
+    },
+    {
       // Wrappers: a token that may propose them gets their tools; a wrapper
       // over a tool that wants its key as an argument, approved with the key
       // typed in on the request's page; its tool puts the key in and the

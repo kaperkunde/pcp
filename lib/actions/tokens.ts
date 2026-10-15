@@ -66,6 +66,7 @@ export async function createTokenAction(
       webFetch: field(formData, "webFetch") === "on",
       runCode: field(formData, "runCode") === "on",
       manageWrappers: field(formData, "manageWrappers") === "on",
+      shareFiles: field(formData, "shareFiles") === "on",
       expiresAt:
         days > 0 ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null,
     })
@@ -141,6 +142,7 @@ export async function updateTokenAction(
       webFetch: field(formData, "webFetch") === "on",
       runCode: field(formData, "runCode") === "on",
       manageWrappers: field(formData, "manageWrappers") === "on",
+      shareFiles: field(formData, "shareFiles") === "on",
       expiresAt,
     }
     await updateApiToken(session.ctx, id, input, { ownerConfirmed: reviving })

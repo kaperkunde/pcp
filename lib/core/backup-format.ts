@@ -136,6 +136,7 @@ const ApiTokenRow = z.strictObject({
   webFetch: z.boolean(),
   runCode: z.boolean().default(false),
   manageWrappers: z.boolean().default(false),
+  shareFiles: z.boolean().default(false),
   expiresAt: dateOrNull,
   revokedAt: dateOrNull,
   createdAt: date,

@@ -1,4 +1,5 @@
 import { pruneAllowances } from "../allowances"
+import { pruneFileLinks } from "../file-links"
 import { pruneOAuthStates } from "../oauth"
 import { pruneUnusedClients } from "../oauth-server/clients"
 import { pruneOAuthCredentials } from "../oauth-server/tokens"
@@ -55,7 +56,9 @@ const PARTS: Part[] = [
   {
     key: "results",
     label: "kept results past their day",
-    run: (_, now) => pruneToolResults(now),
+    // With the links that move them, which last an hour.
+    run: async (_, now) =>
+      (await pruneToolResults(now)) + (await pruneFileLinks(now)),
   },
   {
     key: "allowances",
