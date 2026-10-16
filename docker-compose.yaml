@@ -3,6 +3,10 @@
 #
 #   docker compose up -d
 #
+# For develop's builds, ahead of the releases (they may break):
+#
+#   PCP_TAG=develop docker compose up -d
+#
 # For anything beyond a LAN, PCP needs HTTPS: the session cookie is only
 # marked Secure over https, and OAuth servers generally require https
 # redirect URLs. Either turn on HTTPS under Settings and start PCP with the
@@ -19,8 +23,9 @@ services:
     # The published image, which install.sh runs without a checkout. With
     # both lines, `docker compose up -d` builds from this checkout when the
     # image is not on this computer yet and gives the build this name, and
-    # `docker compose pull` fetches the published one instead.
-    image: ghcr.io/kaperkunde/pcp:latest
+    # `docker compose pull` fetches the published one instead. PCP_TAG picks
+    # another tag: `develop` follows develop's builds, a version pins one.
+    image: ghcr.io/kaperkunde/pcp:${PCP_TAG:-latest}
     build: .
     restart: unless-stopped
     ports:

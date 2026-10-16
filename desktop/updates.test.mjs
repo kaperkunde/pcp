@@ -5,6 +5,7 @@ import {
   isNewer,
   parseHealth,
   pendingInstall,
+  updateFeedUrl,
   updaterMode,
 } from "./updates.mjs"
 
@@ -60,6 +61,17 @@ describe("parseHealth", () => {
 })
 
 describe("pendingInstall", () => {
+  it("installs a build of develop later than this one", () => {
+    expect(
+      pendingInstall(health(request({ version: "0.3.0-dev.2" })), {
+        startedAt: STARTED,
+        handled: new Set(),
+        current: "0.2.0",
+        now: STARTED + 6 * 60_000,
+      }),
+    ).toEqual(request({ version: "0.3.0-dev.2" }))
+  })
+
   const state = (overrides = {}) => ({
     startedAt: STARTED,
     handled: new Set(),
@@ -110,5 +122,34 @@ describe("isNewer", () => {
     expect(isNewer("0.10.0", "0.9.9")).toBe(true)
     expect(isNewer("0.2.0", "0.2.0")).toBe(false)
     expect(isNewer("garbage", "0.2.0")).toBe(false)
+  })
+
+  it("puts a build of develop between the releases around it", () => {
+    expect(isNewer("0.3.0-dev.4", "0.2.0")).toBe(true)
+    expect(isNewer("0.3.0", "0.3.0-dev.4")).toBe(true)
+    expect(isNewer("0.3.0-dev.10", "0.3.0-dev.9")).toBe(true)
+    expect(isNewer("0.3.0-dev.4", "0.3.0")).toBe(false)
+    expect(isNewer("0.3.0-rc.1", "0.2.0")).toBe(false)
+  })
+})
+
+describe("updateFeedUrl", () => {
+  const repo = "https://github.com/o/r"
+
+  it("reads a release from the latest release", () => {
+    expect(updateFeedUrl("0.3.0", repo)).toBe(
+      "https://github.com/o/r/releases/latest/download",
+    )
+  })
+
+  it("reads a build of develop from its own pre-release", () => {
+    expect(updateFeedUrl("v0.3.0-dev.12", repo)).toBe(
+      "https://github.com/o/r/releases/download/v0.3.0-dev.12",
+    )
+  })
+
+  it("refuses anything that is not a version", () => {
+    expect(() => updateFeedUrl("0.3.0/../../evil", repo)).toThrow()
+    expect(() => updateFeedUrl("latest", repo)).toThrow()
   })
 })

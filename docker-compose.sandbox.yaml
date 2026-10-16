@@ -20,7 +20,8 @@ services:
       - pcp-sandbox:/run/pcp-sandbox
 
   sandbox:
-    image: ghcr.io/kaperkunde/pcp-sandbox:latest
+    # The same tag as PCP's (docker-compose.yaml): they speak one protocol.
+    image: ghcr.io/kaperkunde/pcp-sandbox:${PCP_TAG:-latest}
     build: sandbox
     restart: unless-stopped
     depends_on: [pcp]

@@ -77,6 +77,21 @@ is re-run. The package's visibility is set on GitHub, not here: a package
 takes the repository's visibility when it is first pushed, and anonymous
 pulls need it public.
 
+Every push to `develop` gets the same, ahead of the releases
+(`.github/workflows/develop.yml`): the checks a pull request runs (`ci.yml`),
+and once they pass, the apps and images built from that commit as a GitHub
+pre-release tagged `vX.Y.Z-dev.N`, X.Y.Z being the release `develop` leads to
+and N the run number. Nothing is committed: the version is written into the
+build's checkout only. The images are pushed as `<version>` and `develop`
+(never `latest`), which `PCP_CHANNEL=develop` in `install.sh` and
+`PCP_TAG=develop` with compose pull. A pre-release is never GitHub's latest
+release, so the stable channel, the README's links and the app's updater keep
+to `main`'s releases; an owner on the develop channel (Settings → Updates) is
+offered each build, then the release. Only the newest five builds stay on the
+release page. `release.yml` and `develop.yml` share the app and image builds
+(`build-desktop.yml`, `build-images.yml`), and `release.yml` ignores the `-dev`
+tags, so merging `develop` into `main` still releases.
+
 MAJOR and MINOR are raised by hand, in a commit on `develop`, when the
 maintainer decides a release warrants one; a contributor does not bump, and
 an automated assistant does so only when asked to in so many words:

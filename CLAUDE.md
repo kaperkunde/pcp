@@ -19,7 +19,7 @@ The pre-commit hook runs the first three; a red hook is fixed, not skipped
 (`pnpm format` settles formatting; `--no-verify` is not an answer). Run the
 Playwright projects your change touches (`pnpm exec playwright test
 --project=<name>`; dependencies run first) — CI runs the whole suite on the
-pull request, and nothing runs on a push.
+pull request and on a push to `develop`, and nothing runs on other pushes.
 
 When pushing straight to `develop`, skip the Playwright run: it is slow, and
 the suite runs on the pull request from `develop` to `main` anyway. Still
@@ -364,7 +364,9 @@ so in the summary; the bump itself waits for the request.
   only the password and the recovery key decide who gets in. A new place
   that accepts it goes through `confirmOwner`, with a test.
 - The update check (`lib/core/updates/`) asks GitHub's latest-release address
-  and nothing else, sends nothing but PCP's version in its user agent, reads
+  (on the develop channel, its list of the newest releases, of which the
+  latest version counts) and nothing else, sends nothing but PCP's version in
+  its user agent, reads
   the answer as untrusted input (never rendered as HTML, never a link taken
   from it), and runs no timer and no request while the owner has it off; it
   asks nothing before setup. It tells the owner how to update for the way PCP
@@ -373,7 +375,9 @@ so in the summary; the bump itself waits for the request.
   a file in the data folder (`updates/host-signal.ts`: an id and a time,
   nothing of the vault) that the installer's `watch` reads through `exec` and
   checks as untrusted input before it runs its own `update`; PCP never
-  addresses the host.
+  addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
+  `.github/workflows/develop.yml` makes on every push to develop) is never
+  offered on the stable channel.
 - `desktop/` is a host for the production build, not part of the app. It
   imports nothing from `lib/`, `app/` or `components/`; the app knows it only
   as `PCP_DESKTOP=1` and `PCP_DESKTOP_UPDATER` (`lib/server/desktop.ts`), for

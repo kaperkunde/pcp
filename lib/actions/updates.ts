@@ -2,12 +2,17 @@
 
 import { revalidatePath } from "next/cache"
 
-import { PcpError } from "@/lib/core/errors"
+import { invalid, PcpError } from "@/lib/core/errors"
 import { checkRateLimit } from "@/lib/core/rate-limit"
-import { CHECK_NOW_LIMIT } from "@/lib/core/updates/limits"
-import { checkNow, reconcileUpdates } from "@/lib/core/updates/runtime"
+import { CHECK_NOW_LIMIT, isUpdateChannel } from "@/lib/core/updates/limits"
+import {
+  checkNow,
+  reconcileUpdates,
+  setUpdateChannel,
+} from "@/lib/core/updates/runtime"
 import { isNewer } from "@/lib/core/updates/semver"
 import {
+  getUpdateConfig,
   newerRelease,
   requestInstall,
   saveUpdateConfig,
@@ -15,7 +20,10 @@ import {
 import { PCP_VERSION } from "@/lib/core/version"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import { desktopUpdater, isDesktopApp } from "@/lib/server/desktop"
-import { hostUpdater } from "@/lib/server/install-kind"
+import {
+  hostUpdater,
+  hostUpdaterFollowsChannel,
+} from "@/lib/server/install-kind"
 import { requireContext } from "@/lib/server/session"
 
 /**
@@ -46,6 +54,52 @@ export async function setUpdateCheckAction(
         ? "PCP checks for new releases once a day."
         : "PCP no longer checks for new releases by itself.",
     }
+  })
+
+  refresh()
+  return result
+}
+
+/**
+ * Stable or develop. What the last check found is forgotten, and PCP asks
+ * again at once while the daily check is on (the owner chose; it counts as
+ * a Check now), so the page says straight away what the channel has.
+ */
+export async function setUpdateChannelAction(
+  _previous: UpdatesResult,
+  formData: FormData,
+): Promise<UpdatesResult> {
+  await requireContext()
+
+  const result = await guarded(async () => {
+    const channel = field(formData, "channel")
+
+    if (!isUpdateChannel(channel)) {
+      throw invalid("Choose stable or develop.")
+    }
+
+    await setUpdateChannel(channel)
+    const named =
+      channel === "develop" ? "develop's builds and releases" : "releases"
+
+    if (
+      (await getUpdateConfig()).check &&
+      checkRateLimit("updates:check-now", CHECK_NOW_LIMIT)
+    ) {
+      const status = await checkNow()
+      const newer = newerRelease(status)
+
+      if (newer) {
+        return {
+          message: `PCP now follows ${named}. v${newer.version} is available.`,
+        }
+      }
+      if (!status.lastError) {
+        return { message: `PCP now follows ${named}. This PCP is up to date.` }
+      }
+    }
+
+    return { message: `PCP now follows ${named}.` }
   })
 
   refresh()
@@ -107,7 +161,20 @@ export async function requestInstallAction(): Promise<UpdatesResult> {
       )
     }
 
-    const request = await requestInstall(new Date(), { signalHost: installer })
+    const { channel } = await getUpdateConfig()
+
+    if (installer && channel === "develop" && !hostUpdaterFollowsChannel()) {
+      throw new PcpError(
+        "state",
+        "The installer on this computer installs releases only. To follow develop, run the install line under How to update this PCP once more, with PCP_CHANNEL=develop.",
+      )
+    }
+
+    const request = await requestInstall(new Date(), {
+      signalHost: installer,
+      signalChannel:
+        installer && hostUpdaterFollowsChannel() ? channel : undefined,
+    })
 
     return {
       message: desktop

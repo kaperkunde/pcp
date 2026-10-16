@@ -8,6 +8,7 @@ import { installSignalFile } from "./host-signal"
 import {
   checkNow,
   reconcileUpdates,
+  setUpdateChannel,
   setUpdateFetch,
   updateTimerActive,
   updatesIdle,
@@ -16,6 +17,7 @@ import {
 import {
   availableUpdate,
   clearFinishedInstall,
+  defaultChannel,
   INSTALL_REQUEST_FRESH_MS,
   pendingInstallRequest,
   requestInstall,
@@ -57,13 +59,99 @@ afterEach(async () => {
 
 describe("the update check's settings", () => {
   it("is on until the owner turns it off", async () => {
-    expect(await getUpdateConfig()).toEqual({ check: true })
+    expect(await getUpdateConfig()).toEqual({
+      check: true,
+      channel: "stable",
+    })
 
     await saveUpdateConfig({ check: false })
-    expect(await getUpdateConfig()).toEqual({ check: false })
+    expect((await getUpdateConfig()).check).toBe(false)
 
     await saveUpdateConfig({ check: true })
-    expect(await getUpdateConfig()).toEqual({ check: true })
+    expect((await getUpdateConfig()).check).toBe(true)
+  })
+
+  it("keeps the channel when the check changes, and the check when the channel does", async () => {
+    await saveUpdateConfig({ check: false })
+    await setUpdateChannel("develop")
+    expect(await getUpdateConfig()).toEqual({
+      check: false,
+      channel: "develop",
+    })
+
+    await saveUpdateConfig({ check: true })
+    expect((await getUpdateConfig()).channel).toBe("develop")
+  })
+
+  it("follows the channel this PCP came from until the owner picks one", () => {
+    expect(defaultChannel("0.4.2")).toBe("stable")
+    expect(defaultChannel("0.4.3-dev.12")).toBe("develop")
+  })
+})
+
+describe("the develop channel", () => {
+  const NOW = new Date("2026-10-05T12:00:00Z")
+
+  /** GitHub's list of releases, newest first, as the develop channel reads it. */
+  function list(...tags: string[]): typeof fetch {
+    return (async (input: string | URL | Request) => {
+      asked++
+      expect(input.toString()).toBe(
+        "https://api.github.com/repos/kaperkunde/pcp/releases?per_page=10",
+      )
+      return new Response(
+        JSON.stringify(
+          tags.map((tag) => ({ tag_name: tag, body: "", assets: [] })),
+        ),
+        { status: 200 },
+      )
+    }) as typeof fetch
+  }
+
+  it("asks for the newest releases and offers the latest build", async () => {
+    await setUpdateChannel("develop")
+    setUpdateFetch(list("v999.0.1-dev.4", "v999.0.0", "v999.0.1-dev.3"))
+
+    const status = await checkNow()
+
+    expect(status.latest?.version).toBe("999.0.1-dev.4")
+    expect(await updatesOverview()).toMatchObject({
+      channel: "develop",
+      available: true,
+      downloads:
+        "https://github.com/kaperkunde/pcp/releases/download/v999.0.1-dev.4",
+    })
+  })
+
+  it("forgets what the other channel found, and keeps an install the owner asked for", async () => {
+    setUpdateFetch(answer("v999.0.0"))
+    await checkNow()
+    const request = await requestInstall(NOW)
+
+    await setUpdateChannel("develop")
+    expect(await getUpdateStatus()).toEqual({ installRequest: request })
+    expect(await availableUpdate()).toBeNull()
+
+    // Picking the channel it already follows changes nothing.
+    setUpdateFetch(list("v999.0.1-dev.1"))
+    await checkNow()
+    await setUpdateChannel("develop")
+    expect((await getUpdateStatus()).latest?.version).toBe("999.0.1-dev.1")
+  })
+
+  it("is written into the installer's request for an installer that reads it", async () => {
+    await setUpdateChannel("develop")
+    setUpdateFetch(list("v999.0.1-dev.4"))
+    await checkNow()
+
+    const request = await requestInstall(NOW, {
+      signalHost: true,
+      signalChannel: "develop",
+    })
+    expect(readFileSync(installSignalFile(), "utf8")).toBe(
+      `${request.id} ${NOW.getTime() / 1000} develop\n`,
+    )
+    expect(request.version).toBe("999.0.1-dev.4")
   })
 })
 

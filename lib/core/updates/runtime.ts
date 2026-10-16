@@ -1,10 +1,15 @@
 import { isSetUp } from "../vault"
 import { runUpdateRound } from "./check"
-import { UPDATE_FIRST_TICK_MS, UPDATE_TICK_MS } from "./limits"
+import {
+  type UpdateChannel,
+  UPDATE_FIRST_TICK_MS,
+  UPDATE_TICK_MS,
+} from "./limits"
 import {
   clearFinishedInstall,
   getUpdateConfig,
   getUpdateStatus,
+  saveUpdateConfig,
   saveUpdateStatus,
   type UpdateStatus,
 } from "./state"
@@ -75,11 +80,13 @@ function withRound(fresh: UpdateStatus, round: UpdateStatus): UpdateStatus {
 async function round(force: boolean): Promise<UpdateStatus> {
   const state = runtime()
   const status = await getUpdateStatus()
+  const { channel } = await getUpdateConfig()
   const next = await runUpdateRound({
     status,
     now: new Date(),
     force,
     fetchFn: state.fetchFn,
+    channel,
   })
 
   if (next === status) {
@@ -149,6 +156,24 @@ export function reconcileUpdates(): Promise<void> {
       state.interval = null
       state.first = null
     }
+  })
+}
+
+/**
+ * The owner picks a channel. What the last check found was for the other
+ * one, so it is forgotten, between rounds (a round out now would otherwise
+ * write the old channel's answer back), and the next round is due at once.
+ * An install the owner already asked for stays.
+ */
+export function setUpdateChannel(channel: UpdateChannel): Promise<void> {
+  return chain(async () => {
+    if ((await getUpdateConfig()).channel === channel) {
+      return
+    }
+
+    await saveUpdateConfig({ channel })
+    const { installRequest } = await getUpdateStatus()
+    await saveUpdateStatus(installRequest ? { installRequest } : {})
   })
 }
 

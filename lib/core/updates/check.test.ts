@@ -9,7 +9,12 @@ import {
   UPDATE_BACKOFF_MS,
   UPDATE_CHECK_EVERY_MS,
 } from "./limits"
-import { fetchLatestRelease, parseRelease, USER_AGENT } from "./release"
+import {
+  fetchLatestRelease,
+  parseRelease,
+  parseReleaseList,
+  USER_AGENT,
+} from "./release"
 import { newerRelease, type UpdateStatus } from "./state"
 
 // The update check: reading what GitHub answers (an untrusted document),
@@ -106,6 +111,48 @@ describe("reading a release", () => {
   })
 })
 
+describe("reading the develop channel's list", () => {
+  it("takes the latest version among them, a build or a release", () => {
+    expect(
+      parseReleaseList([
+        release({ tag_name: "v1.2.4-dev.7" }),
+        release({ tag_name: "v1.2.4-dev.6" }),
+        release({ tag_name: "v1.2.3" }),
+      ]).version,
+    ).toBe("1.2.4-dev.7")
+    expect(
+      parseReleaseList([
+        release({ tag_name: "v1.2.4-dev.7" }),
+        release({ tag_name: "v1.2.4" }),
+      ]).version,
+    ).toBe("1.2.4")
+  })
+
+  it("skips drafts and entries it cannot read, and refuses a list with none left", () => {
+    expect(
+      parseReleaseList([
+        release({ tag_name: "v9.0.0", draft: true }),
+        release({ tag_name: "nightly" }),
+        "text",
+        release({ tag_name: "v1.0.0-dev.2" }),
+      ]).version,
+    ).toBe("1.0.0-dev.2")
+    expect(() => parseReleaseList([])).toThrow(/no published release/)
+    expect(() => parseReleaseList(release())).toThrow(
+      "PCP could not read what GitHub answered.",
+    )
+  })
+
+  it("reads only as many as it asked for", () => {
+    const many = Array.from({ length: 10 }, (_, i) =>
+      release({ tag_name: `v1.0.0-dev.${i + 1}` }),
+    )
+    expect(
+      parseReleaseList([...many, release({ tag_name: "v9.0.0" })]).version,
+    ).toBe("1.0.0-dev.10")
+  })
+})
+
 describe("asking GitHub", () => {
   it("sends the version in the user agent and nothing that identifies the owner", async () => {
     const { fetchFn, calls } = fakeFetch(json(release()))
@@ -123,6 +170,32 @@ describe("asking GitHub", () => {
   it("asks the repository's latest release at GitHub unless told otherwise", () => {
     expect(releaseApiUrl()).toBe(
       "https://api.github.com/repos/kaperkunde/pcp/releases/latest",
+    )
+    expect(releaseApiUrl("develop")).toBe(
+      "https://api.github.com/repos/kaperkunde/pcp/releases?per_page=10",
+    )
+  })
+
+  it("asks a mirror's list beside its latest release", () => {
+    const before = process.env.PCP_RELEASES_URL
+    process.env.PCP_RELEASES_URL = "http://127.0.0.1:4999/releases/latest"
+    try {
+      expect(releaseApiUrl("stable")).toBe(
+        "http://127.0.0.1:4999/releases/latest",
+      )
+      expect(releaseApiUrl("develop")).toBe(
+        "http://127.0.0.1:4999/releases?per_page=10",
+      )
+    } finally {
+      if (before === undefined) delete process.env.PCP_RELEASES_URL
+      else process.env.PCP_RELEASES_URL = before
+    }
+  })
+
+  it("never takes a build of develop for the stable channel's release", async () => {
+    const { fetchFn } = fakeFetch(json(release({ tag_name: "v9.9.9-dev.3" })))
+    await expect(fetchLatestRelease(fetchFn, URL_)).rejects.toThrow(
+      "PCP could not read what GitHub answered.",
     )
   })
 
@@ -337,6 +410,7 @@ describe("a newer release", () => {
     expect(newerRelease(status("999.0.0"))?.version).toBe("999.0.0")
     expect(newerRelease(status(PCP_VERSION))).toBeNull()
     expect(newerRelease(status("0.0.1"))).toBeNull()
+    expect(newerRelease(status("999.0.0-dev.1"))?.version).toBe("999.0.0-dev.1")
     expect(newerRelease({})).toBeNull()
   })
 })

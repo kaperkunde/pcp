@@ -7,15 +7,27 @@
 /** How long a request stays worth acting on, as the Settings page reckons it. */
 export const INSTALL_REQUEST_FRESH_MS = 15 * 60_000
 
-const VERSION = /^v?(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/
+// MAJOR.MINOR.PATCH, or MAJOR.MINOR.PATCH-dev.N for a build of develop, as
+// lib/core/updates/semver.ts reads them.
+const VERSION =
+  /^v?(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(?:-dev\.(0|[1-9]\d{0,8}))?$/
 
 /** @param {string} text */
 function parseVersion(text) {
   const match = VERSION.exec(String(text).trim())
-  return match ? match.slice(1).map(Number) : null
+  if (!match) return null
+  return [
+    Number(match[1]),
+    Number(match[2]),
+    Number(match[3]),
+    match[4] === undefined ? null : Number(match[4]),
+  ]
 }
 
-/** Whether `candidate` is a later release than `current`; garbage never is. */
+/**
+ * Whether `candidate` is later than `current`; garbage never is. A build of
+ * develop comes before the release it leads to and after the one before.
+ */
 export function isNewer(candidate, current) {
   const a = parseVersion(candidate)
   const b = parseVersion(current)
@@ -23,7 +35,25 @@ export function isNewer(candidate, current) {
   for (let i = 0; i < 3; i++) {
     if (a[i] !== b[i]) return a[i] > b[i]
   }
-  return false
+  if (a[3] === b[3]) return false
+  return a[3] === null || (b[3] !== null && a[3] > b[3])
+}
+
+/**
+ * Where the updater reads the update file and the installer: a release's
+ * files from the latest release, a build of develop's from its own
+ * pre-release (which `releases/latest` never is). Built from the version,
+ * which must be one PCP knows.
+ *
+ * @param {string} version
+ * @param {string} repositoryUrl
+ */
+export function updateFeedUrl(version, repositoryUrl) {
+  const parsed = parseVersion(version)
+  if (!parsed) throw new Error(`Not a version PCP knows: ${version}`)
+  return parsed[3] === null
+    ? `${repositoryUrl}/releases/latest/download`
+    : `${repositoryUrl}/releases/download/v${parsed.slice(0, 3).join(".")}-dev.${parsed[3]}`
 }
 
 /**

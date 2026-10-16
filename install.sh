@@ -21,7 +21,12 @@
 # `update`. PCP itself still pulls and restarts nothing. PCP_UPDATE_BUTTON=0
 # turns it off; a pinned PCP_VERSION has no use for it.
 #
-# Settings, by environment variable. The first six are remembered in
+# PCP_CHANNEL=develop follows develop's builds, ahead of the releases: the
+# image's `develop` tag rather than `latest`, for the install, the daily
+# update and the button alike. A request from PCP that names the other
+# channel (the owner chose it under Settings) moves the install to it.
+#
+# Settings, by environment variable. The first seven are remembered in
 # ~/.config/pcp/install.conf, so a later run without them keeps them (run as
 # root, in /etc/pcp/install.conf instead):
 #
@@ -32,7 +37,10 @@
 #   PCP_DATA_VOLUME=pcp-data          the volume that holds the vault
 #   PCP_AUTO_UPDATE=1                 update PCP by itself, once a day
 #   PCP_UPDATE_BUTTON=0               no "Install and restart" in PCP's Settings
-#   PCP_VERSION=latest                the image tag
+#   PCP_CHANNEL=stable|develop        releases (the image's latest tag), or
+#                                     develop's builds (its develop tag)
+#   PCP_VERSION=                      an image tag instead of the channel's: a
+#                                     version (0.4.2) stays put; not remembered
 #   PCP_IMAGE=ghcr.io/kaperkunde/pcp  the image
 #
 # PCP's browser shows sites the time zone and language of the container, so
@@ -74,7 +82,7 @@ die() {
 usage() {
   warn "Usage: install.sh [uninstall|update|watch]" "" \
     "Settings go in the environment: PCP_PORT, PCP_HTTPS, PCP_RUNTIME," \
-    "PCP_DATA_VOLUME, PCP_AUTO_UPDATE, PCP_UPDATE_BUTTON, PCP_VERSION," \
+    "PCP_DATA_VOLUME, PCP_AUTO_UPDATE, PCP_UPDATE_BUTTON, PCP_CHANNEL, PCP_VERSION," \
     "PCP_IMAGE. The top of the script explains them."
   exit 2
 }
@@ -99,6 +107,7 @@ load_conf() {
       PCP_DATA_VOLUME) conf_volume=$value ;;
       PCP_AUTO_UPDATE) conf_auto=$value ;;
       PCP_UPDATE_BUTTON) conf_button=$value ;;
+      PCP_CHANNEL) conf_channel=$value ;;
     esac
   done <"$1"
 }
@@ -137,6 +146,7 @@ resolve_settings() {
   conf_volume=
   conf_auto=
   conf_button=
+  conf_channel=
   read_conf
   PCP_PORT=${PCP_PORT:-${conf_port:-3000}}
   PCP_HTTPS=${PCP_HTTPS:-${conf_https:-0}}
@@ -144,10 +154,9 @@ resolve_settings() {
   PCP_DATA_VOLUME=${PCP_DATA_VOLUME:-${conf_volume:-pcp-data}}
   PCP_AUTO_UPDATE=${PCP_AUTO_UPDATE:-${conf_auto:-0}}
   PCP_UPDATE_BUTTON=${PCP_UPDATE_BUTTON:-${conf_button:-1}}
-  PCP_VERSION=${PCP_VERSION:-latest}
-  PCP_VERSION=${PCP_VERSION#v}
+  PCP_CHANNEL=${PCP_CHANNEL:-${conf_channel:-stable}}
+  PINNED_VERSION=${PCP_VERSION:-}
   PCP_IMAGE=${PCP_IMAGE:-$DEFAULT_IMAGE}
-  IMAGE="$PCP_IMAGE:$PCP_VERSION"
 
   case "$PCP_PORT" in
     '' | *[!0-9]*) usage_error "PCP_PORT must be a port number, not '$PCP_PORT'." ;;
@@ -164,6 +173,10 @@ resolve_settings() {
     0 | 1) ;;
     *) usage_error "PCP_UPDATE_BUTTON must be 0 or 1, not '$PCP_UPDATE_BUTTON'." ;;
   esac
+  case "$PCP_CHANNEL" in
+    stable | develop) ;;
+    *) usage_error "PCP_CHANNEL must be stable or develop, not '$PCP_CHANNEL'." ;;
+  esac
   case "$PCP_RUNTIME" in
     '' | docker | podman) ;;
     *) usage_error "PCP_RUNTIME must be docker or podman, not '$PCP_RUNTIME'." ;;
@@ -171,8 +184,26 @@ resolve_settings() {
   case "$PCP_DATA_VOLUME" in
     '' | *[!A-Za-z0-9_.-]*) usage_error "PCP_DATA_VOLUME must be a volume name (letters, digits, '_', '.', '-'), not '$PCP_DATA_VOLUME'." ;;
   esac
-  # A pinned version never changes, so there is nothing to install from PCP.
-  if [ "$PCP_UPDATE_BUTTON" = 1 ] && [ "$PCP_VERSION" = latest ]; then
+  pick_image
+}
+
+# The image tag: the one PCP_VERSION pins, else the channel's. A pinned
+# version never changes, so there is nothing to install from PCP; a channel's
+# tag (or latest or develop named outright) moves, and PCP's button follows it.
+pick_image() {
+  if [ -n "$PINNED_VERSION" ]; then
+    PCP_VERSION=${PINNED_VERSION#v}
+  elif [ "$PCP_CHANNEL" = develop ]; then
+    PCP_VERSION=develop
+  else
+    PCP_VERSION=latest
+  fi
+  IMAGE="$PCP_IMAGE:$PCP_VERSION"
+  case "$PCP_VERSION" in
+    latest | develop) moving=1 ;;
+    *) moving=0 ;;
+  esac
+  if [ "$PCP_UPDATE_BUTTON" = 1 ] && [ "$moving" = 1 ]; then
     WATCH=1
   else
     WATCH=0
@@ -195,8 +226,8 @@ make_dir() {
 
 save_conf() {
   make_dir "$(dirname "$CONF")"
-  printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\nPCP_AUTO_UPDATE=%s\nPCP_UPDATE_BUTTON=%s\n' \
-    "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" "$PCP_AUTO_UPDATE" "$PCP_UPDATE_BUTTON" >"$CONF"
+  printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\nPCP_AUTO_UPDATE=%s\nPCP_UPDATE_BUTTON=%s\nPCP_CHANNEL=%s\n' \
+    "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" "$PCP_AUTO_UPDATE" "$PCP_UPDATE_BUTTON" "$PCP_CHANNEL" >"$CONF"
   if [ "$ROOT" = 1 ]; then
     chmod 0644 "$CONF"
   fi
@@ -461,9 +492,10 @@ install_container() {
   if [ "$PCP_AUTO_UPDATE" = 1 ]; then
     set -- "$@" -e PCP_AUTO_UPDATE=1
   fi
-  # Tells it that "Install and restart" on its Settings page is watched for.
+  # Tells it that "Install and restart" on its Settings page is watched for,
+  # from either channel (1 was an installer that knew only the releases).
   if [ "$WATCH" = 1 ]; then
-    set -- "$@" -e PCP_HOST_UPDATER=1
+    set -- "$@" -e PCP_HOST_UPDATER=2
   fi
   # The browser's time zone and language follow the container's.
   if [ -n "$HOST_TZ" ]; then
@@ -496,7 +528,7 @@ write_unit() {
       printf 'Label=io.containers.autoupdate=registry\n'
     fi
     if [ "$WATCH" = 1 ]; then
-      printf 'Environment=PCP_HOST_UPDATER=1\n'
+      printf 'Environment=PCP_HOST_UPDATER=2\n'
     fi
     if [ -n "$HOST_TZ" ]; then
       printf 'Environment=TZ=%s\n' "$HOST_TZ"
@@ -693,22 +725,34 @@ enable_request_watch() {
 }
 
 # What the watcher runs: when the owner asked for an update on PCP's Settings
-# page, PCP has left `<id> <seconds since 1970>` in /data/install-request
+# page, PCP has left `<id> <seconds since 1970>` in /data/install-request,
+# followed by ` stable` or ` develop` for the channel it was asked from
 # (lib/core/updates/host-signal.ts). PCP wrote it, so it is checked like any
 # input: a request that is not exactly that, is older than 15 minutes, was
 # already answered, or comes within 5 minutes of the last one does nothing.
-# The id is noted before `update` runs, so a failed one is not retried.
+# The id is noted before `update` runs, so a failed one is not retried. A
+# channel other than the remembered one moves the install to it, unless
+# PCP_VERSION pins the tag.
 watch() {
   [ "$WATCH" = 1 ] || return 0
   container_running || return 0
   signal=$("$RUNTIME" exec "$CONTAINER" cat /data/install-request 2>/dev/null) || return 0
   id=${signal%% *}
-  at=${signal#* }
+  rest=${signal#* }
+  at=${rest%% *}
+  channel=
+  if [ "$at" != "$rest" ]; then
+    channel=${rest#* }
+  fi
   case "$id" in
     '' | *[!0-9a-f-]*) return 0 ;;
   esac
   case "$at" in
     '' | *[!0-9]*) return 0 ;;
+  esac
+  case "$channel" in
+    '' | stable | develop) ;;
+    *) return 0 ;;
   esac
   [ "${#id}" -eq 36 ] && [ "${#at}" -le 12 ] || return 0
   now=$(date +%s)
@@ -727,7 +771,13 @@ watch() {
 
   make_dir "$STATE_DIR"
   printf '%s %s\n' "$id" "$now" >"$handled"
-  say "PCP asked for an update."
+  if [ -n "$channel" ] && [ "$channel" != "$PCP_CHANNEL" ] && [ -z "$PINNED_VERSION" ]; then
+    PCP_CHANNEL=$channel
+    pick_image
+    say "PCP asked for an update from its $channel channel."
+  else
+    say "PCP asked for an update."
+  fi
   update
 }
 
@@ -811,6 +861,11 @@ summary() {
     cron) updates="$updates
                or \"Install and restart\" in PCP, with its crontab line above" ;;
   esac
+  if [ "$PCP_CHANNEL" = develop ]; then
+    updates="$updates
+  Channel      develop's builds, ahead of the releases (PCP_CHANNEL=stable
+               goes back to the releases from the next one on)"
+  fi
   say "" \
     "Open it now and set up your vault: the first person to open it becomes" \
     "its owner." "" \

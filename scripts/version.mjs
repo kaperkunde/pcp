@@ -5,8 +5,14 @@
 // (.github/workflows/release.yml): every push to main asks `next` for the
 // version, writes it with `set`, commits, and tags it `vX.Y.Z`.
 //
+// A build of develop (.github/workflows/develop.yml) is the next release with
+// `-dev.<n>`, n the workflow's run number: later than the release before it,
+// earlier than the one it leads to. It is written into the build's checkout
+// only and tagged `vX.Y.Z-dev.N`; develop's package.json keeps the release.
+//
 //   node scripts/version.mjs next               print the next release
-//   node scripts/version.mjs set <x.y.z>        write it into package.json
+//   node scripts/version.mjs dev <n>            print develop's build <n>
+//   node scripts/version.mjs set <version>      write it into package.json
 //   node scripts/version.mjs bump major|minor   raise one and write it
 
 import { execFileSync } from "node:child_process"
@@ -14,6 +20,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+const DEV_BUILD = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-dev\.(0|[1-9]\d*)$/
 const PACKAGE_JSON = fileURLToPath(new URL("../package.json", import.meta.url))
 
 /** @param {string} version */
@@ -51,6 +58,20 @@ export function nextRelease(packageVersion, tags) {
 }
 
 /**
+ * The version of develop's build `run`: the release it leads to, -dev.<run>.
+ *
+ * @param {string} packageVersion
+ * @param {string[]} tags
+ * @param {string} run
+ */
+export function devBuild(packageVersion, tags, run) {
+  if (!/^[1-9]\d{0,8}$/.test(String(run))) {
+    throw new Error(`Not a build number: ${run}`)
+  }
+  return `${nextRelease(packageVersion, tags)}-dev.${run}`
+}
+
+/**
  * @param {string} version
  * @param {string} part
  */
@@ -72,21 +93,25 @@ function readPackage() {
 
 /** @param {string} version */
 function writeVersion(version) {
-  parse(version)
+  if (!DEV_BUILD.test(version)) parse(version)
   const pkg = readPackage()
   pkg.version = version
   writeFileSync(PACKAGE_JSON, `${JSON.stringify(pkg, null, 2)}\n`)
 }
 
+function releaseTags() {
+  return execFileSync("git", ["tag", "--list", "v*"], { encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean)
+}
+
 function main([command, arg]) {
   const current = readPackage().version
   if (command === "next") {
-    const tags = execFileSync("git", ["tag", "--list", "v*"], {
-      encoding: "utf8",
-    })
-      .split("\n")
-      .filter(Boolean)
-    return nextRelease(current, tags)
+    return nextRelease(current, releaseTags())
+  }
+  if (command === "dev") {
+    return devBuild(current, releaseTags(), arg)
   }
   if (command === "set") {
     writeVersion(arg)
@@ -98,7 +123,7 @@ function main([command, arg]) {
     return version
   }
   throw new Error(
-    "Usage: node scripts/version.mjs next | set <x.y.z> | bump <major|minor>",
+    "Usage: node scripts/version.mjs next | dev <n> | set <version> | bump <major|minor>",
   )
 }
 

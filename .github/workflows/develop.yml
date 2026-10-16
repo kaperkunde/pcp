@@ -1,0 +1,179 @@
+# A build of develop for every push to it: the checks of a pull request
+# (ci.yml) first, and once they pass, the desktop apps and the container
+# images, as a release from main has them (build-desktop.yml,
+# build-images.yml), published as a GitHub pre-release.
+#
+# The version is the release develop leads to with the run number after it,
+# vX.Y.Z-dev.N (scripts/version.mjs dev): later than the release before,
+# earlier than the one it leads to, so an owner on the develop channel is
+# offered each build and then the release, and one on the stable channel
+# never a build. It is tagged on the pushed commit and written into the
+# builds' checkouts only; develop's package.json keeps the release version,
+# and no commit is made.
+#
+# A pre-release is never GitHub's latest release, so releases/latest (the
+# stable channel's update check, the README's download links, the app's
+# updater) keeps pointing at main's. The images go to ghcr.io as <version>
+# and develop (never latest), which install.sh pulls with PCP_CHANNEL=develop
+# and docker-compose.yaml with PCP_TAG=develop. PCP's develop channel asks
+# GitHub for the newest releases, these among them (lib/core/updates/).
+#
+# Only the newest few builds are kept: older pre-releases are deleted with
+# their tags when a new one is published. Container images by version stay
+# in the registry until someone removes them there.
+#
+# One build at a time: a push while one runs waits for it, and a newer push
+# replaces one that is still waiting. A failed app or image build does not
+# hold the pre-release back, as in release.yml.
+
+name: develop
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: develop
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # How many builds of develop stay on GitHub's release page.
+  KEEP_BUILDS: 5
+
+jobs:
+  ci:
+    name: checks
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  release:
+    name: tag and draft
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Pick the version
+        id: version
+        env:
+          RUN: ${{ github.run_number }}
+        run: |
+          version="$(node scripts/version.mjs dev "$RUN")"
+          echo "Building v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Write the notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          # What changed since the build or release before: the commits'
+          # subjects, which PCP shows as plain text.
+          previous="$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)"
+          {
+            echo "A build of develop, ahead of the releases. It may break."
+            echo
+            echo "Built from $SHA."
+            echo
+            if [ -n "$previous" ]; then
+              echo "Changes since $previous:"
+              echo
+              git log --no-merges --format='- %s (%h)' "$previous..HEAD" | head -n 50
+            else
+              git log --no-merges --format='- %s (%h)' HEAD | head -n 20
+            fi
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - name: Tag and draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        # A re-run of the whole workflow has the same run number, so it finds
+        # its tag and draft already made.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            git tag -a "v$VERSION" -m "v$VERSION (develop)"
+            git push origin "refs/tags/v$VERSION"
+          fi
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release create "v$VERSION" --verify-tag --title "v$VERSION (develop)" \
+              --notes-file "$RUNNER_TEMP/notes.md" --prerelease --draft
+          fi
+
+  desktop:
+    name: desktop apps
+    needs: release
+    uses: ./.github/workflows/build-desktop.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+    secrets: inherit
+    permissions:
+      contents: write
+
+  image:
+    name: container images
+    needs: release
+    uses: ./.github/workflows/build-images.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+      channel-tag: develop
+    permissions:
+      contents: read
+      packages: write
+
+  publish:
+    name: publish
+    needs: [release, desktop, image]
+    if: always() && needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+          APPS: ${{ needs.desktop.result }}
+          IMAGE: ${{ needs.image.result }}
+        run: |
+          if [ "$APPS" != "success" ]; then
+            echo "::warning::A desktop app build did not succeed; v$VERSION is published without it. Re-run the failed job to attach it."
+          fi
+          if [ "$IMAGE" != "success" ]; then
+            echo "::warning::The container images did not build; v$VERSION is published without them and ghcr.io/$GH_REPO:develop stays at the build before. Re-run the failed job."
+          fi
+          gh release edit "v$VERSION" --draft=false --prerelease
+      - name: Remove older builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Builds of develop only (vX.Y.Z-dev.N), newest first by version;
+          # releases are never touched.
+          gh release list --limit 200 --json tagName \
+            --jq '.[].tagName | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+-dev\\.[0-9]+$"))' |
+            sort -V -r |
+            tail -n +"$((KEEP_BUILDS + 1))" |
+            while read -r tag; do
+              echo "Removing $tag"
+              gh release delete "$tag" --yes --cleanup-tag
+            done

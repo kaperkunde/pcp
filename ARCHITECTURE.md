@@ -1802,7 +1802,9 @@ The code is `lib/core/updates/`.
 
 **What it asks, and of whom.** Once a day PCP asks GitHub for the
 repository's latest release (`api.github.com/repos/kaperkunde/pcp/releases/latest`,
-which leaves out drafts and pre-releases). The request carries an `accept`
+which leaves out drafts and pre-releases), or, on the develop channel, for
+its ten newest releases (`…/releases?per_page=10`), develop's pre-releases
+among them. The request carries an `accept`
 header and a user agent naming PCP's version, nothing else: no credential, no
 cookie, nothing of the vault. So GitHub learns this PCP's address and version.
 The owner is told so where the check is turned off (Settings → Updates, and
@@ -1810,7 +1812,21 @@ the step after setup). The address is PCP's own, not one an assistant chose,
 so it goes through plain `fetch` like dynamic DNS does (which works behind an
 outbound proxy), with `redirect: "manual"`: at most two redirects, to the same
 origin (a renamed repository answers with one). `PCP_RELEASES_URL` replaces
-the address, for tests and mirrors.
+the latest-release address, for tests and mirrors; the develop channel's list
+is the same address without its `/latest`.
+
+**Channels.** Every push to `main` is a release, `vMAJOR.MINOR.PATCH`; every
+push to `develop` that passes CI is a build of develop, a GitHub pre-release
+`vMAJOR.MINOR.PATCH-dev.N` (`.github/workflows/develop.yml`: the release it
+leads to, then the run number), with the same apps and images (the image tag
+`develop` rather than `latest`). A build orders after the release before it
+and before the one it leads to (`updates/semver.ts`). The owner picks a
+channel under Settings → Updates (`update.config`'s `channel`; by default
+the one the running PCP came from): **Stable** reads the latest release
+only, and never takes a build for it; **Develop** takes the latest version
+among the newest releases, a build or a release. Changing it forgets what the
+last check found, between rounds, so an answer for the other channel is never
+written back, and asks again at once while the check is on.
 
 **The answer is untrusted input.** It is read within limits
 (`updates/limits.ts`: ten seconds, 256 KB) through a schema that keeps the tag,
@@ -1843,7 +1859,9 @@ runs it), the desktop app sets `PCP_DESKTOP` (below), and
 anything else is a checkout (`git pull` and a build). A develop build ahead
 of the last release counts as up to date.
 
-**The desktop app installs it itself,** when it can. The page cannot reach
+**The desktop app installs it itself,** when it can (a build of develop
+from that build's own pre-release, whose files `releases/latest` never
+points at). The page cannot reach
 the wrapper (no IPC), so **Install and restart** records the owner's request
 in `update.status`, and `/api/health` repeats it, in the app only and for
 fifteen minutes. The wrapper reads that every fifteen seconds and has
@@ -1863,16 +1881,22 @@ installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
 
 **The Linux installer also installs it when the owner asks** (on unless
-`PCP_UPDATE_BUTTON=0`, and only for the `latest` tag). It passes
-`PCP_HOST_UPDATER=1` into the container, so Settings shows **Install and
+`PCP_UPDATE_BUTTON=0`, and only for a channel's tag, `latest` or `develop`,
+never a pinned version). It passes `PCP_HOST_UPDATER=2` into the container, so Settings shows **Install and
 restart**, and sets up `pcp-update-request.timer`, which runs the copy of the
 installer with `watch` every 30 seconds. The button records the request in
 `update.status` as the app's does, and also writes `install-request` in the
 data folder (`updates/host-signal.ts`): the request's id and when it was made,
-one line, nothing of the vault. `watch` reads it with `docker exec` /
-`podman exec` and treats it as untrusted: only a well-formed id and time,
+and the channel it was asked from, one line, nothing of the vault. `watch`
+reads it with `docker exec` / `podman exec` and treats it as untrusted: only
+a well-formed id and time, `stable` or `develop` or nothing for the channel,
 fifteen minutes old at most, one it has not answered, and no more than one
-every five minutes. It notes the id before it runs `update`, so a failed
+every five minutes. A channel other than the one it remembers
+(`PCP_CHANNEL`, `latest` or `develop` for the image tag) moves the install to
+it. An installer from before channels passes `PCP_HOST_UPDATER=1` and would
+ignore a line with a channel, so PCP writes the channel only for
+`PCP_HOST_UPDATER=2`, and on develop asks the owner to run the install line
+with `PCP_CHANNEL=develop` instead. It notes the id before it runs `update`, so a failed
 install is not retried. The new PCP clears the request and the file at boot.
 The host reads the container; PCP never addresses the host and has no Docker
 socket.
