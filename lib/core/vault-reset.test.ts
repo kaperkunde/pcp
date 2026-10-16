@@ -4,6 +4,7 @@ import { createApiToken, resolveApiToken } from "./api-tokens"
 import { storeTools } from "./catalogue"
 import { db } from "./db"
 import { createDeviceKey, unlockWithDeviceKey } from "./device-keys"
+import { receiveFile } from "./file-links"
 import { getHostJson, setHostJson } from "./host-settings"
 import { createMemory } from "./memories"
 import { DDNS_CONFIG_KEY } from "./network/ddns"
@@ -87,6 +88,7 @@ async function populate() {
     text: "a long answer",
     mediaType: "text/plain",
   })
+  await receiveFile(ctx, { tokenId, publicUrl: "https://pcp.example" })
   await createMemory(ctx, { path: "notes.md", text: "Remember this." })
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
   await setHostJson(DDNS_CONFIG_KEY, { provider: "duckdns", subdomain: "ada" })

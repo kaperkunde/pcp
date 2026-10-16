@@ -28,11 +28,22 @@ export function autoUpdated(): boolean {
 
 /**
  * Whether the Linux installer watches for the owner's "Install and restart"
- * (`PCP_HOST_UPDATER=1`, which install.sh passes into the container unless
+ * (`PCP_HOST_UPDATER`, which install.sh passes into the container unless
  * PCP_UPDATE_BUTTON=0). The request goes in a file in the data folder that
  * the installer reads (lib/core/updates/host-signal.ts); PCP pulls and
  * restarts nothing itself.
  */
 export function hostUpdater(): boolean {
-  return process.env.PCP_HOST_UPDATER === "1"
+  const value = process.env.PCP_HOST_UPDATER
+
+  return value === "1" || value === "2"
+}
+
+/**
+ * Whether that installer also installs from the channel the request names
+ * (`PCP_HOST_UPDATER=2`); one that says 1 knows only the stable channel's
+ * image, and would ignore a request that names one.
+ */
+export function hostUpdaterFollowsChannel(): boolean {
+  return process.env.PCP_HOST_UPDATER === "2"
 }

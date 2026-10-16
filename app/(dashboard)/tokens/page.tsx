@@ -96,6 +96,7 @@ function TokenRow({ token, now }: { token: ApiTokenSummary; now: Date }) {
         token.keepMemories ? "Keeps memories" : null,
         token.webFetch ? "Fetches the web" : null,
         token.runCode ? "Runs code" : null,
+        token.shareFiles ? "Moves files by link" : null,
         token.manageWrappers ? "Proposes wrappers" : null,
       ].filter((feature): feature is string => feature !== null)
 

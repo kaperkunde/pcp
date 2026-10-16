@@ -72,6 +72,9 @@ installer again):
 - `PCP_DATA_VOLUME=pcp-data`: the volume that holds your vault.
 - `PCP_AUTO_UPDATE=1`: update PCP once a day by itself (see
   [Keeping it running](#6-keeping-it-running)).
+- `PCP_CHANNEL=develop`: follow develop's builds, every change as soon as it
+  is built and ahead of the releases (they may break); `PCP_CHANNEL=stable`
+  goes back to the releases from the next one on.
 - `PCP_VERSION=1.2.3`: a release other than the latest, for this run only.
 
 Use either the installer or a checkout, not both: the installer stops if a
@@ -282,6 +285,16 @@ button, and if there is a fresh one, it updates PCP as the line above would.
 PCP itself never talks to Docker or Podman. Without a systemd session the
 installer prints its crontab line too. `PCP_UPDATE_BUTTON=0` takes the timer
 and the button away; a pinned `PCP_VERSION` has no button.
+
+**Develop's builds.** Every change to the `develop` branch is built once its
+checks pass and published as a pre-release, `vX.Y.Z-dev.N`, ahead of the
+release it leads to. To follow them, pick **Develop** under **Settings →
+Updates**: PCP then tells you of each build, and **Install and restart** (with
+an installer from this version or later) moves the container to the image's
+`develop` tag. Or say so to the installer (`PCP_CHANNEL=develop`), or to
+compose (`PCP_TAG=develop docker compose pull`, then `up -d` with the same
+`PCP_TAG`). Picking **Stable** again offers the next release when it is out;
+it is always later than the builds before it.
 
 **Backing up.** **Settings → Export** writes everything PCP holds to one
 file, locked with an export password you choose. **Settings → Restore** (or

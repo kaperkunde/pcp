@@ -43,6 +43,7 @@ import {
   isNewer,
   parseHealth,
   pendingInstall,
+  updateFeedUrl,
   updaterMode,
 } from "./updates.mjs"
 import { permissionAllowed, webUrl } from "./window-policy.mjs"
@@ -524,6 +525,13 @@ async function installUpdate(request) {
     // downgrade, which an update never is.
     autoUpdater.channel = `latest-${process.arch}`
     autoUpdater.allowDowngrade = false
+    // A release comes from the latest release (electron-builder.yml's
+    // address), a build of develop from its own pre-release.
+    autoUpdater.setFeedURL({
+      provider: "generic",
+      url: updateFeedUrl(request.version, REPOSITORY_URL),
+      channel: autoUpdater.channel,
+    })
 
     const result = await autoUpdater.checkForUpdates()
     const found = result?.updateInfo?.version

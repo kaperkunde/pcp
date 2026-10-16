@@ -77,6 +77,21 @@ is re-run. The package's visibility is set on GitHub, not here: a package
 takes the repository's visibility when it is first pushed, and anonymous
 pulls need it public.
 
+Every push to `develop` gets the same, ahead of the releases
+(`.github/workflows/develop.yml`): the checks a pull request runs (`ci.yml`),
+and once they pass, the apps and images built from that commit as a GitHub
+pre-release tagged `vX.Y.Z-dev.N`, X.Y.Z being the release `develop` leads to
+and N the run number. Nothing is committed: the version is written into the
+build's checkout only. The images are pushed as `<version>` and `develop`
+(never `latest`), which `PCP_CHANNEL=develop` in `install.sh` and
+`PCP_TAG=develop` with compose pull. A pre-release is never GitHub's latest
+release, so the stable channel, the README's links and the app's updater keep
+to `main`'s releases; an owner on the develop channel (Settings → Updates) is
+offered each build, then the release. Only the newest five builds stay on the
+release page. `release.yml` and `develop.yml` share the app and image builds
+(`build-desktop.yml`, `build-images.yml`), and `release.yml` ignores the `-dev`
+tags, so merging `develop` into `main` still releases.
+
 MAJOR and MINOR are raised by hand, in a commit on `develop`, when the
 maintainer decides a release warrants one; a contributor does not bump, and
 an automated assistant does so only when asked to in so many words:
@@ -177,6 +192,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/register-rules.ts`         | What register_server accepts for each kind                    |
 | `lib/core/tool-results.ts`           | Kept answers and files, encrypted; `read_result`, handles     |
 | `lib/core/result-handles.ts`         | Handles in a call's arguments, replaced before sending        |
+| `lib/core/file-links.ts`             | Links an assistant's own computer moves a kept file by        |
 | `lib/core/media-types.ts`            | Text types, charsets, and a file's type from its first bytes  |
 | `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
 | `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
@@ -214,6 +230,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `app/oauth/`, `app/.well-known/`     | PCP's OAuth server: sign-in page, token, register, discovery  |
 | `app/api/servers/[id]/oauth/`        | OAuth start; the per-server callback older clients use        |
 | `app/api/export/route.ts`            | The export download (a file needs `Content-Disposition`)      |
+| `app/api/files/[secret]/route.ts`    | A file link: GET downloads, PUT sends (`file-links.ts`)       |
 | `app/api/health/route.ts`            | Health check; in the app, the version and an install request  |
 | `e2e/fixtures/upstream.ts`           | The fake MCP, OAuth, REST and JMAP servers the e2e suite uses |
 | `app/manifest.ts`, `public/icons/`   | The manifest and icon set; `assets/icon.png` is the master    |

@@ -1,6 +1,7 @@
 import { isPcpError } from "../errors"
 import { describeFetchError } from "../openapi/http"
 import {
+  type UpdateChannel,
   UPDATE_BACKOFF_MS,
   UPDATE_CHECK_EVERY_MS,
   UPDATE_FETCH_TIMEOUT_MS,
@@ -40,19 +41,21 @@ export async function runUpdateRound({
   force = false,
   fetchFn = fetch,
   url,
+  channel = "stable",
 }: {
   status: UpdateStatus
   now: Date
   force?: boolean
   fetchFn?: typeof fetch
   url?: string
+  channel?: UpdateChannel
 }): Promise<UpdateStatus> {
   if (!force && !updateDue(status, now)) {
     return status
   }
 
   try {
-    const latest = await fetchLatestRelease(fetchFn, url)
+    const latest = await fetchLatestRelease(fetchFn, url, channel)
 
     return {
       ...status,

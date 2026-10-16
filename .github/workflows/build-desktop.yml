@@ -1,0 +1,113 @@
+# The desktop apps (desktop/) for one tagged version, built on macOS and
+# Windows runners and attached to that version's GitHub Release, which the
+# caller has drafted: release.yml for a release from main, develop.yml for a
+# build of develop. The installers keep stable names (PCP-mac-arm64.dmg,
+# PCP-mac-x64.dmg, PCP-windows-x64.exe), so releases/latest/download/<name>
+# always points at the latest release's. Beside each go the files the app's
+# own updater reads (desktop/main.mjs): the update file for its architecture,
+# latest-<arch>[-mac].yml, and on macOS the zip it installs from.
+#
+# The version is written into the checkout's package.json before the build: a
+# release's tag already carries it, a build of develop's does not (its commit
+# keeps the release it follows).
+
+name: build desktop apps
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: MAJOR.MINOR.PATCH, or MAJOR.MINOR.PATCH-dev.N; tagged vVERSION.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS app (Apple silicon)
+            os: macos-latest
+            arch: arm64
+            asset: PCP-mac-arm64.dmg
+            updates: PCP-mac-arm64.zip latest-arm64-mac.yml
+          - name: macOS app (Intel)
+            os: macos-latest
+            arch: x64
+            asset: PCP-mac-x64.dmg
+            updates: PCP-mac-x64.zip latest-x64-mac.yml
+          - name: Windows app
+            os: windows-latest
+            arch: x64
+            asset: PCP-windows-x64.exe
+            updates: latest-x64.yml
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: v${{ inputs.version }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Set the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node scripts/version.mjs set "$VERSION"
+      - name: Install pnpm
+        run: npm install -g --no-update-notifier pnpm@10.33.0
+      - name: Install dependencies
+        # Hoisted, so the standalone output holds files rather than pnpm's
+        # symlinks, which an installer cannot carry (desktop/README.md).
+        run: pnpm install --frozen-lockfile --config.node-linker=hoisted
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Build
+        run: pnpm build
+      - name: Install Electron and electron-builder
+        run: pnpm install --frozen-lockfile
+        working-directory: desktop
+      - name: Package
+        # Signed and notarized when the secrets exist, unsigned otherwise
+        # (desktop/README.md, "Signing").
+        run: pnpm dist --arch ${{ matrix.arch }}
+        working-directory: desktop
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The Developer ID provisioning profile that lets Touch ID keep its
+          # key in a keychain item macOS opens only for a fingerprint.
+          MAC_PROVISIONING_PROFILE: ${{ secrets.MAC_PROVISIONING_PROFILE }}
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          ASSET: ${{ matrix.asset }}
+          UPDATES: ${{ matrix.updates }}
+        run: |
+          ls -la desktop/dist
+          gh release upload "v$VERSION" "desktop/dist/$ASSET" --clobber
+          # Without these the app cannot update itself and sends the owner to
+          # the download page instead, so a missing one warns, not fails.
+          for file in $UPDATES; do
+            if [ -f "desktop/dist/$file" ]; then
+              gh release upload "v$VERSION" "desktop/dist/$file" --clobber
+            else
+              echo "::warning::desktop/dist/$file was not built; this app cannot install v$VERSION by itself."
+            fi
+          done

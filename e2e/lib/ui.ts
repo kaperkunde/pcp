@@ -208,6 +208,7 @@ export type TokenOptions = {
   keepMemories?: boolean
   webFetch?: boolean
   runCode?: boolean
+  shareFiles?: boolean
   manageEndpoints?: boolean
   manageWrappers?: boolean
 }
@@ -217,6 +218,7 @@ const OPTION_LABELS = {
   keepMemories: "Keep memories",
   webFetch: "Read web pages",
   runCode: "Run code",
+  shareFiles: "Move files by link",
   manageEndpoints: "Manage API endpoints",
   manageWrappers: "Propose wrappers",
 } as const

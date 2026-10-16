@@ -465,14 +465,16 @@ and these tools:
 Options on a token's page, each off until you tick it, add more tools,
 described further down:
 
-| Tool              | Option (**Let an assistant with this token …**) | What it does                                                                                                                               |
-| ----------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `get_endpoint`    | **read and change API endpoints**               | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.         |
-| `update_endpoint` | **read and change API endpoints**               | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again. |
-| `memory`          | **keep memories**                               | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                               |
-| `read_memory`     | **keep memories**                               | Reads those notes (`every`, `view`, `search`) and nothing else.                                                                            |
-| `web_fetch`       | **fetch web pages**                             | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.              |
-| `run_code`        | **run code that calls its tools**               | Runs a program that calls the token's tools and works on their answers inside PCP.                                                         |
+| Tool              | Option (**Let an assistant with this token …**)     | What it does                                                                                                                               |
+| ----------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `get_endpoint`    | **read and change API endpoints**                   | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.         |
+| `update_endpoint` | **read and change API endpoints**                   | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again. |
+| `memory`          | **keep memories**                                   | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                               |
+| `read_memory`     | **keep memories**                                   | Reads those notes (`every`, `view`, `search`) and nothing else.                                                                            |
+| `web_fetch`       | **fetch web pages**                                 | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.              |
+| `run_code`        | **run code that calls its tools**                   | Runs a program that calls the token's tools and works on their answers inside PCP.                                                         |
+| `share_result`    | **move files to and from its own computer by link** | A link the assistant's own computer downloads a file PCP keeps for it from with curl (a browser download, a mail attachment).              |
+| `receive_file`    | **move files to and from its own computer by link** | A link its own computer sends one file to with curl, and the handle the file is then kept under.                                           |
 
 The **Log** page lists what assistants did with their tokens: every call,
 by token, tool and server, how long it took and whether it was done, failed
@@ -657,7 +659,8 @@ desktop apps do not add it; JavaScript works everywhere.
 server like any other, with tools to open a page (`navigate`, `back`, `tabs`),
 read it (`snapshot`, which names each element with a ref; `read_page`; `find`;
 `screenshot`), act on it (`click`, `type`, `select_option`, `press_key`,
-`scroll`, `wait_for`, `handle_dialog`) and `hand_over` a tab to you. It is
+`scroll`, `wait_for`, `handle_dialog`), move files (`upload_file`,
+`download`) and `hand_over` a tab to you. It is
 Chromium without a window on PCP's machine, with up to eight tabs, started with
 the first page and closed after fifteen idle minutes. The Docker image includes
 it; elsewhere (the desktop app, a checkout), **Install Chromium** on the Browser
@@ -676,6 +679,16 @@ a page alone once its lines no longer let it open the site.
 The browser keeps its cookies, local storage and IndexedDB, encrypted in your
 vault, so a sign-in lasts between conversations; an assistant acts as you
 where you signed in, but no tool hands back a cookie or runs a script.
+Files go in and out as results PCP keeps for the token for a day, encrypted,
+never as files on the machine: `download` keeps the file a page offers (a
+download nobody asked for is refused) and `upload_file` puts kept ones, a
+download or a mail attachment, into a page's file field, so a run_code
+program can take an invoice from an email and upload it without its bytes
+passing through the assistant. A token you let **Move files by link** can
+also fetch such a file to the assistant's own computer (a sandbox or a
+terminal it runs commands in) or send one from there, with curl and a link
+that works for an hour, for that one file: still without the bytes passing
+through the assistant.
 **Forget all sites** signs it out of everything. Every answer names the tab
 and a link to it in PCP, where you watch it live and **Take over**: your
 mouse and keyboard go to the page, with the timing you made them, and the

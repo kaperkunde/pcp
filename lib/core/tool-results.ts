@@ -119,10 +119,12 @@ async function store(
     name: string | null
     length: number
     ciphertext: (id: string) => Buffer
+    /** The id a handle already names (an upload by link); a new one otherwise. */
+    id?: string
   },
   now: Date,
 ): Promise<{ id: string; expiresAt: Date }> {
-  const id = newId()
+  const id = input.id ?? newId()
   const expiresAt = new Date(now.getTime() + RESULT_TTL_MS)
 
   await db().toolResult.create({
@@ -312,6 +314,80 @@ export function handleOf(kept: KeptResult, preview?: string): ResultHandle {
   }
 }
 
+/**
+ * Files that arrived through an upload link (lib/core/file-links.ts) whose
+ * handles name these ids, kept now as the token's results under those ids.
+ * The link holds the file under a key of its own, which only the vault's
+ * key unwraps: so it becomes a result the first time the token, holding the
+ * vault's key, uses its handle. Each is taken once, in a transaction that
+ * removes the link, so two calls at once keep it once.
+ */
+async function claimUploads(
+  ctx: VaultContext,
+  tokenId: string,
+  ids: string[],
+  now: Date,
+): Promise<void> {
+  const links = await db().fileLink.findMany({
+    where: {
+      vaultId: ctx.vaultId,
+      tokenId,
+      kind: "upload",
+      resultId: { in: ids },
+      receivedAt: { not: null },
+      expiresAt: { gt: now },
+    },
+  })
+
+  for (const link of links) {
+    if (!link.wrappedKey || !link.ciphertext) {
+      continue
+    }
+
+    const key = decrypt(
+      ctx.dek,
+      Buffer.from(link.wrappedKey),
+      `file_link_key:${link.id}`,
+    )
+    const bytes = decrypt(
+      key,
+      Buffer.from(link.ciphertext),
+      `file_link:${link.id}`,
+    )
+    const claimed = await db().$transaction(async (tx) => {
+      const { count } = await tx.fileLink.deleteMany({
+        where: { id: link.id },
+      })
+
+      if (count === 0) {
+        return false
+      }
+
+      await tx.toolResult.create({
+        data: {
+          id: link.resultId,
+          vaultId: ctx.vaultId,
+          tokenId,
+          serverId: null,
+          toolName: "receive_file",
+          kind: "bytes",
+          name: cleanName(link.name),
+          mediaType: link.mediaType.slice(0, MAX_MEDIA_TYPE_CHARS),
+          length: bytes.length,
+          ciphertext: asBytes(encrypt(ctx.dek, bytes, aad(link.resultId))),
+          createdAt: now,
+          expiresAt: new Date(now.getTime() + RESULT_TTL_MS),
+        },
+      })
+      return true
+    })
+
+    if (claimed) {
+      await enforceTokenLimits(tokenId, now)
+    }
+  }
+}
+
 /** A kept result, opened for use as an argument or an attachment. */
 export type OpenedResult = {
   id: string
@@ -342,14 +418,21 @@ export async function openResult(
     return null
   }
 
-  const row = await db().toolResult.findFirst({
-    where: {
-      id: input.id,
-      vaultId: ctx.vaultId,
-      tokenId: input.tokenId,
-      expiresAt: { gt: now },
-    },
-  })
+  const find = () =>
+    db().toolResult.findFirst({
+      where: {
+        id: input.id,
+        vaultId: ctx.vaultId,
+        tokenId: input.tokenId,
+        expiresAt: { gt: now },
+      },
+    })
+  let row = await find()
+
+  if (!row) {
+    await claimUploads(ctx, input.tokenId, [input.id], now)
+    row = await find()
+  }
 
   if (!row) {
     return null
@@ -416,25 +499,39 @@ export async function describeResults(
     return []
   }
 
-  const rows = await db().toolResult.findMany({
-    where: {
-      id: { in: ids },
-      vaultId: ctx.vaultId,
+  const query = () =>
+    db().toolResult.findMany({
+      where: {
+        id: { in: ids },
+        vaultId: ctx.vaultId,
+        tokenId,
+        expiresAt: { gt: now },
+      },
+      select: {
+        id: true,
+        kind: true,
+        mediaType: true,
+        name: true,
+        length: true,
+        serverId: true,
+        toolName: true,
+        createdAt: true,
+        expiresAt: true,
+      },
+    })
+  let rows = await query()
+
+  if (rows.length < ids.length) {
+    const found = new Set(rows.map((row) => row.id))
+    await claimUploads(
+      ctx,
       tokenId,
-      expiresAt: { gt: now },
-    },
-    select: {
-      id: true,
-      kind: true,
-      mediaType: true,
-      name: true,
-      length: true,
-      serverId: true,
-      toolName: true,
-      createdAt: true,
-      expiresAt: true,
-    },
-  })
+      ids.filter((id) => !found.has(id)),
+      now,
+    )
+    rows = await query()
+  }
+
   const byId = new Map(rows.map((row) => [row.id, row]))
 
   return ids.map((id): ResultInfo => {

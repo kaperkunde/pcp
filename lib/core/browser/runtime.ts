@@ -24,6 +24,7 @@ import {
   wantsVirtualDisplay,
   type VirtualDisplay,
 } from "./display"
+import { openDownloads, watchDownloads, type Downloads } from "./downloads"
 import { chromiumExecutable } from "./executable"
 import {
   DIALOG_DISMISS_MS,
@@ -54,6 +55,9 @@ import type { TabControl, TabView } from "./types"
  * from the vault's saved profile (profile.ts) and saved back while a
  * request holds the vault's key. The idle close has no key, so it saves
  * nothing: what a page changed on its own since the last save is lost.
+ * Downloads are refused but while a download call waits for one
+ * (downloads.ts), whose file is read off the scratch folder and removed
+ * before the call answers.
  *
  * Every connection goes through PCP's proxy (proxy.ts), and every page a
  * tab's main frame opens passes the gate here first: the sites the token
@@ -95,6 +99,11 @@ export type Tab = {
   /** The last site the gate kept the main frame from opening. */
   lastBlocked: string | null
   dialog: Dialog | null
+  /**
+   * A file the page offered while no download call waited (refused), by
+   * the name it gave: said in the next answer, then forgotten.
+   */
+  offeredFile: string | null
   /** What its main frame shows, and whether that is a site's check. */
   documents: DocumentWatch
   createdAt: number
@@ -132,6 +141,8 @@ export type VaultBrowser = {
   display: string | null
   /** Chromium's folder for what it keeps outside the profile (launch). */
   scratchDir: string
+  /** Downloads, refused but while a download call waits (downloads.ts). */
+  downloads: Downloads
   tabs: Map<string, Tab>
   lastTabByToken: Map<string, string>
   /**
@@ -472,12 +483,24 @@ async function start(
   // The display is given back however the browser ends.
   browser.on("disconnected", () => screen?.release())
 
-  await startGate(browser, () => vault).catch(async (error) => {
+  let downloads: Downloads
+
+  try {
+    await startGate(browser, () => vault)
+    downloads = await openDownloads(
+      browser,
+      path.join(scratchDir, "downloads"),
+      (frameId, name) => {
+        const tab = vault ? tabOfFrame(vault, frameId) : undefined
+        if (tab) tab.offeredFile = name
+      },
+    )
+  } catch (error) {
     await browser.close().catch(() => {})
     await proxy.close()
     removeScratchDir(scratchDir)
     throw error
-  })
+  }
 
   const context = await browser.newContext({
     ...contextOptions(browser, { headless: display === null }),
@@ -492,6 +515,7 @@ async function start(
     sandbox,
     display: display?.display ?? null,
     scratchDir,
+    downloads,
     tabs: new Map(),
     lastTabByToken: new Map(),
     fetchContext: null,
@@ -845,11 +869,17 @@ async function attach(
     handoverSince: null,
     lastBlocked: null,
     dialog: null,
+    offeredFile: null,
     documents: watchDocuments(page),
     createdAt: now,
     lastUsedAt: now,
     extra: new Map(),
   }
+
+  // A page's file chooser never opens a window on the machine: a file
+  // reaches a page only through upload_file.
+  page.on("filechooser", () => {})
+  await watchDownloads(vault.downloads, cdp).catch(() => {})
 
   page.on("dialog", (dialog) => {
     tab.dialog = dialog

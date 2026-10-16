@@ -15,6 +15,7 @@ app/                 Routes and pages (Next.js App Router)
   api/oauth/…        OAuth callback and PCP's client metadata document
   api/servers/…      OAuth start (and the per-server callback older clients use)
   api/export/…       The export download (a file needs Content-Disposition)
+  api/files/…        File links: an assistant's own computer downloads or sends one file
   api/health/…       The health check; in the desktop app, the version and an install request
   api/browser/…      A browser tab's live view: its pictures out, the owner's input in
 components/          React components; forms call Server Actions
@@ -1306,14 +1307,43 @@ Hosts are never logged.
 
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
-`select_option`, `scroll`, `wait_for`, `screenshot`, `handle_dialog` and
-`hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
+`select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
+`download`, `handle_dialog` and `hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
 with refs), the page as Markdown (`htmlToMarkdown`, read from the live
 page), a screenshot of the viewport, and the tab's address, title and the
 link to it in PCP. It acts by ref (click, type, select), by key or by
-scroll. It never gets a cookie or storage, never runs JavaScript, never
-downloads a file. A refusal that names a site or an address is a tool
+scroll. It never gets a cookie or storage and never runs JavaScript. A
+refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
+
+**Files** (`downloads.ts`, `call.ts`). A file crosses the browser only as a
+result kept for the token (see Long answers and kept results): never a path on the
+machine, and its bytes never pass through the assistant. `upload_file` names
+kept results by handle (`{"$result": id}`, with a name and type of its own if
+it likes), reads them as bytes before the page is touched, and hands them to
+the file field, or to the file chooser a button opens, as a person choosing
+them would; the page sends them only as it would then. Every tab catches its
+file chooser, so none ever opens a window on the machine.
+
+Playwright makes the vault's context with downloads off, and Chromium refuses
+every download but while a `download` call waits for one. The call lets the
+context save downloads into a folder in the browser's scratch folder, on a
+DevTools session of PCP's own (Playwright's download objects can read nothing
+in a context made with downloads off), clicks the ref or opens the address,
+and takes the first download its tab, a frame in it, or a popup of it starts,
+from an address the tab may open (`mayOpen`; a page's own blob or data file
+is the page's). Every other download is cancelled as it begins, and the one
+taken is cancelled once Chromium says it is larger than PCP keeps of one file
+or slower than `DOWNLOAD_TIMEOUT_MS`. Its bytes are read and the file removed
+before the call answers; it is kept, encrypted, as the token's result, and
+the answer is its handle, so a run_code program can pass a download, or a
+mail attachment, on to `upload_file` or `send_email`, and a token that moves
+files by link can fetch it to its own computer (`share_result`), or send one
+from there for `upload_file` (`receive_file`; see File links). A download a page
+starts while no call waits is refused by Chromium and only said in the tab's
+next answer, by the name the page gave, so the assistant can take it with
+`download`. An address given to `download` must be at a site the tab may
+open already; `navigate` is what asks the owner.
 
 **Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
 `tokenId`; a popup is its opener's) or that the owner last handed it to,
@@ -1772,7 +1802,9 @@ The code is `lib/core/updates/`.
 
 **What it asks, and of whom.** Once a day PCP asks GitHub for the
 repository's latest release (`api.github.com/repos/kaperkunde/pcp/releases/latest`,
-which leaves out drafts and pre-releases). The request carries an `accept`
+which leaves out drafts and pre-releases), or, on the develop channel, for
+its ten newest releases (`…/releases?per_page=10`), develop's pre-releases
+among them. The request carries an `accept`
 header and a user agent naming PCP's version, nothing else: no credential, no
 cookie, nothing of the vault. So GitHub learns this PCP's address and version.
 The owner is told so where the check is turned off (Settings → Updates, and
@@ -1780,7 +1812,21 @@ the step after setup). The address is PCP's own, not one an assistant chose,
 so it goes through plain `fetch` like dynamic DNS does (which works behind an
 outbound proxy), with `redirect: "manual"`: at most two redirects, to the same
 origin (a renamed repository answers with one). `PCP_RELEASES_URL` replaces
-the address, for tests and mirrors.
+the latest-release address, for tests and mirrors; the develop channel's list
+is the same address without its `/latest`.
+
+**Channels.** Every push to `main` is a release, `vMAJOR.MINOR.PATCH`; every
+push to `develop` that passes CI is a build of develop, a GitHub pre-release
+`vMAJOR.MINOR.PATCH-dev.N` (`.github/workflows/develop.yml`: the release it
+leads to, then the run number), with the same apps and images (the image tag
+`develop` rather than `latest`). A build orders after the release before it
+and before the one it leads to (`updates/semver.ts`). The owner picks a
+channel under Settings → Updates (`update.config`'s `channel`; by default
+the one the running PCP came from): **Stable** reads the latest release
+only, and never takes a build for it; **Develop** takes the latest version
+among the newest releases, a build or a release. Changing it forgets what the
+last check found, between rounds, so an answer for the other channel is never
+written back, and asks again at once while the check is on.
 
 **The answer is untrusted input.** It is read within limits
 (`updates/limits.ts`: ten seconds, 256 KB) through a schema that keeps the tag,
@@ -1813,7 +1859,9 @@ runs it), the desktop app sets `PCP_DESKTOP` (below), and
 anything else is a checkout (`git pull` and a build). A develop build ahead
 of the last release counts as up to date.
 
-**The desktop app installs it itself,** when it can. The page cannot reach
+**The desktop app installs it itself,** when it can (a build of develop
+from that build's own pre-release, whose files `releases/latest` never
+points at). The page cannot reach
 the wrapper (no IPC), so **Install and restart** records the owner's request
 in `update.status`, and `/api/health` repeats it, in the app only and for
 fifteen minutes. The wrapper reads that every fifteen seconds and has
@@ -1833,16 +1881,22 @@ installer passes `PCP_AUTO_UPDATE=1` into the container, so Settings says
 there is nothing to do. PCP itself still pulls and restarts nothing.
 
 **The Linux installer also installs it when the owner asks** (on unless
-`PCP_UPDATE_BUTTON=0`, and only for the `latest` tag). It passes
-`PCP_HOST_UPDATER=1` into the container, so Settings shows **Install and
+`PCP_UPDATE_BUTTON=0`, and only for a channel's tag, `latest` or `develop`,
+never a pinned version). It passes `PCP_HOST_UPDATER=2` into the container, so Settings shows **Install and
 restart**, and sets up `pcp-update-request.timer`, which runs the copy of the
 installer with `watch` every 30 seconds. The button records the request in
 `update.status` as the app's does, and also writes `install-request` in the
 data folder (`updates/host-signal.ts`): the request's id and when it was made,
-one line, nothing of the vault. `watch` reads it with `docker exec` /
-`podman exec` and treats it as untrusted: only a well-formed id and time,
+and the channel it was asked from, one line, nothing of the vault. `watch`
+reads it with `docker exec` / `podman exec` and treats it as untrusted: only
+a well-formed id and time, `stable` or `develop` or nothing for the channel,
 fifteen minutes old at most, one it has not answered, and no more than one
-every five minutes. It notes the id before it runs `update`, so a failed
+every five minutes. A channel other than the one it remembers
+(`PCP_CHANNEL`, `latest` or `develop` for the image tag) moves the install to
+it. An installer from before channels passes `PCP_HOST_UPDATER=1` and would
+ignore a line with a channel, so PCP writes the channel only for
+`PCP_HOST_UPDATER=2`, and on develop asks the owner to run the install line
+with `PCP_CHANNEL=develop` instead. It notes the id before it runs `update`, so a failed
 install is not retried. The new PCP clears the request and the file at boot.
 The host reads the container; PCP never addresses the host and has no Docker
 socket.
@@ -2134,6 +2188,35 @@ refused by name before anything is sent, and the gateway checks the ids
 before it asks the owner. A request
 waiting for the owner stores the handle, never the content, and its page
 shows each one's name, type, size and the tool that kept it.
+
+**File links** (`lib/core/file-links.ts`, `app/api/files/[secret]/`) move a
+kept file between PCP and the assistant's own computer (a sandbox or a
+terminal it runs commands in), so a file's bytes never pass through the
+model: handles keep them out of its answers, and a link keeps them out of
+the commands it writes. Only a token the owner made with **Move files by
+link** (`api_token.share_files`, off by default) gets the two tools:
+`share_result` makes a download link for one of its kept results, and
+`receive_file` an upload link plus the handle the file will be kept under.
+The assistant runs curl with the link; nothing else signs the request.
+
+The link's secret (256 bits, base64url) is the credential for that one file
+and nothing more. `file_link` stores its SHA-256, and the file encrypted
+under a key derived from the secret and the row's id (HKDF, `file_link:<id>`
+as associated data), so serving a download needs no vault key and the row
+alone opens nothing. An upload's key is also wrapped under the vault's data
+key (`file_link_key:<id>`): the file that arrives is held under the link's
+key until the token, which holds the vault's key, first uses its handle
+(`openResult`, `describeResults`), and is then written to `tool_result`
+under the id the handle has named from the start, in a transaction that
+deletes the link. A link works for an hour (never past the result a download
+serves), a download for five fetches and an upload for one file within the
+largest-file limit; an upload that arrived waits a day, as a kept result
+would. It works only while its token is live and still has the switch.
+Each use is a request-log line (`file_link/download`, `file_link/upload`),
+the route is rate-limited per address, and a download is served as an
+attachment with `nosniff` and a `sandbox` CSP, so nothing in it runs under
+PCP's address. Links are not exported, are wiped with the vault, go with
+their token, and the cleanup removes them with the kept results.
 
 ## Tool access and the owner's permission
 

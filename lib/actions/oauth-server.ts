@@ -80,6 +80,7 @@ export async function approveSignInAction(
               webFetch: field(formData, "webFetch") === "on",
               runCode: field(formData, "runCode") === "on",
               manageWrappers: field(formData, "manageWrappers") === "on",
+              shareFiles: field(formData, "shareFiles") === "on",
             },
           },
       publicUrl,

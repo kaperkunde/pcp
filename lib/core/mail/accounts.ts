@@ -585,7 +585,7 @@ async function runTool(
         result: handleOf(kept),
         ...(text === null
           ? {
-              note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants it (send_email's or create_draft's attachments, or a field that takes base64).`,
+              note: `PCP keeps this file for you: pass {"$result": "${kept.id}"} where a tool wants it (send_email's or create_draft's attachments, the browser's upload_file, or a field that takes base64), or get it onto your own computer with share_result's link where this token has it.`,
             }
           : {
               text: text.slice(0, MAX_ATTACHMENT_TEXT_CHARS),

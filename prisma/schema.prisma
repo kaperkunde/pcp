@@ -37,6 +37,7 @@ model Vault {
   sharedToolAccess   VaultToolAccess[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
+  fileLinks          FileLink[]
   browserProfile     BrowserProfile?
   oauthCredentials   OAuthCredential[]
 
@@ -125,6 +126,10 @@ model ApiToken {
   /// owner's other tools. Every change it proposes is the owner's to make.
   /// Off unless the owner turns it on.
   manageWrappers  Boolean   @default(false) @map("manage_wrappers")
+  /// Whether the assistant may move files between PCP and its own computer
+  /// by link (share_result, receive_file; lib/core/file-links.ts), so a
+  /// file's bytes never pass through it. Off unless the owner turns it on.
+  shareFiles      Boolean   @default(false) @map("share_files")
   expiresAt       DateTime? @map("expires_at")
   revokedAt       DateTime? @map("revoked_at")
   createdAt       DateTime  @default(now()) @map("created_at")
@@ -143,6 +148,7 @@ model ApiToken {
   memories           Memory[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
+  fileLinks          FileLink[]
   oauthCredentials   OAuthCredential[]
   toolAllowances     ApiTokenToolAllowance[]
   siteAllowances     ApiTokenSiteAllowance[]
@@ -680,6 +686,48 @@ model ToolResult {
   @@index([tokenId, createdAt])
   @@index([expiresAt])
   @@map("tool_result")
+}
+
+/// A link that moves one file between PCP and an assistant's own computer
+/// (lib/core/file-links.ts): a download of a kept result, or an upload that
+/// becomes one. The link's secret is the credential, for this file alone:
+/// only its hash is stored, and the file is encrypted under a key derived
+/// from it, so neither the row nor the link opens anything else.
+model FileLink {
+  id         String    @id
+  vaultId    String    @map("vault_id")
+  vault      Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId    String    @map("token_id")
+  token      ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  /// download | upload
+  kind       String
+  /// SHA-256 of the link's secret, which a request is looked up by.
+  secretHash String    @unique @map("secret_hash")
+  /// The kept result a download serves, or the id an upload is kept under.
+  resultId   String    @map("result_id")
+  name       String?
+  mediaType  String    @map("media_type")
+  /// The file's bytes; 0 for an upload that has not arrived.
+  length     Int       @default(0)
+  /// An upload's link key, wrapped under the vault's data key with
+  /// "file_link_key:<id>": what turns the file into a kept result once the
+  /// token, holding the vault's key, uses its handle.
+  wrappedKey Bytes?    @map("wrapped_key")
+  /// The file, AES-256-GCM under the link's key with "file_link:<id>"; null
+  /// for an upload that has not arrived.
+  ciphertext Bytes?
+  /// Downloads served, or 1 once an upload arrived.
+  uses       Int       @default(0)
+  maxUses    Int       @map("max_uses")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  /// The link works until then; an upload that arrived waits until then to
+  /// become a kept result.
+  expiresAt  DateTime  @map("expires_at")
+  receivedAt DateTime? @map("received_at")
+
+  @@index([tokenId, resultId])
+  @@index([expiresAt])
+  @@map("file_link")
 }
 
 /// The browser's sign-ins (lib/core/browser/): the cookies, local storage

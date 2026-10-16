@@ -4,9 +4,14 @@ import { invalid } from "../errors"
 import { getHostJson, setHostJson } from "../host-settings"
 import { PCP_VERSION } from "../version"
 import { removeInstallSignal, writeInstallSignal } from "./host-signal"
-import { releasePageUrl } from "./limits"
+import {
+  isUpdateChannel,
+  releaseDownloadsUrl,
+  releasePageUrl,
+  type UpdateChannel,
+} from "./limits"
 import type { Release } from "./release"
-import { isNewer } from "./semver"
+import { isDevBuild, isNewer } from "./semver"
 
 /**
  * What PCP remembers about updates, as host settings: they belong to the
@@ -30,6 +35,8 @@ export const UPDATE_STATUS_KEY = "update.status"
 export type UpdateConfig = {
   /** Look for a newer release by itself, once a day. */
   check: boolean
+  /** Releases only, or develop's builds as well (./limits.ts). */
+  channel: UpdateChannel
 }
 
 export type UpdateStatus = {
@@ -46,15 +53,38 @@ export type UpdateStatus = {
   installRequest?: { id: string; at: string; version: string }
 }
 
-/** On unless the owner turned it off. */
-export async function getUpdateConfig(): Promise<UpdateConfig> {
-  const stored = await getHostJson<{ check?: unknown }>(UPDATE_CONFIG_KEY)
-
-  return { check: typeof stored?.check === "boolean" ? stored.check : true }
+/**
+ * The channel when the owner has not picked one: the one this PCP came from,
+ * so a build of develop keeps hearing of develop's builds.
+ */
+export function defaultChannel(version = PCP_VERSION): UpdateChannel {
+  return isDevBuild(version) ? "develop" : "stable"
 }
 
-export async function saveUpdateConfig(config: UpdateConfig): Promise<void> {
-  await setHostJson(UPDATE_CONFIG_KEY, { check: config.check })
+/** The check is on unless the owner turned it off. */
+export async function getUpdateConfig(): Promise<UpdateConfig> {
+  const stored = await getHostJson<{ check?: unknown; channel?: unknown }>(
+    UPDATE_CONFIG_KEY,
+  )
+
+  return {
+    check: typeof stored?.check === "boolean" ? stored.check : true,
+    channel: isUpdateChannel(stored?.channel)
+      ? stored.channel
+      : defaultChannel(),
+  }
+}
+
+/** Changes what it is given and keeps the rest. */
+export async function saveUpdateConfig(
+  change: Partial<UpdateConfig>,
+): Promise<void> {
+  const current = await getUpdateConfig()
+
+  await setHostJson(UPDATE_CONFIG_KEY, {
+    check: change.check ?? current.check,
+    channel: change.channel ?? current.channel,
+  })
 }
 
 export async function getUpdateStatus(): Promise<UpdateStatus> {
@@ -76,6 +106,7 @@ export function newerRelease(status: UpdateStatus): Release | null {
 export type UpdatesOverview = {
   current: string
   check: boolean
+  channel: UpdateChannel
   checkedAt: string | null
   error: string | null
   /** After a failure: when the timer asks again. */
@@ -83,6 +114,13 @@ export type UpdatesOverview = {
   latest: (Release & { url: string }) | null
   /** `latest` is later than `current`. */
   available: boolean
+  /** This PCP is a build of develop rather than a release. */
+  devBuild: boolean
+  /**
+   * Where the desktop apps for what the owner would install are: the newer
+   * build of develop's own files, else the latest release's.
+   */
+  downloads: string
   /** An install the owner asked for, while it is fresh. */
   installRequest: { id: string; at: string; version: string } | null
 }
@@ -110,12 +148,16 @@ export async function pendingInstallRequest(
 /**
  * The owner asks for the newer release the last check found. The desktop app
  * reads the request from /api/health; with `signalHost` it is also left in
- * the data folder for the Linux installer's watcher (./host-signal.ts). PCP
- * itself installs nothing.
+ * the data folder for the Linux installer's watcher (./host-signal.ts), with
+ * the channel when `signalChannel` says the installer reads one. PCP itself
+ * installs nothing.
  */
 export async function requestInstall(
   now = new Date(),
-  { signalHost = false }: { signalHost?: boolean } = {},
+  {
+    signalHost = false,
+    signalChannel,
+  }: { signalHost?: boolean; signalChannel?: UpdateChannel } = {},
 ): Promise<InstallRequest> {
   const status = await getUpdateStatus()
   const release = newerRelease(status)
@@ -131,7 +173,7 @@ export async function requestInstall(
   }
   await saveUpdateStatus({ ...status, installRequest: request })
   if (signalHost) {
-    await writeInstallSignal(request)
+    await writeInstallSignal(request, signalChannel)
   }
 
   return request
@@ -159,6 +201,7 @@ export async function updatesOverview(): Promise<UpdatesOverview> {
   return {
     current: PCP_VERSION,
     check: config.check,
+    channel: config.channel,
     checkedAt: status.lastCheckedAt ?? null,
     error: status.lastError ?? null,
     retryAt: status.nextAttemptAt ?? null,
@@ -166,6 +209,12 @@ export async function updatesOverview(): Promise<UpdatesOverview> {
       ? { ...status.latest, url: releasePageUrl(status.latest.version) }
       : null,
     available: newerRelease(status) !== null,
+    devBuild: isDevBuild(PCP_VERSION),
+    downloads: releaseDownloadsUrl(
+      status.latest && isDevBuild(status.latest.version)
+        ? status.latest.version
+        : null,
+    ),
     installRequest: freshRequest(status.installRequest, new Date()),
   }
 }

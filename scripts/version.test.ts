@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { bump, nextRelease } from "./version.mjs"
+import { bump, devBuild, nextRelease } from "./version.mjs"
 
 describe("nextRelease", () => {
   it("releases the package version when nothing has been released", () => {
@@ -31,8 +31,27 @@ describe("nextRelease", () => {
     ).toBe("0.1.1")
   })
 
+  it("ignores develop's builds", () => {
+    expect(nextRelease("0.1.0", ["v0.1.0", "v0.1.1-dev.7"])).toBe("0.1.1")
+  })
+
   it("refuses a package version that is not MAJOR.MINOR.PATCH", () => {
     expect(() => nextRelease("0.1.0.0", [])).toThrow()
+  })
+})
+
+describe("devBuild", () => {
+  it("is the next release with the build's number", () => {
+    expect(devBuild("0.4.2", ["v0.4.1", "v0.4.2"], "57")).toBe("0.4.3-dev.57")
+    expect(devBuild("0.5.0", ["v0.4.2", "v0.4.3-dev.57"], "58")).toBe(
+      "0.5.0-dev.58",
+    )
+  })
+
+  it("refuses a build number that is not one", () => {
+    for (const run of ["", "0", "07", "1.2", "x", "1234567890"]) {
+      expect(() => devBuild("0.4.2", [], run)).toThrow()
+    }
   })
 })
 

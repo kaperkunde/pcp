@@ -1,7 +1,7 @@
 "use client"
 
 import { Download } from "lucide-react"
-import { useActionState, useRef } from "react"
+import { useActionState, useRef, useTransition } from "react"
 
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
@@ -10,29 +10,57 @@ import { SubmitButton } from "@/components/submit-button"
 import { SettingsItem } from "@/components/settings-item"
 import { Badge } from "@/components/ui/badge"
 import { List } from "@/components/ui/list"
+import {
+  SegmentedControl,
+  type SegmentedOption,
+} from "@/components/ui/segmented-control"
 import { SwitchRow } from "@/components/ui/switch"
 import {
   checkForUpdatesAction,
   requestInstallAction,
+  setUpdateChannelAction,
   setUpdateCheckAction,
   type UpdatesResult,
 } from "@/lib/actions/updates"
+import type { UpdateChannel } from "@/lib/core/updates/limits"
 import type { UpdatesOverview } from "@/lib/core/updates/state"
 import { REPOSITORY_URL } from "@/lib/operator-identity"
 import type { InstallKind } from "@/lib/server/install-kind"
 
-const INSTALL_LINE =
-  "curl -fsSL https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh | sh"
-const INSTALL_AUTO_LINE = INSTALL_LINE.replace(
-  /\| sh$/,
-  "| PCP_AUTO_UPDATE=1 sh",
-)
-const INSTALL_MANUAL_LINE = INSTALL_LINE.replace(
-  /\| sh$/,
-  "| PCP_AUTO_UPDATE=0 sh",
-)
-const COMPOSE_LINE = "docker compose pull && docker compose up -d"
-const SOURCE_LINE = "git pull && pnpm install && pnpm db:generate && pnpm build"
+const INSTALL_URL =
+  "https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh"
+
+/**
+ * The install line, for the channel: install.sh remembers PCP_CHANNEL, so
+ * the develop one says it every time and the stable one only when it is
+ * leaving develop.
+ */
+function installLine(
+  channel: UpdateChannel,
+  { auto, leaving = false }: { auto?: boolean; leaving?: boolean } = {},
+): string {
+  const settings = [
+    channel === "develop" || leaving ? `PCP_CHANNEL=${channel}` : null,
+    auto === undefined ? null : `PCP_AUTO_UPDATE=${auto ? 1 : 0}`,
+  ].filter(Boolean)
+
+  return `curl -fsSL ${INSTALL_URL} | ${[...settings, "sh"].join(" ")}`
+}
+
+const SOURCE_BUILD = "pnpm install && pnpm db:generate && pnpm build"
+const SOURCE_LINES: Record<UpdateChannel, string> = {
+  stable: `git switch main && git pull && ${SOURCE_BUILD}`,
+  develop: `git switch develop && git pull && ${SOURCE_BUILD}`,
+}
+const COMPOSE_LINES: Record<UpdateChannel, string> = {
+  stable: "docker compose pull && docker compose up -d",
+  develop:
+    "PCP_TAG=develop docker compose pull && PCP_TAG=develop docker compose up -d",
+}
+const CHANNEL_OPTIONS: ReadonlyArray<SegmentedOption<UpdateChannel>> = [
+  { value: "stable", label: "Stable" },
+  { value: "develop", label: "Develop" },
+]
 const DOWNLOADS = [
   { label: "Mac (Apple silicon)", file: "PCP-mac-arm64.dmg" },
   { label: "Mac (Intel)", file: "PCP-mac-x64.dmg" },
@@ -41,6 +69,11 @@ const DOWNLOADS = [
 
 const DISCLOSURE =
   "PCP asks GitHub once a day which release is the latest. GitHub sees this PCP's address and version, nothing else."
+
+/** What the channel's newest version is called. */
+function latestName(channel: UpdateChannel): string {
+  return channel === "develop" ? "the latest build" : "the latest release"
+}
 
 function ExternalLink({
   href,
@@ -63,7 +96,7 @@ function ExternalLink({
 
 /** The grey line under "Updates": which release this is, or that one is out. */
 function updatesState(overview: UpdatesOverview) {
-  const { current, latest, available, check } = overview
+  const { current, latest, available, check, channel } = overview
 
   if (available && latest) {
     return (
@@ -74,7 +107,11 @@ function updatesState(overview: UpdatesOverview) {
   }
 
   return `v${current}${
-    latest ? ", the latest release" : check ? "" : ", checking is off"
+    latest && latest.version === current
+      ? `, ${latestName(channel)}`
+      : check
+        ? ""
+        : ", checking is off"
   }`
 }
 
@@ -89,6 +126,7 @@ export function UpdatesCard({
   desktopInstall,
   autoUpdated = false,
   hostUpdater = false,
+  hostUpdaterChannels = false,
 }: {
   overview: UpdatesOverview
   host: InstallKind
@@ -98,6 +136,8 @@ export function UpdatesCard({
   autoUpdated?: boolean
   /** The Linux installer installs an update when the owner asks here. */
   hostUpdater?: boolean
+  /** ...from the channel chosen here, develop too. */
+  hostUpdaterChannels?: boolean
 }) {
   return (
     <SettingsItem
@@ -113,12 +153,14 @@ export function UpdatesCard({
       <CheckNowButton />
       <List className="bg-field">
         <UpdateCheckSwitch check={overview.check} />
+        <UpdateChannelRow channel={overview.channel} />
       </List>
       <HowToUpdate
         host={host}
         desktopInstall={desktopInstall}
         autoUpdated={autoUpdated}
         hostUpdater={hostUpdater}
+        hostUpdaterChannels={hostUpdaterChannels}
         overview={overview}
       />
     </SettingsItem>
@@ -141,8 +183,17 @@ export function UpdateCheckCard({ check }: { check: boolean }) {
 }
 
 function UpdateStatusLine({ overview }: { overview: UpdatesOverview }) {
-  const { current, latest, available, check, checkedAt, error, retryAt } =
-    overview
+  const {
+    current,
+    latest,
+    available,
+    check,
+    checkedAt,
+    error,
+    retryAt,
+    channel,
+    devBuild,
+  } = overview
 
   return (
     <div className="flex flex-col gap-2 text-sm" data-testid="updates-status">
@@ -161,13 +212,20 @@ function UpdateStatusLine({ overview }: { overview: UpdatesOverview }) {
             <>
               <strong>v{latest.version}</strong> is out. This PCP is v{current}.
             </>
+          ) : latest && devBuild && channel === "stable" ? (
+            <>
+              This PCP is v{current}, a build of develop. The next release after
+              it, later than v{latest.version}, will show here.
+            </>
           ) : latest && latest.version !== current ? (
             <>
-              This PCP is v{current}, newer than the latest release, v
+              This PCP is v{current}, newer than {latestName(channel)}, v
               {latest.version}.
             </>
           ) : latest ? (
-            <>This PCP is v{current}, the latest release.</>
+            <>
+              This PCP is v{current}, {latestName(channel)}.
+            </>
           ) : (
             <>This PCP is v{current}.</>
           )}
@@ -267,6 +325,56 @@ function UpdateCheckSwitch({ check }: { check: boolean }) {
   )
 }
 
+/**
+ * Stable or develop. Like the switch, it shows what PCP holds and moves when
+ * the page has the new value.
+ */
+function UpdateChannelRow({ channel }: { channel: UpdateChannel }) {
+  const [state, action] = useActionState<UpdatesResult, FormData>(
+    setUpdateChannelAction,
+    { status: "idle" },
+  )
+  const [pending, startTransition] = useTransition()
+
+  function choose(next: UpdateChannel) {
+    const data = new FormData()
+    data.set("channel", next)
+    startTransition(() => action(data))
+  }
+
+  return (
+    <div className="flex flex-col">
+      <div
+        data-slot="list-row"
+        className="flex min-h-14 flex-wrap items-center gap-x-3.5 gap-y-2 px-4 py-2.5 text-sm"
+      >
+        <span className="flex min-w-0 flex-1 basis-56 flex-col gap-0.5">
+          <span className="text-[15px] leading-snug text-foreground">
+            Channel
+          </span>
+          <span className="text-xs leading-relaxed text-muted-foreground">
+            Stable has the releases. Develop has every change as soon as it is
+            built, ahead of the releases, and may break now and then.
+          </span>
+        </span>
+        <SegmentedControl<UpdateChannel>
+          name="update-channel"
+          legend="Channel"
+          options={CHANNEL_OPTIONS}
+          value={channel}
+          onValueChange={choose}
+          disabled={pending}
+        />
+      </div>
+      {state.status === "error" ? (
+        <FormError error={state.error} className="px-4 pb-3" />
+      ) : state.status === "ok" && !pending ? (
+        <FormNote message={state.message ?? null} className="px-4 pb-3" />
+      ) : null}
+    </div>
+  )
+}
+
 function InstallButton({ version }: { version: string }) {
   const [state, action] = useActionState<UpdatesResult>(requestInstallAction, {
     status: "idle",
@@ -287,14 +395,11 @@ function InstallButton({ version }: { version: string }) {
   )
 }
 
-function DownloadLinks() {
+function DownloadLinks({ base }: { base: string }) {
   return (
     <p className="flex flex-wrap gap-x-4 gap-y-1">
       {DOWNLOADS.map(({ label, file }) => (
-        <ExternalLink
-          key={file}
-          href={`${REPOSITORY_URL}/releases/latest/download/${file}`}
-        >
+        <ExternalLink key={file} href={`${base}/${file}`}>
           {label}
         </ExternalLink>
       ))}
@@ -339,7 +444,7 @@ function DesktopUpdate({
         <p className="text-xs text-muted-foreground">
           If installing does not work, download the new version and open it:
         </p>
-        <DownloadLinks />
+        <DownloadLinks base={overview.downloads} />
       </>
     )
   }
@@ -350,7 +455,7 @@ function DesktopUpdate({
         This is the PCP app. Download the new version for this computer and open
         it. Your vault stays where it is.
       </p>
-      <DownloadLinks />
+      <DownloadLinks base={overview.downloads} />
     </>
   )
 }
@@ -358,12 +463,16 @@ function DesktopUpdate({
 /** A container the Linux installer runs and watches for the owner's request. */
 function InstallerUpdate({
   autoUpdated,
+  channels,
   overview,
 }: {
   autoUpdated: boolean
+  /** The installer installs from either channel. */
+  channels: boolean
   overview: UpdatesOverview
 }) {
-  const { available, latest, installRequest } = overview
+  const { available, latest, installRequest, channel, devBuild } = overview
+  const leaving = channel === "stable" && devBuild
 
   return (
     <>
@@ -374,6 +483,15 @@ function InstallerUpdate({
           takes a minute or two; reload this page then. Your vault stays in its
           volume.
         </p>
+      ) : available && latest && channel === "develop" && !channels ? (
+        <>
+          <p className="text-muted-foreground">
+            The installer on this computer installs releases only. To install v
+            {latest.version} and follow develop from now on, run the install
+            line with the develop channel:
+          </p>
+          <CopyableValue value={installLine("develop")} />
+        </>
       ) : available && latest ? (
         <>
           <p className="text-muted-foreground">
@@ -394,11 +512,13 @@ function InstallerUpdate({
           The installer also updates it by itself once a day. To turn that off:
         </p>
       ) : null}
-      {autoUpdated ? <CopyableValue value={INSTALL_MANUAL_LINE} /> : null}
+      {autoUpdated ? (
+        <CopyableValue value={installLine(channel, { auto: false, leaving })} />
+      ) : null}
       <p className="text-xs text-muted-foreground">
         If installing does not work, run the install line again:
       </p>
-      <CopyableValue value={INSTALL_LINE} />
+      <CopyableValue value={installLine(channel, { leaving })} />
     </>
   )
 }
@@ -408,32 +528,46 @@ function HowToUpdate({
   desktopInstall,
   autoUpdated,
   hostUpdater,
+  hostUpdaterChannels,
   overview,
 }: {
   host: InstallKind
   desktopInstall: "auto" | "manual" | null
   autoUpdated: boolean
   hostUpdater: boolean
+  hostUpdaterChannels: boolean
   overview: UpdatesOverview
 }) {
+  const { channel, devBuild } = overview
+  // install.sh remembers the channel, so going back to stable says so.
+  const leaving = channel === "stable" && devBuild
+
   return (
     <div className="flex flex-col gap-3 border-t border-separator pt-4 text-sm">
       <h3 className="font-medium">How to update this PCP</h3>
       {host === "container" && hostUpdater ? (
-        <InstallerUpdate autoUpdated={autoUpdated} overview={overview} />
+        <InstallerUpdate
+          autoUpdated={autoUpdated}
+          channels={hostUpdaterChannels}
+          overview={overview}
+        />
       ) : host === "container" && autoUpdated ? (
         <>
           <p>
             This PCP updates itself: the installer set up a daily update that
-            fetches a new release and starts PCP again from it. There is nothing
-            to do.
+            fetches a new {channel === "develop" ? "build" : "release"} and
+            starts PCP again from it. There is nothing to do.
           </p>
           <p className="text-muted-foreground">
-            To update at once, run the install line again:
+            To update at once
+            {channel === "develop" ? ", or to follow develop" : ""}, run the
+            install line again:
           </p>
-          <CopyableValue value={INSTALL_LINE} />
+          <CopyableValue value={installLine(channel, { leaving })} />
           <p className="text-muted-foreground">To turn the daily update off:</p>
-          <CopyableValue value={INSTALL_MANUAL_LINE} />
+          <CopyableValue
+            value={installLine(channel, { auto: false, leaving })}
+          />
         </>
       ) : host === "container" ? (
         <>
@@ -441,19 +575,30 @@ function HowToUpdate({
             This PCP runs in a container. Updating means pulling the new image
             and starting the container again from it. Your vault is in the
             container&apos;s volume and stays.
+            {channel === "develop" ? (
+              <>
+                {" "}
+                Develop&apos;s builds are the image tag <code>develop</code> (
+                <code>ghcr.io/kaperkunde/pcp:develop</code>); the releases are{" "}
+                <code>latest</code>.
+              </>
+            ) : null}
           </p>
           <p>If you installed it with the install line, run it again:</p>
-          <CopyableValue value={INSTALL_LINE} />
+          <CopyableValue value={installLine(channel, { leaving })} />
           <p>Or have the installer do it once a day from now on:</p>
-          <CopyableValue value={INSTALL_AUTO_LINE} />
+          <CopyableValue
+            value={installLine(channel, { auto: true, leaving })}
+          />
           <p>
             From a checkout with docker compose (add the same <code>-f</code>{" "}
             files you started it with):
           </p>
-          <CopyableValue value={COMPOSE_LINE} />
+          <CopyableValue value={COMPOSE_LINES[channel]} />
           <p className="text-muted-foreground">
             If a deploy tool runs it (Coolify, Portainer, a NAS app), redeploy
-            it there. PCP itself never pulls an image or restarts its container.
+            it there{channel === "develop" ? " with the image tag develop" : ""}
+            . PCP itself never pulls an image or restarts its container.
           </p>
         </>
       ) : host === "desktop" ? (
@@ -463,7 +608,7 @@ function HowToUpdate({
           <p className="text-muted-foreground">
             This PCP runs from a checkout. In its folder:
           </p>
-          <CopyableValue value={SOURCE_LINE} />
+          <CopyableValue value={SOURCE_LINES[channel]} />
           <p className="text-muted-foreground">
             Then start it again (<code>pnpm start</code>, or the service you run
             it from). Your vault stays in its data folder.

@@ -32,6 +32,7 @@ import { desktopUpdater, isDesktopApp } from "@/lib/server/desktop"
 import {
   autoUpdated,
   hostUpdater,
+  hostUpdaterFollowsChannel,
   installKind,
 } from "@/lib/server/install-kind"
 import { publicUrlFor, requestOrigin } from "@/lib/server/public-url"
@@ -100,6 +101,7 @@ export default async function SettingsPage({
             desktopInstall={isDesktopApp() ? desktopUpdater() : null}
             autoUpdated={autoUpdated()}
             hostUpdater={hostUpdater()}
+            hostUpdaterChannels={hostUpdaterFollowsChannel()}
           />
         </List>
       </ListSection>

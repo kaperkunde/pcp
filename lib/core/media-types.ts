@@ -89,3 +89,54 @@ export function sniffMediaType(bytes: Uint8Array): string | null {
 
   return found?.type ?? null
 }
+
+/**
+ * What a file is when nothing names its media type (a browser download, an
+ * upload by link): its name's extension says, then its first bytes, then
+ * whether it reads as text. A text type gets the charset its bytes are in,
+ * when they are UTF-8.
+ */
+const BY_EXTENSION: Record<string, string> = {
+  pdf: "application/pdf",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  zip: "application/zip",
+  gz: "application/gzip",
+  json: "application/json",
+  xml: "application/xml",
+  csv: "text/csv",
+  tsv: "text/tab-separated-values",
+  txt: "text/plain",
+  md: "text/markdown",
+  html: "text/html",
+  htm: "text/html",
+  ics: "text/calendar",
+  vcf: "text/vcard",
+  eml: "message/rfc822",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  mp3: "audio/mpeg",
+  mp4: "video/mp4",
+}
+
+export function fileMediaType(name: string, bytes: Uint8Array): string {
+  const extension = /\.([a-z0-9]{1,8})$/i.exec(name)?.[1]?.toLowerCase()
+  const type =
+    (extension ? BY_EXTENSION[extension] : undefined) ??
+    sniffMediaType(bytes) ??
+    (isTextBytes(bytes) ? "text/plain" : "application/octet-stream")
+
+  return isTextType(type) && isTextBytes(bytes)
+    ? `${type}; charset=utf-8`
+    : type
+}
