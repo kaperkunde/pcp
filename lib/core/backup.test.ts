@@ -474,6 +474,44 @@ describe("restoring", { timeout: 60_000 }, () => {
     ).toMatchObject({ syncVersion: null })
   })
 
+  it("carries a token's memory migration, and restores a file from before it as on", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    await db().apiToken.update({
+      where: { id: tokenId },
+      data: { memoryMigration: false },
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    await db().apiToken.update({
+      where: { id: tokenId },
+      data: { memoryMigration: true },
+    })
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect((await resolveApiToken(token))!.memoryMigration).toBe(false)
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    for (const row of older.tables.apiTokens as Record<string, unknown>[]) {
+      delete row.memoryMigration
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    // As for the tokens of a vault that updated: the offer is made once.
+    expect((await resolveApiToken(token))!.memoryMigration).toBe(true)
+  })
+
   it("carries a token's instructions as they are, and restores a file from before them as not set yet", async () => {
     const { ctx, token } = await populate()
     const { tokenId } = (await resolveApiToken(token))!

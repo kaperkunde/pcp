@@ -1,10 +1,20 @@
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { createApiToken, deleteApiToken, resolveApiToken } from "./api-tokens"
+import {
+  createApiToken,
+  deleteApiToken,
+  resolveApiToken,
+  resolveTokenForOwner,
+  updateApiToken,
+} from "./api-tokens"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import {
+  buildGatewayServer,
   buildInstructions,
+  instructionsPreview,
+  loadGatewayServers,
   MEMORY_TOOL_DESCRIPTION,
   READ_MEMORY_TOOL_DESCRIPTION,
 } from "./gateway"
@@ -18,6 +28,8 @@ import {
   hiddenCharacter,
   instructionMemories,
   listMemories,
+  MEMORY_HOME,
+  MEMORY_MIGRATION_STEPS,
   normalizePath,
   runMemoryCommand,
   setMemoriesAccess,
@@ -28,6 +40,7 @@ import {
   type MemoryOutcome,
   type MemoryScope,
 } from "./memories"
+import { SKILL_FILE, SKILL_ROOT } from "./skills"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 
@@ -1218,5 +1231,165 @@ describe("a memory read in every conversation", () => {
     expect((await instructionMemories(ctx, bob.tokenId)).always).toEqual([
       { path: "/memories/shared/voice.md", text: "Speak like a sailor." },
     ])
+  })
+})
+
+describe("memory migration", () => {
+  const STEPS = MEMORY_MIGRATION_STEPS.join("\n")
+  const migrating = async (scope: MemoryScope) =>
+    (await db().apiToken.findUniqueOrThrow({ where: { id: scope.tokenId } }))
+      .memoryMigration
+
+  it("is on for a new token, and tells one that keeps memories to keep them in PCP", async () => {
+    expect(
+      (await resolveApiToken(
+        (await createApiToken(ctx, { name: "Plain", allowAllServers: true }))
+          .token,
+      ))!.memoryMigration,
+    ).toBe(true)
+    expect(alice.memoryMigration).toBe(true)
+
+    // Without memories: neither, whatever the flag.
+    const none = buildInstructions([], { memoryMigration: true })
+    expect(none).not.toContain(MEMORY_HOME)
+    expect(none).not.toContain("MEMORY MIGRATION")
+
+    // With memories, where they live always; the steps only while it is on.
+    const memories = { shared: [], always: [] }
+    const off = buildInstructions([], { memories })
+    expect(off).toContain(MEMORY_HOME)
+    expect(off).not.toContain("MEMORY MIGRATION")
+    const on = buildInstructions([], { memories, memoryMigration: true })
+    expect(on).toContain(MEMORY_HOME)
+    expect(on).toContain(STEPS)
+    // Both confirmations, the read-back and the case it cannot delete.
+    expect(STEPS).toContain("ask whether to move it into PCP")
+    expect(STEPS).toContain("Ask the owner again before deleting the originals")
+    expect(STEPS).toContain("Read each one back")
+    expect(STEPS).toContain("tell the owner exactly what to remove")
+    // A skill goes where the memory tool takes one.
+    expect(STEPS).toContain(`${SKILL_ROOT}/<name>/${SKILL_FILE}`)
+
+    expect(MEMORY_TOOL_DESCRIPTION).toContain(
+      "The owner keeps their memories and skills here, in PCP: store new ones with this tool, not in the client's own memory.",
+    )
+    expect(MEMORY_TOOL_DESCRIPTION).toContain("migration_done")
+  })
+
+  it("gives its steps with every while it is on", async () => {
+    expect(said(await run(alice, { command: "every" }))).toContain(STEPS)
+    expect(
+      said(
+        await run({ ...alice, memoryMigration: false }, { command: "every" }),
+      ),
+    ).not.toContain("MEMORY MIGRATION")
+  })
+
+  it("is turned off by migration_done for the calling token alone, and by nothing an assistant sends turned on", async () => {
+    expect(said(await run(alice, { command: "migration_done" }))).toBe(
+      "Memory migration is off for this token. Only the owner can turn it on again, in PCP.",
+    )
+    expect(await migrating(alice)).toBe(false)
+    expect(await migrating(bob)).toBe(true)
+    expect(said(await run(alice, { command: "migration_done" }))).toContain(
+      "already off",
+    )
+
+    // It takes nothing else, so nothing rides along with it.
+    for (const extra of [
+      { path: "/memories/on.md" },
+      { file_text: "on" },
+      { every: true },
+    ]) {
+      await expect(
+        run(bob, { command: "migration_done", ...extra }),
+      ).rejects.toThrow()
+    }
+    expect(await migrating(bob)).toBe(true)
+
+    // Every other command leaves it as it is.
+    const off = (await resolveApiToken(
+      (
+        await createApiToken(ctx, {
+          name: "Done",
+          allowAllServers: true,
+          keepMemories: true,
+        })
+      ).token,
+    ))!
+    await run(off, { command: "migration_done" })
+    for (const args of [
+      { command: "create", path: "/memories/a.md", file_text: "A." },
+      {
+        command: "str_replace",
+        path: "/memories/a.md",
+        old_str: "A",
+        new_str: "B",
+      },
+      {
+        command: "insert",
+        path: "/memories/a.md",
+        insert_line: 0,
+        insert_text: "C",
+      },
+      { command: "rename", path: "/memories/a.md", new_path: "/memories/b.md" },
+      { command: "view", path: "/memories" },
+      { command: "search", query: "migration" },
+      { command: "every" },
+      { command: "delete", path: "/memories/b.md" },
+    ] satisfies MemoryCommand[]) {
+      await run(off, args)
+    }
+    expect(await migrating(off)).toBe(false)
+
+    // The owner turns it on again.
+    await updateApiToken(ctx, off.tokenId, {
+      name: "Done",
+      allowAllServers: true,
+      memoryMigration: true,
+    })
+    expect(await migrating(off)).toBe(true)
+  })
+
+  it("is turned off through the gateway's memory tool, and the preview follows", async () => {
+    const scope = {
+      ...(await resolveTokenForOwner(ctx, alice.tokenId)),
+      publicUrl: "http://localhost:3000",
+    }
+    expect(await instructionsPreview(ctx, alice.tokenId)).toContain(STEPS)
+
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(scope, await loadGatewayServers(scope), {
+      memories: await instructionMemories(ctx, alice.tokenId),
+    }).connect(serverSide)
+    const client = new Client({ name: "test", version: "1.0.0" })
+    await client.connect(clientSide)
+    expect(client.getInstructions()).toContain(STEPS)
+    const memory = (await client.listTools()).tools.find(
+      (tool) => tool.name === "memory",
+    )!
+    // The one way it changes is migration_done; no argument names the flag.
+    expect(Object.keys(memory.inputSchema.properties ?? {})).not.toContain(
+      "memory_migration",
+    )
+    const refused = await client.callTool({
+      name: "memory",
+      arguments: { command: "migration_done", path: "/skills/x/SKILL.md" },
+    })
+    expect(refused.isError).toBe(true)
+    expect(await migrating(alice)).toBe(true)
+
+    const done = await client.callTool({
+      name: "memory",
+      arguments: { command: "migration_done" },
+    })
+    await client.close()
+    expect(done.isError).toBeFalsy()
+    expect(await migrating(alice)).toBe(false)
+    expect(await migrating(bob)).toBe(true)
+
+    const preview = await instructionsPreview(ctx, alice.tokenId)
+    expect(preview).toContain(MEMORY_HOME)
+    expect(preview).not.toContain("MEMORY MIGRATION")
   })
 })

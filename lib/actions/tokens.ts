@@ -43,6 +43,24 @@ function revalidateToken(id: string) {
   revalidatePath(`/tokens/${id}`)
 }
 
+/**
+ * A switch drawn with what it was when the page was (a hidden
+ * `<name>Was`, "on" or "off"): its new value when the owner flipped it,
+ * otherwise undefined, so a page drawn before an assistant changed it does
+ * not change it back. Undefined too where the form does not show it.
+ */
+function flipped(formData: FormData, name: string): boolean | undefined {
+  const was = field(formData, `${name}Was`)
+
+  if (was !== "on" && was !== "off") {
+    return undefined
+  }
+
+  const now = field(formData, name) === "on"
+
+  return now === (was === "on") ? undefined : now
+}
+
 /** A level for all tokens shows on every token's page. */
 function revalidateEveryToken() {
   revalidatePath("/tokens")
@@ -144,6 +162,9 @@ export async function updateTokenAction(
       serverIds: fields(formData, "serverIds"),
       manageEndpoints: field(formData, "manageEndpoints") === "on",
       keepMemories: field(formData, "keepMemories") === "on",
+      // The assistant turns it off (memory migration_done); only the
+      // owner's switch on the token's page turns it on.
+      memoryMigration: flipped(formData, "memoryMigration"),
       webFetch: field(formData, "webFetch") === "on",
       runCode: field(formData, "runCode") === "on",
       manageWrappers: field(formData, "manageWrappers") === "on",

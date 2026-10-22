@@ -139,6 +139,9 @@ const ApiTokenRow = z.strictObject({
   allSkills: z.boolean().default(true),
   manageEndpoints: z.boolean(),
   keepMemories: z.boolean(),
+  // Memory migration, added in 0.5: an older file's tokens make the offer
+  // once, as the tokens of a vault that updated do.
+  memoryMigration: z.boolean().default(true),
   webFetch: z.boolean(),
   runCode: z.boolean().default(false),
   manageWrappers: z.boolean().default(false),

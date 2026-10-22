@@ -39,7 +39,7 @@ export const TOKEN_OPTIONS: Record<
       "Its own notes between conversations. Sharing one with every assistant still asks you.",
     ask: "Let an assistant with this token keep memories",
     detail:
-      "It can keep notes for itself between conversations, and read the memories you share with all your assistants. To share one of its own, or change a shared one, it has to ask you, and you see the whole text first. You can read, edit and delete every memory under Memories.",
+      "It can keep notes for itself between conversations, and read the memories you share with all your assistants. To share one of its own, or change a shared one, it has to ask you, and you see the whole text first. You can read, edit and delete every memory under Memories. At first it also offers to move the memories its app keeps elsewhere into PCP, asking you before it moves them and again before it deletes the originals.",
   },
   webFetch: {
     label: "Read web pages",

@@ -583,6 +583,21 @@ changed if a path would be taken where they go. A memory that changes hands
 loses its mark to be read in every conversation, since you chose that for its
 old readers. Memories are encrypted like everything else.
 
+PCP's instructions also tell an assistant that keeps memories that you keep
+your memories and skills in PCP, so it saves new ones there rather than in
+its app's own memory. To bring over what an app already keeps, each such
+token has **Memory migration**, which starts on. While it is on, the assistant looks for what its app keeps
+about you (its memory or saved preferences, your own instruction files such
+as a personal `CLAUDE.md`, skills of your own; never a project's), tells you
+what it found and asks before moving anything. It moves each into PCP
+keeping its structure (a skill as a skill change you agree to), reads each
+back, and asks you again before deleting the originals: it deletes them
+itself where its app lets it, and otherwise tells you exactly what to remove.
+Then it turns **Memory migration** off with the `memory` tool's
+`migration_done`, as it does at once when it sees nothing to move or you say
+no. An assistant can only turn it off; the switch under **Keep memories** on
+the assistant's page turns it on again, to have it look once more.
+
 **Skills** are procedures you approve: how you want a kind of task done,
 step by step, written as a `SKILL.md` the way Claude's Agent Skills are (a
 name, a line on when to use it, the `server/tool` names it uses, and
