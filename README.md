@@ -369,7 +369,10 @@ To remove PCP itself:
    app password, a bearer token, or OAuth: choose **Connect** on its page, as
    for an OAuth server (PCP asks for `offline_access` itself when the server
    offers it, so it stays signed in). Or add one over **IMAP**, with an SMTP
-   server to send through if it should send. Passwords and tokens are secrets
+   server to send through if it should send; PCP files a copy of what it
+   sends in Sent only when the mail server did not file one itself, as Gmail
+   and Outlook do (**Save a copy in Sent** in its settings: Automatic, Always
+   or Never). Passwords and tokens are secrets
    you pick, and mail only travels encrypted (TLS, or STARTTLS on `imap://` and
    `smtp://`; a JMAP session URL is `https://`, or `http://` for a server on
    your own network only). Every account offers the same tools: list mailboxes, search one

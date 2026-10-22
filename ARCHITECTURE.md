@@ -561,8 +561,24 @@ SMTP. A connection that is not encrypted after it is made is dropped, and
 STARTTLS is required, never optional. Each call connects, signs in, works
 and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
-email. Sending goes over SMTP and a copy (Bcc kept) is appended to Sent,
-attachments in both, written by nodemailer. A draft is the same message,
+email. Sending goes over SMTP, attachments included, written by nodemailer.
+The copy in Sent (Bcc kept) is the account's setting, `mailSaveSent`:
+`never`, `always` (appended at once), or `auto`, the default: many SMTP
+servers (Gmail's, Outlook's) file their own copy, so PCP first looks for it
+among the newest 15 emails in Sent, by the Message-ID (or Outlook's
+`X-Microsoft-Original-Message-ID`) in their headers rather than a SEARCH,
+which lags on Gmail, at 0, 1, 2, 3, 5, 7.5 and 10 seconds, and appends only
+when it is not there. What it finds is kept as `mailServerFilesSent`, which
+stretches the next look to 15 seconds for a server that files its own and
+shortens it to 3 for one that does not; it is forgotten when the address or
+user name changes. A copy the server files after the look makes two, and
+nothing deletes either. The look runs once the call has answered (`savedTo`
+is `"pending"`), inside the same request: the call hands it to
+`lib/core/after-answer.ts`, whose scope the gateway's route and the owner's
+answer to a request open and drain through Next's `after()`, on a connection
+of its own with the login the call already holds; nothing is stored or timed
+past the request. Where no scope is open, the look runs in the call, for 10
+seconds at most. A draft is the same message,
 appended to Drafts with `\Draft` and `\Seen` and sent nowhere; its id comes
 from APPENDUID, and is null without UIDPLUS.
 

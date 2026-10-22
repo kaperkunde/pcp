@@ -295,6 +295,11 @@ const McpServerRow = z.strictObject({
   mailSubmission: z.boolean().default(false),
   smtpUrl: str.nullable().default(null),
   mailFrom: str.nullable().default(null),
+  // Whether an IMAP account's sent email gets a copy in Sent from PCP, and
+  // what PCP learned of its server, added after 0.4.3: absent from older
+  // exports, whose accounts take the defaults.
+  mailSaveSent: str.default("auto"),
+  mailServerFilesSent: z.boolean().nullable().default(null),
   // SSH servers, added in 0.3: absent from older exports, which hold none.
   sshPublicKey: str.nullable().default(null),
   sshHostKey: str.nullable().default(null),

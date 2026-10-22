@@ -357,7 +357,7 @@ const SPECS: readonly MailToolSpec[] = [
     name: "send_email",
     title: "Send an email",
     description:
-      'Sends a plain-text email from this account, and keeps a copy in Sent. To reply, pass the email you answer as inReplyTo, by its id or its Message-ID: the reply then joins its conversation, and that email is marked answered (answered in the result says whether it could be). To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]: an attachment get_attachment read (from this account or another), or any file a tool answered with. Sending cannot be undone.',
+      'Sends a plain-text email from this account. A copy goes into Sent, as the account is set: savedTo names the mailbox, is "pending" while PCP checks, once it has answered, whether the mail server filed a copy itself (it files one only when not), or is null when no copy is kept. To reply, pass the email you answer as inReplyTo, by its id or its Message-ID: the reply then joins its conversation, and that email is marked answered (answered in the result says whether it could be). To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]: an attachment get_attachment read (from this account or another), or any file a tool answered with. Sending cannot be undone.',
     args: (kind) => composition(kind, { draft: false }),
     annotations: {
       readOnlyHint: false,
