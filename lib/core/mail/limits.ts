@@ -39,6 +39,11 @@ export const MAX_SEARCH_MAILBOXES = 50
  * each mailbox hands over that many of its newest to be merged.
  */
 export const MAX_SEARCH_ALL_WINDOW = 500
+/**
+ * IMAP: mailboxes a reply looks in for the email its Message-ID names, one
+ * at a time: the inbox, then the special ones (Sent, Archive, All…).
+ */
+export const MAX_REPLY_LOOKUP_MAILBOXES = 6
 export const MAX_VACATION_SUBJECT_CHARS = 500
 
 /*

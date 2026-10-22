@@ -11,6 +11,7 @@ import {
   onSameOrigin,
   onSameOriginAbsolute,
   PLAIN_HTTP_REFUSED,
+  replyTarget,
 } from "./addresses"
 import {
   checkDeletable,
@@ -734,29 +735,63 @@ export function openJmapBackend(
     from: MailAddress | null
     messageId: string
     identityId: string
+    /** The id of the email it replies to, found by its Message-ID if so. */
+    original: string | null
   }> {
     // Identities are part of submission: an account that cannot send has
     // none to ask for.
     const withIdentities = send || config.submission
+    const target = input.inReplyTo ? replyTarget(input.inReplyTo) : null
+
+    if (input.inReplyTo && !target) {
+      throw new MailRequestError(
+        "inReplyTo is neither an email id nor a Message-ID.",
+      )
+    }
+
+    // A Message-ID is looked up among the account's emails (RFC 8621
+    // 4.4.1's header filter), its first match read as an id would be.
+    const replied: MethodCall[] = !target
+      ? []
+      : "id" in target
+        ? [
+            [
+              "Email/get",
+              {
+                accountId,
+                ids: [target.id],
+                properties: ["id", "messageId", "references"],
+              },
+              "r",
+            ],
+          ]
+        : [
+            [
+              "Email/query",
+              {
+                accountId,
+                filter: { header: ["Message-ID", `<${target.messageId}>`] },
+                limit: 1,
+              },
+              "rq",
+            ],
+            [
+              "Email/get",
+              {
+                accountId,
+                "#ids": { resultOf: "rq", name: "Email/query", path: "/ids" },
+                properties: ["id", "messageId", "references"],
+              },
+              "r",
+            ],
+          ]
     const first = await request(
       [
         ["Mailbox/get", { accountId, properties: ["id", "name", "role"] }, "m"],
         ...(withIdentities
           ? ([["Identity/get", { accountId }, "i"]] as MethodCall[])
           : []),
-        ...(input.inReplyTo
-          ? ([
-              [
-                "Email/get",
-                {
-                  accountId,
-                  ids: [input.inReplyTo],
-                  properties: ["messageId", "references"],
-                },
-                "r",
-              ],
-            ] as MethodCall[])
-          : []),
+        ...replied,
       ],
       withIdentities ? [CORE, MAIL, SUBMISSION] : [CORE, MAIL],
     )
@@ -790,14 +825,25 @@ export function openJmapBackend(
     const home = place(boxes)
     let inReplyTo: string[] = []
     let references: string[] = []
+    let originalId: string | null = null
 
-    if (input.inReplyTo) {
+    if (target) {
       const [original] = list(answerOf(first, "r").list)
 
       if (!original) {
-        throw new MailRequestError("No email with the id given as inReplyTo.")
+        throw new MailRequestError(
+          "id" in target
+            ? "No email with the id given as inReplyTo."
+            : "No email with that Message-ID in this account.",
+        )
       }
 
+      originalId =
+        typeof original.id === "string"
+          ? original.id
+          : "id" in target
+            ? target.id
+            : null
       inReplyTo = strings(original.messageId).slice(0, 1)
       references = [...strings(original.references), ...inReplyTo].slice(-20)
     }
@@ -847,6 +893,7 @@ export function openJmapBackend(
       from,
       messageId,
       identityId: identity ? String(identity.id) : "",
+      original: originalId,
     }
   }
 
@@ -1052,9 +1099,8 @@ export function openJmapBackend(
         throw new MailRequestError("This account cannot send mail.")
       }
 
-      const { email, boxes, home, from, messageId, identityId } = await compose(
-        input,
-        {
+      const { email, boxes, home, from, messageId, identityId, original } =
+        await compose(input, {
           send: true,
           place: (boxes) => {
             const home = draftsMailbox(boxes) ?? mailboxByRole(boxes, "sent")
@@ -1067,8 +1113,7 @@ export function openJmapBackend(
 
             return home
           },
-        },
-      )
+        })
       const draftsBox = draftsMailbox(boxes)
       const sentBox = mailboxByRole(boxes, "sent")
       const onSuccess: Json = { "keywords/$draft": null }
@@ -1147,7 +1192,11 @@ export function openJmapBackend(
 
       if (input.inReplyTo) {
         try {
-          await setEmail(input.inReplyTo, { "keywords/$answered": true })
+          if (!original) {
+            throw new MailRequestError("No id for the email it answers.")
+          }
+
+          await setEmail(original, { "keywords/$answered": true })
           answered = true
         } catch {
           answered = false

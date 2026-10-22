@@ -11,13 +11,14 @@ import type {
 
 import { describeFetchError } from "../openapi/http"
 import { PCP_VERSION } from "../version"
-import type { MailServerAddress } from "./addresses"
+import { replyTarget, type MailServerAddress } from "./addresses"
 import { htmlToText } from "./html"
 import {
   MAIL_CALL_TIMEOUT_MS,
   MAIL_CONNECT_TIMEOUT_MS,
   MAX_ATTACHMENTS_LISTED,
   MAX_MAILBOXES,
+  MAX_REPLY_LOOKUP_MAILBOXES,
   MAX_SEARCH_ALL_WINDOW,
   MAX_SEARCH_MAILBOXES,
 } from "./limits"
@@ -247,6 +248,23 @@ export const defaultImapDeps: ImapDeps = {
     return node.build()
   },
 }
+
+/**
+ * Where a reply looks for the email its Message-ID names, in this order:
+ * the mailboxes an email answered is most often in first, the ones that
+ * only show others' emails (Flagged, Important) last.
+ */
+const REPLY_LOOKUP_ROLES: readonly MailboxRole[] = [
+  "inbox",
+  "sent",
+  "archive",
+  "all",
+  "junk",
+  "trash",
+  "drafts",
+  "flagged",
+  "important",
+]
 
 const ROLES: Record<string, MailboxRole> = {
   "\\inbox": "inbox",
@@ -968,6 +986,60 @@ export function openImapBackend(
     }
   }
 
+  /**
+   * The id of the email a reply answers: inReplyTo itself when it is an id,
+   * or else the email its Message-ID names, looked for in the inbox and
+   * then the special mailboxes (a bounded few, one at a time), the first
+   * match winning.
+   */
+  async function replyId(inReplyTo: string): Promise<string> {
+    const target = replyTarget(inReplyTo)
+
+    if (!target) {
+      throw new MailRequestError(
+        "inReplyTo is neither an email id nor a Message-ID.",
+      )
+    }
+
+    if ("id" in target) {
+      return target.id
+    }
+
+    const boxes = await mailboxes()
+    const order: MailboxSummary[] = []
+
+    for (const role of REPLY_LOOKUP_ROLES) {
+      const box = mailboxByRole(boxes, role)
+
+      if (
+        box &&
+        !listing.unselectable.has(box.id) &&
+        !order.some((other) => other.id === box.id)
+      ) {
+        order.push(box)
+      }
+    }
+
+    // A HEADER search matches a part of the header: with its brackets, the
+    // whole Message-ID.
+    const criteria: SearchObject = {
+      header: { "message-id": `<${target.messageId}>` },
+    }
+
+    for (const box of order.slice(0, MAX_REPLY_LOOKUP_MAILBOXES)) {
+      const found = await inMailbox(box.id, true, async (imap, uidValidity) => {
+        const [uid] = (await imap.search(criteria, { uid: true })) || []
+        return uid === undefined ? null : encodeImapId(uid, uidValidity, box.id)
+      })
+
+      if (found) {
+        return found
+      }
+    }
+
+    throw new MailRequestError("No email with that Message-ID in this account.")
+  }
+
   /** The From address: the one the owner set, or the user name. */
   const fromAddress =
     config.from ?? (login.username.includes("@") ? login.username : null)
@@ -977,18 +1049,21 @@ export function openImapBackend(
    * when it answers one. From is left out only when there is no address,
    * which only a draft allows.
    */
-  async function outgoing(input: SendInput): Promise<OutgoingMail> {
+  async function outgoing(
+    input: SendInput,
+  ): Promise<{ mail: OutgoingMail; original: string | null }> {
     let inReplyTo: string | undefined
     let references: string[] | undefined
+    const original = input.inReplyTo ? await replyId(input.inReplyTo) : null
 
-    if (input.inReplyTo) {
-      const original = await withEmail(input.inReplyTo, true, (imap, uid) =>
+    if (original) {
+      const answered = await withEmail(original, true, (imap, uid) =>
         headers(imap, uid),
       )
 
-      if (original.messageId) {
-        inReplyTo = `<${original.messageId}>`
-        references = [...original.references, original.messageId]
+      if (answered.messageId) {
+        inReplyTo = `<${answered.messageId}>`
+        references = [...answered.references, answered.messageId]
           .slice(-20)
           .map((value) => `<${value}>`)
       }
@@ -999,23 +1074,26 @@ export function openImapBackend(
       list.map((entry) => ({ name: entry.name ?? "", address: entry.email }))
 
     return {
-      ...(fromAddress ? { from: { name: "", address: fromAddress } } : {}),
-      to: named(input.to),
-      cc: named(input.cc),
-      bcc: named(input.bcc),
-      subject: input.subject,
-      text: input.text,
-      messageId: `<${randomUUID()}@${domain}>`,
-      ...(inReplyTo ? { inReplyTo, references } : {}),
-      ...(input.attachments?.length
-        ? {
-            attachments: input.attachments.map((attachment) => ({
-              filename: attachment.name,
-              contentType: attachment.type,
-              content: attachment.bytes,
-            })),
-          }
-        : {}),
+      mail: {
+        ...(fromAddress ? { from: { name: "", address: fromAddress } } : {}),
+        to: named(input.to),
+        cc: named(input.cc),
+        bcc: named(input.bcc),
+        subject: input.subject,
+        text: input.text,
+        messageId: `<${randomUUID()}@${domain}>`,
+        ...(inReplyTo ? { inReplyTo, references } : {}),
+        ...(input.attachments?.length
+          ? {
+              attachments: input.attachments.map((attachment) => ({
+                filename: attachment.name,
+                contentType: attachment.type,
+                content: attachment.bytes,
+              })),
+            }
+          : {}),
+      },
+      original,
     }
   }
 
@@ -1030,7 +1108,7 @@ export function openImapBackend(
       )
     }
 
-    const mail = await outgoing(input)
+    const { mail } = await outgoing(input)
     const raw = await deps.compose(mail)
     let appended: Awaited<ReturnType<ImapClientLike["append"]>>
 
@@ -1397,7 +1475,7 @@ export function openImapBackend(
         )
       }
 
-      const mail = await outgoing(input)
+      const { mail, original } = await outgoing(input)
       const transport = await deps.smtp(smtp, login)
       let sent: Awaited<ReturnType<SmtpTransportLike["sendMail"]>>
 
@@ -1419,10 +1497,10 @@ export function openImapBackend(
       // gone whatever happens here, so a refusal is reported, not thrown.
       let answered: boolean | undefined
 
-      if (input.inReplyTo) {
+      if (original) {
         try {
           answered =
-            (await withEmail(input.inReplyTo, false, (imap, uid) =>
+            (await withEmail(original, false, (imap, uid) =>
               imap.messageFlagsAdd(uid, ["\\Answered"], { uid: true }),
             )) !== false
         } catch {

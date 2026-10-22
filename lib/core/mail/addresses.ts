@@ -303,29 +303,45 @@ export function onSameOriginAbsolute(
 
 const ADDRESS = /^[^\s@<>()",;:\\[\]]+@[^\s@<>()",;:\\[\]]+$/
 
+/** A recipient as get_email and get_thread give one, which send_email takes back. */
+export type RecipientObject = { name?: string | null; email: string }
+
 /**
- * One recipient as an assistant writes it: "ada@example.com" or
- * "Ada Lovelace <ada@example.com>". Nothing that could start a header of
- * its own gets through. A refusal names the address by `where` ("Recipient 2
- * in to"), never by its text: the request log keeps these messages, and not
- * what an assistant sent.
+ * One recipient as an assistant writes it: "ada@example.com",
+ * "Ada Lovelace <ada@example.com>", or {name, email} as get_email gives
+ * one. Nothing that could start a header of its own gets through. A
+ * refusal names the address by `where` ("Recipient 2 in to"), never by its
+ * text: the request log keeps these messages, and not what an assistant
+ * sent.
  */
 export function parseRecipient(
-  raw: string,
+  raw: string | RecipientObject,
   where = "The address",
 ): {
   name: string | null
   email: string
 } {
-  const value = raw.trim()
+  let email: string
+  let name: string | null
 
-  if (/[\u0000-\u001f\u007f]/.test(value)) {
-    throw invalid(`${where} cannot have line breaks or control characters.`)
+  if (typeof raw === "string") {
+    const value = raw.trim()
+
+    if (/[\u0000-\u001f\u007f]/.test(value)) {
+      throw invalid(`${where} cannot have line breaks or control characters.`)
+    }
+
+    const named = /^(.*?)\s*<([^<>]+)>$/.exec(value)
+    email = (named ? named[2]! : value).trim()
+    name = named ? named[1]!.trim().replace(/^"(.*)"$/, "$1") || null : null
+  } else {
+    email = String(raw.email).trim()
+    name = raw.name == null ? null : String(raw.name).trim() || null
+
+    if (/[\u0000-\u001f\u007f]/.test(`${name ?? ""}${email}`)) {
+      throw invalid(`${where} cannot have line breaks or control characters.`)
+    }
   }
-
-  const named = /^(.*?)\s*<([^<>]+)>$/.exec(value)
-  const email = (named ? named[2]! : value).trim()
-  const name = named ? named[1]!.trim().replace(/^"(.*)"$/, "$1") || null : null
 
   if (!ADDRESS.test(email) || email.length > 320) {
     throw invalid(`${where} is not an email address.`)
@@ -338,4 +354,37 @@ export function parseRecipient(
   }
 
   return { name, email }
+}
+
+/** What inReplyTo names: an email by PCP's id for it, or by its Message-ID. */
+export type ReplyTarget = { id: string } | { messageId: string }
+
+/**
+ * The email a reply answers, as an assistant names it: PCP's own id for it
+ * (as search_emails gives it), or its Message-ID header, with or without
+ * the angle brackets (get_email gives it bare). They are told apart by
+ * shape: neither a JMAP id (RFC 8620 1.2: letters, digits, - and _) nor an
+ * IMAP one ("<uid>.<uidvalidity>.<base64url>") holds an "@", and every
+ * Message-ID does (RFC 5322 3.6.4). The Message-ID comes back bare. Null
+ * when it is neither: brackets around no "@", or a Message-ID with spaces,
+ * control characters or a second pair of brackets.
+ */
+export function replyTarget(raw: string): ReplyTarget | null {
+  const value = raw.trim()
+
+  if (!value.includes("@")) {
+    return value && !/[<>]/.test(value) ? { id: value } : null
+  }
+
+  const inner = /^<([^<>]*)>$/.exec(value)?.[1] ?? value
+
+  if (
+    inner.length > 995 ||
+    !/^[\x21-\x7e]+$/.test(inner) ||
+    !/^[^@<>"\\()]+@[^@<>"\\()]+$/.test(inner)
+  ) {
+    return null
+  }
+
+  return { messageId: inner }
 }
