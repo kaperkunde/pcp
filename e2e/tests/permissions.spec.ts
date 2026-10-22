@@ -92,7 +92,7 @@ async function levelOf(
   assistant: string,
   tool: string,
 ): Promise<string | undefined> {
-  const described = await callTool(baseURL, assistant, "describe_tool", {
+  const described = await callTool(baseURL, assistant, "describe", {
     server: SLUG,
     tool,
   })
@@ -228,7 +228,7 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
     arguments: { to: "Ada", message: "Hi" },
   }
   const asked = await callTool(baseURL!, token, "call_tool", postcard)
-  // The handle describe_tool gave before the owner blocked the tool.
+  // The handle describe gave before the owner blocked the tool.
   const described = await describeForCall(
     baseURL!,
     token,
@@ -241,13 +241,13 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
   await page.getByRole("button", { name: "Block", exact: true }).click()
   await expect(page.getByTestId("permission-outcome")).toBeVisible()
 
-  const search = await callTool(baseURL!, token, "search_tools", {
+  const search = await callTool(baseURL!, token, "search", {
     query: "postcard",
     server: SLUG,
   })
   expect(toolText(search)).not.toContain(`${SLUG}/send_postcard`)
 
-  const hidden = await callTool(baseURL!, token, "describe_tool", {
+  const hidden = await callTool(baseURL!, token, "describe", {
     server: SLUG,
     tool: "send_postcard",
   })

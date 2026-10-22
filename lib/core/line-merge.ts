@@ -138,6 +138,48 @@ export function mergeLines(
   return { text: out.join("\n"), conflicts }
 }
 
+/** One line of a diff: kept, taken out, or put in. */
+export type DiffLine = { kind: "same" | "removed" | "added"; text: string }
+
+/**
+ * The lines of `after` against `before`, in order: what both keep, what is
+ * taken out, what is put in. Past MAX_LINES on a side, every line of the one
+ * is taken out and every line of the other put in.
+ */
+export function diffLines(before: string, after: string): DiffLine[] {
+  const old = before === "" ? [] : lines(before)
+  const now = after === "" ? [] : lines(after)
+
+  if (old.length > MAX_LINES || now.length > MAX_LINES) {
+    return [
+      ...old.map((text) => ({ kind: "removed" as const, text })),
+      ...now.map((text) => ({ kind: "added" as const, text })),
+    ]
+  }
+
+  const out: DiffLine[] = []
+  let i = 0
+  let j = 0
+  const anchors: Array<[number, number]> = [
+    ...commonLines(old, now),
+    [old.length, now.length],
+  ]
+
+  for (const [a, b] of anchors) {
+    for (; i < a; i++) out.push({ kind: "removed", text: old[i]! })
+    for (; j < b; j++) out.push({ kind: "added", text: now[j]! })
+
+    if (a < old.length) {
+      out.push({ kind: "same", text: old[a]! })
+    }
+
+    i = a + 1
+    j = b + 1
+  }
+
+  return out
+}
+
 /** Whether a text still has a marker of a conflict in it. */
 export function hasConflictMarkers(text: string): boolean {
   return lines(text).some(

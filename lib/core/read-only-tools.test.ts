@@ -21,8 +21,8 @@ import { writeToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
 
 // The gateway's read-only tools, as a client that holds back everything else
-// (Claude Code's plan mode) meets them: read_memory and call_read_only_tool
-// say they only read, and call_read_only_tool runs nothing its server does
+// (Claude Code's plan mode) meets them: search, describe, read_memory and
+// call_read_only_tool say they only read, and call_read_only_tool runs nothing its server does
 // not mark read-only, at the token's own levels.
 
 vi.mock("./request-log", async (importOriginal) => ({
@@ -142,6 +142,16 @@ describe("the read-only tools", () => {
 
     expect(readOnly("read_memory")).toBe(true)
     expect(readOnly("call_read_only_tool")).toBe(true)
+    // Finding and reading tools, skills and memories, and the old names
+    // kept for one release.
+    for (const name of [
+      "search",
+      "describe",
+      "search_tools",
+      "describe_tool",
+    ]) {
+      expect(readOnly(name), name).toBe(true)
+    }
     expect(readOnly("memory")).toBe(false)
     expect(readOnly("call_tool")).not.toBe(true)
     expect(readOnly("list_secrets")).toBeUndefined()

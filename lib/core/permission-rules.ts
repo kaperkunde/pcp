@@ -247,6 +247,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Allow the change",
     decline: "Not now",
   },
+  // A skill added, changed, renamed or deleted, as the owner saw it whole.
+  skill_change: {
+    allow_once: "Allow the change",
+    decline: "Not now",
+  },
   // Saved with the levels the owner chose on the page (applyAccessRequest),
   // never by a decision: the only one is no.
   access: {

@@ -10,12 +10,14 @@ import {
   TokenReachForm,
   TokenWaiting,
 } from "@/components/token-detail"
+import { TokenSkillsForm } from "@/components/token-skills"
 import { TokenTools } from "@/components/token-tools"
 import { Badge } from "@/components/ui/badge"
 import { ButtonLink } from "@/components/ui/button"
 import { List, ListRow } from "@/components/ui/list"
 import { listTokenAllowances } from "@/lib/core/allowances"
 import { listOpenPermissions } from "@/lib/core/permissions"
+import { listSkills, tokenSkills } from "@/lib/core/skills"
 import { listTokenToolAccess } from "@/lib/core/tool-access"
 import { listFetchRules } from "@/lib/core/web-fetch"
 import { publicUrlFor } from "@/lib/server/public-url"
@@ -43,12 +45,15 @@ export default async function TokenPage({
     id,
   )
   const publicUrl = await publicUrlFor(ctx)
-  const [access, waiting, allowances, fetchRules] = await Promise.all([
-    listTokenToolAccess(ctx, id),
-    listOpenPermissions(ctx, id, publicUrl),
-    listTokenAllowances(ctx, id),
-    token.webFetch || browser ? listFetchRules(ctx, id) : null,
-  ])
+  const [access, waiting, allowances, fetchRules, skills, seen] =
+    await Promise.all([
+      listTokenToolAccess(ctx, id),
+      listOpenPermissions(ctx, id, publicUrl),
+      listTokenAllowances(ctx, id),
+      token.webFetch || browser ? listFetchRules(ctx, id) : null,
+      listSkills(ctx),
+      tokenSkills(ctx, id),
+    ])
   const advanced = `/tokens/${id}/advanced`
 
   return (
@@ -105,7 +110,12 @@ export default async function TokenPage({
         <TokenWaiting
           waiting={waiting.map((request) => ({
             id: request.id,
-            review: request.kind === "access",
+            review:
+              request.kind === "access"
+                ? "Review and save"
+                : request.kind === "skill_change"
+                  ? "Review the skill"
+                  : null,
             title: request.title,
             lines: request.lines,
             full: request.full,
@@ -139,6 +149,18 @@ export default async function TokenPage({
             ? { href: `${advanced}#web-pages`, count: fetchRules.sites.length }
             : null
         }
+      />
+
+      <TokenSkillsForm
+        tokenId={id}
+        skills={skills.map(({ id: skillId, name, description }) => ({
+          id: skillId,
+          name,
+          description,
+        }))}
+        all={seen.all}
+        selected={seen.skillIds}
+        locked={locked}
       />
 
       <TokenTools tokenId={id} access={access} kinds={kinds} locked={locked} />

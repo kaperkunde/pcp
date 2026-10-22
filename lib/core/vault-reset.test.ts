@@ -11,6 +11,7 @@ import { DDNS_CONFIG_KEY } from "./network/ddns"
 import { appendRequestLog, logDays } from "./request-log"
 import { createSecret } from "./secrets"
 import { createServer } from "./servers"
+import { createSkill, setTokenSkills } from "./skills"
 import { createSession, resolveSession } from "./sessions"
 import { SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
@@ -90,6 +91,13 @@ async function populate() {
   })
   await receiveFile(ctx, { tokenId, publicUrl: "https://pcp.example" })
   await createMemory(ctx, { path: "notes.md", text: "Remember this." })
+  const skill = await createSkill(ctx, {
+    name: "release-notes",
+    description: "Write release notes.",
+    body: "List the changes.",
+    tools: [],
+  })
+  await setTokenSkills(ctx, tokenId, { all: false, skillIds: [skill.id] })
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
   await setHostJson(DDNS_CONFIG_KEY, { provider: "duckdns", subdomain: "ada" })
   const { cookieValue } = await createSession(ctx)

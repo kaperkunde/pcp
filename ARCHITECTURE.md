@@ -177,7 +177,7 @@ from one endpoint could be built on it. What that would take:
 An API with an OpenAPI schema is added like a server and reached the same way.
 It is an `mcp_server` row with `kind = "openapi"`; its `url` is the API's base
 URL, and each operation in the schema is an `mcp_tool` row. Because it is a
-server row, token scoping, `search_tools`, `describe_tool`, description
+server row, token scoping, `search`, `describe`, description
 overrides, the "used by" list on a secret and the request log all work on it
 unchanged. Two functions in `lib/core/upstream.ts` branch on the kind:
 `syncServerTools` re-reads the schema, `callServerTool` makes the request.
@@ -387,7 +387,7 @@ change an endpoint decides where PCP sends requests:
   answer. A change to an endpoint that other assistants can see (its words,
   schema or address, or read-only turned off) disables it until the owner
   enables it. Text an assistant writes reaches every other assistant through
-  `search_tools`, the gateway's instructions and `describe_tool`, so it is the
+  `search`, the gateway's instructions and `describe`, so it is the
   owner's to approve. Names cannot hold line breaks, which would otherwise
   start a line of their own in those instructions.
 - **No credential changes, ever.** A secret only comes with a registration
@@ -836,6 +836,63 @@ another one reads:
   vault's memories, as `search.ts` scores every tool. A memory outlives the
   token that wrote it (`token_id` is set to null) and is then the owner's.
 
+## Skills
+
+A skill is a procedure the owner approved, for an assistant to follow when a
+task matches (`lib/core/skills.ts`). It is modelled on Anthropic's Agent
+Skills: a `SKILL.md` with YAML frontmatter (`name`, a slug; `description`,
+the line an assistant picks it by; `version`; `tools`, the `server/tool`
+names it uses) and Markdown steps, plus at most ten reference text files.
+Nothing in a skill is ever run: a "script" among its files is text.
+
+A memory is a note an assistant weighs, written by assistants as they go;
+a skill is how the owner wants a kind of task done, so every word of one is
+the owner's or one they read:
+
+- **Stored whole, encrypted.** A `skill` row holds one ciphertext of the
+  name, description, version, body, tools and files, under the vault's key
+  with `skill:<id>` as associated data, and `author` (`owner`, or
+  `assistant` once the owner agreed to an assistant's text). Names are
+  unique per vault by checking after decrypting, as memory paths are.
+  Limits are in `lib/core/constants.ts` (`MAX_SKILL_*`, `MAX_SKILLS`), and
+  text with characters that do not show on screen is refused, as for a
+  memory (`hiddenCharacter`). The frontmatter is read with `yaml` in its
+  core schema, no aliases or custom tags; keys other tools write
+  (`license`, `allowed-tools`, `metadata`, `compatibility`) are left out,
+  any other is refused, so what the owner reads is the skill.
+- **Versions.** Every change, the owner's or an approved one, is the next
+  version; the SKILL.md PCP serializes carries it.
+- **Which tokens see it.** `api_token.all_skills` (on by default), or the
+  skills listed in `api_token_skill` (cascades from both sides), the
+  servers' pattern. `liveToken` resolves it into `ResolvedToken.skillIds`
+  (null: every skill), `copyTokenAccess` copies it, and the token's page
+  chooses it. A skill an assistant added through a request is added to its
+  token's list when the token sees only some.
+- **Found and read.** The gateway's instructions frame skills apart from
+  memories and name each visible one with its description while they fit in
+  `SKILL_INSTRUCTIONS_CHARS`, past it by name alone, and past
+  `MAX_INSTRUCTION_SKILLS` not at all ("search finds the rest"). `search`
+  ranks them beside tools and memories; `describe` with `skill:<name>`
+  answers with one framing line ("A procedure the owner approved: follow it
+  when the task matches."), the whole SKILL.md, its files by ref
+  (`skill:<name>/<file>` reads one) and, for each tool it names that the
+  token can call, that tool's `call_handle`.
+- **Changed only by asking.** There is no skill tool: the `memory` tool
+  takes `/skills/<name>/SKILL.md` and `/skills/<name>/<file>` (view, create,
+  str_replace, insert, delete, rename; `read_memory` views them too). Every
+  write becomes a `skill_change` request that carries the whole skill as it
+  would be and `basis`, the version it was made against; the owner's page
+  shows a line diff (`lib/core/line-merge.ts diffLines`) and the whole
+  SKILL.md and every file, unfolded (`components/skill-review.tsx`).
+  `applySkillChange` writes exactly that, checked again and refused unless
+  the check leaves it as shown, and only while the skill is still at
+  `basis` ("the skill changed since the owner was asked"); a new skill only
+  while its name is free. The owner edits, imports (a pasted SKILL.md) and
+  deletes skills freely on the Skills page.
+- **Exported** as rows (`skill`, `api_token_skill`, `all_skills`); an older
+  file restores with none, every token seeing every skill. Deleting the
+  vault wipes them.
+
 ## Instructions for an assistant
 
 Every token has instructions of its own, the owner's words to that
@@ -856,7 +913,7 @@ version of PCP's suggested instructions they were copied or merged from.
   owner's instructions for this assistant:" (at most 4,000 characters,
   `MAX_INSTRUCTIONS_CHARS`), since clients cut instructions short. For a
   token that keeps memories, `read_memory every` opens with the same block.
-  `search_tools`' description carries the one rule that matters most:
+  `search`'s description carries the one rule that matters most:
   describe a tool before calling it and pass its call_handle; check before
   retrying anything that may have happened.
 - **The owner's to change.** The token's Advanced page has the editor and,
@@ -1177,7 +1234,7 @@ checkSyntax`), nothing has a character that does not show on screen
   additionalProperties, items, anyOf, oneOf and allOf, bounded in values and
   depth; formats and ranges are not checked, and no schema is compiled to
   code); one that does not fit is an error naming where, not passed on.
-  `describe_tool` shows the schema as an outline under `returns`
+  `describe` shows the schema as an outline under `returns`
   (`openapi/outline.ts outlineSchema`), and the owner reads it in full on
   the request. A `$ref` is refused when it is saved, not followed. Gateway calls and the owner's allowed requests
   run with `withWrappers(executor)`, which sends a wrapper's tool to its
@@ -1227,10 +1284,10 @@ checkSyntax`), nothing has a character that does not show on screen
   value a tool transforms or stores and answers with later: the owner's
   review of the place a secret goes is what decides, and the page says so.
 - **Replacing.** A tool listed in `replaces` (it has to be among the
-  tool's `calls`) is left out of `search_tools`, `list_tools`, `pcp.tools`
+  tool's `calls`) is left out of `search`, `list_tools`, `pcp.tools`
   and the instructions' counts (`listedTools`) for a token while the
   wrapper's tool is not blocked for it; it can still be called and
-  described by name, and `describe_tool` says what replaced it. The owner
+  described by name, and `describe` says what replaced it. The owner
   shows it again from the server's page (`showReplacedTool`, which takes it
   out of every wrapper's lists).
 - **Changes** (`admin.ts`). A token made with "propose wrappers"
@@ -2321,14 +2378,22 @@ above). A request without a valid
 token is answered 401, and a token makes at most 240 requests a minute, one
 message each (`app/mcp/route.ts`). The tools:
 
-- `search_tools(query, server?, limit?)` ranks the catalogue
-  (`lib/core/search.ts`: name, title, description and server words, with
-  light stemming) and returns `server/tool — summary` lines.
+- `search(query, server?, kind?, limit?)` ranks the catalogue, the skills
+  the token sees and (for a token that keeps memories) the memories it reads
+  together (`lib/core/search.ts searchEverything`: name, title, description
+  and server words, with light stemming; a skill scores as a tool named
+  after it, a memory as one named by its path and described by its text),
+  and returns `kind ref — line` lines: `tool server/tool`, `skill
+skill:<name>` with its description, `memory /memories/…` with the line
+  that says most of the query. `server` keeps to one server's tools, `kind`
+  to one kind.
 - `list_tools(server, offset?)` names every tool the token sees on one
   server, by name, with its level (`allowed` or `ask`) and a summary,
   `LIST_PAGE_SIZE` at a time (`listTools` in `lib/core/search.ts`), so an
   access review does not depend on what a search happens to rank.
-- `describe_tool(server, tool)` returns the description (the owner's
+- `describe(ref)` (or `describe(server, tool)`) reads what search
+  found: a skill (Skills, above), a memory as `read_memory view` gives it,
+  or a tool. For a tool it returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
   published it, whether the tool runs at once or asks first, and for an API
   endpoint's tool, `returns`: an outline of its success answer read from the
@@ -2336,7 +2401,7 @@ message each (`app/mcp/route.ts`). The tools:
   schema marks base64 (`format: byte`) shows as `string (base64)`. First
   in its answer is the tool's `call_handle` (below).
 - `call_tool(call_handle, arguments, fields?, decode?, keep?)` takes no
-  server or tool name, only the handle `describe_tool` gave, so a tool is
+  server or tool name, only the handle `describe` gave, so a tool is
   always described before it is called. It checks the arguments against
   the tool's stored inputSchema, then opens a connection
   to the upstream with the configured credential (header secret or OAuth
@@ -2352,6 +2417,9 @@ message each (`app/mcp/route.ts`). The tools:
   decode and keep paths on the request (`permission_request.fields`,
   `permission_request.decode`, `permission_request.keep`).
   `call_read_only_tool` takes the same handle.
+- `search_tools` and `describe_tool`, the old names, stay registered for
+  one release and answer exactly as before (tools only; server and tool),
+  under one first line naming the new tool.
 - `check_permission(id)`, `check_server(server)`, `register_server(...)`
   and `propose_tool_access(changes)` belong to the permission flow below.
 - `check_run(id)`, beside `run_code` for a token that runs code, says how
@@ -2485,7 +2553,7 @@ Every token has a level per tool (`api_token_tool_access`,
 `lib/core/tool-access.ts`): **allowed**, **blocked**, or, when there is no
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
-instructions, `search_tools`, `list_tools` and `describe_tool`, and
+instructions, `search`, `list_tools` and `describe`, and
 `call_tool` and `run_code` refuse them. The gateway loads the levels by
 token id. A wrapper's tool comes out at the strictest of its own level and
 those of the tools it calls (Wrappers, above).

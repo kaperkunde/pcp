@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   listTools,
+  searchEverything,
   searchTools,
   summarize,
   tokenize,
@@ -140,5 +141,82 @@ describe("listTools", () => {
     expect(listTools("porkbun", many, { offset: 5 })).toContain(
       "nothing from offset 5",
     )
+  })
+})
+
+describe("searchEverything", () => {
+  const skills = [
+    {
+      name: "release-notes",
+      description: "Write release notes from the merged pull requests.",
+    },
+    {
+      name: "weekly-review",
+      description: "Go through the week with the owner.",
+    },
+  ]
+  const memories = [
+    {
+      path: "/memories/shared/releases.md",
+      text: "# Releases\nWe release on Tuesdays.\nRelease notes go in CHANGELOG.md.",
+    },
+    { path: "/memories/units.md", text: "Metric units." },
+  ]
+
+  it("ranks tools, skills and memories by one score, each with its ref", () => {
+    const results = searchEverything(
+      { tools, skills, memories },
+      "release notes",
+    )
+
+    expect(results.map((result) => result.ref).slice(0, 2)).toEqual([
+      "skill:release-notes",
+      "/memories/shared/releases.md",
+    ])
+    expect(results[0]).toMatchObject({
+      kind: "skill",
+      description: "Write release notes from the merged pull requests.",
+    })
+    // A memory's line is the one that says most of what was asked about.
+    expect(results[1]).toMatchObject({
+      kind: "memory",
+      description: "Release notes go in CHANGELOG.md.",
+    })
+
+    const pulls = searchEverything(
+      { tools, skills, memories },
+      "pull requests",
+    ).map((result) => `${result.kind} ${result.ref}`)
+    expect(pulls.slice(0, 2)).toEqual([
+      "tool github/list_pull_requests",
+      "skill skill:release-notes",
+    ])
+  })
+
+  it("keeps to one kind, or to one server's tools", () => {
+    const query = "release notes pull requests"
+
+    expect(
+      searchEverything({ tools, skills, memories }, query, {
+        kind: "skill",
+      }).map((result) => result.kind),
+    ).toEqual(["skill"])
+    expect(
+      searchEverything({ tools, skills, memories }, query, {
+        server: "github",
+      }).every((result) => result.ref.startsWith("github/")),
+    ).toBe(true)
+  })
+
+  it("lists the skills, then the tools, for a query with nothing to rank by", () => {
+    const results = searchEverything({ tools, skills, memories }, "the", {
+      limit: 3,
+    })
+
+    expect(results.map((result) => result.ref)).toEqual([
+      "skill:release-notes",
+      "skill:weekly-review",
+      "github/create_issue",
+    ])
   })
 })

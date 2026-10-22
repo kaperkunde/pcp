@@ -193,6 +193,9 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           apiTokenServers: (await tx.apiTokenServer.findMany(byToken)).map(
             rowJson,
           ),
+          apiTokenSkills: (await tx.apiTokenSkill.findMany(byToken)).map(
+            rowJson,
+          ),
           apiTokenToolAccess: (
             await tx.apiTokenToolAccess.findMany(byToken)
           ).map(rowJson),
@@ -204,6 +207,7 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
             await tx.permissionRequest.findMany(byVault)
           ).map(rowJson),
           memories: (await tx.memory.findMany(byVault)).map(rowJson),
+          skills: (await tx.skill.findMany(byVault)).map(rowJson),
           secrets: (await tx.secret.findMany(byVault)).map(rowJson),
           servers: (await tx.mcpServer.findMany(byVault)).map(rowJson),
           serverAuthHeaders: (await tx.serverAuthHeader.findMany(byServer)).map(
@@ -488,6 +492,15 @@ async function writeExport(
         await inChunks(tables.memories, (data) =>
           tx.memory.createMany({ data }),
         )
+        // A skill carries up to MAX_SKILL_BODY and its files in ciphertext.
+        await inChunks(
+          tables.skills,
+          (data) => tx.skill.createMany({ data }),
+          RESTORE_SPEC_CHUNK_ROWS,
+        )
+        await inChunks(tables.apiTokenSkills, (data) =>
+          tx.apiTokenSkill.createMany({ data }),
+        )
         await inChunks(tables.settings, (data) =>
           tx.setting.createMany({ data }),
         )
@@ -536,6 +549,8 @@ export async function wipeVault(
   await tx.apiTokenToolAllowance.deleteMany(byToken)
   await tx.apiTokenSiteAllowance.deleteMany(byToken)
   await tx.memory.deleteMany(byVault)
+  await tx.apiTokenSkill.deleteMany(byToken)
+  await tx.skill.deleteMany(byVault)
   await tx.permissionRequest.deleteMany(byVault)
   await tx.webFetchRule.deleteMany(byVault)
   await tx.vaultToolAccess.deleteMany(byVault)

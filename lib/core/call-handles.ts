@@ -3,7 +3,7 @@ import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto"
 import { canonicalJson } from "./permission-rules"
 
 /**
- * Call handles: what describe_tool hands an assistant and call_tool takes in
+ * Call handles: what describe hands an assistant and call_tool takes in
  * place of a server and a tool name, so a tool is always described before
  * it is called. A handle is stateless (/mcp keeps no session): it names the
  * tool's catalogue row and carries two MACs under a key derived from the

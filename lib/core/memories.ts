@@ -1299,6 +1299,20 @@ export async function instructionMemories(
   }
 }
 
+/**
+ * The memories a token reads (its own and the shared ones), by their full
+ * path, for the gateway's search to rank beside tools and skills.
+ */
+export async function readableMemories(
+  ctx: VaultContext,
+  tokenId: string,
+): Promise<MemoryBody[]> {
+  return (await load(ctx, tokenId)).map((entry) => ({
+    path: toolPath(entry.visibility, entry.path),
+    text: entry.text,
+  }))
+}
+
 /** Every memory in the vault, shared first, for the owner's page. */
 export async function listMemories(
   ctx: VaultContext,

@@ -63,7 +63,7 @@ export type WrapperTool = {
   program: string
   /** Every tool the program may call. */
   calls: ToolRef[]
-  /** Tools it stands in for: they drop out of search_tools and list_tools. */
+  /** Tools it stands in for: they drop out of search and list_tools. */
   replaces: ToolRef[]
 }
 

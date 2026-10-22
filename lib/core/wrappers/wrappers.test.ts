@@ -493,17 +493,17 @@ describe("calling a wrapper's tool", () => {
 
 describe("what a wrapper replaces", () => {
   it("leaves the replaced tool out of search and lists, still callable", async () => {
-    const before = await call("search_tools", { query: "says back" })
+    const before = await call("search", { query: "says back" })
     expect(before.text).toContain("things/echo")
 
     await approvedWrapper()
 
-    const search = await call("search_tools", { query: "says back" })
+    const search = await call("search", { query: "says back" })
     expect(search.text).not.toContain("things/echo")
     const listed = await call("list_tools", { server: "things" })
     expect(listed.text).not.toContain("echo")
     expect(listed.text).toContain("count")
-    const described = await call("describe_tool", {
+    const described = await call("describe", {
       server: "things",
       tool: "echo",
     })
@@ -642,7 +642,7 @@ describe("what an assistant can set", () => {
     expect(server.tools.map((tool) => tool.name)).toEqual(["count"])
 
     // Nothing stands in for things/echo any more: it is back in search.
-    const search = await call("search_tools", { query: "says back" })
+    const search = await call("search", { query: "says back" })
     expect(search.text).toContain("things/echo")
   })
 
@@ -799,7 +799,7 @@ describe("a tool's output schema", () => {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const described = await call("describe_tool", {
+    const described = await call("describe", {
       server: "lookup",
       tool: "lookup",
     })
@@ -921,7 +921,7 @@ describe("whose levels a wrapper's calls follow", () => {
       expect(result.text).toContain(`q=${level}`)
     }
 
-    const described = await call("describe_tool", {
+    const described = await call("describe", {
       server: "lookup",
       tool: "lookup",
     })

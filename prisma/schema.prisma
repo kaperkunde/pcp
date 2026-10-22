@@ -34,6 +34,7 @@ model Vault {
 
   permissionRequests PermissionRequest[]
   memories           Memory[]
+  skills             Skill[]
   sharedToolAccess   VaultToolAccess[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
@@ -93,7 +94,9 @@ model Session {
 }
 
 /// A bearer token an MCP client presents to /mcp. It reaches the servers
-/// listed in ApiTokenServer, or every server when allowAllServers is set.
+/// listed in ApiTokenServer, or every server when allowAllServers is set,
+/// and sees the skills listed in ApiTokenSkill, or every one when allSkills
+/// is set.
 model ApiToken {
   id              String    @id
   vaultId         String    @map("vault_id")
@@ -104,6 +107,9 @@ model ApiToken {
   /// The first characters of the token, so the owner can tell them apart.
   prefix          String
   allowAllServers Boolean   @default(true) @map("allow_all_servers")
+  /// Whether the assistant sees every skill of the vault (lib/core/skills.ts)
+  /// or only those in ApiTokenSkill. On unless the owner chooses some.
+  allSkills       Boolean   @default(true) @map("all_skills")
   /// Whether the assistant may read and change the API endpoints it set up
   /// through the gateway (get_endpoint, update_endpoint). Registering one is
   /// register_server, which every token may ask for and the owner decides.
@@ -151,6 +157,7 @@ model ApiToken {
   instructionsBase Int?    @map("instructions_base")
 
   servers            ApiTokenServer[]
+  skills             ApiTokenSkill[]
   toolAccess         ApiTokenToolAccess[]
   permissionRequests PermissionRequest[]
   memories           Memory[]
@@ -173,6 +180,18 @@ model ApiTokenServer {
 
   @@id([tokenId, serverId])
   @@map("api_token_server")
+}
+
+/// A skill a token sees while its allSkills is off (the owner chose some).
+model ApiTokenSkill {
+  tokenId String   @map("token_id")
+  token   ApiToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  skillId String   @map("skill_id")
+  skill   Skill    @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([tokenId, skillId])
+  @@index([skillId])
+  @@map("api_token_skill")
 }
 
 /// What one token may do with one tool. No row means the tool's level for
@@ -357,6 +376,29 @@ model Memory {
   @@index([vaultId, visibility])
   @@index([tokenId])
   @@map("memory")
+}
+
+/// A procedure the owner approved, for assistants to follow when a task
+/// matches (lib/core/skills.ts), in the shape of an Agent Skill's SKILL.md.
+/// Written by the owner, or by an assistant through a request they agreed
+/// to; the tokens that see it are their allSkills and ApiTokenSkill.
+model Skill {
+  id         String   @id
+  vaultId    String   @map("vault_id")
+  vault      Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// owner | assistant: who wrote the text as it is now.
+  author     String   @default("owner")
+  /// The name, description, version, body, tools and files as JSON,
+  /// AES-256-GCM under the vault's data key with "skill:<id>" as associated
+  /// data. Names are unique per vault by checking, as memory paths are.
+  ciphertext Bytes
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  tokens ApiTokenSkill[]
+
+  @@index([vaultId])
+  @@map("skill")
 }
 
 /// One encrypted value. `text` secrets are entered by the owner; `oauth`

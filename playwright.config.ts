@@ -198,6 +198,14 @@ export default defineConfig({
       use: signedIn("memories"),
     },
     {
+      // Skills: written on the Skills page, found with search and read with
+      // describe, and an assistant's change waiting for the owner.
+      name: "skills",
+      testMatch: /skills\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("skills"),
+    },
+    {
       // APIs an assistant proposes with more than a bearer token: HTTP Basic
       // with the password typed in on the approval page, and a key and a
       // secret key in two headers; each sent by PCP, and kept from the

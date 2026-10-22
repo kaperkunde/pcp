@@ -109,7 +109,7 @@ export function lastToolText(response: McpResponse): string {
 const HANDLED = new Set(["call_tool", "call_read_only_tool"])
 
 /**
- * The call_handle describe_tool gives for server/tool, or describe_tool's
+ * The call_handle describe gives for server/tool, or describe's
  * answer when it gives none (no such tool, or one the token cannot see).
  */
 export async function describeForCall(
@@ -119,7 +119,7 @@ export async function describeForCall(
   tool: string,
 ): Promise<{ handle: string } | { refused: McpResponse }> {
   const described = await mcpRequest(baseURL, token, "tools/call", {
-    name: "describe_tool",
+    name: "describe",
     arguments: { server, tool },
   })
 
@@ -137,7 +137,7 @@ export async function describeForCall(
  * A tool's arguments as an assistant sends them: call_tool and
  * call_read_only_tool written with a server and a tool name describe the
  * tool first and pass its call_handle in their place, as the gateway's
- * instructions say. When describe_tool refuses, its answer is the result.
+ * instructions say. When describe refuses, its answer is the result.
  */
 async function withHandle(
   baseURL: string,

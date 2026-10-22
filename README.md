@@ -29,7 +29,7 @@
 A self-hosted gateway between your AI assistant and the MCP servers you use.
 PCP keeps the credentials those servers need in an encrypted store, signs in
 to the ones that use OAuth, and exposes a single MCP endpoint built around
-three tools — `search_tools`, `describe_tool` and `call_tool` — so an
+three tools — `search`, `describe` and `call_tool` — so an
 assistant can reach dozens of servers without carrying every tool definition
 in its context. You decide, per token and per tool, what an assistant may run
 on its own, what it has to ask you about first, and what it cannot touch.
@@ -37,6 +37,9 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **One endpoint for every server.** Add servers in the web UI; an assistant
   connects once, with an API token, and finds tools by describing what it
   needs.
+- **Skills to follow.** Write down how you want a kind of task done (or
+  import a `SKILL.md`) and every assistant finds it and follows it; an
+  assistant's change to one waits for you to read it.
 - **APIs without an MCP server.** Give PCP an OpenAPI schema, as a URL or a
   file, and each operation becomes a tool. PCP makes the HTTP calls itself,
   with your secret or OAuth sign-in, and hands the assistant the answer.
@@ -451,9 +454,9 @@ and these tools:
 
 | Tool                  | What it does                                                                                                                                                                                  |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                                                                                                        |
+| `search`              | Finds tools across servers, your skills, and the memories the token reads, from a few words ("create a github issue"), each with a ref for `describe`.                                        |
 | `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                                                      |
-| `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, for an API what it answers, and the `call_handle` that calls it.                                                 |
+| `describe`            | For a tool, its full description, JSON Schema, whether it asks you first, for an API what it answers, and the `call_handle` that calls it; for a skill or a memory, its text.                 |
 | `call_tool`           | Runs the tool a `call_handle` stands for, after checking the arguments against its schema, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer.           |
 | `call_read_only_tool` | `call_tool` for a tool its server marks read-only (an API's GET, a mail search, an MCP tool with `readOnlyHint`); anything else is refused.                                                   |
 | `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                                                     |
@@ -579,6 +582,22 @@ be one that keeps memories), and **Delete selected** deletes them. Nothing is
 changed if a path would be taken where they go. A memory that changes hands
 loses its mark to be read in every conversation, since you chose that for its
 old readers. Memories are encrypted like everything else.
+
+**Skills** are procedures you approve: how you want a kind of task done,
+step by step, written as a `SKILL.md` the way Claude's Agent Skills are (a
+name, a line on when to use it, the `server/tool` names it uses, and
+Markdown steps, with a few reference files beside it; nothing in one is ever
+run). A memory is a note an assistant weighs; a skill is one it follows when
+the task matches. Write one under **Skills**, or paste a `SKILL.md` to import
+it, and every assistant sees its name and description in PCP's
+instructions, finds it with `search` and reads it whole with `describe`,
+which also hands it the `call_handle` of each tool the skill names. On an
+assistant's page you choose whether it sees every skill or only some. An
+assistant that keeps memories can propose a new skill or a change through
+the `memory` tool, under `/skills/<name>/SKILL.md`; you see what changes line
+by line and the whole skill as it would be, and nothing is written until you
+agree, and then only if nobody changed the skill in the meantime. Each change
+is a new version.
 
 A token made with **Let an assistant with this token fetch web pages** gets a
 `web_fetch` tool, like the web fetch Claude has: it takes an address and

@@ -245,9 +245,9 @@ describe("delivery", () => {
 
     expect(told).toContain(`${INSTRUCTIONS_LEAD}\n${V2}`)
     expect(await instructionsPreview(ctx, id)).toBe(told)
-    expect(
-      tools.find((tool) => tool.name === "search_tools")?.description,
-    ).toContain(CORE_RULE)
+    expect(tools.find((tool) => tool.name === "search")?.description).toContain(
+      CORE_RULE,
+    )
     const everyText = (every.content as Array<{ text?: string }>)[0]!.text!
     expect(everyText.startsWith(`${INSTRUCTIONS_LEAD}\n${V2}`)).toBe(true)
     expect(everyText).toContain("/memories/shared/units.md")
