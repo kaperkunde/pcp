@@ -20,6 +20,8 @@ import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { diffLines, type DiffLine } from "./line-merge"
 import { hiddenCharacter, withoutPresentation } from "./memories"
+import { canonicalJson } from "./permission-rules"
+import { readStrictYaml } from "./strict-yaml"
 
 /**
  * Skills: procedures the owner approved, for an assistant to follow when a
@@ -73,6 +75,13 @@ const MAX_FRONTMATTER_CHARS = 4_000
 
 export type SkillAuthor = "owner" | "assistant"
 export type SkillFile = { path: string; text: string }
+/**
+ * Frontmatter keys PCP does not use itself, which other tools write
+ * (license, metadata, allowed-tools, compatibility and anything else): kept
+ * with the skill and written back out as they were, so a skill imported from
+ * elsewhere goes back the way it came. Plain YAML values; nothing reads them.
+ */
+export type SkillExtra = Record<string, unknown>
 
 /** What a skill is: what the ciphertext holds. */
 export type SkillBody = {
@@ -85,6 +94,8 @@ export type SkillBody = {
   /** The server/tool names it uses. */
   tools: string[]
   files: SkillFile[]
+  /** Left out by skills stored before PCP kept other tools' keys. */
+  extra?: SkillExtra
 }
 
 export type SkillEntry = SkillBody & {
@@ -107,26 +118,33 @@ export type SkillText = {
   version: number | null
   tools: string[]
   body: string
+  /** The frontmatter's other keys, as they were. */
+  extra: SkillExtra
+  /** The pcp_format a repository's copy carries (lib/core/repos/). */
+  format: number | null
 }
 
 // ---- SKILL.md --------------------------------------------------------------
 
-/** Frontmatter keys other tools write that PCP leaves out of a skill. */
-const IGNORED_KEYS = new Set([
-  "license",
-  "metadata",
-  "allowed-tools",
-  "compatibility",
+/** The frontmatter keys PCP reads; every other one is kept as it is. */
+const KNOWN_KEYS = new Set([
+  "name",
+  "description",
+  "version",
+  "tools",
+  "pcp_format",
 ])
-const KNOWN_KEYS = new Set(["name", "description", "version", "tools"])
+/** How deep a kept key's value may nest. */
+const MAX_EXTRA_DEPTH = 8
+const MAX_EXTRA_KEY = 100
 
 const NOT_SKILL_MD =
   "A SKILL.md starts with YAML frontmatter between two --- lines, with the skill's name and a description of when to use it, then the steps in Markdown."
 
 /**
  * A SKILL.md's text as PCP reads it: the frontmatter's name, description,
- * version and tools, and the Markdown body. What it says is checked by
- * checkSkill, not here.
+ * version and tools, every other key as it is, and the Markdown body. What
+ * it says is checked by checkSkill, not here.
  */
 export function parseSkillMd(input: string): SkillText {
   const text = input.replace(/^﻿/, "").replace(/\r\n?/g, "\n")
@@ -155,37 +173,19 @@ export function parseSkillMd(input: string): SkillText {
     )
   }
 
-  let front: unknown
-
-  try {
-    front = YAML.parse(yaml, {
-      version: "1.2",
-      schema: "core",
-      customTags: [],
-      resolveKnownTags: false,
-      merge: false,
-      maxAliasCount: 0,
-      logLevel: "error",
-    })
-  } catch (error) {
-    throw invalid(
-      `The frontmatter is not YAML PCP can read: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
-    )
-  }
+  const front = readStrictYaml(yaml, "The frontmatter")
 
   if (front === null || typeof front !== "object" || Array.isArray(front)) {
     throw invalid(NOT_SKILL_MD)
   }
 
   const fields = front as Record<string, unknown>
-  const unknown = Object.keys(fields).filter(
-    (key) => !KNOWN_KEYS.has(key) && !IGNORED_KEYS.has(key),
-  )
+  const extra: SkillExtra = {}
 
-  if (unknown.length > 0) {
-    throw invalid(
-      `The frontmatter has ${unknown.map((key) => `"${key}"`).join(", ")}, which PCP does not take: a skill's frontmatter is name, description, version and tools.`,
-    )
+  for (const [key, value] of Object.entries(fields)) {
+    if (!KNOWN_KEYS.has(key)) {
+      extra[key] = value
+    }
   }
 
   const string = (key: string): string => {
@@ -204,6 +204,15 @@ export function parseSkillMd(input: string): SkillText {
 
   const version = fields.version
   const tools = fields.tools
+  const format = fields.pcp_format
+
+  if (
+    format !== undefined &&
+    format !== null &&
+    !(typeof format === "number" && Number.isInteger(format) && format > 0)
+  ) {
+    throw invalid("The frontmatter's pcp_format is a whole number, like 1.")
+  }
 
   if (
     version !== undefined &&
@@ -237,21 +246,37 @@ export function parseSkillMd(input: string): SkillText {
     version: typeof version === "number" ? version : null,
     tools: toolList,
     body,
+    extra,
+    format: typeof format === "number" ? format : null,
   }
 }
 
-/** A skill as its SKILL.md text: frontmatter, then the body. */
+/**
+ * A skill as its SKILL.md text: frontmatter, then the body. `format` is
+ * the pcp_format a repository's copy carries; the Skills page leaves it out.
+ */
 export function serializeSkillMd(
-  skill: Pick<SkillBody, "name" | "description" | "version" | "body" | "tools">,
+  skill: Pick<
+    SkillBody,
+    "name" | "description" | "version" | "body" | "tools" | "extra"
+  >,
+  { format }: { format?: number } = {},
 ): string {
   const front: Record<string, unknown> = {
     name: skill.name,
     description: skill.description,
     version: skill.version,
+    ...(format !== undefined ? { pcp_format: format } : {}),
     ...(skill.tools.length > 0 ? { tools: skill.tools } : {}),
   }
 
-  return `---\n${YAML.stringify(front, { lineWidth: 0 })}---\n\n${skill.body}\n`
+  for (const [key, value] of Object.entries(skill.extra ?? {})) {
+    if (!KNOWN_KEYS.has(key)) {
+      front[key] = value
+    }
+  }
+
+  return `---\n${YAML.stringify(front, { lineWidth: 0, aliasDuplicateObjects: false })}---\n\n${skill.body}\n`
 }
 
 // ---- Checks ----------------------------------------------------------------
@@ -337,13 +362,96 @@ function checkText(input: string, what: string, max: number): string {
 }
 
 /**
+ * Other tools' frontmatter keys, checked: plain values, nothing that does
+ * not show on screen, and no more than a frontmatter holds.
+ */
+function checkExtra(input: unknown): SkillExtra {
+  if (input === undefined || input === null) {
+    return {}
+  }
+
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw invalid("The frontmatter's other keys are a map of names to values.")
+  }
+
+  const walk = (value: unknown, depth: number, where: string): void => {
+    if (depth > MAX_EXTRA_DEPTH) {
+      throw invalid(
+        `The frontmatter's ${where} nests deeper than ${MAX_EXTRA_DEPTH} levels.`,
+      )
+    }
+
+    if (value === null || typeof value === "boolean") {
+      return
+    }
+
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) {
+        throw invalid(`The frontmatter's ${where} is not a number PCP keeps.`)
+      }
+      return
+    }
+
+    if (typeof value === "string") {
+      noHidden(value.replace(/\r\n?/g, "\n"), `frontmatter's ${where}`)
+      return
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => walk(item, depth + 1, where))
+      return
+    }
+
+    if (typeof value === "object") {
+      for (const [key, item] of Object.entries(value)) {
+        noHidden(key, `frontmatter's ${where}`)
+        walk(item, depth + 1, where)
+      }
+      return
+    }
+
+    throw invalid(`The frontmatter's ${where} is not a plain value.`)
+  }
+
+  const extra: SkillExtra = {}
+
+  for (const [key, value] of Object.entries(input)) {
+    if (KNOWN_KEYS.has(key)) {
+      throw invalid(`The frontmatter's ${key} is the skill's own.`)
+    }
+
+    if (!key.trim() || key.length > MAX_EXTRA_KEY) {
+      throw invalid(
+        `A frontmatter key is 1 to ${MAX_EXTRA_KEY} characters long.`,
+      )
+    }
+
+    noHidden(key, "frontmatter's key")
+    walk(value, 1, `"${key}"`)
+    extra[key] = value
+  }
+
+  if (
+    Object.keys(extra).length > 0 &&
+    YAML.stringify(extra, { lineWidth: 0, aliasDuplicateObjects: false })
+      .length > MAX_FRONTMATTER_CHARS
+  ) {
+    throw invalid(
+      `Keep the frontmatter under ${MAX_FRONTMATTER_CHARS} characters, its other keys included.`,
+    )
+  }
+
+  return extra
+}
+
+/**
  * Everything a skill says, checked and made plain (newlines, the
  * description on one line). Text that has just arrived goes through
  * `arrived` first; what an owner's answer writes is checked as they read it.
  */
 export function checkSkill(
   input: SkillInput,
-): Omit<SkillBody, "version"> & { files: SkillFile[] } {
+): Omit<SkillBody, "version"> & { files: SkillFile[]; extra: SkillExtra } {
   const name = checkSkillName(input.name)
   const description = checkText(
     input.description.replace(/\s+/g, " ").trim(),
@@ -391,7 +499,33 @@ export function checkSkill(
     }
   })
 
-  return { name, description, body, tools, files: checked }
+  return {
+    name,
+    description,
+    body,
+    tools,
+    files: checked,
+    extra: checkExtra(input.extra),
+  }
+}
+
+/** Every string in a kept value, without its emoji presentation selectors. */
+function plainValues(value: unknown): unknown {
+  if (typeof value === "string") {
+    return withoutPresentation(value)
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(plainValues)
+  }
+
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, plainValues(item)]),
+    )
+  }
+
+  return value
 }
 
 /** Text that has just arrived, before anything checks or shows it. */
@@ -405,7 +539,21 @@ function arrived(input: SkillInput): SkillInput {
       path: file.path,
       text: withoutPresentation(file.text),
     })),
+    ...(input.extra !== undefined
+      ? { extra: plainValues(input.extra) as SkillExtra }
+      : {}),
   }
+}
+
+/**
+ * A skill that has just arrived from outside PCP (a linked repository),
+ * checked as the owner's own import is: prose without its emoji
+ * presentation selectors, then everything checkSkill checks.
+ */
+export function checkArrivedSkill(
+  input: SkillInput,
+): ReturnType<typeof checkSkill> {
+  return checkSkill(arrived(input))
 }
 
 // ---- Storage ---------------------------------------------------------------
@@ -425,6 +573,9 @@ function seal(ctx: VaultContext, id: string, body: SkillBody) {
         body: body.body,
         tools: body.tools,
         files: body.files,
+        ...(body.extra && Object.keys(body.extra).length > 0
+          ? { extra: body.extra }
+          : {}),
       }),
       aad(id),
     ),
@@ -444,6 +595,7 @@ function unseal(ctx: VaultContext, row: Skill): SkillEntry {
     body: body.body,
     tools: body.tools ?? [],
     files: body.files ?? [],
+    extra: body.extra ?? {},
     author: row.author === "assistant" ? "assistant" : "owner",
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -577,6 +729,7 @@ export async function importSkill(
     description: parsed.description,
     body: parsed.body,
     tools: parsed.tools,
+    extra: parsed.extra,
   })
 }
 
@@ -609,7 +762,8 @@ async function write(
 
 /**
  * The owner's edit of a skill's name, description, tools and steps; its
- * files stay as they are. Every change is a new version.
+ * files, and other tools' frontmatter keys unless given, stay as they are.
+ * Every change is a new version.
  */
 export async function updateSkill(
   ctx: VaultContext,
@@ -617,13 +771,95 @@ export async function updateSkill(
   input: Omit<SkillInput, "files">,
 ): Promise<{ version: number }> {
   const { entries, entry } = await ownerEntry(ctx, id)
-  const skill = checkSkill(arrived({ ...input, files: entry.files }))
+  const skill = checkSkill(
+    arrived({
+      ...input,
+      files: entry.files,
+      extra: input.extra ?? entry.extra,
+    }),
+  )
 
   if (taken(entries, skill.name, id)) {
     throw takenError(skill.name)
   }
 
   return { version: await write(ctx, entry, skill, "owner") }
+}
+
+/**
+ * A whole skill the owner approved as it is, files and all, from a linked
+ * repository (lib/core/repos/apply.ts): a new one at the version it carries,
+ * or onto `id` at that version, or one past the skill's own when that is not
+ * higher, so a version never goes back.
+ */
+export async function saveSkillByOwner(
+  ctx: VaultContext,
+  id: string | null,
+  input: SkillInput & { version: number },
+): Promise<{ id: string; name: string; version: number }> {
+  if (!Number.isInteger(input.version) || input.version < 1) {
+    throw invalid("A skill's version is a whole number, 1 or more.")
+  }
+
+  const skill = checkSkill(arrived(input))
+
+  if (id === null) {
+    const entries = await load(ctx)
+
+    if (taken(entries, skill.name)) {
+      throw takenError(skill.name)
+    }
+
+    await roomForOneMore(ctx)
+    const newSkillId = newId()
+
+    await db().skill.create({
+      data: {
+        id: newSkillId,
+        vaultId: ctx.vaultId,
+        author: "owner",
+        ciphertext: seal(ctx, newSkillId, { ...skill, version: input.version }),
+      },
+    })
+
+    return { id: newSkillId, name: skill.name, version: input.version }
+  }
+
+  const { entries, entry } = await ownerEntry(ctx, id)
+
+  if (taken(entries, skill.name, id)) {
+    throw takenError(skill.name)
+  }
+
+  const content = (value: Omit<SkillBody, "version">) =>
+    canonicalJson([
+      value.name,
+      value.description,
+      value.body,
+      value.tools,
+      value.files.map((file) => [file.path, file.text]),
+      value.extra ?? {},
+    ])
+  const sameText = content(skill) === content(entry)
+
+  // The same skill is left as it is; its version moves only forward.
+  if (sameText && input.version <= entry.version) {
+    return { id, name: entry.name, version: entry.version }
+  }
+
+  const version = sameText
+    ? input.version
+    : Math.max(input.version, entry.version + 1)
+
+  await db().skill.update({
+    where: { id },
+    data: {
+      author: "owner",
+      ciphertext: seal(ctx, id, { ...skill, version }),
+    },
+  })
+
+  return { id, name: skill.name, version }
 }
 
 /**
@@ -1064,6 +1300,7 @@ function change(
         body: entry.body,
         tools: entry.tools,
         files: entry.files,
+        extra: entry.extra ?? {},
       }
     : null
 
@@ -1095,6 +1332,7 @@ function deleteAsk(entry: SkillEntry): SkillOutcome {
           body: entry.body,
           tools: entry.tools,
           files: entry.files,
+          extra: entry.extra ?? {},
         },
         after: null,
       },
@@ -1117,6 +1355,7 @@ function fromText(
     body: parsed.body,
     tools: parsed.tools,
     files: entry?.files ?? [],
+    extra: parsed.extra,
   }
 }
 
@@ -1447,6 +1686,7 @@ function asShown(after: SkillBody): Omit<SkillBody, "version"> {
       value.body,
       value.tools,
       value.files.map((file) => [file.path, file.text]),
+      canonicalJson(value.extra ?? {}),
     ])
 
   if (canonical(skill) !== canonical(after)) {

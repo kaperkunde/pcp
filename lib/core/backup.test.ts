@@ -432,6 +432,46 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
   })
 
+  it("carries a server's version in a linked repository, and restores a file from before it as none", async () => {
+    const { ctx, serverId } = await populate()
+    await db().mcpServer.update({
+      where: { id: serverId },
+      data: { syncVersion: 4 },
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await db().mcpServer.update({
+      where: { id: serverId },
+      data: { syncVersion: 9 },
+    })
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } }),
+    ).toMatchObject({ syncVersion: 4 })
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    for (const row of older.tables.servers as Record<string, unknown>[]) {
+      delete row.syncVersion
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } }),
+    ).toMatchObject({ syncVersion: null })
+  })
+
   it("carries a token's instructions as they are, and restores a file from before them as not set yet", async () => {
     const { ctx, token } = await populate()
     const { tokenId } = (await resolveApiToken(token))!

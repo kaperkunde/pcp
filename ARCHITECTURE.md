@@ -857,9 +857,13 @@ the owner's or one they read:
   Limits are in `lib/core/constants.ts` (`MAX_SKILL_*`, `MAX_SKILLS`), and
   text with characters that do not show on screen is refused, as for a
   memory (`hiddenCharacter`). The frontmatter is read with `yaml` in its
-  core schema, no aliases or custom tags; keys other tools write
-  (`license`, `allowed-tools`, `metadata`, `compatibility`) are left out,
-  any other is refused, so what the owner reads is the skill.
+  core schema, plain (`lib/core/strict-yaml.ts`: no anchors, aliases or
+  tags of any kind). Keys other tools write (`license`, `allowed-tools`,
+  `metadata`, `compatibility`, any other) are kept in the ciphertext as
+  `extra` and written back out after PCP's own, so a skill imported from
+  elsewhere goes back the way it came; they are checked like the rest
+  (nothing hidden, plain values, within the frontmatter's size) and shown
+  in the SKILL.md the owner reads. Nothing in PCP acts on them.
 - **Versions.** Every change, the owner's or an approved one, is the next
   version; the SKILL.md PCP serializes carries it.
 - **Which tokens see it.** `api_token.all_skills` (on by default), or the
@@ -892,6 +896,83 @@ the owner's or one they read:
 - **Exported** as rows (`skill`, `api_token_skill`, `all_skills`); an older
   file restores with none, every token seeing every skill. Deleting the
   vault wipes them.
+
+## Shared items in repositories
+
+The owner can link GitHub repositories so that what is useful and not
+secret is shared between PCP instances, organizations and people, and
+changed and reviewed in GitHub: skills, wrappers (browser flows among them),
+API endpoints and MCP servers. A repository is never a backup and never
+holds a secret or anything else of the vault's. `lib/core/repos/` is the
+file format both ways and what sync needs to review a change; linking,
+the GitHub client and sync itself build on it.
+
+- **Layout** (`layout.ts`): plain folders, native formats, names a person
+  reads, and no index or manifest. `skills/<name>/SKILL.md` and its
+  reference files beside it (an Agent Skills repository reads as is);
+  `wrappers/<name>/wrapper.yaml` with one `<tool>.js` per tool, and
+  `flows/<name>/` likewise for a wrapper that drives the browser
+  (`isFlow`); `endpoints/<name>/openapi.json` or `openapi.yaml` (the
+  document as PCP holds it, in the format it came in) with `pcp.yaml`;
+  `servers/<name>.yaml` for an MCP server. Names are slugs (a skill's name,
+  a server's short name). Wrappers, flows, endpoints and servers share the
+  vault's server names, so two of them by one name, or two items at one
+  path, are refused. Other files (a README, CI, dotfiles) are no item's and
+  are left alone.
+- **Documents** (`documents.ts`): `serializeItem` writes an item as files,
+  the same item always as the same text; `parseItem` and `readRepo` read
+  files back into what they propose. Secrets appear by name only, an OAuth
+  client by its ID; never a value, a token, a row id or an address PCP
+  found itself (a JMAP session's, a token endpoint's). A wrapper's calls
+  are `server/tool` by short name as `get_wrapper` shows them, and its
+  secret places by secret name, tool and argument. `apply.ts resolveItem`
+  says what the names are in this vault: a server or tool with nothing to
+  it is a problem (never a guess), a secret the vault lacks is listed.
+- **Untrusted input.** A repository with a path that leaves its folder,
+  hides a character, or clashes with another but for case is refused
+  whole, as is an item past `repos/limits.ts` (files per item, bytes per
+  file and per item, path length). PCP's YAML is read plain (no anchors,
+  aliases or tags), unknown keys are refused, nothing that does not show
+  on screen is taken (prose loses its emoji presentation selectors first),
+  and each kind's own checks run before anything is proposed: a skill's
+  (`checkSkill`), a program's compile and size, a schema's generation with
+  its edits (`generateEndpointTools`, `readPatches`), addresses, headers,
+  logins and OAuth fields as the owner's forms check them.
+- **Formats.** Every document carries `pcp_format` (a SKILL.md written
+  elsewhere may leave it out, reading as 1). A parser reads every format up
+  to `PCP_FORMAT` and refuses a newer one in so many words ("written by a
+  newer PCP"), so an older PCP never half-reads what a newer one wrote. A
+  change to a document's shape stays backward compatible: a field is added
+  with a default (what a document without it always meant), never
+  repurposed or removed, and `PCP_FORMAT` goes up by one.
+- **Versions.** Each document carries `version`, a whole number: a skill's
+  own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
+  (null reads as 1), which applying an item sets to the document's. PCP's
+  own edits leave it alone; sync counts it on when it writes a changed
+  document. It is a column rather than derived because nothing on those
+  rows counts changes (`updated_at` moves with every status write) and a
+  hash has no order. Sync itself compares hashes: `hash.ts localHash` is
+  SHA-256 of the canonical JSON of the serialized files, so formatting in
+  the repository never reads as a change.
+- **Review** (`review.ts`): an incoming item against the vault's (or none),
+  file by file (`diffLines`), with a flag for each thing that would reach
+  further: a new or changed program, new calls, calls on the wrapper's
+  approval instead of the token's levels, a new or changed secret place; an
+  endpoint's base URL, OpenAPI document or edits, read-only turned off, its
+  sign-in or a secret's name; `publicOnly` turned off; an MCP server's
+  address or sign-in; a skill's new tools; a character that does not show
+  on screen anywhere. `textOnly` is true only when an existing skill's
+  description, steps or reference files change and nothing is flagged: the
+  one change sync may apply by itself, from a repository the owner trusts.
+  Everything else waits for the owner.
+- **Apply** (`apply.ts applyItem`) writes what the owner approved with the
+  owner's own paths (`saveSkillByOwner`, `saveWrapperByOwner`,
+  `createEndpoint`/`updateEndpoint`, `createServer`/`updateServer`), and
+  gives the row the item's name. An endpoint read from a URL keeps its
+  address, the approved text becoming its copy. A secret the vault lacks is
+  never made up: the item is saved without it (a wrapper without that
+  secret's places, an endpoint or server without that credential) and a
+  note tells the owner to add it on PCP's page.
 
 ## Instructions for an assistant
 

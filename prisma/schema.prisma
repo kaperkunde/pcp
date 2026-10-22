@@ -560,6 +560,12 @@ model McpServer {
   /// or sign-in changes.
   davHomeUrl     String? @map("dav_home_url")
 
+  /// mcp, openapi, wrapper: the version of this item's document in a linked
+  /// repository (lib/core/repos/), as last read from or written to one; null
+  /// reads as 1. PCP's own edits leave it alone: sync counts it on when it
+  /// writes a changed document.
+  syncVersion    Int?    @map("sync_version")
+
   tools              McpTool[]
   tokens             ApiTokenServer[]
   oauthStates        OAuthState[]
