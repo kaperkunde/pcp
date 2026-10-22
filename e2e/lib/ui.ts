@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test"
+import { expect, type Locator, type Page } from "@playwright/test"
 
 import { OWNER_PASSWORD } from "./auth"
 
@@ -167,6 +167,23 @@ export function permissionFrom(text: string): { path: string; id: string } {
 /** Accepts the next confirm() the page shows (Delete, Copy access…). */
 export function acceptNextDialog(page: Page) {
   page.once("dialog", (dialog) => void dialog.accept())
+}
+
+/**
+ * Clicks a button once React has hydrated it. A button whose only handler
+ * is React's (onClick, no form) does nothing when clicked on a page that has
+ * loaded but not hydrated yet, which a full load in the dev server can take
+ * a while to do.
+ */
+export async function clickHydrated(button: Locator) {
+  await expect
+    .poll(() =>
+      button.evaluate((element) =>
+        Object.keys(element).some((key) => key.startsWith("__reactProps$")),
+      ),
+    )
+    .toBe(true)
+  await button.click()
 }
 
 /** The bell in the sidebar that lists what waits for the owner. */

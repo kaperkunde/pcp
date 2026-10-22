@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test"
 
 import { startGitHub, type FakeGitHub } from "../fixtures/github"
-import { openRequestFromBell } from "../lib/ui"
+import { clickHydrated, openRequestFromBell } from "../lib/ui"
 
 // Linked repositories against the fake GitHub (e2e/fixtures/github.ts): the
 // owner links a public repository from Settings, adds a skill from it after
@@ -38,7 +38,7 @@ test("the owner links a repository from Settings", async ({ page }) => {
   await page.goto("/settings")
   await page.getByRole("link", { name: /Repositories/ }).click()
   await expect(
-    page.getByRole("heading", { name: "Repositories" }),
+    page.getByRole("heading", { name: "Repositories", exact: true }),
   ).toBeVisible()
 
   await page.getByRole("button", { name: "Add a repository" }).click()
@@ -72,7 +72,7 @@ test("adds a skill from it after reading every file", async ({ page }) => {
   await expect(page.getByTestId("repo-flags")).toContainText(
     "nothing that reaches further",
   )
-  await page.getByRole("button", { name: "Add this item" }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add this item" }))
   await expect(page.getByText("Added 1 of 1.")).toBeVisible()
 
   await page.goto("/skills")
@@ -91,11 +91,12 @@ test("a change from the untrusted repository waits in the bell until the owner a
 
   await page.goto("/settings/repositories")
   await page.getByRole("link", { name: new RegExp(NAME) }).click()
-  await page.getByRole("button", { name: "Sync now" }).first().click()
+  await clickHydrated(page.getByRole("button", { name: "Sync now" }).first())
   await expect(page.getByText(/not one you trust/)).toBeVisible()
 
   await page.reload()
-  await openRequestFromBell(page, /Change to review in skills\//)
+  // This run's change: an earlier run's may still wait in the bell.
+  await openRequestFromBell(page, `Change to review in skills/${SKILL}`)
   await expect(page.getByTestId("repo-files")).toContainText(
     `Take better notes (${RUN}).`,
   )
@@ -104,7 +105,7 @@ test("a change from the untrusted repository waits in the bell until the owner a
   await expect(page.getByText(`Take notes (${RUN}).`)).toBeVisible()
 
   await page.goBack()
-  await page.getByRole("button", { name: "Approve" }).click()
+  await clickHydrated(page.getByRole("button", { name: "Approve" }))
   // The answer, or the page read again once it was applied.
   await expect(
     page.getByText(/Applied as you were shown it|in step, or you answered/),
