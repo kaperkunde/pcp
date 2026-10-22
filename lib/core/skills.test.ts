@@ -179,6 +179,8 @@ describe("SKILL.md", () => {
       version: null,
       tools: ["postcards/send_postcard", "postcards/gone_tool"],
       body: "# Sending postcards\n\n1. Look up the address in addresses.md.\n2. Send it with postcards/send_postcard.",
+      extra: {},
+      format: null,
     })
   })
 
@@ -193,28 +195,38 @@ describe("SKILL.md", () => {
     const text = serializeSkillMd(skill)
 
     expect(text.startsWith("---\nname: release-notes\n")).toBe(true)
-    expect(parseSkillMd(text)).toEqual(skill)
+    expect(parseSkillMd(text)).toEqual({ ...skill, extra: {}, format: null })
     expect(
       parseSkillMd(serializeSkillMd({ ...skill, tools: [] })).tools,
     ).toEqual([])
   })
 
-  it("takes tools as one line, leaves out what other tools write, and refuses the rest", () => {
-    expect(
-      parseSkillMd(
-        "---\nname: a\ndescription: b\ntools: x/y, z/w\nlicense: MIT\nallowed-tools: Bash\n---\nBody",
-      ),
-    ).toMatchObject({ tools: ["x/y", "z/w"], body: "Body" })
+  it("takes tools as one line, keeps what other tools write, and refuses what is not plain YAML", () => {
+    const text =
+      "---\nname: a\ndescription: b\ntools: x/y, z/w\nlicense: MIT\nallowed-tools: Bash\nrun: rm -rf /\n---\nBody"
+
+    expect(parseSkillMd(text)).toMatchObject({
+      tools: ["x/y", "z/w"],
+      body: "Body",
+      extra: { license: "MIT", "allowed-tools": "Bash", run: "rm -rf /" },
+    })
+    // Written back out after PCP's own keys, as they were.
+    expect(serializeSkillMd({ ...parseSkillMd(text), version: 2 })).toContain(
+      "license: MIT\nallowed-tools: Bash\nrun: rm -rf /\n---",
+    )
     expect(() => parseSkillMd("# No frontmatter")).toThrow(/frontmatter/)
     expect(() => parseSkillMd("---\nname: a\n# never closed")).toThrow(
       /closing ---/,
     )
     expect(() =>
-      parseSkillMd("---\nname: a\ndescription: b\nrun: rm -rf /\n---\nx"),
-    ).toThrow(/"run"/)
-    expect(() =>
       parseSkillMd("---\nname: &n a\ndescription: *n\n---\nx"),
     ).toThrow(/YAML/)
+    expect(() =>
+      parseSkillMd("---\nname: &n a\ndescription: b\n---\nx"),
+    ).toThrow(/anchor/)
+    expect(() =>
+      parseSkillMd("---\nname: a\ndescription: !!binary aGk=\n---\nx"),
+    ).toThrow(/tag/)
     expect(() =>
       parseSkillMd("---\nname: a\ndescription: b\nversion: two\n---\nx"),
     ).toThrow(/whole number/)
@@ -327,6 +339,38 @@ describe("what a skill may hold", () => {
     await expect(
       createSkill(ctx, { ...base, name: "one-too-many" }),
     ).rejects.toThrow(/200 skills/)
+  })
+
+  it("keeps other tools' frontmatter keys through the owner's import and edits, and checks them", async () => {
+    const { id } = await importSkill(
+      ctx,
+      "---\nname: pdf\ndescription: Read PDFs.\nlicense: Apache-2.0\nmetadata:\n  author: someone\n  tags: [a, b]\n---\nSteps.",
+    )
+    const extra = {
+      license: "Apache-2.0",
+      metadata: { author: "someone", tags: ["a", "b"] },
+    }
+    expect((await getSkill(ctx, id)).extra).toEqual(extra)
+
+    await updateSkill(ctx, id, {
+      name: "pdf",
+      description: "Read PDF files.",
+      body: "Steps.",
+      tools: [],
+    })
+    const skill = await getSkill(ctx, id)
+    expect(skill.extra).toEqual(extra)
+    expect(skill.text).toContain("license: Apache-2.0")
+
+    expect(() =>
+      checkSkill({ ...base, extra: { note: "hidden\u200Bhere" } }),
+    ).toThrow(/does not show/)
+    expect(() => checkSkill({ ...base, extra: { name: "x" } })).toThrow(
+      /skill's own/,
+    )
+    expect(() =>
+      checkSkill({ ...base, extra: { big: "x".repeat(5_000) } }),
+    ).toThrow(/under/)
   })
 
   it("counts a new version with each of the owner's changes", async () => {
