@@ -16,6 +16,7 @@ import { json, startTestApi, type TestApi } from "../openapi/test-api"
 import { decidePermission, getPermissionView } from "../permissions"
 import { createSecret } from "../secrets"
 import { scratchDatabase } from "../test-db"
+import { catalogueHandle, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 
@@ -111,7 +112,14 @@ async function connect(): Promise<Client> {
 }
 
 async function call(name: string, args: Record<string, unknown>) {
-  const result = await (await connect()).callTool({ name, arguments: args })
+  const connected = await connect()
+  const result = await connected.callTool({
+    name,
+    arguments:
+      name === "call_tool" || name === "call_read_only_tool"
+        ? await withCallHandle(connected, args)
+        : args,
+  })
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -325,7 +333,7 @@ describe("calling a wrapper's tool", () => {
     })
 
     expect(result.isError).toBe(true)
-    expect(result.text).toContain('"word" is required')
+    expect(result.text).toContain('"word" is missing')
     expect(api.requests).toHaveLength(0)
   })
 
@@ -417,9 +425,9 @@ describe("calling a wrapper's tool", () => {
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
     await writeToolAccess(scope.tokenId, endpointId, "echo", "blocked")
 
+    // Described before, so its handle is genuine; blocked now all the same.
     const result = await call("call_tool", {
-      server: "lookup",
-      tool: "lookup",
+      call_handle: await catalogueHandle(scope, "lookup", "lookup"),
       arguments: { word: "hi" },
     })
 

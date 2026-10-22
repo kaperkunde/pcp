@@ -27,6 +27,7 @@ import {
   saveResourceConfig,
 } from "../resources/state"
 import { scratchDatabase } from "../test-db"
+import { describedHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import {
   keepBytes,
@@ -487,10 +488,13 @@ return { file: got.file, sent: sent.includes("Thank you") }
         const parts = (result as { content: Array<{ text?: string }> }).content
         return parts.map((part) => part.text ?? "").join("\n")
       }
-      const browser = (tool: string, args: Record<string, unknown>) =>
+      const browser = async (tool: string, args: Record<string, unknown>) =>
         client.callTool({
           name: "call_tool",
-          arguments: { server: "browser", tool, arguments: args },
+          arguments: {
+            call_handle: await describedHandle(client, "browser", tool),
+            arguments: args,
+          },
         })
       /** The secret at the end of a link, as the route takes it. */
       const secretOf = (url: string) => url.split("/").pop()!

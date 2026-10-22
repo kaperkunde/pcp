@@ -191,6 +191,32 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   })
   expect(unknown.body.result?.isError).toBe(true)
   expect(toolText(unknown)).toContain("no tool called no_such_tool")
+
+  // call_tool takes only describe_tool's call_handle. A name in its place
+  // answers with the tool described, so the next call can be the right one.
+  const named = await callTool(baseURL!, token, "call_tool", {
+    call_handle: `${SLUG}/add_numbers`,
+    arguments: { a: 1, b: 2 },
+  })
+  expect(named.body.result?.isError).toBe(true)
+  expect(toolText(named)).toContain("not a tool's name")
+  const handle = /"call_handle": "(ch_[a-z0-9_]+)"/.exec(toolText(named))?.[1]
+  expect(handle, toolText(named)).toBeTruthy()
+  const retried = await callTool(baseURL!, token, "call_tool", {
+    call_handle: handle,
+    arguments: { a: 1, b: 2 },
+  })
+  expect(toolText(retried)).toBe("3")
+
+  // Arguments that do not fit the schema never reach the server.
+  const calls = upstream.calls.length
+  const wrong = await callTool(baseURL!, token, "call_tool", {
+    call_handle: handle,
+    arguments: { a: "one" },
+  })
+  expect(wrong.body.result?.isError).toBe(true)
+  expect(toolText(wrong)).toContain("nothing was run or asked")
+  expect(upstream.calls.length).toBe(calls)
 })
 
 test("picks up tools the server adds later", async ({ baseURL }) => {

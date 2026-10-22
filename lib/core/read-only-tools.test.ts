@@ -14,6 +14,7 @@ import type { PermissionExecutor } from "./permissions"
 import { appendRequestLog } from "./request-log"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
+import { catalogueHandle, withCallHandle } from "./test-handles"
 import { writeToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
 
@@ -93,7 +94,13 @@ async function connect() {
 }
 
 async function call(name: string, args: Record<string, unknown>) {
-  const result = await client.callTool({ name, arguments: args })
+  const result = await client.callTool({
+    name,
+    arguments:
+      name === "call_tool" || name === "call_read_only_tool"
+        ? await withCallHandle(client, args)
+        : args,
+  })
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -193,9 +200,9 @@ describe("call_read_only_tool", () => {
   })
 
   it("keeps the owner's levels: a blocked tool is refused, an ask asks", async () => {
+    // A handle for it from before the owner blocked it.
     const blocked = await call("call_read_only_tool", {
-      server: "postcards",
-      tool: "hidden_cards",
+      call_handle: await catalogueHandle(scope, "postcards", "hidden_cards"),
     })
     expect(blocked.isError).toBe(true)
     expect(blocked.text).toContain("blocked")

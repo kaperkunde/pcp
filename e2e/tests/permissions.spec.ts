@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test"
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import {
   callTool,
+  describeForCall,
   initialize,
   mcpRequest,
   mcpToolCall2026,
@@ -227,6 +228,15 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
     arguments: { to: "Ada", message: "Hi" },
   }
   const asked = await callTool(baseURL!, token, "call_tool", postcard)
+  // The handle describe_tool gave before the owner blocked the tool.
+  const described = await describeForCall(
+    baseURL!,
+    token,
+    SLUG,
+    "send_postcard",
+  )
+  expect("handle" in described).toBe(true)
+  const handle = (described as { handle: string }).handle
   await page.goto(permissionFrom(toolText(asked)).path)
   await page.getByRole("button", { name: "Block", exact: true }).click()
   await expect(page.getByTestId("permission-outcome")).toBeVisible()
@@ -237,13 +247,16 @@ test("a blocked tool is hidden from the assistant and refused; a copy of the acc
   })
   expect(toolText(search)).not.toContain(`${SLUG}/send_postcard`)
 
-  const described = await callTool(baseURL!, token, "describe_tool", {
+  const hidden = await callTool(baseURL!, token, "describe_tool", {
     server: SLUG,
     tool: "send_postcard",
   })
-  expect(described.body.result?.isError).toBe(true)
+  expect(hidden.body.result?.isError).toBe(true)
 
-  const refused = await callTool(baseURL!, token, "call_tool", postcard)
+  const refused = await callTool(baseURL!, token, "call_tool", {
+    call_handle: handle,
+    arguments: postcard.arguments,
+  })
   expect(refused.body.result?.isError).toBe(true)
   expect(toolText(refused)).toContain("blocked")
 

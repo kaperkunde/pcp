@@ -2127,8 +2127,12 @@ message each (`app/mcp/route.ts`). The tools:
   published it, whether the tool runs at once or asks first, and for an API
   endpoint's tool, `returns`: an outline of its success answer read from the
   schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text the
-  schema marks base64 (`format: byte`) shows as `string (base64)`.
-- `call_tool(server, tool, arguments, fields?, decode?, keep?)` opens a connection
+  schema marks base64 (`format: byte`) shows as `string (base64)`. First
+  in its answer is the tool's `call_handle` (below).
+- `call_tool(call_handle, arguments, fields?, decode?, keep?)` takes no
+  server or tool name, only the handle `describe_tool` gave, so a tool is
+  always described before it is called. It checks the arguments against
+  the tool's stored inputSchema, then opens a connection
   to the upstream with the configured credential (header secret or OAuth
   token, refreshed by the SDK when needed), calls the tool, and passes the
   content back shaped for the assistant (`lib/core/answers.ts`): `fields`
@@ -2141,11 +2145,48 @@ message each (`app/mcp/route.ts`). The tools:
   become handles (below). A call that waits for the owner keeps its fields,
   decode and keep paths on the request (`permission_request.fields`,
   `permission_request.decode`, `permission_request.keep`).
+  `call_read_only_tool` takes the same handle.
 - `check_permission(id)`, `check_server(server)`, `register_server(...)`
   and `propose_tool_access(changes)` belong to the permission flow below.
 - `read_result(id, offset?, length?, find?)` reads a slice of an answer
   PCP shortened and kept whole, or of a kept value; a file that is not text
   is described, not shown (below).
+
+### Call handles
+
+`/mcp` keeps no session, so a call handle carries what it needs
+(`lib/core/call-handles.ts`): `ch_<ref>_<tag>`, where the ref is the
+`mcp_tool` row's id in base32 (opaque, never a name) and the tag is an
+HMAC-SHA256 under a key derived with HKDF from the vault's data key ("pcp
+call handle v1"), never stored. The tag holds an identity MAC (token,
+server, tool name, row id and the first bytes of the schema's hash), those
+bytes, and a 128-bit call MAC over the same with the whole hash of the
+tool's canonical inputSchema (`canonicalJson`). So a handle cannot be made
+without the vault's key, works for its own token only, and goes stale when
+the schema changes. `call_tool` resolves it against the catalogue as it is
+and answers, as a tool error and with nothing run or asked:
+
+- a genuine handle for an older schema: "The tool changed since you
+  described it", with the tool described again and a fresh handle;
+- a name, or anything else that is not a handle: how to get one, and when
+  the text names a tool the token sees (`server/tool`, or a name only one
+  server has), that tool described, so recovery takes one round trip;
+- a handle changed or made up, or another token's: a refusal;
+- a handle for a tool the token no longer reaches (removed, its server
+  gone, off or out of the token's reach): a plain refusal; a blocked one
+  says it is blocked.
+
+Then the arguments are checked against the stored inputSchema
+(`checkArguments` in `wrappers/schema-check.ts`: types, required, enum,
+const, properties, additionalProperties, items and the combinators) before
+`withPermission` asks or anything runs: arguments
+that cannot work are answered with every problem and the schema, and leave
+no permission request for the owner. The check is lenient where the schema
+says more than it reads: a `$ref`, `patternProperties` or
+`unevaluatedProperties` passes, OpenAPI's `nullable` is honoured, `oneOf`
+counts as `anyOf`, and a kept result's handle stands for what goes there.
+`run_code`'s `pcp.call` and a wrapper's calls keep naming a server and a
+tool: they are the gateway's own, decided by `resolveCall` as before.
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the
