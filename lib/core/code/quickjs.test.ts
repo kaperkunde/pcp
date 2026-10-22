@@ -28,7 +28,7 @@ describe("what a program can reach", () => {
     expect(result.kind).toBe("done")
     expect(JSON.parse((result as { returned: string }).returned)).toEqual({
       node: Array(8).fill("undefined"),
-      pcp: ["call", "keep", "read", "step", "tools"],
+      pcp: ["call", "image", "keep", "read", "step", "tools", "video"],
       frozen: true,
     })
   })
@@ -84,6 +84,37 @@ describe("talking to the bridge", () => {
       returned:
         '{"one":"call answered","two":"read answered","three":"keep answered"}',
       output: "got call answered read answered\n",
+    })
+  })
+
+  it("sends an image or a video as its handle and options, never its bytes", async () => {
+    const seen: Array<{ op: string; payload: unknown }> = []
+    const result = await run(
+      `
+      const small = await pcp.image.compress({ $result: "r1", type: "image/png" }, { maxWidth: 800, grayscale: true })
+      const shots = await pcp.video.frames("r2")
+      return [small, shots]
+    `,
+      async (op, payload) => {
+        seen.push({ op, payload })
+        return { ok: true, value: { from: op } }
+      },
+    )
+
+    expect(seen).toEqual([
+      {
+        op: "media",
+        payload: {
+          kind: "image",
+          id: "r1",
+          options: { maxWidth: 800, grayscale: true },
+        },
+      },
+      { op: "media", payload: { kind: "frames", id: "r2", options: {} } },
+    ])
+    expect(result).toMatchObject({
+      kind: "done",
+      returned: '[{"from":"media"},{"from":"media"}]',
     })
   })
 
@@ -420,7 +451,7 @@ describe("how a run ends", () => {
     )
     expect(capped).toMatchObject({ kind: "error", reason: "calls" })
     expect((capped as { message: string }).message).toContain(
-      "at most 200 things",
+      "at most 220 things",
     )
 
     const thrown = await run(`throw new Error("mine")`)

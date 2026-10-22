@@ -79,6 +79,32 @@ const SIGNATURES: Array<{ type: string; bytes: number[] }> = [
   { type: "application/zip", bytes: [0x50, 0x4b, 0x03, 0x04] },
 ]
 
+/** Whether `text` (ASCII) stands in `bytes` at `at`. */
+function has(bytes: Uint8Array, at: number, text: string): boolean {
+  return (
+    bytes.length >= at + text.length &&
+    [...text].every((char, index) => bytes[at + index] === char.charCodeAt(0))
+  )
+}
+
+/**
+ * The brands of an ISO media file (its `ftyp` box) that are not a video:
+ * still images in the same container, and sound alone. QuickTime's is a
+ * video of its own type; every other brand is an MP4.
+ */
+const FTYP_BRANDS: Record<string, string> = {
+  avif: "image/avif",
+  avis: "image/avif",
+  heic: "image/heic",
+  heix: "image/heic",
+  heim: "image/heic",
+  heis: "image/heic",
+  mif1: "image/heif",
+  msf1: "image/heif",
+  "M4A ": "audio/mp4",
+  "qt  ": "video/quicktime",
+}
+
 /** The media type a binary file's first bytes name, or null when unknown. */
 export function sniffMediaType(bytes: Uint8Array): string | null {
   const found = SIGNATURES.find(
@@ -87,7 +113,36 @@ export function sniffMediaType(bytes: Uint8Array): string | null {
       signature.every((byte, index) => bytes[index] === byte),
   )
 
-  return found?.type ?? null
+  if (found) {
+    return found.type
+  }
+
+  // RIFF, its size, then the form: WebP's is "WEBP".
+  if (has(bytes, 0, "RIFF") && has(bytes, 8, "WEBP")) {
+    return "image/webp"
+  }
+
+  // An ISO media file (MP4, QuickTime, HEIF): its size, "ftyp", its brand.
+  if (has(bytes, 4, "ftyp") && bytes.length >= 12) {
+    const brand = String.fromCharCode(...bytes.subarray(8, 12))
+
+    return FTYP_BRANDS[brand] ?? "video/mp4"
+  }
+
+  // Matroska's EBML header, whose doc type says when it is a WebM.
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x1a &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0xdf &&
+    bytes[3] === 0xa3
+  ) {
+    const header = String.fromCharCode(...bytes.subarray(4, 64))
+
+    return header.includes("webm") ? "video/webm" : "video/x-matroska"
+  }
+
+  return null
 }
 
 /**
@@ -127,6 +182,12 @@ const BY_EXTENSION: Record<string, string> = {
   ods: "application/vnd.oasis.opendocument.spreadsheet",
   mp3: "audio/mpeg",
   mp4: "video/mp4",
+  m4v: "video/mp4",
+  mov: "video/quicktime",
+  webm: "video/webm",
+  mkv: "video/x-matroska",
+  avif: "image/avif",
+  heic: "image/heic",
 }
 
 export function fileMediaType(name: string, bytes: Uint8Array): string {

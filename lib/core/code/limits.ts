@@ -55,6 +55,29 @@ export const MAX_PARALLEL_CALLS = 5
 export const MAX_KEEPS_PER_RUN = 50
 /** Kept results one run may read (pcp.read). */
 export const MAX_READS_PER_RUN = 50
+/**
+ * Images and videos one run may work on (pcp.image.compress,
+ * pcp.video.frames; code/media.ts). Each also counts as a keep, and each
+ * frame a video gives is one.
+ */
+export const MAX_MEDIA_PER_RUN = 20
+/**
+ * Pixels of an image PCP decodes: about 200 MB as it is worked on, in PCP's
+ * own process. One image is worked on at a time, whichever run asks.
+ */
+export const MAX_IMAGE_PIXELS = 50_000_000
+/** The longest side of an image asked for, or of a crop, in pixels. */
+export const MAX_IMAGE_SIDE = 16_384
+/** How long one image may take to decode, change and encode. */
+export const IMAGE_TIMEOUT_S = 30
+/** JPEG and WebP quality when the program names none: small, still legible. */
+export const DEFAULT_IMAGE_QUALITY = 75
+/** Frames one pcp.video.frames takes at most (sandbox/pcp.py says so too). */
+export const MAX_VIDEO_FRAMES = 30
+/** Frames taken when the program names no times. */
+export const DEFAULT_VIDEO_FRAMES = 5
+/** A frame's width when the program names none, in pixels. */
+export const DEFAULT_FRAME_WIDTH = 1280
 /** Random bytes one crypto.getRandomValues fills, as the web allows. */
 export const MAX_RANDOM_BYTES = 65_536
 /** What the program prints, in characters; the rest is dropped and counted. */

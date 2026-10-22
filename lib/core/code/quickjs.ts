@@ -12,6 +12,7 @@ import {
   MAX_CALLS_PER_RUN,
   MAX_ERROR_CHARS,
   MAX_KEEPS_PER_RUN,
+  MAX_MEDIA_PER_RUN,
   MAX_RANDOM_BYTES,
   MAX_READS_PER_RUN,
   MAX_STEP_NAME_CHARS,
@@ -380,6 +381,13 @@ const PRELUDE = `(() => {
       })
     },
     tools: (server) => ask("tools", { server: server ?? null }),
+    // Decoded by PCP, not here: the handle and the options go, a handle comes back.
+    image: Object.freeze({
+      compress: (handle, options) => ask("media", { kind: "image", id: idOf(handle), options: options ?? {} }),
+    }),
+    video: Object.freeze({
+      frames: (handle, options) => ask("media", { kind: "frames", id: idOf(handle), options: options ?? {} }),
+    }),
   })
   const log = (...values) => print(values.map(show).join(" "))
 
@@ -450,7 +458,8 @@ export async function checkSyntax(code: string): Promise<string | null> {
 }
 
 /** Requests one run may send, of every kind together. */
-const MAX_REQUESTS = MAX_CALLS_PER_RUN + MAX_KEEPS_PER_RUN + MAX_READS_PER_RUN
+const MAX_REQUESTS =
+  MAX_CALLS_PER_RUN + MAX_KEEPS_PER_RUN + MAX_READS_PER_RUN + MAX_MEDIA_PER_RUN
 
 function clip(text: string): string {
   return text.length > MAX_ERROR_CHARS
@@ -630,7 +639,7 @@ async function runInQuickJs(
     if (++requests > MAX_REQUESTS) {
       overRequests = true
       throw new Error(
-        `A run may ask PCP for at most ${MAX_REQUESTS} things (calls, reads and keeps together).`,
+        `A run may ask PCP for at most ${MAX_REQUESTS} things (calls, reads, keeps, images and videos together).`,
       )
     }
 

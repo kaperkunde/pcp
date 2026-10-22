@@ -5,30 +5,44 @@ import path from "path"
 import { fileURLToPath } from "url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const requireHere = createRequire(import.meta.url)
 
 /**
- * patchright-core's browsers.json, by its real path: through pnpm's
- * node_modules/patchright-core link, the tracing would copy it into a folder
- * of that name, which then holds nothing else.
+ * A file in an installed package, by its real path: through pnpm's
+ * node_modules/<package> link, the tracing would copy it into a folder of
+ * that name, which then holds nothing else. `manifest` is how the package
+ * lets its package.json be required.
  */
-export const patchrightBrowsersJson =
-  "./" +
-  path
-    .relative(
-      __dirname,
-      path.join(
-        path.dirname(
-          realpathSync(
-            createRequire(import.meta.url).resolve(
-              "patchright-core/package.json",
-            ),
-          ),
+function packageFile(manifest: string, file: string): string {
+  return (
+    "./" +
+    path
+      .relative(
+        __dirname,
+        path.join(
+          path.dirname(realpathSync(requireHere.resolve(manifest))),
+          file,
         ),
-        "browsers.json",
-      ),
-    )
-    .split(path.sep)
-    .join("/")
+      )
+      .split(path.sep)
+      .join("/")
+  )
+}
+
+/** patchright-core's list of browser builds. */
+export const patchrightBrowsersJson = packageFile(
+  "patchright-core/package.json",
+  "browsers.json",
+)
+
+/**
+ * sharp's WebAssembly, which its loader reads by a path it works out at
+ * runtime (lib/core/code/media.ts): the tracing finds the script, not this.
+ */
+export const sharpWasm = packageFile(
+  "@img/sharp-wasm32/package",
+  `lib/sharp-wasm32-${(requireHere("@img/sharp-wasm32/package") as { version: string }).version}.node.wasm`,
+)
 
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -44,7 +58,9 @@ const nextConfig: NextConfig = {
   // gains nothing from bundling; node-cron (the cleanup's schedule,
   // lib/core/cleanup/) ships a forking mode PCP never uses, whose worker
   // file a bundle would lose track of; ssh2 (SSH servers, lib/core/ssh/)
-  // looks for optional native parts at runtime and runs without them.
+  // looks for optional native parts at runtime and runs without them; sharp
+  // (run_code's pcp.image, lib/core/code/media.ts) finds its WebAssembly
+  // build (@img/sharp-wasm32) at runtime, which loads its .wasm by path.
   serverExternalPackages: [
     "better-sqlite3",
     "@prisma/adapter-better-sqlite3",
@@ -56,13 +72,16 @@ const nextConfig: NextConfig = {
     "@jitl/quickjs-singlefile-cjs-release-sync",
     "node-cron",
     "ssh2",
+    "sharp",
+    "@img/sharp-wasm32",
   ],
   // patchright-core reads its list of browser builds with a path it works
   // out at runtime, which the file tracing cannot follow; without the file,
   // every import of it throws and the browser never starts
-  // (scripts/standalone.test.ts).
+  // (scripts/standalone.test.ts). sharp's WebAssembly is read the same way:
+  // without it, pcp.image fails in the image and the app.
   outputFileTracingIncludes: {
-    "/**": [patchrightBrowsersJson],
+    "/**": [patchrightBrowsersJson, sharpWasm],
   },
   experimental: {
     // An uploaded OpenAPI schema (up to MAX_SPEC_BYTES, 5 MB) and an export

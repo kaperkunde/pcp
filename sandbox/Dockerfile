@@ -1,4 +1,6 @@
 # PCP's sandbox: runs run_code's shell and Python programs beside PCP.
+# ffmpeg is here for videos: pcp frames (sandbox/pcp.py) and run_code's
+# pcp.video.frames take frames with it, from Debian's package, offline.
 #
 #   docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml up -d
 #
@@ -17,7 +19,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     bash jq python3 coreutils findutils gawk sed grep diffutils \
-    bc ca-certificates file gzip bzip2 xz-utils unzip zip less \
+    bc ca-certificates file gzip bzip2 xz-utils unzip zip less ffmpeg \
   && rm -rf /var/lib/apt/lists/* /var/cache/apt \
   && groupadd --system --gid 2000 program \
   && useradd --system --uid 2000 --gid program --no-create-home \

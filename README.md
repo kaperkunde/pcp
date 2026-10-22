@@ -669,6 +669,19 @@ assistant. `pcp.tools()` lists the token's servers and tools, as `list_tools`
 does. The program also has `atob`, `btoa`, `TextEncoder`, `TextDecoder` and
 `crypto.getRandomValues`, so it can make a strong secret itself.
 
+A large picture costs an assistant far more to look at than a small one, so
+`pcp.image.compress(handle, { maxWidth, maxHeight, crop, grayscale, format,
+quality })` makes a smaller copy of a kept PNG, JPEG, WebP or GIF (a
+screenshot, an attachment) and hands back its handle with its size; the
+original stays as it was, for a tool that needs it whole. PCP decodes the
+image itself, as WebAssembly, the same in the container, a checkout and the
+desktop app, one image at a time and up to 50 million pixels; the copy
+carries no metadata (no camera details or place). The `run_code` description
+tells the assistant when to crop, when grey is enough, and when to send the
+original instead. `pcp.video.frames(handle, { at, every, count })` takes
+frames from a kept video as JPEGs, with ffmpeg in the sandbox (below); without
+the sandbox it says so.
+
 Each call is decided as if the assistant had made it with `call_tool`: an
 allowed tool runs, a blocked one is an error the program sees, and one that
 asks you first stops the program at that call (the calls before it have run),
@@ -681,8 +694,10 @@ your secrets, and stops after 3 minutes, 15 seconds of computing, its memory
 **Shell and Python programs.** Where PCP runs in Docker or Podman from a
 checkout, add the sandbox and an assistant can also send a bash or Python
 program, which runs in a container of its own beside PCP, with `jq`, the
-usual command-line tools and Python 3, and calls tools with a `pcp` command
-(`pcp call github list_issues '{"repo": "pcp"}' | jq …`) or `import pcp`:
+usual command-line tools, ffmpeg and Python 3, and calls tools with a `pcp`
+command (`pcp call github list_issues '{"repo": "pcp"}' | jq …`, `pcp image`,
+`pcp frames`) or `import pcp`. The sandbox is also where JavaScript's
+`pcp.video.frames` takes its frames:
 
 ```bash
 docker compose -f docker-compose.yaml -f docker-compose.sandbox.yaml up -d

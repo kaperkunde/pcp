@@ -25,6 +25,7 @@ import {
   MAX_CALLS_PER_RUN,
   MAX_CODE_CHARS,
   MAX_KEEPS_PER_RUN,
+  MAX_MEDIA_PER_RUN,
   MAX_PARALLEL_CALLS,
   MAX_READS_PER_RUN,
   MAX_STEP_NAME_CHARS,
@@ -32,6 +33,14 @@ import {
   RUN_PROGRESS_MS,
   RUN_TIMEOUT_MS,
 } from "./limits"
+import {
+  compressImage,
+  framesProgram,
+  mediaKind,
+  readFrameOptions,
+  readImageOptions,
+  type FrameOptions,
+} from "./media"
 import { Output } from "./output"
 import { runJavaScript } from "./quickjs"
 import {
@@ -52,6 +61,7 @@ import {
   type RunState,
   type TraceEntry,
 } from "./runs"
+import { sandboxExecutor, sandboxLanguages, sandboxRuns } from "./sandbox"
 import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
 
 /**
@@ -74,6 +84,14 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  *   program's or the assistant's) can name in place of the value.
  * - `tools` lists what the gateway's list_tools would: the token's servers,
  *   or one server's tools it can see, at its levels. It reaches no server.
+ * - `media` makes a smaller copy of one of the token's kept images
+ *   (pcp.image.compress: crop, fit, grey, re-encode), decoded here in PCP's
+ *   process (media.ts) and never in the program's engine, or takes frames
+ *   from one of its kept videos (pcp.video.frames), which ffmpeg does in the
+ *   sandbox: PCP runs sandbox/pcp.py's `frames` there with a bridge that
+ *   only reads that video and keeps JPEGs. Either is a new result of the
+ *   token's, counted as a keep (each frame one), and neither is logged, as
+ *   keeps are not.
  *
  * `pcp.step(name, fn)` is no operation of its own: the program's runtime
  * (quickjs.ts) runs fn, sends the step's name with each call made in it for
@@ -709,6 +727,7 @@ export async function runProgram(
   let overCalls = false
   let reads = 0
   let keeps = 0
+  let media = 0
   /** Where the owner has to act first, once a call said so. */
   const halt: { stop: { at: string; result: CallToolResult } | null } = {
     stop: null,
@@ -1043,6 +1062,195 @@ export async function runProgram(
     }
   }
 
+  /** pcp.image.compress and pcp.video.frames: one of the token's files. */
+  async function mediaOp(payload: unknown): Promise<BridgeReply> {
+    const kind = isRecord(payload) ? payload.kind : undefined
+    const id = isRecord(payload) ? payload.id : undefined
+    const options = isRecord(payload) ? payload.options : undefined
+
+    if (kind !== "image" && kind !== "frames") {
+      return refuse(
+        'PCP works on an image (kind "image") or a video (kind "frames").',
+      )
+    }
+
+    const what = kind === "image" ? "pcp.image.compress" : "pcp.video.frames"
+
+    if (typeof id !== "string" || id === "" || id.length > 64) {
+      return refuse(
+        `${what} takes a handle, or its id: ${what}(handle, { … }).`,
+      )
+    }
+
+    const overMedia = () => ++media > MAX_MEDIA_PER_RUN
+    const tooMany = `A run works on at most ${MAX_MEDIA_PER_RUN} images and videos.`
+
+    if (kind === "frames") {
+      const video = readFrameOptions(options)
+
+      if (!video.ok) {
+        return refuse(video.error)
+      }
+
+      return overMedia() ? refuse(tooMany) : frames(id, video.options)
+    }
+
+    const image = readImageOptions(options)
+
+    if (!image.ok) {
+      return refuse(image.error)
+    }
+
+    if (overMedia()) {
+      return refuse(tooMany)
+    }
+
+    if (++keeps > MAX_KEEPS_PER_RUN) {
+      return refuse(`A run keeps at most ${MAX_KEEPS_PER_RUN} values.`)
+    }
+
+    const opened = await openResult(scope.ctx, { tokenId: scope.tokenId, id })
+
+    if (!opened) {
+      return refuse(missingResultMessage())
+    }
+
+    const bytes = opened.bytes()
+    const found = mediaKind(bytes, opened.mediaType)
+
+    if (opened.kind !== "bytes" || !found.image) {
+      return refuse(
+        `Result ${id} is ${opened.kind === "bytes" ? found.type : "a text"}, not an image PCP reads (PNG, JPEG, WebP or GIF)${found.video ? ": take frames from a video with pcp.video.frames" : ""}.`,
+      )
+    }
+
+    const made = await compressImage(bytes, {
+      options: image.options,
+      name: opened.name,
+      maxBytes: limits.fileBytes,
+    })
+
+    if (!made.ok) {
+      return refuse(made.error)
+    }
+
+    try {
+      const kept = await keepBytes(scope.ctx, {
+        tokenId: scope.tokenId,
+        serverId: null,
+        toolName: label,
+        bytes: made.image.bytes,
+        mediaType: made.image.type,
+        name: made.image.name,
+      })
+
+      return {
+        ok: true,
+        value: {
+          handle: handleOf(kept),
+          width: made.image.width,
+          height: made.image.height,
+          bytes: made.image.bytes.length,
+          type: made.image.type,
+        },
+      }
+    } catch (error) {
+      if (isPcpError(error)) {
+        return refuse(error.message)
+      }
+
+      throw error
+    }
+  }
+
+  /**
+   * Frames from one of the token's videos, taken by ffmpeg in the sandbox:
+   * PCP runs sandbox/pcp.py's `frames` there, with a bridge that reads only
+   * that video and keeps only JPEGs, through this run's own read and keep.
+   */
+  async function frames(
+    id: string,
+    options: FrameOptions,
+  ): Promise<BridgeReply> {
+    // A program in the sandbox has ffmpeg at hand; the runner, running it,
+    // could not take another job for it.
+    if (sandboxRuns(bridge)) {
+      return refuse(
+        "In the sandbox, take frames with the pcp command (pcp frames HANDLE --count 5) or pcp.frames in Python, or with ffmpeg itself.",
+      )
+    }
+
+    const opened = await openResult(scope.ctx, { tokenId: scope.tokenId, id })
+
+    if (!opened) {
+      return refuse(missingResultMessage())
+    }
+
+    const found = mediaKind(opened.bytes(), opened.mediaType)
+
+    if (opened.kind !== "bytes" || !found.video) {
+      return refuse(
+        `Result ${id} is ${opened.kind === "bytes" ? found.type : "a text"}, not a video${found.image ? ": make an image smaller with pcp.image.compress" : ""}.`,
+      )
+    }
+
+    if (!sandboxLanguages().includes("python")) {
+      return refuse(
+        "Video needs the sandbox runner (see docs/self-hosting.md), which is not connected to this PCP.",
+      )
+    }
+
+    const job: Bridge = async (op, payload) => {
+      if (
+        op === "read" &&
+        isRecord(payload) &&
+        payload.id === id &&
+        payload.as === "base64"
+      ) {
+        return read(payload)
+      }
+
+      if (
+        op === "keep" &&
+        isRecord(payload) &&
+        payload.encoding === "base64" &&
+        payload.type === "image/jpeg"
+      ) {
+        return keep(payload)
+      }
+
+      return refuse("Taking frames reads the video and keeps frames, only.")
+    }
+
+    const ran = await sandboxExecutor("python")({
+      code: framesProgram(id, options),
+      bridge: job,
+      signal: controller.signal,
+    })
+    const last = ran.output.trimEnd().split("\n").at(-1) ?? ""
+    let answer: unknown = null
+
+    try {
+      answer = JSON.parse(last)
+    } catch {
+      // Not the program's answer: it failed before it could give one.
+    }
+
+    if (ran.kind === "done" && isRecord(answer)) {
+      if (typeof answer.error === "string") {
+        return refuse(answer.error.slice(0, 1_000))
+      }
+
+      if (isRecord(answer.value)) {
+        return { ok: true, value: answer.value }
+      }
+    }
+
+    return refuse(
+      `Taking frames failed${ran.kind === "error" ? `: ${ran.message}` : ""}${last ? ` (${last.slice(0, 500)})` : ""}.`,
+    )
+  }
+
   function tools(payload: unknown): BridgeReply {
     const server = isRecord(payload) ? (payload.server ?? null) : undefined
 
@@ -1072,6 +1280,8 @@ export async function runProgram(
         return keep(payload)
       case "tools":
         return tools(payload)
+      case "media":
+        return mediaOp(payload)
       default:
         return refuse(`PCP does not know "${String(op).slice(0, 40)}".`)
     }
