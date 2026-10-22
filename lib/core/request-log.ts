@@ -21,7 +21,8 @@ import {
  * One line per gateway call, appended to a daily JSON Lines file under the
  * data directory. Files rather than rows: the log grows with use, is read
  * with grep more often than with SQL, and does not belong in the database
- * backups. Arguments and results are never written — only what was called.
+ * backups. Arguments and results are never written — only what was called,
+ * and for a secret the browser typed, which one and at which site.
  *
  * The Log page reads it back (`readRequestLog`), newest first, a vault's own
  * lines only; the scheduled cleanup (lib/core/cleanup/) deletes the days
@@ -42,6 +43,12 @@ export type RequestLogEntry = {
   asked?: boolean
   /** The permission request it made or found, for the Log page to link. */
   request?: string
+  /**
+   * A secret the browser typed for the call (lib/core/browser-secrets.ts):
+   * its name and the site (an origin) it was typed at, never its value.
+   */
+  secret?: string
+  origin?: string
 }
 
 const FILE = /^mcp-(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -62,7 +69,12 @@ function dayOf(date: Date): string {
  * context, so a result rewritten on its way out (a lead added, a run_code
  * answer built around it) still logs what happened.
  */
-export type LogNote = { asked?: boolean; request?: string }
+export type LogNote = {
+  asked?: boolean
+  request?: string
+  secret?: string
+  origin?: string
+}
 
 const notes = new AsyncLocalStorage<LogNote>()
 
@@ -80,6 +92,39 @@ export function noteOwnerAsked(request?: string): void {
     note.asked = true
     note.request ??= request
   }
+}
+
+/**
+ * The call under way had the browser type one of the owner's secrets: its
+ * name and the origin, on the call's own line. A call with no line of its
+ * own (one the owner allowed on PCP's page) gets one, as the browser's type.
+ */
+export function noteSecretTyped(typed: {
+  vaultId: string
+  tokenId: string
+  server: string
+  secret: string
+  origin: string
+}): void {
+  const note = notes.getStore()
+
+  if (note) {
+    note.secret = typed.secret
+    note.origin = typed.origin
+    return
+  }
+
+  void appendRequestLog({
+    vaultId: typed.vaultId,
+    tokenId: typed.tokenId,
+    tool: "type",
+    server: typed.server,
+    upstreamTool: "type",
+    ok: true,
+    ms: 0,
+    secret: typed.secret,
+    origin: typed.origin,
+  })
 }
 
 // ---- Writing ----------------------------------------------------------------
@@ -103,6 +148,8 @@ export async function appendRequestLog(
     server: clamp(entry.server),
     upstreamTool: clamp(entry.upstreamTool),
     request: clamp(entry.request),
+    secret: entry.secret?.slice(0, 100),
+    origin: entry.origin?.slice(0, 300),
   })
   const file = fileFor(dayOf(now))
 
@@ -214,6 +261,8 @@ function parseLine(line: string): RequestLogEntry | null {
     error: text("error"),
     asked: entry.asked === true ? true : undefined,
     request: text("request"),
+    secret: text("secret"),
+    origin: text("origin"),
   }
 }
 
@@ -237,7 +286,12 @@ function matches(
   const needle = query.text?.trim().toLowerCase()
 
   if (needle) {
-    const haystack = [entry.tool, entry.server, entry.upstreamTool]
+    const haystack = [
+      entry.tool,
+      entry.server,
+      entry.upstreamTool,
+      entry.secret,
+    ]
       .filter(Boolean)
       .join(" ")
       .toLowerCase()

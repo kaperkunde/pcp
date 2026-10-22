@@ -27,6 +27,7 @@ describe("the browser's tools", () => {
       "download",
       "handle_dialog",
       "hand_over",
+      "request_secret",
     ])
 
     for (const tool of tools) {
@@ -72,6 +73,69 @@ describe("the browser's tools", () => {
       .map((tool) => tool.name)
       .join(" ")
     expect(names).not.toMatch(/evaluate|script|cookie|storage/)
+  })
+
+  it("take a secret only as type's text, by its name", () => {
+    const parse = (name: string, args: unknown) =>
+      parseBrowserArgs(browserToolSpec(name)!, args)
+
+    expect(
+      parse("type", { tab: "t1", ref: "e3", text: { $secret: "Shop" } }),
+    ).toEqual({ tab: "t1", ref: "e3", text: { $secret: "Shop" } })
+    expect(() =>
+      parse("type", {
+        tab: "t1",
+        ref: "e3",
+        text: { $secret: "Shop", template: "x {{secret}}" },
+      }),
+    ).toThrow()
+    expect(() =>
+      parse("type", { tab: "t1", ref: "e3", text: { $secret: "" } }),
+    ).toThrow()
+    expect(() =>
+      parse("press_key", { tab: "t1", key: { $secret: "Shop" } }),
+    ).toThrow()
+    expect(() =>
+      parse("select_option", {
+        tab: "t1",
+        ref: "e3",
+        values: [{ $secret: "Shop" }],
+      }),
+    ).toThrow()
+    expect(() =>
+      parse("handle_dialog", {
+        tab: "t1",
+        action: "accept",
+        text: { $secret: "Shop" },
+      }),
+    ).toThrow()
+  })
+
+  it("ask for a secret by its name, purpose, sites and kind", () => {
+    const parse = (args: unknown) =>
+      parseBrowserArgs(browserToolSpec("request_secret")!, args)
+    const ask = {
+      name: "Shop password",
+      purpose: "To sign in to the shop.",
+      origins: ["https://shop.example"],
+    }
+
+    expect(parse(ask)).toEqual(ask)
+    expect(parse({ ...ask, kind: "totp" })).toEqual({ ...ask, kind: "totp" })
+    expect(() => parse({ ...ask, kind: "hotp" })).toThrow()
+    expect(() => parse({ ...ask, name: "" })).toThrow()
+    expect(() => parse({ ...ask, name: "x".repeat(101) })).toThrow()
+    expect(() => parse({ ...ask, purpose: "" })).toThrow()
+    expect(() => parse({ ...ask, purpose: "x".repeat(501) })).toThrow()
+    expect(() => parse({ ...ask, origins: [] })).toThrow()
+    expect(() =>
+      parse({
+        ...ask,
+        origins: Array.from({ length: 11 }, (_, i) => `https://s${i}.example`),
+      }),
+    ).toThrow()
+    // No value: the owner types it in on PCP's page.
+    expect(() => parse({ ...ask, value: "hunter2" })).toThrow()
   })
 
   it("move files only as kept results, never by a path", () => {
@@ -185,11 +249,11 @@ describe("the browser's tools", () => {
     ).toThrow(/at most one/)
   })
 
-  it("name the tab in every tool but tabs' open and list", () => {
+  it("name the tab in every tool but tabs' open and list, and request_secret", () => {
     for (const tool of browserTools()) {
       const schema = tool.inputSchema as { required?: string[] }
       expect(schema.required?.includes("tab") ?? false, tool.name).toBe(
-        tool.name !== "tabs",
+        tool.name !== "tabs" && tool.name !== "request_secret",
       )
     }
     expect(

@@ -875,6 +875,7 @@ export async function runProgram(
         ...(!owner && !outcome.ok ? { error: "The call failed." } : {}),
         ...(owner || note.asked ? { asked: true } : {}),
         ...(note.request ? { request: note.request } : {}),
+        ...(note.secret ? { secret: note.secret, origin: note.origin } : {}),
       })
 
       if ("owner" in outcome) {

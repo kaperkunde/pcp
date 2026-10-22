@@ -250,7 +250,8 @@ export async function endAllowanceAction(
   tokenId: string,
   target:
     | { kind: "tool"; serverId: string; toolName: string }
-    | { kind: "site"; host: string },
+    | { kind: "site"; host: string }
+    | { kind: "secret"; secretId: string; origin: string },
 ): Promise<ActionState> {
   const ctx = await requireContext()
 
@@ -260,16 +261,23 @@ export async function endAllowanceAction(
       tokenId,
       target?.kind === "site"
         ? { kind: "site", host: String(target.host) }
-        : {
-            kind: "tool",
-            serverId: String(target?.serverId),
-            toolName: String(target?.toolName),
-          },
+        : target?.kind === "secret"
+          ? {
+              kind: "secret",
+              secretId: String(target.secretId),
+              origin: String(target.origin),
+            }
+          : {
+              kind: "tool",
+              serverId: String(target?.serverId),
+              toolName: String(target?.toolName),
+            },
     )
     return {}
   })
 
   revalidatePath(`/tokens/${tokenId}`)
+  revalidatePath("/secrets")
 
   return result
 }

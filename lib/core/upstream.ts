@@ -20,8 +20,10 @@ import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { admitSecretUse } from "./browser-secrets"
 import { callBrowserTool } from "./browser/call"
 import { syncBrowserTools } from "./browser/server"
+import { isOwnerNeeded, type SecretTyper } from "./browser/types"
 import { callEndpointTool, syncEndpointTools } from "./endpoints"
 import { invalid, isPcpError, PcpError } from "./errors"
 import { callCalendarTool, syncCalendarTools } from "./caldav/accounts"
@@ -50,6 +52,7 @@ import {
 import {
   deleteManagedSecret,
   readSecretValue,
+  readTypedValue,
   revealSecret,
   writeManagedSecret,
 } from "./secrets"
@@ -62,6 +65,7 @@ import {
   renderAuthValue,
   setServerStatus,
 } from "./servers"
+import { noteSecretTyped } from "./request-log"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
 import { PCP_VERSION } from "./version"
@@ -1393,6 +1397,10 @@ export async function callServerTool(
     }
   }
 
+  if (server.kind === "browser") {
+    return callBrowser(ctx, server, toolName, args, options)
+  }
+
   const { args: sent, redact } = await placeSecrets(
     ctx,
     server,
@@ -1428,10 +1436,122 @@ export async function callServerTool(
 }
 
 /**
+ * A browser call. A secret goes into the browser only as type's text,
+ * {"$secret": name}, and never as an argument: the browser asks for the
+ * value at the moment of typing (browser/call.ts), for the origin the
+ * field is at then, and only here is it let through (browser-secrets.ts
+ * admitSecretUse: the secret's origins and the token's allowance, or a
+ * request to the owner) and decrypted (secrets.ts; a TOTP secret's code of
+ * the moment). That is every way a type call comes: call_tool, run_code, a
+ * wrapper or a browser flow (which needs the owner's binding for it too),
+ * and the owner's own answer. The value is taken out of the answer and any
+ * error, and the request log notes the secret's name and the origin.
+ */
+async function callBrowser(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  options: CallOptions,
+): Promise<CallToolResult> {
+  const found = findPlaceholders(args)
+
+  if (found.length === 0) {
+    return dispatchCall(ctx, server, toolName, args, options, [])
+  }
+
+  if (
+    toolName !== "type" ||
+    found.length !== 1 ||
+    found[0]!.pointer !== "/text"
+  ) {
+    throw invalid(
+      'A secret goes into the browser only as type\'s text, {"$secret": "<name>"}, which PCP types itself; no other tool or argument takes one.',
+    )
+  }
+
+  // A wrapper's or a flow's call carries one only where the owner's
+  // approval of it says so.
+  if (options.secrets !== undefined) {
+    for (const binding of matchGrant(
+      found,
+      options.secrets,
+      `${server.slug}/${toolName}`,
+    )) {
+      if (binding.url !== server.url) {
+        throw invalid(
+          `${server.name}'s address has changed since the owner allowed the secret "${binding.name}" there, so the call was not made.`,
+        )
+      }
+    }
+  }
+
+  const { tokenId } = options
+
+  if (!tokenId) {
+    throw new PcpError("state", "The browser is used through a token.")
+  }
+
+  const name = found[0]!.name
+  const typed: string[] = []
+  const secret: SecretTyper = {
+    name,
+    async value(use) {
+      const admitted = await admitSecretUse(ctx, {
+        tokenId,
+        serverId: server.id,
+        name,
+        use,
+      })
+      const value = await readTypedValue(ctx, admitted.id)
+      typed.push(value)
+      noteSecretTyped({
+        vaultId: ctx.vaultId,
+        tokenId,
+        server: server.slug,
+        secret: admitted.name,
+        origin: use.origin,
+      })
+      return value
+    },
+  }
+
+  try {
+    const result = await callBrowserTool(ctx, server, toolName, args, {
+      tokenId,
+      publicUrl: options.publicUrl,
+      open: options.open,
+      keepBytes: options.keepBytes,
+      signal: options.signal,
+      runId: options.runId,
+      secret,
+    })
+
+    return scrubResult(result, typed)
+  } catch (error) {
+    if (isOwnerNeeded(error) || !(error instanceof Error)) {
+      throw error
+    }
+
+    const scrubbed = makeRedactor(typed).text(error.message)
+
+    if (isPcpError(error)) {
+      throw new PcpError(error.code, scrubbed)
+    }
+
+    if (scrubbed !== error.message) {
+      throw new PcpError("upstream", scrubbed.slice(0, 500))
+    }
+
+    throw error
+  }
+}
+
+/**
  * The arguments with a wrapper's secrets in place, and the values to take
  * out of what comes back. A placeholder needs a binding the owner approved
- * for this very argument, on this server as it was when they approved it;
- * the browser never takes one (a typed value would stay on the page).
+ * for this very argument, on this server as it was when they approved it.
+ * The browser takes one only through callBrowser, typed into a page.
  */
 async function placeSecrets(
   ctx: VaultContext,

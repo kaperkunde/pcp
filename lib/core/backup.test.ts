@@ -14,6 +14,11 @@ import {
   readExport,
   restoreExport,
 } from "./backup"
+import {
+  bindOrigin,
+  grantSecretUse,
+  listBrowserOrigins,
+} from "./browser-secrets"
 import { EXPORT_AAD, type ExportPayloadJson } from "./backup-format"
 import { storeTools } from "./catalogue"
 import {
@@ -626,6 +631,55 @@ describe("restoring", { timeout: 60_000 }, () => {
     await expect(
       readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
     ).rejects.toThrow(/names no item/)
+  })
+
+  it("carries the sites a secret is typed at, never a token's allowance there, and restores a file from before them", async () => {
+    const { ctx, secretId, token } = await populate()
+    const tokenId = (await resolveApiToken(token))!.tokenId
+    await bindOrigin(ctx, secretId, "https://shop.example")
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: "https://shop.example",
+      level: "always",
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const raw = await openRaw(file, EXPORT_PASSWORD)
+    expect(raw.tables.secretBrowserOrigins).toMatchObject([
+      { secretId, origin: "https://shop.example" },
+    ])
+    expect(JSON.stringify(raw)).not.toContain("api_token_secret_allowance")
+
+    const { payload } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await listBrowserOrigins(ctx)).toEqual(
+      new Map([[secretId, ["https://shop.example"]]]),
+    )
+    expect(await db().apiTokenSecretAllowance.count()).toBe(0)
+
+    const older = structuredClone(raw)
+    delete (older.tables as Record<string, unknown>).secretBrowserOrigins
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().secretBrowserOrigin.count()).toBe(0)
+
+    // A site of a secret the file does not hold is refused.
+    const broken = structuredClone(raw)
+    broken.tables.secretBrowserOrigins![0]!.secretId = "missing"
+    await expect(
+      readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow(/a secret's site is missing/)
   })
 
   it("carries skills and which tokens see them, and restores a file from before skills", async () => {

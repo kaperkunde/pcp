@@ -182,12 +182,13 @@ export function matchGrant(
 export function scrubResult(
   result: CallToolResult,
   values: string[],
+  { replacement }: { replacement?: string } = {},
 ): CallToolResult {
   if (values.length === 0) {
     return result
   }
 
-  const scrub = makeRedactor(values)
+  const scrub = makeRedactor(values, replacement ? { replacement } : {})
 
   return {
     ...result,

@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/page-header"
 import { TokenAvatar } from "@/components/token-avatar"
 import {
   TokenAllowances,
+  type AllowanceItem,
   TokenEnd,
   TokenReachForm,
   TokenWaiting,
@@ -124,6 +125,9 @@ export default async function TokenPage({
             warning: request.warning,
             decisions: request.decisions,
             secret: request.secretToEnter,
+            allowForFixed:
+              request.kind === "secret_use" ||
+              request.kind === "secret_request",
             every:
               request.kind === "memory_share" && request.memory
                 ? { asked: request.memory.always }
@@ -135,10 +139,14 @@ export default async function TokenPage({
       {allowances.length > 0 ? (
         <TokenAllowances
           tokenId={id}
-          allowances={allowances.map((allowance) => ({
-            ...allowance,
-            until: allowance.until.toISOString(),
-          }))}
+          allowances={allowances.map((allowance): AllowanceItem =>
+            allowance.kind === "secret"
+              ? {
+                  ...allowance,
+                  until: allowance.until?.toISOString() ?? null,
+                }
+              : { ...allowance, until: allowance.until.toISOString() },
+          )}
         />
       ) : null}
 

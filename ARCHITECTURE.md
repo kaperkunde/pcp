@@ -1436,13 +1436,16 @@ checkSyntax`), nothing has a character that does not show on screen
   address as approved. `run.ts` hands the call the tool's bindings as a
   grant; `upstream.ts callServerTool` matches every placeholder to one
   (`placeholders.ts`) before anything is read or sent, refuses any other,
-  refuses a server whose address changed since, never puts one into the
-  browser, reads the value (`readSecretValue`) and writes it in. The values
+  refuses a server whose address changed since, puts one into the browser
+  only as `type`'s text and only through the browser's own gate (see
+  Browser, Secrets in pages), reads the value (`readSecretValue`) and writes
+  it in. The values
   are taken out of the answer (`scrubResult`, `openapi/redact.ts`: text,
   structured content, text resources, and an endpoint's or a mail account's
   own redaction), out of errors and out of the status the server page shows,
   before the program or the assistant sees them. A placeholder in an
-  assistant's own call is refused by `resolveCall`. Scrubbing cannot catch a
+  assistant's own call is refused by `resolveCall`, but as the browser's
+  `type` text (Browser, Secrets in pages). Scrubbing cannot catch a
   value a tool transforms or stores and answers with later: the owner's
   review of the place a secret goes is what decides, and the page says so.
 - **Replacing.** A tool listed in `replaces` (it has to be among the
@@ -1673,8 +1676,8 @@ Hosts are never logged.
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog` and `hand_over`. Every one but `tabs`' open and
-list names its tab (below). An assistant reads a snapshot (Playwright's
+`download`, `handle_dialog`, `hand_over` and `request_secret`. Every one but
+`tabs`' open and list and `request_secret` names its tab (below). An assistant reads a snapshot (Playwright's
 accessibility tree with refs), `find`'s elements of it as JSON (role, name,
 ref, states, and the landmark or region each is in, which tells two lines
 that read the same apart; `within` searches one element), the page as
@@ -1699,6 +1702,51 @@ it with `handle_dialog`, rather than waiting on a page that cannot answer.
 It never gets a cookie or storage and never runs JavaScript. A
 refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
+
+**Secrets in pages** (`lib/core/browser-secrets.ts`, `call.ts`, `held.ts`).
+A secret goes into a page only as `type`'s text, `{"$secret": name}`: in an
+assistant's call (`resolveCall` lets it through there and nowhere else),
+from run_code's `pcp.call`, or from a wrapper or flow whose binding names
+`browser/type` at `/text` with no template (`definition.ts`). Any other
+browser tool or argument is refused, in `resolveCall` and in `upstream.ts`.
+`upstream.ts callBrowser` is the one path: it hands `callBrowserTool` a
+`SecretTyper`, never a value. The browser resolves the field (ref or
+target), checks it is an input or textarea, that the page is at an http(s)
+origin and that the frame the field is in has that same origin (a field in a
+frame from another site is refused), and only then asks the typer for the
+value, with the origin as it is then. The typer is the gate
+(`admitSecretUse`): the secret by name (text or TOTP only), and the token's
+allowance for it at that origin (`ApiTokenSecretAllowance`: once, an hour,
+or always while the origin is the secret's, `SecretBrowserOrigin`). With
+none it throws `OwnerNeeded` for a `secret_use` request: the secret's name,
+the origin, the page, the field and the tab live; Allow once, Allow for 1
+hour and Always allow (which binds the origin) write the allowance and make
+the type call again through the same path (a once allowance the call did not
+use is dropped); there is no Block, and no answer changes the tool's level.
+That an API endpoint sends the secret never counts. Past the gate,
+`secrets.ts readTypedValue` decrypts it (a TOTP secret's code of the moment,
+RFC 6238 in `totp.ts`, the seed never leaving `secrets.ts`); the browser
+clears and focuses the field, checks again that the page, the frame and the
+focus (in the field's frame and each frame around it) are where they were,
+and types it with CDP `Input.insertText`. The page then holds it (`held.ts`:
+the secret's name and an HMAC of the field's value under a key of the
+process, never the value, by page, in memory): while any field of the page
+has that value, every answer to the token shows it as `[secret: name]`
+(the snapshot's field line, and the value wherever else it appears, a title
+included), and `screenshot` is refused (a tool error). It lets go when no
+field has the value any more: the field changed, or a new document does not
+have it. Every password field's value reads as `[password]` in a snapshot,
+typed by anyone. `upstream.ts` scrubs the value from the answer and any error
+too, and the request log notes the secret's name and the origin on the
+call's line (`noteSecretTyped`; a use the owner's answer made gets a line of
+its own), never the value. `request_secret` (name, purpose, origins, kind
+text or totp) checks its arguments and refuses a name PCP holds (no
+assistant writes over a secret), then throws `OwnerNeeded` for a
+`secret_request`: the owner types the value (or the seed) on PCP's page, may
+change the origins, and saves it with the requesting token's allowance at
+each (one use, an hour, or always); the assistant hears the name. Origins
+are exported; allowances are not, are listed with End on the token's page
+and on the secret's row under Secrets, and are pruned once run out.
 
 **Turns and deadlines** (`queue.ts`). The calls on one tab run one at a
 time, in its own lane, so a slow page holds up only its tab. Each has a

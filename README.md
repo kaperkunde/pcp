@@ -55,6 +55,8 @@ on its own, what it has to ask you about first, and what it cannot touch.
   Chromium on the machine PCP runs on, signed in where you signed it in. You
   decide which sites each token opens, watch any tab live in PCP, and take it
   over for a sign-in or a CAPTCHA; an assistant can hand you a tab and wait.
+  It can have PCP type one of your passwords or one-time codes into a page
+  without ever seeing it, at the sites you allow.
 - **Mail without an MCP server.** Add a mail account over JMAP (Stalwart,
   Fastmail, Cyrus) or IMAP with SMTP, or let an assistant propose one for you
   to agree to, and an assistant can search, read, file, draft and send its
@@ -682,7 +684,8 @@ server like any other, with tools to open a page (`navigate`, `back`, `tabs`),
 read it (`snapshot`, which names each element with a ref; `read_page`; `find`;
 `screenshot`), act on it (`click`, `type`, `select_option`, `press_key`,
 `scroll`, `wait_for`, `handle_dialog`), move files (`upload_file`,
-`download`) and `hand_over` a tab to you. It is
+`download`), `hand_over` a tab to you and ask you for a secret to type
+(`request_secret`). It is
 Chromium without a window on PCP's machine, with up to eight tabs, started with
 the first page and closed after fifteen idle minutes. The Docker image includes
 it; elsewhere (the desktop app, a checkout), **Install Chromium** on the Browser
@@ -719,6 +722,26 @@ you choose (the one whose tab it was, unless you pick another; a tab you
 opened is no token's until you hand it to one). `hand_over` asks you the same
 way any request does, with the tab live on the request's page, and **Done**
 gives it back.
+
+**Secrets in pages.** An assistant types a password or a one-time code with
+`type` and `{"$secret": "<name>"}` as the text: PCP types your secret into
+the field itself, and the assistant never sees it. A secret is typed only at
+a site (an origin, like `https://shop.example`) where you allowed it for that
+token: the first use there asks you, with the secret's name, the site and the
+tab live, and you answer **Allow once**, **Allow for 1 hour** or **Always
+allow** (which also adds the site to the secret's sites). Only a field of the
+page's own site takes it, not one in a frame from another site. Afterwards the
+field reads as `[secret: name]` in every answer, any password field's value is
+hidden, and screenshots of the tab are refused until the field changes or the
+page moves on. A secret an API endpoint uses is not allowed in the browser by
+that. Under **Secrets**, add one as **One-time codes (TOTP)** with the seed or
+`otpauth://` link a site shows when you set up its codes: PCP types the code
+of the moment, and **Code** shows it to you. **Browser** on a secret's row
+lists its sites and the tokens allowed there, each with a way to end it, as
+does the token's page. `request_secret` asks you for a secret PCP does not
+hold yet: you type it on PCP's page, check its sites and choose how its uses
+go, and the assistant gets its name. The request log names the secret and the
+site of each use, never the value.
 
 ## How it is secured
 

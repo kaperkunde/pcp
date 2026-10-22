@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   FolderGit2,
   Globe,
+  KeyRound,
   ListChecks,
   Server,
   SlidersHorizontal,
@@ -223,6 +224,9 @@ export default async function PermissionPage({
               id={view.id}
               decisions={view.decisions}
               secret={view.secretToEnter}
+              allowForFixed={
+                view.kind === "secret_use" || view.kind === "secret_request"
+              }
               every={
                 view.kind === "memory_share" && view.memory
                   ? { asked: view.memory.always }
@@ -292,6 +296,9 @@ function RequestTile({ view }: { view: PermissionView }) {
     case "browse":
     case "browser_handover":
       return <IconTile size="lg" icon={Globe} className={tile} />
+    case "secret_use":
+    case "secret_request":
+      return <IconTile size="lg" icon={KeyRound} className={tile} />
     default:
       return <IconTile size="lg" icon={Server} className={tile} />
   }
@@ -366,6 +373,32 @@ function PendingNote({
             "Do what the assistant asks in the tab, then say Done."
           )}{" "}
           The tab is yours until you answer.
+        </p>
+      )
+    case "secret_use":
+      return (
+        <p className={note}>
+          Allow once types it this time. Allow for 1 hour and Always allow let
+          this token have it typed at this site without asking you, for an hour
+          or until you end it; Always allow also adds the site to the
+          secret&apos;s. You can end either on the token&apos;s page or under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>
+          . While a field holds it, the assistant reads the field as [secret:{" "}
+          name] and gets no screenshots of the tab.
+        </p>
+      )
+    case "secret_request":
+      return (
+        <p className={note}>
+          Saving stores the secret under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>{" "}
+          with these sites. Allow one use lets this token have it typed once;
+          the others let it, at these sites, for an hour or until you end it.
+          Any other use asks you first.
         </p>
       )
     case "skill_change":

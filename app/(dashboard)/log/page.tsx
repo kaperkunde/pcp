@@ -191,6 +191,12 @@ function LogLine({ entry }: { entry: ActivityEntry }) {
             )}{" "}
             · {entry.ms.toLocaleString("en")} ms
           </span>
+          {entry.secret ? (
+            <span className="mt-0.5 block">
+              Typed the secret &ldquo;{entry.secret}&rdquo;
+              {entry.origin ? ` at ${entry.origin}` : ""}
+            </span>
+          ) : null}
           {entry.outcome === "error" && entry.error ? (
             <span className="mt-0.5 block text-destructive">{entry.error}</span>
           ) : null}

@@ -294,6 +294,22 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Done",
     decline: "Not now",
   },
+  // A stored secret typed into a page, per secret, site and token. Always
+  // allow also adds the site to the secret's; nothing here lifts a block.
+  secret_use: {
+    allow_once: "Allow once",
+    allow_for: "Allow for 1 hour",
+    always: "Always allow",
+    decline: "Not now",
+  },
+  // A secret the owner types in for the browser, and how its uses go: the
+  // next one only, every one for an hour, or every one.
+  secret_request: {
+    allow_once: "Save, allow one use",
+    allow_for: "Save, allow for 1 hour",
+    always: "Save, always allow",
+    decline: "Not now",
+  },
 }
 
 /** The answers the owner is offered, in order, with their labels. */

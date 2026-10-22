@@ -135,6 +135,7 @@ export const MAX_SECRET_QUERY = 100
 
 const KIND_SHOWN: Record<SecretKind, string> = {
   text: "text",
+  totp: "one-time codes (TOTP), typed by the browser only",
   oauth: "OAuth sign-in (kept by PCP for a server)",
   ssh_key: "SSH key (PCP's own, for an SSH server)",
 }

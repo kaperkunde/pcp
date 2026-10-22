@@ -10,7 +10,7 @@ import {
 } from "@/components/permission-actions"
 import { PermissionOutcome } from "@/components/permission-outcome"
 import { Button } from "@/components/ui/button"
-import { Input, Select } from "@/components/ui/input"
+import { Input, Select, Textarea } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import { List } from "@/components/ui/list"
 import { SwitchRow } from "@/components/ui/switch"
@@ -46,16 +46,24 @@ const QUIET: Decision[] = ["block", "discard"]
  * (`every`), on when the assistant asked for that; it holds whether the
  * owner shares the memory or keeps it for that assistant.
  *
- * "Allow for" comes with how long, chosen beside its button.
+ * "Allow for" comes with how long, chosen beside its button, unless the
+ * kind has one length only (`allowForFixed`: a secret the browser types,
+ * an hour), which its label says.
+ *
+ * A secret for the browser to type (request_secret) has `kind` and
+ * `origins`: a TOTP seed is asked for as such, and the sites it is typed at
+ * can be changed, one a line, before it is saved.
  */
 export function PermissionDecision({
   id,
   decisions,
   secret,
   every,
+  allowForFixed = false,
 }: {
   id: string
   decisions: Array<{ value: Decision; label: string }>
+  allowForFixed?: boolean
   secret?: {
     name: string
     exists: boolean
@@ -63,6 +71,10 @@ export function PermissionDecision({
     clientId?: string | null
     /** The user name this is the password for (basic authentication). */
     login?: string | null
+    /** A secret for the browser: "totp" for a one-time codes seed. */
+    kind?: "text" | "totp"
+    /** The sites a secret for the browser is typed at, to confirm. */
+    origins?: string[]
   } | null
   every?: { asked: boolean } | null
 }) {
@@ -72,6 +84,7 @@ export function PermissionDecision({
   const [secretValue, setSecretValue] = useState("")
   const [always, setAlways] = useState(every?.asked === true)
   const [minutes, setMinutes] = useState<number>(DEFAULT_ALLOW_FOR_MINUTES)
+  const [origins, setOrigins] = useState((secret?.origins ?? []).join("\n"))
   const [done, setDone] = useState<{
     message: string
     isError: boolean
@@ -90,7 +103,9 @@ export function PermissionDecision({
       setError(
         secret.login
           ? `Enter the password for ${secret.login} first.`
-          : `Enter the value of the secret "${secret.name}" first.`,
+          : secret.kind === "totp"
+            ? `Enter the seed of "${secret.name}" first.`
+            : `Enter the value of the secret "${secret.name}" first.`,
       )
       return
     }
@@ -104,7 +119,13 @@ export function PermissionDecision({
         value,
         secret && agrees && secretValue ? secretValue : undefined,
         every ? always : undefined,
-        value === "allow_for" ? minutes : undefined,
+        value === "allow_for" && !allowForFixed ? minutes : undefined,
+        secret?.origins && agrees
+          ? origins
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean)
+          : undefined,
       )
 
       if (result.status === "error") {
@@ -128,15 +149,18 @@ export function PermissionDecision({
   function labelOf(decision: { value: Decision; label: string }): string {
     return pending && chosen === decision.value
       ? "Working…"
-      : decision.value === "allow_for"
+      : decision.value === "allow_for" && !allowForFixed
         ? `${decision.label} ${allowForLabel(minutes)}`
         : decision.label
   }
 
   const primary = decisions.find((decision) => decision.value === "allow_once")
-  const allowFor = decisions.find((decision) => decision.value === "allow_for")
-  // The grey buttons, refusal first: Not now, Always allow.
-  const order: Decision[] = ["decline", "always"]
+  const allowFor = allowForFixed
+    ? undefined
+    : decisions.find((decision) => decision.value === "allow_for")
+  // The grey buttons, refusal first: Not now, Allow for (when it has one
+  // length), Always allow.
+  const order: Decision[] = ["decline", "allow_for", "always"]
   const others = decisions
     .filter(
       (decision) =>
@@ -156,17 +180,25 @@ export function PermissionDecision({
               ? `Client secret of the OAuth client "${secret.clientId}"`
               : secret.login
                 ? `Password for ${secret.login}`
-                : `Value of the secret "${secret.name}"`
+                : secret.kind === "totp"
+                  ? `Seed of the one-time codes "${secret.name}"`
+                  : `Value of the secret "${secret.name}"`
           }
           htmlFor={`permission-${id}-secret`}
           hint={
-            secret.exists
-              ? `You have added a secret named "${secret.name}" since; leave this empty to use it, or enter a value to save a new one.`
-              : secret.clientId
-                ? `From the provider's developer settings, where you created the client. It is saved under Secrets as "${secret.name}", encrypted, and sent only to the token address above; the assistant never sees it. Leave it empty for a client without a secret.`
-                : secret.login
-                  ? `An app password, if the server offers them, rather than your own. It is saved under Secrets as "${secret.name}", encrypted, and sent only to the address above; the assistant never sees it.`
-                  : "The key or token itself. It is saved under Secrets, encrypted, and sent only to the address above; the assistant never sees it."
+            secret.origins && secret.exists
+              ? `You have added a secret named "${secret.name}" since; leave this empty to use it. Nothing is written over it.`
+              : secret.origins
+                ? secret.kind === "totp"
+                  ? `The base32 text, or the otpauth:// link of the QR code, that the site showed when you set up its codes. It is saved under Secrets as "${secret.name}", encrypted; PCP types only the code of the moment, and only at the sites below. The assistant never sees it.`
+                  : `It is saved under Secrets as "${secret.name}", encrypted, and typed only at the sites below. The assistant never sees it.`
+                : secret.exists
+                  ? `You have added a secret named "${secret.name}" since; leave this empty to use it, or enter a value to save a new one.`
+                  : secret.clientId
+                    ? `From the provider's developer settings, where you created the client. It is saved under Secrets as "${secret.name}", encrypted, and sent only to the token address above; the assistant never sees it. Leave it empty for a client without a secret.`
+                    : secret.login
+                      ? `An app password, if the server offers them, rather than your own. It is saved under Secrets as "${secret.name}", encrypted, and sent only to the address above; the assistant never sees it.`
+                      : "The key or token itself. It is saved under Secrets, encrypted, and sent only to the address above; the assistant never sees it."
           }
         >
           <Input
@@ -175,6 +207,23 @@ export function PermissionDecision({
             autoComplete="off"
             value={secretValue}
             onChange={(event) => setSecretValue(event.target.value)}
+            disabled={pending}
+          />
+        </Field>
+      ) : null}
+      {secret?.origins ? (
+        <Field
+          label="Sites"
+          htmlFor={`permission-${id}-origins`}
+          hint="Where the browser may type it, one a line: https://example.com. Remove a site to leave it out."
+        >
+          <Textarea
+            id={`permission-${id}-origins`}
+            value={origins}
+            onChange={(event) => setOrigins(event.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+            className="min-h-16 font-mono"
             disabled={pending}
           />
         </Field>
