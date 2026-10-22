@@ -137,6 +137,16 @@ Reuse these before writing a new one; each settles a question once.
   text at the right; then "Nothing runs until you answer". What the
   request carries is `PermissionLines`, and `ShownInFull` when the lines
   cut it short. The token page's waiting requests use the same pieces.
+- **Answering in turn** (`components/answer-queue.tsx`): every answer
+  (a request's decision, saved levels, a repository's change) goes through
+  `useAnswer`. The count in the bell and on Home drops as it is sent and
+  comes back, with the error, if it fails. Once it is in, the owner is
+  taken to the oldest thing still waiting, with what came of their answer
+  above it (`AnsweredBefore`), or told on the page they answered that
+  nothing else is waiting (`AllClearAfter`). A page that lists its own
+  requests (a token's) keeps the owner there; a request whose page still
+  needs them (a server to connect) stays put. It only opens the next page:
+  nothing is answered for the owner.
 - **A server's form** (`components/server-form-parts.tsx`): the frame,
   sections, name and short name, a choice field (segmented or select),
   switch groups, More options and the footer, shared by the MCP server,

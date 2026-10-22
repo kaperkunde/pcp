@@ -2,6 +2,7 @@ import { TriangleAlert } from "lucide-react"
 import Link from "next/link"
 import type { Metadata } from "next"
 
+import { AllClearAfter, AnsweredBefore } from "@/components/answer-queue"
 import { PageColumn } from "@/components/page-column"
 import { PageHeader } from "@/components/page-header"
 import { ChangeAnswer } from "@/components/repo-forms"
@@ -56,6 +57,8 @@ export default async function ChangePage({
     return (
       <PageColumn width="narrow">
         <PageHeader back={back} title="Change from a repository" />
+        {/* Answered just now: what came of it, and whether more waits. */}
+        <AnsweredBefore alone />
         <p className="text-muted-foreground" role="alert">
           {failure ?? "Nothing waits for you here."}
         </p>
@@ -77,6 +80,8 @@ export default async function ChangePage({
         }
         description={`From ${repo.owner}/${repo.name} (${repo.branch}), ${repo.trust === "trusted" ? "a repository you trust" : "a repository you do not trust"}.`}
       />
+
+      <AnsweredBefore />
 
       <Card className="flex flex-col gap-5 p-5 ring-1 ring-warning/25">
         <p className="text-sm">
@@ -160,6 +165,7 @@ export default async function ChangePage({
           />
         ) : null}
       </Card>
+      <AllClearAfter />
     </PageColumn>
   )
 }

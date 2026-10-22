@@ -114,6 +114,8 @@ export function TokenWaiting({ waiting }: { waiting: WaitingRequest[] }) {
                 decisions={item.decisions}
                 secret={item.secret}
                 every={item.every}
+                // The page lists them all: answered, the owner stays here.
+                advance={false}
               />
             )}
           </li>

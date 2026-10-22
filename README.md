@@ -511,8 +511,10 @@ resources can open a kept file itself.
 A tool you have not decided about answers "Not done yet" and asks you: the
 assistant ends its reply with a link to the request in PCP. Answer there,
 tell it you have, and it carries on. The bell at the top of every page in
-PCP shows how many requests are waiting and lists them, so you can answer
-one without the link. **Allow once** runs that one call, **Always allow** and
+PCP shows how many requests are waiting and lists them, oldest first, so you
+can answer one without the link; once you answer one, PCP opens the next one
+waiting, with what came of your answer above it, until nothing is left.
+**Allow once** runs that one call, **Always allow** and
 **Block** also decide the calls after it, **Allow for** (15 minutes, an hour or
 eight hours) lets the calls after it run without asking until that time is up,
 and **Not now** runs nothing. What you allowed for a while is listed on the

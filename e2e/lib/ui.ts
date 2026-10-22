@@ -198,6 +198,69 @@ export async function openRequestFromBell(page: Page, title: RegExp | string) {
   await page.getByRole("menuitem", { name: title }).click()
 }
 
+/** What a request's page says once the owner answered the last one waiting. */
+export function allClear(page: Page) {
+  return page.getByText("Nothing else is waiting for you.")
+}
+
+/**
+ * Answers the request on the page and waits for PCP to take the owner on:
+ * to the next one waiting (a new address), or to "Nothing else is waiting
+ * for you." on this one.
+ */
+export async function answerAndAdvance(page: Page, button: Locator) {
+  const before = page.url()
+  await clickHydrated(button)
+  await expect
+    .poll(
+      async () => page.url() !== before || (await allClear(page).isVisible()),
+    )
+    .toBe(true)
+}
+
+/**
+ * Says no to everything waiting for the owner, walking the queue from the
+ * oldest: what earlier projects left waiting (they share the database) is
+ * out of the way of a test that needs its own requests to be the oldest.
+ */
+export async function answerEverythingWaiting(page: Page) {
+  await page.goto("/home")
+  const review = page.getByRole("link", { name: "Review", exact: true })
+
+  if ((await review.count()) > 0) {
+    await review.first().click()
+  } else if (await bell(page).isVisible()) {
+    // Only a linked repository's change, if anything.
+    await bell(page).click()
+    const change = page.getByRole("menuitem", {
+      name: /^(Change to review|Conflict) in /,
+    })
+
+    if ((await change.count()) === 0) {
+      await page.keyboard.press("Escape")
+      return
+    }
+
+    await change.first().click()
+  } else {
+    return
+  }
+
+  const no = page.getByRole("button", {
+    name: /^(Not now|Keep it for this assistant only|Keep mine)$/,
+  })
+
+  for (let step = 0; step < 100; step++) {
+    if (await allClear(page).isVisible()) {
+      return
+    }
+
+    await answerAndAdvance(page, no.first())
+  }
+
+  throw new Error("More than 100 requests were waiting.")
+}
+
 /** The group of levels for one tool on an assistant's proposal. */
 export function proposedLevel(page: Page, slug: string, tool: string) {
   return page.getByRole("group", { name: `Access to ${slug}/${tool}` })

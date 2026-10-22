@@ -636,7 +636,7 @@ describe("check_permission", () => {
 })
 
 describe("what is waiting for the owner", () => {
-  it("counts open requests, newest first, and leaves out answered ones and dead tokens", async () => {
+  it("counts open requests, oldest first, and leaves out answered ones and dead tokens", async () => {
     const { ctx, scope, server } = await setup()
     const { executor } = stub()
 
@@ -652,10 +652,11 @@ describe("what is waiting for the owner", () => {
     const both = await listPendingRequests(ctx, PUBLIC_URL)
     expect(both.total).toBe(2)
     expect(both.requests.map((request) => request.title)).toEqual([
-      "Allow postcards/send_postcard?",
       "Allow postcards/add_numbers?",
+      "Allow postcards/send_postcard?",
     ])
     expect(both.requests[0]!.tokenName).toBe("Claude")
+    expect(both.requests[0]!.href).toBe(`/permissions/${both.requests[0]!.id}`)
     // The arguments stay on the request's own page.
     expect(JSON.stringify(both)).not.toContain("Ada")
 

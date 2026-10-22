@@ -47,6 +47,8 @@ export async function repoNotices(ctx: VaultContext): Promise<RepoNotice[]> {
       const conflict = item.data.pending!.kind === "conflict"
 
       return {
+        // lib/pending-count.ts `repoNoticeId` drops it from the count once
+        // the owner answers it: the two stay the same.
         id: `repo:${item.id}`,
         kind: "repos" as const,
         title: conflict

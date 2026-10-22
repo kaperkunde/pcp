@@ -106,9 +106,13 @@ test("a change from the untrusted repository waits in the bell until the owner a
 
   await page.goBack()
   await clickHydrated(page.getByRole("button", { name: "Approve" }))
-  // The answer, or the page read again once it was applied.
+  // The answer, or the page read again once it was applied (with the answer
+  // above it when nothing else waits), or the next thing waiting with the
+  // answer above it.
   await expect(
-    page.getByText(/Applied as you were shown it|in step, or you answered/),
+    page
+      .getByText(/Applied as you were shown it|in step, or you answered/)
+      .first(),
   ).toBeVisible()
 
   await page.goto("/skills")

@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
 import { invalid } from "@/lib/core/errors"
+import { nextPendingRequest } from "@/lib/core/owner-queue"
 import type { ItemKind } from "@/lib/core/repos/layout"
 import { pollGitHubSignIn, startGitHubSignIn } from "@/lib/core/repos/signin"
 import {
@@ -39,6 +40,11 @@ export type RepoActionResult = ActionState<{
   id?: string
   message?: string
   lines?: string[]
+  /**
+   * After the owner answered a change: the oldest thing still waiting for
+   * them (lib/core/owner-queue.ts), or null when nothing is.
+   */
+  next?: string | null
 }>
 
 const PAGES = "/settings/repositories"
@@ -274,27 +280,30 @@ export async function answerChangeAction(
   const ctx = await requireContext()
   const result = await guarded(async () => {
     const sha = String(shown.sha)
-
-    switch (answer) {
-      case "approve": {
-        const notes = await approveChange(ctx, itemId, {
-          sha,
-          hash: String(shown.hash),
-        })
-        return { message: "Applied as you were shown it.", lines: notes }
-      }
-      case "keep":
-        return { message: (await keepMine(ctx, itemId, { sha })).message }
-      default:
-        await declineChange(ctx, itemId, { sha })
-        return {
-          message: "Left alone: sync asks again when the repository changes.",
+    const answered = await (async () => {
+      switch (answer) {
+        case "approve": {
+          const notes = await approveChange(ctx, itemId, {
+            sha,
+            hash: String(shown.hash),
+          })
+          return { message: "Applied as you were shown it.", lines: notes }
         }
-    }
+        case "keep":
+          return { message: (await keepMine(ctx, itemId, { sha })).message }
+        default:
+          await declineChange(ctx, itemId, { sha })
+          return {
+            message: "Left alone: sync asks again when the repository changes.",
+          }
+      }
+    })()
+
+    return { ...answered, next: await nextPendingRequest(ctx, itemId) }
   })
 
-  revalidate()
-  revalidatePath("/home")
+  // The bell and Home's count are on every page.
+  revalidatePath("/", "layout")
 
   return result
 }
