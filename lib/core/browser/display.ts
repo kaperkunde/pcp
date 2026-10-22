@@ -16,7 +16,8 @@ import { DISPLAY_START_TIMEOUT_MS, SCREEN } from "./limits"
  * Only where it is asked for: in the container image (PCP_CONTAINER=1) by
  * default, or with PCP_BROWSER_DISPLAY=virtual on another Linux machine;
  * PCP_BROWSER_DISPLAY=headless turns it off. Never in the desktop app,
- * which runs on a real screen and starts no child process.
+ * which runs on a real screen and starts no child process: there Chromium
+ * has a window of its own, kept off the screen (launch.ts).
  *
  * One display per PCP process, started when the first browser starts and
  * stopped when the last one closes. Its socket takes only clients that
@@ -27,6 +28,9 @@ import { DISPLAY_START_TIMEOUT_MS, SCREEN } from "./limits"
  */
 
 export type DisplaySetting = "auto" | "virtual" | "headless"
+
+/** The process's environment, or one a test hands in. */
+export type Environment = Record<string, string | undefined>
 
 export type VirtualDisplay = {
   /** As DISPLAY takes it: ":99". */
@@ -104,21 +108,22 @@ export function setXvfbCommand(command: string | null): void {
   state().command = command
 }
 
-export function displaySetting(): DisplaySetting {
-  const value = process.env.PCP_BROWSER_DISPLAY?.toLowerCase()
+export function displaySetting(env: Environment = process.env): DisplaySetting {
+  const value = env.PCP_BROWSER_DISPLAY?.toLowerCase()
   return value === "virtual" || value === "headless" ? value : "auto"
 }
 
 /** Whether the browser should look for a virtual display here. */
-export function wantsVirtualDisplay(): boolean {
-  if (process.env.PCP_DESKTOP === "1" || process.platform !== "linux") {
+export function wantsVirtualDisplay(
+  env: Environment = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (env.PCP_DESKTOP === "1" || platform !== "linux") {
     return false
   }
 
-  const setting = displaySetting()
-  return setting === "auto"
-    ? process.env.PCP_CONTAINER === "1"
-    : setting === "virtual"
+  const setting = displaySetting(env)
+  return setting === "auto" ? env.PCP_CONTAINER === "1" : setting === "virtual"
 }
 
 /**

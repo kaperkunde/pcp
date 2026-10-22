@@ -166,6 +166,14 @@ E2E_RELEASES_PORT })` listens on a fixed port). It answers
   the tokens in `issuedTokens`. `tokenLifetime.seconds` sets how long the
   tokens `/token` hands out last, and `tokenRequests` records each grant.
 
+## What sites see of the browser
+
+Whether a site's bot check flags PCP's browser is not something the suite
+can tell: it depends on live sites. That check is manual, with the
+fingerprint harness and its list of detection sites in
+[`scripts/fingerprint/`](../scripts/fingerprint/README.md); run it again
+after a Chromium or `patchright-core` upgrade.
+
 ## Writing a new spec
 
 Walk the flow in a real browser first (`pnpm test:e2e:codegen`), then write

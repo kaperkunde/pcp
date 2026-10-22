@@ -244,7 +244,7 @@ export function BrowserManager({
 
       <ListSection
         title="Chromium"
-        footer="The browser is Chromium. Where PCP can start a virtual screen for it (in the container), it runs with a window on that screen, as on a desktop; anywhere else it runs without a window. It starts with the first page opened and closes once nothing has happened for an hour, or as long as you set on Settings → Resources. A tab you are watching, or one waiting on you after a hand-over, keeps it open."
+        footer="The browser is Chromium. Where PCP can start a virtual screen for it (in the container), it runs with a window on that screen, as on a desktop; in the Mac app, and on a Mac or Windows machine, it has a window of its own, kept off your screen; anywhere else it runs without a window. It starts with the first page opened and closes once nothing has happened for an hour, or as long as you set on Settings → Resources. A tab you are watching, or one waiting on you after a hand-over, keeps it open."
       >
         <List>
           {chromium.path ? (
@@ -341,16 +341,21 @@ function isInstalling(install: BrowserOverview["chromium"]["install"]) {
 
 /**
  * What the running browser says about its window: on the virtual display,
- * or without one, and why when the display was wanted and did not start.
+ * of its own off the screen, or without one, and why when a display or a
+ * window was wanted and did not start.
  */
 function windowNote(
   running: BrowserOverview["status"]["display"],
   wanted: BrowserOverview["chromium"]["display"],
 ): string {
   if (running === "virtual") return ", with a window on a virtual display"
+  if (running === "window") return ", with a window kept off your screen"
   if (running === "headless") {
-    return wanted === "virtual"
-      ? ", without a window (the virtual display did not start)"
+    if (wanted === "virtual") {
+      return ", without a window (the virtual display did not start)"
+    }
+    return wanted === "window"
+      ? ", without a window (its window did not open)"
       : ", without a window"
   }
 
