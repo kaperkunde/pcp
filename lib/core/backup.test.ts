@@ -35,6 +35,7 @@ import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
 import { UPDATE_CONFIG_KEY, UPDATE_STATUS_KEY } from "./updates/state"
 import { createSecret, deleteSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
+import { createSkill, deleteSkill, listSkills, setTokenSkills } from "./skills"
 import { saveWrapperByOwner } from "./wrappers/admin"
 import { createSession, resolveSession } from "./sessions"
 import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
@@ -534,6 +535,79 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await db().apiToken.findFirstOrThrow()).toMatchObject({
       manageWrappers: false,
     })
+  })
+
+  it("carries skills and which tokens see them, and restores a file from before skills", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    const { id: skillId } = await createSkill(ctx, {
+      name: "release-notes",
+      description: "Write release notes from merged pull requests.",
+      body: "1. List the merged pull requests.\n2. Group them.",
+      tools: ["upstream/alpha"],
+      files: [{ path: "template.md", text: "## Changes" }],
+    })
+    await createSkill(ctx, {
+      name: "other",
+      description: "Another one.",
+      body: "Do the other thing.",
+      tools: [],
+    })
+    await setTokenSkills(ctx, tokenId, { all: false, skillIds: [skillId] })
+    const before = await listSkills(ctx)
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const payload = await openRaw(file, EXPORT_PASSWORD)
+    // Ciphertext in the file, never the text.
+    expect(JSON.stringify(payload)).not.toContain("merged pull requests")
+    const { payload: read, preview } = await readExport(file, EXPORT_PASSWORD)
+    expect(preview.counts.skills).toBe(2)
+
+    await deleteSkill(ctx, skillId)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await listSkills(ctx)).toEqual(before)
+    expect((await resolveApiToken(token))!.skillIds).toEqual([skillId])
+
+    const older = structuredClone(payload)
+    delete (older.tables as Record<string, unknown>).skills
+    delete (older.tables as Record<string, unknown>).apiTokenSkills
+    for (const row of older.tables.apiTokens as Record<string, unknown>[]) {
+      delete row.allSkills
+    }
+    const { payload: old, preview: oldPreview } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    expect(oldPreview.counts.skills).toBe(0)
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+
+    expect(await db().skill.count()).toBe(0)
+    expect(await db().apiTokenSkill.count()).toBe(0)
+    // Every token of an older file sees every skill, as before skills.
+    expect((await resolveApiToken(token))!.skillIds).toBeNull()
+  })
+
+  it("refuses a file whose token sees a skill it does not carry", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    const payload = await openRaw(
+      await exportVault(ctx, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    ;(payload.tables as Record<string, unknown>).apiTokenSkills = [
+      { tokenId, skillId: "gone" },
+    ]
+
+    await expect(
+      readExport(await encodeExport(payload, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow("a skill is missing")
   })
 
   it("replaces the host's network settings only when asked, and drops their status", async () => {

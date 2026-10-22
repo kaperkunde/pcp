@@ -6,7 +6,7 @@ import type { GatewayScope } from "./gateway"
 
 /**
  * For tests that call tools through the gateway: call_tool takes the
- * call_handle describe_tool gives, so a test describes the tool first, as
+ * call_handle describe gives, so a test describes the tool first, as
  * an assistant does.
  */
 
@@ -16,20 +16,20 @@ function textOf(result: unknown): string {
     .join("")
 }
 
-/** The call_handle describe_tool answers with for server/tool. */
+/** The call_handle describe answers with for server/tool. */
 export async function describedHandle(
   client: Client,
   server: string,
   tool: string,
 ): Promise<string> {
   const result = await client.callTool({
-    name: "describe_tool",
+    name: "describe",
     arguments: { server, tool },
   })
   const text = textOf(result)
 
   if (result.isError) {
-    throw new Error(`describe_tool ${server}/${tool}: ${text}`)
+    throw new Error(`describe ${server}/${tool}: ${text}`)
   }
 
   return (JSON.parse(text) as { call_handle: string }).call_handle
@@ -54,8 +54,8 @@ export async function withCallHandle(
 }
 
 /**
- * The handle describe_tool would give, made from the catalogue: for a tool
- * describe_tool no longer shows (one the owner blocked after it was
+ * The handle describe would give, made from the catalogue: for a tool
+ * describe no longer shows (one the owner blocked after it was
  * described).
  */
 export async function catalogueHandle(

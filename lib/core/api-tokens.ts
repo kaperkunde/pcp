@@ -78,6 +78,8 @@ export type ResolvedToken = {
   tokenName: string
   /** null: every server in the vault. */
   serverIds: string[] | null
+  /** The skills it sees (lib/core/skills.ts); null: every skill in the vault. */
+  skillIds: string[] | null
   /** May read and change the endpoints it set up (get_endpoint, update_endpoint). */
   manageEndpoints: boolean
   /** May keep memories: its own, and the shared ones (memory). */
@@ -451,7 +453,10 @@ export async function liveToken(
 ): Promise<ResolvedToken | null> {
   const record = await db().apiToken.findUnique({
     where,
-    include: { servers: { select: { serverId: true } } },
+    include: {
+      servers: { select: { serverId: true } },
+      skills: { select: { skillId: true } },
+    },
   })
 
   if (
@@ -478,7 +483,10 @@ export async function liveToken(
 }
 
 type TokenRecord = Prisma.ApiTokenGetPayload<{
-  include: { servers: { select: { serverId: true } } }
+  include: {
+    servers: { select: { serverId: true } }
+    skills: { select: { skillId: true } }
+  }
 }>
 
 function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
@@ -489,6 +497,9 @@ function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
     serverIds: record.allowAllServers
       ? null
       : record.servers.map((link) => link.serverId),
+    skillIds: record.allSkills
+      ? null
+      : record.skills.map((link) => link.skillId),
     manageEndpoints: record.manageEndpoints,
     keepMemories: record.keepMemories,
     webFetch: record.webFetch,
@@ -510,7 +521,10 @@ export async function resolveTokenForOwner(
 ): Promise<ResolvedToken> {
   const record = await db().apiToken.findFirst({
     where: { id, vaultId: ctx.vaultId },
-    include: { servers: { select: { serverId: true } } },
+    include: {
+      servers: { select: { serverId: true } },
+      skills: { select: { skillId: true } },
+    },
   })
 
   if (!record) {

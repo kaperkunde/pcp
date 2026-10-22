@@ -107,6 +107,7 @@ export type PermissionKind =
   | "browse"
   | "browser_handover"
   | "wrapper_change"
+  | "skill_change"
 
 /**
  * The HTTP methods web_fetch has a level for. Each is the default for a
@@ -184,6 +185,22 @@ export const MAX_INSTRUCTIONS_CHARS = 4_000
 
 /** The longest memory path, without the leading /memories/. */
 export const MAX_MEMORY_PATH = 200
+
+/**
+ * Skills (lib/core/skills.ts): procedures the owner approved. The longest
+ * name (a slug, as an Agent Skill's), description and body, how many
+ * reference files one carries and how long each is, how many tools it
+ * names, and how many skills a vault keeps. Short enough that the owner
+ * reads a whole skill before agreeing to an assistant's change.
+ */
+export const MAX_SKILL_NAME = 64
+export const MAX_SKILL_DESCRIPTION = 300
+export const MAX_SKILL_BODY = 20_000
+export const MAX_SKILL_FILES = 10
+export const MAX_SKILL_FILE_CHARS = 20_000
+export const MAX_SKILL_FILE_PATH = 100
+export const MAX_SKILL_TOOLS = 30
+export const MAX_SKILLS = 200
 
 /**
  * Dynamic DNS services PCP can keep pointed at this machine

@@ -4,6 +4,7 @@ import {
   CONFLICT_END,
   CONFLICT_MIDDLE,
   CONFLICT_START,
+  diffLines,
   hasConflictMarkers,
   mergeLines,
 } from "./line-merge"
@@ -95,5 +96,20 @@ describe("hasConflictMarkers", () => {
     expect(hasConflictMarkers("a\n=======\nb")).toBe(true)
     expect(hasConflictMarkers("<<<<<<< Yours\na")).toBe(true)
     expect(hasConflictMarkers("a ======= b\n<<< not one")).toBe(false)
+  })
+})
+
+describe("diffLines", () => {
+  it("keeps the lines both have, and says which went and which came", () => {
+    expect(diffLines(BASE, "- one\n- 2\n- three\n- four\n- five")).toEqual([
+      { kind: "same", text: "- one" },
+      { kind: "removed", text: "- two" },
+      { kind: "added", text: "- 2" },
+      { kind: "same", text: "- three" },
+      { kind: "same", text: "- four" },
+      { kind: "added", text: "- five" },
+    ])
+    expect(diffLines("", "new")).toEqual([{ kind: "added", text: "new" }])
+    expect(diffLines("old", "")).toEqual([{ kind: "removed", text: "old" }])
   })
 })

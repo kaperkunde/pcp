@@ -83,6 +83,13 @@ import {
 } from "./secrets"
 import { oauthRedirectUrl } from "./oauth-client"
 import {
+  applySkillChange,
+  describeSkillAsk,
+  type SkillAsk,
+  type SkillChangeAsk,
+  type SkillShown,
+} from "./skills"
+import {
   createServer,
   getServer,
   type ExtraAuthHeader,
@@ -199,6 +206,7 @@ export type PermissionAsk =
   | { kind: "endpoint_change"; input: EndpointChangeAsk }
   | { kind: "wrapper_change"; input: WrapperChangeAsk }
   | MemoryAsk
+  | SkillAsk
   | AccessAsk
   | { kind: "fetch"; input: FetchArgs }
   | { kind: "browse"; input: BrowseAsk }
@@ -249,6 +257,8 @@ export type PermissionView = {
   full: ShownText[] | null
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
+  /** A skill request's skill as it would be, and what changes, in full. */
+  skill: SkillShown | null
   /** A wrapper request's tools and secrets, for the page to show in full. */
   wrapper: WrapperShown | null
   /** The browser tab a request is about, for the page to show it live. */
@@ -568,6 +578,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `memory:${ask.input.memoryId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "skill_change":
+      return {
+        target: `skill:${ask.input.skillId ?? ask.input.after?.name ?? ""}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "access":
       return { target: "access", args: ask.input }
     case "endpoint_change":
@@ -620,6 +635,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return ask.input.toolName
     case "browser_handover":
       return "hand_over"
+    // A skill is changed through the memory tool, as a memory is.
+    case "skill_change":
     default:
       return "memory"
   }
@@ -752,6 +769,7 @@ async function summarizeRow(
   warning: string | null
   full?: ShownText[] | null
   memory?: MemoryShown
+  skill?: SkillShown
   wrapper?: WrapperShown
   ownerOnly?: string[]
 }> {
@@ -763,6 +781,15 @@ async function summarizeRow(
       kind: row.kind,
       input: args,
     } as MemoryAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "skill_change") {
+    const asked = describeSkillAsk({
+      kind: "skill_change",
+      input: args as SkillChangeAsk,
+    })
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1145,6 +1172,7 @@ async function toView(
 ): Promise<PermissionView> {
   const {
     memory = null,
+    skill = null,
     wrapper = null,
     full = null,
     ownerOnly = [],
@@ -1174,6 +1202,7 @@ async function toView(
     ownerOnly: ownerOnly.map((line) => visible(line)),
     full,
     memory,
+    skill,
     wrapper,
     browserTabId: browserTabOf(ctx, row),
     url: permissionUrl(publicUrl, row.id),
@@ -1572,30 +1601,38 @@ export async function decidePermission(
                 readArgs(ctx, row) as EndpointChangeAsk,
               ),
             )
-          : kind === "wrapper_change"
+          : kind === "skill_change"
             ? text(
-                await applyWrapperChange(
+                await applySkillChange(
                   ctx,
-                  readArgs(ctx, row) as WrapperChangeAsk,
-                  {
-                    tokenId: row.tokenId,
-                    ...(secretValue ? { secretValue } : {}),
-                  },
+                  row.tokenId,
+                  readArgs(ctx, row) as SkillChangeAsk,
                 ),
               )
-            : kind === "fetch"
-              ? await executeFetch(ctx, row, publicUrl, executor)
-              : kind === "browse"
-                ? await executeBrowse(ctx, row, publicUrl, executor)
-                : kind === "browser_handover"
-                  ? await executeHandover(ctx, row)
-                  : await executeRegister(
-                      ctx,
-                      row,
-                      publicUrl,
-                      executor,
-                      secretValue,
-                    )
+            : kind === "wrapper_change"
+              ? text(
+                  await applyWrapperChange(
+                    ctx,
+                    readArgs(ctx, row) as WrapperChangeAsk,
+                    {
+                      tokenId: row.tokenId,
+                      ...(secretValue ? { secretValue } : {}),
+                    },
+                  ),
+                )
+              : kind === "fetch"
+                ? await executeFetch(ctx, row, publicUrl, executor)
+                : kind === "browse"
+                  ? await executeBrowse(ctx, row, publicUrl, executor)
+                  : kind === "browser_handover"
+                    ? await executeHandover(ctx, row)
+                    : await executeRegister(
+                        ctx,
+                        row,
+                        publicUrl,
+                        executor,
+                        secretValue,
+                      )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -1935,7 +1972,7 @@ async function executeRegister(
   }
 
   return text(
-    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search_tools finds them.${saved}`,
+    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search finds them.${saved}`,
   )
 }
 

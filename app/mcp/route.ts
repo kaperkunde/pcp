@@ -9,6 +9,7 @@ import {
   type GatewayScope,
 } from "@/lib/core/gateway"
 import { instructionMemories } from "@/lib/core/memories"
+import { instructionSkills } from "@/lib/core/skills"
 import { bearerChallenge } from "@/lib/core/oauth-server/metadata"
 import {
   ACCESS_TOKEN_PREFIX,
@@ -54,6 +55,7 @@ const mcpHandler = createMcpHandler(
       memories: scope.keepMemories
         ? await instructionMemories(scope.ctx, scope.tokenId)
         : null,
+      skills: await instructionSkills(scope.ctx, scope.skillIds),
     })
   },
   {

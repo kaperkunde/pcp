@@ -26,7 +26,9 @@ describe("PCP's suggested instructions", () => {
 
     const text = currentTemplate().text
     for (const word of [
-      "describe_tool",
+      "describe",
+      "search",
+      "skill",
       "call_handle",
       "check_permission",
       "link",

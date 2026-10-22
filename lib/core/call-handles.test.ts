@@ -26,7 +26,7 @@ import { writeToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
 import { checkArguments } from "./wrappers/schema-check"
 
-// call_tool takes the call_handle describe_tool gives, never a server and a
+// call_tool takes the call_handle describe gives, never a server and a
 // tool name: a tool is described before it is called, a handle goes stale
 // with its schema, and arguments that cannot work never reach the owner.
 
@@ -218,9 +218,9 @@ describe("a call handle", () => {
 })
 
 describe("call_tool with a call handle", () => {
-  it("runs the tool describe_tool gave it for, and logs it by name", async () => {
+  it("runs the tool describe gave it for, and logs it by name", async () => {
     const client = await connect()
-    const described = await call(client, "describe_tool", {
+    const described = await call(client, "describe", {
       server: "postcards",
       tool: "send_postcard",
     })
@@ -322,7 +322,7 @@ describe("call_tool with a call handle", () => {
       })
 
       expect(result.isError).toBe(true)
-      expect(result.text).toContain("not one describe_tool gave this token")
+      expect(result.text).toContain("not one describe gave this token")
       expect(result.text).not.toContain('"inputSchema"')
     }
 
@@ -343,7 +343,7 @@ describe("call_tool with a call handle", () => {
     })
 
     expect(result.isError).toBe(true)
-    expect(result.text).toContain("not one describe_tool gave this token")
+    expect(result.text).toContain("not one describe gave this token")
     expect(ran).toEqual([])
   })
 
@@ -373,7 +373,7 @@ describe("call_tool with a call handle", () => {
       call_handle: "postcards/burn_cards",
     })
     expect(unknown.isError).toBe(true)
-    expect(unknown.text).toContain("describe_tool")
+    expect(unknown.text).toContain("describe")
     expect(unknown.text).not.toContain('call_handle":')
   })
 

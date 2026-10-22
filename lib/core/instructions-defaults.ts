@@ -22,6 +22,19 @@ export const INSTRUCTION_TEMPLATES: readonly InstructionTemplate[] = [
       "- If this app cannot load call_tool, run_code makes the same calls: await pcp.call(server, tool, args).",
     ].join("\n"),
   },
+  {
+    // search and describe take over from search_tools and describe_tool,
+    // and find the owner's skills.
+    version: 2,
+    text: [
+      "- Find tools, skills and memories with search. Describe a tool with describe before you call it, and call it with the call_handle that describe gives. Do not guess argument names.",
+      "- When a skill fits the task, describe it and follow its steps: the owner approved them.",
+      "- After an action failed or is waiting for the owner, check before you try it again (check_permission, or look at what it would have changed), so nothing happens twice.",
+      "- When an answer gives you a link to PCP, end your reply with it, on a line of its own.",
+      "- Read a memory before you change or replace it.",
+      "- If this app cannot load call_tool, run_code makes the same calls: await pcp.call(server, tool, args).",
+    ].join("\n"),
+  },
 ]
 
 /** The suggested instructions new tokens get now. */
