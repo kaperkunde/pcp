@@ -362,6 +362,18 @@ To remove PCP itself:
    or to the origin the schema was downloaded from, so with an uploaded file you
    enter the base URL yourself. **Edits** (a JSON Patch) fix or narrow a schema
    you do not control, and are kept when it is read again.
+
+   One API on two hosts (Coolify on two machines, say) is one definition
+   with two servers: **Clone** on a server's or endpoint's page makes
+   another with its own address, secret and note, the same description,
+   schema, edits and tool descriptions, and the first one's levels. A change
+   to what they share reaches both, after PCP says which servers it changes;
+   **Detach** gives one its own again. PCP offers to merge endpoints that
+   already have the same schema. **Your note**, under About on any server or
+   skill, is a private line about that one (which host, what it is for):
+   assistants read it as your note beside the description, and it is never
+   synced or shared.
+
 4. **Mail accounts.** Add one over **JMAP** with its session URL (usually
    `https://<mail server>/.well-known/jmap`), signing in with a user name and an
    app password, a bearer token, or OAuth: choose **Connect** on its page, as

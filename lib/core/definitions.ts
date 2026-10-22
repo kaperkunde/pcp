@@ -14,7 +14,7 @@ import { createEndpoint } from "./endpoints"
 import { invalid, notFound, PcpError } from "./errors"
 import { checkPersonalNote, setPersonalNote } from "./personal-notes"
 import { canonicalJson } from "./permission-rules"
-import { createServer, getServer } from "./servers"
+import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
 import { getSetting, setSetting } from "./settings"
 
 /**
@@ -161,6 +161,8 @@ export type CloneInput = {
   oauthClientSecretValue?: string | null
   oauthScope?: string | null
   oauthAuthorizeParams?: string | null
+  /** Further secret headers, each with a stored secret of the clone's own. */
+  authExtraHeaders?: ExtraAuthHeaderInput[] | null
 }
 
 /** The kinds a clone can be made of: each takes an address of its own. */
@@ -213,6 +215,7 @@ export async function cloneServer(
     oauthClientSecretValue: input.oauthClientSecretValue,
     oauthScope: input.oauthScope,
     oauthAuthorizeParams: input.oauthAuthorizeParams,
+    authExtraHeaders: input.authExtraHeaders,
   }
   let id: string
 

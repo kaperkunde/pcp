@@ -211,6 +211,14 @@ export default defineConfig({
       use: signedIn("skills"),
     },
     {
+      // Definitions and instances: an endpoint's About card, the owner's
+      // private note, cloning it with an address of its own, and Detach.
+      name: "definitions",
+      testMatch: /definitions\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("definitions"),
+    },
+    {
       // Linked repositories against a fake GitHub: linking one, adding a
       // skill from it after reading it whole, and a change that waits for
       // the owner in the bell.
