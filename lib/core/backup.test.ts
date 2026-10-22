@@ -37,6 +37,8 @@ import { createSecret, deleteSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { createSkill, deleteSkill, listSkills, setTokenSkills } from "./skills"
 import { saveWrapperByOwner } from "./wrappers/admin"
+import { addLinkedRepo } from "./repos/test-vault"
+import { listRepoItems, listRepos } from "./repos/store"
 import { createSession, resolveSession } from "./sessions"
 import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
@@ -575,6 +577,55 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await db().apiToken.findFirstOrThrow()).toMatchObject({
       manageWrappers: false,
     })
+  })
+
+  it("carries linked repositories and their items, and restores a file from before them", async () => {
+    const { ctx, secretId } = await populate()
+    const { id: skillId } = await createSkill(ctx, {
+      name: "release-notes",
+      description: "Write release notes.",
+      body: "List the changes.",
+      tools: [],
+    })
+    await addLinkedRepo(ctx, { skillId, secretId })
+    const repos = await listRepos(ctx)
+    const items = await listRepoItems(ctx)
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const raw = await openRaw(file, EXPORT_PASSWORD)
+    // Ciphertext in the file: which repository is not readable from it.
+    expect(JSON.stringify(raw.tables.repos)).not.toContain("shared")
+    expect(raw.tables.repoItems).toHaveLength(1)
+
+    const { payload } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await listRepos(ctx)).toEqual(repos)
+    expect(await listRepoItems(ctx)).toEqual(items)
+
+    const older = structuredClone(raw)
+    delete (older.tables as Record<string, unknown>).repos
+    delete (older.tables as Record<string, unknown>).repoItems
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().repo.count()).toBe(0)
+    expect(await db().repoItem.count()).toBe(0)
+
+    // A linked item that names no item is refused.
+    const broken = structuredClone(raw)
+    broken.tables.repoItems![0]!.skillId = null
+    await expect(
+      readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow(/names no item/)
   })
 
   it("carries skills and which tokens see them, and restores a file from before skills", async () => {

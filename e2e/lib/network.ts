@@ -21,3 +21,12 @@ export const E2E_RELEASES_URL = `http://127.0.0.1:${E2E_RELEASES_PORT}/releases/
  */
 export const E2E_PCPGG_RELAY_PORT = 18092
 export const E2E_PCPGG_RELAY_URL = `ws://127.0.0.1:${E2E_PCPGG_RELAY_PORT}/v1/connect`
+
+/**
+ * Where the fake GitHub (e2e/fixtures/github.ts) answers during the suite
+ * (PCP_GITHUB_API_URL and PCP_GITHUB_URL in playwright.config.ts): the
+ * repositories project starts it on this port, and nothing answers there
+ * otherwise, so linked repositories never reach GitHub.
+ */
+export const E2E_GITHUB_PORT = 18094
+export const E2E_GITHUB_URL = `http://127.0.0.1:${E2E_GITHUB_PORT}`
