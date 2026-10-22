@@ -8,7 +8,6 @@ import {
   serializeItem,
   type EndpointAuthDocument,
   type EndpointDocument,
-  type HeaderDocument,
   type ItemDocument,
   type ServerDocument,
   type SkillDocument,
@@ -25,14 +24,20 @@ import {
   WRAPPER_YAML,
   type ItemRef,
 } from "./layout"
-
 /**
  * What an item from a repository would change, for the owner to read before
  * it is applied: every file, line by line, against the item as it is, and
  * each thing it would let an assistant or a document reach further, listed
  * on its own. Sync applies by itself only a change that is text and nothing
  * else (`textOnly`: a skill's description, steps or reference files, from a
- * repository the owner trusts); everything else waits for them.
+ * read-and-write repository the owner trusts); everything else waits for
+ * them.
+ *
+ * A server's item is its definition: an instance's address, sign-in,
+ * read-only and public-only switches are its own and never change from a
+ * repository (apply.ts), so none of them is flagged on a server the vault
+ * has. A new one is flagged for the way it signs in; the owner gives its
+ * address and secret when they add it.
  */
 
 export type FlagKind =
@@ -44,24 +49,16 @@ export type FlagKind =
   | "call_levels"
   /** A secret goes somewhere new, or differently. */
   | "secret_binding"
-  /** An endpoint's requests go to another address. */
-  | "base_url"
   /** An endpoint's OpenAPI document, or PCP's edits to it, changed. */
   | "spec"
-  /** An endpoint offers more than reading. */
-  | "read_only_off"
-  /** How an endpoint signs in changed: its kind, header, login or client. */
+  /** How a new endpoint signs in: its kind and headers. */
   | "auth"
-  /** A secret named for a credential changed. */
-  | "secret_name"
-  /** Private and local addresses are no longer refused. */
-  | "public_only_off"
-  /** An MCP server's address changed. */
-  | "server_url"
-  /** How an MCP server signs in changed, secrets included. */
+  /** How a new MCP server signs in: its kind and headers. */
   | "server_auth"
   /** A skill names a tool it did not. */
   | "skill_tools"
+  /** A file has a character that does not show on screen. */
+  | "hidden_characters"
   /** A file has a character that does not show on screen. */
   | "hidden_characters"
 
@@ -184,58 +181,34 @@ function wrapperFlags(
   return flags
 }
 
-function secretsOf(auth: EndpointAuthDocument): Array<string | null> {
-  switch (auth.kind) {
-    case "none":
-      return []
-    case "header":
-      return [auth.secret, ...auth.headers.map((header) => header.secret)]
-    case "basic":
-      return [auth.secret]
-    case "oauth":
-      return [auth.clientSecret]
-  }
-}
-
-/** The auth without its secrets' names: its kind and where things go. */
-function shapeOfAuth(auth: EndpointAuthDocument): string {
-  const header = ({ header, template }: HeaderDocument) => ({
-    header,
-    template,
-  })
-
-  switch (auth.kind) {
-    case "none":
-      return canonicalJson({ kind: "none" })
-    case "header":
-      return canonicalJson({
-        kind: "header",
-        ...header(auth),
-        headers: auth.headers.map(header),
-      })
-    case "basic":
-      return canonicalJson({ kind: "basic", username: auth.username })
-    case "oauth":
-      return canonicalJson({
-        kind: "oauth",
-        clientId: auth.clientId,
-        scope: auth.scope,
-        authorizeParams: auth.authorizeParams,
-      })
-  }
-}
-
 function authLine(auth: EndpointAuthDocument): string {
   switch (auth.kind) {
     case "none":
       return "no credential"
     case "header":
-      return `the secret "${auth.secret ?? "(none)"}" in ${auth.header}${auth.headers.map((header) => `, "${header.secret ?? "(none)"}" in ${header.header}`).join("")}`
+      return `a secret in ${[auth.header, ...auth.headers.map((header) => header.header)].join(", ")}`
     case "basic":
-      return `${auth.username} with the secret "${auth.secret ?? "(none)"}"`
+      return "a user name and password"
     case "oauth":
-      return `OAuth${auth.clientId ? ` with the client ${auth.clientId}` : ""}`
+      return `OAuth${auth.scope ? ` (scope ${auth.scope})` : ""}`
   }
+}
+
+/**
+ * How a new server would sign in. A server the vault has keeps its own
+ * sign-in whatever the repository says (sync never writes an instance's),
+ * so that is flagged only for a new one, whose sign-in the owner gives when
+ * adding it.
+ */
+function authFlag(
+  current: ItemDocument | null,
+  auth: EndpointAuthDocument,
+  path: string,
+  kind: "auth" | "server_auth",
+): ReviewFlag[] {
+  return current === null && auth.kind !== "none"
+    ? [{ kind, path, message: `It signs in with ${authLine(auth)}.` }]
+    : []
 }
 
 function endpointFlags(
@@ -249,14 +222,6 @@ function endpointFlags(
     ref,
     incoming.spec.format === "json" ? SPEC_JSON : SPEC_YAML,
   )
-
-  if (!current || current.baseUrl !== incoming.baseUrl) {
-    flags.push({
-      kind: "base_url",
-      path: yamlPath,
-      message: `Its requests would go to ${incoming.baseUrl}${current ? `, not ${current.baseUrl}` : ""}.`,
-    })
-  }
 
   if (
     !current ||
@@ -283,46 +248,7 @@ function endpointFlags(
     })
   }
 
-  if (current?.readOnly && !incoming.readOnly) {
-    flags.push({
-      kind: "read_only_off",
-      path: yamlPath,
-      message: "It would offer every operation, not only those that read.",
-    })
-  }
-
-  if (
-    (!current && incoming.auth.kind !== "none") ||
-    (current && shapeOfAuth(current.auth) !== shapeOfAuth(incoming.auth))
-  ) {
-    flags.push({
-      kind: "auth",
-      path: yamlPath,
-      message: `It would sign in with ${authLine(incoming.auth)}${current ? `, not ${authLine(current.auth)}` : ""}.`,
-    })
-  }
-
-  const names = secretsOf(incoming.auth)
-
-  if (
-    (!current && names.some((name) => name !== null)) ||
-    (current && canonicalJson(secretsOf(current.auth)) !== canonicalJson(names))
-  ) {
-    flags.push({
-      kind: "secret_name",
-      path: yamlPath,
-      message: `It would send ${listed(names.map((name) => `"${name ?? "(none)"}"`))}.`,
-    })
-  }
-
-  if (current?.publicOnly && !incoming.publicOnly) {
-    flags.push({
-      kind: "public_only_off",
-      path: yamlPath,
-      message:
-        "Private, loopback and link-local addresses would no longer be refused.",
-    })
-  }
+  flags.push(...authFlag(current, incoming.auth, yamlPath, "auth"))
 
   return flags
 }
@@ -332,40 +258,8 @@ function serverFlags(
   incoming: ServerDocument,
   ref: ItemRef,
 ): ReviewFlag[] {
-  const flags: ReviewFlag[] = []
-  const path = itemRoot(ref)
-
-  if (!current || current.url !== incoming.url) {
-    flags.push({
-      kind: "server_url",
-      path,
-      message: `PCP would connect to ${incoming.url}${current ? `, not ${current.url}` : ""}.`,
-    })
-  }
-
-  if (
-    (!current && incoming.auth.kind !== "none") ||
-    (current && canonicalJson(current.auth) !== canonicalJson(incoming.auth))
-  ) {
-    flags.push({
-      kind: "server_auth",
-      path,
-      message: `It would sign in with ${authLine(incoming.auth)}${current ? `, not ${authLine(current.auth)}` : ""}.`,
-    })
-  }
-
-  if (current?.publicOnly && !incoming.publicOnly) {
-    flags.push({
-      kind: "public_only_off",
-      path,
-      message:
-        "Private, loopback and link-local addresses would no longer be refused.",
-    })
-  }
-
-  return flags
+  return authFlag(current, incoming.auth, itemRoot(ref), "server_auth")
 }
-
 function skillFlags(
   current: SkillDocument | null,
   incoming: SkillDocument,

@@ -5,7 +5,7 @@ import type { VaultContext } from "../context"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 
-import { applyItem } from "./apply"
+import { applyItem, type InstanceInput } from "./apply"
 import {
   PCP_FORMAT,
   readRepo,
@@ -25,6 +25,7 @@ import {
   CLIENT_SECRET,
   OAUTH_TOKEN,
   PETS_KEY,
+  PETS_SPEC,
   populate,
   REFRESH_TOKEN,
   yamlText,
@@ -63,6 +64,52 @@ async function vaultFiles(ctx: VaultContext): Promise<RepoFiles> {
   return files
 }
 
+/**
+ * The first instance of a server item in another vault, signing in the way
+ * the item says with that vault's own secrets: what the owner gives on the
+ * page that adds it.
+ */
+function instanceFor(
+  document: ItemDocument,
+  secrets: { pets: string; client: string },
+): InstanceInput | undefined {
+  if (document.kind !== "endpoint" && document.kind !== "server") {
+    return undefined
+  }
+
+  const common = {
+    name: document.displayName,
+    url: `https://${document.name}.example.org/`,
+    readOnly: false,
+  }
+  const auth = document.auth
+
+  switch (auth.kind) {
+    case "header":
+      return {
+        ...common,
+        authType: "header",
+        authHeaderName: auth.header,
+        authValueTemplate: auth.template,
+        authSecretId: secrets.pets,
+        authExtraHeaders: auth.headers.map((header) => ({
+          secretId: secrets.client,
+          headerName: header.header,
+          valueTemplate: header.template,
+        })),
+      }
+    case "oauth":
+      return {
+        ...common,
+        authType: "oauth",
+        oauthScope: auth.scope,
+        oauthAuthorizeParams: auth.authorizeParams,
+      }
+    default:
+      return { ...common, authType: "none" }
+  }
+}
+
 /** Applied in the order things depend on each other. */
 const ORDER = ["skill", "server", "endpoint", "wrapper", "flow"]
 
@@ -94,7 +141,7 @@ describe("a round trip", () => {
       "wrappers/pet-tools/wrapper.yaml",
     ])
     expect(files["skills/release-notes/SKILL.md"]).toContain("version: 2\n")
-    expect(files["skills/release-notes/SKILL.md"]).toContain("pcp_format: 1\n")
+    expect(files["skills/release-notes/SKILL.md"]).toContain("pcp_format: 2\n")
     expect(files["wrappers/pet-tools/dogs.js"]).toMatch(
       /^\/\/ dogs: a tool of the PCP wrapper pet-tools\./,
     )
@@ -114,11 +161,17 @@ describe("a round trip", () => {
     // Another vault, with secrets of the same names (and other values) and
     // a browser of its own.
     const second = await freshVault()
-    await addSecrets(second, { pets: "another-key", client: "another" })
+    const secrets = await addSecrets(second, {
+      pets: "another-key",
+      client: "another",
+    })
     await createBrowserServer(second)
 
     for (const item of inOrder(items)) {
-      const { notes } = await applyItem(second, item, { id: null })
+      const { notes } = await applyItem(second, item, {
+        id: null,
+        instance: instanceFor(item, secrets),
+      })
       expect(notes).toEqual([])
     }
 
@@ -175,7 +228,7 @@ describe("a round trip", () => {
     const files = serializeItem(pets.document)
     const reformatted = {
       ...files,
-      "endpoints/pets/pcp.yaml": `# A comment\n${files["endpoints/pets/pcp.yaml"]!.replace("pcp_format: 1\n", "")}pcp_format: 1\n\n`,
+      "endpoints/pets/pcp.yaml": `# A comment\n${files["endpoints/pets/pcp.yaml"]!.replace("pcp_format: 2\n", "")}pcp_format: 2\n\n`,
     }
     const { items } = await readRepo(reformatted)
     expect(localHash(items[0]!)).toBe(localHash(pets.document))
@@ -244,10 +297,137 @@ describe("secrets", () => {
       expect(everything).not.toContain(value)
     }
 
-    // The names are there, which is all a repository holds.
+    // A wrapper's secret places name their secret, which its program
+    // needs. Which secret a server signs in with, and its OAuth client, are
+    // the instance's own and stay in the vault.
     expect(everything).toContain("Pets key")
-    expect(everything).toContain("Notes client secret")
+    expect(everything).not.toContain("Notes client secret")
+    expect(everything).not.toContain("notes-client")
     expect(everything).not.toContain("Calendar Hub OAuth")
+  })
+})
+
+describe("format 2: the definition only", () => {
+  it("writes no address, switch, secret name, login or OAuth client of an instance", async () => {
+    const ctx = await freshVault()
+    await populate(ctx)
+    const files = await vaultFiles(ctx)
+
+    for (const path of [
+      "endpoints/pets/pcp.yaml",
+      "endpoints/notes/pcp.yaml",
+      "servers/docs.yaml",
+      "servers/calendar-hub.yaml",
+    ]) {
+      const text = files[path]!
+      expect(text).toContain("pcp_format: 2\n")
+
+      for (const key of [
+        "baseUrl",
+        "url:",
+        "readOnly",
+        "publicOnly",
+        "secret:",
+        "username",
+        "clientId",
+        "clientSecret",
+      ]) {
+        expect(text, `${path} has ${key}`).not.toContain(key)
+      }
+    }
+
+    expect(files["servers/docs.yaml"]).toBe(
+      yamlText({
+        pcp_format: 2,
+        version: 1,
+        name: "Docs",
+        description: "The team's documents.",
+        auth: {
+          kind: "header",
+          header: "Authorization",
+          template: "Bearer {{secret}}",
+          headers: [{ header: "X-Client", template: "{{secret}}" }],
+        },
+      }),
+    )
+    const everything = Object.values(files).join("\n")
+    expect(everything).not.toContain("pets.example.com/v1\n")
+    expect(everything).not.toContain("docs.example.com")
+  })
+
+  it("reads a format-1 document, keeping what it says of its instance apart", async () => {
+    const { items, problems } = await readRepo({
+      "servers/docs.yaml": yamlText({
+        pcp_format: 1,
+        version: 2,
+        name: "Docs",
+        description: "Documents.",
+        url: "https://docs.example.com/mcp",
+        publicOnly: true,
+        auth: {
+          kind: "header",
+          header: "Authorization",
+          template: "Bearer {{secret}}",
+          secret: "Docs token",
+        },
+      }),
+    })
+
+    expect(problems).toEqual([])
+    expect(items[0]).toMatchObject({
+      kind: "server",
+      instance: { url: "https://docs.example.com/mcp", publicOnly: true },
+      auth: { kind: "header", secret: "Docs token" },
+    })
+    // Written again, it is format 2: the instance's part is not in it.
+    const again = serializeItem(items[0]!)["servers/docs.yaml"]!
+    expect(again).toContain("pcp_format: 2\n")
+    expect(again).not.toContain("docs.example.com")
+    expect(again).not.toContain("Docs token")
+  })
+
+  it("refuses an instance's address, switches or secrets in a format-2 document, and a format-1 one without its address", async () => {
+    const pcpYaml = (fields: Record<string, unknown>) => ({
+      "endpoints/api/openapi.json": PETS_SPEC,
+      "endpoints/api/pcp.yaml": yamlText({
+        name: "API",
+        auth: { kind: "none" },
+        ...fields,
+      }),
+    })
+
+    expect(
+      await problemOf(
+        pcpYaml({ pcp_format: 2, baseUrl: "https://api.example.com" }),
+      ),
+    ).toMatch(/format 2, which leaves out .*baseUrl/)
+    expect(await problemOf(pcpYaml({ pcp_format: 2, readOnly: true }))).toMatch(
+      /readOnly/,
+    )
+    expect(
+      await problemOf(
+        pcpYaml({
+          pcp_format: 2,
+          auth: { kind: "header", header: "X-Key", secret: "Mine" },
+        }),
+      ),
+    ).toMatch(/the secret of X-Key/)
+    expect(
+      await problemOf({
+        "servers/docs.yaml": yamlText({
+          pcp_format: 2,
+          name: "Docs",
+          url: "https://docs.example.com/mcp",
+          auth: { kind: "none" },
+        }),
+      }),
+    ).toMatch(/url/)
+    expect(await problemOf(pcpYaml({ pcp_format: 1 }))).toMatch(
+      /format-1 document says its baseUrl/,
+    )
+    expect((await readRepo(pcpYaml({ pcp_format: 2 }))).items[0]).toMatchObject(
+      { kind: "endpoint", instance: null },
+    )
   })
 })
 
@@ -436,7 +616,7 @@ describe("a hostile repository", () => {
       await problemOf(
         wrapperFiles({ ...WRAPPER, pcp_format: PCP_FORMAT + 1, more: "new" }),
       ),
-    ).toMatch(/format 2, written by a newer PCP; this one reads format 1/)
+    ).toMatch(/format 3, written by a newer PCP; this one reads format 2/)
     expect(
       await problemOf({
         "skills/pdf-tools/SKILL.md": ANTHROPIC_SKILL.replace(

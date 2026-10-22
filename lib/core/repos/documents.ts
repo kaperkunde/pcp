@@ -81,10 +81,21 @@ import { MAX_DOCUMENT_DEPTH } from "./limits"
  * or removed, and PCP_FORMAT goes up by one. A document's own `version`
  * (a skill's version, or the syncVersion of a server row) is something
  * else: it counts changes to the item.
+ *
+ * Format 2 carries a server's definition only (definitions.ts): what every
+ * instance of it shares. Where an instance is (an endpoint's base URL, an
+ * MCP server's address), whether it is read-only or limited to public
+ * addresses, which of the owner's secrets it signs in with, the user name
+ * of a basic login and an OAuth client's ID are each instance's own, so a
+ * format-2 document has none of them: its sign-in is the way it signs in
+ * (the kind, the headers and their formats, an OAuth scope), never with
+ * what. A format-1 document still reads: what it says of its instance is
+ * kept apart (`instance`), used only to fill in the first instance when it
+ * is added, and never written over a server the vault has.
  */
 
 /** The newest document format this PCP reads and writes. */
-export const PCP_FORMAT = 1
+export const PCP_FORMAT = 2
 
 // ---- Documents --------------------------------------------------------------
 
@@ -161,11 +172,26 @@ export type OAuthDocument = {
 export type EndpointAuthDocument =
   | { kind: "none" }
   | HeaderAuthDocument
-  | { kind: "basic"; username: string; secret: string | null }
+  /** username null: the instance's own (format 2 names none). */
+  | { kind: "basic"; username: string | null; secret: string | null }
   | OAuthDocument
 
 export type ServerAuthDocument =
   { kind: "none" } | HeaderAuthDocument | OAuthDocument
+
+/**
+ * What a format-1 document said of the server it was written from: its
+ * address and switches. Format 2 leaves them out (each instance has its
+ * own); PCP takes them only as what the first instance starts with when the
+ * owner adds the item, never onto a server the vault has.
+ */
+export type InstanceHint = {
+  /** An endpoint's base URL, an MCP server's address. */
+  url: string
+  /** An endpoint's; undefined for an MCP server. */
+  readOnly?: boolean
+  publicOnly: boolean
+}
 
 export type EndpointDocument = {
   kind: "endpoint"
@@ -173,9 +199,8 @@ export type EndpointDocument = {
   version: number
   displayName: string
   description: string
-  baseUrl: string
-  readOnly: boolean
-  publicOnly: boolean
+  /** Only from a format-1 document: see InstanceHint. Never written. */
+  instance: InstanceHint | null
   /** The OpenAPI document as PCP holds it, in the format it came in. */
   spec: { format: "json" | "yaml"; text: string }
   patches: PatchOperation[]
@@ -190,8 +215,8 @@ export type ServerDocument = {
   version: number
   displayName: string
   description: string
-  url: string
-  publicOnly: boolean
+  /** Only from a format-1 document: see InstanceHint. Never written. */
+  instance: InstanceHint | null
   auth: ServerAuthDocument
 }
 
@@ -256,13 +281,14 @@ const HEADER_END =
   ". This is the body of an async function; its arguments are in `args`."
 
 function headerYaml(header: HeaderDocument) {
-  return {
-    header: header.header,
-    template: header.template,
-    secret: header.secret,
-  }
+  return { header: header.header, template: header.template }
 }
 
+/**
+ * How a server signs in, as format 2 writes it: the way, never with what.
+ * The secrets' names, a basic login's user name and an OAuth client are the
+ * instance's own.
+ */
 function authYaml(auth: EndpointAuthDocument) {
   switch (auth.kind) {
     case "none":
@@ -276,14 +302,10 @@ function authYaml(auth: EndpointAuthDocument) {
           : {}),
       }
     case "basic":
-      return { kind: "basic", username: auth.username, secret: auth.secret }
+      return { kind: "basic" }
     case "oauth":
       return {
         kind: "oauth",
-        ...(auth.clientId !== null ? { clientId: auth.clientId } : {}),
-        ...(auth.clientSecret !== null
-          ? { clientSecret: auth.clientSecret }
-          : {}),
         ...(auth.scope !== null ? { scope: auth.scope } : {}),
         ...(auth.authorizeParams !== null
           ? { authorizeParams: auth.authorizeParams }
@@ -363,9 +385,6 @@ export function serializeItem(document: ItemDocument): RepoFiles {
         version: document.version,
         name: document.displayName,
         description: document.description,
-        baseUrl: document.baseUrl,
-        readOnly: document.readOnly,
-        publicOnly: document.publicOnly,
         auth: authYaml(document.auth),
         ...(document.patches.length > 0 ? { patches: document.patches } : {}),
         ...(Object.keys(document.toolDescriptions).length > 0
@@ -387,8 +406,6 @@ export function serializeItem(document: ItemDocument): RepoFiles {
         version: document.version,
         name: document.displayName,
         description: document.description,
-        url: document.url,
-        publicOnly: document.publicOnly,
         auth: authYaml(document.auth),
       })
       break
@@ -535,7 +552,7 @@ const headerAuth = z.strictObject({
 })
 const basicAuth = z.strictObject({
   kind: z.literal("basic"),
-  username: text,
+  username: text.nullable().default(null),
   secret: text.nullable().default(null),
 })
 const oauthAuth = z.strictObject({
@@ -594,9 +611,10 @@ const endpointSchema = z.strictObject({
   version,
   name: text,
   description: text.default(""),
-  baseUrl: text,
-  readOnly: z.boolean().default(false),
-  publicOnly: z.boolean().default(false),
+  // Format 1 only: the instance it was written from.
+  baseUrl: text.optional(),
+  readOnly: z.boolean().optional(),
+  publicOnly: z.boolean().optional(),
   auth: z.discriminatedUnion("kind", [
     noneAuth,
     headerAuth,
@@ -612,8 +630,9 @@ const serverSchema = z.strictObject({
   version,
   name: text,
   description: text.default(""),
-  url: text,
-  publicOnly: z.boolean().default(false),
+  // Format 1 only: the instance it was written from.
+  url: text.optional(),
+  publicOnly: z.boolean().optional(),
   auth: z.discriminatedUnion("kind", [noneAuth, headerAuth, oauthAuth]),
 })
 
@@ -698,10 +717,12 @@ function checkAuth(
       return { kind: "header", ...first, headers }
     }
     case "basic": {
-      let username: string
+      let username: string | null = null
 
       try {
-        username = validateUsername(auth.username)
+        if (auth.username !== null) {
+          username = validateUsername(auth.username)
+        }
       } catch (error) {
         throw withWhere(error, what)
       }
@@ -749,6 +770,70 @@ function checkAuth(
         authorizeParams,
       }
     }
+  }
+}
+
+/**
+ * What a sign-in names that is an instance's own: its secrets, a basic
+ * login's user name, an OAuth client. A format-2 document names none.
+ */
+function instanceNames(auth: EndpointAuthDocument): string[] {
+  switch (auth.kind) {
+    case "none":
+      return []
+    case "header":
+      return [auth, ...auth.headers].flatMap((header) =>
+        header.secret !== null ? [`the secret of ${header.header}`] : [],
+      )
+    case "basic":
+      return [
+        ...(auth.username !== null ? ["a user name"] : []),
+        ...(auth.secret !== null ? ["a secret"] : []),
+      ]
+    case "oauth":
+      return [
+        ...(auth.clientId !== null ? ["an OAuth client ID"] : []),
+        ...(auth.clientSecret !== null ? ["an OAuth client secret"] : []),
+      ]
+  }
+}
+
+/**
+ * A format-2 document carries the definition alone: an address, a switch or
+ * a name of the instance in it is refused, as a newer PCP would never write
+ * one. A format-1 document must say where its server is, as it always did.
+ */
+function checkInstanceFields(
+  format: number,
+  parsed: {
+    baseUrl?: string
+    url?: string
+    readOnly?: boolean
+    publicOnly?: boolean
+  },
+  auth: EndpointAuthDocument,
+  what: string,
+  address: "baseUrl" | "url",
+): void {
+  if (format >= 2) {
+    const named = [
+      ...(["baseUrl", "url", "readOnly", "publicOnly"] as const).filter(
+        (key) => parsed[key] !== undefined,
+      ),
+      ...instanceNames(auth),
+    ]
+
+    if (named.length > 0) {
+      throw invalid(
+        `${what} is in format ${format}, which leaves out what each server has of its own (${named.join(", ")}): take it out, or write it as format 1.`,
+      )
+    }
+
+    return
+  }
+
+  if (parsed[address] === undefined) {
+    throw invalid(`${what}: a format-1 document says its ${address}.`)
   }
 }
 
@@ -1063,15 +1148,22 @@ async function parseEndpoint(item: ItemFiles): Promise<EndpointDocument> {
         (path[0] === "name" || path[0] === "description")) ||
       (path.length === 2 && path[0] === "toolDescriptions"),
   )
-  formatOf(raw, what)
+  const format = formatOf(raw, what)
   const parsed = parseWith(endpointSchema, raw, what)
   const { displayName, description } = nameAndDescription(parsed, what)
   const auth = checkAuth(parsed.auth, what)
-  let baseUrl: string
+  checkInstanceFields(format, parsed, auth, what, "baseUrl")
+  let instance: InstanceHint | null = null
   let patches: PatchOperation[]
 
   try {
-    baseUrl = validateBaseUrl(parsed.baseUrl)
+    if (parsed.baseUrl !== undefined) {
+      instance = {
+        url: validateBaseUrl(parsed.baseUrl),
+        readOnly: parsed.readOnly ?? false,
+        publicOnly: parsed.publicOnly ?? false,
+      }
+    }
     patches = readPatches(parsed.patches)
   } catch (error) {
     throw withWhere(error, what)
@@ -1082,8 +1174,9 @@ async function parseEndpoint(item: ItemFiles): Promise<EndpointDocument> {
   let generated: ReturnType<typeof generateEndpointTools>
 
   try {
+    // Every operation, read-only or not: which an instance offers is its own.
     generated = generateEndpointTools(specText, {
-      readOnly: parsed.readOnly,
+      readOnly: false,
       authHeaderNames: authHeaders(auth),
       patches,
     })
@@ -1124,9 +1217,7 @@ async function parseEndpoint(item: ItemFiles): Promise<EndpointDocument> {
     version: parsed.version,
     displayName,
     description,
-    baseUrl,
-    readOnly: parsed.readOnly,
-    publicOnly: parsed.publicOnly,
+    instance,
     spec: { format: hasJson ? "json" : "yaml", text: specText },
     patches,
     toolDescriptions,
@@ -1148,13 +1239,20 @@ function parseServer(item: ItemFiles): ServerDocument {
     (path) =>
       path.length === 1 && (path[0] === "name" || path[0] === "description"),
   )
-  formatOf(raw, what)
+  const format = formatOf(raw, what)
   const parsed = parseWith(serverSchema, raw, what)
   const { displayName, description } = nameAndDescription(parsed, what)
-  let url: string
+  const auth = checkAuth(parsed.auth, what) as ServerAuthDocument
+  checkInstanceFields(format, parsed, auth, what, "url")
+  let instance: InstanceHint | null = null
 
   try {
-    url = validateServerUrl(parsed.url)
+    if (parsed.url !== undefined) {
+      instance = {
+        url: validateServerUrl(parsed.url),
+        publicOnly: parsed.publicOnly ?? false,
+      }
+    }
   } catch (error) {
     throw withWhere(error, what)
   }
@@ -1165,9 +1263,8 @@ function parseServer(item: ItemFiles): ServerDocument {
     version: parsed.version,
     displayName,
     description,
-    url,
-    publicOnly: parsed.publicOnly,
-    auth: checkAuth(parsed.auth, what) as ServerAuthDocument,
+    instance,
+    auth,
   }
 }
 

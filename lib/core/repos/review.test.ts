@@ -58,9 +58,7 @@ const ENDPOINT: EndpointDocument = {
   version: 1,
   displayName: "Pets",
   description: "The pet shop.",
-  baseUrl: "https://pets.example.com/v1",
-  readOnly: true,
-  publicOnly: true,
+  instance: null,
   spec: { format: "json", text: '{"openapi": "3.0.3"}' },
   patches: [],
   toolDescriptions: {},
@@ -79,8 +77,7 @@ const SERVER: ServerDocument = {
   version: 1,
   displayName: "Docs",
   description: "Documents.",
-  url: "https://docs.example.com/mcp",
-  publicOnly: true,
+  instance: null,
   auth: { kind: "none" },
 }
 
@@ -226,13 +223,31 @@ describe("reviewing an item", () => {
     ])
   })
 
-  it("flags an endpoint's new base URL", () => {
-    expect(
-      kinds(
-        reviewItem(ENDPOINT, { ...ENDPOINT, baseUrl: "https://evil.example" })
-          .flags,
-      ),
-    ).toEqual(["base_url"])
+  it("never flags an instance's own address, switches or sign-in on a server the vault has", () => {
+    // What a format-1 document says of its instance is never written over
+    // the vault's server, so it reaches nothing further.
+    const endpoint = reviewItem(ENDPOINT, {
+      ...ENDPOINT,
+      instance: {
+        url: "https://evil.example",
+        readOnly: false,
+        publicOnly: false,
+      },
+      auth: { kind: "basic", username: "ada", secret: "Other key" },
+    })
+    expect(endpoint.flags).toEqual([])
+    const server = reviewItem(SERVER, {
+      ...SERVER,
+      instance: { url: "https://evil.example/mcp", publicOnly: false },
+      auth: {
+        kind: "oauth",
+        clientId: "theirs",
+        clientSecret: null,
+        scope: null,
+        authorizeParams: null,
+      },
+    })
+    expect(server.flags).toEqual([])
   })
 
   it("flags a changed OpenAPI document, or changed edits to it", () => {
@@ -254,66 +269,28 @@ describe("reviewing an item", () => {
     ).toEqual(["spec"])
   })
 
-  it("flags read-only turned off", () => {
+  it("flags how a new endpoint or MCP server signs in", () => {
+    expect(kinds(reviewItem(null, ENDPOINT).flags)).toEqual(["spec", "auth"])
     expect(
-      kinds(reviewItem(ENDPOINT, { ...ENDPOINT, readOnly: false }).flags),
-    ).toEqual(["read_only_off"])
-  })
-
-  it("flags a changed kind of sign-in, and a changed secret name", () => {
-    expect(
-      kinds(
-        reviewItem(ENDPOINT, {
-          ...ENDPOINT,
-          auth: { kind: "basic", username: "ada", secret: "Pets key" },
-        }).flags,
-      ),
-    ).toEqual(["auth"])
+      reviewItem(null, ENDPOINT).flags.find((flag) => flag.kind === "auth")
+        ?.message,
+    ).toBe("It signs in with a secret in X-Api-Key.")
+    expect(kinds(reviewItem(null, SERVER).flags)).toEqual([])
     expect(
       kinds(
-        reviewItem(ENDPOINT, {
-          ...ENDPOINT,
-          auth: {
-            ...ENDPOINT.auth,
-            secret: "Other key",
-          } as EndpointDocument["auth"],
-        }).flags,
-      ),
-    ).toEqual(["secret_name"])
-  })
-
-  it("flags publicOnly turned off, on an endpoint and on a server", () => {
-    expect(
-      kinds(reviewItem(ENDPOINT, { ...ENDPOINT, publicOnly: false }).flags),
-    ).toEqual(["public_only_off"])
-    expect(
-      kinds(reviewItem(SERVER, { ...SERVER, publicOnly: false }).flags),
-    ).toEqual(["public_only_off"])
-  })
-
-  it("flags an MCP server's new address, and its sign-in", () => {
-    expect(
-      kinds(
-        reviewItem(SERVER, { ...SERVER, url: "https://evil.example/mcp" })
-          .flags,
-      ),
-    ).toEqual(["server_url"])
-    expect(
-      kinds(
-        reviewItem(SERVER, {
+        reviewItem(null, {
           ...SERVER,
           auth: {
             kind: "oauth",
-            clientId: "theirs",
+            clientId: null,
             clientSecret: null,
-            scope: null,
+            scope: "docs",
             authorizeParams: null,
           },
         }).flags,
       ),
     ).toEqual(["server_auth"])
   })
-
   it("flags characters that do not show on screen anywhere", () => {
     const review = reviewItem(ENDPOINT, {
       ...ENDPOINT,

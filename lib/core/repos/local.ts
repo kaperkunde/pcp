@@ -3,6 +3,7 @@ import type { McpServer } from "@/lib/generated/prisma/client"
 import { SECRET_PLACEHOLDER } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { ensureDefinition } from "../definition-rows"
 import { invalid, notFound } from "../errors"
 import { storedSpec } from "../endpoints"
 import { extraAuthHeaders } from "../servers"
@@ -27,13 +28,22 @@ import { checkDistinct, itemSlug, type ItemKind } from "./layout"
  * The vault's shareable items as documents (documents.ts): its skills, its
  * wrappers and browser flows, its API endpoints and its MCP servers. Other
  * kinds (mail and calendar accounts, SSH servers, the browser) hold what is
- * the owner's alone and are never shared. Only names of secrets are read,
- * never a value, and never an OAuth token.
+ * the owner's alone and are never shared.
+ *
+ * A server's document is its definition (definitions.ts), the same from
+ * every instance: the definition's short name and name, the description,
+ * the schema, edits and tool descriptions, a wrapper's programs, and how it
+ * signs in, by kind and header only. Nothing of one instance is read for it:
+ * not its name, address, switches, note or levels, not which secret it
+ * signs in with (only a wrapper's secret places name secrets, as its
+ * programs need them), never a value and never an OAuth token. The vault
+ * has one item per definition; the instance linked to a repository, or the
+ * oldest, stands for it.
  */
 
 /** An item of the vault: what it is in PCP, and as a document. */
 export type LocalItem = {
-  /** The skill's id, or the server row's. */
+  /** The skill's id, or the server row's (the instance standing for it). */
   id: string
   document: ItemDocument
 }
@@ -72,22 +82,36 @@ function skillDocument(entry: SkillEntry): SkillDocument {
   }
 }
 
-/** The name an item of this row goes by in a repository. */
-function serverName(row: Pick<McpServer, "slug">): string {
-  return itemSlug(row.slug)
+/** What a server's definition is called: its short name and its name. */
+type Named = { slug: string; name: string }
+
+/** The definition a row is an instance of, by its short name and name. */
+async function definitionName(row: McpServer): Promise<Named> {
+  const definitionId = row.definitionId ?? (await ensureDefinition(row.id))
+  const definition = definitionId
+    ? await db().serverDefinition.findUnique({
+        where: { id: definitionId },
+        select: { slug: true, name: true },
+      })
+    : null
+
+  return definition
+    ? { slug: itemSlug(definition.slug), name: definition.name }
+    : { slug: itemSlug(row.slug), name: row.name }
 }
 
 async function wrapperDocument(
   ctx: VaultContext,
   row: McpServer,
+  named: Named,
 ): Promise<WrapperDocument> {
   const view = await getWrapper(ctx, { id: row.id })
 
   return {
     kind: view.flow ? "flow" : "wrapper",
-    name: serverName(row),
+    name: named.slug,
     version: row.syncVersion ?? 1,
-    displayName: view.name,
+    displayName: named.name,
     description: view.description,
     callLevels: view.callLevels,
     tools: view.tools.map((tool) => ({
@@ -112,52 +136,81 @@ async function wrapperDocument(
   }
 }
 
-/** A header-authenticated row's headers, secrets by name. */
+/** A header-authenticated row's headers and their formats, no secret. */
 async function headerAuth(
-  ctx: VaultContext,
   row: McpServer,
 ): Promise<EndpointAuthDocument & { kind: "header" }> {
   const extras = await extraAuthHeaders(row.id)
-  const names = await secretNames(ctx, [
-    row.authSecretId,
-    ...extras.map((extra) => extra.secretId),
-  ])
-  const name = (id: string | null) => (id ? (names.get(id) ?? null) : null)
   const headers: HeaderDocument[] = extras.map((extra) => ({
     header: extra.headerName,
     template: extra.valueTemplate,
-    secret: name(extra.secretId),
+    secret: null,
   }))
 
   return {
     kind: "header",
     header: row.authHeaderName ?? "Authorization",
     template: row.authValueTemplate ?? SECRET_PLACEHOLDER,
-    secret: name(row.authSecretId),
+    secret: null,
     headers,
   }
 }
 
-async function oauthAuth(
-  ctx: VaultContext,
-  row: McpServer,
-): Promise<EndpointAuthDocument & { kind: "oauth" }> {
-  const names = await secretNames(ctx, [row.oauthClientSecretId])
-
+function oauthAuth(row: McpServer): EndpointAuthDocument & { kind: "oauth" } {
   return {
     kind: "oauth",
-    clientId: row.oauthClientId,
-    clientSecret: row.oauthClientSecretId
-      ? (names.get(row.oauthClientSecretId) ?? null)
-      : null,
+    clientId: null,
+    clientSecret: null,
     scope: row.oauthScope,
     authorizeParams: row.oauthAuthorizeParams,
   }
 }
 
-async function endpointDocument(
+/**
+ * How an instance signs in, in words, with its secrets by name, its login
+ * and its OAuth client: what stays in the vault when its definition is
+ * shared (share-review.ts's "Stays private").
+ */
+export async function instanceSignIn(
   ctx: VaultContext,
   row: McpServer,
+): Promise<string[]> {
+  const extras = row.authType === "header" ? await extraAuthHeaders(row.id) : []
+  const names = await secretNames(ctx, [
+    row.authSecretId,
+    row.oauthClientSecretId,
+    ...extras.map((extra) => extra.secretId),
+  ])
+  const name = (id: string | null) =>
+    `"${(id ? names.get(id) : null) ?? "(none)"}"`
+
+  switch (row.authType) {
+    case "header":
+      return [
+        `the secret ${name(row.authSecretId)} in ${row.authHeaderName ?? "Authorization"}`,
+        ...extras.map(
+          (extra) =>
+            `the secret ${name(extra.secretId)} in ${extra.headerName}`,
+        ),
+      ]
+    case "basic":
+      return [
+        `the user name ${row.authUsername ?? "(none)"} with the secret ${name(row.authSecretId)}`,
+      ]
+    case "oauth":
+      return [
+        row.oauthClientId
+          ? `the OAuth client ${row.oauthClientId}${row.oauthClientSecretId ? ` with the secret ${name(row.oauthClientSecretId)}` : ""}, and PCP's sign-in there`
+          : "PCP's OAuth sign-in there",
+      ]
+    default:
+      return []
+  }
+}
+
+async function endpointDocument(
+  row: McpServer,
+  named: Named,
 ): Promise<EndpointDocument> {
   const spec = await storedSpec(row.id)
 
@@ -174,19 +227,13 @@ async function endpointDocument(
 
   switch (row.authType) {
     case "header":
-      auth = await headerAuth(ctx, row)
+      auth = await headerAuth(row)
       break
-    case "basic": {
-      const names = await secretNames(ctx, [row.authSecretId])
-      auth = {
-        kind: "basic",
-        username: row.authUsername ?? "",
-        secret: row.authSecretId ? (names.get(row.authSecretId) ?? null) : null,
-      }
+    case "basic":
+      auth = { kind: "basic", username: null, secret: null }
       break
-    }
     case "oauth":
-      auth = await oauthAuth(ctx, row)
+      auth = oauthAuth(row)
       break
     default:
       auth = { kind: "none" }
@@ -194,13 +241,11 @@ async function endpointDocument(
 
   return {
     kind: "endpoint",
-    name: serverName(row),
+    name: named.slug,
     version: row.syncVersion ?? 1,
-    displayName: row.name,
+    displayName: named.name,
     description: row.description,
-    baseUrl: row.url,
-    readOnly: row.readOnly,
-    publicOnly: row.publicOnly,
+    instance: null,
     spec: { format: specFormat(spec.text), text: spec.text },
     patches: spec.patches,
     toolDescriptions: Object.fromEntries(
@@ -211,17 +256,17 @@ async function endpointDocument(
 }
 
 async function serverDocument(
-  ctx: VaultContext,
   row: McpServer,
+  named: Named,
 ): Promise<ServerDocument> {
   let auth: ServerAuthDocument
 
   switch (row.authType) {
     case "header":
-      auth = await headerAuth(ctx, row)
+      auth = await headerAuth(row)
       break
     case "oauth":
-      auth = await oauthAuth(ctx, row)
+      auth = oauthAuth(row)
       break
     default:
       auth = { kind: "none" }
@@ -229,12 +274,11 @@ async function serverDocument(
 
   return {
     kind: "server",
-    name: serverName(row),
+    name: named.slug,
     version: row.syncVersion ?? 1,
-    displayName: row.name,
+    displayName: named.name,
     description: row.description,
-    url: row.url,
-    publicOnly: row.publicOnly,
+    instance: null,
     auth,
   }
 }
@@ -243,15 +287,19 @@ async function documentOfRow(
   ctx: VaultContext,
   row: McpServer,
 ): Promise<ItemDocument> {
+  if (row.kind !== "wrapper" && row.kind !== "openapi" && row.kind !== "mcp") {
+    throw invalid(`${row.name} is not something PCP shares in a repository.`)
+  }
+
+  const named = await definitionName(row)
+
   switch (row.kind) {
     case "wrapper":
-      return wrapperDocument(ctx, row)
+      return wrapperDocument(ctx, row, named)
     case "openapi":
-      return endpointDocument(ctx, row)
+      return endpointDocument(row, named)
     case "mcp":
-      return serverDocument(ctx, row)
-    default:
-      throw invalid(`${row.name} is not something PCP shares in a repository.`)
+      return serverDocument(row, named)
   }
 }
 
@@ -294,11 +342,54 @@ export async function localItem(
   return { id, document }
 }
 
+/** A server row as an item: its kind, or null for one PCP never shares. */
+export function itemKindOfServer(serverKind: string): ItemKind | null {
+  return serverKind === "mcp"
+    ? "server"
+    : serverKind === "openapi"
+      ? "endpoint"
+      : serverKind === "wrapper"
+        ? "wrapper"
+        : null
+}
+
+/**
+ * The instance that stands for each definition: the one linked to a
+ * repository, else the oldest. Rows of kinds that are never shared, and
+ * instances that do not stand for theirs, are left out.
+ */
+async function standingRows(ctx: VaultContext): Promise<McpServer[]> {
+  const rows = await db().mcpServer.findMany({
+    where: { vaultId: ctx.vaultId, kind: { in: [...SERVER_KINDS] } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  })
+  const linked = new Set(
+    (
+      await db().repoItem.findMany({
+        where: { serverId: { in: rows.map((row) => row.id) } },
+        select: { serverId: true },
+      })
+    ).map((item) => item.serverId),
+  )
+  const chosen = new Map<string, McpServer>()
+
+  for (const row of rows) {
+    const key = row.definitionId ?? row.id
+    const held = chosen.get(key)
+
+    if (!held || (linked.has(row.id) && !linked.has(held.id))) {
+      chosen.set(key, row)
+    }
+  }
+
+  return [...chosen.values()]
+}
+
 /**
  * Every shareable item of the vault, as documents: skills first, then
- * servers by short name. A row that cannot be one (an endpoint with no
- * stored schema) is left out, and listed in `skipped` with why. Two that
- * would be at one path are refused (layout.ts).
+ * servers by short name, one per definition. A row that cannot be one (an
+ * endpoint with no stored schema) is left out, and listed in `skipped`
+ * with why. Two that would be at one path are refused (layout.ts).
  */
 export async function localItems(
   ctx: VaultContext,
@@ -308,13 +399,9 @@ export async function localItems(
     id: entry.id,
     document: skillDocument(entry) as ItemDocument,
   }))
-  const rows = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, kind: { in: [...SERVER_KINDS] } },
-    orderBy: { slug: "asc" },
-  })
   const servers: LocalItem[] = []
 
-  for (const row of rows) {
+  for (const row of await standingRows(ctx)) {
     try {
       servers.push({ id: row.id, document: await documentOfRow(ctx, row) })
     } catch (error) {
@@ -326,6 +413,7 @@ export async function localItems(
     }
   }
 
+  servers.sort((a, b) => a.document.name.localeCompare(b.document.name))
   const items = [...skills, ...servers]
   checkDistinct(
     items.map((item) => ({
@@ -338,11 +426,13 @@ export async function localItems(
 }
 
 /**
- * What in the vault has a repository item's name: a skill by its name, a
- * server, endpoint or wrapper by its short name; null when nothing does.
- * `kind` is what the row is as an item (a wrapper's kind is the one asked
- * about, flow or not), or null when the name is something PCP never shares
- * (a mail account, say): applying the item then is refused for its name.
+ * What in the vault has a repository item's name: a skill by its name; a
+ * server, endpoint or wrapper by its definition's short name (the instance
+ * linked to a repository, or the oldest, standing for it); null when
+ * nothing does. `kind` is what the row is as an item (a wrapper's kind is
+ * the one asked about, flow or not), or null when the name is a server PCP
+ * never shares (a mail account, say): applying the item then is refused for
+ * its name.
  */
 export async function findLocalItem(
   ctx: VaultContext,
@@ -355,25 +445,37 @@ export async function findLocalItem(
     return entry ? { id: entry.id, kind: "skill" } : null
   }
 
+  const asItem = (serverKind: string): ItemKind | null => {
+    const kind = itemKindOfServer(serverKind)
+    return kind === "wrapper" && ref.kind === "flow" ? "flow" : kind
+  }
+  const definition = await db().serverDefinition.findUnique({
+    where: { vaultId_slug: { vaultId: ctx.vaultId, slug: ref.name } },
+    select: { id: true, kind: true },
+  })
+
+  if (definition) {
+    const instances = await db().mcpServer.findMany({
+      where: { definitionId: definition.id, vaultId: ctx.vaultId },
+      select: { id: true, repoItems: { select: { id: true } } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    })
+    const standing =
+      instances.find((instance) => instance.repoItems.length > 0) ??
+      instances[0]
+
+    if (standing) {
+      return { id: standing.id, kind: asItem(definition.kind) }
+    }
+  }
+
+  // A server of a kind without definitions goes by its own short name.
   const row = await db().mcpServer.findUnique({
     where: { vaultId_slug: { vaultId: ctx.vaultId, slug: ref.name } },
     select: { id: true, kind: true },
   })
 
-  if (!row) {
-    return null
-  }
-
-  const kind: ItemKind | null =
-    row.kind === "mcp"
-      ? "server"
-      : row.kind === "openapi"
-        ? "endpoint"
-        : row.kind === "wrapper"
-          ? ref.kind === "flow"
-            ? "flow"
-            : "wrapper"
-          : null
-
-  return { id: row.id, kind }
+  return row && itemKindOfServer(row.kind) === null
+    ? { id: row.id, kind: null }
+    : null
 }
