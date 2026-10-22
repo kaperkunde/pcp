@@ -180,6 +180,7 @@ import {
 import { markedReadOnly } from "./read-only"
 import { readWrapperOperation } from "./wrappers/definition"
 import {
+  FLOW_RUN_TIMEOUT_MS,
   MAX_PROGRAM_CHARS,
   MAX_SECRET_BINDINGS,
   MAX_WRAPPER_TOOLS,
@@ -305,6 +306,14 @@ const FILES_INSTRUCTIONS =
 
 const WRAPPER_INSTRUCTIONS =
   'This token can also propose wrappers with create_wrapper: a server whose tools are short JavaScript programs over the owner\'s other tools, for a cleaner way to use a server (fewer arguments, several calls made one, an answer cut to what matters, a secret put where an API wants it, as {"$secret": "<name>"} in a call, where the owner allowed it). Each tool calls only the tools it lists, and can stand in for them in search; it can declare the shape of its answer (outputSchema). By default the calls it lists run on the owner\'s approval of the wrapper, so a token needs a level only for the wrapper\'s tool and the server behind it can be hidden from search; callLevels "token" holds them to the calling token\'s own levels instead. The owner reads every program and decides; get_wrapper reads one, update_wrapper and delete_wrapper propose changes.'
+
+/**
+ * What a token that reaches the browser and proposes wrappers is told about
+ * browser flows: a site task it did once, made one call (a wrapper whose
+ * tool calls the browser's tools).
+ */
+export const FLOW_INSTRUCTIONS = (slug: string) =>
+  `Browser flows: after you have done a task on a site with the owner, offer to make it a flow, a wrapper (create_wrapper) whose tool does it again in one call. Write down the steps you took, each in await pcp.step("<what it does>", async () => { … }) so a failure names its step, and target elements by role and name (target), never by ref. Take an argument for every value you typed or chose. Open a tab of its own with ${slug}/tabs (action open) and pass tab to every call. Go to the task's own address rather than clicking through overlays. Check first whether it is done already (the message already in the thread) and if so return {already: true} without acting; after acting, confirm the result on the page. Return {ok, url}, and on failure also step and a screenshot's handle. On a CAPTCHA, a sign-in or a page you did not expect, call ${slug}/hand_over and stop rather than guess. A flow that sends, buys or deletes stays at "ask": do not propose it as allowed.`
 
 const MANAGE_INSTRUCTIONS =
   "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one. A change to an endpoint you registered switches it off until the owner enables it again. Once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs: you can turn read-only on, and ask them to fix its schema with edits or better tool descriptions, which they answer in PCP. You cannot change a credential. list_secrets names the owner's secrets and what uses each, never a value: name one of them in register_server rather than a new one, so the owner need not enter it again."
@@ -565,6 +574,7 @@ export function buildInstructions(
     ...(runCode ? [CODE_INSTRUCTIONS] : []),
     ...(shareFiles ? [FILES_INSTRUCTIONS] : []),
     ...(manageWrappers ? [WRAPPER_INSTRUCTIONS] : []),
+    ...(manageWrappers && browser ? [FLOW_INSTRUCTIONS(browser.slug)] : []),
   ].join("\n")
 }
 
@@ -2816,6 +2826,10 @@ export function buildGatewayServer(
     const slugOf = (args: unknown) => ({
       server: (args as { wrapper?: string }).wrapper,
     })
+    /** The browser this token reaches, for what create_wrapper says of flows. */
+    const browserServer = servers.find(
+      (entry) => entry.kind === "browser" && visibleTools(entry).length > 0,
+    )
     const hint = (key: string) => z.boolean().optional().describe(key)
     const wrapperTool = z.object({
       name: z
@@ -2857,7 +2871,7 @@ export function buildGatewayServer(
         .min(1)
         .max(MAX_PROGRAM_CHARS)
         .describe(
-          'The body of an async function, as for run_code: args holds the arguments it was called with, await pcp.call(server, tool, args, { fields, decode, keep }) calls one of the tools in calls, pcp.read and pcp.keep work as in run_code, and return hands back the answer (a string as it is, anything else as JSON). A secret goes in as {"$secret": "<its name>"} where secrets allows it. For example: const issues = await pcp.call("github", "list_issues", { owner: "me", repo: args.repo }, { fields: ["number", "title"] }); return issues',
+          'The body of an async function, as for run_code: args holds the arguments it was called with, await pcp.call(server, tool, args, { fields, decode, keep }) calls one of the tools in calls, pcp.read and pcp.keep work as in run_code, await pcp.step("name", async () => { … }) runs one step and names it in the trace and in any error from it, and return hands back the answer (a string as it is, anything else as JSON). A secret goes in as {"$secret": "<its name>"} where secrets allows it. For example: const issues = await pcp.call("github", "list_issues", { owner: "me", repo: args.repo }, { fields: ["number", "title"] }); return issues',
         ),
       calls: z
         .array(z.string())
@@ -2949,6 +2963,11 @@ export function buildGatewayServer(
         description: [
           `Propose a wrapper: a new server whose tools are short JavaScript programs over the owner's other tools, so that a messy or long-winded server gets a few clean tools of your design (fewer arguments, defaults filled in, several calls made one, an answer cut to what matters, a secret put where an API wants it in its arguments). Up to ${MAX_WRAPPER_TOOLS} tools, each with a name, a description, an input schema, a program and the tools it calls; and up to ${MAX_SECRET_BINDINGS} places a secret goes.`,
           "Each tool's program runs like run_code's, with its arguments as args, and calls only the tools listed in its calls. With callLevels \"approved\" (the default) those calls were approved with the wrapper, so a token needs a level only for the wrapper's tool and the tools it replaces can stay hidden; with \"token\" they follow the calling token's own levels. You can only name tools you may use yourself. Give a tool an outputSchema to fix the shape of its answer. Try the program with run_code first, where you can.",
+          ...(browserServer
+            ? [
+                `A tool that calls ${browserServer.slug}'s tools is a browser flow: a site task you did once, made one call. Wrap each step in pcp.step(name, fn), target elements by role and name, never by ref, open a tab of its own, take an argument for every value typed or chosen, check first whether it is done already (return {already: true}) and confirm the result after acting, and call hand_over and stop on a CAPTCHA, a sign-in or an unexpected page. It runs for up to ${FLOW_RUN_TIMEOUT_MS / 1000} seconds.`,
+              ]
+            : []),
           "Nothing is made yet: the owner is shown every program, schema, call and secret in full on PCP's page and decides. End your reply with the link, and call check_permission once they say they have answered.",
         ].join("\n\n"),
         inputSchema: z.object({
@@ -3434,7 +3453,7 @@ export function buildGatewayServer(
             limits.answerChars.toLocaleString("en") +
             " characters of JSON. A tool's error, a refusal and a blocked tool throw an Error the program may catch. A tool the owner has not allowed yet stops the program at that call (calls before it have run) and answers with the owner's link, handed over as a tool's is.",
           'Files in an answer (attachments, images) come back as handles, {"$result": id, "type", "size", …}: pass a handle as it is where a tool wants the file, and PCP puts the file there (as base64 where the tool wants a string). keep works here as in call_tool: pcp.call(…, { keep: ["password"] }) hands the program a handle in place of that value, so a secret one tool makes (a generated password, an API key) goes into another tool\'s arguments, an API\'s request body included, without the program or you ever reading it. A handle stands for a whole string; to put a file inside a text you build (a MIME message), read its bytes.',
-          'await pcp.read(handle) reads a kept text, and pcp.read(handle, { as: "base64" }) a file\'s bytes as base64 ({ as: "bytes" } as a Uint8Array). await pcp.keep(text, { name, type }) keeps a text (a CSV, a report) and returns its handle, to pass to a tool or to return; pcp.keep(base64, { encoding: "base64", name, type }), or a Uint8Array, keeps a file. await pcp.tools() lists the servers, and pcp.tools(server) every tool on one, as list_tools does.',
+          'await pcp.read(handle) reads a kept text, and pcp.read(handle, { as: "base64" }) a file\'s bytes as base64 ({ as: "bytes" } as a Uint8Array). await pcp.keep(text, { name, type }) keeps a text (a CSV, a report) and returns its handle, to pass to a tool or to return; pcp.keep(base64, { encoding: "base64", name, type }), or a Uint8Array, keeps a file. await pcp.tools() lists the servers, and pcp.tools(server) every tool on one, as list_tools does. await pcp.step("name", async () => { … }) runs a part of the program under a name: its calls are listed under it, and an error from it reads "failed at step \'name\'" (error.step names it).',
           `Limits: ${RUN_TIMEOUT_MS / 60_000} minutes in all, ${RUN_CPU_MS / 1000} seconds of computing, ${Math.round(limits.programMemoryBytes / 1024 / 1024).toLocaleString("en")} MB of memory, ${MAX_CALLS_PER_RUN} calls, ${MAX_PARALLEL_CALLS} at a time; a file read or kept is ${Math.round(limits.fileBytes / 1024 / 1024).toLocaleString("en")} MB at most. The owner sets these in PCP's settings. What it prints and returns comes back in the answer; a long part is kept as a result to read with read_result.`,
           `Every run has an id (run_…). run_code answers within ${RUN_ANSWER_MS / 1000} seconds: a program not done by then goes on (within the limit above), and the answer says it is still running, with its id and its calls so far; check_run with that id waits for it and gives its outcome. An answer that is not a plain success names the run, why it ended, and the calls that change things that completed. A run that failed or is still running may have done part of its work: check it (check_run) before running it again; to run the same program again on purpose pass rerun: true. Sent again while it runs, or a few minutes after it ended, the same program is answered with that run instead of running twice.`,
           ...(shells.length > 0

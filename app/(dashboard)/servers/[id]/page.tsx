@@ -275,6 +275,7 @@ export default async function ServerPage({
           lastSyncedAt: server.lastSyncedAt,
           oauthConnection,
           oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+          flow: wrapper?.flow ?? false,
         }}
         tools={server.tools.map((tool) => {
           const plan = readCallPlan(tool.operation)

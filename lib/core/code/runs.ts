@@ -34,6 +34,13 @@ export type TraceEntry = {
   readOnly: boolean | null
   /** It failed on the way (not reached, timed out): it may have gone through. */
   transit: boolean
+  /** The step it was made in (pcp.step), when the program named one. */
+  step?: string
+  /**
+   * The run a call to a wrapper's tool started (run.ts withWrappers), whose
+   * answer names this run back: a flow called from run_code.
+   */
+  runId?: string
 }
 
 export type RunState = "running" | "finished" | "failed" | "stopped"
@@ -100,7 +107,12 @@ export function callLine(entry: TraceEntry, now = Date.now()): string {
             ? "error, may have gone through"
             : entry.outcome
 
-  return `- ${name}: ${how}${entry.ms !== null ? `, ${seconds(entry.ms)}` : ""}${entry.readOnly === true ? " (read-only)" : ""}`
+  const where = [
+    ...(entry.step ? [`step '${entry.step}'`] : []),
+    ...(entry.runId ? [`run ${entry.runId}`] : []),
+  ]
+
+  return `- ${name}${where.length > 0 ? ` (${where.join(", ")})` : ""}: ${how}${entry.ms !== null ? `, ${seconds(entry.ms)}` : ""}${entry.readOnly === true ? " (read-only)" : ""}`
 }
 
 /**

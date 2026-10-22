@@ -1,4 +1,4 @@
-import { KeyRound } from "lucide-react"
+import { Globe, KeyRound } from "lucide-react"
 import type { ReactNode } from "react"
 
 import { Badge } from "@/components/ui/badge"
@@ -43,6 +43,7 @@ export function WrapperReview({ shown }: { shown: WrapperShown }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {shown.flow ? <FlowSummary shown={shown} /> : null}
       {shown.secrets.length > 0 ? <SecretPlaces shown={shown} /> : null}
       {open.map((tool) => (
         <ToolReview key={tool.name} tool={tool} />
@@ -61,6 +62,82 @@ export function WrapperReview({ shown }: { shown: WrapperShown }) {
             ))}
           </div>
         </details>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * What a browser flow opens, gathered from its tools: the sites its
+ * programs name, and whether an address comes from elsewhere. Read from
+ * the programs' text, so it says it is a best guess.
+ */
+function FlowSummary({ shown }: { shown: WrapperShown }) {
+  const flows = shown.tools.filter(
+    (tool) => tool.flow && tool.status !== "removed",
+  )
+  const sites = [...new Set(flows.flatMap((tool) => tool.sites?.sites ?? []))]
+  const fromArguments = flows.some((tool) => tool.sites?.fromArguments)
+  const computed = flows.some((tool) => tool.sites?.computed)
+
+  return (
+    <section
+      aria-labelledby="wrapper-flow"
+      className="flex flex-col gap-3 rounded-xl border border-input bg-card px-4 py-4 sm:px-5"
+    >
+      <h3
+        id="wrapper-flow"
+        className="flex flex-wrap items-center gap-2 text-[13px] font-semibold"
+      >
+        <Globe aria-hidden className="size-4" strokeWidth={1.8} />
+        Sites it opens
+        <Badge variant="secondary">Browser flow</Badge>
+      </h3>
+      <SiteList
+        sites={sites}
+        fromArguments={fromArguments}
+        computed={computed}
+      />
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        PCP reads these from the programs’ text, so this is a best guess, not a
+        promise. Whatever the list says, the browser opens only sites the token
+        calling it may open.
+      </p>
+    </section>
+  )
+}
+
+function SiteList({
+  sites,
+  fromArguments,
+  computed,
+}: {
+  sites: string[]
+  fromArguments: boolean
+  computed: boolean
+}) {
+  const more = [
+    ...(fromArguments ? ["any address given in its arguments"] : []),
+    ...(computed ? ["addresses it works out as it runs"] : []),
+  ].join(", and ")
+
+  if (sites.length === 0 && !more) {
+    return (
+      <p className="text-[13px] text-muted-foreground">
+        No address in the program’s text.
+      </p>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {sites.length > 0 ? <Chips names={sites} /> : null}
+      {more ? (
+        <p className="text-[13px]">
+          {sites.length > 0
+            ? `And ${more}.`
+            : `${more[0]!.toUpperCase()}${more.slice(1)}.`}
+        </p>
       ) : null}
     </div>
   )
@@ -148,6 +225,7 @@ function ToolReview({ tool }: { tool: WrapperShownTool }) {
           <Badge variant={tool.status === "same" ? "secondary" : "warning"}>
             {STATUS[tool.status]}
           </Badge>
+          {tool.flow ? <Badge variant="secondary">Browser flow</Badge> : null}
           <Hints annotations={tool.annotations} />
         </div>
         <p className="leading-relaxed break-words whitespace-pre-wrap">
@@ -174,6 +252,12 @@ function ToolReview({ tool }: { tool: WrapperShownTool }) {
       <Part label="Calls">
         <Chips names={tool.calls} />
       </Part>
+
+      {tool.sites && tool.status !== "removed" ? (
+        <Part label="Opens">
+          <SiteList {...tool.sites} />
+        </Part>
+      ) : null}
 
       {tool.replaces.length > 0 ? (
         <Part label="Stands in for">

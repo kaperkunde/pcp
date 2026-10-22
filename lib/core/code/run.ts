@@ -27,6 +27,7 @@ import {
   MAX_KEEPS_PER_RUN,
   MAX_PARALLEL_CALLS,
   MAX_READS_PER_RUN,
+  MAX_STEP_NAME_CHARS,
   RUN_ANSWER_MS,
   RUN_PROGRESS_MS,
   RUN_TIMEOUT_MS,
@@ -74,6 +75,10 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  * - `tools` lists what the gateway's list_tools would: the token's servers,
  *   or one server's tools it can see, at its levels. It reaches no server.
  *
+ * `pcp.step(name, fn)` is no operation of its own: the program's runtime
+ * (quickjs.ts) runs fn, sends the step's name with each call made in it for
+ * the trace, and rethrows an error from it as "failed at step '…'".
+ *
  * Files move as handles: a file in an answer is kept and the program gets
  * its handle, and passes the handle on; it reads the bytes only when it
  * asks to (`read` as base64).
@@ -92,6 +97,16 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  * ended, is answered with that run unless the assistant asks for a rerun.
  */
 
+/**
+ * The run a program's call is made for. `onRun` is told the id of the run
+ * a wrapper's tool starts for it (wrappers/run.ts), for the trace.
+ */
+export type CallRun = {
+  runId: string
+  signal: AbortSignal
+  onRun?: (runId: string) => void
+}
+
 /** How the gateway runs a program's call: by name, at the token's level. */
 export type CodeCaller = (
   input: {
@@ -101,9 +116,10 @@ export type CodeCaller = (
     /**
      * The run the call is made for: its id, and a signal that aborts only
      * when the run itself is over (never when the client leaves), for the
-     * upstream call (upstream.ts callServerTool's runId and signal).
+     * upstream call (upstream.ts callServerTool's runId and signal), and
+     * where a call to a wrapper's tool says the run it started.
      */
-    run: { runId: string; signal: AbortSignal }
+    run: CallRun
     /** Says, once the tool is found, whether its server marks it read-only. */
     lookedUp?: (readOnly: boolean) => void
   } & AnswerShape,
@@ -763,6 +779,16 @@ export async function runProgram(
       throw error
     }
 
+    // The step it is made in (pcp.step), for the trace only; the program's
+    // own text, so it is cut and kept to one line.
+    const step =
+      typeof payload.step === "string"
+        ? payload.step
+            .replace(/[\u0000-\u001f\u007f]+/g, " ")
+            .trim()
+            .slice(0, MAX_STEP_NAME_CHARS)
+        : ""
+
     if (++calls > MAX_CALLS_PER_RUN) {
       overCalls = true
       return refuse(`A run makes at most ${MAX_CALLS_PER_RUN} calls.`)
@@ -786,6 +812,7 @@ export async function runProgram(
         ms: null,
         readOnly: null,
         transit: false,
+        ...(step ? { step } : {}),
       }
       trace.push(entry)
 
@@ -799,7 +826,13 @@ export async function runProgram(
             server,
             tool,
             args: bareHandles(args) as Record<string, unknown>,
-            run: { runId, signal: controller.signal },
+            run: {
+              runId,
+              signal: controller.signal,
+              onRun: (inner) => {
+                entry.runId = inner
+              },
+            },
             lookedUp: (readOnly) => {
               entry.readOnly = readOnly
             },

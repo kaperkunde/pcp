@@ -59,6 +59,11 @@ export const MAX_READS_PER_RUN = 50
 export const MAX_RANDOM_BYTES = 65_536
 /** What the program prints, in characters; the rest is dropped and counted. */
 export const MAX_OUTPUT_CHARS = 1_000_000
+/**
+ * A step's name (pcp.step, a wrapper's or run_code's), in characters: a
+ * longer one is cut, in the trace and in the error that names it.
+ */
+export const MAX_STEP_NAME_CHARS = 100
 /** An error's message and stack, as the assistant reads it. */
 export const MAX_ERROR_CHARS = 4_000
 

@@ -1308,6 +1308,52 @@ checkSyntax`), nothing has a character that does not show on screen
   token in ten minutes and a vault to 50 wrappers. The owner adds and edits
   wrappers directly on the Servers page (`saveWrapperByOwner`, the same
   checks, with secrets they hold).
+- **Browser flows.** A site task an assistant did step by step (snapshot,
+  find, click, type) becomes one parameterized call as a wrapper whose
+  tools call the browser's tools: no executor, approval path or column of
+  its own. A tool is a flow when its `calls` name a tool of a browser
+  server, and a wrapper is one when any tool is (`definition.ts isFlowTool`,
+  `isFlow`, `flowWrapperIds`): derived from the definition, never stored,
+  so its hash is unchanged. A flow's tools start at "ask" for every token
+  like any new tool (`DEFAULT_TOOL_ACCESS`; a read-only one follows that
+  default too), and nothing about a flow lifts or writes a level: the
+  owner's own and their answers decide, and the instructions tell the
+  assistant to leave one that sends, buys or deletes at "ask". The browser
+  still opens only the sites the calling token's lines allow, and pacing
+  (`browser/call.ts`) holds its actions wherever it runs. A flow's run may
+  take `FLOW_RUN_TIMEOUT_MS` (2.5 minutes, as pages and pacing waits count)
+  rather than `WRAPPER_RUN_TIMEOUT_MS`, still under run_code's
+  `RUN_TIMEOUT_MS`. The owner's review (`WrapperShown.flow`, each tool's
+  `flow` and `sites`) marks it "Browser flow", as the Servers list and the
+  wrapper's page do, and lists the sites it opens: string literals and the
+  fixed start of templates in its `tabs`/`navigate` calls' `url`, and
+  whether an address comes from its arguments or is worked out as it runs
+  (`flow-sites.ts`, a best-effort reading of the text, which the page says).
+  An assistant that reaches the browser and proposes wrappers is told how
+  to write one (`FLOW_INSTRUCTIONS` in `gateway.ts`, and in brief in
+  `create_wrapper`): its own tab, elements by role and name, an argument
+  for every value, check first and return `{already: true}`, confirm after
+  acting, `hand_over` and stop on a CAPTCHA, sign-in or surprise.
+- **From run_code.** A program's `pcp.call` reaches a wrapper's tool the
+  token may call as any other: `resolveCall` at the token's level for it,
+  then `runCodeCall` with `withWrappers`, which runs the tool's program in a
+  QuickJS instance of its own under the "wrapper" count of programs at once
+  (`runProgram`'s `runningBy`), apart from run_code's, so the outer program
+  never waits on a slot it holds itself; a wrapper past that count answers
+  busy, an error the program sees. Its calls are paced in `callServerTool`
+  and the browser's call path as everywhere. The two runs name each other:
+  the inner run's id is handed back through `CallOptions.onRun` into the
+  outer trace's entry for the call (`- chat/post_message (run run_…)`), and
+  the inner answer's report says `called from run run_…`.
+- **Steps.** `pcp.step(name, fn)` is part of the program's runtime
+  (`code/quickjs.ts`'s prelude, so run_code has it too), not a bridge
+  operation: it runs `fn`, sends the step's name (cut to
+  `MAX_STEP_NAME_CHARS`, on one line) with each call made in it, which the
+  trace shows (`- browser/click (step 'send it'): ok`), and rethrows an error
+  from it as "failed at step '…': …", with `error.step` set for a program
+  that catches it; an outer step passes an error an inner one named on as
+  it is. Steps are meant one after another: run side by side, a call
+  carries whichever began last.
 
 ## Browser
 

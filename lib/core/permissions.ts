@@ -35,6 +35,7 @@ import {
   type EndpointRegistration,
 } from "./endpoint-admin"
 import { MAX_CALLS_PER_RUN } from "./code/limits"
+import type { CallRun } from "./code/run"
 import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
@@ -491,9 +492,10 @@ export async function runCodeCall(
     secrets?: SecretGrant
     /**
      * The run the call is made for, handed on to the upstream call: its id,
-     * and a signal that aborts when the run itself is over.
+     * a signal that aborts when the run itself is over, and where a
+     * wrapper's tool says the run it started.
      */
-    run?: { runId: string; signal: AbortSignal }
+    run?: CallRun
     executor?: PermissionExecutor
   } & AnswerShape,
 ): Promise<CodeCallOutcome> {
@@ -511,7 +513,13 @@ export async function runCodeCall(
       keepBytes: keepers.bytes,
       open: resultOpener(ctx, tokenId),
       ...(secrets ? { secrets } : {}),
-      ...(run ? { runId: run.runId, signal: run.signal } : {}),
+      ...(run
+        ? {
+            runId: run.runId,
+            signal: run.signal,
+            ...(run.onRun ? { onRun: run.onRun } : {}),
+          }
+        : {}),
     })
 
     return await answerValue(
