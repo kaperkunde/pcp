@@ -77,16 +77,19 @@ test("a token made to run code gets run_code and is told how, and no other", asy
   ;({ token } = await connectAssistant(page, TOKEN_NAME, { runCode: true }))
   await expect(page.getByRole("switch", { name: /^Run code/ })).toBeChecked()
 
+  // The gateway's own part about run_code, not the owner's instructions
+  // for the token, whose suggested text names run_code for every token.
+  const runCodePart = "This token can also run code with run_code"
   const told = await initialize(baseURL!, token)
   expect(told.tools).toContain("run_code")
-  expect(told.instructions).toContain("run_code")
+  expect(told.instructions).toContain(runCodePart)
 
   const plain = await initialize(
     baseURL!,
     await createToken(page, PLAIN_TOKEN_NAME),
   )
   expect(plain.tools).not.toContain("run_code")
-  expect(plain.instructions).not.toContain("run_code")
+  expect(plain.instructions).not.toContain(runCodePart)
 })
 
 test("a program calls the token's tools and hands back only what it kept", async ({
