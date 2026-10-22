@@ -9,7 +9,6 @@ import {
   dismissMerge,
   mergeDefinitions,
   setPersonalNote,
-  type CloneInput,
   type NoteKind,
 } from "@/lib/core/definitions"
 import { getServer } from "@/lib/core/servers"
@@ -20,7 +19,7 @@ import {
   fields,
   guarded,
 } from "@/lib/server/action-state"
-import { extraHeadersFrom } from "@/lib/server/extra-headers"
+import { instanceInputFrom } from "@/lib/server/instance-input"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -86,32 +85,6 @@ export async function detachServerAction(
   return result
 }
 
-function cloneInputFrom(formData: FormData): CloneInput {
-  const authType = field(formData, "authType")
-
-  return {
-    name: field(formData, "name"),
-    url: field(formData, "url"),
-    note: field(formData, "note"),
-    authType:
-      authType === "header" || authType === "basic" || authType === "oauth"
-        ? authType
-        : "none",
-    authHeaderName: field(formData, "authHeaderName") || null,
-    authValueTemplate: field(formData, "authValueTemplate") || null,
-    authSecretId: field(formData, "authSecretId") || null,
-    authSecretName: field(formData, "authSecretName") || null,
-    authSecretValue: field(formData, "authSecretValue") || null,
-    authUsername: field(formData, "authUsername") || null,
-    oauthClientId: field(formData, "oauthClientId") || null,
-    oauthClientSecretId: field(formData, "oauthClientSecretId") || null,
-    oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,
-    oauthScope: field(formData, "oauthScope") || null,
-    oauthAuthorizeParams: field(formData, "oauthAuthorizeParams") || null,
-    authExtraHeaders: extraHeadersFrom(formData),
-  }
-}
-
 /** Another server of the same definition; opens its page when made. */
 export async function cloneServerAction(
   _previous: DefinitionActionResult,
@@ -120,7 +93,7 @@ export async function cloneServerAction(
   const ctx = await requireContext()
   const sourceId = field(formData, "sourceId")
   const result = await guarded(() =>
-    cloneServer(ctx, sourceId, cloneInputFrom(formData)),
+    cloneServer(ctx, sourceId, instanceInputFrom(formData)),
   )
 
   if (result.status !== "ok") {

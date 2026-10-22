@@ -19,6 +19,7 @@ import { SubmitButton } from "@/components/submit-button"
 import { ButtonLink } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
+import { SwitchRow } from "@/components/ui/switch"
 import {
   cloneServerAction,
   type DefinitionActionResult,
@@ -40,29 +41,55 @@ export type CloneSource = {
   oauthScope: string
 }
 
+type FormResult =
+  { status: "idle" } | { status: "error"; error: string } | { status: "ok" }
+
+/**
+ * The same form for a server's first instance, when it is added from a
+ * linked repository: its own action, button and switches, what it starts
+ * with, and where Cancel goes.
+ */
+export type InstanceFormVariant = {
+  action: (state: FormResult, formData: FormData) => Promise<FormResult>
+  submitLabel: string
+  pendingLabel: string
+  cancelHref: string
+  name: string
+  url: string
+  /** An endpoint's switches, as they start. */
+  switches?: { readOnly: boolean; publicOnly: boolean }
+}
+
 /**
  * Clone a server: only what is the new one's own. Its name, its address, how
  * it signs in there (the source's way, with a secret of its own), and your
  * note. The description, schema, edits and tool descriptions are the
- * definition's; the levels are copied from the source.
+ * definition's; the levels are copied from the source. With `variant`, the
+ * same for the first server of a definition added from a repository.
  */
 export function CloneForm({
   source,
   secrets,
   redirectUrl,
+  variant,
 }: {
   source: CloneSource
   secrets: SecretOption[]
   redirectUrl: string
+  variant?: InstanceFormVariant
 }) {
-  const [state, action] = useActionState<DefinitionActionResult, FormData>(
-    cloneServerAction,
+  const [state, action] = useActionState<FormResult, FormData>(
+    variant?.action ??
+      (cloneServerAction as (
+        state: FormResult,
+        formData: FormData,
+      ) => Promise<DefinitionActionResult>),
     { status: "idle" },
   )
   const endpoint = source.kind === "openapi"
   const prefix = `clone-${source.id}`
-  const [name, setName] = useState(`${source.name} (copy)`)
-  const [url, setUrl] = useState("")
+  const [name, setName] = useState(variant?.name ?? `${source.name} (copy)`)
+  const [url, setUrl] = useState(variant?.url ?? "")
   const [note, setNote] = useState("")
   const [authType, setAuthType] = useState<AuthType>(source.authType)
   const choices: Array<{ value: AuthType; label: string }> = [
@@ -76,7 +103,9 @@ export function CloneForm({
 
   return (
     <ServerFormFrame editing={false} action={action}>
-      <input type="hidden" name="sourceId" value={source.id} />
+      {variant ? null : (
+        <input type="hidden" name="sourceId" value={source.id} />
+      )}
 
       <Field
         label="Name"
@@ -122,7 +151,11 @@ export function CloneForm({
           options={choices}
           value={authType}
           onValueChange={setAuthType}
-          hint="As the source signs in, with a secret of this one's own."
+          hint={
+            variant
+              ? "As the repository says it signs in, with a secret of yours."
+              : "As the source signs in, with a secret of this one's own."
+          }
         />
         {authType === "header" ? (
           <HeaderAuthFields
@@ -159,16 +192,41 @@ export function CloneForm({
             }}
             redirectUrl={redirectUrl}
             foldClient
-            scopeHint="Leave empty for the scope the source asks for."
+            scopeHint={
+              variant
+                ? "Leave empty for the scope its operations need."
+                : "Leave empty for the scope the source asks for."
+            }
             intro={
               <>
-                After cloning, choose <strong>Connect</strong> on its page to
-                sign in there.
+                After {variant ? "adding it" : "cloning"}, choose{" "}
+                <strong>Connect</strong> on its page to sign in there.
               </>
             }
           />
         ) : null}
       </FormSection>
+
+      {variant?.switches ? (
+        <FormSection>
+          <div className="overflow-hidden rounded-xl bg-field">
+            <SwitchRow
+              id={`${prefix}-read-only`}
+              name="readOnly"
+              label="Read-only"
+              description="Only the operations that read. Recommended: turn it off when you need more."
+              defaultChecked={variant.switches.readOnly}
+            />
+            <SwitchRow
+              id={`${prefix}-public-only`}
+              name="publicOnly"
+              label="Public addresses only"
+              description="Refuse private, loopback and link-local addresses."
+              defaultChecked={variant.switches.publicOnly}
+            />
+          </div>
+        </FormSection>
+      ) : null}
 
       <FormSection>
         <Field
@@ -191,10 +249,15 @@ export function CloneForm({
       <div className="flex flex-col gap-3">
         <FormError error={state.status === "error" ? state.error : null} />
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <ButtonLink href={`/servers/${source.id}`} variant="secondary">
+          <ButtonLink
+            href={variant?.cancelHref ?? `/servers/${source.id}`}
+            variant="secondary"
+          >
             Cancel
           </ButtonLink>
-          <SubmitButton pendingText="Cloning…">Clone</SubmitButton>
+          <SubmitButton pendingText={variant?.pendingLabel ?? "Cloning…"}>
+            {variant?.submitLabel ?? "Clone"}
+          </SubmitButton>
         </div>
       </div>
     </ServerFormFrame>

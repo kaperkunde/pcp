@@ -220,8 +220,8 @@ export default defineConfig({
     },
     {
       // Linked repositories against a fake GitHub: linking one, adding a
-      // skill from it after reading it whole, and a change that waits for
-      // the owner in the bell.
+      // skill from it after reading it whole, an update available that waits
+      // for the owner, and pushing one of theirs after its review.
       name: "repositories",
       testMatch: /repositories\.spec\.ts/,
       dependencies: ["setup"],
