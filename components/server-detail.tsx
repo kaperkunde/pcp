@@ -69,6 +69,8 @@ export type ServerDetailProps = {
   redirectUrl: string
   /** The kind's settings form, folded under Advanced. */
   settings: ReactNode
+  /** Its pace (components/server-pacing-form.tsx), under Advanced too. */
+  pacing?: ReactNode
   /** What the kind needs from you, shown after About (SSH's keys). */
   children?: ReactNode
 }
@@ -85,6 +87,7 @@ export function ServerDetail({
   notice,
   redirectUrl,
   settings,
+  pacing,
   children,
 }: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
@@ -335,6 +338,11 @@ export function ServerDetail({
         {endpoint ? <EndpointFacts server={server} /> : null}
         {/* Its own box: made on the server page, it is no list item. */}
         <div className="flex flex-col gap-4">{settings}</div>
+        {pacing ? (
+          <div className="flex flex-col gap-4 border-t border-separator pt-4">
+            {pacing}
+          </div>
+        ) : null}
       </Disclosure>
 
       <RemoveServer server={server} />
@@ -345,20 +353,20 @@ export function ServerDetail({
 function advancedSummary(kind: ServerKind): string {
   switch (kind) {
     case "openapi":
-      return "Schema, base URL, sign-in, edits to the schema, public addresses, name"
+      return "Schema, base URL, sign-in, edits to the schema, public addresses, name, pacing"
     case "jmap":
     case "imap":
-      return "Addresses, sign-in, sender, read-only, name"
+      return "Addresses, sign-in, sender, read-only, name, pacing"
     case "caldav":
-      return "Address, sign-in, read-only, name"
+      return "Address, sign-in, read-only, name, pacing"
     case "ssh":
-      return "Host, port, login, name"
+      return "Host, port, login, name, pacing"
     case "wrapper":
       return "The whole definition as JSON, short name, name"
     case "browser":
-      return "Name and description"
+      return "Name and description, pacing"
     default:
-      return "Address, public addresses, sign-in, headers, sign-in app, short name"
+      return "Address, public addresses, sign-in, headers, sign-in app, short name, pacing"
   }
 }
 
