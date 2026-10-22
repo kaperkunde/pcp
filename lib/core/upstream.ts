@@ -1289,7 +1289,10 @@ export type CallOptions = {
   runId?: string
   /**
    * Aborts when the run the call is made for is over (its own limit, or it
-   * ended), never because its client went away.
+   * ended), never because its client went away. The browser honours it: a
+   * call waiting its turn on a tab, or running, stops waiting, is rejected
+   * with the signal's reason, and its turn passes on. Other kinds of server
+   * do not look at it yet.
    */
   signal?: AbortSignal
 }
@@ -1383,7 +1386,7 @@ async function dispatchCall(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl, tokenId, keep, keepBytes, open }: CallOptions,
+  { publicUrl, tokenId, keep, keepBytes, open, signal, runId }: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
   if (server.kind === "wrapper") {
@@ -1405,6 +1408,8 @@ async function dispatchCall(
       publicUrl,
       open,
       keepBytes,
+      signal,
+      runId,
     })
   }
 

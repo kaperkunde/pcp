@@ -1376,7 +1376,7 @@ which `runCall` turns into a `browse` request offering Allow once (the site
 for that tab while it is open), Allow this site for (an allowance, as for
 web fetch), Always allow this site and Block this site (the token's site
 line, as for web fetch) and Not now. A popup becomes a tab
-of the tab that opened it. The gate is the browser's, not a tab's (`Fetch`
+of the tab that opened it, which that tab's next answer names by its id. The gate is the browser's, not a tab's (`Fetch`
 on the browser's own DevTools session, on before the first page exists), so
 it holds a popup from its very first request, before Playwright has
 reported the popup: until then the popup opens only what the tab that
@@ -1407,13 +1407,54 @@ Hosts are never logged.
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog` and `hand_over`. An assistant reads a snapshot (Playwright's accessibility tree
-with refs), the page as Markdown (`htmlToMarkdown`, read from the live
-page), a screenshot of the viewport, and the tab's address, title and the
-link to it in PCP. It acts by ref (click, type, select), by key or by
-scroll. It never gets a cookie or storage and never runs JavaScript. A
+`download`, `handle_dialog` and `hand_over`. Every one but `tabs`' open and
+list names its tab (below). An assistant reads a snapshot (Playwright's
+accessibility tree with refs), `find`'s elements of it as JSON (role, name,
+ref, states, and the landmark or region each is in, which tells two lines
+that read the same apart; `within` searches one element), the page as
+Markdown (`read-page.ts`: `htmlToMarkdown` of the live page, or of one
+element or its main part, less what its HTML hides and code blocks of JSON
+data, which a site's app carries hidden; web_fetch's Markdown is
+unchanged), a screenshot of the viewport or of one element, and the tab's
+address, title and the link to it in PCP. It acts by ref, or by a target
+(`target.ts`: a role and a name, as Playwright's `getByRole` finds them,
+optionally `exact`, the `nth` of several, `within` an element), which a
+program can name without a snapshot; a target that is not exactly one
+element is refused with the ones it could mean. A click is scrolled into
+view first (`force` skips Playwright's checks), and one that cannot happen
+says why from Playwright's call log (`failures.ts`: what covers the
+element, by its role and label, or that it is hidden, disabled or gone),
+with a short snapshot. A screenshot steps its quality, then its size, down
+until it fits what an answer passes on inline (`MAX_ANSWER_IMAGE_CHARS`,
+an image's own budget, apart from the text's); one that never fits is kept
+and handed back as its handle. While the page shows a dialog (an alert),
+every tool that needs the page answers at once with it and how to answer
+it with `handle_dialog`, rather than waiting on a page that cannot answer.
+It never gets a cookie or storage and never runs JavaScript. A
 refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
+
+**Turns and deadlines** (`queue.ts`). The calls on one tab run one at a
+time, in its own lane, so a slow page holds up only its tab. Each has a
+deadline (`TAB_DEADLINE_MS`, above a page load, a check and a snapshot;
+`DOWNLOAD_DEADLINE_MS` for a download): a tab whose call passes it is taken
+to have stopped responding, its page closed and opened again at its
+address through the gate (`reopenTab`; its id, token and allowed sites
+stay), the lane goes on, and the call is told so in those words. A page
+that crashes is reopened on the tab's next call, and `tabs` with action
+reset does the same on request. Every page has Playwright's timeouts by
+default, and what has none (its content, its title, a key press, a
+DevTools call) is bounded. Only what changes the set of tabs holds the
+whole browser, and briefly (`withVault`, `BROWSER_LOCK_DEADLINE_MS`):
+opening or closing a tab, taking a popup in, closing the browser. Closing
+a tab does not wait behind a call that hangs on it: that call ends with
+the page. `tabs` list and the owner's own input wait for nothing. A caller
+that gives up (an `AbortSignal` on the call, which run_code passes) stops
+waiting at once and passes its turn on; what Playwright was already doing
+finishes alone. One call waits for a download at a time, whichever its
+tab; another meanwhile is told to try again. Profile saves run one at a
+time, and none once the browser has closed, so a call that finished past
+its deadline cannot write over a restore.
 
 **Files** (`downloads.ts`, `call.ts`). A file crosses the browser only as a
 result kept for the token (see Long answers and kept results): never a path on the
@@ -1446,10 +1487,14 @@ open already; `navigate` is what asks the owner.
 
 **Whose tab** (`call.ts`). A tab belongs to the token that opened it (its
 `tokenId`; a popup is its opener's) or that the owner last handed it to,
-and that token alone sees and drives it: `tabs` lists only its own, the current tab a call without one falls on
-is its own, and any tool given another token's tab, or the owner's own, is
-answered as for a tab that does not exist, in the same words, so its
-address and title never reach it. `navigate` naming such a tab opens a new
+and that token alone sees and drives it: `tabs` lists only its own, and
+any tool given another token's tab, or the owner's own, is answered as for
+a tab that does not exist, in the same words, so its address and title
+never reach it. There is no current tab: every tool but `tabs`' open and
+list names one, and a call that does not is refused (a tool error, with
+the token's tabs by id, title and address), since two conversations on
+one token would otherwise act on each other's tab. `tabs` open answers
+with the new tab's id first. `navigate` naming such a tab opens a new
 one of the token's own, and a `browse` request never names another token's
 tab. So a site the owner allowed once stays with the token whose tab it
 is, and no token reads a page another opened under its own lines. Before a
@@ -1469,7 +1514,7 @@ owner picks (`handBackTab`, `giveTab`): one of the vault's tokens that is
 neither revoked nor expired and reaches the browser, checked in the core
 whatever the form sent. The page offers the token whose tab it was first;
 a tab no token had yet waits for a choice. The token gets the tab as its
-own (its lines read again, its current tab), and the site the tab is at
+own (its lines read again), and the site the tab is at
 counts as one the owner allowed for that tab, as Allow once does; handed to
 another token than before, the tab first drops the sites allowed for the
 one before, which were that token's. `hand_over` makes the tab the
@@ -1532,7 +1577,12 @@ page refuses once the tab is not the owner's would be lost, and on a slow
 connection the last keys are still on their way.
 
 **Bounded** (`browser/limits.ts`). Eight tabs per vault, every token's and
-the owner's together; thirty seconds per page load and ten per action; 300
+the owner's together; thirty seconds per page load and ten per action
+(every page's default), two for a title; a call's turn on its tab
+(`TAB_DEADLINE_MS`, `DOWNLOAD_DEADLINE_MS`) and the browser's lock
+(`BROWSER_LOCK_DEADLINE_MS`); a target's role and name, and the elements a
+refusal lists; the snapshot a failed click answers with; screenshot's
+qualities, sizes and narrowest width; 300
 tool calls per token per ten minutes; four people watching a tab; and the
 owner's input in batches of at most 500 events, 300 batches per session in
 ten seconds, moves dropped while Chromium is a second behind. A check that may pass on its own is waited for twenty seconds

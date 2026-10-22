@@ -4,12 +4,20 @@ import type { CatalogueTool } from "../catalogue"
 import { invalid } from "../errors"
 import {
   DEFAULT_READ_CHARS,
+  MAX_FIND_MATCHES,
   MAX_HANDOVER_MESSAGE,
   MAX_READ_CHARS,
+  MAX_ROLE_CHARS,
+  MAX_SCREENSHOT_QUALITY,
+  MAX_TARGET_NAME_CHARS,
+  MAX_TARGET_NTH,
   MAX_TYPE_CHARS,
   MAX_UPLOAD_FILES,
   MAX_URL_LENGTH,
   MAX_WAIT_MS,
+  MIN_SCREENSHOT_QUALITY,
+  MIN_SCREENSHOT_WIDTH,
+  VIEWPORT,
 } from "./limits"
 import { REF_PATTERN } from "./snapshot"
 
@@ -61,16 +69,60 @@ export type BrowserToolSpec = {
   changes: boolean
 }
 
-const tab = z
-  .string()
-  .min(1)
-  .max(16)
-  .optional()
-  .describe("A tab's id, from tabs. Left out: this token's current tab.")
+const tabId = z.string().min(1).max(16)
+const tab = tabId.describe(
+  "The tab's id, from tabs (open answers with it, list names them all). Required: the browser never picks a tab for you.",
+)
 const ref = z
   .string()
   .regex(REF_PATTERN, "A ref looks like e12, from the latest snapshot.")
   .describe("The element's ref from the latest snapshot, like e12.")
+/**
+ * An element by what it is, for a program that has no snapshot's refs:
+ * Playwright's getByRole, refused unless it comes out as one element.
+ */
+const target = z
+  .strictObject({
+    role: z
+      .string()
+      .min(1)
+      .max(MAX_ROLE_CHARS)
+      .regex(/^[a-z]+$/, { message: "A role is an ARIA role, like button." })
+      .describe(
+        "Its ARIA role, as a snapshot shows it: button, link, textbox…",
+      ),
+    name: z
+      .string()
+      .min(1)
+      .max(MAX_TARGET_NAME_CHARS)
+      .describe(
+        "Its accessible name, as a snapshot shows it in quotes: matched case aside, as a part of the name unless exact.",
+      ),
+    exact: z
+      .boolean()
+      .optional()
+      .describe("true: the whole name, case and all."),
+    nth: z
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_TARGET_NTH)
+      .optional()
+      .describe("Which of several that match, from 0, in page order."),
+    within: ref
+      .optional()
+      .describe(
+        "Only inside this element (a ref): a dialog, a list, a part of the page.",
+      ),
+  })
+  .describe(
+    "The element by its role and name instead of a ref: it must match exactly one (or give nth), or the call is refused with what it could mean.",
+  )
+const oneOf = (value: { ref?: unknown; target?: unknown }) =>
+  !!value.ref !== !!value.target
+const atMostOne = (value: { ref?: unknown; target?: unknown }) =>
+  !(value.ref && value.target)
+const REF_OR_TARGET = { message: "Give a ref or a target, one of them." }
 const url = z
   .string()
   .min(1)
@@ -141,20 +193,20 @@ const SPECS: readonly BrowserToolSpec[] = [
   {
     name: "tabs",
     title: "Browser tabs",
-    description: `Lists, opens, closes or switches this token's browser tabs (each assistant sees only the tabs it opened). list: each with its id, title, address and the link where the owner can watch it. open: a new tab at url, answered with its snapshot. close: the tab. select: makes it the tab the other tools use when not given one, and shows it. ${ASKS_FIRST}`,
+    description: `Lists, opens, closes or resets this token's browser tabs (each assistant sees only the tabs it opened). open: a new tab at url, answered first with its id (every other tool needs it as tab) and then its snapshot. list: each with its id, title, address and the link where the owner can watch it. close: the tab, even while a call on it hangs. reset: closes the tab's page and opens it again at its address, for a page that stopped responding (what the page held is gone). ${ASKS_FIRST}`,
     args: z
       .strictObject({
-        action: z.enum(["list", "open", "close", "select"]),
+        action: z.enum(["list", "open", "close", "reset"]),
         url: url.optional(),
-        tab,
+        tab: tabId.optional().describe("The tab's id, for close and reset."),
       })
       .refine((value) => value.action !== "open" || value.url, {
         message: "open needs a url.",
       })
       .refine(
         (value) =>
-          (value.action !== "close" && value.action !== "select") || value.tab,
-        { message: "close and select need the tab's id." },
+          (value.action !== "close" && value.action !== "reset") || value.tab,
+        { message: "close and reset need the tab's id." },
       ),
     annotations: MOVES,
     changes: true,
@@ -162,7 +214,7 @@ const SPECS: readonly BrowserToolSpec[] = [
   {
     name: "navigate",
     title: "Open a page",
-    description: `Opens an address in a tab (this token's current one, or a new one if it has none) and answers with the page's snapshot. ${ASKS_FIRST} A link or redirect to a site this token may not open yet stops there and says which; call navigate with that address to ask. A site that first checks its visitors are human is given a moment to pass the check; one that does not pass says so, and hand_over lets the owner pass it.`,
+    description: `Opens an address in the tab and answers with the page's snapshot (a new tab is tabs with action open). ${ASKS_FIRST} A link or redirect to a site this token may not open yet stops there and says which; call navigate with that address to ask. A site that first checks its visitors are human is given a moment to pass the check; one that does not pass says so, and hand_over lets the owner pass it.`,
     args: z.strictObject({ tab, url }),
     annotations: MOVES,
     changes: true,
@@ -188,21 +240,34 @@ const SPECS: readonly BrowserToolSpec[] = [
   {
     name: "read_page",
     title: "Read the page's text",
-    description: `The page's text as Markdown, ${DEFAULT_READ_CHARS.toLocaleString("en")} characters at a time unless max_length says otherwise; the lines in front say how long it is and the start_index for the rest. For reading; snapshot gives the refs to act with.`,
-    args: z.strictObject({
-      tab,
-      start_index: z.number().int().min(0).optional(),
-      max_length: z.number().int().min(1).max(MAX_READ_CHARS).optional(),
-    }),
+    description: `The page's text as Markdown, ${DEFAULT_READ_CHARS.toLocaleString("en")} characters at a time unless max_length says otherwise; the lines in front say how long it is and the start_index for the rest. What the page does not show is left out (what it marks hidden, and blocks of JSON data). ref or target reads one element; main_only: true reads the page's main part. For reading; snapshot gives the refs to act with.`,
+    args: z
+      .strictObject({
+        tab,
+        ref: ref.optional(),
+        target: target.optional(),
+        main_only: z.boolean().optional(),
+        start_index: z.number().int().min(0).optional(),
+        max_length: z.number().int().min(1).max(MAX_READ_CHARS).optional(),
+      })
+      .refine(
+        (value) =>
+          [value.ref, value.target, value.main_only].filter(Boolean).length <=
+          1,
+        { message: "Give a ref, a target or main_only, at most one of them." },
+      ),
     annotations: READS,
     changes: false,
   },
   {
     name: "find",
     title: "Find on the page",
-    description:
-      "The lines of the page's snapshot that mention a text (case aside), with their refs.",
-    args: z.strictObject({ tab, text: z.string().min(1).max(200) }),
+    description: `The elements of the page's snapshot whose name, text or address mentions a text (case aside), as JSON: each one's role, name, ref, states (disabled, checked, expanded, selected, active, level) and the part of the page it is in (landmark: a navigation, a region, a dialog), which tells lines that read the same apart. At most ${MAX_FIND_MATCHES}; total says how many there were. within (a ref) searches inside one element.`,
+    args: z.strictObject({
+      tab,
+      text: z.string().min(1).max(200),
+      within: ref.optional(),
+    }),
     annotations: READS,
     changes: false,
   },
@@ -210,8 +275,21 @@ const SPECS: readonly BrowserToolSpec[] = [
     name: "click",
     title: "Click",
     description:
-      "Clicks an element by its ref, and answers with the page's snapshot. double: true double-clicks.",
-    args: z.strictObject({ tab, ref, double: z.boolean().optional() }),
+      "Clicks an element (ref, or target), scrolled into view first, and answers with the page's snapshot. double: true double-clicks. A click that cannot happen says why (another element covers it, it is hidden or disabled) with a short snapshot.",
+    args: z
+      .strictObject({
+        tab,
+        ref: ref.optional(),
+        target: target.optional(),
+        double: z.boolean().optional(),
+        force: z
+          .boolean()
+          .optional()
+          .describe(
+            "Skip the checks that the element is visible, enabled and not covered.",
+          ),
+      })
+      .refine(oneOf, REF_OR_TARGET),
     annotations: ACTS,
     changes: true,
   },
@@ -219,13 +297,16 @@ const SPECS: readonly BrowserToolSpec[] = [
     name: "type",
     title: "Type into a field",
     description:
-      "Replaces the text of a field (by ref) with text; submit: true presses Enter after it. Answers with the page's snapshot.",
-    args: z.strictObject({
-      tab,
-      ref,
-      text: z.string().max(MAX_TYPE_CHARS),
-      submit: z.boolean().optional(),
-    }),
+      "Replaces the text of a field (ref, or target) with text; submit: true presses Enter after it. Answers with the page's snapshot.",
+    args: z
+      .strictObject({
+        tab,
+        ref: ref.optional(),
+        target: target.optional(),
+        text: z.string().max(MAX_TYPE_CHARS),
+        submit: z.boolean().optional(),
+      })
+      .refine(oneOf, REF_OR_TARGET),
     annotations: ACTS,
     changes: true,
   },
@@ -242,12 +323,15 @@ const SPECS: readonly BrowserToolSpec[] = [
     name: "select_option",
     title: "Choose in a list",
     description:
-      "Chooses options in a select element (by ref): values are the options' values or labels.",
-    args: z.strictObject({
-      tab,
-      ref,
-      values: z.array(z.string().max(500)).min(1).max(50),
-    }),
+      "Chooses options in a select element (ref, or target): values are the options' values or labels.",
+    args: z
+      .strictObject({
+        tab,
+        ref: ref.optional(),
+        target: target.optional(),
+        values: z.array(z.string().max(500)).min(1).max(50),
+      })
+      .refine(oneOf, REF_OR_TARGET),
     annotations: ACTS,
     changes: true,
   },
@@ -255,12 +339,15 @@ const SPECS: readonly BrowserToolSpec[] = [
     name: "upload_file",
     title: "Choose files to upload",
     description:
-      "Puts files into a file field (by ref: the field, or the button that opens its file picker), as a person choosing them would; the form is sent only as it would be then, usually by clicking its button. Each file is a result PCP kept for this token, named by its handle ({\"$result\": id}: from download, a mail attachment, or run_code's keep), with a name and type of your own if you like; its bytes never pass through you. Answers with the page's snapshot.",
-    args: z.strictObject({
-      tab,
-      ref,
-      files: z.array(keptFile).min(1).max(MAX_UPLOAD_FILES),
-    }),
+      "Puts files into a file field (ref or target: the field, or the button that opens its file picker), as a person choosing them would; the form is sent only as it would be then, usually by clicking its button. Each file is a result PCP kept for this token, named by its handle ({\"$result\": id}: from download, a mail attachment, or run_code's keep), with a name and type of your own if you like; its bytes never pass through you. Answers with the page's snapshot.",
+    args: z
+      .strictObject({
+        tab,
+        ref: ref.optional(),
+        target: target.optional(),
+        files: z.array(keptFile).min(1).max(MAX_UPLOAD_FILES),
+      })
+      .refine(oneOf, REF_OR_TARGET),
     annotations: ACTS,
     changes: true,
   },
@@ -268,17 +355,21 @@ const SPECS: readonly BrowserToolSpec[] = [
     name: "scroll",
     title: "Scroll",
     description:
-      "Scrolls the page up, down, left or right (amount in pixels, 600 by default), or brings an element (ref) into view.",
+      "Scrolls the page up, down, left or right (amount in pixels, 600 by default), or brings an element (ref, or target) into view.",
     args: z
       .strictObject({
         tab,
         direction: z.enum(["up", "down", "left", "right"]).optional(),
         ref: ref.optional(),
+        target: target.optional(),
         amount: z.number().int().min(1).max(10_000).optional(),
       })
-      .refine((value) => !!value.direction !== !!value.ref, {
-        message: "Give a direction or a ref, one of them.",
-      }),
+      .refine(
+        (value) =>
+          [value.direction, value.ref, value.target].filter(Boolean).length ===
+          1,
+        { message: "Give a direction, a ref or a target, one of them." },
+      ),
     annotations: { ...READS, idempotentHint: false },
     changes: false,
   },
@@ -301,9 +392,28 @@ const SPECS: readonly BrowserToolSpec[] = [
   {
     name: "screenshot",
     title: "Take a screenshot",
-    description:
-      "A picture of what the tab shows now (its viewport, 1280 by 800), as a JPEG.",
-    args: z.strictObject({ tab }),
+    description: `A picture of what the tab shows now (its viewport, ${VIEWPORT.width} by ${VIEWPORT.height}), or of one element (ref, or target), as a JPEG. It is made smaller (its quality, then its size) until it can be passed on; max_width and quality ask for smaller from the start.`,
+    args: z
+      .strictObject({
+        tab,
+        ref: ref.optional(),
+        target: target.optional(),
+        max_width: z
+          .number()
+          .int()
+          .min(MIN_SCREENSHOT_WIDTH)
+          .max(VIEWPORT.width)
+          .optional()
+          .describe("The widest the picture may be, in pixels."),
+        quality: z
+          .number()
+          .int()
+          .min(MIN_SCREENSHOT_QUALITY)
+          .max(MAX_SCREENSHOT_QUALITY)
+          .optional()
+          .describe("JPEG quality to start from."),
+      })
+      .refine(atMostOne, { message: "Give a ref or a target, not both." }),
     annotations: READS,
     changes: false,
   },
@@ -311,7 +421,7 @@ const SPECS: readonly BrowserToolSpec[] = [
     name: "download",
     title: "Download a file",
     description:
-      "Keeps the file a page offers for download: clicks the element (ref) that starts it, or opens its address (url, in this token's current tab or a new one, at a site the tab may open now: navigate asks the owner for another), and waits for it. Answers with a handle to the file ({\"$result\": id}), kept for this token for a day: pass it where a tool wants a file (upload_file's files, send_email's attachments, a field that takes base64), or read it with read_result. A file larger than PCP keeps of one is stopped.",
+      "Keeps the file a page offers for download: clicks the element (ref) that starts it, or opens its address (url, in the tab, at a site the tab may open now: navigate asks the owner for another), and waits for it. Answers with a handle to the file ({\"$result\": id}), kept for this token for a day: pass it where a tool wants a file (upload_file's files, send_email's attachments, a field that takes base64), or read it with read_result. A file larger than PCP keeps of one is stopped.",
     args: z
       .strictObject({ tab, ref: ref.optional(), url: url.optional() })
       .refine((value) => !!value.ref !== !!value.url, {

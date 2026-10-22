@@ -196,9 +196,9 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
       tokenId: other.tokenId,
     })
     expect(textOf(await other.call("tabs", { action: "list" }))).toContain(
-      `* ${tab.id}:`,
+      `- ${tab.id}:`,
     )
-    const read = textOf(await other.call("read_page", {}))
+    const read = textOf(await other.call("read_page", { tab: tab.id }))
     expect(read).toContain(`Tab ${tab.id}:`)
     expect(read).toContain(`Address: ${api.origin}/account`)
 
@@ -228,7 +228,9 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
 
     await takeOverTab(ctx, tabId)
-    expect(textOf(await call("snapshot", {}))).toContain("taken over")
+    expect(textOf(await call("snapshot", { tab: tabId }))).toContain(
+      "taken over",
+    )
     // The token whose tab it was is the one Hand back offers first.
     expect(await tabFor(ctx, tabId)).toMatchObject({
       control: "owner",
@@ -240,12 +242,13 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     })
     await handBackTab(ctx, tabId, tokenId)
 
-    const seen = textOf(await call("snapshot", {}))
+    const seen = textOf(await call("snapshot", { tab: tabId }))
     expect(seen).toContain(`Tab ${tabId}:`)
     expect(seen).toContain(`Address: ${elsewhere.origin}/account`)
 
     // Where the owner left it, the assistant may go on from, unasked.
     const next = await call("navigate", {
+      tab: tabId,
       url: `${elsewhere.origin}/next`,
     })
     expect(textOf(next)).toContain('heading "/next"')
@@ -279,19 +282,19 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     expect([
       ...runningBrowser(ctx.vaultId)!.tabs.get(tabId)!.allowedHosts,
     ]).toEqual([new URL(elsewhere.origin).host])
-    expect(textOf(await other.call("snapshot", {}))).toContain(
+    expect(textOf(await other.call("snapshot", { tab: tabId }))).toContain(
       `Address: ${elsewhere.origin}/account`,
     )
     await expect(
-      other.call("navigate", { url: `${api.origin}/again` }),
+      other.call("navigate", { tab: tabId, url: `${api.origin}/again` }),
     ).rejects.toSatisfy(isOwnerNeeded)
     expect(
       (await listFetchRules(ctx, other.tokenId)).sites.map((site) => site.host),
     ).toEqual([host])
 
-    // The first token has lost it, as its current tab too.
-    expect(textOf(await call("snapshot", {}))).toContain(
-      "This token has no tab open",
+    // The first token has lost it.
+    expect(textOf(await call("snapshot", { tab: tabId }))).toContain(
+      `There is no tab ${tabId}`,
     )
     expect(textOf(await call("tabs", { action: "list" }))).not.toContain(tabId)
   })
