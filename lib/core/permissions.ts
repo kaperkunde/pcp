@@ -124,6 +124,12 @@ import {
   type WrapperShown,
 } from "./wrappers/admin"
 import { readWrapperOperation } from "./wrappers/definition"
+import {
+  applyRepoChange,
+  describeRepoAsk,
+  type RepoChangeAsk,
+  type RepoShown,
+} from "./repos/assist"
 import type { SecretGrant } from "./wrappers/placeholders"
 import {
   describeFetchAsk,
@@ -206,6 +212,7 @@ export type PermissionAsk =
   | { kind: "register"; input: RegisterArgs }
   | { kind: "endpoint_change"; input: EndpointChangeAsk }
   | { kind: "wrapper_change"; input: WrapperChangeAsk }
+  | { kind: "repo_change"; input: RepoChangeAsk }
   | MemoryAsk
   | SkillAsk
   | AccessAsk
@@ -262,6 +269,8 @@ export type PermissionView = {
   skill: SkillShown | null
   /** A wrapper request's tools and secrets, for the page to show in full. */
   wrapper: WrapperShown | null
+  /** A repository change's final files, diffs, flags and review, in full. */
+  repo: RepoShown | null
   /** The browser tab a request is about, for the page to show it live. */
   browserTabId: string | null
   url: string
@@ -603,6 +612,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `wrapper:${ask.input.serverId ?? ask.input.name}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "repo_change":
+      return {
+        target: `repo:${ask.input.repoItemId}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "fetch":
       return {
         target: `fetch:${ask.input.method} ${ask.input.url}`,
@@ -779,6 +793,7 @@ async function summarizeRow(
   memory?: MemoryShown
   skill?: SkillShown
   wrapper?: WrapperShown
+  repo?: RepoShown
   ownerOnly?: string[]
 }> {
   const args = readArgs(ctx, row)
@@ -817,6 +832,13 @@ async function summarizeRow(
       warning: shown.warning,
       wrapper: shown,
     }
+  }
+
+  if (row.kind === "repo_change") {
+    const input = args as RepoChangeAsk
+    const asked = describeRepoAsk(input)
+
+    return { ...asked, lines: [...asked.lines, asker], repo: input.shown }
   }
 
   if (row.kind === "browse") {
@@ -1182,6 +1204,7 @@ async function toView(
     memory = null,
     skill = null,
     wrapper = null,
+    repo = null,
     full = null,
     ownerOnly = [],
     ...summary
@@ -1212,6 +1235,7 @@ async function toView(
     memory,
     skill,
     wrapper,
+    repo,
     browserTabId: browserTabOf(ctx, row),
     url: permissionUrl(publicUrl, row.id),
     createdAt: row.createdAt,
@@ -1513,6 +1537,17 @@ export async function decidePermission(
     )
   }
 
+  // A repository change is a manage-endpoints token's to propose; one that
+  // lost that since asking gets nothing applied.
+  if (kind === "repo_change" && !row.token.manageEndpoints) {
+    return finishUnrun(
+      ctx,
+      row,
+      publicUrl,
+      "The token that asked may no longer manage endpoints, so nothing was applied.",
+    )
+  }
+
   if (isMemoryKind(kind)) {
     return decideMemory(ctx, row, choice as MemoryDecision, publicUrl, {
       always: always === true,
@@ -1628,19 +1663,27 @@ export async function decidePermission(
                     },
                   ),
                 )
-              : kind === "fetch"
-                ? await executeFetch(ctx, row, publicUrl, executor)
-                : kind === "browse"
-                  ? await executeBrowse(ctx, row, publicUrl, executor)
-                  : kind === "browser_handover"
-                    ? await executeHandover(ctx, row)
-                    : await executeRegister(
-                        ctx,
-                        row,
-                        publicUrl,
-                        executor,
-                        secretValue,
-                      )
+              : kind === "repo_change"
+                ? text(
+                    await applyRepoChange(
+                      ctx,
+                      row.tokenId,
+                      readArgs(ctx, row) as RepoChangeAsk,
+                    ),
+                  )
+                : kind === "fetch"
+                  ? await executeFetch(ctx, row, publicUrl, executor)
+                  : kind === "browse"
+                    ? await executeBrowse(ctx, row, publicUrl, executor)
+                    : kind === "browser_handover"
+                      ? await executeHandover(ctx, row)
+                      : await executeRegister(
+                          ctx,
+                          row,
+                          publicUrl,
+                          executor,
+                          secretValue,
+                        )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {

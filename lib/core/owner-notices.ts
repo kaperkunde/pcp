@@ -1,6 +1,7 @@
 import type { VaultContext } from "./context"
 import { countOutdatedInstructions } from "./instructions"
 import { networkNotices } from "./network/runtime"
+import { repoNotices } from "./repos/notices"
 
 /**
  * What PCP itself wants the owner to look at, beside the requests from
@@ -14,6 +15,8 @@ export type OwnerNoticeKind =
   | "network"
   /** PCP's suggested instructions changed since tokens copied them. */
   | "instructions"
+  /** A linked repository's change waits for review, or is a conflict. */
+  | "repos"
 
 export type OwnerNotice = {
   id: string
@@ -50,7 +53,7 @@ async function instructions(ctx: VaultContext): Promise<OwnerNotice[]> {
     : []
 }
 
-const SOURCES: NoticeSource[] = [network, instructions]
+const SOURCES: NoticeSource[] = [network, instructions, repoNotices]
 
 /** Every notice for the owner now, the machine's first. */
 export async function listOwnerNotices(

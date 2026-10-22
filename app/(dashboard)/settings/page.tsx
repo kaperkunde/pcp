@@ -1,4 +1,4 @@
-import { Link2 } from "lucide-react"
+import { FolderGit2, Link2 } from "lucide-react"
 import type { Metadata } from "next"
 
 import { ExportCard, RestoreCard } from "@/components/backup-cards"
@@ -136,6 +136,17 @@ export default async function SettingsPage({
         notice={notices.length > 0}
         username={vault.name}
       />
+
+      <ListSection title="Sharing">
+        <List>
+          <ListRow
+            href="/settings/repositories"
+            icon={<IconTile icon={FolderGit2} size="sm" />}
+            title="Repositories"
+            description="Share skills, wrappers, flows, endpoints and servers through GitHub"
+          />
+        </List>
+      </ListSection>
 
       <ListSection title="Upkeep">
         <List>

@@ -5,6 +5,7 @@ import { defineConfig, devices } from "@playwright/test"
 import {
   E2E_EDGE_HTTP_PORT,
   E2E_EDGE_HTTPS_PORT,
+  E2E_GITHUB_URL,
   E2E_PCPGG_RELAY_URL,
   E2E_RELEASES_URL,
 } from "./e2e/lib/network"
@@ -79,6 +80,10 @@ export default defineConfig({
       // The update check asks a port nothing answers on, never GitHub.
       PCP_RELEASES_URL: E2E_RELEASES_URL,
       PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
+      // Linked repositories talk to the fake GitHub (e2e/fixtures/github.ts)
+      // on a fixed port, never to GitHub. A production build ignores these.
+      PCP_GITHUB_API_URL: E2E_GITHUB_URL,
+      PCP_GITHUB_URL: E2E_GITHUB_URL,
       // The suite acts far faster than a person: pacing (lib/core/pacing/)
       // would make every browser and web fetch step wait. Unit tests cover
       // it; its settings are still shown and saved.
@@ -204,6 +209,15 @@ export default defineConfig({
       testMatch: /skills\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("skills"),
+    },
+    {
+      // Linked repositories against a fake GitHub: linking one, adding a
+      // skill from it after reading it whole, and a change that waits for
+      // the owner in the bell.
+      name: "repositories",
+      testMatch: /repositories\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("repositories"),
     },
     {
       // APIs an assistant proposes with more than a bearer token: HTTP Basic

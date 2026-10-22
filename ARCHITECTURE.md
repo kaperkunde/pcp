@@ -974,6 +974,87 @@ the GitHub client and sync itself build on it.
   secret's places, an endpoint or server without that credential) and a
   note tells the owner to add it on PCP's page.
 
+### Linking, sync and trust
+
+The owner links repositories on Settings › Repositories (`repos/store.ts`):
+`repo` holds which one (owner, name, branch: one ciphertext under
+`repo:<id>`), its trust (trusted or not), its access (read-only, or read and
+write) and the secret PCP signs in with, if any. `repo_item` links one
+item of the vault (a skill, or a server row: deleting it deletes the link)
+to its folder or file there, with how often it syncs (off, hourly, daily,
+weekly), whether two-way, and its state; where it is, the hashes sync
+compares, a change waiting for the owner and an assistant's drafts are one
+ciphertext under `repo_item:<id>`. Both are in an export and in
+`wipeVault`.
+
+- **The GitHub client** (`repos/github.ts`) is fixed and built in: the REST
+  API at api.github.com, and github.com only for the device flow. No
+  redirect is followed (one is an error), an address must resolve to a
+  public one, every answer is read up to a bound (`repos/limits.ts`) and
+  against a schema, and every file is checked against the git id GitHub
+  named it by. It never reads a secret: `upstream.ts githubCredential`
+  decrypts the one chosen for the repository (a text secret holding a
+  personal access token, or PCP's own GitHub sign-in, never another
+  server's OAuth tokens) and hands it the Authorization header, which goes
+  to the API only. PCP's GitHub sign-in is its own OAuth App
+  (`GITHUB_OAUTH_CLIENT_ID`, public; no client secret exists) through
+  GitHub's device flow (`repos/signin.ts`): the owner types a code in at
+  github.com/login/device and the page, while open, asks PCP to ask GitHub;
+  the device code is kept in memory only. The token is saved as a managed
+  `oauth` secret, asks for `public_repo` or `repo` as the owner chose, and
+  does not expire (a 401 means sign in again). A development server or a
+  test points the client at a fake with `PCP_GITHUB_API_URL`; a production
+  build never reads it.
+- **Read and write** is checked with GitHub (the repository's
+  `permissions.push` for the sign-in) when it is chosen, and refused
+  without it. A push (`repos/push.ts`) is GitHub's Git Data API: a blob per
+  changed file, a tree on the branch's, one commit per item naming it and
+  who proposed it (the owner, or an assistant's token by name), and the
+  branch moved as a fast-forward only: when it moved on in between, that is
+  a conflict, never a force.
+- **What a repository offers** (`repos/remote.ts`): PCP's layout, and any
+  other folder with a SKILL.md as a skill (Anthropic's skill repositories:
+  `<name>/SKILL.md` at the root or deeper), read from one listing of the
+  branch's tree. Each item is named by the git id of its folder or file.
+  Adding one shows the owner every file and flag first (`reviewItem`
+  against the vault's item of that name, or none) and applies only on their
+  confirm, read again at the commit they were shown and only if it hashes
+  the same.
+- **Sync** (`repos/sync.ts`) compares by hash: the item's git id against
+  the stored `remoteSha`, `localHash` against the stored one. Only the
+  repository's changed: pulled. Only the vault's, with two-way on: pushed;
+  otherwise kept. Both: a conflict, nothing applied, and a notice with keep
+  mine, take theirs, or let an assistant help. Neither: nothing. The latest
+  change wins only when one side changed.
+- **Trust on a pull.** From a trusted repository a change that is text only
+  (`textOnly`) is applied at once. A flag, a new item, or any change from an
+  untrusted repository waits as a review: the item's `pending` names the
+  change by its git id and hash, never a copy of its files, and the owner's
+  page reads it again by that id, so Approve applies exactly what they were
+  shown, and only while the vault's item is as it was then (`basis`). Not
+  now leaves that change alone until the repository changes again. The
+  bell lists each waiting review and conflict (`repos/notices.ts`, from the
+  items' states). A pending change has no token behind it, and
+  `permission_request.token_id` is required: making it optional would
+  rebuild the table, so sync's reviews stay on the items, and only an
+  assistant's proposal is a permission request.
+- **No background key.** Nothing reads the vault without a credential, so
+  sync never runs on its own: no timer, no webhook, no stored key. A due
+  sync runs after a request that already held the vault's key was answered
+  (`runDueSyncs`, scheduled with Next's `after()` from `/mcp` and the
+  owner's pages), one run per vault at a time, a few items in a short
+  budget, and looked for at most once a minute; what it does not reach is
+  due at the next request. Sync now runs one at once.
+- **Assistants helping**, only a token that may manage endpoints, through
+  the tools it has: `search` lists waiting changes as kind `repo`
+  (`repo:<id>`), `describe` gives both sides' files, what differs and
+  PCP's flags, and the memory tool writes drafts under `/repos/<id>/`.
+  Writing `/repos/<id>/REVIEW.md`, the assistant's own safety review, makes
+  the merged files and the review one `repo_change` request that shows the
+  owner the final files in full, against the vault's and the repository's,
+  with every flag; allowing it applies those files, only if neither side
+  moved since, and with two-way sync pushes them too.
+
 ## Instructions for an assistant
 
 Every token has instructions of its own, the owner's words to that

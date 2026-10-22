@@ -1,4 +1,5 @@
 import { createMcpHandler } from "@modelcontextprotocol/server"
+import { after } from "next/server"
 
 import { resolveApiToken } from "@/lib/core/api-tokens"
 import { clientHello, clientSeen } from "@/lib/core/client-hello"
@@ -18,6 +19,7 @@ import {
 import { checkRateLimit } from "@/lib/core/rate-limit"
 import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
 import { loadResourceLimits } from "@/lib/core/resources/state"
+import { runDueSyncs } from "@/lib/core/repos/sync"
 
 /**
  * The gateway endpoint: https://<pcp>/mcp
@@ -190,6 +192,10 @@ async function handle(request: Request): Promise<Response> {
       extra: { scope },
     },
   })
+
+  // Linked repositories due a sync are synced once this answer is sent,
+  // with the key this request brought: nothing holds one in between.
+  after(() => runDueSyncs(resolved.ctx))
 
   return withCors(response)
 }

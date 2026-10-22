@@ -41,6 +41,7 @@ model Vault {
   fileLinks          FileLink[]
   browserProfile     BrowserProfile?
   oauthCredentials   OAuthCredential[]
+  repos              Repo[]
 
   @@map("vault")
 }
@@ -306,7 +307,8 @@ model PermissionRequest {
   tokenId          String     @map("token_id")
   token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   /// call | register | memory_share | memory_change | access | endpoint_change
-  /// | fetch | browse | browser_handover | wrapper_change
+  /// | fetch | browse | browser_handover | wrapper_change | skill_change
+  /// | repo_change
   kind             String
   serverId         String?    @map("server_id")
   server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
@@ -395,7 +397,8 @@ model Skill {
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
-  tokens ApiTokenSkill[]
+  tokens    ApiTokenSkill[]
+  repoItems RepoItem[]
 
   @@index([vaultId])
   @@map("skill")
@@ -424,6 +427,7 @@ model Secret {
   authHeaderFor ServerAuthHeader[]
   oauthClientFor McpServer[] @relation("ServerOAuthClientSecret")
   oauthTokensFor McpServer[] @relation("ServerOAuthTokens")
+  repos          Repo[]
 
   @@unique([vaultId, name])
   @@map("secret")
@@ -577,6 +581,7 @@ model McpServer {
   wrapperSpec        WrapperSpec?
   authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
+  repoItems          RepoItem[]
 
   @@unique([vaultId, slug])
   @@map("mcp_server")
@@ -867,4 +872,67 @@ model OAuthClient {
 
   @@index([createdAt])
   @@map("oauth_client")
+}
+
+/// A GitHub repository the owner linked to share skills, wrappers, flows,
+/// API endpoints and MCP servers as files (lib/core/repos/). Never a
+/// backup: nothing secret goes there.
+model Repo {
+  id         String   @id
+  vaultId    String   @map("vault_id")
+  vault      Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// {owner, name, branch} as JSON, AES-256-GCM under the vault's data key
+  /// with "repo:<id>" as associated data: which repository is the owner's
+  /// business.
+  ciphertext Bytes
+  /// trusted | untrusted: whether sync applies a text-only change to a
+  /// skill without asking.
+  trust      String   @default("untrusted")
+  /// read | write: someone else's repository, or one the owner pushes to.
+  access     String   @default("read")
+  /// How PCP signs in to GitHub for it: a text secret (a personal access
+  /// token), or the managed oauth secret of PCP's GitHub sign-in; null for a
+  /// public repository read without one.
+  secretId   String?  @map("secret_id")
+  secret     Secret?  @relation(fields: [secretId], references: [id], onDelete: SetNull)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  items RepoItem[]
+
+  @@index([vaultId])
+  @@map("repo")
+}
+
+/// One item of the vault linked to a file or folder in a repository, and
+/// how it syncs. Exactly one of skillId and serverId is set, so deleting the
+/// item deletes the link.
+model RepoItem {
+  id            String     @id
+  repoId        String     @map("repo_id")
+  repo          Repo       @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  /// skill | wrapper | flow | endpoint | server
+  itemKind      String     @map("item_kind")
+  skillId       String?    @unique @map("skill_id")
+  skill         Skill?     @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  serverId      String?    @unique @map("server_id")
+  server        McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  /// {path, remoteSha, localHash, pending, declinedSha, drafts, note} as
+  /// JSON, AES-256-GCM under the vault's data key with "repo_item:<id>" as
+  /// associated data: where the item is, the hashes sync compares, a change
+  /// waiting for the owner (named by its object in the repository, never a
+  /// copy of its files) and an assistant's drafts for it.
+  ciphertext    Bytes
+  /// off | hourly | daily | weekly
+  frequency     String     @default("off")
+  /// Local changes are pushed too (read-write repositories only).
+  bidirectional Boolean    @default(false)
+  lastSyncAt    DateTime?  @map("last_sync_at")
+  /// ok | review | conflict | local | missing | error
+  state         String     @default("ok")
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  @@index([repoId])
+  @@map("repo_item")
 }

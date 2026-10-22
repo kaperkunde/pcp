@@ -216,6 +216,10 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           tools: (await tx.mcpTool.findMany(byServer)).map(rowJson),
           openApiSpecs: (await tx.openApiSpec.findMany(byServer)).map(rowJson),
           wrapperSpecs: (await tx.wrapperSpec.findMany(byServer)).map(rowJson),
+          repos: (await tx.repo.findMany(byVault)).map(rowJson),
+          repoItems: (
+            await tx.repoItem.findMany({ where: { repo: { vaultId } } })
+          ).map(rowJson),
           settings: settings.map(rowJson),
           browserProfiles: (await tx.browserProfile.findMany(byVault)).map(
             rowJson,
@@ -501,6 +505,13 @@ async function writeExport(
         await inChunks(tables.apiTokenSkills, (data) =>
           tx.apiTokenSkill.createMany({ data }),
         )
+        await inChunks(tables.repos, (data) => tx.repo.createMany({ data }))
+        // A linked item carries an assistant's drafts in its ciphertext.
+        await inChunks(
+          tables.repoItems,
+          (data) => tx.repoItem.createMany({ data }),
+          RESTORE_SPEC_CHUNK_ROWS,
+        )
         await inChunks(tables.settings, (data) =>
           tx.setting.createMany({ data }),
         )
@@ -549,6 +560,8 @@ export async function wipeVault(
   await tx.apiTokenToolAllowance.deleteMany(byToken)
   await tx.apiTokenSiteAllowance.deleteMany(byToken)
   await tx.memory.deleteMany(byVault)
+  await tx.repoItem.deleteMany({ where: { repo: { vaultId } } })
+  await tx.repo.deleteMany(byVault)
   await tx.apiTokenSkill.deleteMany(byToken)
   await tx.skill.deleteMany(byVault)
   await tx.permissionRequest.deleteMany(byVault)

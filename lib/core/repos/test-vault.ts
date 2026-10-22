@@ -8,6 +8,10 @@ import { createSecret, writeManagedSecret } from "../secrets"
 import { createServer, setToolDescription } from "../servers"
 import { createSkill, saveSkillFile } from "../skills"
 import { saveWrapperByOwner } from "../wrappers/admin"
+import { asBytes, encryptString } from "../crypto"
+import { newId } from "../ids"
+
+import { encryptItemData } from "./store"
 
 /**
  * A vault with one of every shareable kind, for the repository tests: its
@@ -260,4 +264,55 @@ export async function populate(ctx: VaultContext): Promise<Fixture> {
 /** A YAML document as text, for hand-made repository files. */
 export function yamlText(value: unknown): string {
   return YAML.stringify(value, { lineWidth: 0 })
+}
+
+/**
+ * A linked repository and one linked skill, written as rows without asking
+ * GitHub: for the export and vault-deletion tests, which read no repository.
+ */
+export async function addLinkedRepo(
+  ctx: VaultContext,
+  { skillId, secretId = null }: { skillId: string; secretId?: string | null },
+): Promise<{ repoId: string; itemId: string }> {
+  const repoId = newId()
+  const itemId = newId()
+
+  await db().repo.create({
+    data: {
+      id: repoId,
+      vaultId: ctx.vaultId,
+      ciphertext: asBytes(
+        encryptString(
+          ctx.dek,
+          JSON.stringify({ owner: "ada", name: "shared", branch: "main" }),
+          `repo:${repoId}`,
+        ),
+      ),
+      trust: "trusted",
+      access: "write",
+      secretId,
+    },
+  })
+  await db().repoItem.create({
+    data: {
+      id: itemId,
+      repoId,
+      itemKind: "skill",
+      skillId,
+      ciphertext: encryptItemData(ctx, itemId, {
+        path: "skills/release-notes",
+        remoteSha: "a".repeat(40),
+        localHash: "b".repeat(64),
+        pending: null,
+        declinedSha: null,
+        drafts: {},
+        note: null,
+      }),
+      frequency: "weekly",
+      bidirectional: true,
+      lastSyncAt: new Date("2026-10-01T00:00:00.000Z"),
+    },
+  })
+
+  return { repoId, itemId }
 }

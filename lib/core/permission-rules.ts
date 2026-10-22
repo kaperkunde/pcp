@@ -266,6 +266,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Make the change",
     decline: "Not now",
   },
+  // A linked repository's change, as an assistant merged or reviewed it.
+  repo_change: {
+    allow_once: "Apply the change",
+    decline: "Not now",
+  },
   // A site's answer, not the method's: the owner decides where it goes.
   fetch: {
     allow_once: "Allow once",

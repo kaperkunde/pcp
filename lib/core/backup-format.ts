@@ -13,6 +13,8 @@ import type {
   Memory,
   OpenApiSpec,
   PermissionRequest,
+  Repo,
+  RepoItem,
   Secret,
   ServerAuthHeader,
   Setting,
@@ -342,6 +344,33 @@ const WrapperSpecRow = z.strictObject({
   updatedAt: date,
 })
 
+// Linked repositories, added in 0.5: absent from older files.
+const RepoRow = z.strictObject({
+  id,
+  vaultId: id,
+  ciphertext: bytes,
+  trust: str,
+  access: str,
+  secretId: id.nullable(),
+  createdAt: date,
+  updatedAt: date,
+})
+
+const RepoItemRow = z.strictObject({
+  id,
+  repoId: id,
+  itemKind: str,
+  skillId: id.nullable(),
+  serverId: id.nullable(),
+  ciphertext: bytes,
+  frequency: str.default("off"),
+  bidirectional: z.boolean().default(false),
+  lastSyncAt: dateOrNull,
+  state: str.default("ok"),
+  createdAt: date,
+  updatedAt: date,
+})
+
 const SettingRow = z.strictObject({ vaultId: id, key: str, value: str })
 
 // The browser's sign-ins, added in 0.3: absent from older files.
@@ -403,6 +432,8 @@ export const PayloadSchema = z.strictObject({
     tools: z.array(McpToolRow),
     openApiSpecs: z.array(OpenApiSpecRow),
     wrapperSpecs: z.array(WrapperSpecRow).default([]),
+    repos: z.array(RepoRow).default([]),
+    repoItems: z.array(RepoItemRow).default([]),
     settings: z.array(SettingRow),
     browserProfiles: z.array(BrowserProfileRow).default([]),
   }),
@@ -534,6 +565,8 @@ export function checkReferences(payload: ExportPayload): void {
   idsOf(tables.webFetchRules, "web fetch rule")
   idsOf(tables.permissionRequests, "request")
   idsOf(tables.serverAuthHeaders, "header")
+  const repos = idsOf(tables.repos, "repository")
+  idsOf(tables.repoItems, "linked item")
 
   for (const grant of tables.keyGrants) {
     if (!GRANT_KINDS.has(grant.kind)) {
@@ -566,6 +599,7 @@ export function checkReferences(payload: ExportPayload): void {
   ownedBy(tables.servers, "server")
   ownedBy(tables.settings, "setting")
   ownedBy(tables.browserProfiles, "browser profile")
+  ownedBy(tables.repos, "repository")
 
   if (tables.browserProfiles.length > 1) {
     throw problem("it holds more than one browser profile")
@@ -640,6 +674,20 @@ export function checkReferences(payload: ExportPayload): void {
 
   for (const spec of tables.wrapperSpecs) {
     pointsAt(spec.serverId, servers, "a server")
+  }
+
+  for (const repo of tables.repos) {
+    pointsAt(repo.secretId, secrets, "a repository's secret")
+  }
+
+  for (const item of tables.repoItems) {
+    pointsAt(item.repoId, repos, "a repository")
+    pointsAt(item.skillId, skills, "a linked skill")
+    pointsAt(item.serverId, servers, "a linked server")
+
+    if ((item.skillId === null) === (item.serverId === null)) {
+      throw problem("a linked item names no item, or two")
+    }
   }
 }
 
@@ -763,6 +811,8 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: Covers<McpTool, z.output<typeof McpToolRow>>
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
+  repo: Covers<Repo, z.output<typeof RepoRow>>
+  repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
   setting: Covers<Setting, z.output<typeof SettingRow>>
   browserProfile: Covers<BrowserProfile, z.output<typeof BrowserProfileRow>>
   hostSetting: Covers<HostSetting, z.output<typeof HostSettingRow>>
@@ -784,6 +834,8 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: true,
   openApiSpec: true,
   wrapperSpec: true,
+  repo: true,
+  repoItem: true,
   setting: true,
   browserProfile: true,
   hostSetting: true,
