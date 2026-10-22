@@ -1,7 +1,9 @@
 import {
   BookOpen,
   ChevronLeft,
+  FolderGit2,
   Globe,
+  ListChecks,
   Server,
   SlidersHorizontal,
   TriangleAlert,
@@ -18,10 +20,12 @@ import { PageColumn } from "@/components/page-column"
 import { PermissionDecision } from "@/components/permission-decision"
 import { PermissionLines } from "@/components/permission-lines"
 import { PermissionOutcome } from "@/components/permission-outcome"
+import { RepoReview } from "@/components/repo-review"
 import { buttonVariants } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { IconTile } from "@/components/ui/icon-tile"
 import { ShownInFull } from "@/components/shown-in-full"
+import { SkillReview } from "@/components/skill-review"
 import { WrapperReview } from "@/components/wrapper-review"
 import { tabFor } from "@/lib/core/browser/owner"
 import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
@@ -107,9 +111,14 @@ export default async function PermissionPage({
     view.kind === "browser_handover" && pending && view.browserTabId
       ? await tabFor(ctx, view.browserTabId)
       : null
-  // A live tab, a long list of levels or a wrapper's programs want room.
+  // A live tab, a long list of levels, a wrapper's programs or a skill
+  // want room.
   const roomy = Boolean(
-    handedTab || (access && pending) || view.wrapper !== null,
+    handedTab ||
+    (access && pending) ||
+    view.wrapper !== null ||
+    view.skill !== null ||
+    view.repo !== null,
   )
 
   return (
@@ -159,6 +168,7 @@ export default async function PermissionPage({
         ) : (
           <PermissionLines lines={view.lines} />
         )}
+        {view.skill ? <SkillReview skill={view.skill} /> : null}
         {view.full ? <ShownInFull parts={view.full} /> : null}
         {view.warning && view.memory ? (
           // The text is what to check; the warning says what to look for,
@@ -182,6 +192,7 @@ export default async function PermissionPage({
           </p>
         ) : null}
         {view.wrapper ? <WrapperReview shown={view.wrapper} /> : null}
+        {view.repo ? <RepoReview shown={view.repo} /> : null}
         {pending && proposal ? (
           <>
             <p className="text-muted-foreground">
@@ -271,6 +282,10 @@ function RequestTile({ view }: { view: PermissionView }) {
     case "memory_share":
     case "memory_change":
       return <IconTile size="lg" icon={BookOpen} className={tile} />
+    case "skill_change":
+      return <IconTile size="lg" icon={ListChecks} className={tile} />
+    case "repo_change":
+      return <IconTile size="lg" icon={FolderGit2} className={tile} />
     case "access":
       return <IconTile size="lg" icon={SlidersHorizontal} className={tile} />
     case "fetch":
@@ -351,6 +366,31 @@ function PendingNote({
             "Do what the assistant asks in the tab, then say Done."
           )}{" "}
           The tab is yours until you answer.
+        </p>
+      )
+    case "skill_change":
+      return (
+        <p className={note}>
+          Allowing it writes the skill exactly as shown above, and only if
+          nobody changed it since the assistant asked. Every assistant that sees
+          it follows it from then on. You can read, edit and delete every skill
+          under{" "}
+          <Link href="/skills" className="underline">
+            Skills
+          </Link>
+          .
+        </p>
+      )
+    case "repo_change":
+      return (
+        <p className={note}>
+          Applying it writes the item exactly as shown above, and only if
+          neither your vault&apos;s item nor the repository&apos;s change moved
+          since the assistant asked. Linked repositories are under{" "}
+          <Link href="/settings/repositories" className="underline">
+            Settings › Repositories
+          </Link>
+          .
         </p>
       )
     case "memory_share":

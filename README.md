@@ -29,7 +29,7 @@
 A self-hosted gateway between your AI assistant and the MCP servers you use.
 PCP keeps the credentials those servers need in an encrypted store, signs in
 to the ones that use OAuth, and exposes a single MCP endpoint built around
-three tools — `search_tools`, `describe_tool` and `call_tool` — so an
+three tools — `search`, `describe` and `call_tool` — so an
 assistant can reach dozens of servers without carrying every tool definition
 in its context. You decide, per token and per tool, what an assistant may run
 on its own, what it has to ask you about first, and what it cannot touch.
@@ -37,6 +37,9 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **One endpoint for every server.** Add servers in the web UI; an assistant
   connects once, with an API token, and finds tools by describing what it
   needs.
+- **Skills to follow.** Write down how you want a kind of task done (or
+  import a `SKILL.md`) and every assistant finds it and follows it; an
+  assistant's change to one waits for you to read it.
 - **APIs without an MCP server.** Give PCP an OpenAPI schema, as a URL or a
   file, and each operation becomes a tool. PCP makes the HTTP calls itself,
   with your secret or OAuth sign-in, and hands the assistant the answer.
@@ -451,10 +454,10 @@ and these tools:
 
 | Tool                  | What it does                                                                                                                                                                                  |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `search_tools`        | Finds tools across servers from a few words ("create a github issue").                                                                                                                        |
+| `search`              | Finds tools across servers, your skills, and the memories the token reads, from a few words ("create a github issue"), each with a ref for `describe`.                                        |
 | `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                                                      |
-| `describe_tool`       | Returns one tool's full description, JSON Schema, whether it asks you first, and for an API what it answers.                                                                                  |
-| `call_tool`           | Runs it, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer (some parts only, base64 decoded, parts as handles).                                         |
+| `describe`            | For a tool, its full description, JSON Schema, whether it asks you first, for an API what it answers, and the `call_handle` that calls it; for a skill or a memory, its text.                 |
+| `call_tool`           | Runs the tool a `call_handle` stands for, after checking the arguments against its schema, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer.           |
 | `call_read_only_tool` | `call_tool` for a tool its server marks read-only (an API's GET, a mail search, an MCP tool with `readOnlyHint`); anything else is refused.                                                   |
 | `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it.                                                                                                     |
 | `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                                               |
@@ -469,6 +472,7 @@ described further down:
 | ----------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `get_endpoint`    | **read and change API endpoints**                   | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.         |
 | `update_endpoint` | **read and change API endpoints**                   | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again. |
+| `list_secrets`    | **read and change API endpoints**                   | Lists your secrets by name, with what uses each, so an assistant can name one when it proposes an endpoint; never a value.                 |
 | `memory`          | **keep memories**                                   | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                               |
 | `read_memory`     | **keep memories**                                   | Reads those notes (`every`, `view`, `search`) and nothing else.                                                                            |
 | `web_fetch`       | **fetch web pages**                                 | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.              |
@@ -533,9 +537,11 @@ narrower than what you can. It can change an endpoint it registered only
 while nothing of yours is attached to it (no secret or OAuth sign-in, public
 addresses only), and a change disables the endpoint until you enable it
 again, because the words it writes reach every other assistant. It can send
-a whole new schema only to an endpoint it registered as text, and can never
-see, choose or change a secret afterwards. Once an endpoint sends your secret
-or OAuth token, or you allow private addresses, it is yours: an assistant can
+a whole new schema only to an endpoint it registered as text, and never
+sees a secret's value or chooses or changes a secret afterwards.
+`list_secrets` shows it your secrets' names and what uses each, so it can
+name one you already have when it proposes an endpoint; you are shown what
+already uses it. Once an endpoint sends your secret or OAuth token, or you allow private addresses, it is yours: an assistant can
 read it and turn read-only on, and it can ask you to fix the schema with
 edits, rename it, reword its tools or read its schema URL again. You are shown
 every edit and description in full and what it does to the tools, and nothing
@@ -576,6 +582,22 @@ be one that keeps memories), and **Delete selected** deletes them. Nothing is
 changed if a path would be taken where they go. A memory that changes hands
 loses its mark to be read in every conversation, since you chose that for its
 old readers. Memories are encrypted like everything else.
+
+**Skills** are procedures you approve: how you want a kind of task done,
+step by step, written as a `SKILL.md` the way Claude's Agent Skills are (a
+name, a line on when to use it, the `server/tool` names it uses, and
+Markdown steps, with a few reference files beside it; nothing in one is ever
+run). A memory is a note an assistant weighs; a skill is one it follows when
+the task matches. Write one under **Skills**, or paste a `SKILL.md` to import
+it, and every assistant sees its name and description in PCP's
+instructions, finds it with `search` and reads it whole with `describe`,
+which also hands it the `call_handle` of each tool the skill names. On an
+assistant's page you choose whether it sees every skill or only some. An
+assistant that keeps memories can propose a new skill or a change through
+the `memory` tool, under `/skills/<name>/SKILL.md`; you see what changes line
+by line and the whole skill as it would be, and nothing is written until you
+agree, and then only if nobody changed the skill in the meantime. Each change
+is a new version.
 
 A token made with **Let an assistant with this token fetch web pages** gets a
 `web_fetch` tool, like the web fetch Claude has: it takes an address and

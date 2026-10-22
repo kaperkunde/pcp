@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
+import { MAY_HAVE_GONE_THROUGH } from "./code/runs"
 import { db } from "./db"
+import { PcpError } from "./errors"
 import {
   buildGatewayServer,
   loadGatewayServers,
@@ -14,12 +16,13 @@ import type { PermissionExecutor } from "./permissions"
 import { appendRequestLog } from "./request-log"
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
+import { catalogueHandle, withCallHandle } from "./test-handles"
 import { writeToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
 
 // The gateway's read-only tools, as a client that holds back everything else
-// (Claude Code's plan mode) meets them: read_memory and call_read_only_tool
-// say they only read, and call_read_only_tool runs nothing its server does
+// (Claude Code's plan mode) meets them: search, describe, read_memory and
+// call_read_only_tool say they only read, and call_read_only_tool runs nothing its server does
 // not mark read-only, at the token's own levels.
 
 vi.mock("./request-log", async (importOriginal) => ({
@@ -32,10 +35,17 @@ let ctx: VaultContext
 let scope: GatewayScope
 let client: Client
 let ran: string[]
+/** What the next upstream call throws, when set. */
+let failWith: Error | null = null
 
 const executor: PermissionExecutor = {
   callTool: async (_ctx, _server, tool) => {
     ran.push(tool)
+
+    if (failWith) {
+      throw failWith
+    }
+
     return { content: [{ type: "text", text: `ran ${tool}` }] }
   },
   syncTools: async () => ({ status: "ok", message: "", toolCount: 0 }),
@@ -93,7 +103,13 @@ async function connect() {
 }
 
 async function call(name: string, args: Record<string, unknown>) {
-  const result = await client.callTool({ name, arguments: args })
+  const result = await client.callTool({
+    name,
+    arguments:
+      name === "call_tool" || name === "call_read_only_tool"
+        ? await withCallHandle(client, args)
+        : args,
+  })
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -108,6 +124,7 @@ beforeEach(async () => {
     password: "correct horse battery staple",
   })
   ran = []
+  failWith = null
   vi.mocked(appendRequestLog).mockClear()
   await connect()
 })
@@ -125,8 +142,101 @@ describe("the read-only tools", () => {
 
     expect(readOnly("read_memory")).toBe(true)
     expect(readOnly("call_read_only_tool")).toBe(true)
+    // Finding and reading tools, skills and memories, and the old names
+    // kept for one release.
+    for (const name of [
+      "search",
+      "describe",
+      "search_tools",
+      "describe_tool",
+    ]) {
+      expect(readOnly(name), name).toBe(true)
+    }
     expect(readOnly("memory")).toBe(false)
     expect(readOnly("call_tool")).not.toBe(true)
+    expect(readOnly("list_secrets")).toBeUndefined()
+  })
+
+  it("include list_secrets and get_endpoint for a token that manages endpoints", async () => {
+    const { token } = await createApiToken(ctx, {
+      name: "Manager",
+      allowAllServers: true,
+      manageEndpoints: true,
+    })
+    const manager = {
+      ...(await resolveApiToken(token))!,
+      publicUrl: "http://localhost:3000",
+    }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(manager, await loadGatewayServers(manager), {
+      executor,
+    }).connect(serverSide)
+    const managing = new Client({ name: "test", version: "1.0.0" })
+    await managing.connect(clientSide)
+
+    const { tools } = await managing.listTools()
+    const readOnly = (name: string) =>
+      tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint
+    await managing.close()
+
+    expect(readOnly("list_secrets")).toBe(true)
+    expect(readOnly("get_endpoint")).toBe(true)
+    expect(readOnly("update_endpoint")).toBe(false)
+  })
+
+  it("include check_run for a token that runs code, and not run_code", async () => {
+    const { token } = await createApiToken(ctx, {
+      name: "Coder",
+      allowAllServers: true,
+      runCode: true,
+    })
+    const coder = {
+      ...(await resolveApiToken(token))!,
+      publicUrl: "http://localhost:3000",
+    }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(coder, await loadGatewayServers(coder), {
+      executor,
+    }).connect(serverSide)
+    const coding = new Client({ name: "test", version: "1.0.0" })
+    await coding.connect(clientSide)
+
+    const { tools } = await coding.listTools()
+    const readOnly = (name: string) =>
+      tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint
+    await coding.close()
+
+    expect(readOnly("check_run")).toBe(true)
+    expect(readOnly("run_code")).toBe(false)
+  })
+})
+
+describe("a call that failed on its way", () => {
+  it("says a call that changes things may have gone through, and not a read or a refusal", async () => {
+    failWith = new PcpError("upstream", "Postcards could not be reached.")
+
+    const sent = await call("call_tool", {
+      server: "postcards",
+      tool: "send_postcard",
+    })
+    expect(sent.isError).toBe(true)
+    expect(sent.text).toBe(
+      `Postcards could not be reached.\n\n${MAY_HAVE_GONE_THROUGH}`,
+    )
+
+    const read = await call("call_read_only_tool", {
+      server: "postcards",
+      tool: "list_cards",
+    })
+    expect(read.isError).toBe(true)
+    expect(read.text).toBe("Postcards could not be reached.")
+
+    failWith = new PcpError("validation", "That is not a postcard.")
+    const refused = await call("call_tool", {
+      server: "postcards",
+      tool: "send_postcard",
+    })
+    expect(refused.text).toBe("That is not a postcard.")
   })
 })
 
@@ -165,9 +275,9 @@ describe("call_read_only_tool", () => {
   })
 
   it("keeps the owner's levels: a blocked tool is refused, an ask asks", async () => {
+    // A handle for it from before the owner blocked it.
     const blocked = await call("call_read_only_tool", {
-      server: "postcards",
-      tool: "hidden_cards",
+      call_handle: await catalogueHandle(scope, "postcards", "hidden_cards"),
     })
     expect(blocked.isError).toBe(true)
     expect(blocked.text).toContain("blocked")

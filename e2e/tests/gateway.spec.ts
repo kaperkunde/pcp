@@ -100,8 +100,10 @@ test("issues an API token and describes the servers behind it", async ({
 
   const { instructions, tools } = await initialize(baseURL!, token)
   expect(tools).toEqual([
+    "search",
     "search_tools",
     "list_tools",
+    "describe",
     "describe_tool",
     "call_tool",
     "call_read_only_tool",
@@ -123,7 +125,7 @@ test("issues an API token and describes the servers behind it", async ({
 test("finds, describes and calls an upstream tool with the secret added by PCP", async ({
   baseURL,
 }) => {
-  const search = await callTool(baseURL!, token, "search_tools", {
+  const search = await callTool(baseURL!, token, "search", {
     query: "post a greeting card",
   })
   expect(search.body.result?.isError ?? false, toolText(search)).toBe(false)
@@ -131,10 +133,10 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   // which tie with this one; the line for this run's server is what counts.
   const line = toolText(search)
     .split("\n")
-    .find((entry) => entry.startsWith(`${SLUG}/send_postcard`))
+    .find((entry) => entry.startsWith(`tool ${SLUG}/send_postcard`))
   expect(line, toolText(search)).toBeTruthy()
 
-  const scoped = await callTool(baseURL!, token, "search_tools", {
+  const scoped = await callTool(baseURL!, token, "search", {
     query: "numbers",
     server: SLUG,
   })
@@ -152,7 +154,7 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
     expect.stringMatching(new RegExp(`^${SLUG}/send_postcard \\[allowed\\]`)),
   ])
 
-  const described = await callTool(baseURL!, token, "describe_tool", {
+  const described = await callTool(baseURL!, token, "describe", {
     server: SLUG,
     tool: "add_numbers",
   })
@@ -191,13 +193,39 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   })
   expect(unknown.body.result?.isError).toBe(true)
   expect(toolText(unknown)).toContain("no tool called no_such_tool")
+
+  // call_tool takes only describe's call_handle. A name in its place
+  // answers with the tool described, so the next call can be the right one.
+  const named = await callTool(baseURL!, token, "call_tool", {
+    call_handle: `${SLUG}/add_numbers`,
+    arguments: { a: 1, b: 2 },
+  })
+  expect(named.body.result?.isError).toBe(true)
+  expect(toolText(named)).toContain("not a tool's name")
+  const handle = /"call_handle": "(ch_[a-z0-9_]+)"/.exec(toolText(named))?.[1]
+  expect(handle, toolText(named)).toBeTruthy()
+  const retried = await callTool(baseURL!, token, "call_tool", {
+    call_handle: handle,
+    arguments: { a: 1, b: 2 },
+  })
+  expect(toolText(retried)).toBe("3")
+
+  // Arguments that do not fit the schema never reach the server.
+  const calls = upstream.calls.length
+  const wrong = await callTool(baseURL!, token, "call_tool", {
+    call_handle: handle,
+    arguments: { a: "one" },
+  })
+  expect(wrong.body.result?.isError).toBe(true)
+  expect(toolText(wrong)).toContain("nothing was run or asked")
+  expect(upstream.calls.length).toBe(calls)
 })
 
 test("picks up tools the server adds later", async ({ baseURL }) => {
   // An assistant asking for a tool PCP has not seen yet makes it read the
   // server's list again, and finds it.
   upstream.lateTools.add("water_plants")
-  const described = await callTool(baseURL!, token, "describe_tool", {
+  const described = await callTool(baseURL!, token, "describe", {
     server: SLUG,
     tool: "water_plants",
   })
@@ -217,7 +245,7 @@ test("keeps long answers and files for this token only", async ({
 }) => {
   for (const tool of ["long_text", "picture", "measure"]) {
     upstream.lateTools.add(tool)
-    const described = await callTool(baseURL!, token, "describe_tool", {
+    const described = await callTool(baseURL!, token, "describe", {
       server: SLUG,
       tool,
     })

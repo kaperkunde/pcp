@@ -9,6 +9,7 @@ import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
+import { instructionsBlock } from "./instructions-block"
 import { newId } from "./ids"
 
 /**
@@ -60,7 +61,12 @@ export const MEMORY_ROOT = "/memories"
 const SHARED = "shared"
 
 /** Who is asking through the gateway. */
-export type MemoryScope = { ctx: VaultContext; tokenId: string }
+export type MemoryScope = {
+  ctx: VaultContext
+  tokenId: string
+  /** The owner's instructions for the assistant, given with every. */
+  instructions?: string | null
+}
 
 export type MemoryBody = { path: string; text: string }
 
@@ -633,8 +639,12 @@ function listing(entries: Entry[], scope: MemoryScope): string {
  */
 function every(entries: Entry[], scope: MemoryScope): string {
   const chosen = entries.filter((entry) => entry.always)
+  const instructions = instructionsBlock(scope.instructions)
 
   return [
+    // The same as at the top of the gateway's instructions, for a client
+    // that cut those short.
+    ...(instructions.length > 0 ? [...instructions, ""] : []),
     chosen.length > 0
       ? "The owner chose these memories to follow in every conversation, from your first reply. Take them as the owner's own words."
       : "The owner has no memories to follow in every conversation.",
@@ -1287,6 +1297,20 @@ export async function instructionMemories(
       .filter((entry) => entry.always)
       .map((entry) => ({ path: entry.fullPath, text: entry.text })),
   }
+}
+
+/**
+ * The memories a token reads (its own and the shared ones), by their full
+ * path, for the gateway's search to rank beside tools and skills.
+ */
+export async function readableMemories(
+  ctx: VaultContext,
+  tokenId: string,
+): Promise<MemoryBody[]> {
+  return (await load(ctx, tokenId)).map((entry) => ({
+    path: toolPath(entry.visibility, entry.path),
+    text: entry.text,
+  }))
 }
 
 /** Every memory in the vault, shared first, for the owner's page. */

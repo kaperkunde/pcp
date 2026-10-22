@@ -1,3 +1,5 @@
+import type { Output } from "./output"
+
 /**
  * What run_code's executors share. An executor runs the program and owns
  * nothing else: every request the program makes goes to the bridge
@@ -22,10 +24,16 @@ export type Bridge = (op: string, payload: unknown) => Promise<BridgeReply>
 export type RunEnd =
   /** The program finished; `returned` is its value as JSON, null for none. */
   | { kind: "done"; returned: string | null }
-  /** It threw, or a limit stopped it; the message says which. */
-  | { kind: "error"; message: string }
+  /**
+   * It threw, or a limit stopped it; the message says which, and `reason`
+   * names a limit the executor itself saw (the bridge knows the others).
+   */
+  | { kind: "error"; message: string; reason?: ExecutorLimit }
   /** The bridge stopped it: the owner has to act first. */
   | { kind: "stopped" }
+
+/** The limits an executor holds a program to itself. */
+export type ExecutorLimit = "cpu" | "memory" | "calls" | "time"
 
 export type RunResult = RunEnd & {
   /** What it printed, in order. */
@@ -44,4 +52,9 @@ export type Executor = (input: {
   bridge: Bridge
   /** Aborted when the run is out of time or the request went away. */
   signal: AbortSignal
+  /**
+   * Where an executor that prints as it goes puts the program's output, so
+   * the bridge keeps what was printed even when the executor fails.
+   */
+  output?: Output
 }) => Promise<RunResult>

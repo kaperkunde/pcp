@@ -27,13 +27,18 @@ import {
 import { db } from "./db"
 import { createDeviceKey, unlockWithDeviceKey } from "./device-keys"
 import { getHostJson, setHostJson } from "./host-settings"
+import { getTokenInstructions, saveTokenInstructions } from "./instructions"
+import { currentTemplate } from "./instructions-defaults"
 import { createMailAccount } from "./mail/accounts"
 import { createMemory, listMemories } from "./memories"
 import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
 import { UPDATE_CONFIG_KEY, UPDATE_STATUS_KEY } from "./updates/state"
 import { createSecret, deleteSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
+import { createSkill, deleteSkill, listSkills, setTokenSkills } from "./skills"
 import { saveWrapperByOwner } from "./wrappers/admin"
+import { addLinkedRepo } from "./repos/test-vault"
+import { listRepoItems, listRepos } from "./repos/store"
 import { createSession, resolveSession } from "./sessions"
 import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
@@ -429,6 +434,90 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
   })
 
+  it("carries a server's version in a linked repository, and restores a file from before it as none", async () => {
+    const { ctx, serverId } = await populate()
+    await db().mcpServer.update({
+      where: { id: serverId },
+      data: { syncVersion: 4 },
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await db().mcpServer.update({
+      where: { id: serverId },
+      data: { syncVersion: 9 },
+    })
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } }),
+    ).toMatchObject({ syncVersion: 4 })
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    for (const row of older.tables.servers as Record<string, unknown>[]) {
+      delete row.syncVersion
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } }),
+    ).toMatchObject({ syncVersion: null })
+  })
+
+  it("carries a token's instructions as they are, and restores a file from before them as not set yet", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    await saveTokenInstructions(ctx, tokenId, "- Answer in French.")
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const payload = await openRaw(file, EXPORT_PASSWORD)
+    const [row] = payload.tables.apiTokens as Array<Record<string, unknown>>
+    // Ciphertext in the file, never the text.
+    expect(JSON.stringify(payload)).not.toContain("Answer in French")
+    expect(row).toMatchObject({ instructionsBase: currentTemplate().version })
+
+    await saveTokenInstructions(ctx, tokenId, "- Changed since.")
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect((await resolveApiToken(token))!.instructions).toBe(
+      "- Answer in French.",
+    )
+
+    const older = structuredClone(payload)
+    for (const token of older.tables.apiTokens as Record<string, unknown>[]) {
+      delete token.instructions
+      delete token.instructionsBase
+    }
+    const { payload: readOlder } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      readOlder,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+
+    expect((await resolveApiToken(token))!.instructions).toBeNull()
+    expect(await getTokenInstructions(ctx, tokenId)).toMatchObject({
+      saved: false,
+      base: null,
+    })
+  })
+
   it("carries a wrapper and what it was approved as, and restores a file from before wrappers", async () => {
     const { ctx, serverId } = await populate()
     const { id: wrapperId } = await saveWrapperByOwner(ctx, null, {
@@ -488,6 +577,128 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await db().apiToken.findFirstOrThrow()).toMatchObject({
       manageWrappers: false,
     })
+  })
+
+  it("carries linked repositories and their items, and restores a file from before them", async () => {
+    const { ctx, secretId } = await populate()
+    const { id: skillId } = await createSkill(ctx, {
+      name: "release-notes",
+      description: "Write release notes.",
+      body: "List the changes.",
+      tools: [],
+    })
+    await addLinkedRepo(ctx, { skillId, secretId })
+    const repos = await listRepos(ctx)
+    const items = await listRepoItems(ctx)
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const raw = await openRaw(file, EXPORT_PASSWORD)
+    // Ciphertext in the file: which repository is not readable from it.
+    expect(JSON.stringify(raw.tables.repos)).not.toContain("shared")
+    expect(raw.tables.repoItems).toHaveLength(1)
+
+    const { payload } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await listRepos(ctx)).toEqual(repos)
+    expect(await listRepoItems(ctx)).toEqual(items)
+
+    const older = structuredClone(raw)
+    delete (older.tables as Record<string, unknown>).repos
+    delete (older.tables as Record<string, unknown>).repoItems
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().repo.count()).toBe(0)
+    expect(await db().repoItem.count()).toBe(0)
+
+    // A linked item that names no item is refused.
+    const broken = structuredClone(raw)
+    broken.tables.repoItems![0]!.skillId = null
+    await expect(
+      readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow(/names no item/)
+  })
+
+  it("carries skills and which tokens see them, and restores a file from before skills", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    const { id: skillId } = await createSkill(ctx, {
+      name: "release-notes",
+      description: "Write release notes from merged pull requests.",
+      body: "1. List the merged pull requests.\n2. Group them.",
+      tools: ["upstream/alpha"],
+      files: [{ path: "template.md", text: "## Changes" }],
+    })
+    await createSkill(ctx, {
+      name: "other",
+      description: "Another one.",
+      body: "Do the other thing.",
+      tools: [],
+    })
+    await setTokenSkills(ctx, tokenId, { all: false, skillIds: [skillId] })
+    const before = await listSkills(ctx)
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const payload = await openRaw(file, EXPORT_PASSWORD)
+    // Ciphertext in the file, never the text.
+    expect(JSON.stringify(payload)).not.toContain("merged pull requests")
+    const { payload: read, preview } = await readExport(file, EXPORT_PASSWORD)
+    expect(preview.counts.skills).toBe(2)
+
+    await deleteSkill(ctx, skillId)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await listSkills(ctx)).toEqual(before)
+    expect((await resolveApiToken(token))!.skillIds).toEqual([skillId])
+
+    const older = structuredClone(payload)
+    delete (older.tables as Record<string, unknown>).skills
+    delete (older.tables as Record<string, unknown>).apiTokenSkills
+    for (const row of older.tables.apiTokens as Record<string, unknown>[]) {
+      delete row.allSkills
+    }
+    const { payload: old, preview: oldPreview } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    expect(oldPreview.counts.skills).toBe(0)
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+
+    expect(await db().skill.count()).toBe(0)
+    expect(await db().apiTokenSkill.count()).toBe(0)
+    // Every token of an older file sees every skill, as before skills.
+    expect((await resolveApiToken(token))!.skillIds).toBeNull()
+  })
+
+  it("refuses a file whose token sees a skill it does not carry", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    const payload = await openRaw(
+      await exportVault(ctx, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    ;(payload.tables as Record<string, unknown>).apiTokenSkills = [
+      { tokenId, skillId: "gone" },
+    ]
+
+    await expect(
+      readExport(await encodeExport(payload, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow("a skill is missing")
   })
 
   it("replaces the host's network settings only when asked, and drops their status", async () => {

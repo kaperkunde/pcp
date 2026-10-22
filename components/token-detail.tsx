@@ -31,8 +31,11 @@ import type { ActionState } from "@/lib/server/action-state"
 
 export type WaitingRequest = {
   id: string
-  /** Proposed tool levels are reviewed and saved on their own page. */
-  review: boolean
+  /**
+   * Proposed tool levels and a skill's change are answered on their own
+   * page: the button's words that lead there, or null to answer here.
+   */
+  review: string | null
   title: string
   lines: string[]
   /** Everything it carries, when the lines cut it short. */
@@ -101,7 +104,7 @@ export function TokenWaiting({ waiting }: { waiting: WaitingRequest[] }) {
             {item.review ? (
               <div>
                 <ButtonLink href={`/permissions/${item.id}`}>
-                  Review and save
+                  {item.review}
                 </ButtonLink>
               </div>
             ) : (

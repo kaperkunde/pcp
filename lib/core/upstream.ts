@@ -27,6 +27,8 @@ import { invalid, isPcpError, PcpError } from "./errors"
 import { callCalendarTool, syncCalendarTools } from "./caldav/accounts"
 import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
+import type { GitHubCredential } from "./repos/github"
+import { GITHUB_SIGNIN_SECRET } from "./repos/limits"
 import type { SshIdentity } from "./ssh/client"
 import { callSshTool, syncSshTools } from "./ssh/hosts"
 import {
@@ -35,6 +37,7 @@ import {
   isPublicAddress,
 } from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
+import { paceServerCall } from "./pacing"
 import { checkedFetch } from "./openapi/transport"
 import {
   applyAuthorizeParams,
@@ -80,7 +83,9 @@ import {
  * or login this module builds, or an OAuth token it renews; calendar
  * accounts (kind "caldav") to lib/core/caldav/accounts.ts, the same way;
  * SSH servers (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the
- * server, decrypted here.
+ * server, decrypted here. Linked repositories' GitHub client
+ * (lib/core/repos/github.ts) gets its Authorization header from
+ * githubCredential, the same way.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -883,6 +888,65 @@ async function credential(
   return { headers, redact, login: null }
 }
 
+/**
+ * What PCP signs in to GitHub with for a linked repository
+ * (lib/core/repos/github.ts): the Authorization header made from the secret
+ * the owner chose for it, and the values to keep out of what is repeated.
+ * Only a text secret (a personal access token) or the token of PCP's own
+ * GitHub sign-in is sent: no other server's OAuth tokens ever go to GitHub.
+ * Null for a repository read without one.
+ */
+export async function githubCredential(
+  ctx: VaultContext,
+  secretId: string | null,
+): Promise<GitHubCredential | null> {
+  if (!secretId) {
+    return null
+  }
+
+  const row = await db().secret.findFirst({
+    where: { id: secretId, vaultId: ctx.vaultId },
+    select: { kind: true, name: true },
+  })
+
+  if (
+    !row ||
+    !(
+      row.kind === "text" ||
+      (row.kind === "oauth" && row.name === GITHUB_SIGNIN_SECRET)
+    )
+  ) {
+    throw new PcpError(
+      "state",
+      "The repository's secret is gone or is not one PCP sends to GitHub. Choose its sign-in again.",
+    )
+  }
+
+  const value = await readSecretValue(ctx, secretId)
+  let token = value.trim()
+
+  if (row.kind === "oauth") {
+    try {
+      token = String(
+        (JSON.parse(value) as { access_token?: unknown }).access_token ?? "",
+      )
+    } catch {
+      token = ""
+    }
+  }
+
+  if (!token || /[\u0000-\u001f\u007f\s]/.test(token)) {
+    throw new PcpError(
+      "state",
+      "The repository's secret is empty or has a character a header cannot carry. Check its value.",
+    )
+  }
+
+  const header = `Bearer ${token}`
+
+  return { headers: { Authorization: header }, redact: [token, header, value] }
+}
+
 async function basicCredential(
   ctx: VaultContext,
   server: McpServer,
@@ -1285,8 +1349,33 @@ export type CallOptions = {
    * are scrubbed from the answer. Without it a placeholder is refused.
    */
   secrets?: SecretGrant
+  /** The run_code or wrapper run the call is made for (code/runs.ts). */
+  runId?: string
+  /**
+   * Told the id of the run a wrapper's tool starts for this call
+   * (wrappers/run.ts), so the calling run's trace names it. Only a
+   * wrapper's tool looks at it.
+   */
+  onRun?: (runId: string) => void
+  /**
+   * Aborts when the run the call is made for is over (its own limit, or it
+   * ended), never because its client went away. The browser honours it: a
+   * call waiting its turn on a tab, or running, stops waiting, is rejected
+   * with the signal's reason, and its turn passes on. A call waiting for
+   * its turn under pacing stops waiting too. Other kinds of server do not
+   * look at it yet.
+   */
+  signal?: AbortSignal
 }
 
+/**
+ * Runs one tool of a server. Every real call passes here, whatever made it
+ * (call_tool, run_code, a wrapper, the owner's answer to a request), so
+ * this is where a server's calls are paced (lib/core/pacing/): by the
+ * server, before anything is read or sent. The browser paces its actions
+ * by the tab's site instead (browser/call.ts), and a wrapper's tool is
+ * paced by the calls its program makes.
+ */
 export async function callServerTool(
   ctx: VaultContext,
   server: McpServer,
@@ -1294,6 +1383,16 @@ export async function callServerTool(
   args: Record<string, unknown>,
   options: CallOptions,
 ): Promise<CallToolResult> {
+  if (server.kind !== "browser" && server.kind !== "wrapper") {
+    const paced = await paceServerCall(ctx.vaultId, server, toolName, {
+      signal: options.signal,
+    })
+
+    if (paced) {
+      return { content: [{ type: "text", text: paced }], isError: true }
+    }
+  }
+
   const { args: sent, redact } = await placeSecrets(
     ctx,
     server,
@@ -1376,7 +1475,7 @@ async function dispatchCall(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl, tokenId, keep, keepBytes, open }: CallOptions,
+  { publicUrl, tokenId, keep, keepBytes, open, signal, runId }: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
   if (server.kind === "wrapper") {
@@ -1398,6 +1497,8 @@ async function dispatchCall(
       publicUrl,
       open,
       keepBytes,
+      signal,
+      runId,
     })
   }
 

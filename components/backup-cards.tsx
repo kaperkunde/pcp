@@ -431,6 +431,7 @@ function PreviewList({ preview }: { preview: ExportPreview }) {
     plural(counts.secrets, "secret"),
     plural(counts.tokens, "API token"),
     plural(counts.memories, "memory", "memories"),
+    ...(counts.skills > 0 ? [plural(counts.skills, "skill")] : []),
     plural(counts.webFetchRules, "web fetch level"),
     plural(counts.pendingRequests, "request waiting", "requests waiting"),
     ...(counts.browserSites > 0

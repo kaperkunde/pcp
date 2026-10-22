@@ -28,8 +28,8 @@ Copy (the words) follows CLAUDE.md › Copy.
 
 The sidebar (`components/app-sidebar.tsx`) has two groups:
 
-- **Every day:** Home, Servers, Assistants, Memories, and Browser below
-  Memories while the browser is added and enabled.
+- **Every day:** Home, Servers, Assistants, Memories, Skills, and Browser
+  below Skills while the browser is added and enabled.
 - **Now and then:** Secrets, Log, Settings.
 
 At the bottom: the update notice, the owner's name and **Lock**. The bell
@@ -111,19 +111,20 @@ Use a `Card` for what is not rows: a form, a block of text, a code sample.
 
 ## What goes where
 
-| Shown on the page                               | Folded (Disclosure) or one page down                                   |
-| ----------------------------------------------- | ---------------------------------------------------------------------- |
-| A server's description, sign-in state, on/off   | Its address, headers, sign-in app (OAuth client), private addresses    |
-| Its tools                                       | Each tool's description in the owner's words                           |
-| An endpoint's read-only switch                  | Schema source, base URL, sign-in kind, JSON Patch edits, public-only   |
-| What an assistant reaches; memories, web, code  | Expiry, every tool's level, web methods and sites, what it may propose |
-| Connecting an assistant: which app, name, reach | More options: expiry, memories, web, code, endpoints, wrappers         |
-| Settings: address, updates, sign-in, backup     | Network (public address, outside access, pcp.gg, DNS, HTTPS), upkeep   |
-| A request: what will happen, in plain words     | "Show exactly what will be sent": the raw arguments                    |
+| Shown on the page                                           | Folded (Disclosure) or one page down                                                     |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| A server's description, sign-in state, on/off               | Its address, headers, sign-in app (OAuth client), private addresses                      |
+| Its tools                                                   | Each tool's description in the owner's words                                             |
+| An endpoint's read-only switch                              | Schema source, base URL, sign-in kind, JSON Patch edits, public-only                     |
+| What it reaches and the skills it sees; memories, web, code | Expiry, its instructions, every tool's level, web methods and sites, what it may propose |
+| Connecting an assistant: which app, name, reach             | More options: expiry, memories, web, code, endpoints, wrappers                           |
+| Settings: address, updates, sign-in, backup                 | Network (public address, outside access, pcp.gg, DNS, HTTPS), upkeep                     |
+| A request: what will happen, in plain words                 | "Show exactly what will be sent": the raw arguments                                      |
 
 Anything an assistant proposes (a server, an endpoint change, a wrapper, a
-shared memory) is never folded on the page that asks the owner: they read
-it whole before they agree.
+shared memory, a skill) is never folded on the page that asks the owner:
+they read it whole before they agree. A skill's request shows what changes
+line by line, then the whole skill and every file.
 
 ## Patterns built on these
 

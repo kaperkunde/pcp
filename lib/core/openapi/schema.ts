@@ -2,7 +2,7 @@ import { entries, isObject, own, type JsonObject } from "./json"
 
 /**
  * An OpenAPI schema object (already inlined) as the JSON Schema an
- * assistant reads in describe_tool. 3.1 schemas are JSON Schema already;
+ * assistant reads in describe. 3.1 schemas are JSON Schema already;
  * 3.0 ones differ in a few keywords (nullable, boolean exclusive bounds,
  * example). Keywords that only matter to code generators are dropped, and
  * properties marked readOnly are left out: they are what the API sends

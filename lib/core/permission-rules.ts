@@ -247,6 +247,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Allow the change",
     decline: "Not now",
   },
+  // A skill added, changed, renamed or deleted, as the owner saw it whole.
+  skill_change: {
+    allow_once: "Allow the change",
+    decline: "Not now",
+  },
   // Saved with the levels the owner chose on the page (applyAccessRequest),
   // never by a decision: the only one is no.
   access: {
@@ -259,6 +264,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
   // A wrapper made, changed or deleted, as the owner saw it on the page.
   wrapper_change: {
     allow_once: "Make the change",
+    decline: "Not now",
+  },
+  // A linked repository's change, as an assistant merged or reviewed it.
+  repo_change: {
+    allow_once: "Apply the change",
     decline: "Not now",
   },
   // A site's answer, not the method's: the owner decides where it goes.

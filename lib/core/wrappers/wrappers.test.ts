@@ -1,8 +1,11 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
-import { MAX_CALLS_PER_RUN } from "../code/limits"
+import { createBrowserServer } from "../browser/server"
+import { MAX_CALLS_PER_RUN, RUN_TIMEOUT_MS } from "../code/limits"
+import type { Executor } from "../code/types"
+import { DEFAULT_TOOL_ACCESS } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { createEndpoint } from "../endpoints"
@@ -16,8 +19,42 @@ import { json, startTestApi, type TestApi } from "../openapi/test-api"
 import { decidePermission, getPermissionView } from "../permissions"
 import { createSecret } from "../secrets"
 import { scratchDatabase } from "../test-db"
+import { catalogueHandle, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
+import { setPacingServer } from "../pacing/config"
+import { resetPacing, setPacingClock } from "../pacing/pace"
+import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
+import {
+  browserServerIds,
+  flowWrapperIds,
+  isFlow,
+  isFlowTool,
+  readDefinition,
+} from "./definition"
+import { flowSites } from "./flow-sites"
+import { FLOW_RUN_TIMEOUT_MS, WRAPPER_RUN_TIMEOUT_MS } from "./limits"
+import { wrapperRunTimeout } from "./run"
+
+/** The run limits as tests set them; the real ones unless a test says. */
+const timeouts = vi.hoisted(() => ({
+  wrapper: null as number | null,
+  flow: null as number | null,
+}))
+
+vi.mock("./limits", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./limits")>()
+
+  return {
+    ...actual,
+    get WRAPPER_RUN_TIMEOUT_MS() {
+      return timeouts.wrapper ?? actual.WRAPPER_RUN_TIMEOUT_MS
+    },
+    get FLOW_RUN_TIMEOUT_MS() {
+      return timeouts.flow ?? actual.FLOW_RUN_TIMEOUT_MS
+    },
+  }
+})
 
 // Wrappers as an assistant meets them, through the gateway's MCP interface:
 // proposed, approved by the owner, called (its program calling a real API
@@ -96,22 +133,40 @@ afterEach(async () => {
   client = null
   await api.close()
   await cleanup()
+  timeouts.wrapper = null
+  timeouts.flow = null
+  codeExecutor = undefined
+  setPacingClock(null)
+  resetPacing()
+  vi.unstubAllEnvs()
 })
+
+/** What runs the programs, when a test replaces it. */
+let codeExecutor: Executor | undefined
 
 /** A gateway for the token as it is now, as each request builds one. */
 async function connect(): Promise<Client> {
   await client?.close()
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
-  await buildGatewayServer(scope, await loadGatewayServers(scope)).connect(
-    serverSide,
-  )
+  await buildGatewayServer(
+    scope,
+    await loadGatewayServers(scope),
+    codeExecutor ? { codeExecutor } : {},
+  ).connect(serverSide)
   client = new Client({ name: "test", version: "1.0.0" })
   await client.connect(clientSide)
   return client
 }
 
 async function call(name: string, args: Record<string, unknown>) {
-  const result = await (await connect()).callTool({ name, arguments: args })
+  const connected = await connect()
+  const result = await connected.callTool({
+    name,
+    arguments:
+      name === "call_tool" || name === "call_read_only_tool"
+        ? await withCallHandle(connected, args)
+        : args,
+  })
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
     .join("")
@@ -314,6 +369,61 @@ describe("calling a wrapper's tool", () => {
     expect(api.requests.at(-1)!.url).toContain(`key=${KEY}`)
   })
 
+  it("says, when it fails, the run, why, and the calls that change things that completed", async () => {
+    const { id: notesId } = await createEndpoint(ctx, {
+      name: "Notes",
+      specSource: "upload",
+      specText: JSON.stringify({
+        openapi: "3.0.3",
+        info: { title: "Notes", version: "1" },
+        servers: [{ url: api.origin }],
+        paths: {
+          "/notes": {
+            post: {
+              operationId: "add_note",
+              summary: "Adds a note",
+              responses: { "200": { description: "ok" } },
+            },
+          },
+        },
+      }),
+      readOnly: false,
+      authType: "none",
+    })
+    await writeToolAccess(scope.tokenId, notesId, "add_note", "allowed")
+    const wrapper = await approvedWrapper({
+      ...ECHO_TOOL,
+      program: `
+        await pcp.call("things", "echo", { key: { $secret: "Things key" }, q: args.word })
+        await pcp.call("notes", "add_note", {})
+        console.log("noted")
+        throw new Error("then it broke")
+      `,
+      calls: ["things/echo", "notes/add_note"],
+    })
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const result = await call("call_tool", {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "hello" },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain("lookup/lookup failed: Error: then it broke")
+    expect(result.text).toContain("It printed:\nnoted")
+    expect(result.text).toMatch(
+      /Run run_[0-9a-f]{16}: failed\. Exit reason: uncaught error\./,
+    )
+    // The read is not listed; the note it added is.
+    expect(result.text).toContain(
+      "Calls that change things and completed:\n- notes/add_note: ok",
+    )
+    expect(result.text).not.toContain("things/echo")
+    expect(result.text).toContain("Some of this run may have taken effect")
+    expect(result.text).not.toContain(KEY)
+  })
+
   it("checks the arguments against the tool's schema", async () => {
     const wrapper = await approvedWrapper()
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
@@ -325,7 +435,7 @@ describe("calling a wrapper's tool", () => {
     })
 
     expect(result.isError).toBe(true)
-    expect(result.text).toContain('"word" is required')
+    expect(result.text).toContain('"word" is missing')
     expect(api.requests).toHaveLength(0)
   })
 
@@ -417,9 +527,9 @@ describe("calling a wrapper's tool", () => {
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
     await writeToolAccess(scope.tokenId, endpointId, "echo", "blocked")
 
+    // Described before, so its handle is genuine; blocked now all the same.
     const result = await call("call_tool", {
-      server: "lookup",
-      tool: "lookup",
+      call_handle: await catalogueHandle(scope, "lookup", "lookup"),
       arguments: { word: "hi" },
     })
 
@@ -430,17 +540,17 @@ describe("calling a wrapper's tool", () => {
 
 describe("what a wrapper replaces", () => {
   it("leaves the replaced tool out of search and lists, still callable", async () => {
-    const before = await call("search_tools", { query: "says back" })
+    const before = await call("search", { query: "says back" })
     expect(before.text).toContain("things/echo")
 
     await approvedWrapper()
 
-    const search = await call("search_tools", { query: "says back" })
+    const search = await call("search", { query: "says back" })
     expect(search.text).not.toContain("things/echo")
     const listed = await call("list_tools", { server: "things" })
     expect(listed.text).not.toContain("echo")
     expect(listed.text).toContain("count")
-    const described = await call("describe_tool", {
+    const described = await call("describe", {
       server: "things",
       tool: "echo",
     })
@@ -579,7 +689,7 @@ describe("what an assistant can set", () => {
     expect(server.tools.map((tool) => tool.name)).toEqual(["count"])
 
     // Nothing stands in for things/echo any more: it is back in search.
-    const search = await call("search_tools", { query: "says back" })
+    const search = await call("search", { query: "says back" })
     expect(search.text).toContain("things/echo")
   })
 
@@ -736,7 +846,7 @@ describe("a tool's output schema", () => {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const described = await call("describe_tool", {
+    const described = await call("describe", {
       server: "lookup",
       tool: "lookup",
     })
@@ -858,7 +968,7 @@ describe("whose levels a wrapper's calls follow", () => {
       expect(result.text).toContain(`q=${level}`)
     }
 
-    const described = await call("describe_tool", {
+    const described = await call("describe", {
       server: "lookup",
       tool: "lookup",
     })
@@ -970,5 +1080,378 @@ describe("whose levels a wrapper's calls follow", () => {
 
     expect(result.isError).toBe(true)
     expect(await db().mcpServer.count({ where: { kind: "wrapper" } })).toBe(0)
+  })
+})
+
+/** A browser flow's tool, as an assistant writes one after doing it once. */
+const FLOW_TOOL = {
+  name: "post_message",
+  description: "Posts a message in a chat thread, unless it is there already.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      thread: { type: "string" },
+      text: { type: "string" },
+      next: { type: "string" },
+    },
+    required: ["thread", "text"],
+  },
+  program: `
+    const opened = await pcp.step("open the thread", () =>
+      pcp.call("browser", "tabs", { action: "open", url: \`https://chat.example.com/t/\${args.thread}\` }))
+    const tab = opened.match(/^Tab (\\S+):/m)[1]
+    await pcp.step("write it", () =>
+      pcp.call("browser", "type", { tab, target: { role: "textbox", name: "Message" }, text: args.text }))
+    await pcp.step("send it", () =>
+      pcp.call("browser", "click", { tab, target: { role: "button", name: "Send" } }))
+    if (args.next) await pcp.call("browser", "navigate", { tab, url: args.next })
+    return { ok: true, url: "https://chat.example.com/t/" + args.thread }
+  `,
+  calls: ["browser/tabs", "browser/type", "browser/click", "browser/navigate"],
+}
+
+const READ_FLOW_TOOL = {
+  name: "read_thread",
+  description: "Reads a chat thread.",
+  inputSchema: { type: "object", properties: {} },
+  annotations: { readOnlyHint: true },
+  program:
+    'const opened = await pcp.call("browser", "tabs", { action: "open", url: "https://chat.example.com/" }); return opened',
+  calls: ["browser/tabs"],
+}
+
+const PLAIN_TOOL = {
+  name: "lookup",
+  description: "Looks a word up.",
+  inputSchema: { type: "object", properties: { word: { type: "string" } } },
+  program:
+    'return await pcp.call("things", "echo", { key: "k", q: args.word })',
+  calls: ["things/echo"],
+}
+
+/** Proposes a wrapper of these tools and has the owner agree. */
+async function approved(
+  tools: Array<Record<string, unknown>>,
+  extra: Record<string, unknown> = {},
+) {
+  const asked = await call("create_wrapper", {
+    name: "Chat",
+    description: "The chat, one call at a time.",
+    tools,
+    ...extra,
+  })
+  expect(asked.text).toContain("Not done yet")
+  const row = await newestRequest()
+  const view = await getPermissionView(ctx, row.id, { publicUrl: PUBLIC_URL })
+  const result = await decidePermission(ctx, row.id, "allow_once", {
+    publicUrl: PUBLIC_URL,
+  })
+  expect(result.isError).not.toBe(true)
+
+  return {
+    view: view!,
+    wrapper: await db().mcpServer.findFirstOrThrow({
+      where: { kind: "wrapper" },
+    }),
+  }
+}
+
+describe("a browser flow", () => {
+  beforeEach(async () => {
+    await createBrowserServer(ctx)
+  })
+
+  it("is a wrapper with a tool that calls the browser, told apart without being stored", async () => {
+    const { view, wrapper } = await approved([FLOW_TOOL, PLAIN_TOOL])
+    const definition = readDefinition(
+      (await db().wrapperSpec.findFirstOrThrow()).definition,
+    )
+    const browsers = await browserServerIds(ctx)
+
+    expect(isFlow(definition, browsers)).toBe(true)
+    expect(
+      definition.tools.map((tool) => [tool.name, isFlowTool(tool, browsers)]),
+    ).toEqual([
+      ["post_message", true],
+      ["lookup", false],
+    ])
+    expect(isFlow(definition, new Set())).toBe(false)
+    expect(Object.keys(definition)).not.toContain("flow")
+    expect(await flowWrapperIds(ctx)).toEqual(new Set([wrapper.id]))
+
+    // The owner's review says so, and lists what the program opens.
+    expect(view.wrapper!.flow).toBe(true)
+    expect(view.lines.join("\n")).toContain("A browser flow")
+    const [flowTool, plainTool] = view.wrapper!.tools
+    expect(flowTool).toMatchObject({
+      flow: true,
+      sites: {
+        sites: ["chat.example.com"],
+        fromArguments: true,
+        computed: false,
+      },
+    })
+    expect(plainTool!.flow).toBe(false)
+    expect(plainTool!.sites).toBeUndefined()
+
+    const read = await call("get_wrapper", { wrapper: "chat" })
+    expect(read.text).toContain('"flow": true')
+  })
+
+  it("is not one without a browser call", async () => {
+    const { view } = await approved([PLAIN_TOOL])
+
+    expect(view.wrapper!.flow).toBe(false)
+    expect(view.lines.join("\n")).not.toContain("browser flow")
+    expect(await flowWrapperIds(ctx)).toEqual(new Set())
+  })
+
+  it("asks first by default, read-only or not, and keeps every level the owner set", async () => {
+    const { wrapper } = await approved([FLOW_TOOL, READ_FLOW_TOOL])
+    const levels = async () =>
+      (await loadGatewayServers(scope))
+        .find((server) => server.id === wrapper.id)!
+        .tools.map((tool) => [tool.name, tool.access])
+
+    // Nothing the owner set: a flow that acts asks; one that only reads
+    // has every tool's default, which asks too.
+    expect(DEFAULT_TOOL_ACCESS).toBe("ask")
+    expect(await levels()).toEqual([
+      ["post_message", "ask"],
+      ["read_thread", DEFAULT_TOOL_ACCESS],
+    ])
+    const asked = await call("call_tool", {
+      server: "chat",
+      tool: "post_message",
+      arguments: { thread: "1", text: "hi" },
+    })
+    expect(asked.text).toContain("Not done yet")
+
+    // What the owner set stays as they set it.
+    await writeToolAccess(scope.tokenId, wrapper.id, "post_message", "allowed")
+    await writeToolAccess(scope.tokenId, wrapper.id, "read_thread", "blocked")
+    expect(await levels()).toEqual([
+      ["post_message", "allowed"],
+      ["read_thread", "blocked"],
+    ])
+  })
+
+  it("runs longer than other wrappers, and still ends before a program that calls it", async () => {
+    const actual = await vi.importActual<typeof import("./limits")>("./limits")
+
+    expect(actual.FLOW_RUN_TIMEOUT_MS).toBeGreaterThan(
+      actual.WRAPPER_RUN_TIMEOUT_MS,
+    )
+    expect(actual.FLOW_RUN_TIMEOUT_MS).toBeLessThan(RUN_TIMEOUT_MS)
+    expect(wrapperRunTimeout(true)).toBe(FLOW_RUN_TIMEOUT_MS)
+    expect(wrapperRunTimeout(false)).toBe(WRAPPER_RUN_TIMEOUT_MS)
+
+    // Each run gets its own: a program that waits until it is stopped.
+    timeouts.wrapper = 1_000
+    timeouts.flow = 2_000
+    codeExecutor = ({ signal }) =>
+      new Promise((resolve) =>
+        signal.addEventListener("abort", () =>
+          resolve({
+            kind: "error",
+            message: String(signal.reason),
+            output: "",
+            dropped: 0,
+          }),
+        ),
+      )
+    const { wrapper } = await approved([FLOW_TOOL, PLAIN_TOOL])
+    await writeToolAccess(scope.tokenId, wrapper.id, "post_message", "allowed")
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const plain = await call("call_tool", {
+      server: "chat",
+      tool: "lookup",
+      arguments: { word: "x" },
+    })
+    expect(plain.text).toContain("took longer than 1 seconds")
+
+    const flow = await call("call_tool", {
+      server: "chat",
+      tool: "post_message",
+      arguments: { thread: "1", text: "hi" },
+    })
+    expect(flow.text).toContain("took longer than 2 seconds")
+  })
+})
+
+describe("a wrapper's steps", () => {
+  it("names the step that failed in the answer, and the step of each call", async () => {
+    const { wrapper } = await approved([
+      {
+        ...PLAIN_TOOL,
+        program: `
+          await pcp.step("look it up", () => pcp.call("things", "echo", { key: "k", q: args.word }))
+          await pcp.step("check the answer", async () => { throw new Error("not what was asked") })
+        `,
+        calls: ["things/echo"],
+      },
+    ])
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const result = await call("call_tool", {
+      server: "chat",
+      tool: "lookup",
+      arguments: { word: "hello" },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain(
+      "chat/lookup failed: Error: failed at step 'check the answer': not what was asked",
+    )
+    expect(api.requests).toHaveLength(1)
+  })
+})
+
+describe("a wrapper called from run_code", () => {
+  beforeEach(async () => {
+    const { token } = await createApiToken(ctx, {
+      name: "Coder",
+      allowAllServers: true,
+      serverIds: [],
+      manageWrappers: true,
+      runCode: true,
+    })
+    scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+  })
+
+  it("runs in a run of its own, paced, linked both ways, with one program at a time", async () => {
+    vi.stubEnv("PCP_PACING", "on")
+    const waits: number[] = []
+    let now = 1_000_000
+    setPacingClock({
+      now: () => now,
+      sleep: async (ms) => {
+        waits.push(ms)
+        now += ms
+      },
+      random: () => 0,
+    })
+    await setPacingServer(ctx, endpointId, {
+      minIntervalMs: 5_000,
+      jitterMs: 0,
+      burst: null,
+    })
+    // One program at a time, of each: a wrapper's run is not run_code's.
+    await saveResourceConfig({ ...EMPTY_CONFIG, programsAtOnce: 1 })
+    const { wrapper } = await approved([
+      PLAIN_TOOL,
+      {
+        ...PLAIN_TOOL,
+        name: "broken",
+        description: "Breaks.",
+        program: 'throw new Error("it broke")',
+      },
+    ])
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+    await writeToolAccess(scope.tokenId, wrapper.id, "broken", "allowed")
+
+    const result = await call("run_code", {
+      code: `
+        const one = await pcp.call("chat", "lookup", { word: "one" })
+        const two = await pcp.call("chat", "lookup", { word: "two" })
+        try { await pcp.call("chat", "broken", {}) } catch (error) { console.log(error.message) }
+        throw new Error(JSON.stringify([one, two]))
+      `,
+    })
+
+    // Both ran, the second after the server's pause.
+    expect(result.text).toContain("q=one")
+    expect(result.text).toContain("q=two")
+    expect(waits).toEqual([5_000])
+    expect(api.requests).toHaveLength(2)
+
+    // The outer run names each run it started, and the inner names it back.
+    const outer = /Run (run_[0-9a-f]{16}): failed/.exec(result.text)![1]!
+    const inner = [
+      ...result.text.matchAll(/- chat\/lookup \(run (run_[0-9a-f]{16})\): ok/g),
+    ].map((match) => match[1])
+    expect(inner).toHaveLength(2)
+    expect(inner).not.toContain(outer)
+    expect(result.text).toContain("chat/broken failed: Error: it broke")
+    expect(result.text).toMatch(
+      new RegExp(`Run run_[0-9a-f]{16} \\(called from run ${outer}\\): failed`),
+    )
+  })
+})
+
+describe("the sites a flow opens", () => {
+  it("reads literals and fixed starts, and says when an address comes from elsewhere", () => {
+    expect(
+      flowSites(
+        `await pcp.call("browser", "tabs", { action: "open", url: "https://mail.example.com/inbox" })
+         await pcp.call('browser', 'navigate', { tab, url: 'https://mail.example.com/compose' })
+         await pcp.call("browser", "navigate", { tab, "url": \`https://shop.example.com:8443/\${args.item}\` })
+         await pcp.call("other", "navigate", { url: "https://elsewhere.example.com" })
+         await pcp.call("browser", "click", { url: "https://not-opened.example.com" })`,
+        ["browser"],
+      ),
+    ).toEqual({
+      sites: ["mail.example.com", "shop.example.com:8443"],
+      fromArguments: false,
+      computed: false,
+    })
+
+    expect(
+      flowSites(
+        'await pcp.call("browser", "navigate", { tab, url: args.address })',
+        ["browser"],
+      ),
+    ).toMatchObject({ sites: [], fromArguments: true, computed: false })
+
+    // A host that is not ended yet is not one.
+    expect(
+      flowSites(
+        'await pcp.call("browser", "navigate", { tab, url: `https://ex${args.tld}` })',
+        ["browser"],
+      ),
+    ).toMatchObject({ sites: [], fromArguments: true })
+
+    for (const program of [
+      'await pcp.call("browser", "navigate", { tab, url })',
+      'await pcp.call("browser", "navigate", { tab, url: links[0] })',
+      'await pcp.call(server, "navigate", { tab, url: "https://a.example.com" })',
+      'await pcp.call("browser", "navigate", options)',
+    ]) {
+      expect(flowSites(program, ["browser"]).computed, program).toBe(true)
+    }
+
+    // Commas and brackets inside strings and comments do not confuse it.
+    expect(
+      flowSites(
+        `await pcp.call("browser", /* "tabs", */ "navigate", { tab, note: "a, b)", url: "https://x.example.com/?q=(1,2)" })`,
+        ["browser"],
+      ).sites,
+    ).toEqual(["x.example.com"])
+  })
+})
+
+describe("what an assistant is told about flows", () => {
+  it("tells a token with the browser and wrappers how to write one, and no other", async () => {
+    await createBrowserServer(ctx)
+    const servers = await loadGatewayServers(scope)
+    const told = buildInstructions(servers, { manageWrappers: true })
+
+    expect(told).toContain("Browser flows:")
+    expect(told).toContain("never by ref")
+    expect(told).toContain("{already: true}")
+    expect(told).toContain("browser/hand_over")
+    expect(buildInstructions(servers, {})).not.toContain("Browser flows:")
+    expect(
+      buildInstructions(
+        servers.filter((server) => server.kind !== "browser"),
+        { manageWrappers: true },
+      ),
+    ).not.toContain("Browser flows:")
+
+    const listed = await connect()
+    const { tools } = await listed.listTools()
+    const create = tools.find((tool) => tool.name === "create_wrapper")!
+    expect(create.description).toContain("browser flow")
   })
 })

@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache"
 
 import { notFound } from "@/lib/core/errors"
-import { type NetworkNotice, networkNotices } from "@/lib/core/network/runtime"
+import { listOwnerNotices, type OwnerNotice } from "@/lib/core/owner-notices"
 import { parseDecision } from "@/lib/core/permission-rules"
 import {
   applyAccessRequest,
@@ -103,8 +103,11 @@ export type PendingRequestsState = {
     tokenName: string
     createdAt: string
   }>
-  /** Not from an assistant: PCP itself needs a look (HTTPS not renewing). */
-  notices: NetworkNotice[]
+  /**
+   * Not from an assistant: PCP itself needs a look (HTTPS not renewing, new
+   * suggested instructions).
+   */
+  notices: OwnerNotice[]
 }
 
 /**
@@ -116,7 +119,7 @@ export async function pendingRequestsAction(): Promise<PendingRequestsState> {
   const ctx = await requireContext()
   const [{ total, requests }, notices] = await Promise.all([
     publicUrlFor(ctx).then((publicUrl) => listPendingRequests(ctx, publicUrl)),
-    networkNotices(),
+    listOwnerNotices(ctx),
   ])
 
   return {

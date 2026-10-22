@@ -133,6 +133,9 @@ describe("reading the develop channel's list", () => {
       parseReleaseList([
         release({ tag_name: "v9.0.0", draft: true }),
         release({ tag_name: "nightly" }),
+        release({ tag_name: "v1.0.0-dev.20261022153000" }),
+        release({ tag_name: "v1.0.0-dev.09" }),
+        release({ tag_name: "v1.0.1-rc.1" }),
         "text",
         release({ tag_name: "v1.0.0-dev.2" }),
       ]).version,

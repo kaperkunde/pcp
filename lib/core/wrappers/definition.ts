@@ -63,7 +63,7 @@ export type WrapperTool = {
   program: string
   /** Every tool the program may call. */
   calls: ToolRef[]
-  /** Tools it stands in for: they drop out of search_tools and list_tools. */
+  /** Tools it stands in for: they drop out of search and list_tools. */
   replaces: ToolRef[]
 }
 
@@ -232,6 +232,67 @@ export function readWrapperOperation(json: string | null): {
       callLevels: "token",
     }
   }
+}
+
+/**
+ * A browser flow: a wrapper tool whose program drives the vault's browser,
+ * which an assistant writes after doing a site task step by step, so the
+ * task becomes one call. A tool is one when its `calls` name any tool of a
+ * browser server, and a wrapper is one when any of its tools is. Derived,
+ * never stored: the definition (and its hash) stays as it is.
+ */
+export function isFlowTool(
+  tool: Pick<WrapperTool, "calls">,
+  browserIds: ReadonlySet<string>,
+): boolean {
+  return tool.calls.some((call) => browserIds.has(call.serverId))
+}
+
+export function isFlow(
+  definition: Pick<WrapperDefinition, "tools">,
+  browserIds: ReadonlySet<string>,
+): boolean {
+  return definition.tools.some((tool) => isFlowTool(tool, browserIds))
+}
+
+/** The vault's browser servers, by id, for isFlow and isFlowTool. */
+export async function browserServerIds(
+  ctx: Pick<VaultContext, "vaultId">,
+): Promise<Set<string>> {
+  const rows = await db().mcpServer.findMany({
+    where: { vaultId: ctx.vaultId, kind: "browser" },
+    select: { id: true },
+  })
+
+  return new Set(rows.map((row) => row.id))
+}
+
+/** The vault's wrappers that are browser flows, by id. */
+export async function flowWrapperIds(
+  ctx: Pick<VaultContext, "vaultId">,
+): Promise<Set<string>> {
+  const browserIds = await browserServerIds(ctx)
+
+  if (browserIds.size === 0) {
+    return new Set()
+  }
+
+  const specs = await db().wrapperSpec.findMany({
+    where: { server: { vaultId: ctx.vaultId } },
+    select: { serverId: true, definition: true },
+  })
+
+  return new Set(
+    specs.flatMap((spec) => {
+      try {
+        return isFlow(readDefinition(spec.definition), browserIds)
+          ? [spec.serverId]
+          : []
+      } catch {
+        return []
+      }
+    }),
+  )
 }
 
 /** "server/tool", split at its first slash. */

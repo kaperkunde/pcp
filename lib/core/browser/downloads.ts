@@ -69,6 +69,8 @@ export type CaughtDownload =
   | { kind: "too_large"; name: string; size: number }
   | { kind: "timeout"; name: string }
   | { kind: "failed"; name: string }
+  /** Another tab's download call is waiting for one now. */
+  | { kind: "busy" }
 
 /** A file name as a page offered it, for an answer: one plain line. */
 export function offeredName(name: string): string {
@@ -275,8 +277,8 @@ function until(waiter: Waiter, done: () => boolean, ms: number) {
 /**
  * Runs `start` (a click, or opening an address) with downloads let through
  * for the vault's context, and takes the first one `judge` says is the
- * call's. The vault's browser work runs one call at a time (withVault), so
- * no two calls wait at once.
+ * call's. One call waits for a download at a time, whichever its tab:
+ * while one does, another is answered busy rather than kept waiting.
  */
 export async function catchDownload(
   downloads: Downloads,
@@ -296,7 +298,10 @@ export async function catchDownload(
     maxBytes: number
   },
 ): Promise<CaughtDownload> {
-  const browserContextId = await watchDownloads(downloads, tabSession)
+  if (downloads.waiter) {
+    return { kind: "busy" }
+  }
+
   const waiter: Waiter = {
     judge,
     taken: null,
@@ -306,7 +311,16 @@ export async function catchDownload(
   const tooLarge = (entry: Entry) =>
     entry.total > maxBytes || entry.received > maxBytes
 
+  // Taken before anything is awaited, so no second call slips in.
   downloads.waiter = waiter
+  let browserContextId: string
+
+  try {
+    browserContextId = await watchDownloads(downloads, tabSession)
+  } catch (error) {
+    downloads.waiter = null
+    throw error
+  }
 
   try {
     await downloads.session.send("Browser.setDownloadBehavior", {
@@ -365,7 +379,7 @@ export async function catchDownload(
 
     return { kind: "file", name: entry.name, url: entry.url, bytes }
   } finally {
-    downloads.waiter = null
+    if (downloads.waiter === waiter) downloads.waiter = null
     await downloads.session
       .send("Browser.setDownloadBehavior", {
         behavior: "deny",

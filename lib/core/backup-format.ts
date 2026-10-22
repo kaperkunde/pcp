@@ -3,6 +3,7 @@ import { z } from "zod"
 import type {
   ApiToken,
   ApiTokenServer,
+  ApiTokenSkill,
   ApiTokenToolAccess,
   BrowserProfile,
   HostSetting,
@@ -12,9 +13,12 @@ import type {
   Memory,
   OpenApiSpec,
   PermissionRequest,
+  Repo,
+  RepoItem,
   Secret,
   ServerAuthHeader,
   Setting,
+  Skill,
   Vault,
   VaultToolAccess,
   WebFetchRule,
@@ -131,6 +135,8 @@ const ApiTokenRow = z.strictObject({
   name: str,
   prefix: str,
   allowAllServers: z.boolean(),
+  // Skills, added in 0.4: an older file's tokens see every skill (it has none).
+  allSkills: z.boolean().default(true),
   manageEndpoints: z.boolean(),
   keepMemories: z.boolean(),
   webFetch: z.boolean(),
@@ -146,9 +152,17 @@ const ApiTokenRow = z.strictObject({
   // restore the assistant signs in again.
   oauthClientId: str.nullable().default(null),
   oauthClientName: str.nullable().default(null),
+  // The owner's instructions for the assistant, as ciphertext under the
+  // vault's key, and the suggested instructions' version they came from.
+  // An older file has neither: the token shows them as not set yet.
+  instructions: bytesOrNull.default(null),
+  instructionsBase: z.number().int().positive().nullable().default(null),
 })
 
 const ApiTokenServerRow = z.strictObject({ tokenId: id, serverId: id })
+
+// Skills, added in 0.4: absent from older files.
+const ApiTokenSkillRow = z.strictObject({ tokenId: id, skillId: id })
 
 const ApiTokenToolAccessRow = z.strictObject({
   tokenId: id,
@@ -214,6 +228,16 @@ const MemoryRow = z.strictObject({
   updatedAt: date,
 })
 
+// Skills, added in 0.4: absent from older files.
+const SkillRow = z.strictObject({
+  id,
+  vaultId: id,
+  author: str,
+  ciphertext: bytes,
+  createdAt: date,
+  updatedAt: date,
+})
+
 const SecretRow = z.strictObject({
   id,
   vaultId: id,
@@ -274,6 +298,9 @@ const McpServerRow = z.strictObject({
   // Calendar accounts (kind caldav), added in 0.4: absent from older
   // exports, which hold none.
   davHomeUrl: str.nullable().default(null),
+  // The version of its document in a linked repository, added with them:
+  // absent from older exports, which never synced one.
+  syncVersion: z.number().int().nullable().default(null),
 })
 
 const ServerAuthHeaderRow = z.strictObject({
@@ -314,6 +341,33 @@ const WrapperSpecRow = z.strictObject({
   serverId: id,
   definition: str,
   hash: str,
+  updatedAt: date,
+})
+
+// Linked repositories, added in 0.5: absent from older files.
+const RepoRow = z.strictObject({
+  id,
+  vaultId: id,
+  ciphertext: bytes,
+  trust: str,
+  access: str,
+  secretId: id.nullable(),
+  createdAt: date,
+  updatedAt: date,
+})
+
+const RepoItemRow = z.strictObject({
+  id,
+  repoId: id,
+  itemKind: str,
+  skillId: id.nullable(),
+  serverId: id.nullable(),
+  ciphertext: bytes,
+  frequency: str.default("off"),
+  bidirectional: z.boolean().default(false),
+  lastSyncAt: dateOrNull,
+  state: str.default("ok"),
+  createdAt: date,
   updatedAt: date,
 })
 
@@ -365,17 +419,21 @@ export const PayloadSchema = z.strictObject({
     keyGrants: z.array(KeyGrantRow),
     apiTokens: z.array(ApiTokenRow),
     apiTokenServers: z.array(ApiTokenServerRow),
+    apiTokenSkills: z.array(ApiTokenSkillRow).default([]),
     apiTokenToolAccess: z.array(ApiTokenToolAccessRow),
     vaultToolAccess: z.array(VaultToolAccessRow),
     webFetchRules: z.array(WebFetchRuleRow),
     permissionRequests: z.array(PermissionRequestRow),
     memories: z.array(MemoryRow),
+    skills: z.array(SkillRow).default([]),
     secrets: z.array(SecretRow),
     servers: z.array(McpServerRow),
     serverAuthHeaders: z.array(ServerAuthHeaderRow),
     tools: z.array(McpToolRow),
     openApiSpecs: z.array(OpenApiSpecRow),
     wrapperSpecs: z.array(WrapperSpecRow).default([]),
+    repos: z.array(RepoRow).default([]),
+    repoItems: z.array(RepoItemRow).default([]),
     settings: z.array(SettingRow),
     browserProfiles: z.array(BrowserProfileRow).default([]),
   }),
@@ -418,6 +476,7 @@ export type ExportPreview = {
     secrets: number
     tokens: number
     memories: number
+    skills: number
     webFetchRules: number
     pendingRequests: number
     /** Sites the browser keeps sign-ins for; 0 without any. */
@@ -502,9 +561,12 @@ export function checkReferences(payload: ExportPayload): void {
   idsOf(tables.keyGrants, "key")
   idsOf(tables.tools, "tool")
   idsOf(tables.memories, "memory")
+  const skills = idsOf(tables.skills, "skill")
   idsOf(tables.webFetchRules, "web fetch rule")
   idsOf(tables.permissionRequests, "request")
   idsOf(tables.serverAuthHeaders, "header")
+  const repos = idsOf(tables.repos, "repository")
+  idsOf(tables.repoItems, "linked item")
 
   for (const grant of tables.keyGrants) {
     if (!GRANT_KINDS.has(grant.kind)) {
@@ -532,10 +594,12 @@ export function checkReferences(payload: ExportPayload): void {
   ownedBy(tables.webFetchRules, "web fetch rule")
   ownedBy(tables.permissionRequests, "request")
   ownedBy(tables.memories, "memory")
+  ownedBy(tables.skills, "skill")
   ownedBy(tables.secrets, "secret")
   ownedBy(tables.servers, "server")
   ownedBy(tables.settings, "setting")
   ownedBy(tables.browserProfiles, "browser profile")
+  ownedBy(tables.repos, "repository")
 
   if (tables.browserProfiles.length > 1) {
     throw problem("it holds more than one browser profile")
@@ -560,6 +624,11 @@ export function checkReferences(payload: ExportPayload): void {
   for (const link of tables.apiTokenServers) {
     pointsAt(link.tokenId, tokens, "a token")
     pointsAt(link.serverId, servers, "a server")
+  }
+
+  for (const link of tables.apiTokenSkills) {
+    pointsAt(link.tokenId, tokens, "a token")
+    pointsAt(link.skillId, skills, "a skill")
   }
 
   for (const level of tables.apiTokenToolAccess) {
@@ -605,6 +674,20 @@ export function checkReferences(payload: ExportPayload): void {
 
   for (const spec of tables.wrapperSpecs) {
     pointsAt(spec.serverId, servers, "a server")
+  }
+
+  for (const repo of tables.repos) {
+    pointsAt(repo.secretId, secrets, "a repository's secret")
+  }
+
+  for (const item of tables.repoItems) {
+    pointsAt(item.repoId, repos, "a repository")
+    pointsAt(item.skillId, skills, "a linked skill")
+    pointsAt(item.serverId, servers, "a linked server")
+
+    if ((item.skillId === null) === (item.serverId === null)) {
+      throw problem("a linked item names no item, or two")
+    }
   }
 }
 
@@ -653,6 +736,7 @@ export function previewOf(
       secrets: tables.secrets.filter((row) => row.kind === "text").length,
       tokens: tokens.filter((token) => token.status === "works").length,
       memories: tables.memories.length,
+      skills: tables.skills.length,
       webFetchRules: tables.webFetchRules.length,
       pendingRequests: tables.permissionRequests.filter(
         (row) => row.status === "pending",
@@ -705,6 +789,7 @@ export const FORMAT_COVERS_SCHEMA: {
   keyGrant: Covers<KeyGrant, z.output<typeof KeyGrantRow>>
   apiToken: Covers<ApiToken, z.output<typeof ApiTokenRow>>
   apiTokenServer: Covers<ApiTokenServer, z.output<typeof ApiTokenServerRow>>
+  apiTokenSkill: Covers<ApiTokenSkill, z.output<typeof ApiTokenSkillRow>>
   apiTokenToolAccess: Covers<
     ApiTokenToolAccess,
     z.output<typeof ApiTokenToolAccessRow>
@@ -716,6 +801,7 @@ export const FORMAT_COVERS_SCHEMA: {
     z.output<typeof PermissionRequestRow>
   >
   memory: Covers<Memory, z.output<typeof MemoryRow>>
+  skill: Covers<Skill, z.output<typeof SkillRow>>
   secret: Covers<Secret, z.output<typeof SecretRow>>
   server: Covers<McpServer, z.output<typeof McpServerRow>>
   serverAuthHeader: Covers<
@@ -725,6 +811,8 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: Covers<McpTool, z.output<typeof McpToolRow>>
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
+  repo: Covers<Repo, z.output<typeof RepoRow>>
+  repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
   setting: Covers<Setting, z.output<typeof SettingRow>>
   browserProfile: Covers<BrowserProfile, z.output<typeof BrowserProfileRow>>
   hostSetting: Covers<HostSetting, z.output<typeof HostSettingRow>>
@@ -733,17 +821,21 @@ export const FORMAT_COVERS_SCHEMA: {
   keyGrant: true,
   apiToken: true,
   apiTokenServer: true,
+  apiTokenSkill: true,
   apiTokenToolAccess: true,
   vaultToolAccess: true,
   webFetchRule: true,
   permissionRequest: true,
   memory: true,
+  skill: true,
   secret: true,
   server: true,
   serverAuthHeader: true,
   tool: true,
   openApiSpec: true,
   wrapperSpec: true,
+  repo: true,
+  repoItem: true,
   setting: true,
   browserProfile: true,
   hostSetting: true,

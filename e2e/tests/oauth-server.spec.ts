@@ -172,7 +172,9 @@ test("the owner signs in, allows it, and the assistant gets a token of its own",
     baseURL!,
     tokens.access_token,
   )
-  expect(tools).toEqual(expect.arrayContaining(["search_tools", "memory"]))
+  expect(tools).toEqual(
+    expect.arrayContaining(["search", "describe", "memory"]),
+  )
   expect(instructions).toContain("PCP")
 
   // Refresh tokens rotate.

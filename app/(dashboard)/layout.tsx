@@ -1,10 +1,12 @@
+import { after } from "next/server"
 import type { ReactNode } from "react"
 
 import { AppSidebar } from "@/components/app-sidebar"
 import { SiteFooter } from "@/components/site-footer"
 import { findBrowserServer } from "@/lib/core/browser/server"
-import { networkNotices } from "@/lib/core/network/runtime"
+import { listOwnerNotices } from "@/lib/core/owner-notices"
 import { listPendingRequests } from "@/lib/core/permissions"
+import { runDueSyncs } from "@/lib/core/repos/sync"
 import { availableUpdate } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
 import { PCP_VERSION } from "@/lib/core/version"
@@ -27,10 +29,14 @@ export default async function DashboardLayout({
   const [vault, pending, notices, update, browser] = await Promise.all([
     getVault(ctx.vaultId),
     publicUrlFor(ctx).then((publicUrl) => listPendingRequests(ctx, publicUrl)),
-    networkNotices(),
+    listOwnerNotices(ctx),
     availableUpdate(),
     findBrowserServer(ctx),
   ])
+
+  // Linked repositories due a sync are synced once this page is sent, with
+  // the key the owner's session brought: nothing holds one in between.
+  after(() => runDueSyncs(ctx))
 
   return (
     <div className="flex min-h-screen flex-col md:flex-row">

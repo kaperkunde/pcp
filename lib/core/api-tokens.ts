@@ -5,6 +5,7 @@ import { newHkdfParams, randomSecret } from "./crypto"
 import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
+import { newTokenInstructions, openInstructions } from "./instructions"
 import { createCredentialGrant, unlockWithCredential } from "./keys"
 
 /**
@@ -77,6 +78,8 @@ export type ResolvedToken = {
   tokenName: string
   /** null: every server in the vault. */
   serverIds: string[] | null
+  /** The skills it sees (lib/core/skills.ts); null: every skill in the vault. */
+  skillIds: string[] | null
   /** May read and change the endpoints it set up (get_endpoint, update_endpoint). */
   manageEndpoints: boolean
   /** May keep memories: its own, and the shared ones (memory). */
@@ -89,6 +92,11 @@ export type ResolvedToken = {
   manageWrappers: boolean
   /** May move files to and from its own computer by link (share_result, receive_file). */
   shareFiles: boolean
+  /**
+   * The owner's instructions for the assistant (lib/core/instructions.ts),
+   * decrypted: given at the start of every conversation. Null for none.
+   */
+  instructions: string | null
 }
 
 function summaryInclude(now: Date) {
@@ -293,6 +301,8 @@ export async function createApiToken(
       manageWrappers: input.manageWrappers ?? false,
       shareFiles: input.shareFiles ?? false,
       expiresAt: input.expiresAt ?? null,
+      // A copy of PCP's suggested instructions, for the owner to change.
+      ...newTokenInstructions(ctx, id),
       servers: { create: serverIds.map((serverId) => ({ serverId })) },
     },
   })
@@ -342,6 +352,7 @@ export async function createOAuthApiToken(
         expiresAt: input.expiresAt ?? null,
         oauthClientId: input.clientId,
         oauthClientName: input.clientName,
+        ...newTokenInstructions(ctx, id),
         servers: { create: serverIds.map((serverId) => ({ serverId })) },
       },
     }),
@@ -353,7 +364,8 @@ export async function createOAuthApiToken(
 /**
  * Changes a token after the fact: its name, the servers it reaches, what
  * else it may do, and its expiry (each optional field
- * is left alone when undefined). The token itself, and the key it unwraps,
+ * is left alone when undefined). Its instructions are left alone too: they
+ * have their own save (lib/core/instructions.ts). The token itself, and the key it unwraps,
  * stay the same. A new expiry for a token that has expired brings it back
  * (revivesToken), and is refused unless the caller has confirmed the owner
  * (`ownerConfirmed`); every other change is the session's to make.
@@ -441,7 +453,10 @@ export async function liveToken(
 ): Promise<ResolvedToken | null> {
   const record = await db().apiToken.findUnique({
     where,
-    include: { servers: { select: { serverId: true } } },
+    include: {
+      servers: { select: { serverId: true } },
+      skills: { select: { skillId: true } },
+    },
   })
 
   if (
@@ -464,6 +479,17 @@ export async function liveToken(
       .catch(() => {})
   }
 
+  return resolved(record, dek)
+}
+
+type TokenRecord = Prisma.ApiTokenGetPayload<{
+  include: {
+    servers: { select: { serverId: true } }
+    skills: { select: { skillId: true } }
+  }
+}>
+
+function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
   return {
     ctx: { vaultId: record.vaultId, dek },
     tokenId: record.id,
@@ -471,13 +497,41 @@ export async function liveToken(
     serverIds: record.allowAllServers
       ? null
       : record.servers.map((link) => link.serverId),
+    skillIds: record.allSkills
+      ? null
+      : record.skills.map((link) => link.skillId),
     manageEndpoints: record.manageEndpoints,
     keepMemories: record.keepMemories,
     webFetch: record.webFetch,
     runCode: record.runCode,
     manageWrappers: record.manageWrappers,
     shareFiles: record.shareFiles,
+    instructions: openInstructions(dek, record.id, record.instructions),
   }
+}
+
+/**
+ * A token as the gateway would see it, for the owner's own pages (what it
+ * receives at the start of a conversation): with the owner's key, whether
+ * or not the token is live, and without touching it.
+ */
+export async function resolveTokenForOwner(
+  ctx: VaultContext,
+  id: string,
+): Promise<ResolvedToken> {
+  const record = await db().apiToken.findFirst({
+    where: { id, vaultId: ctx.vaultId },
+    include: {
+      servers: { select: { serverId: true } },
+      skills: { select: { skillId: true } },
+    },
+  })
+
+  if (!record) {
+    throw notFound("That token")
+  }
+
+  return resolved(record, ctx.dek)
 }
 
 /** Revoking deletes the token's copy of the key; the row stays as history. */

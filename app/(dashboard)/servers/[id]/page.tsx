@@ -8,6 +8,7 @@ import { MailAccountForm } from "@/components/mail-account-form"
 import { PageColumn } from "@/components/page-column"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
+import { ServerPacingForm } from "@/components/server-pacing-form"
 import { SshAccessCard } from "@/components/ssh-access-card"
 import { SshServerForm } from "@/components/ssh-server-form"
 import { WrapperForm } from "@/components/wrapper-form"
@@ -16,6 +17,7 @@ import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import { readStoredPatches } from "@/lib/core/openapi/patch"
 import { readCallPlan } from "@/lib/core/openapi/plan"
+import { pacingOverview, serverPacing } from "@/lib/core/pacing/config"
 import { listSecrets } from "@/lib/core/secrets"
 import {
   asServerKind,
@@ -233,6 +235,19 @@ export default async function ServerPage({
     />
   )
 
+  // A wrapper's tool is paced by the calls its program makes.
+  const pace = await serverPacing(ctx, server.id)
+  const pacing =
+    kind === "wrapper" ? null : (
+      <ServerPacingForm
+        key={JSON.stringify(pace)}
+        serverId={server.id}
+        pace={pace}
+        browser={browser}
+        defaults={await pacingDefaults(ctx, browser)}
+      />
+    )
+
   return (
     <PageColumn width="narrow">
       <ServerDetail
@@ -260,6 +275,7 @@ export default async function ServerPage({
           lastSyncedAt: server.lastSyncedAt,
           oauthConnection,
           oauthAuthorizeParams: server.oauthAuthorizeParams ?? "",
+          flow: wrapper?.flow ?? false,
         }}
         tools={server.tools.map((tool) => {
           const plan = readCallPlan(tool.operation)
@@ -276,9 +292,28 @@ export default async function ServerPage({
         notice={notice}
         redirectUrl={redirectUrl}
         settings={settings}
+        pacing={pacing}
       >
         {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}
       </ServerDetail>
     </PageColumn>
   )
+}
+
+/** What a server follows without a pace of its own, by kind of call. */
+async function pacingDefaults(
+  ctx: Awaited<ReturnType<typeof requireContext>>,
+  browser: boolean,
+) {
+  const { classes } = await pacingOverview(ctx)
+
+  return browser
+    ? [{ label: "per site,", pace: classes.browser_act.pace }]
+    : [
+        {
+          label: "calls that change things:",
+          pace: classes.server_change.pace,
+        },
+        { label: "calls that only read:", pace: classes.server_read.pace },
+      ]
 }

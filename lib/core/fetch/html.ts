@@ -135,6 +135,16 @@ function collapse(text: string): string {
 export function htmlToMarkdown(
   html: string,
   baseUrl: string,
+  {
+    prune,
+  }: {
+    /**
+     * Takes more out of the parsed page before it is converted: the
+     * browser's read_page leaves out what the page does not show
+     * (browser/read-page.ts). web_fetch passes none.
+     */
+    prune?: (doc: Document) => void
+  } = {},
 ): { title: string | null; markdown: string } {
   const doc = domino.createDocument(html)
   const title = collapse(doc.title ?? "").slice(0, MAX_TITLE_CHARS) || null
@@ -142,6 +152,8 @@ export function htmlToMarkdown(
   for (const node of Array.from(doc.querySelectorAll(DROPPED))) {
     node.parentNode?.removeChild(node)
   }
+
+  prune?.(doc)
 
   for (const link of Array.from(doc.querySelectorAll("a[href]"))) {
     const href = absolute(link.getAttribute("href"), baseUrl, LINK_PROTOCOLS)

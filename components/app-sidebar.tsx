@@ -5,6 +5,7 @@ import {
   Globe,
   House,
   KeyRound,
+  ListChecks,
   Lock,
   ScrollText,
   Server,
@@ -36,7 +37,7 @@ type NavItem = {
 
 /**
  * Where the owner goes every day. DESIGN.md › Navigation. The browser has
- * an item of its own, below Memories, while it is added and enabled, so its
+ * an item of its own, below Skills, while it is added and enabled, so its
  * tabs are one click away; before that its page (where it is added) belongs
  * to Servers.
  */
@@ -51,6 +52,7 @@ function primaryItems(browser: boolean): NavItem[] {
     },
     { href: "/tokens", label: "Assistants", icon: UserRound },
     { href: "/memories", label: "Memories", icon: BookOpen },
+    { href: "/skills", label: "Skills", icon: ListChecks },
     ...(browser ? [{ href: "/browser", label: "Browser", icon: Globe }] : []),
   ]
 }

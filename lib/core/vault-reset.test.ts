@@ -11,10 +11,12 @@ import { DDNS_CONFIG_KEY } from "./network/ddns"
 import { appendRequestLog, logDays } from "./request-log"
 import { createSecret } from "./secrets"
 import { createServer } from "./servers"
+import { createSkill, setTokenSkills } from "./skills"
 import { createSession, resolveSession } from "./sessions"
 import { SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
 import { keepResult } from "./tool-results"
+import { addLinkedRepo } from "./repos/test-vault"
 import { isSetUp, ownerVault, setupVault, unlockOwnerVault } from "./vault"
 import { deleteVault } from "./vault-reset"
 
@@ -90,6 +92,14 @@ async function populate() {
   })
   await receiveFile(ctx, { tokenId, publicUrl: "https://pcp.example" })
   await createMemory(ctx, { path: "notes.md", text: "Remember this." })
+  const skill = await createSkill(ctx, {
+    name: "release-notes",
+    description: "Write release notes.",
+    body: "List the changes.",
+    tools: [],
+  })
+  await setTokenSkills(ctx, tokenId, { all: false, skillIds: [skill.id] })
+  await addLinkedRepo(ctx, { skillId: skill.id, secretId: secret.id })
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
   await setHostJson(DDNS_CONFIG_KEY, { provider: "duckdns", subdomain: "ada" })
   const { cookieValue } = await createSession(ctx)
@@ -110,9 +120,10 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     const { ctx, token, cookieValue, deviceKey } = await populate()
     expect(await isSetUp()).toBe(true)
     expect(await logDays()).not.toHaveLength(0)
-    expect(Object.values(await vaultRows()).some((count) => count > 0)).toBe(
-      true,
-    )
+    const before = await vaultRows()
+    expect(Object.values(before).some((count) => count > 0)).toBe(true)
+    expect(before.repo).toBe(1)
+    expect(before.repo_item).toBe(1)
 
     await deleteVault(ctx)
 

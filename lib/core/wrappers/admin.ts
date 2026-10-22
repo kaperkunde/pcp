@@ -11,7 +11,10 @@ import { deleteServer, slugify, uniqueSlug, WRAPPER_URL } from "../servers"
 
 import { syncWrapperTools } from "./catalogue"
 import {
+  browserServerIds,
   definitionHash,
+  isFlow,
+  isFlowTool,
   readDefinition,
   resolveDefinition,
   type CallLevels,
@@ -21,6 +24,7 @@ import {
   type WrapperToolInput,
   type SecretBindingInput,
 } from "./definition"
+import { flowSites, type FlowSites } from "./flow-sites"
 import { MAX_WRAPPERS } from "./limits"
 
 /**
@@ -48,6 +52,13 @@ export type WrapperShownTool = {
   previousProgram: string | null
   calls: string[]
   replaces: string[]
+  /**
+   * It drives the browser (definition.ts isFlowTool). Left out of a request
+   * made before flows were told apart.
+   */
+  flow?: boolean
+  /** A flow's sites, as far as its program's text says (flow-sites.ts). */
+  sites?: FlowSites
 }
 
 export type WrapperShownSecret = {
@@ -68,6 +79,8 @@ export type WrapperShown = {
   warning: string | null
   /** Whose levels the calls inside its tools follow, once this is made. */
   callLevels: CallLevels
+  /** Any of its tools, once this is made, drives the browser. */
+  flow?: boolean
   tools: WrapperShownTool[]
   secrets: WrapperShownSecret[]
 }
@@ -94,6 +107,8 @@ export type WrapperView = {
   description: string
   enabled: boolean
   callLevels: CallLevels
+  /** A browser flow: one of its tools calls the browser. */
+  flow: boolean
   tools: Array<
     Omit<WrapperToolInput, "calls" | "replaces"> & {
       calls: string[]
@@ -195,6 +210,7 @@ export async function getWrapper(
     description: server.description,
     enabled: server.enabled,
     callLevels: definition.callLevels ?? "token",
+    flow: isFlow(definition, await browserServerIds(ctx)),
     ...(await toInput(ctx, definition)),
   }
 }
@@ -240,11 +256,16 @@ async function describe(
     ctx,
     (after?.secrets ?? []).map((binding) => binding.serverId),
   )
+  const browserIds = await browserServerIds(ctx)
+  const browsers = [...(await slugsById(ctx, [...browserIds])).values()].map(
+    (server) => server.slug,
+  )
   const tools: WrapperShownTool[] = []
 
-  for (const tool of shownAfter?.tools ?? []) {
+  for (const [index, tool] of (shownAfter?.tools ?? []).entries()) {
     const old = shownBefore?.tools.find((entry) => entry.name === tool.name)
     const same = old !== undefined && canonicalJson(old) === canonicalJson(tool)
+    const flow = isFlowTool(after!.tools[index]!, browserIds)
 
     tools.push({
       name: tool.name,
@@ -258,6 +279,8 @@ async function describe(
       previousProgram: old && old.program !== tool.program ? old.program : null,
       calls: tool.calls,
       replaces: tool.replaces,
+      flow,
+      ...(flow ? { sites: flowSites(tool.program, browsers) } : {}),
     })
   }
 
@@ -275,6 +298,12 @@ async function describe(
         previousProgram: null,
         calls: old.calls,
         replaces: old.replaces,
+        flow: before
+          ? isFlowTool(
+              before.tools.find((entry) => entry.name === old.name)!,
+              browserIds,
+            )
+          : false,
       })
     }
   }
@@ -296,6 +325,9 @@ async function describe(
     ),
   ]
   const changed = tools.filter((tool) => tool.status !== "same")
+  const flow =
+    action !== "delete" &&
+    tools.some((tool) => tool.status !== "removed" && tool.flow === true)
 
   const title =
     action === "create"
@@ -334,6 +366,11 @@ async function describe(
           (before?.callLevels ?? "token") !== (after?.callLevels ?? "token")
             ? [
                 `The calls inside its tools now follow ${after?.callLevels === "approved" ? "your approval of the wrapper (they were at each token's own levels)" : "each token's own levels (they followed your approval of the wrapper)"}.`,
+              ]
+            : []),
+          ...(flow
+            ? [
+                `A browser flow: its tools drive PCP's browser as the token that calls them, on the sites that token may open.${action === "create" ? " Like every new tool, each asks you first for every token until you allow it." : ""}`,
               ]
             : []),
           after?.callLevels === "approved"
@@ -378,6 +415,7 @@ async function describe(
     lines,
     warning,
     callLevels: after?.callLevels ?? "token",
+    flow,
     tools,
     secrets,
   }

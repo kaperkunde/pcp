@@ -675,7 +675,7 @@ describe("a site's check of its visitors", () => {
 
   const hints = {
     handOver:
-      "Open it with browser/navigate and call browser/hand_over so the owner can pass the check themselves.",
+      "Open it in a tab with browser/tabs (action open) and call browser/hand_over with that tab so the owner can pass the check themselves.",
     letToken:
       "The owner can let this token use PCP's browser, where they can pass such checks.",
     addBrowser:

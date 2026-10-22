@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { Output } from "./output"
 import { checkSyntax, javaScriptExecutor, runJavaScript } from "./quickjs"
 import type { Bridge, BridgeReply } from "./types"
 
@@ -27,7 +28,7 @@ describe("what a program can reach", () => {
     expect(result.kind).toBe("done")
     expect(JSON.parse((result as { returned: string }).returned)).toEqual({
       node: Array(8).fill("undefined"),
-      pcp: ["call", "keep", "read", "tools"],
+      pcp: ["call", "keep", "read", "step", "tools"],
       frozen: true,
     })
   })
@@ -318,7 +319,7 @@ describe("how a run ends", () => {
       signal: new AbortController().signal,
     })
 
-    expect(result.kind).toBe("error")
+    expect(result).toMatchObject({ kind: "error", reason: "cpu" })
     expect((result as { message: string }).message).toContain(
       "more than 0.3 seconds",
     )
@@ -377,7 +378,7 @@ describe("how a run ends", () => {
       signal: new AbortController().signal,
     })
 
-    expect(result.kind).toBe("error")
+    expect(result).toMatchObject({ kind: "error", reason: "memory" })
     expect((result as { message: string }).message).toMatch(/out of memory/i)
   })
 
@@ -406,10 +407,38 @@ describe("how a run ends", () => {
       signal: new AbortController().signal,
     })
 
-    expect(result.kind).toBe("error")
+    expect(result).toMatchObject({ kind: "error", reason: "memory" })
     expect((result as { message: string }).message).toContain(
       "ran out of memory (32 MB)",
     )
+  })
+
+  it("names the request cap when it ends the run, and no limit for an error of the program's", async () => {
+    const capped = await run(
+      `for (;;) await pcp.call("files", "list")`,
+      async () => ({ ok: true, value: null }),
+    )
+    expect(capped).toMatchObject({ kind: "error", reason: "calls" })
+    expect((capped as { message: string }).message).toContain(
+      "at most 200 things",
+    )
+
+    const thrown = await run(`throw new Error("mine")`)
+    expect(thrown.kind).toBe("error")
+    expect(thrown).not.toHaveProperty("reason")
+  })
+
+  it("prints into the output it was handed, so the bridge keeps it", async () => {
+    const output = new Output()
+    const result = await runJavaScript({
+      code: `console.log("kept"); return 1`,
+      bridge: async () => ({ ok: true, value: null }),
+      signal: new AbortController().signal,
+      output,
+    })
+
+    expect(result.output).toBe("kept\n")
+    expect(output.text()).toBe("kept\n")
   })
 
   it("cuts what it prints past the limit and counts the rest", async () => {
@@ -450,5 +479,75 @@ describe("a wrapper tool's program", () => {
     expect(await checkSyntax("return args.word")).toBeNull()
     expect(await checkSyntax("while (true) {}")).toBeNull()
     expect(await checkSyntax("return (")).toMatch(/SyntaxError/)
+  })
+})
+
+describe("pcp.step", () => {
+  it("sends the step a call is made in, and none outside one", async () => {
+    const seen: unknown[] = []
+    const result = await run(
+      `
+      await pcp.call("browser", "snapshot", { tab: "t1" })
+      const inside = await pcp.step("open compose", async () => {
+        await pcp.call("browser", "click", { tab: "t1" })
+        return "opened"
+      })
+      await pcp.call("browser", "find", { tab: "t1" })
+      return inside
+    `,
+      async (_op, payload) => {
+        seen.push((payload as { step?: string }).step ?? null)
+        return { ok: true, value: null }
+      },
+    )
+
+    expect(result).toMatchObject({ kind: "done", returned: '"opened"' })
+    expect(seen).toEqual([null, "open compose", null])
+  })
+
+  it("names the step that failed, once, with the error it caught", async () => {
+    const result = await run(`
+      await pcp.step("send", async () => {
+        await pcp.step("open compose", async () => {
+          throw new TypeError("no such button")
+        })
+      })
+    `)
+
+    expect(result.kind).toBe("error")
+    expect((result as { message: string }).message).toMatch(
+      /^TypeError: failed at step 'open compose': no such button/,
+    )
+    expect((result as { message: string }).message).not.toContain("'send'")
+  })
+
+  it("lets the program read which step failed, and cuts a long name", async () => {
+    const result = await run(`
+      try {
+        await pcp.step("x".repeat(500) + "\\nmore", async () => { throw "plain" })
+      } catch (error) {
+        return { step: error.step.length, message: error.message.slice(-30) }
+      }
+    `)
+
+    expect(result.kind).toBe("done")
+    const caught = JSON.parse((result as { returned: string }).returned)
+    expect(caught.step).toBe(100)
+    expect(caught.message).toContain("…': plain")
+  })
+
+  it("refuses what is not a name and a function", async () => {
+    for (const code of [
+      'await pcp.step("", async () => 1)',
+      "await pcp.step(1, async () => 1)",
+      'await pcp.step("name")',
+    ]) {
+      const result = await run(code)
+
+      expect(result.kind).toBe("error")
+      expect((result as { message: string }).message).toContain(
+        "TypeError: pcp.step takes a name and a function",
+      )
+    }
   })
 })

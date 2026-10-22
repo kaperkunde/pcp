@@ -52,7 +52,9 @@ test("with the owner's own client it connects", async ({ page }) => {
     .getByLabel("Client secret", { exact: true })
     .fill(upstream.closedClient.secret)
   await page.getByRole("button", { name: "Save client" }).click()
-  await expect(page.getByRole("button", { name: "Save client" })).toHaveCount(0)
+  // The form goes once the client is saved; its button alone says "Saving…"
+  // while the save is still on its way.
+  await expect(page.getByLabel("Client ID", { exact: true })).toHaveCount(0)
 
   await page.getByRole("link", { name: "Connect", exact: true }).click()
   await expect(page).toHaveURL(

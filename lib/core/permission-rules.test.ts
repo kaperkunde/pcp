@@ -230,6 +230,14 @@ describe("decisions", () => {
     expect(() => parseDecision("memory_change", "discard")).toThrow()
   })
 
+  it("offers a skill's change two ways, and nothing that settles more", () => {
+    expect(decisionsFor("skill_change")).toEqual([
+      { value: "allow_once", label: "Allow the change" },
+      { value: "decline", label: "Not now" },
+    ])
+    expect(() => parseDecision("skill_change", "always")).toThrow()
+  })
+
   it("offers proposed tool levels no answer but no", () => {
     expect(decisionsFor("access").map((decision) => decision.value)).toEqual([
       "decline",

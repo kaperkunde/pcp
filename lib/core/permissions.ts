@@ -35,6 +35,7 @@ import {
   type EndpointRegistration,
 } from "./endpoint-admin"
 import { MAX_CALLS_PER_RUN } from "./code/limits"
+import type { CallRun } from "./code/run"
 import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
@@ -83,6 +84,13 @@ import {
 } from "./secrets"
 import { oauthRedirectUrl } from "./oauth-client"
 import {
+  applySkillChange,
+  describeSkillAsk,
+  type SkillAsk,
+  type SkillChangeAsk,
+  type SkillShown,
+} from "./skills"
+import {
   createServer,
   getServer,
   type ExtraAuthHeader,
@@ -108,6 +116,7 @@ import {
   type HandoverAsk,
 } from "./browser/types"
 import { resourceLimits } from "./resources/state"
+import { namesInWords, secretUses } from "./secret-uses"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
   applyWrapperChange,
@@ -115,6 +124,12 @@ import {
   type WrapperShown,
 } from "./wrappers/admin"
 import { readWrapperOperation } from "./wrappers/definition"
+import {
+  applyRepoChange,
+  describeRepoAsk,
+  type RepoChangeAsk,
+  type RepoShown,
+} from "./repos/assist"
 import type { SecretGrant } from "./wrappers/placeholders"
 import {
   describeFetchAsk,
@@ -197,7 +212,9 @@ export type PermissionAsk =
   | { kind: "register"; input: RegisterArgs }
   | { kind: "endpoint_change"; input: EndpointChangeAsk }
   | { kind: "wrapper_change"; input: WrapperChangeAsk }
+  | { kind: "repo_change"; input: RepoChangeAsk }
   | MemoryAsk
+  | SkillAsk
   | AccessAsk
   | { kind: "fetch"; input: FetchArgs }
   | { kind: "browse"; input: BrowseAsk }
@@ -248,8 +265,12 @@ export type PermissionView = {
   full: ShownText[] | null
   /** A memory request's memory, for the page to show its text first. */
   memory: MemoryShown | null
+  /** A skill request's skill as it would be, and what changes, in full. */
+  skill: SkillShown | null
   /** A wrapper request's tools and secrets, for the page to show in full. */
   wrapper: WrapperShown | null
+  /** A repository change's final files, diffs, flags and review, in full. */
+  repo: RepoShown | null
   /** The browser tab a request is about, for the page to show it live. */
   browserTabId: string | null
   url: string
@@ -279,12 +300,24 @@ export type PermissionView = {
 
 type Row = PermissionRequest & {
   server: McpServer | null
-  token: { name: string; revokedAt: Date | null; expiresAt: Date | null }
+  token: {
+    name: string
+    revokedAt: Date | null
+    expiresAt: Date | null
+    manageEndpoints: boolean
+  }
 }
 
 const ROW_INCLUDE = {
   server: true,
-  token: { select: { name: true, revokedAt: true, expiresAt: true } },
+  token: {
+    select: {
+      name: true,
+      revokedAt: true,
+      expiresAt: true,
+      manageEndpoints: true,
+    },
+  },
 } as const
 
 function aad(id: string): string {
@@ -421,7 +454,17 @@ async function ownerFirst(
 /** What one call of a program run by run_code came to. */
 export type CodeCallOutcome =
   | { ok: true; value: unknown }
-  | { ok: false; error: string }
+  | {
+      ok: false
+      error: string
+      /** PCP refused it before anything was sent. */
+      refused?: boolean
+      /**
+       * It failed on its way (the server could not be reached, or did not
+       * answer in time), so it may have gone through.
+       */
+      transit?: boolean
+    }
   /** The owner has to act first: the result with their link. */
   | { owner: CallToolResult }
 
@@ -447,6 +490,7 @@ export async function runCodeCall(
     keep,
     max,
     secrets,
+    run,
     executor = defaultExecutor,
   }: {
     publicUrl: string
@@ -455,6 +499,12 @@ export async function runCodeCall(
     max: number
     /** A wrapper's call: where the owner allowed its secrets to go. */
     secrets?: SecretGrant
+    /**
+     * The run the call is made for, handed on to the upstream call: its id,
+     * a signal that aborts when the run itself is over, and where a
+     * wrapper's tool says the run it started.
+     */
+    run?: CallRun
     executor?: PermissionExecutor
   } & AnswerShape,
 ): Promise<CodeCallOutcome> {
@@ -472,6 +522,13 @@ export async function runCodeCall(
       keepBytes: keepers.bytes,
       open: resultOpener(ctx, tokenId),
       ...(secrets ? { secrets } : {}),
+      ...(run
+        ? {
+            runId: run.runId,
+            signal: run.signal,
+            ...(run.onRun ? { onRun: run.onRun } : {}),
+          }
+        : {}),
     })
 
     return await answerValue(
@@ -491,11 +548,24 @@ export async function runCodeCall(
     }
 
     if (isPcpError(error)) {
-      return { ok: false, error: error.message }
+      return {
+        ok: false,
+        error: error.message,
+        ...(isTransitFailure(error) ? { transit: true } : {}),
+      }
     }
 
     throw error
   }
+}
+
+/**
+ * Whether a call failed on its way to the server or back (it could not be
+ * reached, or did not answer in time): upstream.ts says so as "upstream".
+ * Such a call may have gone through; a refusal before sending has not.
+ */
+export function isTransitFailure(error: unknown): boolean {
+  return isPcpError(error) && error.code === "upstream"
 }
 
 function describeAsk(ask: PermissionAsk): {
@@ -525,6 +595,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `memory:${ask.input.memoryId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "skill_change":
+      return {
+        target: `skill:${ask.input.skillId ?? ask.input.after?.name ?? ""}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "access":
       return { target: "access", args: ask.input }
     case "endpoint_change":
@@ -535,6 +610,11 @@ function describeAsk(ask: PermissionAsk): {
     case "wrapper_change":
       return {
         target: `wrapper:${ask.input.serverId ?? ask.input.name}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "repo_change":
+      return {
+        target: `repo:${ask.input.repoItemId}`,
         args: ask.input as Record<string, unknown>,
       }
     case "fetch":
@@ -577,6 +657,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return ask.input.toolName
     case "browser_handover":
       return "hand_over"
+    // A skill is changed through the memory tool, as a memory is.
+    case "skill_change":
     default:
       return "memory"
   }
@@ -655,6 +737,50 @@ function registerOAuthLines(input: RegisterArgs, publicUrl: string): string[] {
   ]
 }
 
+/**
+ * For a register request still open: a line for each secret the owner
+ * already holds that it would send, naming what already uses it.
+ */
+async function reusedSecretLines(
+  ctx: VaultContext,
+  row: Row,
+  input: RegisterArgs,
+): Promise<string[]> {
+  if (row.status !== "pending") {
+    return []
+  }
+
+  const named = new Map<string, string>()
+
+  if (input.authSecretId) {
+    named.set(input.authSecretId, input.secretName ?? "?")
+  }
+
+  if (input.oauthClientSecretId) {
+    named.set(input.oauthClientSecretId, input.secretName ?? "?")
+  }
+
+  for (const extra of input.authExtraHeaders ?? []) {
+    named.set(extra.secretId, extra.secretName)
+  }
+
+  if (named.size === 0) {
+    return []
+  }
+
+  const uses = await secretUses(ctx, [...named.keys()])
+
+  return [...named]
+    .filter(([id]) => uses.has(id))
+    .map(([id, name]) => {
+      const by = uses.get(id)!.map((use) => use.name)
+
+      return by.length > 0
+        ? `Reuses your secret "${name}", already used by ${namesInWords(by)}: you do not enter it again`
+        : `Reuses your secret "${name}", not used by anything yet: you do not enter it again`
+    })
+}
+
 async function summarizeRow(
   ctx: VaultContext,
   row: Row,
@@ -665,7 +791,9 @@ async function summarizeRow(
   warning: string | null
   full?: ShownText[] | null
   memory?: MemoryShown
+  skill?: SkillShown
   wrapper?: WrapperShown
+  repo?: RepoShown
   ownerOnly?: string[]
 }> {
   const args = readArgs(ctx, row)
@@ -676,6 +804,15 @@ async function summarizeRow(
       kind: row.kind,
       input: args,
     } as MemoryAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "skill_change") {
+    const asked = describeSkillAsk({
+      kind: "skill_change",
+      input: args as SkillChangeAsk,
+    })
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -695,6 +832,13 @@ async function summarizeRow(
       warning: shown.warning,
       wrapper: shown,
     }
+  }
+
+  if (row.kind === "repo_change") {
+    const input = args as RepoChangeAsk
+    const asked = describeRepoAsk(input)
+
+    return { ...asked, lines: [...asked.lines, asker], repo: input.shown }
   }
 
   if (row.kind === "browse") {
@@ -773,6 +917,12 @@ async function summarizeRow(
                 : input.authType === "oauth"
                   ? oauthLines[0]!
                   : "Authentication: none"
+    // A secret the owner already holds is sent as it is: they are told what
+    // already uses it. So is the assistant, when its token may manage
+    // endpoints (list_secrets tells it as much); otherwise it is the
+    // owner's to read.
+    const reused = await reusedSecretLines(ctx, row, input)
+    const reusedHidden = row.token.manageEndpoints ? [] : reused
     const where = input.mail
       ? "this mail server"
       : input.calendar
@@ -815,6 +965,7 @@ async function summarizeRow(
           ...(flagged ? [flagged] : []),
           ...(input.authType === "basic" ? [`User name: ${login}`] : []),
           auth,
+          ...reused,
           ...oauthLines.slice(1),
           readOnly
             ? "Read-only: only the tools that read mail"
@@ -824,7 +975,7 @@ async function summarizeRow(
           asker,
         ],
         warning,
-        ownerOnly: flagged ? [flagged] : [],
+        ownerOnly: [...(flagged ? [flagged] : []), ...reusedHidden],
       }
     }
 
@@ -846,6 +997,7 @@ async function summarizeRow(
           ...(flagged ? [flagged] : []),
           ...(input.authType === "basic" ? [`User name: ${login}`] : []),
           auth,
+          ...reused,
           ...oauthLines.slice(1),
           readOnly
             ? "Read-only: only the tools that read calendars and reminders"
@@ -854,7 +1006,7 @@ async function summarizeRow(
           asker,
         ],
         warning,
-        ownerOnly: flagged ? [flagged] : [],
+        ownerOnly: [...(flagged ? [flagged] : []), ...reusedHidden],
       }
     }
 
@@ -882,11 +1034,13 @@ async function summarizeRow(
             ? "Read-only: only GET operations become tools"
             : "Can change things: its tools may create, change and delete at this address",
           auth,
+          ...reused,
           ...oauthLines.slice(1),
           ...(input.description ? [`Description: ${input.description}`] : []),
           asker,
         ],
         warning,
+        ownerOnly: reusedHidden,
       }
     }
 
@@ -900,12 +1054,13 @@ async function summarizeRow(
         `Address: ${input.url}`,
         ...(flagged ? [flagged] : []),
         auth,
+        ...reused,
         ...oauthLines.slice(1),
         ...(input.description ? [`Description: ${input.description}`] : []),
         asker,
       ],
       warning,
-      ownerOnly: flagged ? [flagged] : [],
+      ownerOnly: [...(flagged ? [flagged] : []), ...reusedHidden],
     }
   }
 
@@ -1047,7 +1202,9 @@ async function toView(
 ): Promise<PermissionView> {
   const {
     memory = null,
+    skill = null,
     wrapper = null,
+    repo = null,
     full = null,
     ownerOnly = [],
     ...summary
@@ -1076,7 +1233,9 @@ async function toView(
     ownerOnly: ownerOnly.map((line) => visible(line)),
     full,
     memory,
+    skill,
     wrapper,
+    repo,
     browserTabId: browserTabOf(ctx, row),
     url: permissionUrl(publicUrl, row.id),
     createdAt: row.createdAt,
@@ -1378,6 +1537,17 @@ export async function decidePermission(
     )
   }
 
+  // A repository change is a manage-endpoints token's to propose; one that
+  // lost that since asking gets nothing applied.
+  if (kind === "repo_change" && !row.token.manageEndpoints) {
+    return finishUnrun(
+      ctx,
+      row,
+      publicUrl,
+      "The token that asked may no longer manage endpoints, so nothing was applied.",
+    )
+  }
+
   if (isMemoryKind(kind)) {
     return decideMemory(ctx, row, choice as MemoryDecision, publicUrl, {
       always: always === true,
@@ -1474,30 +1644,46 @@ export async function decidePermission(
                 readArgs(ctx, row) as EndpointChangeAsk,
               ),
             )
-          : kind === "wrapper_change"
+          : kind === "skill_change"
             ? text(
-                await applyWrapperChange(
+                await applySkillChange(
                   ctx,
-                  readArgs(ctx, row) as WrapperChangeAsk,
-                  {
-                    tokenId: row.tokenId,
-                    ...(secretValue ? { secretValue } : {}),
-                  },
+                  row.tokenId,
+                  readArgs(ctx, row) as SkillChangeAsk,
                 ),
               )
-            : kind === "fetch"
-              ? await executeFetch(ctx, row, publicUrl, executor)
-              : kind === "browse"
-                ? await executeBrowse(ctx, row, publicUrl, executor)
-                : kind === "browser_handover"
-                  ? await executeHandover(ctx, row)
-                  : await executeRegister(
+            : kind === "wrapper_change"
+              ? text(
+                  await applyWrapperChange(
+                    ctx,
+                    readArgs(ctx, row) as WrapperChangeAsk,
+                    {
+                      tokenId: row.tokenId,
+                      ...(secretValue ? { secretValue } : {}),
+                    },
+                  ),
+                )
+              : kind === "repo_change"
+                ? text(
+                    await applyRepoChange(
                       ctx,
-                      row,
-                      publicUrl,
-                      executor,
-                      secretValue,
-                    )
+                      row.tokenId,
+                      readArgs(ctx, row) as RepoChangeAsk,
+                    ),
+                  )
+                : kind === "fetch"
+                  ? await executeFetch(ctx, row, publicUrl, executor)
+                  : kind === "browse"
+                    ? await executeBrowse(ctx, row, publicUrl, executor)
+                    : kind === "browser_handover"
+                      ? await executeHandover(ctx, row)
+                      : await executeRegister(
+                          ctx,
+                          row,
+                          publicUrl,
+                          executor,
+                          secretValue,
+                        )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -1837,7 +2023,7 @@ async function executeRegister(
   }
 
   return text(
-    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search_tools finds them.${saved}`,
+    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search finds them.${saved}`,
   )
 }
 

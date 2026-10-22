@@ -135,7 +135,7 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
   baseURL,
 }) => {
   // The replaced tool has left search; the wrapper's is there instead.
-  const search = await callTool(baseURL!, token, "search_tools", {
+  const search = await callTool(baseURL!, token, "search", {
     query: "looks a text up",
   })
   expect(toolText(search)).toContain(`${WRAPPER_SLUG}/lookup`)
@@ -143,7 +143,7 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
 
   // New tools ask first, a wrapper's too.
   await allowAllTools(page, TOKEN_NAME, WRAPPER_SLUG)
-  const described = await callTool(baseURL!, token, "describe_tool", {
+  const described = await callTool(baseURL!, token, "describe", {
     server: WRAPPER_SLUG,
     tool: "lookup",
   })

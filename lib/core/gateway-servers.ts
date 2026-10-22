@@ -31,7 +31,7 @@ export type GatewayTool = Pick<
   access: ToolAccess
   /**
    * A wrapper's tool this token sees stands in for this one ("wrapper/tool"):
-   * left out of search_tools and list_tools, still called by its name.
+   * left out of search and list_tools, still called by its name.
    */
   hiddenBy?: string
 }
@@ -192,7 +192,7 @@ export function visibleTools(server: GatewayServer): GatewayTool[] {
 }
 
 /**
- * The tools search_tools and list_tools offer: the visible ones, less those
+ * The tools search and list_tools offer: the visible ones, less those
  * a wrapper's tool stands in for.
  */
 export function listedTools(server: GatewayServer): GatewayTool[] {
