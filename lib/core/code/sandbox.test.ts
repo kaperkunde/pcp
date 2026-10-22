@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
@@ -22,6 +22,11 @@ import type { Bridge, BridgeReply } from "./types"
 const has = (command: string) =>
   spawnSync(command, ["--version"], { stdio: "ignore" }).status === 0
 const ready = has("python3") && has("bash") && has("jq")
+// ffmpeg says its version with one dash.
+const hasFfmpeg = ["ffmpeg", "ffprobe"].every(
+  (command) =>
+    spawnSync(command, ["-version"], { stdio: "ignore" }).status === 0,
+)
 
 const root = path.resolve(__dirname, "../../..")
 let dir: string
@@ -198,6 +203,135 @@ print(len(data), data[:8].decode(), [tool["name"] for tool in pcp.tools("files")
       { op: "tools", payload: { server: null } },
     ])
   })
+
+  it("asks PCP to make an image smaller, from Python and the shell", async () => {
+    const seen: Array<{ op: string; payload: unknown }> = []
+    const bridge: Bridge = async (op, payload) => {
+      seen.push({ op, payload })
+      return { ok: true, value: { handle: { $result: "small" }, width: 600 } }
+    }
+
+    const python = await run(
+      "python",
+      `
+import pcp
+small = pcp.image({"$result": "shot"}, max_width=600, crop=(0, 10, 800, 400), grayscale=True)
+print(small["width"])
+`,
+      bridge,
+    )
+    const shell = await run(
+      "bash",
+      `pcp image --max-height 300 --format webp --quality 60 shot | jq -c .handle`,
+      bridge,
+    )
+
+    expect(python).toMatchObject({ kind: "done", output: "600\n" })
+    expect(shell).toMatchObject({
+      kind: "done",
+      output: '{"$result":"small"}\n',
+    })
+    expect(seen).toEqual([
+      {
+        op: "media",
+        payload: {
+          kind: "image",
+          id: "shot",
+          options: {
+            maxWidth: 600,
+            grayscale: true,
+            crop: { x: 0, y: 10, width: 800, height: 400 },
+          },
+        },
+      },
+      {
+        op: "media",
+        payload: {
+          kind: "image",
+          id: "shot",
+          options: { maxHeight: 300, format: "webp", quality: 60 },
+        },
+      },
+    ])
+  })
+
+  it.skipIf(!hasFfmpeg)(
+    "takes frames from a video with ffmpeg and keeps each as a JPEG",
+    async () => {
+      // Four seconds of ffmpeg's test picture, 640 × 360, as an MP4.
+      const file = path.join(dir, "clip.mp4")
+      const made = spawnSync("ffmpeg", [
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=duration=4:size=640x360:rate=10",
+        "-c:v",
+        "mpeg4",
+        "-y",
+        file,
+      ])
+      expect(made.status).toBe(0)
+      const video = readFileSync(file)
+
+      const kept: Array<{ type: unknown; name: unknown; size: number }> = []
+      const bridge: Bridge = async (op, payload) => {
+        const request = payload as Record<string, string>
+
+        if (op === "read") {
+          return { ok: true, value: video.toString("base64") }
+        }
+
+        const bytes = Buffer.from(request.value!, "base64")
+        // A JPEG: FF D8 FF.
+        expect([...bytes.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff])
+        kept.push({
+          type: request.type,
+          name: request.name,
+          size: bytes.length,
+        })
+        return { ok: true, value: { $result: `frame${kept.length}` } }
+      }
+
+      const python = await run(
+        "python",
+        `
+import json, pcp
+shots = pcp.frames({"$result": "clip"}, count=2, max_width=320)
+print(json.dumps(shots))
+`,
+        bridge,
+      )
+      expect(python.kind).toBe("done")
+      expect(JSON.parse(python.output)).toEqual({
+        duration: 4,
+        width: 640,
+        height: 360,
+        frames: [
+          { t: 1, handle: { $result: "frame1" } },
+          { t: 3, handle: { $result: "frame2" } },
+        ],
+      })
+      expect(kept.map(({ type, name }) => [type, name])).toEqual([
+        ["image/jpeg", "frame-1s.jpg"],
+        ["image/jpeg", "frame-3s.jpg"],
+      ])
+
+      const shell = await run(
+        "bash",
+        `pcp frames --at 0,2.5 clip | jq -c '[.frames[].t]'
+        pcp frames --at 9 clip || echo refused`,
+        bridge,
+      )
+      expect(shell).toMatchObject({
+        kind: "done",
+        output:
+          "[0,2.5]\npcp: The video is 4.00 seconds long: ask for times within it.\nrefused\n",
+      })
+    },
+    30_000,
+  )
 
   it("hands a refusal to the program as an error, and says how it exited", async () => {
     const result = await run(

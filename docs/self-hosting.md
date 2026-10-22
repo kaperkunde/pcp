@@ -108,8 +108,11 @@ publishes port 3000 on every interface. (The second file needs Docker Compose
 run code (**Let an assistant with this token run code that calls its
 tools**) runs JavaScript programs inside PCP. From a checkout, a third file
 adds a sandbox container where it can also run bash and Python programs; it
-has no network and reaches PCP only through a shared volume. The installer
-does not add it. From the `pcp` folder:
+has no network and reaches PCP only through a shared volume. It carries
+ffmpeg (Debian's package), which takes frames from videos: without the
+sandbox, a program's `pcp.video.frames` says that video needs it. (Images
+need nothing: PCP makes them smaller itself.) The installer does not add it.
+From the `pcp` folder:
 
 ```bash
 docker compose -f docker-compose.yaml -f docker-compose.https.yaml -f docker-compose.sandbox.yaml up -d

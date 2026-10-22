@@ -1,10 +1,13 @@
-import { randomUUID } from "node:crypto"
-import { mkdtempSync, rmSync } from "node:fs"
+import { spawn, spawnSync } from "node:child_process"
+import { randomBytes, randomUUID } from "node:crypto"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { connect as connectSocket, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { crc32, deflateSync } from "node:zlib"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import sharp from "sharp"
 
 import { createApiToken, resolveApiToken, updateApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
@@ -21,10 +24,10 @@ import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
 import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
-import { keepBytes, keepResult } from "../tool-results"
+import { keepBytes, keepResult, openResult } from "../tool-results"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
-import { MAX_CALLS_PER_RUN } from "./limits"
+import { MAX_CALLS_PER_RUN, MAX_MEDIA_PER_RUN } from "./limits"
 import { checkRun, runCode, runProgram } from "./run"
 import { javaScriptExecutor } from "./quickjs"
 import { MAY_HAVE_TAKEN_EFFECT } from "./runs"
@@ -503,6 +506,10 @@ describe("a program's calls", () => {
       "pcp.tools()",
       'keep: ["password"]',
       "not running on this PCP",
+      "pcp.image.compress(handle",
+      "Compress an image before you read it or return it",
+      "send the original handle",
+      "needs PCP's sandbox, which is not running",
     ]) {
       expect(description).toContain(part)
     }
@@ -598,6 +605,431 @@ describe("a server the owner has to connect", () => {
     expect(text).not.toContain("check_permission gives")
     expect(ran).toEqual([{ tool: "archive", args: {} }])
   })
+})
+
+describe("images and videos", () => {
+  beforeEach(async () => {
+    await connect()
+  })
+
+  /** A picture with something in it: a gradient, 1600 × 1200, as a PNG. */
+  async function picture(): Promise<Buffer> {
+    const width = 1600
+    const height = 1200
+    const raw = Buffer.alloc(width * height * 3)
+
+    for (let index = 0; index < width * height; index++) {
+      raw[index * 3] = (index % width) % 256
+      raw[index * 3 + 1] = Math.floor(index / width) % 256
+      raw[index * 3 + 2] = 128
+    }
+
+    return sharp(raw, { raw: { width, height, channels: 3 } })
+      .png()
+      .toBuffer()
+  }
+
+  async function kept(
+    bytes: Buffer,
+    mediaType: string,
+    name: string,
+    tokenId = scope.tokenId,
+  ): Promise<string> {
+    const result = await keepBytes(ctx, {
+      tokenId,
+      serverId: null,
+      toolName: "scan_card",
+      bytes,
+      mediaType,
+      name,
+    })
+    return result.id
+  }
+
+  type Compressed = {
+    handle: { $result: string; type: string; size: number; name: string }
+    width: number
+    height: number
+    bytes: number
+    type: string
+  }
+
+  it("makes a smaller copy, kept for the token, and leaves the original", async () => {
+    const original = await picture()
+    const id = await kept(original, "image/png", "screen.png")
+
+    const { isError, text } = await run(`
+      return await pcp.image.compress({ $result: "${id}" }, { maxWidth: 800 })
+    `)
+    expect(isError).toBe(false)
+    const value = returned(text) as Compressed
+    expect(value).toMatchObject({
+      width: 800,
+      height: 600,
+      type: "image/jpeg",
+      handle: { type: "image/jpeg", name: "screen.jpg" },
+    })
+    expect(value.bytes).toBe(value.handle.size)
+    expect(value.bytes).toBeLessThan(original.length / 4)
+
+    const row = await db().toolResult.findUniqueOrThrow({
+      where: { id: value.handle.$result },
+    })
+    expect(row).toMatchObject({
+      tokenId: scope.tokenId,
+      kind: "bytes",
+      toolName: "run_code",
+      mediaType: "image/jpeg",
+    })
+    const made = await openResult(ctx, {
+      tokenId: scope.tokenId,
+      id: value.handle.$result,
+    })
+    expect(await sharp(made!.bytes()).metadata()).toMatchObject({
+      format: "jpeg",
+      width: 800,
+      height: 600,
+    })
+    // The run is in the request log, as every run is; the image is not, as
+    // a kept result is not.
+    expect(logLines()).toEqual([
+      expect.objectContaining({ tool: "run_code", ok: true }),
+    ])
+    expect(logLines()[0]).not.toHaveProperty("server")
+  })
+
+  it("crops first, then greys and encodes as asked", async () => {
+    const id = await kept(await picture(), "image/png", "screen.png")
+
+    const { text } = await run(`
+      const handle = { $result: "${id}" }
+      const crop = { x: 100, y: 50, width: 400, height: 300 }
+      const grey = await pcp.image.compress(handle, { crop, grayscale: true, format: "png" })
+      const fit = await pcp.image.compress(handle, { crop, maxHeight: 150, format: "webp", quality: 40 })
+      let past
+      try { await pcp.image.compress(handle, { crop: { x: 1500, y: 0, width: 200, height: 10 } }) } catch (error) { past = error.message }
+      return { grey, fit, past }
+    `)
+    const value = returned(text) as {
+      grey: Compressed
+      fit: Compressed
+      past: string
+    }
+
+    expect(value.grey).toMatchObject({
+      width: 400,
+      height: 300,
+      type: "image/png",
+    })
+    const grey = await openResult(ctx, {
+      tokenId: scope.tokenId,
+      id: value.grey.handle.$result,
+    })
+    expect(await sharp(grey!.bytes()).metadata()).toMatchObject({
+      format: "png",
+      channels: 1,
+    })
+    // Its top left corner is the original's (100, 50): red 100, green 50.
+    const corner = await sharp(
+      (await openResult(ctx, {
+        tokenId: scope.tokenId,
+        id: value.fit.handle.$result,
+      }))!.bytes(),
+    )
+      .extract({ left: 0, top: 0, width: 1, height: 1 })
+      .raw()
+      .toBuffer()
+    expect(Math.abs(corner[0]! - 100)).toBeLessThan(20)
+    expect(Math.abs(corner[1]! - 50)).toBeLessThan(20)
+    expect(value.fit).toMatchObject({
+      width: 200,
+      height: 150,
+      type: "image/webp",
+    })
+    expect(value.past).toBe(
+      "The crop goes past the image, which is 1600 × 1200 pixels.",
+    )
+  })
+
+  it("refuses what is not an image, another token's, and wrong options", async () => {
+    const { token: otherToken } = await createApiToken(ctx, {
+      name: "Phone",
+      allowAllServers: true,
+    })
+    const other = (await resolveApiToken(otherToken))!
+    const theirs = await kept(
+      await picture(),
+      "image/png",
+      "theirs.png",
+      other.tokenId,
+    )
+    const pdf = await kept(
+      Buffer.from(PDF, "base64"),
+      "application/pdf",
+      "card.pdf",
+    )
+    const video = await kept(
+      Buffer.concat([
+        Buffer.from([0, 0, 0, 0x18]),
+        Buffer.from("ftypisom"),
+        Buffer.alloc(64),
+      ]),
+      "application/octet-stream",
+      "clip.mp4",
+    )
+    const note = await keepResult(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "list_cards",
+      text: "just words",
+      mediaType: "text/plain",
+    })
+
+    const { text } = await run(`
+      const tries = {
+        pdf: () => pcp.image.compress("${pdf}"),
+        video: () => pcp.image.compress("${video}"),
+        note: () => pcp.image.compress("${note.id}"),
+        theirs: () => pcp.image.compress("${theirs}"),
+        option: () => pcp.image.compress("${pdf}", { width: 10 }),
+        quality: () => pcp.image.compress("${pdf}", { quality: 0 }),
+        format: () => pcp.image.compress("${pdf}", { format: "bmp" }),
+        noHandle: () => pcp.image.compress(),
+      }
+      const said = {}
+      for (const [name, attempt] of Object.entries(tries)) {
+        try { await attempt(); said[name] = "made" } catch (error) { said[name] = error.message }
+      }
+      return said
+    `)
+    const said = returned(text) as Record<string, string>
+
+    expect(said.pdf).toBe(
+      `Result ${pdf} is application/pdf, not an image PCP reads (PNG, JPEG, WebP or GIF).`,
+    )
+    expect(said.video).toBe(
+      `Result ${video} is video/mp4, not an image PCP reads (PNG, JPEG, WebP or GIF): take frames from a video with pcp.video.frames.`,
+    )
+    expect(said.note).toContain("is a text, not an image")
+    expect(said.theirs).toContain(
+      "A kept result named in the arguments is not there for this token",
+    )
+    expect(said.option).toContain('has no option "width"')
+    expect(said.quality).toBe("quality is a whole number from 1 to 100.")
+    expect(said.format).toContain('format is "jpeg" (the default)')
+    expect(said.noHandle).toContain("pcp.image.compress takes a handle")
+  })
+
+  it("refuses an image larger than PCP decodes, and one that comes out too large", async () => {
+    // A PNG whose header says 10,000 × 10,000 pixels, with next to nothing
+    // in it: the size is refused before anything is decoded.
+    const chunk = (type: string, data: Buffer) => {
+      const length = Buffer.alloc(4)
+      length.writeUInt32BE(data.length)
+      const crc = Buffer.alloc(4)
+      crc.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type), data])))
+      return Buffer.concat([length, Buffer.from(type), data, crc])
+    }
+    const header = Buffer.alloc(13)
+    header.writeUInt32BE(10_000, 0)
+    header.writeUInt32BE(10_000, 4)
+    header.set([8, 0, 0, 0, 0], 8)
+    const huge = await kept(
+      Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        chunk("IHDR", header),
+        chunk("IDAT", deflateSync(Buffer.alloc(10))),
+        chunk("IEND", Buffer.alloc(0)),
+      ]),
+      "image/png",
+      "huge.png",
+    )
+
+    // Noise, which a JPEG keeps small and a PNG cannot.
+    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 1 })
+    const noise = await sharp(randomBytes(700 * 700 * 3), {
+      raw: { width: 700, height: 700, channels: 3 },
+    })
+      .jpeg({ quality: 70 })
+      .toBuffer()
+    const noisy = await kept(noise, "image/jpeg", "noise.jpg")
+
+    const { text } = await run(`
+      const said = []
+      for (const [id, options] of [["${huge}", {}], ["${noisy}", { format: "png" }]]) {
+        try { await pcp.image.compress(id, options) } catch (error) { said.push(error.message) }
+      }
+      return said
+    `)
+
+    expect(returned(text)).toEqual([
+      "The image is 10,000 × 10,000 pixels, more than PCP decodes (50 million).",
+      expect.stringMatching(
+        /^The image came out at [\d,]+ bytes, more than PCP keeps of one file \(1,048,576\)\. Ask for a smaller size or a lower quality\.$/,
+      ),
+    ])
+  })
+
+  it("says video needs the sandbox runner when none is connected", async () => {
+    const video = await kept(
+      Buffer.concat([
+        Buffer.from([0, 0, 0, 0x18]),
+        Buffer.from("ftypqt  "),
+        Buffer.alloc(64),
+      ]),
+      "video/quicktime",
+      "clip.mov",
+    )
+    const image = await kept(await picture(), "image/png", "screen.png")
+
+    const { text } = await run(`
+      const said = []
+      for (const attempt of [
+        () => pcp.video.frames("${video}"),
+        () => pcp.video.frames("${image}"),
+        () => pcp.video.frames("${video}", { count: 2, every: 3 }),
+        () => pcp.video.frames("${video}", { count: 31 }),
+      ]) {
+        try { await attempt() } catch (error) { said.push(error.message) }
+      }
+      return said
+    `)
+
+    expect(returned(text)).toEqual([
+      "Video needs the sandbox runner (see docs/self-hosting.md), which is not connected to this PCP.",
+      `Result ${image} is image/png, not a video: make an image smaller with pcp.image.compress.`,
+      "pcp.video.frames takes one of at (times in seconds), every (seconds between frames) or count (frames spread over the video).",
+      "count is a whole number of frames, 1 to 30.",
+    ])
+  })
+
+  it("counts each image against the run's media and keeps", async () => {
+    const id = await kept(await picture(), "image/png", "screen.png")
+
+    const { text } = await run(`
+      let made = 0
+      let said
+      for (let index = 0; index < ${MAX_MEDIA_PER_RUN + 1}; index++) {
+        try { await pcp.image.compress("${id}", { maxWidth: 16 }); made++ } catch (error) { said = error.message; break }
+      }
+      return { made, said }
+    `)
+
+    expect(returned(text)).toEqual({
+      made: MAX_MEDIA_PER_RUN,
+      said: `A run works on at most ${MAX_MEDIA_PER_RUN} images and videos.`,
+    })
+  })
+
+  const hasRunner = ["python3", "bash", "jq"].every(
+    (command) =>
+      spawnSync(command, ["--version"], { stdio: "ignore" }).status === 0,
+  )
+  const hasFfmpeg = ["ffmpeg", "ffprobe"].every(
+    (command) =>
+      spawnSync(command, ["-version"], { stdio: "ignore" }).status === 0,
+  )
+
+  it.skipIf(!hasRunner || !hasFfmpeg)(
+    "takes a video's frames in the sandbox, kept for the token as JPEGs",
+    async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "pcp-frames-"))
+      const socketPath = path.join(dir, "socket", "sandbox.sock")
+      await startSandbox(socketPath)
+      const runner = spawn(
+        "python3",
+        [path.resolve(__dirname, "../../../sandbox/runner.py")],
+        {
+          env: {
+            ...process.env,
+            PCP_SANDBOX_SOCKET: socketPath,
+            PCP_SANDBOX_WORK: path.join(dir, "work"),
+            PCP_SANDBOX_SAME_USER: "1",
+          },
+          stdio: "ignore",
+        },
+      )
+
+      try {
+        const deadline = Date.now() + 10_000
+        while (sandboxLanguages().length === 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+
+        const file = path.join(dir, "clip.mp4")
+        const made = spawnSync("ffmpeg", [
+          "-v",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc=duration=4:size=640x360:rate=10",
+          "-c:v",
+          "mpeg4",
+          "-y",
+          file,
+        ])
+        expect(made.status).toBe(0)
+        const id = await kept(readFileSync(file), "video/mp4", "clip.mp4")
+
+        // The gateway is built per request: a new one sees the runner.
+        await client.close()
+        const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+        await buildGatewayServer(scope, await loadGatewayServers(scope), {
+          executor,
+        }).connect(serverSide)
+        client = new Client({ name: "test", version: "1.0.0" })
+        await client.connect(clientSide)
+
+        const { isError, text } = await run(`
+          return await pcp.video.frames("${id}", { count: 2, maxWidth: 320 })
+        `)
+        expect(isError).toBe(false)
+        const value = returned(text) as {
+          duration: number
+          width: number
+          height: number
+          frames: Array<{ t: number; handle: { $result: string } }>
+        }
+        expect(value).toMatchObject({ duration: 4, width: 640, height: 360 })
+        expect(value.frames.map((frame) => frame.t)).toEqual([1, 3])
+
+        for (const frame of value.frames) {
+          const row = await db().toolResult.findUniqueOrThrow({
+            where: { id: frame.handle.$result },
+          })
+          expect(row).toMatchObject({
+            tokenId: scope.tokenId,
+            mediaType: "image/jpeg",
+            toolName: "run_code",
+          })
+          const opened = await openResult(ctx, {
+            tokenId: scope.tokenId,
+            id: frame.handle.$result,
+          })
+          expect(await sharp(opened!.bytes()).metadata()).toMatchObject({
+            format: "jpeg",
+            width: 320,
+            height: 180,
+          })
+        }
+
+        // A program in the sandbox takes frames itself; it cannot ask PCP to.
+        const inside = await run(
+          `python3 -c 'import pcp; pcp._ask("media", {"kind": "frames", "id": "${id}", "options": {}})' 2>&1 | tail -1`,
+          { language: "bash" },
+        )
+        expect(inside.text).toContain(
+          "pcp.PcpError: In the sandbox, take frames with the pcp command",
+        )
+      } finally {
+        runner.kill("SIGKILL")
+        await stopSandbox()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    60_000,
+  )
 })
 
 describe("the sandbox's languages", () => {

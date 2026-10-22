@@ -1234,8 +1234,9 @@ three parts:
   engine has the language and nothing of Node's: no `require`, `process`,
   `fetch`, timers or file system. Two host functions are put on its global
   object, and a prelude takes them off at once and wraps them as `pcp`
-  (`call`, `read`, `keep`) and `console`; only strings cross, both ways, so
-  the host never holds one of the program's objects. Memory is a
+  (`call`, `read`, `keep`, `tools`, `step`, `image`, `video`) and `console`;
+  only strings cross, both ways, so the host never holds one of the
+  program's objects. Memory is a
   `WebAssembly.Memory` made with a maximum (128 MB), which the WebAssembly
   engine enforces; QuickJS's own memory limit counts nothing in these
   builds, which lack `malloc_usable_size`, so it is not used. An interrupt
@@ -1248,8 +1249,9 @@ three parts:
 - **The bridge** (`run.ts`) is everything the program can ask for, as an
   operation name and a JSON payload it checks as untrusted: `call` (a
   server, a tool, its arguments, and call_tool's `fields`, `decode` and
-  `keep`), `read` (one of the token's own kept results, as text) and `keep`
-  (a text kept as a result of the token's, returning its handle). A handle
+  `keep`), `read` (one of the token's own kept results, as text), `keep`
+  (a text kept as a result of the token's, returning its handle), `tools`
+  and `media` (below). A handle
   PCP wrote into an answer is made bare (`{"$result"}`) before a call, so a
   program passes on what it was handed as it is. Limits are in
   `code/limits.ts`: 3 minutes in all, 100 calls with 5 under way at once,
@@ -1271,10 +1273,36 @@ three parts:
   sight, so their bytes never enter the program. An OAuth server to connect
   or a browser site to allow stops the run the same way, with its link.
 
+**Images and videos** (`code/media.ts`, the bridge's `media` operation) are
+there so an assistant looks at a small picture rather than a large one.
+`pcp.image.compress(handle, options)` sends the handle and the options as
+JSON, never the bytes: PCP opens the token's own kept result, checks by its
+first bytes that it is a PNG, JPEG, WebP or GIF of at most
+`MAX_IMAGE_PIXELS` (50 million, from the header, before anything is
+decoded), crops, fits, greys and encodes it as JPEG, WebP or PNG, and keeps
+the result as a new result of the token's, refused when it comes out past
+the largest file. The codec is sharp's WebAssembly build
+(`@img/sharp-wasm32`) in PCP's process: sharp's native packages are left out
+of the install (`ignoredOptionalDependencies` in `pnpm-workspace.yaml`), so
+its loader takes the WebAssembly in the container, a checkout and the Mac app
+alike, with no native code and nothing for `allowBuilds`; the `.wasm` it
+reads by path is named in `outputFileTracingIncludes`
+(`scripts/standalone.test.ts`). Images take turns, one at a time in the
+process, with libvips's cache off, one thread and a 30-second timeout, and
+what it writes has no metadata. `pcp.video.frames` hands the job to the
+sandbox (below): the bridge runs `sandbox/pcp.py`'s `frames` there as a
+Python program, with a bridge of its own that reads only that video and keeps
+only JPEGs, through the run's own `read` and `keep`, so ffmpeg never runs in
+PCP's process; with no runner connected it says video needs one. A program
+already in the sandbox calls `pcp frames` itself (the runner, running it,
+could not take another job for it). Each image and each frame counts as a
+keep, with `MAX_MEDIA_PER_RUN` (20) images and videos a run; like keeps,
+they are not in the request log.
+
 **The sandbox** (`code/sandbox.ts`, `sandbox/`, `docker-compose.sandbox.yaml`)
 is a second executor behind the same bridge, for installs that run PCP in
-Docker or Podman: a container with bash, `jq` and Python 3 where a program in
-`bash` or `python` runs. It has no network (`network_mode: none`), a
+Docker or Podman: a container with bash, `jq`, ffmpeg (Debian's package, for
+`pcp frames`) and Python 3 where a program in `bash` or `python` runs. It has no network (`network_mode: none`), a
 read-only root, every capability dropped but SETUID and SETGID, an init that
 reaps, and memory, CPU and process limits. PCP starts nothing and never
 touches the Docker socket: when `PCP_SANDBOX_SOCKET` is set (only the compose
