@@ -1,15 +1,16 @@
 "use client"
 
-import { AppWindow } from "lucide-react"
 import Link from "next/link"
 import { useActionState, useEffect, useState, useTransition } from "react"
 
+import { AnsweredBefore } from "@/components/answer-queue"
 import { BrowserDescribeForm } from "@/components/browser-describe-form"
+import { BrowserTabView } from "@/components/browser-tab-view"
+import { BrowserTabs } from "@/components/browser-tabs"
 import { FormError } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
 import { SubmitButton } from "@/components/submit-button"
-import { Badge } from "@/components/ui/badge"
-import { Button, ButtonLink } from "@/components/ui/button"
+import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -17,7 +18,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { IconTile } from "@/components/ui/icon-tile"
 import { Input } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import { List, ListRow, ListSection } from "@/components/ui/list"
@@ -30,7 +30,7 @@ import {
   installChromiumAction,
   openTabAction,
 } from "@/lib/actions/browser"
-import type { BrowserOverview } from "@/lib/core/browser/owner"
+import type { BrowserOverview, BrowserToken } from "@/lib/core/browser/owner"
 import type { ActionState } from "@/lib/server/action-state"
 
 /** How often the page asks for the tabs and the browser's state. */
@@ -41,16 +41,23 @@ const INSTALL_REFRESH_MS = 1_000
 type ErrorPlace = "page" | "chromium"
 
 /**
- * The Browser page's sections: adding the browser, its tabs (live), opening
- * one of your own, the sign-ins it keeps, Chromium on this machine, and
- * what assistants read about it.
+ * The Browser page's sections: adding the browser, its tabs (the tabs view:
+ * every tab, its hand-over answered on it, and the one chosen live under
+ * them), opening one of your own, the sign-ins it keeps, Chromium on this
+ * machine, and what assistants read about it.
  */
 export function BrowserManager({
   initial,
+  selected,
+  tokens,
   serverDescription,
   desktop,
 }: {
   initial: BrowserOverview
+  /** The tab shown live (`?tab=`), if one is chosen. */
+  selected: string | null
+  /** The tokens Hand back can give a tab to. */
+  tokens: BrowserToken[]
   serverDescription: string
   desktop: boolean
 }) {
@@ -98,6 +105,7 @@ export function BrowserManager({
 
   return (
     <>
+      <AnsweredBefore alone />
       {!server ? (
         <Card className="ring-1 ring-primary/25">
           <CardHeader>
@@ -126,74 +134,31 @@ export function BrowserManager({
 
       <ListSection
         title="Tabs"
-        footer="Every tab open in the browser, the assistants' and yours. An assistant sees only its own tabs: the ones it opened and the ones you hand it. Open one to watch it live, or to take it over: while you have a tab, its assistant leaves it alone."
+        footer="Every tab open in the browser, the assistants' and yours. An assistant sees only its own tabs: the ones it opened and the ones you hand it. Watch one to see it live, and take it over to click and type: while you have a tab, its assistant leaves it alone."
       >
-        <List as="ul" aria-label="Open tabs">
-          {tabs.length === 0 ? (
-            <ListRow
-              as="li"
-              title={
-                <span className="text-muted-foreground">
-                  No tabs are open
-                  {status.running ? "." : ": the browser is not running."}
-                </span>
-              }
-            />
-          ) : (
-            tabs.map((tab) => (
-              <ListRow
-                as="li"
-                key={tab.id}
-                aria-label={tab.title || tab.url}
-                icon={<IconTile icon={AppWindow} size="sm" />}
-                title={
-                  <Link
-                    href={`/browser/tabs/${tab.id}`}
-                    className="block truncate font-medium text-foreground hover:text-primary"
-                  >
-                    {tab.title || "(no title)"}
-                  </Link>
-                }
-                description={
-                  <span className="flex min-w-0 flex-col">
-                    <code className="truncate">{tab.url}</code>
-                    <span>
-                      Opened by{" "}
-                      {tab.openedBy === "owner" ? "you" : tab.openedBy} · last
-                      used <LocalDate value={tab.lastUsedAt} />
-                    </span>
-                  </span>
-                }
-                trailing={
-                  <span className="flex items-center gap-2">
-                    {tab.control === "owner" ? (
-                      <Badge>{tab.handover ? "Handed to you" : "Yours"}</Badge>
-                    ) : null}
-                    <ButtonLink
-                      href={`/browser/tabs/${tab.id}`}
-                      size="sm"
-                      variant="secondary"
-                    >
-                      Watch
-                    </ButtonLink>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="plain"
-                      disabled={pending}
-                      onClick={() => act(() => closeTabAction(tab.id))}
-                      aria-label={`Close ${tab.title || tab.url}`}
-                    >
-                      Close
-                    </Button>
-                  </span>
-                }
-              />
-            ))
-          )}
-        </List>
+        <BrowserTabs
+          tabs={tabs}
+          selected={selected}
+          running={status.running}
+          disabled={pending}
+          onClose={(tab) =>
+            act(() => closeTabAction(tab.id), {
+              confirm: tab.waiting
+                ? "Close this tab? Its assistant's hand-over closes with it."
+                : undefined,
+            })
+          }
+        />
         {server ? <OpenTabForm /> : null}
       </ListSection>
+
+      {selected ? (
+        <LiveTab
+          key={selected}
+          tab={tabs.find((tab) => tab.id === selected) ?? null}
+          tokens={tokens}
+        />
+      ) : null}
 
       <ListSection
         title="Sign-ins"
@@ -455,6 +420,45 @@ function ChromiumInstall({
         {install.stage === "failed" ? "Try again" : "Install Chromium"}
       </Button>
     </>
+  )
+}
+
+/** The chosen tab, live, to watch or take over; or why it is not there. */
+function LiveTab({
+  tab,
+  tokens,
+}: {
+  tab: BrowserOverview["tabs"][number] | null
+  tokens: BrowserToken[]
+}) {
+  return (
+    <section aria-label="Live tab" className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-1 px-1">
+        <h2 className="min-w-0 truncate text-[13px] font-semibold text-muted-foreground">
+          {tab ? tab.title || "(no title)" : "Browser tab"}
+        </h2>
+        <Link
+          href="/browser"
+          scroll={false}
+          className="text-sm text-primary hover:text-accent-foreground"
+        >
+          Stop watching
+        </Link>
+      </div>
+      {tab ? (
+        <BrowserTabView tabId={tab.id} initial={tab} tokens={tokens} />
+      ) : (
+        <Card>
+          <CardContent>
+            <p className="text-muted-foreground" role="alert">
+              This tab is closed, or the browser has closed since (it closes
+              after a while with nothing to do). The tabs above are the open
+              ones.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+    </section>
   )
 }
 

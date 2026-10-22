@@ -249,4 +249,56 @@ describe("the owner's queue", () => {
     )
     expect(queueHref({ source: "request", id })).toBe(`/permissions/${id}`)
   })
+
+  it("answers a hand-over on its tab while the tab is open, and on its page once it is gone", () => {
+    expect(
+      queueHref({
+        source: "request",
+        id: "r1",
+        kind: "browser_handover",
+        tabId: "t 1",
+      }),
+    ).toBe("/browser?tab=t%201")
+    // Its tab is gone (closed, or PCP started again since).
+    expect(
+      queueHref({
+        source: "request",
+        id: "r1",
+        kind: "browser_handover",
+        tabId: null,
+      }),
+    ).toBe("/permissions/r1")
+    expect(
+      queueHref({ source: "request", id: "r1", kind: "browser_handover" }),
+    ).toBe("/permissions/r1")
+    // A tab says nothing for another kind.
+    expect(
+      queueHref({ source: "request", id: "r1", kind: "browse", tabId: "t1" }),
+    ).toBe("/permissions/r1")
+  })
+
+  it("leads to a hand-over's own page when no browser holds its tab", async () => {
+    const { ctx, scope, serverId } = await setup()
+    await withPermission(scope, {
+      kind: "browser_handover",
+      input: {
+        serverId,
+        tabId: "gone",
+        message: "Please sign in.",
+        url: "https://example.com/login",
+        title: "Sign in",
+      },
+    })
+    const { id } = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "browser_handover" },
+    })
+
+    expect(await ownerQueue(ctx)).toMatchObject([
+      { source: "request", id, kind: "browser_handover", tabId: null },
+    ])
+    expect(await nextPendingRequest(ctx)).toBe(`/permissions/${id}`)
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).requests).toEqual([
+      expect.objectContaining({ id, href: `/permissions/${id}` }),
+    ])
+  })
 })

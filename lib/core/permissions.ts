@@ -58,7 +58,12 @@ import {
   type ConnectLinks,
   type ServerState,
 } from "./connect"
-import { queueHref, WAITING_ORDER, waitingRequestsWhere } from "./owner-queue"
+import {
+  handoverTab,
+  queueHref,
+  WAITING_ORDER,
+  waitingRequestsWhere,
+} from "./owner-queue"
 import { waitForOwner } from "./owner-wait"
 import {
   argsInFull,
@@ -2365,6 +2370,55 @@ export async function getPermissionView(
   return row ? toView(ctx, row, publicUrl) : null
 }
 
+/** A hand-over waiting for the owner, as its tab shows it in the tabs view. */
+export type WaitingHandover = {
+  id: string
+  tabId: string
+  /** The assistant's words: what it asks the owner to do in the tab. */
+  message: string
+  tokenName: string
+  createdAt: string
+  decisions: Array<{ value: PermissionDecision; label: string }>
+}
+
+/**
+ * The hand-overs among `ids` (the requests asked about the open tabs) that
+ * still wait for the owner, oldest first, with what each asks: the tabs
+ * view shows them on their tabs and answers them through decidePermission,
+ * as the request's own page would.
+ */
+export async function waitingHandovers(
+  ctx: VaultContext,
+  ids: string[],
+): Promise<WaitingHandover[]> {
+  if (ids.length === 0) {
+    return []
+  }
+
+  const rows = await db().permissionRequest.findMany({
+    where: {
+      ...waitingRequestsWhere(ctx),
+      kind: "browser_handover",
+      id: { in: ids },
+    },
+    include: ROW_INCLUDE,
+    orderBy: WAITING_ORDER,
+  })
+
+  return rows.map((row) => {
+    const ask = readArgs(ctx, row) as HandoverAsk
+
+    return {
+      id: row.id,
+      tabId: ask.tabId,
+      message: visible(ask.message),
+      tokenName: row.token.name,
+      createdAt: row.createdAt.toISOString(),
+      decisions: decisionsFor("browser_handover"),
+    }
+  })
+}
+
 /**
  * A token's requests still waiting for an answer, oldest first, as the
  * bell and Home list them (owner-queue.ts).
@@ -2427,6 +2481,7 @@ export async function listPendingRequests(
           source: "request",
           id: row.id,
           kind: row.kind as PermissionKind,
+          tabId: handoverTab(ctx, row),
         }),
       }
     }),

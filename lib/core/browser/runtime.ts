@@ -22,6 +22,7 @@ import { watchDocuments, type DocumentWatch } from "./challenge"
 import { acquireDisplay, type VirtualDisplay } from "./display"
 import { openDownloads, watchDownloads, type Downloads } from "./downloads"
 import { chromiumExecutable } from "./executable"
+import { watchFavicon } from "./favicon"
 import { handoverWaiting, waitIdle } from "./idle"
 import {
   contextOptions,
@@ -121,6 +122,11 @@ export type Tab = {
   handoverRequests: Set<string>
   /** The last site the gate kept the main frame from opening. */
   lastBlocked: string | null
+  /**
+   * Its page's icon as a data: address, as Chromium loaded it for the page
+   * (favicon.ts); null until then, and for a page without one.
+   */
+  favicon: string | null
   dialog: Dialog | null
   /**
    * A file the page offered while no download call waited (refused), by
@@ -931,6 +937,14 @@ async function listen(
   // reaches a page only through upload_file.
   page.on("filechooser", () => {})
   await watchDownloads(vault.downloads, tab.cdp).catch(() => {})
+  tab.favicon = null
+  await watchFavicon(tab.cdp, {
+    mainFrame: () => tab.mainFrameId,
+    mine,
+    set: (favicon) => {
+      tab.favicon = favicon
+    },
+  }).catch(() => {})
 
   page.on("dialog", (dialog) => {
     if (!mine()) {
@@ -982,6 +996,7 @@ async function attach(
     handoverSince: null,
     handoverRequests: new Set(),
     lastBlocked: null,
+    favicon: null,
     dialog: null,
     offeredFile: null,
     lane: newLane(),
@@ -1241,6 +1256,23 @@ export function noteHandoverRequest(
   getTab(vaultId, tabId)?.handoverRequests.add(requestId)
 }
 
+/**
+ * The open tab a hand-over request is about, or null once that tab is gone
+ * (or the browser closed): where the owner answers it (owner-queue.ts).
+ */
+export function handoverTabOf(
+  vaultId: string,
+  requestId: string,
+): string | null {
+  for (const tab of runningBrowser(vaultId)?.tabs.values() ?? []) {
+    if (tab.handoverRequests.has(requestId)) {
+      return tab.id
+    }
+  }
+
+  return null
+}
+
 /** Tabs that are gone: the hand-overs still waiting about them close. */
 async function closeHandovers(vaultId: string, tabs: Tab[]): Promise<void> {
   const ids = tabs.flatMap((tab) => [...tab.handoverRequests])
@@ -1285,15 +1317,24 @@ export async function tabTitle(tab: Tab): Promise<string> {
   ).slice(0, 300)
 }
 
-export async function tabView(tab: Tab): Promise<TabView> {
+/**
+ * A tab as PCP's pages show it. `favicon: false` leaves the icon out (the
+ * live view, which sends this again every moment and shows no icon).
+ */
+export async function tabView(
+  tab: Tab,
+  { favicon = true }: { favicon?: boolean } = {},
+): Promise<TabView> {
   return {
     id: tab.id,
     url: tab.page.url(),
     title: await tabTitle(tab),
+    favicon: favicon ? tab.favicon : null,
     openedBy: tab.openedBy,
     tokenId: tab.tokenId,
     control: tab.control,
     handover: tab.handoverSince !== null,
+    busy: tab.running !== null,
     lastUsedAt: new Date(tab.lastUsedAt).toISOString(),
   }
 }
@@ -1308,7 +1349,7 @@ export async function listTabs(vaultId: string): Promise<TabView[]> {
   return Promise.all(
     [...vault.tabs.values()]
       .sort((a, b) => a.createdAt - b.createdAt)
-      .map(tabView),
+      .map((tab) => tabView(tab)),
   )
 }
 

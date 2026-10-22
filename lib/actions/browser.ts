@@ -82,7 +82,7 @@ export async function openTabAction(
   revalidateBrowser()
 
   if (opened) {
-    redirect(`/browser/tabs/${opened}`)
+    redirect(`/browser?tab=${encodeURIComponent(opened)}`)
   }
 
   return result

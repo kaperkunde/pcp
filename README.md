@@ -765,14 +765,19 @@ also fetch such a file to the assistant's own computer (a sandbox or a
 terminal it runs commands in) or send one from there, with curl and a link
 that works for an hour, for that one file: still without the bytes passing
 through the assistant.
-**Forget all sites** signs it out of everything. Every answer names the tab
-and a link to it in PCP, where you watch it live and **Take over**: your
-mouse and keyboard go to the page, with the timing you made them, and the
-assistant's tools leave the tab alone until you **Hand back** to the token
-you choose (the one whose tab it was, unless you pick another; a tab you
-opened is no token's until you hand it to one). `hand_over` asks you the same
-way any request does, with the tab live on the request's page, and **Done**
-gives it back.
+**Forget all sites** signs it out of everything. The Browser page lists
+every open tab in one place, as a browser's tab strip would: the page's icon
+(the one Chromium loaded for the page, or the site's first letter), its
+title and site, who opened it and whose it is now, and whether it is idle,
+in use or with you; **Close** on any tab closes it. Every answer names the
+tab and a link into that list, where you watch it live and **Take over**:
+your mouse and keyboard go to the page, with the timing you made them, and
+the assistant's tools leave the tab alone until you **Hand back** to the
+token you choose (the one whose tab it was, unless you pick another; a tab
+you opened is no token's until you hand it to one). `hand_over` asks you the
+same way any request does, and its link, the bell and Home all lead to the
+tab, where the assistant's message waits on it: **Done** gives it back, and
+**Not now** gives it back undone.
 
 **Secrets in pages.** An assistant types a password or a one-time code with
 `type` and `{"$secret": "<name>"}` as the text: PCP types your secret into

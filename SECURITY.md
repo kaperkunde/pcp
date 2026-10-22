@@ -147,7 +147,10 @@ over goes only to a token you pick that is live and reaches the browser,
 and the site it is at counts as allowed for that tab. Every connection goes
 through PCP's proxy, which checks the address it dials, so a page, a
 redirect or a script on it cannot reach your network either. No tool runs a
-script, reads cookies or storage, or downloads a file. The sign-ins are kept
+script, reads cookies or storage, or downloads a file. The Browser page shows
+a tab's icon from the picture Chromium loaded for the page itself, as a data:
+address: PCP fetches nothing for it, and opening the page makes your own
+browser ask no site for anything. The sign-ins are kept
 in your vault, encrypted, and shared by every token that reaches the
 browser; **Forget all sites** signs it out of everything. It never sees your
 secrets, but it can have PCP type one into a page (`type` with

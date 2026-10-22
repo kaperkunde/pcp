@@ -102,7 +102,7 @@ export async function GET(
 
   const stream = new ReadableStream<Uint8Array>({
     async start() {
-      tabState = await tabView(tab)
+      tabState = await tabView(tab, { favicon: false })
       subscription = await subscribeScreencast(tab, (next) => {
         touch(ctx.vaultId)
         frame = next
@@ -145,7 +145,7 @@ export async function GET(
               checking = false
             })
         }
-        void tabView(tab).then((view) => {
+        void tabView(tab, { favicon: false }).then((view) => {
           tabState = view
           notify()
         })

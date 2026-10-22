@@ -58,6 +58,14 @@ type Carried = {
   tell: boolean
 }
 
+/**
+ * Whether `href` is the page at `pathname`: the same path, whatever its
+ * query says (the tabs view's `?tab=` picks a tab on the one page).
+ */
+function onPage(href: string, pathname: string): boolean {
+  return href.split(/[?#]/, 1)[0] === pathname
+}
+
 type QueueContext = {
   state: PendingRequestsState
   refresh: () => Promise<void>
@@ -104,7 +112,7 @@ export function OwnerQueueProvider({
   // What an answer carried belongs to the page it was carried to.
   useEffect(() => {
     setCarried((current) =>
-      current && current.href !== pathname ? null : current,
+      current && !onPage(current.href, pathname) ? null : current,
     )
   }, [pathname])
 
@@ -298,7 +306,11 @@ export function AnsweredBefore({
   const { carried } = useQueue()
   const pathname = usePathname()
 
-  if (!carried || carried.href !== pathname || (!carried.next && !alone)) {
+  if (
+    !carried ||
+    !onPage(carried.href, pathname) ||
+    (!carried.next && !alone)
+  ) {
     return null
   }
 
@@ -333,7 +345,7 @@ export function AllClearAfter({ className }: { className?: string }) {
   const { carried } = useQueue()
   const pathname = usePathname()
 
-  if (!carried || carried.next || carried.href !== pathname) {
+  if (!carried || carried.next || !onPage(carried.href, pathname)) {
     return null
   }
 

@@ -13,6 +13,11 @@ export type TabView = {
   id: string
   url: string
   title: string
+  /**
+   * The page's icon as a data: address, from what Chromium loaded for the
+   * page itself (favicon.ts); null when it has none PCP shows.
+   */
+  favicon: string | null
   /** "owner", or the name of the token that opened it. */
   openedBy: string
   /**
@@ -23,6 +28,8 @@ export type TabView = {
   control: TabControl
   /** Set while the owner holds the tab for an assistant's hand-over. */
   handover: boolean
+  /** A tool call is working in it now. */
+  busy: boolean
   lastUsedAt: string
 }
 

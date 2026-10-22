@@ -32,8 +32,8 @@ import type { ActionState } from "@/lib/server/action-state"
  * A browser tab on PCP's machine, live: Chromium's pictures of it drawn on
  * a canvas as they come (server-sent events), and, while the owner has
  * taken it over, their mouse and keyboard sent back in batches with each
- * event's own time, so the page sees them at the pace they were made. Used
- * on a tab's page and on an assistant's hand-over request.
+ * event's own time, so the page sees them at the pace they were made. Shown
+ * in the Browser page's tabs view, for the tab chosen there.
  *
  * A canvas cannot take a phone's on-screen keyboard, nor a long press to
  * paste. So the view also keeps a hidden text box: the Keyboard button
@@ -60,13 +60,10 @@ const BUTTONS = ["left", "middle", "right"] as const
 export function BrowserTabView({
   tabId,
   initial,
-  mode = "tab",
   tokens = [],
 }: {
   tabId: string
   initial: TabView
-  /** handover: the owner has the tab until they answer the request below. */
-  mode?: "tab" | "handover"
   /** The tokens Hand back can give the tab to (those that reach the browser). */
   tokens?: Array<{ id: string; name: string }>
 }) {
@@ -398,7 +395,8 @@ export function BrowserTabView({
     })
   }
 
-  const handover = mode === "handover" || view.handover
+  // An assistant handed it over: it goes back when you answer its request.
+  const handover = view.handover
 
   return (
     <div className="flex flex-col gap-3">
@@ -472,7 +470,7 @@ export function BrowserTabView({
                     ? "Too many people are watching this tab."
                     : holding
                       ? handover
-                        ? "What you do here goes to the page. The assistant waits until you answer below."
+                        ? "What you do here goes to the page. The assistant waits until you say Done or Not now on its request."
                         : view.tokenId === null
                           ? "What you do here goes to the page. No assistant sees this tab until you hand it to one."
                           : "What you do here goes to the page. The assistant whose tab it is waits until you hand it back."
@@ -552,21 +550,19 @@ export function BrowserTabView({
               Take over
             </Button>
           )}
-          {mode === "tab" ? (
-            <Button
-              type="button"
-              variant="plain"
-              size="sm"
-              disabled={pending || status === "closed"}
-              onClick={() => {
-                if (window.confirm("Close this tab?")) {
-                  act(() => closeTabAction(tabId))
-                }
-              }}
-            >
-              Close tab
-            </Button>
-          ) : null}
+          <Button
+            type="button"
+            variant="plain"
+            size="sm"
+            disabled={pending || status === "closed"}
+            onClick={() => {
+              if (window.confirm("Close this tab?")) {
+                act(() => closeTabAction(tabId))
+              }
+            }}
+          >
+            Close tab
+          </Button>
         </div>
       </div>
 
