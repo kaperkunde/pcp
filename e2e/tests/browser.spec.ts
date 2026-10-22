@@ -119,9 +119,11 @@ test("the first page at a site asks the owner, and the assistant then reads and 
 }) => {
   const host = new URL(upstream.browserUrl).host
   // Every tool but tabs' open and list names its tab, and is refused
-  // without one.
+  // without one: its schema requires it, so nothing runs.
   const unnamed = await browse(baseURL!, "snapshot")
-  expect(toolText(unnamed)).toContain("needs the tab to act on (tab)")
+  expect(toolText(unnamed)).toContain(
+    '"tab" is missing; the inputSchema requires it',
+  )
 
   const asked = await browse(baseURL!, "tabs", {
     action: "open",
