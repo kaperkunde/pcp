@@ -166,6 +166,10 @@ export default async function ServerPage({
         authUsername: server.authUsername ?? "",
         authSecretId: server.authSecretId ?? "",
         mailFrom: server.mailFrom ?? "",
+        mailSaveSent:
+          server.mailSaveSent === "always" || server.mailSaveSent === "never"
+            ? server.mailSaveSent
+            : "auto",
         oauthClientId: server.oauthClientId ?? "",
         oauthClientSecretId: server.oauthClientSecretId ?? "",
         oauthScope: server.oauthScope ?? "",

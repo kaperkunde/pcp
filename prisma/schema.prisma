@@ -547,6 +547,14 @@ model McpServer {
   smtpUrl         String? @map("smtp_url")
   /// jmap/imap: the From address when sending, when the user name is not one.
   mailFrom        String? @map("mail_from")
+  /// imap: whether PCP files a copy of what it sends in Sent: auto (only
+  /// when the mail server did not file one itself), always or never. The
+  /// owner's choice; jmap accounts file theirs as the server does.
+  mailSaveSent    String  @default("auto") @map("mail_save_sent")
+  /// imap: what PCP found out by looking in Sent after a send: the mail
+  /// server files its own copy of what it sends (true), it does not
+  /// (false), or not known yet (null). Shapes how long the next look waits.
+  mailServerFilesSent Boolean? @map("mail_server_files_sent")
 
   /// ssh: the public half of PCP's own key for this server, whose private
   /// half is the managed secret in authSecretId. The owner adds it to the

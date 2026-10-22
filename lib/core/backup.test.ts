@@ -260,6 +260,11 @@ describe("restoring", { timeout: 60_000 }, () => {
       authUsername: "ada@example.com",
       authSecretId: secretId,
       mailFrom: "Ada <ada@example.com>",
+      mailSaveSent: "never",
+    })
+    await db().mcpServer.update({
+      where: { id: imap.id },
+      data: { mailServerFilesSent: true },
     })
     const jmap = await createMailAccount(ctx, {
       protocol: "jmap",
@@ -407,6 +412,8 @@ describe("restoring", { timeout: 60_000 }, () => {
         "mailSubmission",
         "smtpUrl",
         "mailFrom",
+        "mailSaveSent",
+        "mailServerFilesSent",
       ]) {
         delete row[column]
       }
@@ -431,6 +438,8 @@ describe("restoring", { timeout: 60_000 }, () => {
       mailSubmission: false,
       smtpUrl: null,
       mailFrom: null,
+      mailSaveSent: "auto",
+      mailServerFilesSent: null,
     })
   })
 

@@ -2,6 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type { McpServer } from "@/lib/generated/prisma/client"
 
+import { afterAnswer } from "../after-answer"
 import { storeTools, type SyncResult } from "../catalogue"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -52,6 +53,7 @@ import {
   openImapBackend,
   type ImapConfig,
   type ImapDeps,
+  type ImapSendHooks,
 } from "./imap"
 import { fetchJmapSession, openJmapBackend } from "./jmap"
 import {
@@ -68,11 +70,13 @@ import {
   parseRecipients,
 } from "./tools"
 import {
+  MAIL_SAVE_SENT,
   MailAuthError,
   MailRequestError,
   type BulkResult,
   type MailBackend,
   type MailCredential,
+  type MailSaveSent,
   type SearchQuery,
   type SendInput,
 } from "./types"
@@ -104,6 +108,11 @@ export type MailAccountInput = OAuthClientInput & {
   authUsername?: string | null
   authSecretId?: string | null
   mailFrom?: string | null
+  /**
+   * imap: whether PCP files a copy of what it sends in Sent (auto, always
+   * or never). Left out: auto for a new account, unchanged for one there.
+   */
+  mailSaveSent?: string | null
 }
 
 const EMPTY_AUTH = {
@@ -115,6 +124,25 @@ const EMPTY_AUTH = {
   oauthClientSecretId: null as string | null,
   oauthScope: null as string | null,
   oauthAuthorizeParams: null as string | null,
+}
+
+/** The owner's choice for the copy in Sent; undefined when not given. */
+function saveSentOf(
+  value: string | null | undefined,
+): MailSaveSent | undefined {
+  const chosen = value?.trim()
+
+  if (!chosen) {
+    return undefined
+  }
+
+  if (!(MAIL_SAVE_SENT as readonly string[]).includes(chosen)) {
+    throw invalid(
+      "Choose whether PCP saves a copy in Sent: automatically, always or never.",
+    )
+  }
+
+  return chosen as MailSaveSent
 }
 
 async function normalizeMailAccount(
@@ -138,6 +166,8 @@ async function normalizeMailAccount(
   const mailFrom = input.mailFrom?.trim()
     ? parseRecipient(input.mailFrom, "The mail_from address").email
     : null
+  // Only an IMAP account files its own copy; a JMAP server does that.
+  const mailSaveSent = imap ? saveSentOf(input.mailSaveSent) : undefined
   const auth = { ...EMPTY_AUTH }
   let newSecret: NewSecret | null = null
 
@@ -196,6 +226,8 @@ async function normalizeMailAccount(
       url,
       smtpUrl,
       mailFrom,
+      // Undefined leaves the column as it is (or at its default).
+      mailSaveSent,
       readOnly: input.readOnly,
       authType: input.authType,
       ...auth,
@@ -232,6 +264,9 @@ export async function createMailAccount(
 
   return { id }
 }
+
+/** Which server PCP learned files its own copy in Sent (or does not). */
+const SENDING_FIELDS = ["url", "smtpUrl", "authUsername"] as const
 
 /** What reaching the account depends on; a change means checking it again. */
 const CONNECTION_FIELDS = [
@@ -273,6 +308,8 @@ export async function updateMailAccount(
   const reconnect =
     newSecret !== null ||
     CONNECTION_FIELDS.some((key) => data[key] !== existing[key])
+  // What PCP learned of the copy in Sent was of another server or login.
+  const relearn = SENDING_FIELDS.some((key) => data[key] !== existing[key])
 
   await withNewSecret(ctx, newSecret, (secretId) =>
     db().mcpServer.update({
@@ -293,6 +330,7 @@ export async function updateMailAccount(
         ...(dropTokens
           ? { oauthTokensId: null, oauthConnectedAt: null, status: "unknown" }
           : {}),
+        ...(relearn ? { mailServerFilesSent: null } : {}),
       },
     }),
   )
@@ -309,7 +347,28 @@ function imapConfig(server: McpServer): ImapConfig {
     imap: parseImapAddress(server.url),
     smtp: server.smtpUrl ? parseSmtpAddress(server.smtpUrl) : null,
     from: server.mailFrom,
+    saveSent: (MAIL_SAVE_SENT as readonly string[]).includes(
+      server.mailSaveSent,
+    )
+      ? (server.mailSaveSent as MailSaveSent)
+      : "auto",
+    serverFilesSent: server.mailServerFilesSent,
   }
+}
+
+/**
+ * Keeps what a look in Sent found out about the account's server, which
+ * shapes how long the next one waits. Not a secret, and only the owner's
+ * own server's habit.
+ */
+async function learnServerFilesSent(
+  serverId: string,
+  serverFilesSent: boolean,
+): Promise<void> {
+  await db().mcpServer.updateMany({
+    where: { id: serverId, kind: "imap" },
+    data: { mailServerFilesSent: serverFilesSent },
+  })
 }
 
 function loginOf(server: McpServer, credential: MailCredential) {
@@ -410,12 +469,18 @@ async function openBackend(
   server: McpServer,
   credential: MailCredential,
   imap: ImapDeps,
+  defer: ImapSendHooks["defer"],
 ): Promise<MailBackend> {
   if (server.kind === "imap") {
     return openImapBackend(
       imapConfig(server),
       loginOf(server, credential),
       imap,
+      {
+        defer,
+        learned: (serverFilesSent) =>
+          learnServerFilesSent(server.id, serverFilesSent),
+      },
     )
   }
 
@@ -816,6 +881,7 @@ export async function callMailTool(
     keepBytes,
     open,
     imap = defaultImapDeps,
+    defer = afterAnswer,
   }: {
     credential: MailCredential
     keep?: ResultKeeper
@@ -824,6 +890,11 @@ export async function callMailTool(
     /** Opens a result the token kept: handles in the arguments. */
     open?: ResultOpener
     imap?: ImapDeps
+    /**
+     * Runs work once the call has answered (an IMAP send's look for the
+     * copy in Sent): the request's own, lib/core/after-answer.ts.
+     */
+    defer?: ImapSendHooks["defer"]
   },
 ): Promise<CallToolResult> {
   const kind = server.kind as MailKind
@@ -867,7 +938,7 @@ export async function callMailTool(
   let backend: MailBackend | null = null
 
   try {
-    backend = await openBackend(server, credential, imap)
+    backend = await openBackend(server, credential, imap, defer)
     const scrub = makeRedactor(credential.redact)
     const value = await runTool(backend, server, toolName, args, {
       keep,
