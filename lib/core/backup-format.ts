@@ -296,6 +296,9 @@ const McpServerRow = z.strictObject({
   // Calendar accounts (kind caldav), added in 0.4: absent from older
   // exports, which hold none.
   davHomeUrl: str.nullable().default(null),
+  // The version of its document in a linked repository, added with them:
+  // absent from older exports, which never synced one.
+  syncVersion: z.number().int().nullable().default(null),
 })
 
 const ServerAuthHeaderRow = z.strictObject({
