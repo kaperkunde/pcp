@@ -423,8 +423,14 @@ export async function importItemAction(
           hash: String(choice.hash),
           instance: {
             ...instanceInputFrom(formData),
-            readOnly: field(formData, "readOnly") === "on",
-            publicOnly: field(formData, "publicOnly") === "on",
+            // Only where the form showed them (an endpoint's); otherwise
+            // what the item says, or the safe default.
+            ...(field(formData, "switches") === "1"
+              ? {
+                  readOnly: field(formData, "readOnly") === "on",
+                  publicOnly: field(formData, "publicOnly") === "on",
+                }
+              : {}),
           },
         },
       ],

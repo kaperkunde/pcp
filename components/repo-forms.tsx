@@ -83,11 +83,13 @@ function TrustWarning() {
         className="mt-0.5 size-4 shrink-0 text-warning"
       />
       <span>
-        Sync then changes a skill&apos;s text from this repository without
-        asking you: whoever can push to it can put instructions in front of your
-        assistants (prompt injection). Trust only a repository you or people you
-        trust control. Anything that reaches further than text still waits for
-        you.
+        When you can push to it too (read and write), sync then changes a
+        skill&apos;s text from this repository without asking you: whoever can
+        push to it can put instructions in front of your assistants (prompt
+        injection). Trust only a repository you or people you trust control.
+        Anything that reaches further than text still waits for you, and what
+        you add from a read-only repository stays as you reviewed it until you
+        take an update.
       </span>
     </p>
   )

@@ -209,6 +209,7 @@ export function CloneForm({
 
       {variant?.switches ? (
         <FormSection>
+          <input type="hidden" name="switches" value="1" />
           <div className="overflow-hidden rounded-xl bg-field">
             <SwitchRow
               id={`${prefix}-read-only`}
