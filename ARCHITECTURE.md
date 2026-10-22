@@ -1044,6 +1044,52 @@ printed (up to a million characters) and what it returned come back in the
 answer, and a long part is kept as a result of the token's (the returned
 value as JSON, shown by its handle) rather than cut.
 
+**Runs, and a run that outlives its call.** Claude Code gives up on a tool
+call after 60 seconds, and a client's disconnect may never reach PCP (the
+connection stays open until PCP answers; in stateless mode a
+`notifications/cancelled` reaches a fresh server, not the one running), so
+run_code cannot learn in time that nobody is waiting. It does not try to:
+
+- Every run (run_code's, and a wrapper tool's) has an id, `run_` and random
+  hex, and a trace (`code/runs.ts`) of its calls: server, tool, how it went
+  (ok, error, asked the owner, refused, under way), how long it took, and
+  whether its server marks it read-only (`read-only.ts markedReadOnly`, as
+  `call_read_only_tool` decides). The trace never holds arguments or
+  results. Every answer but a plain success says the run's id and state,
+  the exit reason (uncaught error, wall-clock, CPU, call or memory limit,
+  the client went away, stopped for the owner's answer, or PCP failing
+  around it, whose catch in `runProgram` keeps what the program printed),
+  the error and what it printed, and the calls that change things that
+  completed, with a warning to check them before running it again when
+  there are any. A call that changes things and failed on its way (a
+  `PcpError` "upstream": not reached, timed out) is marked as one that may
+  have gone through; `call_tool` says the same in one line.
+- run_code answers at most `RUN_ANSWER_MS` (45 seconds) after it started.
+  A program not done by then, or whose request's signal aborted, is not
+  stopped: it goes on within `RUN_TIMEOUT_MS`, and the answer says it is
+  still running, with its id and its calls so far. Its calls run on the
+  run's own signal, which aborts when the run is over, never when the
+  client leaves; the bridge hands it, with the run's id, to
+  `callServerTool` (`runId`, `signal`), for the browser. When such a run
+  ends, its whole outcome (the answer it would have given, and its calls)
+  is kept as a result of the token's own (`tool-results.ts`: encrypted,
+  gone after a day, never logged), and an in-memory map from run id to that
+  result is all PCP holds of it. `check_run(id)` waits up to 45 seconds for
+  a run still going and answers with its state or its kept outcome; a run
+  is its token's own, so another token's id (and any id after a restart,
+  which also ends an unfinished run) is unknown. While either call is held
+  open and the request carried a `progressToken`, PCP sends
+  `notifications/progress` every `RUN_PROGRESS_MS` (15 seconds).
+- The same program (the SHA-256 of its language and text, not the text)
+  from the same token while a run of it is going, or within
+  `DUPLICATE_RUN_MS` (5 minutes) of its end, is answered with that run's
+  id, state and calls instead of running again; `rerun: true` runs it all
+  the same. A run that stopped for the owner is not held to this: its
+  answer says to run it again once they have answered.
+
+A wrapper's run reports the same way but does not outlive its call: it
+stops when its request goes away, as before.
+
 ## Wrappers
 
 A wrapper is a server of its own (`mcp_server.kind = "wrapper"`, its url the
@@ -2143,6 +2189,8 @@ message each (`app/mcp/route.ts`). The tools:
   `permission_request.decode`, `permission_request.keep`).
 - `check_permission(id)`, `check_server(server)`, `register_server(...)`
   and `propose_tool_access(changes)` belong to the permission flow below.
+- `check_run(id)`, beside `run_code` for a token that runs code, says how
+  one of the token's runs went (Running code, above). It only reads.
 - `read_result(id, offset?, length?, find?)` reads a slice of an answer
   PCP shortened and kept whole, or of a kept value; a file that is not text
   is described, not shown (below).

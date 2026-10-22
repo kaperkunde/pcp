@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { Output } from "./output"
 import { checkSyntax, javaScriptExecutor, runJavaScript } from "./quickjs"
 import type { Bridge, BridgeReply } from "./types"
 
@@ -318,7 +319,7 @@ describe("how a run ends", () => {
       signal: new AbortController().signal,
     })
 
-    expect(result.kind).toBe("error")
+    expect(result).toMatchObject({ kind: "error", reason: "cpu" })
     expect((result as { message: string }).message).toContain(
       "more than 0.3 seconds",
     )
@@ -377,7 +378,7 @@ describe("how a run ends", () => {
       signal: new AbortController().signal,
     })
 
-    expect(result.kind).toBe("error")
+    expect(result).toMatchObject({ kind: "error", reason: "memory" })
     expect((result as { message: string }).message).toMatch(/out of memory/i)
   })
 
@@ -406,10 +407,38 @@ describe("how a run ends", () => {
       signal: new AbortController().signal,
     })
 
-    expect(result.kind).toBe("error")
+    expect(result).toMatchObject({ kind: "error", reason: "memory" })
     expect((result as { message: string }).message).toContain(
       "ran out of memory (32 MB)",
     )
+  })
+
+  it("names the request cap when it ends the run, and no limit for an error of the program's", async () => {
+    const capped = await run(
+      `for (;;) await pcp.call("files", "list")`,
+      async () => ({ ok: true, value: null }),
+    )
+    expect(capped).toMatchObject({ kind: "error", reason: "calls" })
+    expect((capped as { message: string }).message).toContain(
+      "at most 200 things",
+    )
+
+    const thrown = await run(`throw new Error("mine")`)
+    expect(thrown.kind).toBe("error")
+    expect(thrown).not.toHaveProperty("reason")
+  })
+
+  it("prints into the output it was handed, so the bridge keeps it", async () => {
+    const output = new Output()
+    const result = await runJavaScript({
+      code: `console.log("kept"); return 1`,
+      bridge: async () => ({ ok: true, value: null }),
+      signal: new AbortController().signal,
+      output,
+    })
+
+    expect(result.output).toBe("kept\n")
+    expect(output.text()).toBe("kept\n")
   })
 
   it("cuts what it prints past the limit and counts the rest", async () => {

@@ -164,6 +164,7 @@ function resultOf(message: Record<string, unknown>, current: Job): RunResult {
     return {
       kind: "error",
       message: `The run took longer than ${Math.round(RUN_TIMEOUT_MS / 1000)} seconds and was stopped.`,
+      reason: "time",
       ...shown,
     }
   }

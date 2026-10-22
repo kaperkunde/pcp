@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
+import { MAY_HAVE_GONE_THROUGH } from "./code/runs"
 import { db } from "./db"
+import { PcpError } from "./errors"
 import {
   buildGatewayServer,
   loadGatewayServers,
@@ -32,10 +34,17 @@ let ctx: VaultContext
 let scope: GatewayScope
 let client: Client
 let ran: string[]
+/** What the next upstream call throws, when set. */
+let failWith: Error | null = null
 
 const executor: PermissionExecutor = {
   callTool: async (_ctx, _server, tool) => {
     ran.push(tool)
+
+    if (failWith) {
+      throw failWith
+    }
+
     return { content: [{ type: "text", text: `ran ${tool}` }] }
   },
   syncTools: async () => ({ status: "ok", message: "", toolCount: 0 }),
@@ -108,6 +117,7 @@ beforeEach(async () => {
     password: "correct horse battery staple",
   })
   ran = []
+  failWith = null
   vi.mocked(appendRequestLog).mockClear()
   await connect()
 })
@@ -155,6 +165,61 @@ describe("the read-only tools", () => {
     expect(readOnly("list_secrets")).toBe(true)
     expect(readOnly("get_endpoint")).toBe(true)
     expect(readOnly("update_endpoint")).toBe(false)
+  })
+
+  it("include check_run for a token that runs code, and not run_code", async () => {
+    const { token } = await createApiToken(ctx, {
+      name: "Coder",
+      allowAllServers: true,
+      runCode: true,
+    })
+    const coder = {
+      ...(await resolveApiToken(token))!,
+      publicUrl: "http://localhost:3000",
+    }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(coder, await loadGatewayServers(coder), {
+      executor,
+    }).connect(serverSide)
+    const coding = new Client({ name: "test", version: "1.0.0" })
+    await coding.connect(clientSide)
+
+    const { tools } = await coding.listTools()
+    const readOnly = (name: string) =>
+      tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint
+    await coding.close()
+
+    expect(readOnly("check_run")).toBe(true)
+    expect(readOnly("run_code")).toBe(false)
+  })
+})
+
+describe("a call that failed on its way", () => {
+  it("says a call that changes things may have gone through, and not a read or a refusal", async () => {
+    failWith = new PcpError("upstream", "Postcards could not be reached.")
+
+    const sent = await call("call_tool", {
+      server: "postcards",
+      tool: "send_postcard",
+    })
+    expect(sent.isError).toBe(true)
+    expect(sent.text).toBe(
+      `Postcards could not be reached.\n\n${MAY_HAVE_GONE_THROUGH}`,
+    )
+
+    const read = await call("call_read_only_tool", {
+      server: "postcards",
+      tool: "list_cards",
+    })
+    expect(read.isError).toBe(true)
+    expect(read.text).toBe("Postcards could not be reached.")
+
+    failWith = new PcpError("validation", "That is not a postcard.")
+    const refused = await call("call_tool", {
+      server: "postcards",
+      tool: "send_postcard",
+    })
+    expect(refused.text).toBe("That is not a postcard.")
   })
 })
 

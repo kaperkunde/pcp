@@ -314,6 +314,61 @@ describe("calling a wrapper's tool", () => {
     expect(api.requests.at(-1)!.url).toContain(`key=${KEY}`)
   })
 
+  it("says, when it fails, the run, why, and the calls that change things that completed", async () => {
+    const { id: notesId } = await createEndpoint(ctx, {
+      name: "Notes",
+      specSource: "upload",
+      specText: JSON.stringify({
+        openapi: "3.0.3",
+        info: { title: "Notes", version: "1" },
+        servers: [{ url: api.origin }],
+        paths: {
+          "/notes": {
+            post: {
+              operationId: "add_note",
+              summary: "Adds a note",
+              responses: { "200": { description: "ok" } },
+            },
+          },
+        },
+      }),
+      readOnly: false,
+      authType: "none",
+    })
+    await writeToolAccess(scope.tokenId, notesId, "add_note", "allowed")
+    const wrapper = await approvedWrapper({
+      ...ECHO_TOOL,
+      program: `
+        await pcp.call("things", "echo", { key: { $secret: "Things key" }, q: args.word })
+        await pcp.call("notes", "add_note", {})
+        console.log("noted")
+        throw new Error("then it broke")
+      `,
+      calls: ["things/echo", "notes/add_note"],
+    })
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const result = await call("call_tool", {
+      server: "lookup",
+      tool: "lookup",
+      arguments: { word: "hello" },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain("lookup/lookup failed: Error: then it broke")
+    expect(result.text).toContain("It printed:\nnoted")
+    expect(result.text).toMatch(
+      /Run run_[0-9a-f]{16}: failed\. Exit reason: uncaught error\./,
+    )
+    // The read is not listed; the note it added is.
+    expect(result.text).toContain(
+      "Calls that change things and completed:\n- notes/add_note: ok",
+    )
+    expect(result.text).not.toContain("things/echo")
+    expect(result.text).toContain("Some of this run may have taken effect")
+    expect(result.text).not.toContain(KEY)
+  })
+
   it("checks the arguments against the tool's schema", async () => {
     const wrapper = await approvedWrapper()
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")

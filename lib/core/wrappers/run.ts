@@ -14,7 +14,9 @@ import {
   type CodeCallOutcome,
   type PermissionExecutor,
 } from "../permissions"
+import { markedReadOnly } from "../read-only"
 import { resourceLimits } from "../resources/state"
+import { effectLines, reasonLabel, stateLabel } from "../code/runs"
 
 import {
   readDefinition,
@@ -224,12 +226,20 @@ async function callWrapperTool(
   }
 
   const { result, stop } = run
+  /** What every answer but a plain success says of the run. */
+  const report = [
+    `Run ${run.id}: ${stateLabel(run.state)}.${run.reason ? ` Exit reason: ${reasonLabel(run.reason)}.` : ""}`,
+    ...effectLines(run.trace),
+  ]
 
   if (result.kind === "stopped" && stop) {
     return withLead(
-      isConnectResult(stop.result)
-        ? `${label} calls ${stop.at}, which the owner has to connect first; nothing after that call ran. Once they have (check_server says when), call ${label} again.`
-        : `${label} calls ${stop.at}, which needs the owner first; nothing after that call ran. Once they have answered below, call ${label} again.`,
+      [
+        isConnectResult(stop.result)
+          ? `${label} calls ${stop.at}, which the owner has to connect first; nothing after that call ran. Once they have (check_server says when), call ${label} again.`
+          : `${label} calls ${stop.at}, which needs the owner first; nothing after that call ran. Once they have answered below, call ${label} again.`,
+        ...report,
+      ].join("\n\n"),
       stop.result,
     )
   }
@@ -238,7 +248,10 @@ async function callWrapperTool(
     if (result.returned === null) {
       return tool.outputSchema
         ? text(
-            `${label} returned nothing, but its outputSchema describes an answer.`,
+            [
+              `${label} returned nothing, but its outputSchema describes an answer.`,
+              ...report,
+            ].join("\n\n"),
             true,
           )
         : text(`${label} finished and returned nothing.`)
@@ -258,7 +271,10 @@ async function callWrapperTool(
 
     if (mismatch) {
       return text(
-        `${label} returned something its outputSchema does not allow. ${mismatch}`,
+        [
+          `${label} returned something its outputSchema does not allow. ${mismatch}`,
+          ...report,
+        ].join("\n\n"),
         true,
       )
     }
@@ -272,6 +288,7 @@ async function callWrapperTool(
     [
       `${label} failed: ${result.kind === "error" ? result.message : "it was stopped."}`,
       ...(printed ? [`It printed:\n${printed.slice(0, 4_000)}`] : []),
+      ...report,
     ].join("\n\n"),
     true,
   )
@@ -287,6 +304,8 @@ async function innerCall(
     server: slug,
     tool: name,
     args,
+    run,
+    lookedUp,
     ...shape
   }: Parameters<Parameters<typeof runProgram>[2]["call"]>[0],
   definition: Pick<WrapperDefinition, "secrets" | "callLevels">,
@@ -306,6 +325,7 @@ async function innerCall(
   if (!target || !declared || target.kind === "wrapper") {
     return {
       ok: false,
+      refused: true,
       error: `${tool.name} may call only the tools the owner approved for it, and ${slug}/${name} is not one of them.`,
     }
   }
@@ -314,6 +334,7 @@ async function innerCall(
     if (!target.enabled) {
       return {
         ok: false,
+        refused: true,
         error: `${slug} is switched off in PCP, so ${tool.name} cannot call ${slug}/${name}.`,
       }
     }
@@ -325,6 +346,7 @@ async function innerCall(
     if (level === undefined || level === "blocked") {
       return {
         ok: false,
+        refused: true,
         error: `${slug}/${name} is blocked for this token, so ${tool.name} cannot call it.`,
       }
     }
@@ -332,6 +354,7 @@ async function innerCall(
     if (level === "ask" && !env.approved) {
       return {
         ok: false,
+        refused: true,
         error: `${slug}/${name} asks the owner first for this token. Call the wrapper's tool again: it asks the owner for the whole call.`,
       }
     }
@@ -353,11 +376,14 @@ async function innerCall(
       : [],
   )
 
+  lookedUp?.(await markedReadOnly(target.id, name))
+
   return runCodeCall(env.ctx, target, name, args, {
     publicUrl: env.publicUrl,
     tokenId: env.tokenId,
     max: resourceLimits().answerChars,
     executor: base,
+    run,
     ...(secrets.length > 0 ? { secrets } : {}),
     ...shape,
   })

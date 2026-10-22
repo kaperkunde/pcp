@@ -434,7 +434,17 @@ async function ownerFirst(
 /** What one call of a program run by run_code came to. */
 export type CodeCallOutcome =
   | { ok: true; value: unknown }
-  | { ok: false; error: string }
+  | {
+      ok: false
+      error: string
+      /** PCP refused it before anything was sent. */
+      refused?: boolean
+      /**
+       * It failed on its way (the server could not be reached, or did not
+       * answer in time), so it may have gone through.
+       */
+      transit?: boolean
+    }
   /** The owner has to act first: the result with their link. */
   | { owner: CallToolResult }
 
@@ -460,6 +470,7 @@ export async function runCodeCall(
     keep,
     max,
     secrets,
+    run,
     executor = defaultExecutor,
   }: {
     publicUrl: string
@@ -468,6 +479,11 @@ export async function runCodeCall(
     max: number
     /** A wrapper's call: where the owner allowed its secrets to go. */
     secrets?: SecretGrant
+    /**
+     * The run the call is made for, handed on to the upstream call: its id,
+     * and a signal that aborts when the run itself is over.
+     */
+    run?: { runId: string; signal: AbortSignal }
     executor?: PermissionExecutor
   } & AnswerShape,
 ): Promise<CodeCallOutcome> {
@@ -485,6 +501,7 @@ export async function runCodeCall(
       keepBytes: keepers.bytes,
       open: resultOpener(ctx, tokenId),
       ...(secrets ? { secrets } : {}),
+      ...(run ? { runId: run.runId, signal: run.signal } : {}),
     })
 
     return await answerValue(
@@ -504,11 +521,24 @@ export async function runCodeCall(
     }
 
     if (isPcpError(error)) {
-      return { ok: false, error: error.message }
+      return {
+        ok: false,
+        error: error.message,
+        ...(isTransitFailure(error) ? { transit: true } : {}),
+      }
     }
 
     throw error
   }
+}
+
+/**
+ * Whether a call failed on its way to the server or back (it could not be
+ * reached, or did not answer in time): upstream.ts says so as "upstream".
+ * Such a call may have gone through; a refusal before sending has not.
+ */
+export function isTransitFailure(error: unknown): boolean {
+  return isPcpError(error) && error.code === "upstream"
 }
 
 function describeAsk(ask: PermissionAsk): {
