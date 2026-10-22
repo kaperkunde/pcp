@@ -39,12 +39,14 @@ describe("what PCP picks itself", () => {
       programsAtOnce: 8,
       fileMb: 128,
       keptMb: 4096,
+      browserIdleMinutes: 60,
     })
     expect(chooseResources(EMPTY_CONFIG, tiny)).toEqual({
       programMemoryMb: 128,
       programsAtOnce: 1,
       fileMb: 16,
       keptMb: 102,
+      browserIdleMinutes: 60,
     })
   })
 
@@ -73,6 +75,7 @@ describe("what PCP picks itself", () => {
       programsAtOnce: 1,
       fileMb: 1,
       keptMb: 10,
+      browserIdleMinutes: 5,
     })
     expect(small).toMatchObject({
       textChars: 4_000_000,
@@ -87,11 +90,27 @@ describe("what PCP picks itself", () => {
       programsAtOnce: 2,
       fileMb: 100,
       keptMb: 1000,
+      browserIdleMinutes: 60,
     })
     expect(large.answerChars).toBeGreaterThan(
       Buffer.alloc(100 * MB).toString("base64").length,
     )
     expect(large.sandboxMessageBytes).toBeGreaterThan(large.answerChars * 2)
+  })
+
+  it("keeps the browser open an hour idle, whatever the machine", () => {
+    expect(limitsOf(chooseResources(EMPTY_CONFIG, tiny)).browserIdleMs).toBe(
+      60 * 60_000,
+    )
+    expect(
+      limitsOf(
+        chooseResources({ ...EMPTY_CONFIG, browserIdleMinutes: 240 }, laptop),
+      ).browserIdleMs,
+    ).toBe(240 * 60_000)
+    expect(
+      automaticResources({ ...EMPTY_CONFIG, browserIdleMinutes: 240 }, laptop)
+        .browserIdleMinutes,
+    ).toBe(60)
   })
 })
 
@@ -103,6 +122,25 @@ describe("what the owner may set", () => {
     expect(() =>
       checkResourceConfig({ ...EMPTY_CONFIG, fileMb: 1.5 }, laptop),
     ).toThrow(/whole number/)
+  })
+
+  it("keeps the browser's idle close from 5 minutes to 8 hours", () => {
+    for (const minutes of [5, 60, 480]) {
+      expect(
+        checkResourceConfig(
+          { ...EMPTY_CONFIG, browserIdleMinutes: minutes },
+          tiny,
+        ).browserIdleMinutes,
+      ).toBe(minutes)
+    }
+    for (const minutes of [0, 4, 481, 10.5]) {
+      expect(() =>
+        checkResourceConfig(
+          { ...EMPTY_CONFIG, browserIdleMinutes: minutes },
+          laptop,
+        ),
+      ).toThrow(/idle close \(minutes\) is a whole number from 5 to 480/)
+    }
   })
 
   it("refuses programs that could hold most of the machine's memory together", () => {
@@ -145,16 +183,23 @@ describe("the settings", () => {
   })
 
   it("are saved as a host setting and used at once", async () => {
-    await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 3, keptMb: 50 })
+    await saveResourceConfig({
+      ...EMPTY_CONFIG,
+      fileMb: 3,
+      keptMb: 50,
+      browserIdleMinutes: 30,
+    })
 
     expect(await getHostJson(RESOURCES_CONFIG_KEY)).toEqual({
       ...EMPTY_CONFIG,
       fileMb: 3,
       keptMb: 50,
+      browserIdleMinutes: 30,
     })
     expect(resourceLimits()).toMatchObject({
       fileBytes: 3 * MB,
       keptBytesPerToken: 50 * MB,
+      browserIdleMs: 30 * 60_000,
     })
   })
 
@@ -162,12 +207,16 @@ describe("the settings", () => {
     const { setHostJson } = await import("../host-settings")
     const before = await loadResourceLimits()
 
-    await setHostJson(RESOURCES_CONFIG_KEY, { fileMb: 7, programsAtOnce: 999 })
+    await setHostJson(RESOURCES_CONFIG_KEY, {
+      fileMb: 7,
+      programsAtOnce: 999,
+      browserIdleMinutes: 2,
+    })
 
     expect(await loadResourceLimits()).toEqual(before)
     expect(await getResourceConfig()).toEqual({ ...EMPTY_CONFIG, fileMb: 7 })
-    expect((await loadResourceLimits(Date.now() + 61_000)).fileBytes).toBe(
-      7 * MB,
-    )
+    const later = await loadResourceLimits(Date.now() + 61_000)
+    expect(later.fileBytes).toBe(7 * MB)
+    expect(later.browserIdleMs).toBe(60 * 60_000)
   })
 })

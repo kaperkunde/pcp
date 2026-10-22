@@ -280,7 +280,9 @@ what PCP picked and lets you set each yourself: a `run_code` program's memory
 (no more than the processors, and half the memory together), the largest file
 PCP keeps for an assistant and so what a program reads of one (an eighth of a
 program's memory, 10 to 256 MB), and what one token's kept results may hold
-together (a twentieth of the free disk, 50 MB to 4 GB). PCP refuses settings
+together (a twentieth of the free disk, 50 MB to 4 GB). It also sets how long
+the browser stays open with nothing happening (an hour, 5 minutes to 8 hours):
+an open browser holds memory. PCP refuses settings
 that would let programs together hold more than three quarters of the
 machine's memory, or kept results more than the disk.
 
@@ -684,9 +686,10 @@ read it (`snapshot`, which names each element with a ref; `read_page`; `find`;
 `scroll`, `wait_for`, `handle_dialog`), move files (`upload_file`,
 `download`) and `hand_over` a tab to you. It is
 Chromium without a window on PCP's machine, with up to eight tabs, started with
-the first page and closed after fifteen idle minutes. The Docker image includes
-it; elsewhere (the desktop app, a checkout), **Install Chromium** on the Browser
-page downloads it, about 200 MB, into PCP's data folder; outside the app,
+the first page and closed after an hour idle (**Settings → Resources** sets
+how long; a tab you watch or one handed over to you keeps it open). The Docker
+image includes it; elsewhere (the desktop app, a checkout), **Install
+Chromium** on the Browser page downloads it, about 200 MB, into PCP's data folder; outside the app,
 `PCP_BROWSER_EXECUTABLE` can point at a Chromium or Chrome already installed.
 Which sites a token opens follows the same lines as web fetch, on the token's
 page (as **Browser sites** for a token without web fetch): a site it has not

@@ -5,6 +5,7 @@ import { dataDir } from "../data-dir"
 import { invalid } from "../errors"
 import { getHostJson, setHostJson } from "../host-settings"
 import {
+  AUTO_BROWSER_IDLE_MINUTES,
   AUTO_FILE_MB,
   AUTO_FILE_SHARE,
   AUTO_KEPT_DISK_SHARE,
@@ -28,11 +29,12 @@ import {
 /**
  * How much of the machine PCP may use for what assistants hand it: the
  * memory and number of run_code programs, the largest file it keeps (and so
- * what a program reads of one), and what one token's kept results may hold.
+ * what a program reads of one), what one token's kept results may hold, and
+ * how long an idle browser holds its memory before it closes.
  *
  * Each is picked from the machine (its memory, as the container allows it,
- * its processors, the free disk where PCP keeps its data) unless the owner
- * set it in Settings. A host setting, `resources.config`: it is the
+ * its processors, the free disk where PCP keeps its data; the browser's is
+ * the same anywhere) unless the owner set it in Settings. A host setting, `resources.config`: it is the
  * machine's, read with no credential, and nothing of the vault is in it.
  *
  * The rest of lib/core reads the limits with `resourceLimits()`, which is
@@ -48,6 +50,7 @@ const FIELDS = [
   "programsAtOnce",
   "fileMb",
   "keptMb",
+  "browserIdleMinutes",
 ] as const
 
 export type ResourceField = (typeof FIELDS)[number]
@@ -89,6 +92,11 @@ export type ResourceLimits = {
   sandboxRequestBytes: number
   /** What all the handles in one call's arguments may add up to. */
   resolvedChars: number
+  /**
+   * How long the browser stays open with no tool call, no input, nobody
+   * watching and no hand-over waiting (browser/idle.ts).
+   */
+  browserIdleMs: number
 }
 
 export const EMPTY_CONFIG: ResourceConfig = {
@@ -96,6 +104,7 @@ export const EMPTY_CONFIG: ResourceConfig = {
   programsAtOnce: null,
   fileMb: null,
   keptMb: null,
+  browserIdleMinutes: null,
 }
 
 function clamp(value: number, { min, max }: Bound): number {
@@ -167,7 +176,10 @@ export function chooseResources(
         : FALLBACK_KEPT_MB,
     )
 
-  return { programMemoryMb, programsAtOnce, fileMb, keptMb }
+  const browserIdleMinutes =
+    config.browserIdleMinutes ?? AUTO_BROWSER_IDLE_MINUTES
+
+  return { programMemoryMb, programsAtOnce, fileMb, keptMb, browserIdleMinutes }
 }
 
 /** What PCP would pick for each setting, given the owner's other ones. */
@@ -205,6 +217,7 @@ export function limitsOf(choice: ResourceChoice): ResourceLimits {
     ),
     sandboxRequestBytes: Math.max(MIN_SANDBOX_REQUEST_BYTES, answerChars + MB),
     resolvedChars: Math.max(MIN_RESOLVED_CHARS, answerChars * 2),
+    browserIdleMs: choice.browserIdleMinutes * 60_000,
   }
 }
 
@@ -213,6 +226,7 @@ const LABELS: Record<ResourceField, string> = {
   programsAtOnce: "Programs at once",
   fileMb: "The largest file",
   keptMb: "Kept results per token",
+  browserIdleMinutes: "The browser's idle close (minutes)",
 }
 
 function megabytes(mb: number): string {

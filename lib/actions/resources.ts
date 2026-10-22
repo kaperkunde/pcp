@@ -25,6 +25,7 @@ const NAMES: Record<ResourceField, string> = {
   programsAtOnce: "programs at once",
   fileMb: "the largest file",
   keptMb: "kept results per token",
+  browserIdleMinutes: "the browser's idle minutes",
 }
 
 export async function saveResourcesAction(
@@ -56,7 +57,7 @@ export async function saveResourcesAction(
 
     return {
       message:
-        "Saved. Programs that start and results kept from now on follow these limits.",
+        "Saved. Programs that start, results kept and the browser's idle close follow these limits from now on.",
     }
   })
 

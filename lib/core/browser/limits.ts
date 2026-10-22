@@ -9,8 +9,10 @@ import { BROWSER_VIEWPORT } from "../constants"
 
 /** Tabs open at once in a vault's browser, assistants' and the owner's. */
 export const MAX_TABS = 8
-/** With no tool call, no input and nobody watching, the browser closes. */
-export const IDLE_CLOSE_MS = 15 * 60_000
+/*
+ * How long the browser stays open with nothing happening is the owner's
+ * (Settings → Resources): `resourceLimits().browserIdleMs`, see idle.ts.
+ */
 /** One page load, with its redirects. */
 export const NAVIGATION_TIMEOUT_MS = 30_000
 /**
