@@ -2789,6 +2789,20 @@ request still waiting, `listPendingRequests`, and links to each); `decidePermiss
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
 
+What waits for the owner is one queue, oldest first
+(`lib/core/owner-queue.ts`): the requests from live tokens
+(`waitingRequestsWhere`, `WAITING_ORDER`, which the bell, Home and a
+token's page all read) and the changes linked repositories left for
+review, by when each started waiting. `queueHref` is the one place that
+says where each is answered. Once the owner answers one, the answer's
+action returns `nextPendingRequest` (the oldest other one, or none) and the
+page (`components/answer-queue.tsx`) follows that link, carrying what came
+of the answer above the next request, or says nothing else is waiting. It
+only opens a page: the next request waits for its own answer. The bell's
+count drops the moment the owner answers and comes back if the answer
+fails; every answer revalidates the dashboard's layout, so the count PCP
+reads next agrees.
+
 The page shows a call's arguments one line each, and a long value is cut
 there, saying how long it is; Show everything under the lines has each
 argument whole, which is what runs when the owner allows it

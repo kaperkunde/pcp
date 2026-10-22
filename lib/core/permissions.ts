@@ -58,6 +58,7 @@ import {
   type ConnectLinks,
   type ServerState,
 } from "./connect"
+import { queueHref, WAITING_ORDER, waitingRequestsWhere } from "./owner-queue"
 import { waitForOwner } from "./owner-wait"
 import {
   argsInFull,
@@ -2135,21 +2136,19 @@ export async function getPermissionView(
   return row ? toView(ctx, row, publicUrl) : null
 }
 
-/** A token's requests still waiting for an answer, oldest first. */
+/**
+ * A token's requests still waiting for an answer, oldest first, as the
+ * bell and Home list them (owner-queue.ts).
+ */
 export async function listOpenPermissions(
   ctx: VaultContext,
   tokenId: string,
   publicUrl: string,
 ): Promise<PermissionView[]> {
   const rows = await db().permissionRequest.findMany({
-    where: {
-      vaultId: ctx.vaultId,
-      tokenId,
-      status: "pending",
-      expiresAt: { gt: new Date() },
-    },
+    where: waitingRequestsWhere(ctx, { tokenId }),
     include: ROW_INCLUDE,
-    orderBy: { createdAt: "asc" },
+    orderBy: WAITING_ORDER,
   })
 
   return Promise.all(rows.map((row) => toView(ctx, row, publicUrl)))
@@ -2161,34 +2160,28 @@ export type PendingRequest = {
   title: string
   tokenName: string
   createdAt: Date
+  /** Where the owner answers it (owner-queue.ts `queueHref`). */
+  href: string
 }
 
 /**
- * Every request in the vault still waiting for the owner, newest first: how
- * many there are, and the first `limit` of them with their titles.
+ * Every request in the vault still waiting for the owner, oldest first (the
+ * order the owner is walked through them in, owner-queue.ts): how many
+ * there are, and the first `limit` of them with their titles.
  */
 export async function listPendingRequests(
   ctx: VaultContext,
   publicUrl: string,
   { limit = 10 }: { limit?: number } = {},
 ): Promise<{ total: number; requests: PendingRequest[] }> {
-  const now = new Date()
   // A revoked or expired token's requests can no longer be answered.
-  const where = {
-    vaultId: ctx.vaultId,
-    status: "pending",
-    expiresAt: { gt: now },
-    token: {
-      revokedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-    },
-  }
+  const where = waitingRequestsWhere(ctx)
   const [total, rows] = await Promise.all([
     db().permissionRequest.count({ where }),
     db().permissionRequest.findMany({
       where,
       include: ROW_INCLUDE,
-      orderBy: { createdAt: "desc" },
+      orderBy: WAITING_ORDER,
       take: limit,
     }),
   ])
@@ -2201,6 +2194,11 @@ export async function listPendingRequests(
         title: visible(title),
         tokenName: row.token.name,
         createdAt: row.createdAt,
+        href: queueHref({
+          source: "request",
+          id: row.id,
+          kind: row.kind as PermissionKind,
+        }),
       }
     }),
   )

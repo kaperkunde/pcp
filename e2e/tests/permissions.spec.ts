@@ -11,6 +11,10 @@ import {
 } from "../lib/mcp"
 import {
   acceptNextDialog,
+  allClear,
+  answerAndAdvance,
+  answerEverythingWaiting,
+  bell,
   chooseProposedLevel,
   createToken,
   expectLevel,
@@ -139,6 +143,10 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
     uri: "ui://pcp/panel",
   })
   expect(panel.body.result?.contents ?? []).toEqual([])
+
+  // The bell lists the oldest first: what earlier projects left waiting is
+  // answered, so this test's request is among those it shows.
+  await answerEverythingWaiting(page)
 
   const args = {
     server: SLUG,
@@ -547,4 +555,89 @@ test("an OAuth server an assistant proposes is connected through a link", async 
     "[redacted]",
   )
   expect(upstream.calls.at(-1)?.authorization).toMatch(/^Bearer access-/)
+})
+
+test("answering a request takes you to the next one waiting, oldest first, until none is left", async ({
+  page,
+  baseURL,
+}) => {
+  const walker = await createToken(page, `Queue walker ${RUN}`)
+  const ask = async (tool: string, args: Record<string, unknown>) =>
+    permissionFrom(
+      toolText(
+        await callTool(baseURL!, walker, "call_tool", {
+          server: SLUG,
+          tool,
+          arguments: args,
+        }),
+      ),
+    )
+  const ours = () =>
+    page.getByRole("menuitem").filter({ hasText: `Allow ${SLUG}/` })
+  const title = (tool: string) => `Allow ${SLUG}/${tool}?`
+
+  await answerEverythingWaiting(page)
+  const echoes = callsOf("echo_auth")
+  const postcards = callsOf("send_postcard")
+  const first = await ask("add_numbers", { a: 20, b: 22 })
+  const second = await ask("echo_auth", {})
+  const third = await ask("send_postcard", { to: "Grace", message: "Hi" })
+
+  // The bell lists them oldest first, and leads to the oldest.
+  await page.goto("/servers")
+  await bell(page).click()
+  await expect(ours()).toHaveCount(3)
+  await expect(ours().nth(0)).toContainText(title("add_numbers"))
+  await expect(ours().nth(1)).toContainText(title("echo_auth"))
+  await expect(ours().nth(2)).toContainText(title("send_postcard"))
+  await ours().nth(0).click()
+  await expect(page).toHaveURL(new RegExp(`${first.path}$`))
+
+  // Answered, it runs, and PCP opens the next one with what came of the
+  // first above it. The next one waits for its own answer.
+  await answerAndAdvance(page, page.getByRole("button", { name: "Allow once" }))
+  await expect(page).toHaveURL(new RegExp(`${second.path}$`))
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `You answered: ${title("add_numbers")}`,
+  )
+  await expect(page.getByTestId("permission-outcome")).toContainText("42")
+  await expect(
+    page.getByRole("heading", { name: title("echo_auth") }),
+  ).toBeVisible()
+  expect(callsOf("echo_auth")).toBe(echoes)
+
+  // The bell no longer has the one answered.
+  await bell(page).click()
+  await expect(ours()).toHaveCount(2)
+  await page.keyboard.press("Escape")
+
+  await answerAndAdvance(page, page.getByRole("button", { name: "Not now" }))
+  await expect(page).toHaveURL(new RegExp(`${third.path}$`))
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `You answered: ${title("echo_auth")}`,
+  )
+
+  // The last one answered, PCP says so where it was answered.
+  await answerAndAdvance(page, page.getByRole("button", { name: "Not now" }))
+  await expect(allClear(page)).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`${third.path}$`))
+  await expect(page.getByText("You said no, so nothing ran.")).toBeVisible()
+  expect(callsOf("echo_auth")).toBe(echoes)
+  expect(callsOf("send_postcard")).toBe(postcards)
+
+  // A link opens its own request first, newest or not, then goes on with
+  // the oldest still waiting.
+  const older = await ask("add_numbers", { a: 1, b: 1 })
+  const newer = await ask("send_postcard", { to: "Ada", message: "Again" })
+  await page.goto(newer.path)
+  await answerAndAdvance(page, page.getByRole("button", { name: "Not now" }))
+  await expect(page).toHaveURL(new RegExp(`${older.path}$`))
+  await answerAndAdvance(page, page.getByRole("button", { name: "Not now" }))
+  await expect(allClear(page)).toBeVisible()
+
+  // Nothing of theirs waits any more.
+  await page.goto("/home")
+  await expect(
+    page.getByRole("link", { name: "Review", exact: true }),
+  ).toHaveCount(0)
 })

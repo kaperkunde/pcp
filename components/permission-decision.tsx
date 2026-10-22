@@ -1,7 +1,8 @@
 "use client"
 
-import { useState, useTransition } from "react"
+import { useState } from "react"
 
+import { useAnswer } from "@/components/answer-queue"
 import { FormError } from "@/components/form-status"
 import {
   DECISION_BUTTON,
@@ -47,13 +48,19 @@ const QUIET: Decision[] = ["block", "discard"]
  * owner shares the memory or keeps it for that assistant.
  *
  * "Allow for" comes with how long, chosen beside its button.
+ *
+ * The answer goes through the owner's queue (components/answer-queue.tsx):
+ * the count drops at once, and the owner is taken on to the next request,
+ * unless `advance` is off (a token's page, which lists its own).
  */
 export function PermissionDecision({
   id,
   decisions,
   secret,
   every,
+  advance = true,
 }: {
+  advance?: boolean
   id: string
   decisions: Array<{ value: Decision; label: string }>
   secret?: {
@@ -66,16 +73,14 @@ export function PermissionDecision({
   } | null
   every?: { asked: boolean } | null
 }) {
-  const [pending, startTransition] = useTransition()
+  const { submit, pending, error, setError, done } = useAnswer(
+    { request: id },
+    { advance },
+  )
   const [chosen, setChosen] = useState<Decision | null>(null)
-  const [error, setError] = useState<string | null>(null)
   const [secretValue, setSecretValue] = useState("")
   const [always, setAlways] = useState(every?.asked === true)
   const [minutes, setMinutes] = useState<number>(DEFAULT_ALLOW_FOR_MINUTES)
-  const [done, setDone] = useState<{
-    message: string
-    isError: boolean
-  } | null>(null)
 
   function decide(value: Decision) {
     const agrees = AGREES.includes(value)
@@ -96,9 +101,8 @@ export function PermissionDecision({
     }
 
     setChosen(value)
-    setError(null)
 
-    startTransition(async () => {
+    submit(async () => {
       const result = await decidePermissionAction(
         id,
         value,
@@ -107,11 +111,9 @@ export function PermissionDecision({
         value === "allow_for" ? minutes : undefined,
       )
 
-      if (result.status === "error") {
-        setError(result.error)
-      } else if (result.status === "ok") {
-        setDone({ message: result.message, isError: result.isError })
-      }
+      return result.status === "ok"
+        ? result
+        : { error: result.status === "error" ? result.error : "Not sent." }
     })
   }
 

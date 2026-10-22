@@ -4,6 +4,7 @@ import { Plus, TriangleAlert } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useActionState, useEffect, useState, useTransition } from "react"
 
+import { useAnswer } from "@/components/answer-queue"
 import { FormError, FormNote } from "@/components/form-status"
 import { ChoiceField } from "@/components/server-form-parts"
 import { SubmitButton } from "@/components/submit-button"
@@ -700,16 +701,35 @@ export function ChangeAnswer({
   hash: string
   conflict: boolean
 }) {
-  const [state, setState] = useState<RepoActionResult>(IDLE)
-  const [pending, start] = useTransition()
-  // The answer stays on the page; the bell drops it at the next page.
+  // The same way through as a request's answer (components/answer-queue.tsx):
+  // the count drops at once, then the owner is taken on to what waits next.
+  const { submit, pending, error, done } = useAnswer(
+    { repoItem: itemId },
+    { tell: false },
+  )
   const answer = (choice: "approve" | "decline" | "keep") =>
-    start(async () => {
-      setState(await answerChangeAction(itemId, choice, { sha, hash }))
+    submit(async () => {
+      const result = await answerChangeAction(itemId, choice, { sha, hash })
+
+      return result.status === "ok"
+        ? {
+            message: [result.message, ...(result.lines ?? [])]
+              .filter(Boolean)
+              .join("\n"),
+            isError: false,
+            next: result.next ?? null,
+          }
+        : { error: result.status === "error" ? result.error : "Not sent." }
     })
 
-  if (state.status === "ok") {
-    return <ResultLines state={state} />
+  if (done) {
+    return (
+      <div className="flex flex-col gap-1" role="status">
+        <p className="text-sm break-words whitespace-pre-wrap text-muted-foreground">
+          {done.message}
+        </p>
+      </div>
+    )
   }
 
   return (
@@ -754,7 +774,7 @@ export function ChangeAnswer({
         )}
       </div>
       <FormNote message="Nothing changes until you answer." />
-      <FormError error={state.status === "error" ? state.error : null} />
+      <FormError error={error} />
     </div>
   )
 }

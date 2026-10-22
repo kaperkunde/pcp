@@ -12,6 +12,7 @@ import type { Metadata } from "next"
 import Link from "next/link"
 
 import { AccessReview } from "@/components/access-review"
+import { AllClearAfter, AnsweredBefore } from "@/components/answer-queue"
 import { BrowserTabView } from "@/components/browser-tab-view"
 import { RelativeDate } from "@/components/local-date"
 import { MemoryReview } from "@/components/memory-review"
@@ -130,6 +131,9 @@ export default async function PermissionPage({
         <ChevronLeft aria-hidden className="size-4" />
         Home
       </Link>
+      <AnsweredBefore
+        className={cn("mx-auto w-full", !roomy && "max-w-[720px]")}
+      />
       <Card
         className={cn(
           "mx-auto w-full gap-6 rounded-[18px] p-5 sm:p-8",
@@ -260,6 +264,9 @@ export default async function PermissionPage({
           </div>
         ) : null}
       </Card>
+      <AllClearAfter
+        className={cn("mx-auto w-full", !roomy && "max-w-[720px]")}
+      />
     </PageColumn>
   )
 }
