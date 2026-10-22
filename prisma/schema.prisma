@@ -332,7 +332,8 @@ model PermissionRequest {
   /// call: the parts of the answer the assistant asked to be kept as results
   /// and handed back as handles (call_tool's keep), as a JSON list of paths.
   keep             String?
-  /// pending | running | executed | failed | declined
+  /// pending | running | executed | failed | declined | withdrawn (the
+  /// assistant took it back) | closed (a hand-over's tab closed first)
   status           String     @default("pending")
   /// Where the owner answered: app | form | url | web
   via              String?

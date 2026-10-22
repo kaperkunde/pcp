@@ -14,6 +14,7 @@ import type {
 
 import type { VaultContext } from "../context"
 import { PcpError } from "../errors"
+import { closePendingRequests } from "../permission-close"
 import { isPcpSite } from "../fetch/fetch"
 import { resolveFetchAccess, siteKey, type FetchRuleSet } from "../fetch/rules"
 import { isOwnAddress, isPublicAddress } from "../openapi/address"
@@ -107,6 +108,11 @@ export type Tab = {
   control: TabControl
   /** The owner holds the tab for an assistant's hand-over, since then. */
   handoverSince: number | null
+  /**
+   * The hand-over requests asked about this tab (noteHandoverRequest):
+   * closed when the tab closes, so none waits for a tab that is gone.
+   */
+  handoverRequests: Set<string>
   /** The last site the gate kept the main frame from opening. */
   lastBlocked: string | null
   dialog: Dialog | null
@@ -588,7 +594,7 @@ async function start(
   })
   browser.on("disconnected", () => {
     if (runtime().vaults.get(self.vaultId) === self) {
-      forget(self)
+      void forget(self)
     }
     removeScratchDir(self.scratchDir)
   })
@@ -597,12 +603,16 @@ async function start(
   return vault
 }
 
-function forget(vault: VaultBrowser): void {
+/** The browser is gone, and its tabs with it: their hand-overs close. */
+function forget(vault: VaultBrowser): Promise<void> {
+  const tabs = [...vault.tabs.values()]
+
   if (vault.idleTimer) clearTimeout(vault.idleTimer)
   runtime().vaults.delete(vault.vaultId)
   vault.tabs.clear()
   vault.solves.clear()
   void vault.proxy.close()
+  return closeHandovers(vault.vaultId, tabs)
 }
 
 /**
@@ -628,8 +638,9 @@ export async function closeBrowser(
       )
     }
 
-    forget(vault)
+    const closed = forget(vault)
     await vault.browser.close().catch(() => {})
+    await closed
   }
 
   // A lock that does not come in time still closes the browser.
@@ -965,8 +976,12 @@ async function listen(
   page.on("close", () => {
     // A page closed as its tab is reopened is no longer the tab's.
     if (!mine()) return
+    // Closed by the page itself (closeTab and the browser's close take the
+    // tab out first, and close its hand-overs themselves).
+    const listed = vault.tabs.get(tab.id) === tab
     vault.tabs.delete(tab.id)
     recomputePrivate(vault)
+    if (listed) void closeHandovers(vault.vaultId, [tab])
   })
 }
 
@@ -988,6 +1003,7 @@ async function attach(
     allowedHosts: new Set(meta.allowedHosts ?? []),
     control: "assistant",
     handoverSince: null,
+    handoverRequests: new Set(),
     lastBlocked: null,
     dialog: null,
     offeredFile: null,
@@ -1226,8 +1242,37 @@ export function getTab(vaultId: string, id: string): Tab | null {
 export async function closeTab(vault: VaultBrowser, tab: Tab): Promise<void> {
   vault.tabs.delete(tab.id)
   recomputePrivate(vault)
+  await closeHandovers(vault.vaultId, [tab])
   await bounded(tab.page.close(), ACTION_TIMEOUT_MS, "page.close").catch(
     () => {},
+  )
+}
+
+/**
+ * A hand-over request an assistant made about a tab: closed with the tab
+ * (or the browser), as one nobody can answer any more.
+ */
+export function noteHandoverRequest(
+  vaultId: string,
+  tabId: string,
+  requestId: string,
+): void {
+  getTab(vaultId, tabId)?.handoverRequests.add(requestId)
+}
+
+/** Tabs that are gone: the hand-overs still waiting about them close. */
+async function closeHandovers(vaultId: string, tabs: Tab[]): Promise<void> {
+  const ids = tabs.flatMap((tab) => [...tab.handoverRequests])
+
+  if (ids.length === 0) {
+    return
+  }
+
+  await closePendingRequests(
+    { vaultId, kind: "browser_handover", id: { in: ids } },
+    "closed",
+  ).catch((error) =>
+    console.error("[browser] closing a tab's hand-over failed", error),
   )
 }
 

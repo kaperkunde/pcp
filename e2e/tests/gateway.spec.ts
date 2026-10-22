@@ -108,6 +108,7 @@ test("issues an API token and describes the servers behind it", async ({
     "call_tool",
     "call_read_only_tool",
     "check_permission",
+    "withdraw_request",
     "check_server",
     "read_result",
     "register_server",

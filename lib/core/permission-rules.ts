@@ -22,8 +22,18 @@ export const PERMISSION_TTL_MS = 24 * 60 * 60_000
 /** Rows this long past their expiry are deleted at boot. */
 export const PERMISSION_KEEP_MS = 7 * 24 * 60 * 60_000
 
+/**
+ * `withdrawn`: the assistant that asked took it back (withdraw_request).
+ * `closed`: what it was about went away first (a hand-over's tab).
+ */
 export type PermissionStatus =
-  "pending" | "running" | "executed" | "failed" | "declined"
+  | "pending"
+  | "running"
+  | "executed"
+  | "failed"
+  | "declined"
+  | "withdrawn"
+  | "closed"
 
 /** JSON with sorted keys and no undefined values, so equal args hash equal. */
 export function canonicalJson(value: unknown): string {

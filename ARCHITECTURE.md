@@ -1788,7 +1788,11 @@ owner's and throws `OwnerNeeded` for a `browser_handover` request, which
 shows the assistant's message and the tab live; Done (or Not now) gives it
 back to the token that handed it over, saves the profile, and is what
 `check_permission` reports. A hand-over nobody answers goes back when its
-request expires.
+request expires, or when the assistant withdraws it. The request is noted
+on its tab (`noteHandoverRequest`), and a tab that closes (the owner's
+Close, an assistant's, the page's own, or the browser closing) closes the
+hand-overs still waiting for it (status `closed`), so none stays in the
+bell for a tab that is gone.
 
 **The live view** (`app/api/browser/tabs/[id]/`, `screencast.ts`,
 `input.ts`, `components/browser-tab-view.tsx`). The tab's page draws
@@ -2628,8 +2632,9 @@ skill:<name>` with its description, `memory /memories/…` with the line
 - `search_tools` and `describe_tool`, the old names, stay registered for
   one release and answer exactly as before (tools only; server and tool),
   under one first line naming the new tool.
-- `check_permission(id)`, `check_server(server)`, `register_server(...)`
-  and `propose_tool_access(changes)` belong to the permission flow below.
+- `check_permission(id?)`, `withdraw_request(id)`, `check_server(server)`,
+  `register_server(...)` and `propose_tool_access(changes)` belong to the
+  permission flow below.
 - `check_run(id)`, beside `run_code` for a token that runs code, says how
   one of the token's runs went (Running code, above). It only reads.
 - `read_result(id, offset?, length?, find?)` reads a slice of an answer
@@ -2788,6 +2793,19 @@ owner answers on that page, and only there (the header's bell lists every
 request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
+
+An assistant can take back a request of its own token's while it is still
+pending and unexpired (`withdraw_request`, `withdrawPermission`): one
+update from pending to `withdrawn` (`closePendingRequests` in
+`permission-close.ts`), so it and an answer racing it cannot both win, and
+another token's request reads as none at all. Nothing runs and nothing is
+written for it; in particular a memory to share is not kept for the
+assistant, as the owner's Not now would. A hand-over's tab goes back to the
+browser tools (`finishHandover`). The bell drops it (it lists pending rows
+only), the request's page says "Withdrawn by the assistant", and the Log
+shows the call that asked as withdrawn. `check_permission` with no id lists
+the token's own requests still waiting (id, kind, title, age and link),
+and only reads.
 
 The page shows a call's arguments one line each, and a long value is cut
 there, saying how long it is; Show everything under the lines has each

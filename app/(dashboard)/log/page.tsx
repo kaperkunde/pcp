@@ -30,6 +30,8 @@ const REQUEST_STATES: Record<RequestState, string> = {
   allowed: "You allowed it",
   failed: "Allowed, failed",
   declined: "You said no",
+  withdrawn: "Withdrawn",
+  closed: "Tab closed",
   expired: "Expired",
 }
 
