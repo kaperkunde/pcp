@@ -79,11 +79,11 @@ test("the owner adds the browser, and a token that reaches it gets its tools and
   ).toBeVisible()
   await expect(page.getByText(/Found at/)).toBeVisible()
 
-  // Added: the sidebar lists it right below Memories, and its page is it.
+  // Added: the sidebar lists it right below Skills, and its page is it.
   await expect(browserItem).toHaveAttribute("aria-current", "page")
   await expect(
     nav
-      .getByRole("link", { name: "Memories" })
+      .getByRole("link", { name: "Skills" })
       .locator("xpath=following-sibling::a[1]"),
   ).toHaveText("Browser")
 

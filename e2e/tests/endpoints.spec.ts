@@ -127,17 +127,17 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
   // this spec is about the endpoint, so let the token run them.
   await allowAllTools(page, `Pets assistant ${RUN}`, SLUG)
 
-  const search = await callTool(baseURL!, token, "search_tools", {
+  const search = await callTool(baseURL!, token, "search", {
     query: "list pets",
     server: SLUG,
   })
   expect(toolText(search)).toMatch(
-    new RegExp(`^${SLUG}/listPets \\(List pets\\)`),
+    new RegExp(`^tool ${SLUG}/listPets \\(List pets\\)`),
   )
 
   const described = JSON.parse(
     toolText(
-      await callTool(baseURL!, token, "describe_tool", {
+      await callTool(baseURL!, token, "describe", {
         server: SLUG,
         tool: "getPet",
       }),
@@ -238,8 +238,10 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
 })
 
 const GATEWAY_TOOLS = [
+  "search",
   "search_tools",
   "list_tools",
+  "describe",
   "describe_tool",
   "call_tool",
   "call_read_only_tool",
@@ -310,7 +312,7 @@ test("an assistant proposes an API as OpenAPI text; nothing exists until the own
   // Not before the owner agrees: not in the instructions, not in search.
   const before = await initialize(baseURL!, managerToken)
   expect(before.instructions).not.toContain(MANAGED_SLUG)
-  const search = await callTool(baseURL!, managerToken, "search_tools", {
+  const search = await callTool(baseURL!, managerToken, "search", {
     query: "list pets",
   })
   expect(toolText(search)).not.toContain(MANAGED_SLUG)
@@ -391,7 +393,7 @@ test("a change by the assistant switches the endpoint off until the owner enable
   expect(JSON.parse(toolText(changed)).updated).toMatch(
     /disabled until the owner enables it again/,
   )
-  const gone = await callTool(baseURL!, managerToken, "search_tools", {
+  const gone = await callTool(baseURL!, managerToken, "search", {
     query: "list pets",
     server: MANAGED_SLUG,
   })
@@ -407,7 +409,7 @@ test("a change by the assistant switches the endpoint off until the owner enable
 
   // The switch saves on its own; the gateway follows once it has.
   await expect(async () => {
-    const back = await callTool(baseURL!, managerToken, "search_tools", {
+    const back = await callTool(baseURL!, managerToken, "search", {
       query: "list pets",
       server: MANAGED_SLUG,
     })
@@ -526,7 +528,7 @@ test("the owner attaches a secret, typing the address to confirm it; then the en
   const listPetsDescription = async () =>
     JSON.parse(
       toolText(
-        await callTool(baseURL!, managerToken, "describe_tool", {
+        await callTool(baseURL!, managerToken, "describe", {
           server: MANAGED_SLUG,
           tool: "listPets",
         }),

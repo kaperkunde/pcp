@@ -14,10 +14,10 @@ test("a token's calls are on the Log page, by tool and outcome, never what they 
 }) => {
   const token = await createToken(page, TOKEN_NAME)
 
-  await callTool(baseURL!, token, "search_tools", {
+  await callTool(baseURL!, token, "search", {
     query: `secret words ${RUN}`,
   })
-  await callTool(baseURL!, token, "describe_tool", {
+  await callTool(baseURL!, token, "describe", {
     server: `missing-${RUN}`,
     tool: "anything",
   })
@@ -48,10 +48,10 @@ test("a token's calls are on the Log page, by tool and outcome, never what they 
   await expect(lines.nth(0)).toContainText("call_tool")
   await expect(lines.nth(0)).toContainText("Failed")
   await expect(lines.nth(0)).toContainText(TOKEN_NAME)
-  await expect(lines.nth(1)).toContainText("describe_tool")
+  await expect(lines.nth(1)).toContainText("describe")
   await expect(lines.nth(1)).toContainText(`missing-${RUN}/anything`)
   await expect(lines.nth(1)).toContainText("Failed")
-  await expect(lines.nth(2)).toContainText("search_tools")
+  await expect(lines.nth(2)).toContainText("search")
   await expect(lines.nth(2)).toContainText("Done")
   await expect(page.getByText(`secret words ${RUN}`)).toHaveCount(0)
   await expect(page.getByText(`private ${RUN}`)).toHaveCount(0)

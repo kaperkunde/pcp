@@ -168,82 +168,83 @@ A bug that regressed gets a test that fails before the fix and passes after
 
 ## Key files
 
-| Path                                 | Purpose                                                       |
-| ------------------------------------ | ------------------------------------------------------------- |
-| `lib/core/crypto.ts`                 | Envelope encryption, KEK derivation, wrapping the data key    |
-| `lib/core/keys.ts`                   | Key grants: password, recovery, session, API token, Touch ID  |
-| `lib/core/vault.ts`                  | Setup, sign-in, password change, recovery                     |
-| `lib/core/sessions.ts`               | Browser sessions (cookie secret → grant)                      |
-| `lib/core/device-keys.ts`            | The Mac app's Touch ID key: making it, unlocking, confirming  |
-| `lib/core/api-tokens.ts`             | Bearer tokens for the gateway and their scope                 |
-| `lib/core/secrets.ts`                | The secret store; the only place values are decrypted         |
-| `lib/core/servers.ts`                | The MCP server registry and its auth configuration            |
-| `lib/core/upstream.ts`               | Connecting to upstreams; the OAuth client provider            |
-| `lib/core/oauth.ts`                  | The authorization flow (start, callback, disconnect)          |
-| `lib/core/oauth-client.ts`           | How PCP gets a client ID; redirect URI; sign-in parameters    |
-| `lib/core/oauth-server/`             | PCP's own OAuth server, for apps that sign in to `/mcp`       |
-| `lib/core/endpoints.ts`              | API endpoints: reading a schema, creating them, calling them  |
-| `lib/core/openapi/`                  | OpenAPI → tools and call plans; building and sending requests |
-| `lib/core/answers.ts`                | Shaping an answer: fields, decode, handles, preview           |
-| `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway     |
-| `lib/core/mail/`                     | Mail accounts: JMAP and IMAP/SMTP behind one set of tools     |
-| `lib/core/caldav/`                   | Calendar accounts: CalDAV, iCalendar, time zones, the tools   |
-| `lib/core/ssh/`                      | SSH servers: PCP's key, the pinned host key, `run_command`    |
-| `lib/core/register-rules.ts`         | What register_server accepts for each kind                    |
-| `lib/core/tool-results.ts`           | Kept answers and files, encrypted; `read_result`, handles     |
-| `lib/core/result-handles.ts`         | Handles in a call's arguments, replaced before sending        |
-| `lib/core/file-links.ts`             | Links an assistant's own computer moves a kept file by        |
-| `lib/core/media-types.ts`            | Text types, charsets, and a file's type from its first bytes  |
-| `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share    |
-| `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all      |
-| `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits  |
-| `lib/core/browser/`                  | Browser: Chromium, proxy, tabs, tools; web_fetch past a check |
-| `lib/core/code/`                     | run_code: QuickJS, the bridge, the sandbox executor, limits   |
-| `lib/core/wrappers/`                 | Wrappers: definition, run, secret placeholders, requests      |
-| `sandbox/`                           | The sandbox container: its runner and the `pcp` command       |
-| `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input     |
-| `components/browser-tab-view.tsx`    | The live view: frames on a canvas, timed input sent back      |
-| `lib/browser-keyboard.ts`            | A phone's keyboard as input: edits of a hidden box into keys  |
-| `lib/core/catalogue.ts`              | Writing a server's tool list into the catalogue               |
-| `lib/core/search.ts`, `gateway.ts`   | Ranking tools; the MCP server the gateway serves              |
-| `lib/core/tool-access.ts`            | Tool levels per token and for all tokens; copying them        |
-| `lib/core/access-requests.ts`        | Tool levels an assistant proposes; the owner's save           |
-| `lib/core/permissions.ts`            | Asking the owner before a call runs; running it once          |
-| `lib/core/request-log.ts`            | One line per gateway call, never its arguments or results     |
-| `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in           |
-| `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server   |
-| `lib/core/migrate.ts`                | Boot-time migrations                                          |
-| `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts     |
-| `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted     |
-| `lib/core/network/`                  | Optional pcp.gg, dynamic DNS and HTTPS (Let's Encrypt, edge)  |
-| `lib/core/updates/`                  | The daily check for a newer release; what it found            |
-| `lib/core/version.ts`                | `PCP_VERSION`, read from `package.json`                       |
-| `scripts/version.mjs`                | The next release's version; `pnpm version:bump`               |
-| `lib/core/request-log.ts`            | The request log: writing, reading a page, pruning old days    |
-| `lib/core/activity.ts`               | The Log page's lines: token names, how a request was answered |
-| `lib/core/cleanup/`                  | The scheduled cleanup (node-cron): schedule, parts, status    |
-| `lib/server/install-kind.ts`         | App, container or checkout: how Settings says to update       |
-| `lib/server/`                        | Next-specific glue: session cookie, public URL, action state  |
-| `lib/actions/`                       | Server Actions the forms call                                 |
-| `app/mcp/route.ts`                   | The gateway endpoint                                          |
-| `app/api/oauth/`                     | OAuth callback; PCP's client metadata document                |
-| `app/oauth/`, `app/.well-known/`     | PCP's OAuth server: sign-in page, token, register, discovery  |
-| `app/api/servers/[id]/oauth/`        | OAuth start; the per-server callback older clients use        |
-| `app/api/export/route.ts`            | The export download (a file needs `Content-Disposition`)      |
-| `app/api/files/[secret]/route.ts`    | A file link: GET downloads, PUT sends (`file-links.ts`)       |
-| `app/api/health/route.ts`            | Health check; in the app, the version and an install request  |
-| `e2e/fixtures/upstream.ts`           | The fake MCP, OAuth, REST and JMAP servers the e2e suite uses |
-| `app/manifest.ts`, `public/icons/`   | The manifest and icon set; `assets/icon.png` is the master    |
-| `lib/core/local-address.ts`          | Whether PCP's own address is one only a home network reaches  |
-| `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                  |
-| `desktop/main.mjs`                   | The desktop app: starts the server, opens the window          |
-| `desktop/preload.cjs`                | `window.pcpDesktop`, for PCP's own pages only                 |
-| `desktop/touch-id.mjs`               | Touch ID in the app: answers `preload.cjs`, keeps the key     |
-| `desktop/updates.mjs`                | When the app installs an update the owner asked for           |
-| `desktop/native/keychain/`           | Touch ID's keychain item; `scripts/keychain-profile.mjs`      |
-| `desktop/scripts/stage.mjs`          | Stages the server for the app, as the Dockerfile lays it out  |
-| `.github/workflows/release.yml`      | Tags, builds the apps and the image, publishes the release    |
-| `install.sh`                         | The one-line Linux install: Docker or Podman, published image |
+| Path                                 | Purpose                                                               |
+| ------------------------------------ | --------------------------------------------------------------------- |
+| `lib/core/crypto.ts`                 | Envelope encryption, KEK derivation, wrapping the data key            |
+| `lib/core/keys.ts`                   | Key grants: password, recovery, session, API token, Touch ID          |
+| `lib/core/vault.ts`                  | Setup, sign-in, password change, recovery                             |
+| `lib/core/sessions.ts`               | Browser sessions (cookie secret → grant)                              |
+| `lib/core/device-keys.ts`            | The Mac app's Touch ID key: making it, unlocking, confirming          |
+| `lib/core/api-tokens.ts`             | Bearer tokens for the gateway and their scope                         |
+| `lib/core/secrets.ts`                | The secret store; the only place values are decrypted                 |
+| `lib/core/servers.ts`                | The MCP server registry and its auth configuration                    |
+| `lib/core/upstream.ts`               | Connecting to upstreams; the OAuth client provider                    |
+| `lib/core/oauth.ts`                  | The authorization flow (start, callback, disconnect)                  |
+| `lib/core/oauth-client.ts`           | How PCP gets a client ID; redirect URI; sign-in parameters            |
+| `lib/core/oauth-server/`             | PCP's own OAuth server, for apps that sign in to `/mcp`               |
+| `lib/core/endpoints.ts`              | API endpoints: reading a schema, creating them, calling them          |
+| `lib/core/openapi/`                  | OpenAPI → tools and call plans; building and sending requests         |
+| `lib/core/answers.ts`                | Shaping an answer: fields, decode, handles, preview                   |
+| `lib/core/endpoint-admin.ts`         | What an assistant may do to endpoints through the gateway             |
+| `lib/core/mail/`                     | Mail accounts: JMAP and IMAP/SMTP behind one set of tools             |
+| `lib/core/caldav/`                   | Calendar accounts: CalDAV, iCalendar, time zones, the tools           |
+| `lib/core/ssh/`                      | SSH servers: PCP's key, the pinned host key, `run_command`            |
+| `lib/core/register-rules.ts`         | What register_server accepts for each kind                            |
+| `lib/core/tool-results.ts`           | Kept answers and files, encrypted; `read_result`, handles             |
+| `lib/core/result-handles.ts`         | Handles in a call's arguments, replaced before sending                |
+| `lib/core/file-links.ts`             | Links an assistant's own computer moves a kept file by                |
+| `lib/core/media-types.ts`            | Text types, charsets, and a file's type from its first bytes          |
+| `lib/core/memories.ts`               | Memories an assistant keeps; what needs the owner to share            |
+| `lib/core/skills.ts`                 | Skills the owner approved; an assistant's change waits for them       |
+| `lib/core/web-fetch.ts`              | Web fetch levels per method and site, for a token or all              |
+| `lib/core/fetch/`                    | web_fetch: the request, sending it, HTML to Markdown, limits          |
+| `lib/core/browser/`                  | Browser: Chromium, proxy, tabs, tools; web_fetch past a check         |
+| `lib/core/code/`                     | run_code: QuickJS, the bridge, the sandbox executor, limits           |
+| `lib/core/wrappers/`                 | Wrappers: definition, run, secret placeholders, requests              |
+| `sandbox/`                           | The sandbox container: its runner and the `pcp` command               |
+| `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input             |
+| `components/browser-tab-view.tsx`    | The live view: frames on a canvas, timed input sent back              |
+| `lib/browser-keyboard.ts`            | A phone's keyboard as input: edits of a hidden box into keys          |
+| `lib/core/catalogue.ts`              | Writing a server's tool list into the catalogue                       |
+| `lib/core/search.ts`, `gateway.ts`   | Ranking tools, skills and memories; the MCP server the gateway serves |
+| `lib/core/tool-access.ts`            | Tool levels per token and for all tokens; copying them                |
+| `lib/core/access-requests.ts`        | Tool levels an assistant proposes; the owner's save                   |
+| `lib/core/permissions.ts`            | Asking the owner before a call runs; running it once                  |
+| `lib/core/request-log.ts`            | One line per gateway call, never its arguments or results             |
+| `lib/core/owner-wait.ts`             | Holding a check while the owner answers or signs in                   |
+| `lib/core/connect.ts`                | The link an assistant hands over to connect an OAuth server           |
+| `lib/core/migrate.ts`                | Boot-time migrations                                                  |
+| `lib/core/backup.ts`                 | Export to one file and restore from one; backup-format.ts             |
+| `lib/core/host-settings.ts`          | Settings of the machine (not a vault), stored unencrypted             |
+| `lib/core/network/`                  | Optional pcp.gg, dynamic DNS and HTTPS (Let's Encrypt, edge)          |
+| `lib/core/updates/`                  | The daily check for a newer release; what it found                    |
+| `lib/core/version.ts`                | `PCP_VERSION`, read from `package.json`                               |
+| `scripts/version.mjs`                | The next release's version; `pnpm version:bump`                       |
+| `lib/core/request-log.ts`            | The request log: writing, reading a page, pruning old days            |
+| `lib/core/activity.ts`               | The Log page's lines: token names, how a request was answered         |
+| `lib/core/cleanup/`                  | The scheduled cleanup (node-cron): schedule, parts, status            |
+| `lib/server/install-kind.ts`         | App, container or checkout: how Settings says to update               |
+| `lib/server/`                        | Next-specific glue: session cookie, public URL, action state          |
+| `lib/actions/`                       | Server Actions the forms call                                         |
+| `app/mcp/route.ts`                   | The gateway endpoint                                                  |
+| `app/api/oauth/`                     | OAuth callback; PCP's client metadata document                        |
+| `app/oauth/`, `app/.well-known/`     | PCP's OAuth server: sign-in page, token, register, discovery          |
+| `app/api/servers/[id]/oauth/`        | OAuth start; the per-server callback older clients use                |
+| `app/api/export/route.ts`            | The export download (a file needs `Content-Disposition`)              |
+| `app/api/files/[secret]/route.ts`    | A file link: GET downloads, PUT sends (`file-links.ts`)               |
+| `app/api/health/route.ts`            | Health check; in the app, the version and an install request          |
+| `e2e/fixtures/upstream.ts`           | The fake MCP, OAuth, REST and JMAP servers the e2e suite uses         |
+| `app/manifest.ts`, `public/icons/`   | The manifest and icon set; `assets/icon.png` is the master            |
+| `lib/core/local-address.ts`          | Whether PCP's own address is one only a home network reaches          |
+| `components/outside-access-card.tsx` | The Settings guide to tunnels and the router                          |
+| `desktop/main.mjs`                   | The desktop app: starts the server, opens the window                  |
+| `desktop/preload.cjs`                | `window.pcpDesktop`, for PCP's own pages only                         |
+| `desktop/touch-id.mjs`               | Touch ID in the app: answers `preload.cjs`, keeps the key             |
+| `desktop/updates.mjs`                | When the app installs an update the owner asked for                   |
+| `desktop/native/keychain/`           | Touch ID's keychain item; `scripts/keychain-profile.mjs`              |
+| `desktop/scripts/stage.mjs`          | Stages the server for the app, as the Dockerfile lays it out          |
+| `.github/workflows/release.yml`      | Tags, builds the apps and the image, publishes the release            |
+| `install.sh`                         | The one-line Linux install: Docker or Podman, published image         |
 
 ## Licence
 

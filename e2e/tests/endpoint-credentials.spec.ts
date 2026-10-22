@@ -119,7 +119,7 @@ test("an assistant proposes an API with a user name and a password, which the ow
   await allowAllTools(page, TOKEN_NAME, slug)
 
   const described = toolText(
-    await callTool(baseURL!, token, "describe_tool", {
+    await callTool(baseURL!, token, "describe", {
       server: slug,
       tool: "whoami",
     }),
@@ -207,7 +207,7 @@ test("an assistant proposes an API with a key and a secret key in two headers, a
   await allowAllTools(page, TOKEN_NAME, slug)
 
   const described = toolText(
-    await callTool(baseURL!, token, "describe_tool", {
+    await callTool(baseURL!, token, "describe", {
       server: slug,
       tool: "ping",
     }),
