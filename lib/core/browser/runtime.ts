@@ -17,6 +17,7 @@ import { PcpError } from "../errors"
 import { isPcpSite } from "../fetch/fetch"
 import { resolveFetchAccess, siteKey, type FetchRuleSet } from "../fetch/rules"
 import { isOwnAddress, isPublicAddress } from "../openapi/address"
+import { loadResourceLimits, resourceLimits } from "../resources/state"
 import { watchDocuments, type DocumentWatch } from "./challenge"
 import {
   acquireDisplay,
@@ -26,11 +27,11 @@ import {
 } from "./display"
 import { openDownloads, watchDownloads, type Downloads } from "./downloads"
 import { chromiumExecutable } from "./executable"
+import { handoverWaiting, waitIdle } from "./idle"
 import {
   ACTION_TIMEOUT_MS,
   BROWSER_LOCK_DEADLINE_MS,
   DIALOG_DISMISS_MS,
-  IDLE_CLOSE_MS,
   MAX_SOLVES,
   MAX_TABS,
   NAVIGATION_TIMEOUT_MS,
@@ -50,7 +51,8 @@ import type { TabControl, TabView } from "./types"
 
 /**
  * The browser's running side: one Chromium per vault, started on first use
- * and closed after IDLE_CLOSE_MS with nothing happening, its tabs, and who
+ * and closed after the owner's idle minutes (Settings → Resources) with
+ * nothing happening and no hand-over waiting (idle.ts), its tabs, and who
  * drives each. It runs headless, or with windows on PCP's virtual display
  * where there is one (display.ts: the container image). One per process, kept on globalThis because
  * the gateway, the Server Actions and the route handlers are bundled apart
@@ -259,7 +261,11 @@ export function withVault<T>(
   })
 }
 
-/** Something happened: the idle close waits again. */
+/**
+ * Something happened: the idle close waits again, for as long as the
+ * owner's setting says. When the wait is over, a tab held for a hand-over
+ * the owner has not answered keeps the browser open (idle.ts).
+ */
 export function touch(vaultId: string): void {
   const vault = runningBrowser(vaultId)
 
@@ -267,15 +273,16 @@ export function touch(vaultId: string): void {
     return
   }
 
-  if (vault.idleTimer) {
-    clearTimeout(vault.idleTimer)
-  }
-
-  vault.idleTimer = setTimeout(() => {
-    void closeBrowser(vaultId).catch((error) =>
-      console.error("[browser] closing after idle failed", error),
-    )
-  }, IDLE_CLOSE_MS).unref()
+  waitIdle(vault, {
+    delayMs: () => resourceLimits().browserIdleMs,
+    holdsOpen: () => handoverWaiting(vault.tabs.values()),
+    close: () => {
+      if (runningBrowser(vaultId) !== vault) return
+      void closeBrowser(vaultId).catch((error) =>
+        console.error("[browser] closing after idle failed", error),
+      )
+    },
+  })
 }
 
 function bareName(hostname: string): string {
@@ -441,6 +448,8 @@ export async function ensureBrowser(
   ctx: VaultContext,
   { publicUrl }: { publicUrl?: string } = {},
 ): Promise<VaultBrowser> {
+  // The idle close follows the owner's setting as last saved.
+  await loadResourceLimits()
   const state = runtime()
 
   if (state.held.has(ctx.vaultId)) {

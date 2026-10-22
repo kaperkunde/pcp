@@ -128,6 +128,8 @@ export async function GET(
           end("closed", {})
           return
         }
+        // Someone is watching, even a page that paints nothing new.
+        touch(ctx.vaultId)
         ticks += 1
         if (ticks % SESSION_EVERY_TICKS === 0 && !checking) {
           checking = true

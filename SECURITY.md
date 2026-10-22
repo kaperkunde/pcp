@@ -31,8 +31,9 @@ under a key in your login keychain, which a copy of the disk does not open.
 **Someone with a running server but no credential** cannot read the vault
 either: the key exists in memory only for the duration of a request that
 presented one. The one thing kept decrypted longer is the browser's: while
-it runs (until fifteen idle minutes have passed), Chromium holds its
-sign-ins in memory.
+it runs (until it has been idle for the minutes set on Settings → Resources,
+an hour unless you change it; a hand-over waiting for you keeps it open),
+Chromium holds its sign-ins in memory.
 
 **An assistant with an API token** can call the tools of the servers that
 token reaches, as far as you allowed them: tools ask you first until you
@@ -285,7 +286,8 @@ Not defended against:
   limits it: the browser is off until you add it on the Browser page, and
   Chromium starts only when a page is opened (by an assistant you let use
   its tools, by you, or by web fetch reading past a Cloudflare check when the
-  browser is added), and stops after fifteen minutes idle. Keep the image
+  browser is added), and stops once idle for the minutes set on Settings →
+  Resources (an hour unless you change it). Keep the image
   current (its Chromium is the version its Playwright pins, so it moves with
   the image), do not add the browser if you do not use it, and keep its
   tools at Ask you first, with sites you do not know blocked or asked

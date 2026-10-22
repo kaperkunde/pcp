@@ -1529,8 +1529,12 @@ proposed for and called like any server, and a long snapshot is kept for
 
 **What runs** (`runtime.ts`). One Chromium per vault, driven by
 `patchright-core`, started on the first page opened (by an assistant or the
-owner) and closed after fifteen minutes with no tool call, no input and
-nobody watching. It runs headless, or in the container image with windows
+owner) and closed after the owner's idle minutes (Settings → Resources,
+`resourceLimits().browserIdleMs`: an hour unless set, 5 minutes to 8 hours)
+with no tool call, no input, nobody watching a tab (the live view's tick
+counts, not only a new picture) and no hand-over waiting: a tab held for a
+hand-over whose request can still be answered keeps it open
+(`idle.ts`). It runs headless, or in the container image with windows
 on a virtual display (below). The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
 Chromium runs with one in-memory context for the vault (and one more,

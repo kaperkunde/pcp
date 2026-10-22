@@ -244,7 +244,7 @@ export function BrowserManager({
 
       <ListSection
         title="Chromium"
-        footer="The browser is Chromium. Where PCP can start a virtual screen for it (in the container), it runs with a window on that screen, as on a desktop; anywhere else it runs without a window. It starts with the first page opened and closes after fifteen minutes with nothing happening."
+        footer="The browser is Chromium. Where PCP can start a virtual screen for it (in the container), it runs with a window on that screen, as on a desktop; anywhere else it runs without a window. It starts with the first page opened and closes once nothing has happened for an hour, or as long as you set on Settings → Resources. A tab you are watching, or one waiting on you after a hand-over, keeps it open."
       >
         <List>
           {chromium.path ? (
