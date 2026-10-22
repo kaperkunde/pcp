@@ -5,7 +5,12 @@ import { isConnectResult } from "../connect"
 import { isPcpError } from "../errors"
 import { bareType, isTextType } from "../media-types"
 import type { CodeCallOutcome, PermissionScope } from "../permissions"
-import { appendRequestLog, noteOwnerAsked, withLogNote } from "../request-log"
+import {
+  appendRequestLog,
+  noteOwnerAsked,
+  withLogNote,
+  type LogNote,
+} from "../request-log"
 import { MAX_HANDLE_DEPTH, missingResultMessage } from "../result-handles"
 import {
   handleOf,
@@ -16,14 +21,36 @@ import {
 } from "../tool-results"
 import { loadResourceLimits, type ResourceLimits } from "../resources/state"
 import {
+  DUPLICATE_RUN_MS,
   MAX_CALLS_PER_RUN,
   MAX_CODE_CHARS,
   MAX_KEEPS_PER_RUN,
   MAX_PARALLEL_CALLS,
   MAX_READS_PER_RUN,
+  RUN_ANSWER_MS,
+  RUN_PROGRESS_MS,
   RUN_TIMEOUT_MS,
 } from "./limits"
+import { Output } from "./output"
 import { runJavaScript } from "./quickjs"
+import {
+  duplicateRun,
+  effectLines,
+  findRun,
+  MAY_HAVE_TAKEN_EFFECT,
+  newRunId,
+  programKey,
+  reasonLabel,
+  rememberRun,
+  seconds,
+  sideEffects,
+  stateLabel,
+  traceLines,
+  type ExitReason,
+  type RunRecord,
+  type RunState,
+  type TraceEntry,
+} from "./runs"
 import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
 
 /**
@@ -53,6 +80,16 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  *
  * Nothing here reads a secret or opens a connection, and the program's text
  * is not logged or kept.
+ *
+ * Every run has an id (`run_…`) and a trace of its calls (runs.ts: server,
+ * tool, how it went, whether it only reads; never arguments or results), and
+ * every answer but a plain success says the id, why the run ended, and the
+ * calls that change things that completed. run_code answers at most
+ * RUN_ANSWER_MS after it started, under the minute after which clients give
+ * up: a program not done by then, or whose client went away, goes on within
+ * RUN_TIMEOUT_MS, and its outcome is kept as a result of the token's for
+ * check_run. The same program sent again while it runs, or soon after it
+ * ended, is answered with that run unless the assistant asks for a rerun.
  */
 
 /** How the gateway runs a program's call: by name, at the token's level. */
@@ -61,6 +98,14 @@ export type CodeCaller = (
     server: string
     tool: string
     args: Record<string, unknown>
+    /**
+     * The run the call is made for: its id, and a signal that aborts only
+     * when the run itself is over (never when the client leaves), for the
+     * upstream call (upstream.ts callServerTool's runId and signal).
+     */
+    run: { runId: string; signal: AbortSignal }
+    /** Says, once the tool is found, whether its server marks it read-only. */
+    lookedUp?: (readOnly: boolean) => void
   } & AnswerShape,
 ) => Promise<CodeCallOutcome>
 
@@ -142,14 +187,29 @@ function plural(count: number, one: string, many = `${one}s`): string {
   return `${count} ${count === 1 ? one : many}`
 }
 
-function seconds(ms: number): string {
-  return `${(ms / 1000).toFixed(1)} s`
+/** What runCode is told besides what runs the program. */
+export type RunCodeOptions = RunOptions & {
+  /**
+   * The request's own: when it aborts, the client went away. The run goes
+   * on (its outcome is kept for check_run); only the answer comes early.
+   */
+  signal?: AbortSignal
+  /** How long the call is held before it answers "still running". */
+  answerMs?: number
+  /** How often `progress` is told while the call is held. */
+  progressMs?: number
+  /** Told now and then while the call is held: progress notifications. */
+  progress?: (progress: RunProgress) => void
 }
+
+export type RunProgress = { runId: string; elapsedMs: number; calls: number }
 
 /**
  * Runs one program for the token. The answer says what it printed and
  * returned, or why it failed or stopped; a long part is kept as a result
- * of the token's and shown cut, with a notice naming it.
+ * of the token's and shown cut, with a notice naming it. A program not done
+ * within `answerMs`, or whose client went away, goes on, and the answer says
+ * it is still running; its outcome is kept for check_run when it ends.
  */
 export async function runCode(
   scope: PermissionScope,
@@ -157,8 +217,18 @@ export async function runCode(
     code: string
     /** A shell program has no value to return, only output and a status. */
     returns?: boolean
+    /** The language it is in, to tell one program from another. */
+    language?: string
+    /** Run it even when the same program runs, or ran a moment ago. */
+    rerun?: boolean
   },
-  options: RunOptions,
+  {
+    signal,
+    answerMs = RUN_ANSWER_MS,
+    progressMs = RUN_PROGRESS_MS,
+    progress,
+    ...options
+  }: RunCodeOptions,
 ): Promise<CallToolResult> {
   if (typeof input.code !== "string" || input.code.trim() === "") {
     return text("Send the program in code.", true)
@@ -171,22 +241,210 @@ export async function runCode(
     )
   }
 
-  const limits = await loadResourceLimits()
-  const run = await runProgram(scope, { code: input.code }, options)
+  const key = programKey(input.language ?? "javascript", input.code)
 
-  if ("busy" in run) {
-    return text(run.busy, true)
+  if (input.rerun !== true) {
+    const earlier = duplicateRun(
+      scope.ctx.vaultId,
+      scope.tokenId,
+      key,
+      DUPLICATE_RUN_MS,
+    )
+
+    if (earlier) {
+      return duplicateAnswer(earlier)
+    }
   }
 
-  const { result, stop, calls, took } = run
+  const limits = await loadResourceLimits()
+  const record = rememberRun({
+    id: newRunId(),
+    vaultId: scope.ctx.vaultId,
+    tokenId: scope.tokenId,
+    key,
+    trace: [],
+    startedAt: Date.now(),
+  })
+
+  // The client's signal is not the run's: the run ends by its own limits.
+  const outcome = runProgram(
+    scope,
+    { code: input.code },
+    { ...options, runId: record.id, trace: record.trace },
+  )
+    .then(
+      async (run): Promise<{ answer: CallToolResult } | { busy: string }> => {
+        if ("busy" in run) {
+          return run
+        }
+
+        const answer = await answerFor(scope, run, input, limits)
+        record.state = run.state
+        record.reason = run.reason
+        record.endedAt = Date.now()
+
+        return { answer }
+      },
+    )
+    .catch((error: unknown) => {
+      // PCP failed around the run (its answer could not be put together):
+      // the run is over all the same, and what it did is still said.
+      console.error("[run_code] a run failed inside PCP", {
+        error: error instanceof Error ? error.message : "unknown",
+      })
+      record.state = "failed"
+      record.reason = "internal"
+      record.endedAt = Date.now()
+
+      return {
+        answer: text(
+          [
+            `Run ${record.id}: failed. Exit reason: ${reasonLabel("internal")}.`,
+            "Something went wrong inside PCP.",
+            ...effectLines(record.trace),
+          ].join("\n\n"),
+          true,
+        ),
+      }
+    })
+
+  const first = await held(record, outcome, {
+    ms: answerMs,
+    signal,
+    progressMs,
+    progress,
+  })
+
+  if (first) {
+    if ("busy" in first.value) {
+      dropRun(record)
+      return text(first.value.busy, true)
+    }
+
+    record.answered = true
+    record.settle()
+    return first.value.answer
+  }
+
+  // It goes on without its call: its outcome is kept for check_run.
+  void outcome
+    .then(async (answer) => {
+      if ("busy" in answer) {
+        dropRun(record)
+        return
+      }
+
+      const kept = await keepResult(scope.ctx, {
+        tokenId: scope.tokenId,
+        serverId: null,
+        toolName: "run_code",
+        // The calls first: a stop's permission link stays last.
+        text: [
+          `Calls:\n${traceLines(record.trace)}`,
+          ...answer.answer.content.flatMap((part) =>
+            part.type === "text" ? [part.text] : [],
+          ),
+        ].join("\n\n"),
+        mediaType: "text/plain",
+        name: `${record.id}.txt`,
+      })
+      record.outcomeId = kept.id
+    })
+    .catch((error: unknown) => {
+      console.error("[run_code] a run's outcome was not kept", {
+        error: error instanceof Error ? error.message : "unknown",
+      })
+    })
+    .finally(() => record.settle())
+
+  return stillRunning(record)
+}
+
+/**
+ * Holds a call open until `until` settles, `ms` after the run started, or
+ * the client goes away, telling `progress` as it waits. Null when it gave
+ * up first.
+ */
+async function held<T>(
+  record: RunRecord,
+  until: Promise<T>,
+  {
+    ms,
+    signal,
+    progressMs,
+    progress,
+  }: {
+    ms: number
+    signal?: AbortSignal
+    progressMs: number
+    progress?: (progress: RunProgress) => void
+  },
+): Promise<{ value: T } | null> {
+  const ticker = progress
+    ? setInterval(
+        () =>
+          progress({
+            runId: record.id,
+            elapsedMs: Date.now() - record.startedAt,
+            calls: record.trace.length,
+          }),
+        progressMs,
+      )
+    : null
+  let release = () => {}
+  const gaveUp = new Promise<null>((resolve) => {
+    if (signal?.aborted) {
+      resolve(null)
+      return
+    }
+
+    const deadline = setTimeout(() => resolve(null), ms)
+    const onGone = () => resolve(null)
+    signal?.addEventListener("abort", onGone, { once: true })
+    release = () => {
+      clearTimeout(deadline)
+      signal?.removeEventListener("abort", onGone)
+    }
+  })
+
+  try {
+    return await Promise.race([until.then((value) => ({ value })), gaveUp])
+  } finally {
+    release()
+
+    if (ticker) {
+      clearInterval(ticker)
+    }
+  }
+}
+
+/** A run that never started (PCP was busy): nothing to ask about. */
+function dropRun(record: RunRecord): void {
+  record.state = "failed"
+  record.endedAt = record.startedAt
+  record.key = ""
+  record.settle()
+}
+
+/** What an ended run answers, in run_code's call or kept for check_run. */
+async function answerFor(
+  scope: PermissionScope,
+  run: Extract<ProgramRun, { result: RunResult }>,
+  input: { returns?: boolean },
+  limits: ResourceLimits,
+): Promise<CallToolResult> {
+  const { result, stop, calls, took, id, trace, reason, state } = run
   const did = `${seconds(took)}, ${plural(calls, "call")}`
   const output = await shownOutput(scope, result.output, result.dropped)
+  const head = `Run ${id}: ${stateLabel(state)}.${reason ? ` Exit reason: ${reasonLabel(reason)}.` : ""}`
 
   if (result.kind === "stopped" && stop) {
     return withLead(
       [
         `The program stopped at ${stop.at} after ${did}: the owner has to act before that call can run, and nothing of the program ran after it. Calls before it did run.`,
+        head,
         ...(output ? [`It printed:\n${output}`] : []),
+        ...effectLines(trace),
         isConnectResult(stop.result)
           ? "Once the owner has connected it (check_server says when), run the program again."
           : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow, or Allow for while that lasts).",
@@ -198,7 +456,7 @@ export async function runCode(
   if (result.kind === "done") {
     return text(
       [
-        `The program finished in ${did}.`,
+        `The program finished in ${did} (${id}).`,
         ...(output ? [`It printed:\n${output}`] : []),
         ...(result.returned !== null
           ? [
@@ -214,30 +472,158 @@ export async function runCode(
   return text(
     [
       `The program failed after ${did}.`,
+      head,
       result.kind === "error" ? result.message : "It was stopped.",
       ...(output ? [`It printed:\n${output}`] : []),
+      ...effectLines(trace),
     ].join("\n\n"),
     true,
+  )
+}
+
+/** The answer for a run that goes on past its call. */
+function stillRunning(record: RunRecord): CallToolResult {
+  const now = Date.now()
+
+  return text(
+    [
+      `Run ${record.id} is still running, ${seconds(now - record.startedAt)} after it started, with ${plural(record.trace.length, "call")} so far. PCP answers now so that this call does not time out; the run goes on, for ${RUN_TIMEOUT_MS / 60_000} minutes at most in all.`,
+      `Calls so far:\n${traceLines(record.trace, now)}`,
+      ...(sideEffects(record.trace).length > 0 ? [MAY_HAVE_TAKEN_EFFECT] : []),
+      `Call check_run with this id (${record.id}) for how it ends; don't start it again.`,
+    ].join("\n\n"),
+  )
+}
+
+/** The answer for a program sent again while its run goes on, or soon after. */
+function duplicateAnswer(record: RunRecord): CallToolResult {
+  const now = Date.now()
+  const again = "To run the same program again on purpose, pass rerun: true."
+
+  if (record.state === "running") {
+    return text(
+      [
+        `This program is already running for this token as ${record.id} (started ${seconds(now - record.startedAt)} ago, ${plural(record.trace.length, "call")} so far), so PCP did not start it again.`,
+        `Calls so far:\n${traceLines(record.trace, now)}`,
+        ...(sideEffects(record.trace).length > 0
+          ? [MAY_HAVE_TAKEN_EFFECT]
+          : []),
+        `Call check_run with ${record.id} for how it ends. ${again}`,
+      ].join("\n\n"),
+    )
+  }
+
+  return text(
+    [
+      `This program ran for this token ${seconds(now - (record.endedAt ?? now))} ago as ${record.id}, and ${stateLabel(record.state)}${record.reason ? ` (exit reason: ${reasonLabel(record.reason)})` : ""}, so PCP did not start it again.`,
+      ...effectLines(record.trace, now),
+      `${record.outcomeId ? `check_run with ${record.id} reads its whole outcome.` : `Its answer was handed back when it ended; check_run with ${record.id} lists its calls.`} ${again}`,
+    ].join("\n\n"),
+  )
+}
+
+/**
+ * check_run: how one of the token's runs went. A run still going is waited
+ * for up to `waitMs`; an ended one answers with its kept outcome, or, when
+ * run_code's own answer carried that, with its state and calls. Another
+ * token's run, and one PCP forgot (it restarted), are unknown.
+ */
+export async function checkRun(
+  scope: PermissionScope,
+  id: string,
+  {
+    waitMs = RUN_ANSWER_MS,
+    signal,
+    progressMs = RUN_PROGRESS_MS,
+    progress,
+  }: {
+    waitMs?: number
+    signal?: AbortSignal
+    progressMs?: number
+    progress?: (progress: RunProgress) => void
+  } = {},
+): Promise<CallToolResult> {
+  const record =
+    typeof id === "string" && id.length <= 64
+      ? findRun(scope.ctx.vaultId, scope.tokenId, id)
+      : null
+
+  if (!record || record.key === "") {
+    return text(
+      "PCP knows no run by that id for this token. It knows only this token's own runs, and forgets them when it restarts, which also ends a run that was still going: if it may have run, check what it acts on before running it again.",
+      true,
+    )
+  }
+
+  // Waiting until the run ended and its outcome, when it is kept, is.
+  await held(record, record.settled, {
+    ms: waitMs,
+    signal,
+    progressMs,
+    progress,
+  })
+
+  if (record.state === "running") {
+    return stillRunning(record)
+  }
+
+  const took = seconds((record.endedAt ?? Date.now()) - record.startedAt)
+  const head = `Run ${record.id}: ${stateLabel(record.state)}${record.reason ? `. Exit reason: ${reasonLabel(record.reason)}` : ""}, ${took} after it started.`
+  const failed = record.state === "failed"
+
+  if (record.outcomeId) {
+    const opened = await openResult(scope.ctx, {
+      tokenId: scope.tokenId,
+      id: record.outcomeId,
+    })
+
+    if (opened) {
+      return text(
+        `${head} Its outcome, as run_code would have answered it (kept as result ${record.outcomeId}):\n\n${opened.text()}`,
+        failed,
+      )
+    }
+  }
+
+  return text(
+    [
+      record.answered
+        ? `${head} run_code's own answer carried its outcome.`
+        : `${head} Its outcome is no longer kept.`,
+      `Calls:\n${traceLines(record.trace)}`,
+      ...(record.state === "finished" ? [] : effectLines(record.trace)),
+    ].join("\n\n"),
+    failed,
   )
 }
 
 export type RunOptions = {
   call: CodeCaller
   list?: CodeLister
-  /** The request's own: the run stops when it goes away. */
+  /** The request's own: the run stops when it goes away (a wrapper's). */
   signal?: AbortSignal
   executor?: Executor
   timeoutMs?: number
+  /** The run's id, when the caller remembers the run; a new one otherwise. */
+  runId?: string
+  /** Where the run's calls are traced, for a caller that reads it as it goes. */
+  trace?: TraceEntry[]
 }
 
 /** How one program's run went, before it is put into words. */
 export type ProgramRun =
   | {
+      id: string
       result: RunResult
       /** Where the owner has to act first, when a call said so. */
       stop: { at: string; result: CallToolResult } | null
       calls: number
       took: number
+      state: Exclude<RunState, "running">
+      /** Why it ended, when it did not finish. */
+      reason: ExitReason | null
+      /** Its calls, by server and tool, with no arguments or results. */
+      trace: TraceEntry[]
     }
   /** Too many programs run already; nothing ran. */
   | { busy: string }
@@ -265,6 +651,8 @@ export async function runProgram(
     signal,
     executor = runJavaScript,
     timeoutMs = RUN_TIMEOUT_MS,
+    runId = newRunId(),
+    trace = [],
   }: RunOptions,
 ): Promise<ProgramRun> {
   const limits = await loadResourceLimits()
@@ -278,19 +666,31 @@ export async function runProgram(
   runningBy[label] += 1
 
   const controller = new AbortController()
-  const timer = setTimeout(
-    () =>
-      controller.abort(
-        `The run took longer than ${Math.round(timeoutMs / 1000)} seconds and was stopped.`,
-      ),
-    timeoutMs,
-  )
-  const onGone = () =>
+  /** What ended the run from outside the program, when something did. */
+  let abortedFor: "time" | "gone" | null = null
+  const timer = setTimeout(() => {
+    abortedFor ??= "time"
+    controller.abort(
+      `The run took longer than ${Math.round(timeoutMs / 1000)} seconds and was stopped.`,
+    )
+  }, timeoutMs)
+  const onGone = () => {
+    abortedFor ??= "gone"
     controller.abort("The request went away, so the run was stopped.")
-  signal?.addEventListener("abort", onGone, { once: true })
+  }
+
+  // A request already gone fires no abort event: it is noticed here.
+  if (signal?.aborted) {
+    onGone()
+  } else {
+    signal?.addEventListener("abort", onGone, { once: true })
+  }
 
   const started = Date.now()
+  const output = new Output()
   let calls = 0
+  /** A call was refused for being past MAX_CALLS_PER_RUN. */
+  let overCalls = false
   let reads = 0
   let keeps = 0
   /** Where the owner has to act first, once a call said so. */
@@ -364,6 +764,7 @@ export async function runProgram(
     }
 
     if (++calls > MAX_CALLS_PER_RUN) {
+      overCalls = true
       return refuse(`A run makes at most ${MAX_CALLS_PER_RUN} calls.`)
     }
 
@@ -377,18 +778,54 @@ export async function runProgram(
       }
 
       const at = Date.now()
-      // A note of the call's own, for the request it made; the run itself
-      // asked the owner too, so it goes on run_code's note as well.
-      const { outcome, note } = await withLogNote(async (note) => ({
-        outcome: await call({
-          server,
-          tool,
-          args: bareHandles(args) as Record<string, unknown>,
-          ...shape,
-        }),
-        note,
-      }))
+      const entry: TraceEntry = {
+        server,
+        tool,
+        outcome: "running",
+        startedAt: at,
+        ms: null,
+        readOnly: null,
+        transit: false,
+      }
+      trace.push(entry)
+
+      let traced: { outcome: CodeCallOutcome; note: LogNote }
+
+      try {
+        // A note of the call's own, for the request it made; the run itself
+        // asked the owner too, so it goes on run_code's note as well.
+        traced = await withLogNote(async (note) => ({
+          outcome: await call({
+            server,
+            tool,
+            args: bareHandles(args) as Record<string, unknown>,
+            run: { runId, signal: controller.signal },
+            lookedUp: (readOnly) => {
+              entry.readOnly = readOnly
+            },
+            ...shape,
+          }),
+          note,
+        }))
+      } catch (error) {
+        // Nothing says how far it got.
+        entry.outcome = "error"
+        entry.transit = true
+        entry.ms = Date.now() - at
+        throw error
+      }
+
+      const { outcome, note } = traced
       const owner = "owner" in outcome
+      entry.ms = Date.now() - at
+      entry.outcome = owner
+        ? "asked"
+        : outcome.ok
+          ? "ok"
+          : outcome.refused
+            ? "refused"
+            : "error"
+      entry.transit = !owner && !outcome.ok && outcome.transit === true
 
       if (note.asked) {
         noteOwnerAsked(note.request)
@@ -412,7 +849,10 @@ export async function runProgram(
         return { stop: true }
       }
 
-      return outcome
+      // The program is told the value or the error, nothing else.
+      return outcome.ok
+        ? { ok: true, value: outcome.value }
+        : { ok: false, error: outcome.error }
     })
   }
 
@@ -604,19 +1044,64 @@ export async function runProgram(
     }
   }
 
+  let result: RunResult
+  let internal = false
+
   try {
-    const result = await executor({
+    result = await executor({
       code,
       ...(input !== undefined ? { input } : {}),
       bridge,
       signal: controller.signal,
+      output,
     })
-
-    return { result, stop: halt.stop, calls, took: Date.now() - started }
+  } catch (error) {
+    // A failure of PCP's, not the program's: what it printed so far stays.
+    console.error("[run_code] the executor failed", {
+      label,
+      error: error instanceof Error ? error.message : "unknown",
+    })
+    internal = true
+    result = {
+      kind: "error",
+      message: "Something went wrong inside PCP while the program ran.",
+      output: output.text(),
+      dropped: output.dropped,
+    }
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener("abort", onGone)
     runningBy[label] -= 1
+    // The run is over: a call it left under way is not waited for.
+    controller.abort("The run is over.")
+  }
+
+  const state: Exclude<RunState, "running"> =
+    result.kind === "done"
+      ? "finished"
+      : result.kind === "stopped" && halt.stop
+        ? "stopped"
+        : "failed"
+  const reason: ExitReason | null =
+    state === "finished"
+      ? null
+      : state === "stopped"
+        ? "owner"
+        : internal
+          ? "internal"
+          : result.kind === "error" && result.reason
+            ? result.reason
+            : (abortedFor ?? (overCalls ? "calls" : "error"))
+
+  return {
+    id: runId,
+    result,
+    stop: halt.stop,
+    calls,
+    took: Date.now() - started,
+    state,
+    reason,
+    trace,
   }
 }
 

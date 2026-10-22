@@ -18,6 +18,31 @@ export const MAX_CODE_CHARS = 100_000
  * than the call timing out.
  */
 export const RUN_TIMEOUT_MS = 3 * 60_000
+/**
+ * How long run_code holds its call before it answers: under the minute after
+ * which Claude Code gives up on a tool call. A program not done by then goes
+ * on (within RUN_TIMEOUT_MS) and the answer says so, with its run id for
+ * check_run; check_run holds its call as long, waiting for the end.
+ */
+export const RUN_ANSWER_MS = 45_000
+/**
+ * How often a call that holds a run open sends a progress notification,
+ * when the client asked for them (a progressToken).
+ */
+export const RUN_PROGRESS_MS = 15_000
+/**
+ * How long after a run ended the same program from the same token is
+ * answered with that run instead of being started again (rerun: true
+ * starts it all the same). A run still going is always answered so.
+ */
+export const DUPLICATE_RUN_MS = 5 * 60_000
+/**
+ * How long PCP remembers a run, for check_run: as long as its outcome is
+ * kept (lib/core/tool-results.ts). Only in memory; a restart forgets them.
+ */
+export const REMEMBERED_RUN_MS = 24 * 60 * 60_000
+/** Runs remembered at most, the oldest ended ones forgotten first. */
+export const MAX_REMEMBERED_RUNS = 2_000
 /** Time the program itself spends computing, waiting on calls not counted. */
 export const RUN_CPU_MS = 15_000
 /** How deep the program's own calls may nest. */

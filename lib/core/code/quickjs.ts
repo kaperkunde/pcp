@@ -463,10 +463,10 @@ export function javaScriptExecutor({
 export const runJavaScript: Executor = javaScriptExecutor()
 
 async function runInQuickJs(
-  { code, input, bridge, signal }: Parameters<Executor>[0],
+  { code, input, bridge, signal, output: sink }: Parameters<Executor>[0],
   { cpuMs, memoryBytes }: { cpuMs: number; memoryBytes: number },
 ): Promise<RunResult> {
-  const output = new Output()
+  const output = sink ?? new Output()
   const memory = new WebAssembly.Memory({
     initial: INITIAL_PAGES,
     maximum: Math.max(INITIAL_PAGES, Math.floor(memoryBytes / PAGE_BYTES)),
@@ -485,6 +485,8 @@ async function runInQuickJs(
   let broken: string | null = null
   let finished = false
   let requests = 0
+  /** Set once the program asked for more than a run may. */
+  let overRequests = false
   const waiting = new Set<Promise<void>>()
   const deferreds = new Set<QuickJSDeferredPromise>()
 
@@ -542,17 +544,30 @@ async function runInQuickJs(
     }
 
     if (broken) {
-      return ended({ kind: "error", message: broken })
+      return ended({ kind: "error", message: broken, reason: "memory" })
     }
 
     if (overCpu) {
       return ended({
         kind: "error",
         message: `The program computed for more than ${cpuMs / 1000} seconds and was stopped.`,
+        reason: "cpu",
       })
     }
 
-    return ended({ kind: "error", message: describeThrown(value) })
+    const message = describeThrown(value)
+
+    // QuickJS throws an InternalError when its allocator is refused; a
+    // program that made more requests than a run may throws on the last.
+    return ended({
+      kind: "error",
+      message,
+      ...(/^InternalError: out of memory/.test(message)
+        ? { reason: "memory" as const }
+        : overRequests
+          ? { reason: "calls" as const }
+          : {}),
+    })
   }
 
   const print = vm.newFunction("__pcp_print", (text) => {
@@ -570,6 +585,7 @@ async function runInQuickJs(
     }
 
     if (++requests > MAX_REQUESTS) {
+      overRequests = true
       throw new Error(
         `A run may ask PCP for at most ${MAX_REQUESTS} things (calls, reads and keeps together).`,
       )
@@ -701,7 +717,7 @@ async function runInQuickJs(
       }
 
       if (broken) {
-        return ended({ kind: "error", message: broken })
+        return ended({ kind: "error", message: broken, reason: "memory" })
       }
 
       const state = vm.getPromiseState(promise)
@@ -736,7 +752,7 @@ async function runInQuickJs(
       await Promise.race([...waiting, aborted])
 
       if (broken) {
-        return ended({ kind: "error", message: broken })
+        return ended({ kind: "error", message: broken, reason: "memory" })
       }
     }
   } finally {

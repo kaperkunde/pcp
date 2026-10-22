@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createApiToken, resolveApiToken, updateApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { PcpError } from "../errors"
 import {
   buildGatewayServer,
   buildInstructions,
@@ -24,7 +25,9 @@ import { keepBytes, keepResult } from "../tool-results"
 import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { MAX_CALLS_PER_RUN } from "./limits"
-import { runCode } from "./run"
+import { checkRun, runCode, runProgram } from "./run"
+import { javaScriptExecutor } from "./quickjs"
+import { MAY_HAVE_TAKEN_EFFECT } from "./runs"
 import { sandboxLanguages, startSandbox, stopSandbox } from "./sandbox"
 
 // run_code as an assistant meets it, through the gateway's MCP interface,
@@ -48,6 +51,8 @@ let ctx: VaultContext
 let scope: GatewayScope
 let client: Client
 let ran: Array<{ tool: string; args: Record<string, unknown> }>
+/** How long slow_send takes. */
+let slowMs = 0
 
 const CARDS = Array.from({ length: 500 }, (_, index) => ({
   id: index,
@@ -76,6 +81,11 @@ const executor: PermissionExecutor = {
           content: [{ type: "text", text: "The printer is on fire." }],
           isError: true,
         }
+      case "slow_send":
+        await new Promise((resolve) => setTimeout(resolve, slowMs))
+        return { content: [{ type: "text", text: "sent slowly" }] }
+      case "flaky":
+        throw new PcpError("upstream", "Postcards could not be reached.")
       default:
         return { content: [{ type: "text", text: `ran ${tool}` }] }
     }
@@ -83,7 +93,10 @@ const executor: PermissionExecutor = {
   syncTools: async () => ({ status: "ok", message: "", toolCount: 0 }),
 }
 
-async function connect(runCodeRight = true) {
+async function connect(
+  runCodeRight = true,
+  options: Parameters<typeof buildGatewayServer>[2] = {},
+) {
   const { id: serverId } = await createServer(ctx, {
     name: "Postcards",
     url: "https://postcards.example.com/mcp",
@@ -97,6 +110,8 @@ async function connect(runCodeRight = true) {
     "burn_cards",
     "broken",
     "archive",
+    "slow_send",
+    "flaky",
   ]) {
     await db().mcpTool.create({
       data: {
@@ -105,6 +120,10 @@ async function connect(runCodeRight = true) {
         name,
         description: `${name} does one thing.`,
         inputSchema: JSON.stringify({ type: "object" }),
+        // list_cards only reads, as its server says; the others may not.
+        ...(name === "list_cards"
+          ? { annotations: JSON.stringify({ readOnlyHint: true }) }
+          : {}),
       },
     })
   }
@@ -115,7 +134,14 @@ async function connect(runCodeRight = true) {
     runCode: runCodeRight,
   })
 
-  for (const name of ["list_cards", "scan_card", "broken", "archive"]) {
+  for (const name of [
+    "list_cards",
+    "scan_card",
+    "broken",
+    "archive",
+    "slow_send",
+    "flaky",
+  ]) {
     await writeToolAccess(tokenId, serverId, name, "allowed")
   }
   await writeToolAccess(tokenId, serverId, "burn_cards", "blocked")
@@ -124,6 +150,7 @@ async function connect(runCodeRight = true) {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
   await buildGatewayServer(scope, await loadGatewayServers(scope), {
     executor,
+    ...options,
   }).connect(serverSide)
   client = new Client({ name: "test", version: "1.0.0" })
   await client.connect(clientSide)
@@ -136,6 +163,7 @@ beforeEach(async () => {
     password: "correct horse battery staple",
   })
   ran = []
+  slowMs = 0
   vi.mocked(appendRequestLog).mockClear()
 })
 
@@ -144,10 +172,10 @@ afterEach(async () => {
   await cleanup()
 })
 
-async function run(code: string) {
+async function run(code: string, extra: Record<string, unknown> = {}) {
   const result = await client.callTool({
     name: "run_code",
-    arguments: { code },
+    arguments: { code, ...extra },
   })
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
@@ -264,6 +292,13 @@ describe("a program's calls", () => {
 
     expect(isError).toBe(false)
     expect(text).toContain("stopped at postcards/send_postcard")
+    expect(text).toMatch(
+      /Run run_[0-9a-f]{16}: stopped\. Exit reason: stopped for the owner's answer\./,
+    )
+    expect(text).toContain(
+      "Calls that change things and completed:\n- postcards/archive: ok",
+    )
+    expect(text).toContain(MAY_HAVE_TAKEN_EFFECT)
     expect(text).toContain("It printed:\nsending")
     expect(text).toContain("Not done yet")
     expect(text.trimEnd()).toMatch(/\/permissions\/[\w-]+$/)
@@ -439,15 +474,17 @@ describe("a program's calls", () => {
           server: "postcards",
           name: "Postcards",
           description: "",
-          tools: 5,
+          tools: 7,
         },
       ],
       tools: [
         ["archive", "allowed"],
         ["broken", "allowed"],
+        ["flaky", "allowed"],
         ["list_cards", "allowed"],
         ["scan_card", "allowed"],
         ["send_postcard", "ask"],
+        ["slow_send", "allowed"],
       ],
       missing: "No server called nowhere. Servers: postcards.",
     })
@@ -604,7 +641,7 @@ describe("the sandbox's languages", () => {
       (await client.listTools()).tools.find((tool) => tool.name === "run_code")!
         .inputSchema.properties as Record<string, { enum?: string[] }>
 
-    expect(Object.keys(await schema())).toEqual(["code"])
+    expect(Object.keys(await schema())).toEqual(["code", "rerun"])
 
     const dir = mkdtempSync(path.join(tmpdir(), "pcp-runner-"))
     const socketPath = path.join(dir, "sandbox.sock")
@@ -656,5 +693,330 @@ describe("runCode on its own", () => {
     expect(JSON.stringify(result.content)).toContain(
       "took longer than 2 seconds",
     )
+  })
+})
+
+const RUN_ID = /run_[0-9a-f]{16}/
+
+function runIdOf(text: string): string {
+  const id = text.match(RUN_ID)?.[0]
+  expect(id, text).toBeDefined()
+  return id!
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+describe("how a run says it ended", () => {
+  it("names the run, the uncaught error and the calls that change things that completed", async () => {
+    await connect()
+    const { isError, text } = await run(`
+      await pcp.call("postcards", "archive", { label: "zebra" })
+      await pcp.call("postcards", "list_cards")
+      try { await pcp.call("postcards", "burn_cards") } catch {}
+      console.log("halfway")
+      throw new Error("boom")
+    `)
+
+    expect(isError).toBe(true)
+    expect(text).toMatch(
+      /Run run_[0-9a-f]{16}: failed\. Exit reason: uncaught error\./,
+    )
+    expect(text).toContain("Error: boom")
+    expect(text).toContain("It printed:\nhalfway")
+    // Only what may have changed something: not the read, not the refusal.
+    expect(text).toMatch(
+      /Calls that change things and completed:\n- postcards\/archive: ok, \d+\.\d s\n\n/,
+    )
+    expect(text).not.toContain("list_cards")
+    expect(text).not.toContain("burn_cards")
+    expect(text).toContain(MAY_HAVE_TAKEN_EFFECT)
+    // Never an argument.
+    expect(text).not.toContain("zebra")
+  })
+
+  it("says nothing may have taken effect when only reads ran", async () => {
+    await connect()
+    const { text } = await run(
+      `await pcp.call("postcards", "list_cards"); throw new Error("no")`,
+    )
+
+    expect(text).toContain("No call that changes things completed.")
+    expect(text).not.toContain(MAY_HAVE_TAKEN_EFFECT)
+  })
+
+  it("marks a call that failed on its way as one that may have gone through", async () => {
+    await connect()
+    const { text } = await run(`
+      try { await pcp.call("postcards", "flaky") } catch (error) { console.log(error.message) }
+      throw new Error("gave up")
+    `)
+
+    expect(text).toContain("It printed:\nPostcards could not be reached.")
+    expect(text).toContain("- postcards/flaky: error, may have gone through")
+    expect(text).toContain(MAY_HAVE_TAKEN_EFFECT)
+  })
+
+  it("names the wall-clock limit, and a call left under way", async () => {
+    await connect()
+    const result = await runCode(
+      scope,
+      { code: `await pcp.call("slow", "send")` },
+      { call: () => new Promise(() => {}), timeoutMs: 500 },
+    )
+    const text = JSON.stringify(result.content)
+
+    expect(result.isError).toBe(true)
+    expect(text).toContain("Exit reason: wall-clock limit.")
+    expect(text).toMatch(RUN_ID)
+    expect(text).toContain("- slow/send: under way")
+    expect(text).toContain(MAY_HAVE_TAKEN_EFFECT)
+  })
+
+  it("names the CPU limit", async () => {
+    await connect(true, { codeExecutor: javaScriptExecutor({ cpuMs: 200 }) })
+    const { text } = await run(
+      `await pcp.call("postcards", "archive"); for (;;) {}`,
+    )
+
+    expect(text).toContain("Exit reason: CPU limit.")
+    expect(text).toContain("- postcards/archive: ok")
+  })
+
+  it("names the call limit when it ends the run", async () => {
+    await connect()
+    const { text } = await run(`
+      for (let i = 0; i <= ${MAX_CALLS_PER_RUN}; i++) await pcp.call("postcards", "archive", { i })
+    `)
+
+    expect(text).toContain("Exit reason: call limit.")
+    expect(text).toContain(`A run makes at most ${MAX_CALLS_PER_RUN} calls.`)
+    expect(text).toContain(MAY_HAVE_TAKEN_EFFECT)
+  })
+
+  it("names the memory limit", async () => {
+    await connect(true, {
+      codeExecutor: javaScriptExecutor({ memoryBytes: 32 * 1024 * 1024 }),
+    })
+    const { text } = await run(
+      `await pcp.call("postcards", "archive"); const parts = []; for (;;) parts.push("x".repeat(1 << 16) + parts.length)`,
+    )
+
+    expect(text).toContain("Exit reason: memory limit.")
+    expect(text).toContain("- postcards/archive: ok")
+  })
+
+  it("keeps what was printed when the executor itself fails", async () => {
+    await connect(true, {
+      codeExecutor: async ({ output, bridge }) => {
+        output!.write("halfway")
+        await bridge("call", { server: "postcards", tool: "archive" })
+        throw new Error("the engine trapped")
+      },
+    })
+    const { isError, text } = await run(`whatever()`)
+
+    expect(isError).toBe(true)
+    expect(text).toContain("It printed:\nhalfway")
+    expect(text).toContain("Exit reason: PCP failed while running it.")
+    expect(text).toContain("- postcards/archive: ok")
+    expect(text).not.toContain("trapped")
+  })
+
+  it("notices a request already gone when a wrapper's run starts", async () => {
+    await connect()
+    const run = await runProgram(
+      scope,
+      { code: "return 1", label: "wrapper" },
+      {
+        call: async () => ({ ok: true, value: null }),
+        signal: AbortSignal.abort(),
+      },
+    )
+
+    expect(run).toMatchObject({ state: "failed", reason: "gone" })
+  })
+})
+
+describe("a run that outlives its call", () => {
+  it("answers still running with its calls, goes on, and check_run gives the outcome", async () => {
+    await connect(true, { runTiming: { answerMs: 200, waitMs: 5_000 } })
+    slowMs = 700
+
+    const first = await run(`
+      await pcp.call("postcards", "archive")
+      await pcp.call("postcards", "slow_send", { to: "Grace" })
+      console.log("done")
+      return 42
+    `)
+    const id = runIdOf(first.text)
+
+    expect(first.isError).toBe(false)
+    expect(first.text).toContain(`Run ${id} is still running`)
+    expect(first.text).toContain("- postcards/archive: ok")
+    expect(first.text).toContain("- postcards/slow_send: under way")
+    expect(first.text).toContain(MAY_HAVE_TAKEN_EFFECT)
+    expect(first.text).toContain(
+      `Call check_run with this id (${id}) for how it ends; don't start it again.`,
+    )
+
+    const checked = await client.callTool({
+      name: "check_run",
+      arguments: { id },
+    })
+    const text = JSON.stringify(checked.content)
+    expect(checked.isError).not.toBe(true)
+    expect(text).toContain(`Run ${id}: finished`)
+    expect(text).toContain("It printed:\\ndone")
+    expect(text).toContain("It returned:\\n42")
+    expect(text).toContain("- postcards/slow_send: ok")
+    expect(ran.map((call) => call.tool)).toEqual(["archive", "slow_send"])
+
+    // Kept as a result of the token's own, encrypted.
+    const row = await db().toolResult.findFirstOrThrow({
+      where: { name: `${id}.txt` },
+    })
+    expect(row).toMatchObject({ tokenId: scope.tokenId, toolName: "run_code" })
+    expect(Buffer.from(row.ciphertext).toString("utf8")).not.toContain(
+      "It returned",
+    )
+    // The log has the calls, by name, and never the outcome.
+    expect(JSON.stringify(logLines())).not.toContain("It returned")
+  })
+
+  it("goes on when its client is gone before it ends", async () => {
+    await connect()
+    const result = await runCode(
+      scope,
+      { code: `return await pcp.call("postcards", "archive")` },
+      {
+        signal: AbortSignal.abort(),
+        call: async () => {
+          await sleep(200)
+          return { ok: true, value: "archived" }
+        },
+      },
+    )
+    const id = runIdOf(JSON.stringify(result.content))
+    expect(JSON.stringify(result.content)).toContain("is still running")
+
+    const checked = await checkRun(scope, id, { waitMs: 5_000 })
+    expect(JSON.stringify(checked.content)).toContain(
+      'It returned:\\n\\"archived\\"',
+    )
+  })
+
+  it("sends progress while it holds the call, when the client asks for it", async () => {
+    await connect(true, { runTiming: { answerMs: 2_000, progressMs: 100 } })
+    slowMs = 600
+    const seen: Array<{ progress: number; message?: string }> = []
+
+    await client.callTool(
+      {
+        name: "run_code",
+        arguments: { code: `await pcp.call("postcards", "slow_send")` },
+      },
+      { onprogress: (progress) => seen.push(progress) },
+    )
+
+    expect(seen.length).toBeGreaterThanOrEqual(2)
+    expect(seen[0]!.message).toMatch(/^run_[0-9a-f]{16} is still running/)
+  })
+
+  it("is unknown to every other token, and so is an id PCP never gave", async () => {
+    await connect(true, { runTiming: { answerMs: 100, waitMs: 5_000 } })
+    slowMs = 300
+    const id = runIdOf(
+      (await run(`await pcp.call("postcards", "slow_send")`)).text,
+    )
+
+    const { token } = await createApiToken(ctx, {
+      name: "Phone",
+      allowAllServers: true,
+      runCode: true,
+    })
+    const other = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+
+    for (const [who, asked] of [
+      [other, id],
+      [scope, "run_0000000000000000"],
+    ] as const) {
+      const result = await checkRun(who, asked, { waitMs: 0 })
+      expect(result.isError).toBe(true)
+      expect(JSON.stringify(result.content)).toContain(
+        "PCP knows no run by that id for this token",
+      )
+    }
+
+    // The token's own still finds it.
+    expect(
+      JSON.stringify((await checkRun(scope, id, { waitMs: 5_000 })).content),
+    ).toContain("finished")
+  })
+})
+
+describe("the same program again", () => {
+  it("is answered with the run that just ended, unless rerun is true", async () => {
+    await connect()
+    const program = `return await pcp.call("postcards", "archive")`
+
+    const first = await run(program)
+    const id = runIdOf(first.text)
+    expect(first.text).toContain("finished")
+
+    const again = await run(program)
+    expect(again.isError).toBe(false)
+    expect(again.text).toContain(`ago as ${id}, and finished`)
+    expect(again.text).toContain("PCP did not start it again")
+    expect(again.text).toContain("- postcards/archive: ok")
+    expect(again.text).toContain("pass rerun: true")
+    expect(ran).toHaveLength(1)
+
+    // Another program is another run.
+    expect((await run(`${program} `)).text).toContain("finished")
+    expect(ran).toHaveLength(2)
+
+    const rerun = await run(program, { rerun: true })
+    expect(rerun.text).toContain("The program finished in")
+    expect(runIdOf(rerun.text)).not.toBe(id)
+    expect(ran).toHaveLength(3)
+
+    const checked = await client.callTool({
+      name: "check_run",
+      arguments: { id },
+    })
+    expect(JSON.stringify(checked.content)).toContain(
+      "run_code's own answer carried its outcome",
+    )
+  })
+
+  it("is answered with the run still going, which goes on once", async () => {
+    await connect(true, { runTiming: { answerMs: 100, waitMs: 5_000 } })
+    slowMs = 500
+    const program = `await pcp.call("postcards", "slow_send"); return "sent"`
+
+    const id = runIdOf((await run(program)).text)
+    const again = await run(program)
+
+    expect(again.text).toContain(
+      `This program is already running for this token as ${id}`,
+    )
+    expect(again.text).toContain("- postcards/slow_send: under way")
+    expect(again.text).toContain(`Call check_run with ${id}`)
+
+    expect(
+      JSON.stringify(
+        (await client.callTool({ name: "check_run", arguments: { id } }))
+          .content,
+      ),
+    ).toContain('It returned:\\n\\"sent\\"')
+    expect(ran.map((call) => call.tool)).toEqual(["slow_send"])
+  })
+
+  it("runs again after it stopped for the owner, as that answer says to", async () => {
+    await connect()
+    const program = `await pcp.call("postcards", "send_postcard", { to: "Grace" })`
+
+    expect((await run(program)).text).toContain("stopped at")
+    expect((await run(program)).text).toContain("stopped at")
   })
 })

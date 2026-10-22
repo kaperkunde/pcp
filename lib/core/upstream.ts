@@ -1285,6 +1285,13 @@ export type CallOptions = {
    * are scrubbed from the answer. Without it a placeholder is refused.
    */
   secrets?: SecretGrant
+  /** The run_code or wrapper run the call is made for (code/runs.ts). */
+  runId?: string
+  /**
+   * Aborts when the run the call is made for is over (its own limit, or it
+   * ended), never because its client went away.
+   */
+  signal?: AbortSignal
 }
 
 export async function callServerTool(
