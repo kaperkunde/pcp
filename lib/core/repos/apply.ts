@@ -235,12 +235,18 @@ async function wrapperProblems(
  * What an item's names are in this vault: the servers and tools a wrapper
  * calls (a name with nothing to it is a problem, never a guess) and the
  * secrets it names (one the vault lacks is listed, for the owner to add).
+ * Onto a server the vault has (`onto`), a server's sign-in is the
+ * instance's own and never applied, so its secrets are not looked for.
  */
 export async function resolveItem(
   ctx: VaultContext,
   document: ItemDocument,
+  { onto = false }: { onto?: boolean } = {},
 ): Promise<ResolvedItem> {
-  const names = secretsNamed(document)
+  const names =
+    onto && (document.kind === "endpoint" || document.kind === "server")
+      ? []
+      : secretsNamed(document)
   const found = await secretIds(ctx, names)
   const missingSecrets = [...new Set(names)].filter((name) => !found.has(name))
   const problems =
@@ -733,7 +739,9 @@ export async function applyItem(
   document: ItemDocument,
   { id, instance }: { id: string | null; instance?: InstanceInput },
 ): Promise<AppliedItem> {
-  const { problems, missingSecrets } = await resolveItem(ctx, document)
+  const { problems, missingSecrets } = await resolveItem(ctx, document, {
+    onto: id !== null,
+  })
 
   if (problems.length > 0) {
     throw invalid(problems.join(" "))

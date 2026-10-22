@@ -5,6 +5,7 @@ import { asBytes, decryptString, encryptString } from "../crypto"
 import { db } from "../db"
 import { invalid, notFound, PcpError } from "../errors"
 import { newId } from "../ids"
+import { ensureDefinition } from "../definition-rows"
 import { listSkills } from "../skills"
 import { githubCredential } from "../upstream"
 
@@ -16,6 +17,7 @@ import {
   repoInfo,
   type GitHub,
   type RepoCoords,
+  type RepoInfo,
 } from "./github"
 import type { ItemKind, ItemRef } from "./layout"
 import {
@@ -42,6 +44,12 @@ export type RepoState = RepoCoords & { branch: string }
 /** How PCP signs in to GitHub for a repository. */
 export type RepoSignIn = "none" | "token" | "github"
 
+/**
+ * What GitHub last said of who reads it: "unknown" until PCP asked, which
+ * counts as public wherever that is the careful side (a push's review).
+ */
+export type RepoVisibility = "public" | "private" | "unknown"
+
 export type RepoView = RepoState & {
   id: string
   trust: RepoTrust
@@ -50,6 +58,7 @@ export type RepoView = RepoState & {
   secretId: string | null
   /** The secret's name, for a token. */
   secretName: string | null
+  visibility: RepoVisibility
   createdAt: Date
 }
 
@@ -85,6 +94,11 @@ export type RepoItemData = {
   drafts: Record<string, Record<string, string>>
   /** What the last sync said, when it is worth a line. */
   note: string | null
+  /**
+   * The commit the item was last pushed in or read at, when PCP knows it:
+   * where "View in repository" points. Absent from older rows.
+   */
+  commit?: string | null
 }
 
 export type RepoItemState =
@@ -127,6 +141,8 @@ async function viewOf(ctx: VaultContext, row: Repo): Promise<RepoView> {
     signIn: !secret ? "none" : secret.kind === "oauth" ? "github" : "token",
     secretId: secret ? row.secretId : null,
     secretName: secret && secret.kind === "text" ? secret.name : null,
+    visibility:
+      row.private === null ? "unknown" : row.private ? "private" : "public",
     createdAt: row.createdAt,
   }
 }
@@ -230,7 +246,7 @@ async function checkWithGitHub(
   coords: RepoCoords,
   branch: string | undefined,
   access: RepoAccess,
-): Promise<string> {
+): Promise<{ branch: string; info: RepoInfo }> {
   const info = await repoInfo(gh, coords)
   const chosen = branch?.trim() ? checkBranch(branch) : info.defaultBranch
 
@@ -246,7 +262,7 @@ async function checkWithGitHub(
     )
   }
 
-  return chosen
+  return { branch: chosen, info }
 }
 
 export async function createRepo(
@@ -262,7 +278,12 @@ export async function createRepo(
   }
 
   const gh = await clientFor(ctx, { secretId })
-  const branch = await checkWithGitHub(gh, coords, input.branch, input.access)
+  const { branch, info } = await checkWithGitHub(
+    gh,
+    coords,
+    input.branch,
+    input.access,
+  )
 
   if (
     existing.some(
@@ -291,6 +312,7 @@ export async function createRepo(
       trust: input.trust,
       access: input.access,
       secretId,
+      private: info.private,
     },
   })
 
@@ -308,18 +330,24 @@ export async function updateRepo(
   const secretId = await checkSecret(ctx, input.secretId)
 
   // A new sign-in, or read and write, is checked with GitHub again.
-  if (input.access === "write" || secretId !== row.secretId) {
-    await checkWithGitHub(
-      await clientFor(ctx, { secretId }),
-      state,
-      state.branch,
-      input.access,
-    )
-  }
+  const checked =
+    input.access === "write" || secretId !== row.secretId
+      ? await checkWithGitHub(
+          await clientFor(ctx, { secretId }),
+          state,
+          state.branch,
+          input.access,
+        )
+      : null
 
   await db().repo.update({
     where: { id },
-    data: { trust: input.trust, access: input.access, secretId },
+    data: {
+      trust: input.trust,
+      access: input.access,
+      secretId,
+      ...(checked ? { private: checked.info.private } : {}),
+    },
   })
 
   // Pushing needs read and write.
@@ -329,6 +357,28 @@ export async function updateRepo(
       data: { bidirectional: false },
     })
   }
+}
+
+/**
+ * Asks GitHub again whether the repository is private, and keeps what it
+ * says: before a push is reviewed, and on every sync of the repository.
+ */
+export async function refreshVisibility(
+  ctx: VaultContext,
+  repo: RepoView,
+  gh?: GitHub,
+): Promise<RepoView> {
+  const info = await repoInfo(gh ?? (await clientFor(ctx, repo)), repo)
+  const visibility: RepoVisibility = info.private ? "private" : "public"
+
+  if (visibility !== repo.visibility) {
+    await db().repo.update({
+      where: { id: repo.id },
+      data: { private: info.private },
+    })
+  }
+
+  return { ...repo, visibility }
 }
 
 /** Unlinks the repository: its items stay in the vault, unlinked. */
@@ -389,7 +439,32 @@ export async function getRepoItem(
   return itemOf(ctx, row)
 }
 
-/** The link of a vault item, by its kind and id, if it has one. */
+/** Every instance of a server's definition, by id; the server alone without one. */
+async function instanceIds(
+  ctx: VaultContext,
+  serverId: string,
+): Promise<string[]> {
+  const row = await db().mcpServer.findFirst({
+    where: { id: serverId, vaultId: ctx.vaultId },
+    select: { definitionId: true },
+  })
+
+  if (!row?.definitionId) {
+    return [serverId]
+  }
+
+  const instances = await db().mcpServer.findMany({
+    where: { definitionId: row.definitionId, vaultId: ctx.vaultId },
+    select: { id: true },
+  })
+
+  return instances.map((instance) => instance.id)
+}
+
+/**
+ * The link of a vault item, by its kind and id, if it has one. A server's
+ * item is its definition, so the link of any instance of it counts.
+ */
 export async function findRepoItem(
   ctx: VaultContext,
   kind: ItemKind,
@@ -398,7 +473,9 @@ export async function findRepoItem(
   const row = await db().repoItem.findFirst({
     where: {
       repo: { vaultId: ctx.vaultId },
-      ...(kind === "skill" ? { skillId: itemId } : { serverId: itemId }),
+      ...(kind === "skill"
+        ? { skillId: itemId }
+        : { serverId: { in: await instanceIds(ctx, itemId) } }),
     },
   })
 
@@ -415,6 +492,7 @@ export async function linkItem(
     path: string
     remoteSha: string
     localHash: string
+    commit?: string | null
     frequency?: SyncFrequency
     bidirectional?: boolean
   },
@@ -429,6 +507,7 @@ export async function linkItem(
     declinedSha: null,
     drafts: {},
     note: null,
+    commit: input.commit ?? existing?.data.commit ?? null,
   }
   const sync = {
     frequency: input.frequency ?? existing?.frequency ?? "daily",
@@ -550,4 +629,99 @@ export async function linkedItemNames(
 export async function unlinkItem(ctx: VaultContext, id: string): Promise<void> {
   await getRepoItem(ctx, id)
   await db().repoItem.delete({ where: { id } })
+}
+
+// ---- Items kept out ------------------------------------------------------------
+
+/** A vault item as an exclusion names it: a skill, or a server's definition. */
+export type ExclusionKey = `skill:${string}` | `definition:${string}`
+
+async function exclusionTarget(
+  ctx: VaultContext,
+  kind: ItemKind,
+  itemId: string,
+): Promise<{ skillId: string } | { definitionId: string }> {
+  if (kind === "skill") {
+    const skill = await db().skill.findFirst({
+      where: { id: itemId, vaultId: ctx.vaultId },
+      select: { id: true },
+    })
+
+    if (!skill) {
+      throw notFound("That skill")
+    }
+
+    return { skillId: skill.id }
+  }
+
+  const server = await db().mcpServer.findFirst({
+    where: { id: itemId, vaultId: ctx.vaultId },
+    select: { id: true },
+  })
+  const definitionId = server ? await ensureDefinition(server.id) : null
+
+  if (!definitionId) {
+    throw notFound("That server")
+  }
+
+  return { definitionId }
+}
+
+/** The key an item is kept out by, as listExclusions gives them. */
+export async function exclusionKey(
+  ctx: VaultContext,
+  kind: ItemKind,
+  itemId: string,
+): Promise<ExclusionKey> {
+  const target = await exclusionTarget(ctx, kind, itemId)
+  return "skillId" in target
+    ? `skill:${target.skillId}`
+    : `definition:${target.definitionId}`
+}
+
+/** What the owner keeps out of a repository, by key. */
+export async function listExclusions(
+  ctx: VaultContext,
+  repoId: string,
+): Promise<Set<ExclusionKey>> {
+  const rows = await db().repoExclusion.findMany({
+    where: { repoId, repo: { vaultId: ctx.vaultId } },
+    select: { skillId: true, definitionId: true },
+  })
+
+  return new Set(
+    rows.map((row): ExclusionKey =>
+      row.skillId ? `skill:${row.skillId}` : `definition:${row.definitionId}`,
+    ),
+  )
+}
+
+/**
+ * Keeps an item out of a repository on purpose (`excluded`), or takes it
+ * back in. A server's is kept out by its definition: every instance.
+ */
+export async function setExcluded(
+  ctx: VaultContext,
+  repoId: string,
+  item: { kind: ItemKind; id: string },
+  excluded: boolean,
+): Promise<void> {
+  await repoRow(ctx, repoId)
+  const target = await exclusionTarget(ctx, item.kind, item.id)
+
+  if (!excluded) {
+    await db().repoExclusion.deleteMany({ where: { repoId, ...target } })
+    return
+  }
+
+  const existing = await db().repoExclusion.findFirst({
+    where: { repoId, ...target },
+    select: { id: true },
+  })
+
+  if (!existing) {
+    await db().repoExclusion.create({
+      data: { id: newId(), repoId, ...target },
+    })
+  }
 }

@@ -26,10 +26,11 @@ import {
   forgetSyncLooks,
   keepMine,
   pendingChange,
-  pushItems,
   runDueSyncs,
   syncItem,
+  syncRepo,
 } from "./sync"
+import { confirmShare, shareReview } from "./share-review"
 import {
   ANTHROPIC_SKILL,
   CLIENT_SECRET,
@@ -38,6 +39,7 @@ import {
   populate,
   REFRESH_TOKEN,
 } from "./test-vault"
+import type { ItemKind } from "./layout"
 import { localItems } from "./local"
 
 // Linked repositories end to end against a fake GitHub: what a repository
@@ -125,6 +127,15 @@ async function linkedSkill({
   }
 
   return { repoId, itemId: item!.id, skillId: item!.itemId }
+}
+
+/** The owner's review of pushing one item, confirmed as shown. */
+async function share(repoId: string, item: { kind: ItemKind; id: string }) {
+  const review = await shareReview(ctx, repoId, item)
+  return confirmShare(ctx, repoId, item, {
+    basis: review.basis,
+    acknowledged: review.hits.map((hit) => hit.id),
+  })
 }
 
 function remoteSkill(): string {
@@ -315,13 +326,10 @@ describe("pushing items", () => {
     })
     const items = await localItems(ctx)
 
-    const results = await pushItems(
-      ctx,
-      id,
-      items.map((item) => ({ kind: item.document.kind, id: item.id })),
-    )
+    for (const item of items) {
+      await share(id, { kind: item.document.kind, id: item.id })
+    }
 
-    expect(results.every((result) => result.ok)).toBe(true)
     const log = fake.log("ada", "mine")
     expect(log).toHaveLength(items.length + 1)
     expect(log[0]).toMatch(
@@ -336,9 +344,9 @@ describe("pushing items", () => {
     expect(files["README.md"]).toBe("Ours.")
 
     // Pushing again with nothing changed writes no commit.
-    await pushItems(ctx, id, [
-      { kind: items[0]!.document.kind, id: items[0]!.id },
-    ])
+    expect(
+      await share(id, { kind: items[0]!.document.kind, id: items[0]!.id }),
+    ).toMatchObject({ commit: null })
     expect(fake.log("ada", "mine")).toHaveLength(items.length + 1)
 
     // No value of a secret in a file, a path or a request; the token only as
@@ -371,12 +379,9 @@ describe("pushing items", () => {
       })
     }
 
-    const [result] = await pushItems(ctx, repoId, [
-      { kind: "skill", id: skillId },
-    ])
-
-    expect(result).toMatchObject({ ok: false })
-    expect(result!.message).toMatch(/moved on/)
+    await expect(share(repoId, { kind: "skill", id: skillId })).rejects.toThrow(
+      /moved on/,
+    )
     expect(fake.log("ada", "shared")).toEqual(["A change", ...before])
     expect(remoteSkill()).toContain("Take notes.")
   })
@@ -467,8 +472,11 @@ describe("sync by hash", () => {
 })
 
 describe("trust", () => {
-  it("applies a text-only change from a trusted repository at once", async () => {
-    const { itemId, skillId } = await linkedSkill({ trust: "trusted" })
+  it("applies a text-only change from a trusted repository the owner pushes to at once", async () => {
+    const { itemId, skillId } = await linkedSkill({
+      trust: "trusted",
+      access: "write",
+    })
     changeRemote(skillMd("Take better notes.", "Write it all down."))
 
     expect(await syncItem(ctx, itemId)).toMatchObject({ outcome: "pulled" })
@@ -477,6 +485,30 @@ describe("trust", () => {
       body: "Write it all down.",
     })
     expect(await syncItem(ctx, itemId)).toMatchObject({ outcome: "same" })
+  })
+
+  it("pins an import from a read-only repository, trusted or not: an update waits until the owner takes it", async () => {
+    const { itemId, skillId } = await linkedSkill({ trust: "trusted" })
+    const pinned = (await getRepoItem(ctx, itemId)).data.commit
+    expect(pinned).toMatch(/^[0-9a-f]{40}$/)
+    changeRemote(skillMd("Take better notes.", "Write it all down."))
+
+    expect(await syncItem(ctx, itemId)).toMatchObject({
+      outcome: "review",
+      message: expect.stringMatching(/update is available/),
+    })
+    expect((await getSkill(ctx, skillId)).description).toBe("Take notes.")
+    const item = await getRepoItem(ctx, itemId)
+    expect(item.state).toBe("review")
+    expect(item.data.commit).toBe(pinned)
+
+    // Taking it goes through the review, as any other change does.
+    const change = await pendingChange(ctx, itemId)
+    expect(change.review.textOnly).toBe(true)
+    await approveChange(ctx, itemId, change.pending)
+    expect((await getSkill(ctx, skillId)).description).toBe(
+      "Take better notes.",
+    )
   })
 
   it("holds a change that raises a flag, even from a trusted repository", async () => {
@@ -550,6 +582,21 @@ describe("the owner's approval", () => {
   })
 })
 
+describe("a repository's visibility", () => {
+  it("is stored when it is linked, and asked again on every sync", async () => {
+    const { repoId } = await linkedSkill({ access: "write" })
+    expect((await getRepo(ctx, repoId)).visibility).toBe("public")
+
+    fake.repos.get("ada/shared")!.private = true
+    await syncRepo(ctx, repoId)
+    expect((await getRepo(ctx, repoId)).visibility).toBe("private")
+
+    // One not asked yet reads as such, and counts as public in a review.
+    await db().repo.update({ where: { id: repoId }, data: { private: null } })
+    expect((await getRepo(ctx, repoId)).visibility).toBe("unknown")
+  })
+})
+
 describe("links", () => {
   it("goes when its item is deleted from the vault", async () => {
     const { skillId } = await linkedSkill()
@@ -586,7 +633,7 @@ describe("links", () => {
 
 describe("due syncs", () => {
   it("syncs what is due, leaves what is not, and runs one at a time per vault", async () => {
-    const { itemId } = await linkedSkill({ trust: "trusted" })
+    const { itemId } = await linkedSkill({ trust: "trusted", access: "write" })
     changeRemote(skillMd("Take better notes.", "Write it down."))
     const now = Date.now()
 

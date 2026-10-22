@@ -17,6 +17,7 @@ import { createSession, resolveSession } from "./sessions"
 import { SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
 import { keepResult } from "./tool-results"
+import { setExcluded } from "./repos/store"
 import { addLinkedRepo } from "./repos/test-vault"
 import { isSetUp, ownerVault, setupVault, unlockOwnerVault } from "./vault"
 import { deleteVault } from "./vault-reset"
@@ -106,7 +107,17 @@ async function populate() {
     tools: [],
   })
   await setTokenSkills(ctx, tokenId, { all: false, skillIds: [skill.id] })
-  await addLinkedRepo(ctx, { skillId: skill.id, secretId: secret.id })
+  const { repoId } = await addLinkedRepo(ctx, {
+    skillId: skill.id,
+    secretId: secret.id,
+  })
+  const kept = await createSkill(ctx, {
+    name: "kept-out",
+    description: "Not for the repository.",
+    body: "Mine.",
+    tools: [],
+  })
+  await setExcluded(ctx, repoId, { kind: "skill", id: kept.id }, true)
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
   await setHostJson(DDNS_CONFIG_KEY, { provider: "duckdns", subdomain: "ada" })
   const { cookieValue } = await createSession(ctx)

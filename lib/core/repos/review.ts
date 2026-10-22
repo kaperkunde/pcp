@@ -87,7 +87,7 @@ export type ItemReview = {
   textOnly: boolean
 }
 
-function fileChanges(
+export function fileChanges(
   before: Record<string, string>,
   after: Record<string, string>,
 ): FileChange[] {
