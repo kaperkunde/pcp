@@ -1,7 +1,8 @@
+import { EventEmitter } from "node:events"
 import { readFileSync } from "node:fs"
 import { createRequire } from "node:module"
 
-import type { CDPSession } from "patchright-core"
+import type { BrowserContext, CDPSession, Page } from "patchright-core"
 import { describe, expect, it, vi } from "vitest"
 
 import { displaySwitches } from "./display"
@@ -11,9 +12,16 @@ import {
   launchArgs,
   launchOptions,
   modesToTry,
+  openPage,
   wantedMode,
+  type BackgroundTargets,
 } from "./launch"
-import { OFF_SCREEN_WINDOW, SCREEN, SHOWN_WINDOW_POSITION } from "./limits"
+import {
+  ACTION_TIMEOUT_MS,
+  OFF_SCREEN_WINDOW,
+  SCREEN,
+  SHOWN_WINDOW_POSITION,
+} from "./limits"
 
 describe("how the browser is wanted to run", () => {
   it("has a window of its own in the desktop app, wherever it runs", () => {
@@ -297,6 +305,136 @@ describe("a window kept off the screen", () => {
     } finally {
       log.mockRestore()
       delete holder[Symbol.for("pcp.browser.offScreenWarned")]
+    }
+  })
+})
+
+const backgroundWarned = Symbol.for("pcp.browser.backgroundWarned")
+
+/** A context's events and newPage, its pages only names and target ids. */
+function fakeContext() {
+  const emitter = new EventEmitter()
+  const plain = { name: "plain" } as unknown as Page
+  const newPage = vi.fn(async () => plain)
+  const context = {
+    on: (event: string, listener: (page: Page) => void) =>
+      emitter.on(event, listener),
+    off: (event: string, listener: (page: Page) => void) =>
+      emitter.off(event, listener),
+    newPage,
+  } as unknown as BrowserContext
+
+  return { context, emitter, plain, newPage }
+}
+
+/** Chromium's side: createTarget makes a page Playwright announces later. */
+function fakeTargets(
+  emitter: EventEmitter,
+  { failing = false, announce = true } = {},
+) {
+  const created: unknown[] = []
+  const closed: string[] = []
+  const create = vi.fn(async (params: unknown) => {
+    created.push(params)
+    if (failing) throw new Error("Target.createTarget failed")
+    if (announce) {
+      setTimeout(() => {
+        // Another tab's popup, announced in between.
+        emitter.emit("page", { name: "popup", id: "OTHER" })
+        emitter.emit("page", { name: "background", id: "NEW" })
+      }, 5)
+    }
+    return "NEW"
+  })
+  const targets: BackgroundTargets = {
+    contextId: "CTX",
+    create,
+    close: async (targetId) => {
+      closed.push(targetId)
+    },
+    targetOf: async (page) => (page as unknown as { id: string }).id,
+  }
+
+  return { targets, create, created, closed }
+}
+
+describe("a page of PCP's own", () => {
+  it("opens in a window of its own in the background, with a window", async () => {
+    const { context, emitter, newPage } = fakeContext()
+    const { targets, created } = fakeTargets(emitter)
+
+    const page = await openPage(context, "window", targets)
+
+    expect((page as unknown as { name: string }).name).toBe("background")
+    expect(created).toEqual([
+      {
+        url: "about:blank",
+        browserContextId: "CTX",
+        newWindow: true,
+        background: true,
+        left: OFF_SCREEN_WINDOW.x,
+        top: OFF_SCREEN_WINDOW.y,
+      },
+    ])
+    expect(newPage).not.toHaveBeenCalled()
+    expect(emitter.listenerCount("page")).toBe(0)
+  })
+
+  it("opens as Playwright opens it without a window, where no focus is taken", async () => {
+    for (const mode of ["virtual", "headless"] as const) {
+      const { context, emitter, plain } = fakeContext()
+      const { targets, create } = fakeTargets(emitter)
+
+      expect(await openPage(context, mode, targets)).toBe(plain)
+      expect(create).not.toHaveBeenCalled()
+    }
+  })
+
+  it("opens as Playwright opens it when the background does not work, said once", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {})
+    const holder = globalThis as Record<symbol, unknown>
+    delete holder[backgroundWarned]
+
+    try {
+      const failing = fakeContext()
+      const { targets } = fakeTargets(failing.emitter, { failing: true })
+      expect(await openPage(failing.context, "window", targets)).toBe(
+        failing.plain,
+      )
+
+      // No id for the context: nothing to create the target in.
+      const unknown = fakeContext()
+      expect(await openPage(unknown.context, "window", null)).toBe(
+        unknown.plain,
+      )
+
+      expect(log).toHaveBeenCalledTimes(1)
+      expect(String(log.mock.calls[0]![0])).toContain("in front")
+    } finally {
+      log.mockRestore()
+      delete holder[backgroundWarned]
+    }
+  })
+
+  it("closes a window whose page Playwright never takes in", async () => {
+    vi.useFakeTimers()
+    const log = vi.spyOn(console, "error").mockImplementation(() => {})
+    const holder = globalThis as Record<symbol, unknown>
+
+    try {
+      const { context, emitter, plain } = fakeContext()
+      const { targets, closed } = fakeTargets(emitter, { announce: false })
+
+      const opening = openPage(context, "window", targets)
+      await vi.advanceTimersByTimeAsync(ACTION_TIMEOUT_MS + 1)
+
+      expect(await opening).toBe(plain)
+      expect(closed).toEqual(["NEW"])
+      expect(emitter.listenerCount("page")).toBe(0)
+    } finally {
+      log.mockRestore()
+      vi.useRealTimers()
+      delete holder[backgroundWarned]
     }
   })
 })

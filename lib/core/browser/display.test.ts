@@ -30,7 +30,9 @@ import { OFF_SCREEN_WINDOW, SHOWN_WINDOW_POSITION } from "./limits"
 import {
   browserStatus,
   closeAllBrowsers,
+  closeSolvePage,
   ensureBrowser,
+  openSolvePage,
   openTab,
 } from "./runtime"
 import { subscribeScreencast } from "./screencast"
@@ -424,6 +426,85 @@ document.title = JSON.stringify({
           OFF_SCREEN_WINDOW.y,
         ])
       } finally {
+        await closeAllBrowsers()
+        screen?.release()
+      }
+    })
+
+    it("in the desktop app, opens its own tabs and web_fetch's pages in windows of their own, in the background", async () => {
+      const screen = await acquireDisplay()
+      vi.stubEnv("DISPLAY", screen!.display.display)
+      vi.stubEnv("XAUTHORITY", screen!.display.authFile)
+      vi.stubEnv("PCP_DESKTOP", "1")
+      vi.stubEnv("PCP_BROWSER_DISPLAY", "")
+      const log = vi.spyOn(console, "error")
+
+      try {
+        const vault = await ensureBrowser(ctx)
+        expect(vault.mode).toBe("window")
+        const meta = {
+          openedBy: "owner" as const,
+          tokenId: null,
+          rules: null,
+          privateAllowed: true,
+        }
+        const first = await openTab(vault, meta)
+        const second = await openTab(vault, meta)
+        const solve = await openSolvePage(vault, {
+          url: new URL(api.origin),
+          privateAllowed: true,
+        })
+        const solveCdp = await solve.page.context().newCDPSession(solve.page)
+
+        // Each opened through Target.createTarget in the background, not
+        // Playwright's newPage: nothing fell back to it.
+        expect(
+          log.mock.calls.some((call) => String(call[0]).includes("in front")),
+        ).toBe(false)
+
+        const windows = new Set<number>()
+        for (const cdp of [first.cdp, second.cdp, solveCdp]) {
+          const { targetInfo } = await cdp.send("Target.getTargetInfo")
+          expect(targetInfo.type).toBe("page")
+          expect(targetInfo.url).toBe("about:blank")
+
+          // A window of its own, off the screen.
+          const { windowId, bounds } = await cdp.send(
+            "Browser.getWindowForTarget",
+          )
+          windows.add(windowId)
+          expect([bounds.left, bounds.top]).toEqual([
+            OFF_SCREEN_WINDOW.x,
+            OFF_SCREEN_WINDOW.y,
+          ])
+        }
+        expect(windows.size).toBe(3)
+        await solveCdp.detach()
+        await closeSolvePage(vault, solve)
+
+        // Neither tab is a hidden one of a shared window: both still draw.
+        for (const tab of [first, second]) {
+          await tab.page.goto(`${api.origin}/place`)
+          const seen = JSON.parse(await tab.page.title()) as {
+            visible: string
+          }
+          expect(seen.visible).toBe("visible")
+
+          const frames: unknown[] = []
+          const viewer = await subscribeScreencast(tab, (frame) => {
+            frames.push(frame)
+            viewer?.took()
+          })
+          await tab.page.evaluate(() => {
+            document.body.style.background = "rgb(4, 5, 6)"
+          })
+          await vi.waitFor(() => expect(frames.length).toBeGreaterThan(0), {
+            timeout: 10_000,
+          })
+          viewer?.stop()
+        }
+      } finally {
+        log.mockRestore()
         await closeAllBrowsers()
         screen?.release()
       }

@@ -28,6 +28,8 @@ import {
   keepOffScreen,
   launchOptions,
   modesToTry,
+  newBrowserContext,
+  openPage,
   wantedMode,
   type BrowserMode,
 } from "./launch"
@@ -524,7 +526,7 @@ async function start(
     throw error
   }
 
-  const context = await browser.newContext({
+  const context = await newBrowserContext(browser, mode, {
     ...contextOptions(browser.version(), mode),
     storageState: (await loadProfile(ctx)) ?? undefined,
   })
@@ -1042,7 +1044,7 @@ export async function openTab(
     )
   }
 
-  const page = await vault.context.newPage()
+  const page = await openPage(vault.context, vault.mode)
   return attach(vault, page, meta)
 }
 
@@ -1062,7 +1064,7 @@ export function reopenTab(vault: VaultBrowser, tab: Tab): Promise<Reopened> {
     tab.unresponsive = true
     const old = tab.page
     const address = old.url()
-    const page = await vault.context.newPage()
+    const page = await openPage(vault.context, vault.mode)
 
     try {
       Object.assign(tab, await pageParts(vault, page), { dialog: null })
@@ -1128,19 +1130,21 @@ export function solveMayOpen(
 }
 
 function fetchContext(vault: VaultBrowser): Promise<BrowserContext> {
-  vault.fetchContext ??= vault.browser
-    .newContext(contextOptions(vault.browser.version(), vault.mode))
-    .then((context) => {
-      // A page read for web_fetch opens no windows: the gate refuses what a
-      // popup would load, and the window is closed.
-      context.on("page", (page) => {
-        void page
-          .opener()
-          .then((opener) => (opener ? page.close() : undefined))
-          .catch(() => {})
-      })
-      return context
+  vault.fetchContext ??= newBrowserContext(
+    vault.browser,
+    vault.mode,
+    contextOptions(vault.browser.version(), vault.mode),
+  ).then((context) => {
+    // A page read for web_fetch opens no windows: the gate refuses what a
+    // popup would load, and the window is closed.
+    context.on("page", (page) => {
+      void page
+        .opener()
+        .then((opener) => (opener ? page.close() : undefined))
+        .catch(() => {})
     })
+    return context
+  })
   vault.fetchContext.catch(() => {
     vault.fetchContext = null
   })
@@ -1167,7 +1171,7 @@ export async function openSolvePage(
   let page: Page | null = null
 
   try {
-    page = await (await fetchContext(vault)).newPage()
+    page = await openPage(await fetchContext(vault), vault.mode)
     const documents = watchDocuments(page)
     const cdp = await page.context().newCDPSession(page)
     const { frameTree } = await cdp.send("Page.getFrameTree")
