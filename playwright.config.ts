@@ -79,6 +79,10 @@ export default defineConfig({
       // The update check asks a port nothing answers on, never GitHub.
       PCP_RELEASES_URL: E2E_RELEASES_URL,
       PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
+      // The suite acts far faster than a person: pacing (lib/core/pacing/)
+      // would make every browser and web fetch step wait. Unit tests cover
+      // it; its settings are still shown and saved.
+      PCP_PACING: "off",
     },
   },
   projects: [

@@ -29,6 +29,7 @@ import {
   type FetchOptions,
 } from "./fetch/fetch"
 import { MAX_FETCH_RULES } from "./fetch/limits"
+import { paceSite } from "./pacing"
 import type { FetchArgs } from "./fetch/request"
 import {
   emptyRules,
@@ -330,6 +331,10 @@ export async function writeSiteAccess(
  * site the browser passed lately is read through it first, and the plain
  * request is the fallback. Any other request is sent once. An answer that
  * is still the check ends with one line on what the owner can do.
+ *
+ * Every request waits for the site's turn (lib/core/pacing/): each one
+ * fetch/fetch.ts sends, redirects on the site included, and the read
+ * through the browser.
  */
 export async function runFetch(
   ctx: VaultContext,
@@ -353,9 +358,21 @@ export async function runFetch(
   },
 ): Promise<CallToolResult> {
   const host = fetchHostOf(args)
+  const pace = (site: string) => paceSite(ctx.vaultId, site, "web_fetch")
   const options = {
     allowPrivate: await privateAllowedFor(ctx.vaultId, tokenId),
     publicUrl,
+    pace,
+  }
+  const solve = async (): Promise<FetchAnswer> => {
+    const paced = await pace(host)
+
+    return paced
+      ? {
+          result: { content: [{ type: "text", text: paced }], isError: true },
+          challenged: false,
+        }
+      : solver(ctx, args, options)
   }
   // Whether the browser can read the page is asked only when it would:
   // most sites never check, and the answer can mean loading Playwright.
@@ -363,7 +380,7 @@ export async function runFetch(
   let answer: FetchAnswer
 
   if (reading && clearance(ctx.vaultId, host) && (await available(ctx))) {
-    answer = await solver(ctx, args, options)
+    answer = await solve()
 
     if (answer.challenged) {
       answer = await fetcher(args, options)
@@ -372,7 +389,7 @@ export async function runFetch(
     answer = await fetcher(args, options)
 
     if (answer.challenged && reading && (await available(ctx))) {
-      answer = await solver(ctx, args, options)
+      answer = await solve()
     }
   }
 

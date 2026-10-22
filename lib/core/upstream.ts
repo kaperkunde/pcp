@@ -35,6 +35,7 @@ import {
   isPublicAddress,
 } from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
+import { paceServerCall } from "./pacing"
 import { checkedFetch } from "./openapi/transport"
 import {
   applyAuthorizeParams,
@@ -1291,12 +1292,21 @@ export type CallOptions = {
    * Aborts when the run the call is made for is over (its own limit, or it
    * ended), never because its client went away. The browser honours it: a
    * call waiting its turn on a tab, or running, stops waiting, is rejected
-   * with the signal's reason, and its turn passes on. Other kinds of server
-   * do not look at it yet.
+   * with the signal's reason, and its turn passes on. A call waiting for
+   * its turn under pacing stops waiting too. Other kinds of server do not
+   * look at it yet.
    */
   signal?: AbortSignal
 }
 
+/**
+ * Runs one tool of a server. Every real call passes here, whatever made it
+ * (call_tool, run_code, a wrapper, the owner's answer to a request), so
+ * this is where a server's calls are paced (lib/core/pacing/): by the
+ * server, before anything is read or sent. The browser paces its actions
+ * by the tab's site instead (browser/call.ts), and a wrapper's tool is
+ * paced by the calls its program makes.
+ */
 export async function callServerTool(
   ctx: VaultContext,
   server: McpServer,
@@ -1304,6 +1314,16 @@ export async function callServerTool(
   args: Record<string, unknown>,
   options: CallOptions,
 ): Promise<CallToolResult> {
+  if (server.kind !== "browser" && server.kind !== "wrapper") {
+    const paced = await paceServerCall(ctx.vaultId, server, toolName, {
+      signal: options.signal,
+    })
+
+    if (paced) {
+      return { content: [{ type: "text", text: paced }], isError: true }
+    }
+  }
+
   const { args: sent, redact } = await placeSecrets(
     ctx,
     server,

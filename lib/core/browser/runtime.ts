@@ -120,6 +120,11 @@ export type Tab = {
   /** The calls on this tab, one at a time. */
   lane: Lane
   /**
+   * The call whose turn on the lane it is now, and the run_code or wrapper
+   * run it is made for (null for none); null between calls.
+   */
+  running: { runId: string | null } | null
+  /**
    * Its page stopped responding (a call passed its deadline) or crashed:
    * it is reopened at its address, at once or on the next call.
    */
@@ -987,6 +992,7 @@ async function attach(
     dialog: null,
     offeredFile: null,
     lane: newLane(),
+    running: null,
     unresponsive: false,
     reopening: null,
     popups: [],

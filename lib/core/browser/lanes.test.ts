@@ -16,6 +16,7 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import { scratchDatabase } from "../test-db"
+import { resetPacing, setPacingClock } from "../pacing/pace"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
 import { callBrowserTool } from "./call"
@@ -210,5 +211,85 @@ describe.skipIf(!executable)("a tab's lane", { timeout: 60_000 }, () => {
       `This tab (${tab}) stopped responding: its page crashed, and it was reopened at ${api.origin}/crash. Nothing else was done; take a snapshot, then call again.`,
     )
     expect(textOf(await call("snapshot", { tab }))).toContain("Page /crash")
+  })
+})
+
+describe.skipIf(!executable)("a tab a program has", { timeout: 60_000 }, () => {
+  function asRun(name: string, args: Record<string, unknown>, runId: string) {
+    return callBrowserTool(ctx, server, name, args, {
+      tokenId,
+      publicUrl: PUBLIC_URL,
+      runId,
+    })
+  }
+
+  const NOTICE =
+    "A running program (run run_a) is acting on this tab right now; what you see may change under it."
+
+  it("is said in one line in front of another call's answer, which still runs", async () => {
+    const tab = await openTab("/a")
+
+    const running = asRun("wait_for", { tab, ms: 1_500 }, "run_a")
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const read = await call("snapshot", { tab })
+
+    expect(read.isError).toBeUndefined()
+    expect(textOf(read).split("\n")[0]).toBe(NOTICE)
+    expect(textOf(read)).toContain("Page /a")
+    expect(textOf(await running)).not.toContain("A running program")
+
+    // Another run's call is told; the run's own, and a call on a tab no
+    // program has, are not.
+    const again = asRun("wait_for", { tab, ms: 1_500 }, "run_a")
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const [other, own] = await Promise.all([
+      asRun("snapshot", { tab }, "run_b"),
+      asRun("snapshot", { tab }, "run_a"),
+    ])
+    expect(textOf(other).split("\n")[0]).toBe(NOTICE)
+    expect(textOf(own)).not.toContain("A running program")
+    await again
+    expect(textOf(await call("snapshot", { tab }))).not.toContain(
+      "A running program",
+    )
+  })
+})
+
+describe.skipIf(!executable)("pacing a tab", { timeout: 60_000 }, () => {
+  let waits: number[]
+
+  beforeEach(() => {
+    vi.stubEnv("PCP_PACING", "")
+    resetPacing()
+    waits = []
+    // Waits are noted, not waited: the browser's own clock runs as ever.
+    setPacingClock({
+      now: () => 1_000_000 + waits.reduce((sum, ms) => sum + ms, 0),
+      sleep: async (ms) => {
+        waits.push(ms)
+      },
+      random: () => 0,
+    })
+  })
+
+  afterEach(() => {
+    setPacingClock(null)
+    resetPacing()
+    vi.unstubAllEnvs()
+  })
+
+  it("paces acting by the site, before the call queues, and lets reading go", async () => {
+    const tab = await openTab("/a")
+    expect(waits).toEqual([])
+
+    expect((await call("snapshot", { tab })).isError).toBeUndefined()
+    expect(waits).toEqual([])
+
+    const went = await call("navigate", { tab, url: `${api.origin}/b` })
+    expect(textOf(went)).toContain("Page /b")
+    expect(waits).toEqual([1_500])
+
+    await call("press_key", { tab, key: "Tab" })
+    expect(waits).toEqual([1_500, 1_500])
   })
 })
