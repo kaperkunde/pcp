@@ -205,7 +205,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/browser/`                  | Browser: Chromium, proxy, tabs, tools; web_fetch past a check         |
 | `lib/core/code/`                     | run_code: QuickJS, the bridge, the sandbox executor, limits           |
 | `lib/core/wrappers/`                 | Wrappers: definition, run, secret placeholders, requests              |
-| `lib/core/repos/`                    | Shared items as repository files: layout, documents, review, apply    |
+| `lib/core/repos/`                    | Repository items: layout, documents, review, apply, push review       |
 | `sandbox/`                           | The sandbox container: its runner and the `pcp` command               |
 | `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input             |
 | `components/browser-tab-view.tsx`    | The live view: frames on a canvas, timed input sent back              |

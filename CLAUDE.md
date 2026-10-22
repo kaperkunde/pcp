@@ -137,10 +137,21 @@ so in the summary; the bump itself waits for the request.
   (`repos/limits.ts`) and read against a schema, every file checked against
   its git id. It never reads a secret: `upstream.ts githubCredential` hands
   it the header, from a text secret or PCP's own sign-in (`oauth/github`).
-  A push is one commit per item, fast-forward only. From a trusted
-  repository only a `textOnly` change applies by itself; everything else
-  waits on the item (`pending`, named by its git id) and applies only as
-  the owner was shown it, while its `basis` holds. Nothing syncs without a
+  A server's document is its definition only (`PCP_FORMAT` 2): sync never
+  writes an instance's own fields (name and short name, address,
+  credential and secrets, read-only, public-only, enabled, pace, levels,
+  note), and what a format-1 document says of its server only fills in a
+  first instance. A push is one commit per item, fast-forward only, and
+  only through the push's review (`repos/share-review.ts`): every file in
+  full, what stays private, and the personal-data check
+  (`repos/personal-data.ts`, pure), which a public repository waits on
+  until each hit is fixed or ticked; Confirm pushes exactly what was shown
+  (its `basis`) or opens the review again. Never a push of several items
+  at once. From a trusted read-and-write repository only a `textOnly`
+  change applies by itself; an item imported from a read-only repository
+  is pinned, and everything else waits on the item (`pending`, named by
+  its git id) and applies only as the owner was shown it, while its
+  `basis` holds. Nothing syncs without a
   request's key: `runDueSyncs` runs only through `after()` from `/mcp` and
   the owner's pages; never a timer, a webhook or a stored key. An assistant
   (manage-endpoints only) helps through `search`, `describe` and

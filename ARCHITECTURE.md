@@ -563,11 +563,13 @@ instructions as the descriptions do.
 
 **About card** (`item-about.ts`, `components/item-about.tsx`): every item's
 page (a server of any kind, a skill) says its type and definition, its
-source (made here, or the linked repository and path), its sync (local
-only, or the link's state, schedule and last sync), its sharing (private),
-its instances with Clone and Detach, and the note. Source, Sync and Sharing
-read what linked repositories hold today; `sourceOf`, `syncOf` and
-`sharingOf` are where sharing per item extends them.
+source (Local, `owner/repo/path`, or "Imported from owner/repo@commit",
+with View in repo), its sync (Local only, Synced, Pending review, Modified
+locally, Update available or Sync error, with Sync now, Pull update,
+Review, or Review and push), its sharing (Private, or Public while it is in
+a repository GitHub says anyone can read) with a Share switch that opens
+the push's review, its instances with Clone and Detach, and the note. A
+server's link is its definition's: the link of any of its instances counts.
 
 ## Mail accounts
 
@@ -1069,13 +1071,23 @@ the GitHub client and sync itself build on it.
   are left alone.
 - **Documents** (`documents.ts`): `serializeItem` writes an item as files,
   the same item always as the same text; `parseItem` and `readRepo` read
-  files back into what they propose. Secrets appear by name only, an OAuth
-  client by its ID; never a value, a token, a row id or an address PCP
-  found itself (a JMAP session's, a token endpoint's). A wrapper's calls
-  are `server/tool` by short name as `get_wrapper` shows them, and its
-  secret places by secret name, tool and argument. `apply.ts resolveItem`
-  says what the names are in this vault: a server or tool with nothing to
-  it is a problem (never a guess), a secret the vault lacks is listed.
+  files back into what they propose. A server's document is its
+  **definition only** (see Definitions and instances): the definition's
+  short name and name, the description, an endpoint's schema, edits and
+  tool descriptions, a wrapper's programs, and how it signs in by kind,
+  header and format (an OAuth scope). Never anything of an instance: its
+  name, address, read-only and public-only switches, which secrets it
+  signs in with, a basic login's user name, its OAuth client, its note,
+  levels, whether it is on or its pace. The vault has one item per
+  definition (`local.ts`; the instance linked to a repository, or the
+  oldest, stands for it). Secrets appear by name only where a wrapper's
+  program needs them (its secret places, by secret name, tool and
+  argument); never a value, a token, a row id or an address PCP found
+  itself (a JMAP session's, a token endpoint's). A wrapper's calls are
+  `server/tool` by short name as `get_wrapper` shows them. `resolveItem`
+  (`apply.ts`) says what the names are in this vault: a server or tool
+  with nothing to it is a problem (never a guess), a secret the vault
+  lacks is listed.
 - **Untrusted input.** A repository with a path that leaves its folder,
   hides a character, or clashes with another but for case is refused
   whole, as is an item past `repos/limits.ts` (files per item, bytes per
@@ -1092,7 +1104,15 @@ the GitHub client and sync itself build on it.
   newer PCP"), so an older PCP never half-reads what a newer one wrote. A
   change to a document's shape stays backward compatible: a field is added
   with a default (what a document without it always meant), never
-  repurposed or removed, and `PCP_FORMAT` goes up by one.
+  repurposed, and `PCP_FORMAT` goes up by one. Format 2 took the
+  instance's part out of server documents: a format-2 `pcp.yaml` or
+  `servers/<name>.yaml` that names a `baseUrl`, `url`, `readOnly`,
+  `publicOnly`, a secret, a user name or an OAuth client is refused. A
+  format-1 document still reads; what it says of its server is kept apart
+  (`instance`) and only fills in the first instance when the item is added,
+  never a server the vault has. An MCP server's address is its binding,
+  so a format-2 server document has no address, not even a suggested one:
+  adding it asks for the address, as Clone does.
 - **Versions.** Each document carries `version`, a whole number: a skill's
   own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
   (null reads as 1), which applying an item sets to the document's. PCP's
@@ -1106,34 +1126,82 @@ the GitHub client and sync itself build on it.
   file by file (`diffLines`), with a flag for each thing that would reach
   further: a new or changed program, new calls, calls on the wrapper's
   approval instead of the token's levels, a new or changed secret place; an
-  endpoint's base URL, OpenAPI document or edits, read-only turned off, its
-  sign-in or a secret's name; `publicOnly` turned off; an MCP server's
-  address or sign-in; a skill's new tools; a character that does not show
-  on screen anywhere. `textOnly` is true only when an existing skill's
-  description, steps or reference files change and nothing is flagged: the
-  one change sync may apply by itself, from a repository the owner trusts.
+  endpoint's OpenAPI document or edits; how a new endpoint or MCP server
+  signs in; a skill's new tools; a character that does not show on screen
+  anywhere. An instance's address, sign-in and switches never change from
+  a repository, so they are never flagged on a server the vault has.
+  `textOnly` is true only when an existing skill's description, steps or
+  reference files change and nothing is flagged: the one change sync may
+  apply by itself, from a read-and-write repository the owner trusts.
   Everything else waits for the owner.
 - **Apply** (`apply.ts applyItem`) writes what the owner approved with the
   owner's own paths (`saveSkillByOwner`, `saveWrapperByOwner`,
-  `createEndpoint`/`updateEndpoint`, `createServer`/`updateServer`), and
-  gives the row the item's name. An endpoint read from a URL keeps its
-  address, the approved text becoming its copy. A secret the vault lacks is
-  never made up: the item is saved without it (a wrapper without that
-  secret's places, an endpoint or server without that credential) and a
-  note tells the owner to add it on PCP's page.
+  `changeEndpoint`, `shareDescription`, `setToolDescription`,
+  `createEndpoint`, `createServer`). Onto a server the vault has it writes
+  the definition and nothing else: the description, the schema and its
+  edits, the tool descriptions, a wrapper's programs, the definition's name
+  and short name (kept when another definition has that one), and the
+  version on every instance. **Sync never writes an instance's own fields**:
+  its name and short name, address, credential and secrets, read-only and
+  public-only, whether it is on, its pace, levels and note. A new server or
+  endpoint is the definition and its first instance, whose own part the
+  owner gives on the page that adds it (`InstanceInput`, the clone form);
+  a format-1 document's `instance` fills it in otherwise. An endpoint read
+  from a URL keeps its address, the approved text becoming its copy. A
+  secret the vault lacks is never made up: the item is saved without it (a
+  wrapper without that secret's places, a first instance without that
+  credential) and a note tells the owner to add it on PCP's page.
+- **The push's review** (`share-review.ts`, the page
+  `settings/repositories/[id]/share`) is the one way an item of the vault
+  goes to a repository: an item page's Share, Add and "Diff and push" on a
+  repository's page, and the review an assistant's proposal will open. It
+  shows every file in full and, for a change, its diff against the
+  repository; what stays private (each instance's name, address and sign-in
+  by secret name, the note, the levels, the secrets' values); and what in
+  the files looks personal (`personal-data.ts`, pure: email addresses, the
+  owner's own hosts, domains and machine names, IPs, UUIDs and
+  Coolify-style ids, phone numbers, paths with a user name, token-shaped
+  strings, the owner's name). The owner's facts come from the vault's own
+  plain columns (`vaultOwnerFacts`): PCP's public address, the email
+  addresses the mail and calendar accounts sign in or send with, SSH
+  servers, any domain two servers share (never a mail provider's or a
+  vendor's API the owner merely uses), and the vault's name. Each hit links
+  to its line, and offers the fixes that apply: edit the description, move
+  its sentence to the owner's note, rename what is shared (before it is in
+  a repository), or leave the address out of an endpoint's shared schema
+  (its `servers` go; each instance keeps its own base URL). To a public
+  repository, or one GitHub has not said is private, Confirm waits until
+  every hit is fixed or ticked as fine to publish; to a private one the hits
+  are advice. Confirm pushes exactly what was shown: `basis` is a hash of
+  the repository, its visibility, the item's place and every file, and if
+  any of it changed since the page opened nothing is pushed and the review
+  opens again. One commit, then the item is linked and taken off the
+  repository's excluded list.
 
 ### Linking, sync and trust
 
 The owner links repositories on Settings › Repositories (`repos/store.ts`):
 `repo` holds which one (owner, name, branch: one ciphertext under
 `repo:<id>`), its trust (trusted or not), its access (read-only, or read and
-write) and the secret PCP signs in with, if any. `repo_item` links one
-item of the vault (a skill, or a server row: deleting it deletes the link)
-to its folder or file there, with how often it syncs (off, hourly, daily,
-weekly), whether two-way, and its state; where it is, the hashes sync
-compares, a change waiting for the owner and an assistant's drafts are one
-ciphertext under `repo_item:<id>`. Both are in an export and in
-`wipeVault`.
+write), the secret PCP signs in with, if any, and `private`, what GitHub
+last said of who reads it (asked when it is linked, on every sync of it and
+before every push's review; null, not asked yet, counts as public).
+`repo_item` links one item of the vault (a skill, or a server row standing
+for its definition: deleting it deletes the link) to its folder or file
+there, with how often it syncs (off, hourly, daily, weekly), whether
+two-way, and its state; where it is, the hashes sync compares, the last
+commit PCP knows, a change waiting for the owner and an assistant's drafts
+are one ciphertext under `repo_item:<id>`. `repo_exclusion` keeps an item
+out of a repository on purpose (a skill, or a server's definition, by id
+only), until the owner includes it again or pushes it. All three are in an
+export and in `wipeVault`.
+
+A repository's page (`repos/overview.ts`) is one table of every shareable
+item, grouped by kind, each Pushed (in it and in step), Changed (changed
+in the vault, not pushed), Not pushed, Imported (added from a read-only
+repository) or Excluded, with a summary on top. "Add selected" opens the
+push's review of each chosen item in turn; there is no push of several
+items at once.
 
 - **The GitHub client** (`repos/github.ts`) is fixed and built in: the REST
   API at api.github.com, and github.com only for the device flow. No
@@ -1174,9 +1242,12 @@ ciphertext under `repo_item:<id>`. Both are in an export and in
   otherwise kept. Both: a conflict, nothing applied, and a notice with keep
   mine, take theirs, or let an assistant help. Neither: nothing. The latest
   change wins only when one side changed.
-- **Trust on a pull.** From a trusted repository a change that is text only
-  (`textOnly`) is applied at once. A flag, a new item, or any change from an
-  untrusted repository waits as a review: the item's `pending` names the
+- **Trust on a pull.** From a trusted repository the owner pushes to (read
+  and write), a change that is text only (`textOnly`) is applied at once.
+  An item imported from a read-only repository is **pinned** to the commit
+  the owner reviewed: a newer one is an update available, which waits,
+  text only or not, trusted or not. A flag, a new item, or any change from
+  an untrusted repository waits as a review: the item's `pending` names the
   change by its git id and hash, never a copy of its files, and the owner's
   page reads it again by that id, so Approve applies exactly what they were
   shown, and only while the vault's item is as it was then (`basis`). Not
