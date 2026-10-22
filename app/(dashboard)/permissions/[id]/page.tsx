@@ -47,6 +47,8 @@ const STATUS: Record<string, string> = {
   running: "You allowed this; it is running now.",
   failed: "You allowed this, but it did not go through.",
   declined: "You said no, so nothing ran.",
+  withdrawn: "Withdrawn by the assistant, so nothing ran.",
+  closed: "The tab was closed before you were done, so nothing more happens.",
   expired: "This expired without an answer, so nothing ran.",
 }
 
@@ -56,6 +58,7 @@ const ACCESS_STATUS: Record<string, string> = {
   running: "Saving now.",
   failed: "You saved, but the levels were not written.",
   declined: "You said no, so no tool's level changed.",
+  withdrawn: "Withdrawn by the assistant, so no tool's level changed.",
   expired: "This expired without an answer, so no tool's level changed.",
 }
 
@@ -64,8 +67,13 @@ const STATUS_TONE: Record<string, "ok" | "warning" | "error" | "off"> = {
   running: "warning",
   failed: "error",
   declined: "off",
+  withdrawn: "off",
+  closed: "off",
   expired: "off",
 }
+
+/** Nothing for the assistant to hear: it ended without your answer. */
+const UNANSWERED = new Set(["expired", "withdrawn", "closed"])
 
 /**
  * Where an assistant sends you to answer something it asked PCP for
@@ -241,7 +249,7 @@ export default async function PermissionPage({
             tone={STATUS_TONE[view.status] ?? "off"}
             outcome={showOutcome ? view.outcome : null}
             outcomeIsError={view.outcomeIsError}
-            tell={view.status !== "expired"}
+            tell={!UNANSWERED.has(view.status)}
           />
         )}
         {view.connect ? (

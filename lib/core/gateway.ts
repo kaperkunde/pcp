@@ -105,8 +105,10 @@ import {
   checkPermission,
   defaultExecutor,
   isTransitFailure,
+  listOwnOpenRequests,
   runCall,
   runCodeCall,
+  withdrawPermission,
   withPermission,
   type PermissionExecutor,
   type RegisterArgs,
@@ -582,7 +584,7 @@ export function buildInstructions(
   return [
     ...lead,
     `PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts. Tool names are not listed here: ${discovery(hasSkills, memories !== null)} call_tool takes no server or tool name, only the call_handle, and checks the arguments before anything runs. Refer to tools as server/tool.`,
-    "The owner decides per tool what you may run. A tool they have not allowed yet answers \"Not done yet\" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.",
+    "The owner decides per tool what you may run. A tool they have not allowed yet answers \"Not done yet\" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result; withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.",
     'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email or create_draft attachment, and PCP puts the value there, so it never has to pass through you.',
     "Servers:",
     ...lines,
@@ -1807,14 +1809,44 @@ export function buildGatewayServer(
     {
       title: "Check a permission request",
       description:
-        "Says how a request went once the owner has answered it. Call it when they say they have, not in the same reply as the link (that would hide the link in some apps); if it is still open, it waits up to 45 seconds for them. Takes the id from the result that asked.",
+        "Says how a request went once the owner has answered it. Call it when they say they have, not in the same reply as the link (that would hide the link in some apps); if it is still open, it waits up to 45 seconds for them. Takes the id from the result that asked. Without an id, it lists your requests still waiting for the owner.",
       inputSchema: z.object({
-        id: z.string().min(1).max(64).describe("The request's id."),
+        id: z
+          .string()
+          .min(1)
+          .max(64)
+          .optional()
+          .describe(
+            "The request's id. Leave it out to list your open requests.",
+          ),
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    logged("check_permission", () => ({}))(async (args: { id: string }, ctx) =>
-      checkPermission(scope, args.id, { signal: ctx.mcpReq.signal }),
+    logged("check_permission", () => ({}))(
+      async (args: { id?: string }, ctx) =>
+        args.id === undefined
+          ? listOwnOpenRequests(scope)
+          : checkPermission(scope, args.id, { signal: ctx.mcpReq.signal }),
+    ),
+  )
+
+  server.registerTool(
+    "withdraw_request",
+    {
+      title: "Withdraw a permission request",
+      description:
+        "Takes back one of your own requests that still waits for the owner, when you no longer need it (the task changed, or you asked for the wrong thing): the owner no longer sees it, and nothing runs for it. A request the owner already answered cannot be withdrawn. Takes the id from the result that asked; check_permission with no id lists your open requests.",
+      inputSchema: z.object({
+        id: z.string().min(1).max(64).describe("The request's id."),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
+    },
+    logged("withdraw_request", () => ({}))(async (args: { id: string }) =>
+      withdrawPermission(scope, args.id),
     ),
   )
 

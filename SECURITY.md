@@ -38,7 +38,9 @@ Chromium holds its sign-ins in memory.
 **An assistant with an API token** can call the tools of the servers that
 token reaches, as far as you allowed them: tools ask you first until you
 decide, and blocked tools are refused. It cannot answer a permission request
-for you: you answer on PCP's own page, signed in. It can only propose a new
+for you: you answer on PCP's own page, signed in. It can withdraw a request
+of its own while it still waits for you, which runs and writes nothing, and
+no other token's. It can only propose a new
 server, API (as OpenAPI text or a schema URL) or mail account, naming a secret
 rather than seeing it; nothing is added until you agree, you are shown the
 address, the tools and the secret first, and a secret PCP does not hold yet is

@@ -218,6 +218,45 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   expect(callsOf("echo_auth")).toBe(1)
 })
 
+test("an assistant lists its open requests and withdraws one it no longer needs", async ({
+  page,
+  baseURL,
+}) => {
+  const asked = await callTool(baseURL!, token, "call_tool", {
+    server: SLUG,
+    tool: "send_postcard",
+    arguments: { to: "Bob", message: "Never mind" },
+  })
+  const { path, id } = permissionFrom(toolText(asked))
+
+  const open = toolText(await callTool(baseURL!, token, "check_permission", {}))
+  expect(open).toContain(
+    `- ${id} (call, asked just now): Allow ${SLUG}/send_postcard?`,
+  )
+  expect(open).not.toContain("Bob")
+
+  const withdrawn = await callTool(baseURL!, token, "withdraw_request", { id })
+  expect(withdrawn.body.result?.isError ?? false).toBe(false)
+  expect(toolText(withdrawn)).toContain("Withdrawn")
+  expect(
+    toolText(await callTool(baseURL!, token, "check_permission", {})),
+  ).not.toContain(id)
+
+  // The owner's page says so, with nothing left to answer; nothing ran.
+  await page.goto(path)
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "Withdrawn by the assistant",
+  )
+  await expect(page.getByRole("button", { name: "Allow once" })).toHaveCount(0)
+  await expect(page.getByText("Tell the assistant that asked")).toHaveCount(0)
+  expect(callsOf("send_postcard")).toBe(0)
+
+  // Once withdrawn, it stays so.
+  const again = await callTool(baseURL!, token, "withdraw_request", { id })
+  expect(again.body.result?.isError).toBe(true)
+  expect(toolText(again)).toContain("already withdrew")
+})
+
 test("a blocked tool is hidden from the assistant and refused; a copy of the access keeps it blocked", async ({
   page,
   baseURL,

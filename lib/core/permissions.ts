@@ -107,6 +107,8 @@ import {
   resultOpener,
 } from "./tool-results"
 import { finishHandover, performNavigate } from "./browser/call"
+import { noteHandoverRequest } from "./browser/runtime"
+import { closePendingRequests } from "./permission-close"
 import { RUN_COMMAND, stdinAsText } from "./ssh/tools"
 import { describeBrowseAsk, describeHandoverAsk } from "./browser/describe"
 import type { fetchThroughBrowser } from "./browser/solve"
@@ -1337,6 +1339,15 @@ function outcomeOf(view: PermissionView): CallToolResult {
       return text(view.outcome ?? "The owner said no, so nothing ran.")
     case "running":
       return text("The owner allowed it; it is running now.")
+    case "withdrawn":
+      return text(
+        "You withdrew this request, so the owner was not asked any more and nothing ran.",
+      )
+    case "closed":
+      return text(
+        "The tab this was about was closed (or the browser closed) before the owner was done, so there is nothing to go on from. Open the page again if it is still needed.",
+        true,
+      )
     case "expired":
       return text(
         "This request expired without an answer, so nothing ran. Ask again if it is still wanted.",
@@ -1440,6 +1451,11 @@ export async function withPermission(
   }
 
   noteOwnerAsked(id)
+
+  // Closed with the tab it is about, if that closes before the owner answers.
+  if (ask.kind === "browser_handover") {
+    noteHandoverRequest(scope.ctx.vaultId, ask.input.tabId, id)
+  }
 
   const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
   // The assistant hears which tools it named, to check its own patterns;
@@ -2294,6 +2310,105 @@ export async function checkPermission(
   }
 
   return outcome
+}
+
+/**
+ * check_permission with no id: the token's own requests still waiting for
+ * the owner, oldest first, each with its id, kind, title, age and link.
+ * Only reads.
+ */
+export async function listOwnOpenRequests(
+  scope: PermissionScope,
+  now = new Date(),
+): Promise<CallToolResult> {
+  const views = await listOpenPermissions(
+    scope.ctx,
+    scope.tokenId,
+    scope.publicUrl,
+  )
+
+  if (views.length === 0) {
+    return text("You have no requests waiting for the owner.")
+  }
+
+  const lines = views.map(
+    (view) =>
+      `- ${view.id} (${view.kind}, asked ${ageText(now.getTime() - view.createdAt.getTime())}): ${view.title}\n  ${view.url}`,
+  )
+  const count =
+    views.length === 1
+      ? "1 request of yours is"
+      : `${views.length} requests of yours are`
+
+  return text(
+    `${count} waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need.\n\n${lines.join("\n")}`,
+  )
+}
+
+/**
+ * withdraw_request: the token takes back one of its own requests while it
+ * still waits for the owner, in one update that an answer racing it either
+ * wins first or finds closed. Nothing runs and nothing is written for it (a
+ * memory to share stays unwritten, not kept for the assistant as the
+ * owner's Not now does); a hand-over gives the tab back to the browser
+ * tools. Another token's request reads as no request at all.
+ */
+export async function withdrawPermission(
+  scope: PermissionScope,
+  id: string,
+): Promise<CallToolResult> {
+  const where = { id, vaultId: scope.ctx.vaultId, tokenId: scope.tokenId }
+  const row = await loadRow(where)
+
+  if (!row) {
+    return text("There is no permission request with that id.", true)
+  }
+
+  if (isOpen(row) && (await closePendingRequests(where, "withdrawn")) === 1) {
+    if (row.kind === "browser_handover") {
+      await finishHandover(
+        scope.ctx,
+        (readArgs(scope.ctx, row) as HandoverAsk).tabId,
+      ).catch((error) =>
+        console.error("[permissions] giving a tab back failed", error),
+      )
+    }
+
+    const { title } = await summarizeRow(scope.ctx, row, scope.publicUrl)
+
+    return text(
+      `Withdrawn: the owner no longer sees request ${row.id} (${visible(title)}), and nothing ran for it.`,
+    )
+  }
+
+  // Not open, or answered while this looked: say how it stands.
+  const status = ((await loadRow(where)) ?? row).status
+  const reason =
+    status === "withdrawn"
+      ? "You already withdrew this request."
+      : status === "pending"
+        ? "This request expired without an answer, so there is nothing to withdraw; nothing ran."
+        : status === "closed"
+          ? "This request was closed already (its tab was closed), so there is nothing to withdraw."
+          : status === "running"
+            ? "The owner allowed this request and it is running now, so it can no longer be withdrawn. Call check_permission with its id for the result."
+            : "The owner already answered this request, so it can no longer be withdrawn. Call check_permission with its id for how it went."
+
+  return text(reason, true)
+}
+
+/** How long ago, in the largest whole unit: "just now", "5 minutes ago". */
+function ageText(ms: number): string {
+  const minutes = Math.floor(ms / 60_000)
+
+  if (minutes < 1) {
+    return "just now"
+  }
+
+  const [amount, unit] =
+    minutes < 60 ? [minutes, "minute"] : [Math.floor(minutes / 60), "hour"]
+
+  return `${amount} ${unit}${amount === 1 ? "" : "s"} ago`
 }
 
 /**

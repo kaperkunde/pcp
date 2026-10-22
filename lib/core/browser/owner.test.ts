@@ -12,6 +12,11 @@ import { createApiToken, resolveApiToken, revokeApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { startTestApi, type TestApi } from "../openapi/test-api"
+import {
+  listPendingRequests,
+  withdrawPermission,
+  withPermission,
+} from "../permissions"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import {
@@ -25,6 +30,7 @@ import { chromiumExecutable } from "./executable"
 import {
   browserOverview,
   browserTokens,
+  closeOwnerTab,
   forgetSites,
   handBackTab,
   openOwnerTab,
@@ -37,7 +43,7 @@ import {
 import { loadProfile } from "./profile"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
-import { isOwnerNeeded } from "./types"
+import { isOwnerNeeded, type OwnerNeeded } from "./types"
 
 // What the owner does from PCP's pages, against a real Chromium: a tab of
 // their own that no assistant sees until they hand it to a token they
@@ -258,6 +264,56 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     expect(textOf(await other.call("snapshot", { tab: tabId }))).toContain(
       `There is no tab ${tabId}`,
     )
+  })
+
+  it("gives a hand-over's tab back when it is withdrawn, and closes its request with the tab or the browser", async () => {
+    const scope = { ctx, tokenId, publicUrl: PUBLIC_URL }
+    const open = async () =>
+      textOf(
+        await performNavigate(
+          { ...scope, serverId: server.id },
+          { tabId: null, url: `${api.origin}/start` },
+          { allowedByOwner: true },
+        ),
+      ).match(/^Tab (\S+):/m)![1]!
+    const handOver = async (tab: string) => {
+      const needed: unknown = await call("hand_over", {
+        tab,
+        message: "Please sign in.",
+      }).catch((error: unknown) => error)
+      expect(isOwnerNeeded(needed)).toBe(true)
+      await withPermission(scope, (needed as OwnerNeeded).ask)
+      return (
+        await db().permissionRequest.findFirstOrThrow({
+          where: { status: "pending" },
+          orderBy: { createdAt: "desc" },
+        })
+      ).id
+    }
+    const statusOf = async (id: string) =>
+      (await db().permissionRequest.findUniqueOrThrow({ where: { id } })).status
+
+    // Withdrawn: the tab is the assistant's again.
+    const first = await open()
+    const withdrawn = await handOver(first)
+    expect(await tabFor(ctx, first)).toMatchObject({ handover: true })
+    await withdrawPermission(scope, withdrawn)
+    expect(await statusOf(withdrawn)).toBe("withdrawn")
+    expect(await tabFor(ctx, first)).toMatchObject({
+      control: "assistant",
+      handover: false,
+    })
+
+    // The owner closes the tab: nothing is left waiting for it.
+    const closedTab = await handOver(first)
+    await closeOwnerTab(ctx, first)
+    expect(await statusOf(closedTab)).toBe("closed")
+
+    // The browser closes: every tab's hand-over with it.
+    const closedBrowser = await handOver(await open())
+    await stopBrowser(ctx)
+    expect(await statusOf(closedBrowser)).toBe("closed")
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).total).toBe(0)
   })
 
   it("hands a tab to another token without the sites allowed for the one before", async () => {
