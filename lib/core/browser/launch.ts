@@ -1,9 +1,12 @@
 import path from "node:path"
 
 import type {
+  Browser,
+  BrowserContext,
   BrowserContextOptions,
   CDPSession,
   LaunchOptions,
+  Page,
 } from "patchright-core"
 
 import {
@@ -14,6 +17,7 @@ import {
   type VirtualDisplay,
 } from "./display"
 import {
+  ACTION_TIMEOUT_MS,
   OFF_SCREEN_WINDOW,
   SCREEN,
   SHOWN_WINDOW_POSITION,
@@ -205,12 +209,13 @@ export function contextOptions(
 }
 
 const warned = Symbol.for("pcp.browser.offScreenWarned")
+const backgroundWarned = Symbol.for("pcp.browser.backgroundWarned")
 
-/** Says once per process what went wrong keeping a window off the screen. */
-function warnOnce(message: string, error?: unknown): void {
-  const holder = globalThis as unknown as { [warned]?: boolean }
-  if (holder[warned]) return
-  holder[warned] = true
+/** Says once per process what went wrong with a window (once per `key`). */
+function warnOnce(message: string, error?: unknown, key = warned): void {
+  const holder = globalThis as unknown as Record<symbol, boolean | undefined>
+  if (holder[key]) return
+  holder[key] = true
   console.error(`[browser] ${message}`, ...(error ? [error] : []))
 }
 
@@ -269,5 +274,198 @@ export async function keepOffScreen(cdp: CDPSession): Promise<void> {
     })
   } catch (error) {
     warnOnce("Chromium's window could not be kept off the screen", error)
+  }
+}
+
+/** Chromium's id of each context newBrowserContext made in "window" mode. */
+const contextIds = new WeakMap<BrowserContext, string>()
+
+/**
+ * A new context, with its id in Chromium kept for openPage in "window"
+ * mode. Playwright does not tell it, so it is the one
+ * Target.getBrowserContexts lists after the context is made and did not
+ * before. A context whose id is not found so opens its pages as Playwright
+ * does (openPage).
+ */
+export async function newBrowserContext(
+  browser: Browser,
+  mode: BrowserMode,
+  options: BrowserContextOptions,
+): Promise<BrowserContext> {
+  if (mode !== "window") return browser.newContext(options)
+
+  const session = await browser.newBrowserCDPSession().catch(() => null)
+  const ids = async (): Promise<string[]> =>
+    session
+      ? (await session.send("Target.getBrowserContexts")).browserContextIds
+      : []
+
+  try {
+    const before = new Set(await ids().catch(() => []))
+    const context = await browser.newContext(options)
+    const added = (await ids().catch(() => [])).filter((id) => !before.has(id))
+
+    if (added.length === 1) contextIds.set(context, added[0]!)
+    return context
+  } finally {
+    await session?.detach().catch(() => {})
+  }
+}
+
+/** What openPage asks of Chromium's DevTools, apart for its tests. */
+export type BackgroundTargets = {
+  /** The context's id in Chromium. */
+  contextId: string
+  /** Target.createTarget on the browser's own session: the target's id. */
+  create: (params: {
+    url: string
+    browserContextId: string
+    newWindow: true
+    background: true
+    left: number
+    top: number
+  }) => Promise<string>
+  close: (targetId: string) => Promise<void>
+  /** A page's target id, read on its own DevTools session. */
+  targetOf: (page: Page) => Promise<string>
+}
+
+function backgroundTargets(context: BrowserContext): BackgroundTargets | null {
+  const browser = context.browser()
+  const contextId = contextIds.get(context)
+  if (!browser || !contextId) return null
+
+  const onBrowser = async <T>(
+    send: (session: CDPSession) => Promise<T>,
+  ): Promise<T> => {
+    const session = await browser.newBrowserCDPSession()
+    try {
+      return await send(session)
+    } finally {
+      await session.detach().catch(() => {})
+    }
+  }
+
+  return {
+    contextId,
+    create: (params) =>
+      onBrowser(
+        async (session) =>
+          (await session.send("Target.createTarget", params)).targetId,
+      ),
+    close: (targetId) =>
+      onBrowser(async (session) => {
+        await session.send("Target.closeTarget", { targetId })
+      }),
+    targetOf: async (page) => {
+      const session = await page.context().newCDPSession(page)
+      try {
+        return (await session.send("Target.getTargetInfo")).targetInfo.targetId
+      } finally {
+        await session.detach().catch(() => {})
+      }
+    },
+  }
+}
+
+/**
+ * A new, blank page of PCP's own: a tab, or a page read for web_fetch.
+ *
+ * With a window (mode "window"), in a window of its own opened in the
+ * background. Playwright's newPage creates its target without `background`,
+ * and Chromium then shows the window as the active one, which on macOS
+ * makes Chromium the active app and takes the keyboard from the app the
+ * owner is typing in, into a page an assistant may drive. Here the target
+ * is created with `background` (Chromium shows its window inactive) and
+ * `newWindow` (a background tab in a window it shares would be hidden, and
+ * stop drawing), at OFF_SCREEN_WINDOW, and the page Playwright makes of it
+ * is picked out by its target id. keepOffScreen still follows, as for every
+ * page. A popup a page opens is Chromium's own and may still take the
+ * focus; keepOffScreen moves it.
+ *
+ * Without a window there is no focus to take. Anything that goes wrong
+ * here, said once in the log, opens the page as Playwright does.
+ */
+export async function openPage(
+  context: BrowserContext,
+  mode: BrowserMode,
+  targets: BackgroundTargets | null = mode === "window"
+    ? backgroundTargets(context)
+    : null,
+): Promise<Page> {
+  if (mode !== "window") return context.newPage()
+
+  if (!targets) {
+    warnOnce(
+      "Chromium's id for a browser context was not found: its pages open in front",
+      undefined,
+      backgroundWarned,
+    )
+    return context.newPage()
+  }
+
+  try {
+    return await openInBackground(context, targets)
+  } catch (error) {
+    warnOnce(
+      "A page could not be opened in the background: it opens in front",
+      error,
+      backgroundWarned,
+    )
+    return context.newPage()
+  }
+}
+
+async function openInBackground(
+  context: BrowserContext,
+  targets: BackgroundTargets,
+): Promise<Page> {
+  // Every page from here on, the new one among them: Playwright may
+  // announce it before createTarget answers or after.
+  const fresh: Page[] = []
+  let wake = () => {}
+  const onPage = (page: Page) => {
+    fresh.push(page)
+    wake()
+  }
+  context.on("page", onPage)
+  let targetId: string | null = null
+
+  try {
+    targetId = await targets.create({
+      url: "about:blank",
+      browserContextId: targets.contextId,
+      newWindow: true,
+      background: true,
+      left: OFF_SCREEN_WINDOW.x,
+      top: OFF_SCREEN_WINDOW.y,
+    })
+    const deadline = Date.now() + ACTION_TIMEOUT_MS
+
+    for (;;) {
+      for (let page = fresh.shift(); page; page = fresh.shift()) {
+        const id = await targets.targetOf(page).catch(() => null)
+        if (id === targetId) return page
+      }
+
+      const left = deadline - Date.now()
+      if (left <= 0) throw new Error("Playwright did not take the page in")
+
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, left)
+        wake = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+        if (fresh.length) wake()
+      })
+      wake = () => {}
+    }
+  } catch (error) {
+    // The window opened but is not PCP's to use: it goes.
+    if (targetId) await targets.close(targetId).catch(() => {})
+    throw error
+  } finally {
+    context.off("page", onPage)
   }
 }

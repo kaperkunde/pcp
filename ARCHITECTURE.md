@@ -1791,9 +1791,22 @@ PCP's process (the server's utility process in the desktop app), as it was
 headless; only its switches differ. A window that does not open leaves the
 browser headless, and `PCP_BROWSER_DISPLAY=headless` asks for that anywhere.
 On macOS the windowed Chromium is an app of its own: it shows in the Dock
-while it runs, and Chromium makes it the active app when it opens a window
-(the first tab after it starts, a popup), which takes the keyboard from the
-app the owner was in.
+while it runs, and Chromium makes it the active app when it shows a window as
+the active one, which would take the keyboard from the app the owner is
+typing in and could send their keys into a page an assistant drives. So PCP
+opens its own pages (tabs, a reopened tab, web_fetch's pages) in the
+background (`openPage`): with `Target.createTarget` and `background`, which
+shows the window inactive, and `newWindow`, since a background tab in a
+window it shares would be hidden and stop drawing (Playwright's `newPage`
+opened a second tab in the first one's window), at `OFF_SCREEN_WINDOW`. The
+page Playwright makes of that target is picked out by its target id
+(`Target.getTargetInfo` on its own session), and `keepOffScreen` follows as
+for every page. Playwright does not tell a context's id in Chromium, so
+`newBrowserContext` notes the one `Target.getBrowserContexts` lists once the
+context is made. If any of that fails, the page opens as Playwright opens it,
+said once in the log. A popup a page opens is still Chromium's own and may
+take the focus; `keepOffScreen` moves it. Headless and on the virtual display
+there is no focus to take, and pages open as Playwright opens them.
 
 **Sites that check their visitors.** Every context tells pages of a 1920 by
 1080 screen, since headless would otherwise make the screen the 1280 by 800
