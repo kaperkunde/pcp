@@ -835,6 +835,47 @@ another one reads:
   vault's memories, as `search.ts` scores every tool. A memory outlives the
   token that wrote it (`token_id` is set to null) and is then the owner's.
 
+## Instructions for an assistant
+
+Every token has instructions of its own, the owner's words to that
+assistant (`lib/core/instructions.ts`). They are text on the token row,
+`api_token.instructions`, encrypted under the vault's key with
+`api_token:<id>` as associated data, and `api_token.instructions_base`, the
+version of PCP's suggested instructions they were copied or merged from.
+
+- **A copy of a suggestion.** `lib/core/instructions-defaults.ts` lists
+  PCP's suggested instructions by version, oldest first, and keeps every
+  version. A new token, made on PCP's page or by an app's sign-in
+  (`createApiToken`, `createOAuthApiToken`), gets a copy of the latest and
+  its version. A token from before instructions has neither: its page shows
+  the suggestion as not set yet, and it gets nothing until the owner saves.
+  Nothing is copied into existing rows by a migration.
+- **Given first.** `liveToken` decrypts them into `ResolvedToken`, and the
+  gateway's instructions carry them right after the memory lead, under "The
+  owner's instructions for this assistant:" (at most 4,000 characters,
+  `MAX_INSTRUCTIONS_CHARS`), since clients cut instructions short. For a
+  token that keeps memories, `read_memory every` opens with the same block.
+  `search_tools`' description carries the one rule that matters most:
+  describe a tool before calling it and pass its call_handle; check before
+  retrying anything that may have happened.
+- **The owner's to change.** The token's Advanced page has the editor and,
+  folded, exactly what the token is told at the start of a conversation
+  (`instructionsPreview`, the same `buildInstructions` call as `/mcp`).
+  Text with characters that do not show on screen is refused, as for a
+  memory, and so is text still holding a merge's conflict markers. Only the
+  owner writes them; no gateway tool does, and `updateApiToken` leaves them
+  alone.
+- **When the suggestion changes.** A token whose base is older than the
+  latest version is a notice for the owner (`lib/core/owner-notices.ts`,
+  worked out when the bell is read; nothing is stored for it). The notice's
+  page lists those tokens: **Keep mine** moves the base to the latest,
+  **Take PCP's** replaces the text, and **Save merged** saves an editor
+  that starts from a three-way line merge (`lib/core/line-merge.ts`: base
+  the version the token followed, one side its text, the other the latest
+  suggestion), with the places both sides changed marked for the owner to
+  settle. An export carries both columns as they are; an older file
+  restores them as not set yet.
+
 ## Web fetch
 
 A token made with "fetch web pages" (`api_token.web_fetch`, off unless the
@@ -2173,8 +2214,12 @@ message each (`app/mcp/route.ts`). The tools:
   published it, whether the tool runs at once or asks first, and for an API
   endpoint's tool, `returns`: an outline of its success answer read from the
   schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text the
-  schema marks base64 (`format: byte`) shows as `string (base64)`.
-- `call_tool(server, tool, arguments, fields?, decode?, keep?)` opens a connection
+  schema marks base64 (`format: byte`) shows as `string (base64)`. First
+  in its answer is the tool's `call_handle` (below).
+- `call_tool(call_handle, arguments, fields?, decode?, keep?)` takes no
+  server or tool name, only the handle `describe_tool` gave, so a tool is
+  always described before it is called. It checks the arguments against
+  the tool's stored inputSchema, then opens a connection
   to the upstream with the configured credential (header secret or OAuth
   token, refreshed by the SDK when needed), calls the tool, and passes the
   content back shaped for the assistant (`lib/core/answers.ts`): `fields`
@@ -2187,6 +2232,7 @@ message each (`app/mcp/route.ts`). The tools:
   become handles (below). A call that waits for the owner keeps its fields,
   decode and keep paths on the request (`permission_request.fields`,
   `permission_request.decode`, `permission_request.keep`).
+  `call_read_only_tool` takes the same handle.
 - `check_permission(id)`, `check_server(server)`, `register_server(...)`
   and `propose_tool_access(changes)` belong to the permission flow below.
 - `check_run(id)`, beside `run_code` for a token that runs code, says how
@@ -2194,6 +2240,42 @@ message each (`app/mcp/route.ts`). The tools:
 - `read_result(id, offset?, length?, find?)` reads a slice of an answer
   PCP shortened and kept whole, or of a kept value; a file that is not text
   is described, not shown (below).
+
+### Call handles
+
+`/mcp` keeps no session, so a call handle carries what it needs
+(`lib/core/call-handles.ts`): `ch_<ref>_<tag>`, where the ref is the
+`mcp_tool` row's id in base32 (opaque, never a name) and the tag is an
+HMAC-SHA256 under a key derived with HKDF from the vault's data key ("pcp
+call handle v1"), never stored. The tag holds an identity MAC (token,
+server, tool name, row id and the first bytes of the schema's hash), those
+bytes, and a 128-bit call MAC over the same with the whole hash of the
+tool's canonical inputSchema (`canonicalJson`). So a handle cannot be made
+without the vault's key, works for its own token only, and goes stale when
+the schema changes. `call_tool` resolves it against the catalogue as it is
+and answers, as a tool error and with nothing run or asked:
+
+- a genuine handle for an older schema: "The tool changed since you
+  described it", with the tool described again and a fresh handle;
+- a name, or anything else that is not a handle: how to get one, and when
+  the text names a tool the token sees (`server/tool`, or a name only one
+  server has), that tool described, so recovery takes one round trip;
+- a handle changed or made up, or another token's: a refusal;
+- a handle for a tool the token no longer reaches (removed, its server
+  gone, off or out of the token's reach): a plain refusal; a blocked one
+  says it is blocked.
+
+Then the arguments are checked against the stored inputSchema
+(`checkArguments` in `wrappers/schema-check.ts`: types, required, enum,
+const, properties, additionalProperties, items and the combinators) before
+`withPermission` asks or anything runs: arguments
+that cannot work are answered with every problem and the schema, and leave
+no permission request for the owner. The check is lenient where the schema
+says more than it reads: a `$ref`, `patternProperties` or
+`unevaluatedProperties` passes, OpenAPI's `nullable` is honoured, `oneOf`
+counts as `anyOf`, and a kept result's handle stands for what goes there.
+`run_code`'s `pcp.call` and a wrapper's calls keep naming a server and a
+tool: they are the gateway's own, decided by `resolveCall` as before.
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the

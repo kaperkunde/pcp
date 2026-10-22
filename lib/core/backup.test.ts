@@ -27,6 +27,8 @@ import {
 import { db } from "./db"
 import { createDeviceKey, unlockWithDeviceKey } from "./device-keys"
 import { getHostJson, setHostJson } from "./host-settings"
+import { getTokenInstructions, saveTokenInstructions } from "./instructions"
+import { currentTemplate } from "./instructions-defaults"
 import { createMailAccount } from "./mail/accounts"
 import { createMemory, listMemories } from "./memories"
 import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
@@ -426,6 +428,50 @@ describe("restoring", { timeout: 60_000 }, () => {
       mailSubmission: false,
       smtpUrl: null,
       mailFrom: null,
+    })
+  })
+
+  it("carries a token's instructions as they are, and restores a file from before them as not set yet", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    await saveTokenInstructions(ctx, tokenId, "- Answer in French.")
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const payload = await openRaw(file, EXPORT_PASSWORD)
+    const [row] = payload.tables.apiTokens as Array<Record<string, unknown>>
+    // Ciphertext in the file, never the text.
+    expect(JSON.stringify(payload)).not.toContain("Answer in French")
+    expect(row).toMatchObject({ instructionsBase: currentTemplate().version })
+
+    await saveTokenInstructions(ctx, tokenId, "- Changed since.")
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect((await resolveApiToken(token))!.instructions).toBe(
+      "- Answer in French.",
+    )
+
+    const older = structuredClone(payload)
+    for (const token of older.tables.apiTokens as Record<string, unknown>[]) {
+      delete token.instructions
+      delete token.instructionsBase
+    }
+    const { payload: readOlder } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      readOlder,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+
+    expect((await resolveApiToken(token))!.instructions).toBeNull()
+    expect(await getTokenInstructions(ctx, tokenId)).toMatchObject({
+      saved: false,
+      base: null,
     })
   })
 

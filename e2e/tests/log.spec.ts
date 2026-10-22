@@ -17,9 +17,12 @@ test("a token's calls are on the Log page, by tool and outcome, never what they 
   await callTool(baseURL!, token, "search_tools", {
     query: `secret words ${RUN}`,
   })
-  await callTool(baseURL!, token, "call_tool", {
+  await callTool(baseURL!, token, "describe_tool", {
     server: `missing-${RUN}`,
     tool: "anything",
+  })
+  await callTool(baseURL!, token, "call_tool", {
+    call_handle: `not a handle ${RUN}`,
     arguments: { note: `private ${RUN}` },
   })
 
@@ -41,13 +44,16 @@ test("a token's calls are on the Log page, by tool and outcome, never what they 
       },
       { timeout: 15_000 },
     )
-    .toBe(2)
+    .toBe(3)
   await expect(lines.nth(0)).toContainText("call_tool")
-  await expect(lines.nth(0)).toContainText(`missing-${RUN}/anything`)
   await expect(lines.nth(0)).toContainText("Failed")
   await expect(lines.nth(0)).toContainText(TOKEN_NAME)
-  await expect(lines.nth(1)).toContainText("search_tools")
-  await expect(lines.nth(1)).toContainText("Done")
+  await expect(lines.nth(1)).toContainText("describe_tool")
+  await expect(lines.nth(1)).toContainText(`missing-${RUN}/anything`)
+  await expect(lines.nth(1)).toContainText("Failed")
+  await expect(lines.nth(2)).toContainText("search_tools")
+  await expect(lines.nth(2)).toContainText("Done")
   await expect(page.getByText(`secret words ${RUN}`)).toHaveCount(0)
   await expect(page.getByText(`private ${RUN}`)).toHaveCount(0)
+  await expect(page.getByText(`not a handle ${RUN}`)).toHaveCount(0)
 })

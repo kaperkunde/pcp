@@ -12,6 +12,11 @@ import {
   updateApiToken,
 } from "@/lib/core/api-tokens"
 import {
+  keepOwnInstructions,
+  saveTokenInstructions,
+  takeSuggestedInstructions,
+} from "@/lib/core/instructions"
+import {
   copyTokenAccess,
   parseToolAccess,
   setServerToolAccess,
@@ -151,6 +156,67 @@ export async function updateTokenAction(
   })
 
   revalidateToken(id)
+
+  return result
+}
+
+/** Where a token's instructions show: its Advanced page and the notice's. */
+function revalidateInstructions(id: string) {
+  revalidatePath(`/tokens/${id}/advanced`)
+  revalidatePath("/tokens/instructions")
+}
+
+/**
+ * The owner's instructions for an assistant, from the editor on its
+ * Advanced page, or (`merged`) the merge with PCP's newer suggestion.
+ */
+export async function saveInstructionsAction(
+  _previous: UpdateTokenResult,
+  formData: FormData,
+): Promise<UpdateTokenResult> {
+  const ctx = await requireContext()
+  const id = field(formData, "id")
+
+  const result = await guarded(async () => {
+    await saveTokenInstructions(ctx, id, field(formData, "instructions"), {
+      merged: field(formData, "merged") === "on",
+    })
+    return { message: "Saved." }
+  })
+
+  revalidateInstructions(id)
+
+  return result
+}
+
+/** "Keep mine" on PCP's newer suggested instructions. */
+export async function keepInstructionsAction(
+  tokenId: string,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await keepOwnInstructions(ctx, tokenId)
+    return {}
+  })
+
+  revalidateInstructions(tokenId)
+
+  return result
+}
+
+/** "Take PCP's": the newer suggested instructions in place of the token's. */
+export async function takeInstructionsAction(
+  tokenId: string,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await takeSuggestedInstructions(ctx, tokenId)
+    return {}
+  })
+
+  revalidateInstructions(tokenId)
 
   return result
 }

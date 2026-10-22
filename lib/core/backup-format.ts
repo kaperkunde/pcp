@@ -146,6 +146,11 @@ const ApiTokenRow = z.strictObject({
   // restore the assistant signs in again.
   oauthClientId: str.nullable().default(null),
   oauthClientName: str.nullable().default(null),
+  // The owner's instructions for the assistant, as ciphertext under the
+  // vault's key, and the suggested instructions' version they came from.
+  // An older file has neither: the token shows them as not set yet.
+  instructions: bytesOrNull.default(null),
+  instructionsBase: z.number().int().positive().nullable().default(null),
 })
 
 const ApiTokenServerRow = z.strictObject({ tokenId: id, serverId: id })

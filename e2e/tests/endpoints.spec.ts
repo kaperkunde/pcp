@@ -205,7 +205,8 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
     arguments: { bogus: 1 },
   })
   expect(unknown.body.result?.isError).toBe(true)
-  expect(toolText(unknown)).toContain('Unknown argument "bogus"')
+  // Checked against the tool's schema before anything runs or asks.
+  expect(toolText(unknown)).toContain('"bogus" is not an argument')
   const dots = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "getPet",
@@ -218,7 +219,7 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
     tool: "getPet",
     arguments: {},
   })
-  expect(toolText(absent)).toContain('Missing argument "petId"')
+  expect(toolText(absent)).toContain('"petId" is missing')
   expect(upstream.requests).toHaveLength(before)
 
   // Removed, its tools leave the gateway.

@@ -105,13 +105,80 @@ export function lastToolText(response: McpResponse): string {
   )
 }
 
+/** The gateway's tools that take a call_handle rather than a name. */
+const HANDLED = new Set(["call_tool", "call_read_only_tool"])
+
+/**
+ * The call_handle describe_tool gives for server/tool, or describe_tool's
+ * answer when it gives none (no such tool, or one the token cannot see).
+ */
+export async function describeForCall(
+  baseURL: string,
+  token: string,
+  server: string,
+  tool: string,
+): Promise<{ handle: string } | { refused: McpResponse }> {
+  const described = await mcpRequest(baseURL, token, "tools/call", {
+    name: "describe_tool",
+    arguments: { server, tool },
+  })
+
+  if (described.body.result?.isError || !described.body.result) {
+    return { refused: described }
+  }
+
+  return {
+    handle: (JSON.parse(toolText(described)) as { call_handle: string })
+      .call_handle,
+  }
+}
+
+/**
+ * A tool's arguments as an assistant sends them: call_tool and
+ * call_read_only_tool written with a server and a tool name describe the
+ * tool first and pass its call_handle in their place, as the gateway's
+ * instructions say. When describe_tool refuses, its answer is the result.
+ */
+async function withHandle(
+  baseURL: string,
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown> | McpResponse> {
+  const { server, tool, ...rest } = args
+
+  if (
+    !HANDLED.has(name) ||
+    typeof server !== "string" ||
+    typeof tool !== "string"
+  ) {
+    return args
+  }
+
+  const described = await describeForCall(baseURL, token, server, tool)
+
+  return "refused" in described
+    ? described.refused
+    : { call_handle: described.handle, ...rest }
+}
+
+function isResponse(
+  value: Record<string, unknown> | McpResponse,
+): value is McpResponse {
+  return "status" in value && "body" in value
+}
+
 export async function callTool(
   baseURL: string,
   token: string,
   name: string,
   args: Record<string, unknown>,
 ): Promise<McpResponse> {
-  return mcpRequest(baseURL, token, "tools/call", { name, arguments: args })
+  const sent = await withHandle(baseURL, token, name, args)
+
+  return isResponse(sent)
+    ? sent
+    : mcpRequest(baseURL, token, "tools/call", { name, arguments: sent })
 }
 
 /** Reads the server's `instructions` through the initialize handshake. */
@@ -158,6 +225,12 @@ export async function mcpToolCall2026(
     requestState?: string
   } = {},
 ): Promise<McpResponse> {
+  const sent = await withHandle(baseURL, token, name, args)
+
+  if (isResponse(sent)) {
+    return sent
+  }
+
   const response = await fetch(`${baseURL}/mcp`, {
     method: "POST",
     headers: {
@@ -174,7 +247,7 @@ export async function mcpToolCall2026(
       method: "tools/call",
       params: {
         name,
-        arguments: args,
+        arguments: sent,
         _meta: {
           "io.modelcontextprotocol/protocolVersion": "2026-07-28",
           "io.modelcontextprotocol/clientCapabilities": capabilities,
