@@ -85,6 +85,10 @@ type Host = {
   signal?: string
   /** What `timedatectl show -p Timezone --value` answers; no such program when absent. */
   timedatectl?: string
+  /** Accounts in /etc/passwd; `pcp` puts this installer's Quadlet unit in the home. */
+  users?: { name: string; uid: number; pcp?: boolean }[]
+  /** Whether root reaches those users' systemd managers (lingering or logged in). */
+  userSession?: boolean
 }
 
 const roots: string[] = []
@@ -119,6 +123,8 @@ function host({
   image,
   signal,
   timedatectl,
+  users = [],
+  userSession = true,
 }: Host = {}) {
   const root = mkdtempSync(join(tmpdir(), "pcp-install-"))
   roots.push(root)
@@ -206,6 +212,26 @@ esac`,
   if (timedatectl !== undefined) {
     answer("timedatectl", `echo "${timedatectl}"`)
   }
+  shim(
+    "runuser",
+    `case "$*" in
+  *show-environment*) exit ${userSession ? 0 : 1} ;;
+esac`,
+  )
+  answer("systemd-run", "")
+  const homes = join(root, "homes")
+  const passwd = ["root:x:0:0:root:/root:/bin/sh"]
+  for (const { name, uid, pcp } of users) {
+    const userHome = join(homes, name)
+    const units = join(userHome, ".config", "containers", "systemd")
+    mkdirSync(units, { recursive: true })
+    if (pcp) {
+      writeFileSync(join(units, "pcp.container"), UNIT)
+    }
+    passwd.push(`${name}:x:${uid}:${uid}::${userHome}:/bin/sh`)
+  }
+  mkdirSync(join(sys, "etc"), { recursive: true })
+  writeFileSync(join(sys, "etc", "passwd"), passwd.join("\n") + "\n")
 
   return {
     unit: join(home, ".config", "containers", "systemd", "pcp.container"),
@@ -855,6 +881,119 @@ describe("install.sh as root", () => {
     ).toBe(0)
     expect(existsSync(machine.sys.updater)).toBe(false)
     expect(existsSync(machine.sys.timer)).toBe(false)
+  })
+})
+
+describe("install.sh next to another install", () => {
+  const badpirate = { name: "badpirate", uid: 1000, pcp: true }
+  const handOver = (calls: string[]) =>
+    calls.find((call) => call.includes("systemd-run"))
+
+  it("updates a user's rootless PCP as that user when root runs it", () => {
+    const machine = host({ podman: "5.8.4", uid: 0, users: [badpirate] })
+    const result = machine.run([], { PCP_CHANNEL: "develop" })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("PCP is installed for the user badpirate")
+    expect(handOver(result.calls)).toMatch(
+      new RegExp(
+        "^runuser -u badpirate -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus " +
+          "systemd-run --user --quiet --collect --wait --unit=pcp-install-\\d+ --setenv=PCP_CHANNEL=develop " +
+          "sh -c curl -fsSL 'https://raw\\.githubusercontent\\.com/kaperkunde/pcp/main/install\\.sh' \\| sh$",
+      ),
+    )
+    // Its output goes to the journal, never through this session, which
+    // may end with the PCP being replaced.
+    expect(handOver(result.calls)).not.toContain("--pipe")
+    expect(result.stdout).toMatch(
+      /journalctl _SYSTEMD_USER_UNIT=pcp-install-\d+\.service -f/,
+    )
+    // Root starts nothing of its own and writes nothing of its own.
+    expect(started(result.calls)).toBe(false)
+    expect(existsSync(machine.sys.unit)).toBe(false)
+    expect(existsSync(machine.sys.conf)).toBe(false)
+  })
+
+  it("passes on only the settings given, so the user's own stay", () => {
+    const machine = host({ podman: "5.8.4", uid: 0, users: [badpirate] })
+    const result = machine.run([])
+    expect(result.status).toBe(0)
+    expect(handOver(result.calls)).not.toContain("--setenv")
+  })
+
+  it("leaves users without PCP, and system accounts, alone", () => {
+    const machine = host({
+      podman: "5.8.4",
+      uid: 0,
+      users: [
+        { name: "pat", uid: 1001 },
+        { name: "daemon", uid: 2, pcp: true },
+      ],
+    })
+    const result = machine.run([])
+    expect(result.status).toBe(0)
+    expect(handOver(result.calls)).toBeUndefined()
+    expect(existsSync(machine.sys.unit)).toBe(true)
+  })
+
+  it("says to run it as the user when root cannot reach their systemd", () => {
+    const machine = host({
+      podman: "5.8.4",
+      uid: 0,
+      users: [badpirate],
+      userSession: false,
+    })
+    const result = machine.run([])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("Update it as badpirate")
+    expect(result.stderr).toContain("an empty vault")
+    expect(handOver(result.calls)).toBeUndefined()
+    expect(started(result.calls)).toBe(false)
+  })
+
+  it("names the users when more than one has PCP", () => {
+    const machine = host({
+      podman: "5.8.4",
+      uid: 0,
+      users: [badpirate, { name: "pat", uid: 1001, pcp: true }],
+    })
+    const result = machine.run([])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("more than one user here: badpirate pat.")
+    expect(started(result.calls)).toBe(false)
+  })
+
+  it("says which to remove when root and a user both have PCP", () => {
+    const machine = host({ podman: "5.8.4", uid: 0, users: [badpirate] })
+    mkdirSync(dirname(machine.sys.unit), { recursive: true })
+    writeFileSync(machine.sys.unit, UNIT)
+    const result = machine.run([])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("PCP is installed twice here")
+    expect(result.stderr).toContain("sh -s -- uninstall")
+    expect(handOver(result.calls)).toBeUndefined()
+    expect(started(result.calls)).toBe(false)
+  })
+
+  it("refuses a user's install next to root's", () => {
+    const machine = host({ podman: "5.8.4" })
+    mkdirSync(dirname(machine.sys.unit), { recursive: true })
+    writeFileSync(machine.sys.unit, UNIT)
+    const result = machine.run([])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("Update it as root")
+    expect(started(result.calls)).toBe(false)
+    expect(existsSync(machine.unit)).toBe(false)
+  })
+
+  it("still lets root update and remove its own install", () => {
+    const machine = host({ podman: "5.8.4", uid: 0 })
+    expect(machine.run([]).status).toBe(0)
+    const again = machine.run([])
+    expect(again.status).toBe(0)
+    expect(again.stdout).toContain("PCP is updated and running")
+    expect(again.stdout).not.toContain("Open it now")
+    expect(machine.run(["uninstall"]).status).toBe(0)
+    expect(existsSync(machine.sys.unit)).toBe(false)
   })
 })
 

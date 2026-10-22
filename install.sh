@@ -49,6 +49,12 @@
 # environment. Neither is remembered; each run looks again. One that is not
 # there, or is not a plain name, is left out.
 #
+# Under Podman, root and each user have containers and volumes of their own.
+# Run as root next to a user's PCP (a Quadlet unit of this installer's in
+# their home), it updates that one as that user, through runuser and
+# systemd-run in the user's manager, rather than start a second PCP with an
+# empty vault on the same port; run as a user next to root's, it stops.
+#
 # It never runs sudo and never installs Docker or Podman itself: when neither
 # is usable, it prints what to run. POSIX sh, so it runs under dash too.
 #
@@ -380,6 +386,104 @@ check_compose_install() {
   [ -z "$running" ] || die "PCP is already running from a checkout (docker compose). Stop it there first:" "" \
     "  $RUNTIME compose down" "" \
     "then run this installer again, with PCP_DATA_VOLUME=pcp_pcp-data to keep that vault."
+}
+
+# Accounts, as passwd lines. getent also sees the ones a directory service
+# keeps; the file is the fallback.
+passwd_lines() {
+  if has getent; then
+    getent passwd
+  else
+    cat "${PCP_ROOT_PREFIX:-}/etc/passwd"
+  fi
+}
+
+# The ordinary users with PCP under rootless Podman (a Quadlet unit of this
+# installer's in their home), as "name uid" lines.
+user_installs() {
+  passwd_lines 2>/dev/null | while IFS=: read -r name _ uid _ _ home _; do
+    case "$uid" in
+      '' | *[!0-9]*) continue ;;
+    esac
+    [ "$uid" -ge 1000 ] && [ -n "$home" ] || continue
+    if [ -f "$home/.config/containers/systemd/$CONTAINER.container" ]; then
+      printf '%s %s\n' "$name" "$uid"
+    fi
+  done
+}
+
+# Runs a command as USER_NAME, in reach of that user's systemd manager.
+as_user() {
+  runuser -u "$USER_NAME" -- env XDG_RUNTIME_DIR="/run/user/$USER_UID" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_UID/bus" "$@"
+}
+
+# A PCP already installed for an ordinary user holds the vault in that
+# user's volume and the port, so root's run updates that install instead of
+# starting a second PCP, with an empty vault, that cannot get the port. The
+# run is the user's own: this installer, fetched again, in the user's systemd
+# manager, with the settings given here. It goes on there when this session
+# ends, so the PCP being replaced may carry the session itself (an SSH
+# server of PCP's).
+check_user_installs() {
+  found=$(user_installs)
+  [ -n "$found" ] || return 0
+  # shellcheck disable=SC2086 # "name uid" pairs, split on purpose
+  set -- $found
+  if [ "$#" -gt 2 ]; then
+    names=
+    while [ "$#" -gt 0 ]; do
+      names="$names $1"
+      shift 2
+    done
+    die "PCP is installed for more than one user here:$names. Run this installer as the user whose PCP it should update, not as root:" "" \
+      "  curl -fsSL $SCRIPT_URL | sh"
+  fi
+  USER_NAME=$1
+  USER_UID=$2
+  if [ -f "${PCP_ROOT_PREFIX:-}/etc/containers/systemd/$CONTAINER.container" ]; then
+    die "PCP is installed twice here: for the user $USER_NAME (rootless Podman) and for root. Both want the same port, and each has a vault of its own. Remove the one you do not use; as root:" "" \
+      "  curl -fsSL $SCRIPT_URL | sh -s -- uninstall" "" \
+      "or, as $USER_NAME, the same. Its volume, with its vault, is kept."
+  fi
+  if ! has runuser || ! has systemd-run || ! as_user systemctl --user show-environment >/dev/null 2>&1; then
+    die "PCP is installed for the user $USER_NAME, under rootless Podman, with its vault in their own volume. Update it as $USER_NAME (logged in as them, not through su or sudo):" "" \
+      "  curl -fsSL $SCRIPT_URL | sh" "" \
+      "As root, this installer would start a second PCP with an empty vault, on the same port."
+  fi
+  unit="pcp-install-$(date +%s)"
+  say "PCP is installed for the user $USER_NAME, under rootless Podman. Updating that install, as $USER_NAME; it takes a minute or two. To follow it:" "" \
+    "  journalctl _SYSTEMD_USER_UNIT=$unit.service -f" ""
+  set --
+  for setting in PCP_PORT PCP_HTTPS PCP_RUNTIME PCP_DATA_VOLUME PCP_AUTO_UPDATE \
+    PCP_UPDATE_BUTTON PCP_CHANNEL PCP_VERSION PCP_IMAGE TZ LANG; do
+    eval "given=\${$setting+set}"
+    if [ "$given" = set ]; then
+      eval "value=\$$setting"
+      set -- "$@" "--setenv=$setting=$value"
+    fi
+  done
+  # Its output goes to the journal, not to this terminal: a session that ends
+  # with the old PCP would otherwise end the run halfway, on its next line.
+  if as_user systemd-run --user --quiet --collect --wait --unit="$unit" "$@" \
+    sh -c "curl -fsSL '$SCRIPT_URL' | sh" </dev/null >/dev/null 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  if has journalctl; then
+    journalctl _SYSTEMD_USER_UNIT="$unit.service" -o cat --no-pager 2>/dev/null || true
+  fi
+  exit "$status"
+}
+
+# The other way round: a user's run while root has PCP under Podman would
+# start a second PCP next to root's.
+check_root_install() {
+  [ -f "${PCP_ROOT_PREFIX:-}/etc/containers/systemd/$CONTAINER.container" ] || return 0
+  die "PCP is installed for the whole computer here (as root, under Podman), with its vault in root's pcp-data volume. Update it as root:" "" \
+    "  curl -fsSL $SCRIPT_URL | sudo sh" "" \
+    "Run as you, this installer would start a second PCP with an empty vault, on the same port. To move PCP to your user, export the vault under Settings, remove root's install (the same command with 'sh -s -- uninstall'), install it here and restore the export."
 }
 
 # The first port a user without root may open. sysctl is not on every
@@ -842,7 +946,11 @@ lan_address() {
 
 summary() {
   lan=$(lan_address)
-  say "" "PCP is running." "" \
+  headline="PCP is running."
+  if [ "$EXISTING" = 1 ]; then
+    headline="PCP is updated and running: $IMAGE."
+  fi
+  say "" "$headline" "" \
     "  On this computer:     http://localhost:$PCP_PORT"
   if [ "$PCP_HTTPS" = 1 ]; then
     say "  From another device:  not on port $PCP_PORT, which answers on this computer only" \
@@ -866,9 +974,14 @@ summary() {
   Channel      develop's builds, ahead of the releases (PCP_CHANNEL=stable
                goes back to the releases from the next one on)"
   fi
+  if [ "$EXISTING" = 1 ]; then
+    say "" "Your vault in the $PCP_DATA_VOLUME volume is as it was."
+  else
+    say "" \
+      "Open it now and set up your vault: the first person to open it becomes" \
+      "its owner."
+  fi
   say "" \
-    "Open it now and set up your vault: the first person to open it becomes" \
-    "its owner." "" \
     "$updates" \
     "  Logs         $LOGS" \
     "  Your data    the $PCP_DATA_VOLUME volume; nothing else holds state" \
@@ -882,6 +995,12 @@ summary() {
 }
 
 install() {
+  # Settings or a unit from an earlier run: this one updates that PCP.
+  if [ -f "$CONF" ] || [ -f "$UNIT" ]; then
+    EXISTING=1
+  else
+    EXISTING=0
+  fi
   check_compose_install
   check_privileged_ports
   HOST_TZ=$(host_timezone)
@@ -942,6 +1061,15 @@ main() {
     ROOT=1
   else
     ROOT=0
+  fi
+  # An install run first makes sure it is not about to start a second PCP
+  # next to one root or another user already runs.
+  if [ -z "${1:-}" ]; then
+    if [ "$ROOT" = 1 ]; then
+      check_user_installs
+    else
+      check_root_install
+    fi
   fi
   set_conf_path
   # Only an install run may carry settings over from HOME.

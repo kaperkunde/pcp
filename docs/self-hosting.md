@@ -80,6 +80,14 @@ installer again):
 Use either the installer or a checkout, not both: the installer stops if a
 checkout's PCP is running, and says how to take its vault over.
 
+Run it as the same user each time. Under Podman, root and each user have
+containers and volumes of their own, so a run as root next to a user's PCP
+would start a second PCP, with an empty vault, on the same port. The
+installer sees that: run as root, it updates that user's PCP as that user
+(in the user's own systemd, so it carries on if the session it was started
+from ends with the old PCP), and run as a user next to root's PCP, it says to
+run it as root.
+
 **From a checkout** (a Mac or Windows PC with Docker Desktop, or when you want
 to change the compose file):
 
