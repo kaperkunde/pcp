@@ -469,6 +469,7 @@ described further down:
 | ----------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `get_endpoint`    | **read and change API endpoints**                   | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.         |
 | `update_endpoint` | **read and change API endpoints**                   | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again. |
+| `list_secrets`    | **read and change API endpoints**                   | Lists your secrets by name, with what uses each, so an assistant can name one when it proposes an endpoint; never a value.                 |
 | `memory`          | **keep memories**                                   | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                               |
 | `read_memory`     | **keep memories**                                   | Reads those notes (`every`, `view`, `search`) and nothing else.                                                                            |
 | `web_fetch`       | **fetch web pages**                                 | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.              |
@@ -533,9 +534,11 @@ narrower than what you can. It can change an endpoint it registered only
 while nothing of yours is attached to it (no secret or OAuth sign-in, public
 addresses only), and a change disables the endpoint until you enable it
 again, because the words it writes reach every other assistant. It can send
-a whole new schema only to an endpoint it registered as text, and can never
-see, choose or change a secret afterwards. Once an endpoint sends your secret
-or OAuth token, or you allow private addresses, it is yours: an assistant can
+a whole new schema only to an endpoint it registered as text, and never
+sees a secret's value or chooses or changes a secret afterwards.
+`list_secrets` shows it your secrets' names and what uses each, so it can
+name one you already have when it proposes an endpoint; you are shown what
+already uses it. Once an endpoint sends your secret or OAuth token, or you allow private addresses, it is yours: an assistant can
 read it and turn read-only on, and it can ask you to fix the schema with
 edits, rename it, reword its tools or read its schema URL again. You are shown
 every edit and description in full and what it does to the tools, and nothing

@@ -67,10 +67,10 @@ export const TOKEN_OPTIONS: Record<
   manageEndpoints: {
     label: "Manage API endpoints",
     caption:
-      "Read endpoints, and change one it proposed. It never sees or changes a secret.",
+      "Read endpoints, and change one it proposed. It sees your secrets' names, never their values.",
     ask: "Let an assistant with this token read and change API endpoints",
     detail:
-      "It can read an endpoint, and edit one it proposed while that sends no secret and reaches public addresses only. Once it sends a secret, or you allow private addresses, the endpoint is yours: it can only read it and turn read-only on. A change it makes to its own switches the endpoint off until you enable it again. It can never see or change a secret. Leave this off unless the assistant needs it.",
+      "It can read an endpoint, and edit one it proposed while that sends no secret and reaches public addresses only. Once it sends a secret, or you allow private addresses, the endpoint is yours: it can only read it and turn read-only on. A change it makes to its own switches the endpoint off until you enable it again. It sees the names of your secrets and what uses each, so it can name one when it proposes an endpoint, but never their values, and it can never change a secret. Leave this off unless the assistant needs it.",
   },
   manageWrappers: {
     label: "Propose wrappers",

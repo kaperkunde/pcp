@@ -127,6 +127,34 @@ describe("the read-only tools", () => {
     expect(readOnly("call_read_only_tool")).toBe(true)
     expect(readOnly("memory")).toBe(false)
     expect(readOnly("call_tool")).not.toBe(true)
+    expect(readOnly("list_secrets")).toBeUndefined()
+  })
+
+  it("include list_secrets and get_endpoint for a token that manages endpoints", async () => {
+    const { token } = await createApiToken(ctx, {
+      name: "Manager",
+      allowAllServers: true,
+      manageEndpoints: true,
+    })
+    const manager = {
+      ...(await resolveApiToken(token))!,
+      publicUrl: "http://localhost:3000",
+    }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(manager, await loadGatewayServers(manager), {
+      executor,
+    }).connect(serverSide)
+    const managing = new Client({ name: "test", version: "1.0.0" })
+    await managing.connect(clientSide)
+
+    const { tools } = await managing.listTools()
+    const readOnly = (name: string) =>
+      tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint
+    await managing.close()
+
+    expect(readOnly("list_secrets")).toBe(true)
+    expect(readOnly("get_endpoint")).toBe(true)
+    expect(readOnly("update_endpoint")).toBe(false)
   })
 })
 

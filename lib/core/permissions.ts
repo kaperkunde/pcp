@@ -108,6 +108,7 @@ import {
   type HandoverAsk,
 } from "./browser/types"
 import { resourceLimits } from "./resources/state"
+import { namesInWords, secretUses } from "./secret-uses"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
 import {
   applyWrapperChange,
@@ -279,12 +280,24 @@ export type PermissionView = {
 
 type Row = PermissionRequest & {
   server: McpServer | null
-  token: { name: string; revokedAt: Date | null; expiresAt: Date | null }
+  token: {
+    name: string
+    revokedAt: Date | null
+    expiresAt: Date | null
+    manageEndpoints: boolean
+  }
 }
 
 const ROW_INCLUDE = {
   server: true,
-  token: { select: { name: true, revokedAt: true, expiresAt: true } },
+  token: {
+    select: {
+      name: true,
+      revokedAt: true,
+      expiresAt: true,
+      manageEndpoints: true,
+    },
+  },
 } as const
 
 function aad(id: string): string {
@@ -655,6 +668,50 @@ function registerOAuthLines(input: RegisterArgs, publicUrl: string): string[] {
   ]
 }
 
+/**
+ * For a register request still open: a line for each secret the owner
+ * already holds that it would send, naming what already uses it.
+ */
+async function reusedSecretLines(
+  ctx: VaultContext,
+  row: Row,
+  input: RegisterArgs,
+): Promise<string[]> {
+  if (row.status !== "pending") {
+    return []
+  }
+
+  const named = new Map<string, string>()
+
+  if (input.authSecretId) {
+    named.set(input.authSecretId, input.secretName ?? "?")
+  }
+
+  if (input.oauthClientSecretId) {
+    named.set(input.oauthClientSecretId, input.secretName ?? "?")
+  }
+
+  for (const extra of input.authExtraHeaders ?? []) {
+    named.set(extra.secretId, extra.secretName)
+  }
+
+  if (named.size === 0) {
+    return []
+  }
+
+  const uses = await secretUses(ctx, [...named.keys()])
+
+  return [...named]
+    .filter(([id]) => uses.has(id))
+    .map(([id, name]) => {
+      const by = uses.get(id)!.map((use) => use.name)
+
+      return by.length > 0
+        ? `Reuses your secret "${name}", already used by ${namesInWords(by)}: you do not enter it again`
+        : `Reuses your secret "${name}", not used by anything yet: you do not enter it again`
+    })
+}
+
 async function summarizeRow(
   ctx: VaultContext,
   row: Row,
@@ -773,6 +830,12 @@ async function summarizeRow(
                 : input.authType === "oauth"
                   ? oauthLines[0]!
                   : "Authentication: none"
+    // A secret the owner already holds is sent as it is: they are told what
+    // already uses it. So is the assistant, when its token may manage
+    // endpoints (list_secrets tells it as much); otherwise it is the
+    // owner's to read.
+    const reused = await reusedSecretLines(ctx, row, input)
+    const reusedHidden = row.token.manageEndpoints ? [] : reused
     const where = input.mail
       ? "this mail server"
       : input.calendar
@@ -815,6 +878,7 @@ async function summarizeRow(
           ...(flagged ? [flagged] : []),
           ...(input.authType === "basic" ? [`User name: ${login}`] : []),
           auth,
+          ...reused,
           ...oauthLines.slice(1),
           readOnly
             ? "Read-only: only the tools that read mail"
@@ -824,7 +888,7 @@ async function summarizeRow(
           asker,
         ],
         warning,
-        ownerOnly: flagged ? [flagged] : [],
+        ownerOnly: [...(flagged ? [flagged] : []), ...reusedHidden],
       }
     }
 
@@ -846,6 +910,7 @@ async function summarizeRow(
           ...(flagged ? [flagged] : []),
           ...(input.authType === "basic" ? [`User name: ${login}`] : []),
           auth,
+          ...reused,
           ...oauthLines.slice(1),
           readOnly
             ? "Read-only: only the tools that read calendars and reminders"
@@ -854,7 +919,7 @@ async function summarizeRow(
           asker,
         ],
         warning,
-        ownerOnly: flagged ? [flagged] : [],
+        ownerOnly: [...(flagged ? [flagged] : []), ...reusedHidden],
       }
     }
 
@@ -882,11 +947,13 @@ async function summarizeRow(
             ? "Read-only: only GET operations become tools"
             : "Can change things: its tools may create, change and delete at this address",
           auth,
+          ...reused,
           ...oauthLines.slice(1),
           ...(input.description ? [`Description: ${input.description}`] : []),
           asker,
         ],
         warning,
+        ownerOnly: reusedHidden,
       }
     }
 
@@ -900,12 +967,13 @@ async function summarizeRow(
         `Address: ${input.url}`,
         ...(flagged ? [flagged] : []),
         auth,
+        ...reused,
         ...oauthLines.slice(1),
         ...(input.description ? [`Description: ${input.description}`] : []),
         asker,
       ],
       warning,
-      ownerOnly: flagged ? [flagged] : [],
+      ownerOnly: [...(flagged ? [flagged] : []), ...reusedHidden],
     }
   }
 

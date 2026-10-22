@@ -116,6 +116,11 @@ import {
   summarize,
   type ToolCandidate,
 } from "./search"
+import {
+  listSecretNames,
+  MAX_LISTED_SECRETS,
+  MAX_SECRET_QUERY,
+} from "./secret-uses"
 import { findTextSecretByName, validateSecretName } from "./secrets"
 import { validateServerUrl, validateUsername, type AuthType } from "./servers"
 import { collectHandleIds, missingResultMessage } from "./result-handles"
@@ -225,7 +230,7 @@ const WRAPPER_INSTRUCTIONS =
   'This token can also propose wrappers with create_wrapper: a server whose tools are short JavaScript programs over the owner\'s other tools, for a cleaner way to use a server (fewer arguments, several calls made one, an answer cut to what matters, a secret put where an API wants it, as {"$secret": "<name>"} in a call, where the owner allowed it). Each tool calls only the tools it lists, and can stand in for them in search; it can declare the shape of its answer (outputSchema). By default the calls it lists run on the owner\'s approval of the wrapper, so a token needs a level only for the wrapper\'s tool and the server behind it can be hidden from search; callLevels "token" holds them to the calling token\'s own levels instead. The owner reads every program and decides; get_wrapper reads one, update_wrapper and delete_wrapper propose changes.'
 
 const MANAGE_INSTRUCTIONS =
-  "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one. A change to an endpoint you registered switches it off until the owner enables it again. Once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs: you can turn read-only on, and ask them to fix its schema with edits or better tool descriptions, which they answer in PCP. You cannot change a credential."
+  "This token can also read and change API endpoints: get_endpoint reads one, update_endpoint changes one. A change to an endpoint you registered switches it off until the owner enables it again. Once it sends one of the owner's secrets, or the owner has allowed private addresses, it is theirs: you can turn read-only on, and ask them to fix its schema with edits or better tool descriptions, which they answer in PCP. You cannot change a credential. list_secrets names the owner's secrets and what uses each, never a value: name one of them in register_server rather than a new one, so the owner need not enter it again."
 
 /**
  * What a token that keeps memories is told about them. Shaped after the
@@ -1431,7 +1436,7 @@ export function buildGatewayServer(
         "Calendars and reminders are always a calendar account (caldav), never an API: PCP finds the calendars itself and gives every account the same tools (list calendars, list and read events with each occurrence of a repeating one, find free time, create, change, move and delete events, and list, create, change and complete reminders). For iCloud the owner signs in with their Apple ID as username and an app-specific password (made at appleid.apple.com) as the secret, never their Apple ID password.",
         "For an API, PCP turns each operation into a tool and makes the HTTP calls itself; a header parameter an operation declares becomes one of its arguments, except the headers that carry secrets and the ones PCP sets itself (Authorization, Content-Type, Accept and the like), which are left out. spec_patches fixes or narrows the document (a JSON Patch: set the server, remove operations or parameters) without sending it all. If the API has no OpenAPI document, write one from its documentation.",
         "Authentication, in auth_type: none (an open API or MCP server; not for a mail account). header: a secret in a header, such as an API key or token. basic: a user name (username) and a password, which PCP sends as HTTP Basic authentication (an API that takes it, a JMAP app password, an IMAP login, a CalDAV login such as iCloud's app-specific password; not for an MCP server). oauth: the owner signs in once they agree (an MCP server, a JMAP or CalDAV account, or an API whose OpenAPI document declares an oauth2 security scheme with an authorizationCode flow: authorizationUrl and tokenUrl, added with spec_patches when the document lacks it); PCP renews the token itself.",
-        "A secret is named in secret, by its NAME: one the owner stored in PCP, or a name for a new one, whose value the owner types in on PCP's page when they agree (that request can only be answered there). A credential in several header parts (a key and a secret key, as an OpenAPI security requirement naming several apiKey schemes asks) goes in extra_headers, each part a secret the owner stored. Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.",
+        `A secret is named in secret, by its NAME: one the owner stored in PCP, which is then reused so they need not enter it again, or a name for a new one, whose value the owner types in on PCP's page when they agree (that request can only be answered there). ${scope.manageEndpoints ? "list_secrets gives the names of the secrets the owner stored and what already uses each: name one of its text secrets to reuse it rather than inventing a name. " : "A token that may read and change API endpoints can list the names of the owner's secrets with list_secrets. "}A credential in several header parts (a key and a secret key, as an OpenAPI security requirement naming several apiKey schemes asks) goes in extra_headers, each part a secret the owner stored. Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.`,
         "For oauth, PCP finds out itself, when the owner connects, whether the provider lets it register as a client, and registers when it does. Pass client_id only for a provider that lets no app register itself (Google, Microsoft, Spotify and most large providers): the ID of a client the owner created in the provider's developer settings with PCP's redirect URI, and the owner enters its client secret on PCP's page. Not supported: OpenID Connect discovery without an authorizationCode flow, the implicit, password and client-credentials flows, and keys sent in the query string.",
       ].join("\n\n"),
       inputSchema: z.object({
@@ -2130,6 +2135,39 @@ export function buildGatewayServer(
           return json(await getEndpoint(scope, endpoint, options))
         },
       ),
+    )
+
+    // Names and what uses them, never a value: so an assistant proposing an
+    // endpoint can name a secret the owner already has instead of making
+    // them type it in again (lib/core/secret-uses.ts).
+    server.registerTool(
+      "list_secrets",
+      {
+        title: "List the owner's secrets",
+        description: `The names of the secrets the owner keeps in PCP, each with its description, its kind and what uses it (servers, API endpoints, mail and calendar accounts and wrappers, by name and short name). Never a value. A text secret (reusable: true) can be named in register_server's secret or extra_headers to send it to what you propose, so the owner does not enter it again; they still see what it is already used by and decide. An OAuth sign-in or an SSH key is PCP's own for one server: naming one in register_server asks for a new secret instead. Up to ${MAX_LISTED_SECRETS} at a time; query narrows them.`,
+        inputSchema: z.object({
+          query: z
+            .string()
+            .max(MAX_SECRET_QUERY)
+            .optional()
+            .describe(
+              "Only secrets whose name or description contains this text, ignoring case.",
+            ),
+        }),
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      },
+      logged("list_secrets", () => ({}))(async (args: { query?: string }) => {
+        const { secrets, more } = await listSecretNames(scope.ctx, args.query)
+
+        return json(
+          more > 0
+            ? {
+                secrets,
+                more: `${more} more not shown: narrow them with query.`,
+              }
+            : { secrets },
+        )
+      }),
     )
   }
 
