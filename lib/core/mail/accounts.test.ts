@@ -683,7 +683,71 @@ describe("calling its tools", () => {
         PUBLIC,
       ),
     ).rejects.toMatchObject({ code: "validation" })
+
+    for (const args of [
+      { to: [{ name: "Eve", email: "not an address" }] },
+      { to: [{ name: "Eve\r\nBcc: x@y.z", email: "e@example.com" }] },
+      { to: [{ email: "e@example.com", address: "x" }] },
+      { to: ["a@example.com"], inReplyTo: "<e1>" },
+      { to: ["a@example.com"], inReplyTo: "a b@example.com" },
+    ]) {
+      await expect(
+        callServerTool(
+          ctx,
+          server,
+          "send_email",
+          { ...args, subject: "s", text: "t" },
+          PUBLIC,
+        ),
+      ).rejects.toMatchObject({ code: "validation" })
+    }
+
     expect(fake.requests.length).toBe(before)
+  })
+
+  it("sends to addresses as get_email gives them, in reply to a Message-ID", async () => {
+    const server = await ready()
+    const read = await callServerTool(
+      ctx,
+      server,
+      "get_email",
+      { id: "e1" },
+      PUBLIC,
+    )
+    const email = read.structuredContent as {
+      messageId: string
+      from: Array<{ name: string | null; email: string }>
+    }
+    expect(email.messageId).toBe("engine-1@example.com")
+
+    const result = await callServerTool(
+      ctx,
+      server,
+      "send_email",
+      {
+        to: email.from,
+        cc: ["Ada <ada@example.com>"],
+        subject: "Re: The engine",
+        text: "Thursday suits me.",
+        inReplyTo: email.messageId,
+      },
+      PUBLIC,
+    )
+
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({
+      sent: {
+        to: [{ name: "Charles Babbage", email: "charles@example.com" }],
+        cc: [{ name: "Ada", email: "ada@example.com" }],
+        answered: true,
+      },
+    })
+    expect(fake.emails.at(-1)).toMatchObject({
+      inReplyTo: ["engine-1@example.com"],
+    })
+    expect(fake.emails.find((e) => e.id === "e1")!.keywords).toMatchObject({
+      $answered: true,
+    })
   })
 
   it("refuses writing tools on a read-only account, whatever the catalogue says", async () => {

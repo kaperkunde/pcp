@@ -219,6 +219,29 @@ describe("parseRecipient", () => {
     })
   })
 
+  it("reads {name, email} as get_email gives it, to the same checks", () => {
+    expect(
+      parseRecipient({ name: "Ada Lovelace", email: "ada@example.com" }),
+    ).toEqual({ name: "Ada Lovelace", email: "ada@example.com" })
+    expect(parseRecipient({ name: null, email: "ada@example.com" })).toEqual({
+      name: null,
+      email: "ada@example.com",
+    })
+    expect(parseRecipient({ email: " ada@example.com " })).toEqual({
+      name: null,
+      email: "ada@example.com",
+    })
+    expect(() =>
+      parseRecipient({ name: "Ada\nBcc: eve@example.com", email: "a@b.com" }),
+    ).toThrow(/line breaks/)
+    expect(() =>
+      parseRecipient({ email: "ada@example.com>, eve@example.com" }),
+    ).toThrow(/not an email/)
+    expect(() =>
+      parseRecipient({ name: 'Ada "A"', email: "ada@example.com" }),
+    ).toThrow(/quotes/)
+  })
+
   it("lets nothing through that could start a header", () => {
     expect(() =>
       parseRecipient("ada@example.com\r\nBcc: eve@example.com"),

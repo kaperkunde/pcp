@@ -214,24 +214,35 @@ function fakeImap(
     },
     async search(criteria) {
       calls.push(`search ${JSON.stringify(criteria)}`)
-      return current()
-        .messages.filter((m) =>
-          criteria.seen === undefined
-            ? true
-            : m.flags.has("\\Seen") === criteria.seen,
-        )
-        .filter((m) =>
-          criteria.text
-            ? (m.envelope?.subject ?? "").includes(criteria.text)
-            : true,
-        )
-        .filter((m) =>
-          criteria.keyword ? m.flags.has(criteria.keyword) : true,
-        )
-        .filter((m) =>
-          criteria.unKeyword ? !m.flags.has(criteria.unKeyword) : true,
-        )
-        .map((m) => m.uid)
+      return (
+        current()
+          .messages.filter((m) =>
+            criteria.seen === undefined
+              ? true
+              : m.flags.has("\\Seen") === criteria.seen,
+          )
+          .filter((m) =>
+            criteria.text
+              ? (m.envelope?.subject ?? "").includes(criteria.text)
+              : true,
+          )
+          .filter((m) =>
+            criteria.keyword ? m.flags.has(criteria.keyword) : true,
+          )
+          .filter((m) =>
+            criteria.unKeyword ? !m.flags.has(criteria.unKeyword) : true,
+          )
+          // HEADER is a case-insensitive substring match (RFC 3501 6.4.4).
+          .filter((m) => {
+            const wanted = criteria.header?.["message-id"]
+            return typeof wanted === "string"
+              ? (m.envelope?.messageId ?? "")
+                  .toLowerCase()
+                  .includes(wanted.toLowerCase())
+              : true
+          })
+          .map((m) => m.uid)
+      )
     },
     async fetchAll(range) {
       const uids = new Set((range as number[]).map(Number))
@@ -899,6 +910,105 @@ describe("sending", () => {
     expect(original.flags.has("\\Answered")).toBe(true)
   })
 
+  it.each(["<engine-1@example.com>", "engine-1@example.com"])(
+    "replies to an email found by its Message-ID (%s), and marks that one answered",
+    async (messageId) => {
+      const { mail, mailed, imap, boxes } = setup()
+
+      const sent = await mail.sendEmail!({
+        to: [{ name: null, email: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "Re: The engine",
+        text: "Thursday suits me.",
+        inReplyTo: messageId,
+      })
+
+      expect(mailed[0]).toMatchObject({
+        inReplyTo: "<engine-1@example.com>",
+        references: ["<older@example.com>", "<engine-1@example.com>"],
+      })
+      expect(sent).toMatchObject({ answered: true })
+      // Searched with its brackets, so a longer Message-ID does not match.
+      expect(imap.calls.filter((call) => call.startsWith("search"))).toEqual([
+        `search ${JSON.stringify({ header: { "message-id": "<engine-1@example.com>" } })}`,
+      ])
+      const original = boxes
+        .get("INBOX")!
+        .messages.find((message) => message.uid === 1)!
+      expect(original.flags.has("\\Answered")).toBe(true)
+    },
+  )
+
+  it("looks for a Message-ID past the inbox, in the special mailboxes", async () => {
+    const boxes = world()
+    const inbox = boxes.get("INBOX")!.messages[0]!
+    boxes.get("Sent")!.messages.push({
+      ...inbox,
+      uid: 5,
+      flags: new Set(["\\Seen"]),
+      envelope: { ...inbox.envelope, messageId: "<mine-5@example.com>" },
+    })
+    const { mail, mailed, imap } = setup({ boxes })
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "And another thing.",
+      inReplyTo: "mine-5@example.com",
+    })
+
+    expect(mailed[0]).toMatchObject({ inReplyTo: "<mine-5@example.com>" })
+    expect(sent).toMatchObject({ answered: true })
+    expect(imap.calls).toContain("add 5 \\Answered")
+    expect(
+      boxes.get("Sent")!.messages.find((message) => message.uid === 5)!.flags,
+    ).toContain("\\Answered")
+    expect(boxes.get("INBOX")!.messages[0]!.flags.has("\\Answered")).toBe(false)
+  })
+
+  it("refuses a Message-ID no email has, in a bounded few mailboxes, and sends nothing", async () => {
+    const boxes = world()
+    for (const [path, specialUse] of [
+      ["Archive", "\\Archive"],
+      ["All Mail", "\\All"],
+      ["Spam", "\\Junk"],
+      ["Drafts", "\\Drafts"],
+      ["Starred", "\\Flagged"],
+      ["Important", "\\Important"],
+    ] as const) {
+      boxes.set(path, {
+        uidValidity: 30n,
+        uidNext: 1,
+        specialUse,
+        messages: [],
+      })
+    }
+    const { mail, mailed, imap } = setup({ boxes })
+
+    await expect(
+      mail.sendEmail!({
+        to: [{ name: null, email: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "Re: nothing",
+        text: "t",
+        inReplyTo: "<nobody-9@example.com>",
+      }),
+    ).rejects.toThrow("No email with that Message-ID in this account.")
+    expect(mailed).toEqual([])
+    expect(imap.calls.filter((call) => call.startsWith("lock"))).toEqual([
+      "lock INBOX read-only",
+      "lock Sent read-only",
+      "lock Archive read-only",
+      "lock All Mail read-only",
+      "lock Spam read-only",
+      "lock Trash read-only",
+    ])
+  })
+
   it("says so when the email it answers cannot be marked, and the email still goes", async () => {
     const { mail, mailed, imap } = setup()
     imap.messageFlagsAdd = async () => false
@@ -1085,6 +1195,41 @@ describe("drafting", () => {
       .get("INBOX")!
       .messages.find((message) => message.uid === 1)!
     expect(original.flags.has("\\Answered")).toBe(false)
+  })
+
+  it("drafts a reply to an email named by its Message-ID", async () => {
+    const { mail, deps, boxes } = setup({ boxes: withDrafts() })
+    const composed: OutgoingMail[] = []
+    const compose = deps.compose
+    deps.compose = async (mail) => {
+      composed.push(mail)
+      return compose(mail)
+    }
+
+    await mail.createDraft({
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: "<engine-1@example.com>",
+    })
+
+    expect(composed[0]).toMatchObject({
+      inReplyTo: "<engine-1@example.com>",
+      references: ["<older@example.com>", "<engine-1@example.com>"],
+    })
+    expect(boxes.get("INBOX")!.messages[0]!.flags.has("\\Answered")).toBe(false)
+    await expect(
+      mail.createDraft({
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: "s",
+        text: "t",
+        inReplyTo: "nobody@example.com",
+      }),
+    ).rejects.toThrow("No email with that Message-ID in this account.")
   })
 
   it("finds Drafts by name, and needs neither SMTP, a From address nor UIDPLUS", async () => {

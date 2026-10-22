@@ -3,7 +3,7 @@ import { z } from "zod"
 import type { CatalogueTool } from "../catalogue"
 import { invalid } from "../errors"
 import type { MailKind } from "../servers"
-import { parseRecipient } from "./addresses"
+import { parseRecipient, replyTarget, type RecipientObject } from "./addresses"
 import {
   DEFAULT_SEARCH_LIMIT,
   MAX_BULK_EMAILS,
@@ -135,11 +135,34 @@ const date = z
   .refine((value) => !Number.isNaN(Date.parse(value)), {
     message: "Give a date like 2026-10-01 or 2026-10-01T09:00:00Z.",
   })
+/**
+ * One recipient: written out, or as get_email and get_thread give one
+ * ({name, email}), so an address read can be passed back as it is.
+ */
+const recipient = z.union([
+  z.string().min(3).max(400),
+  z.strictObject({
+    name: z.string().max(200).nullable().optional(),
+    email: z.string().min(3).max(320),
+  }),
+])
 const recipients = z
-  .array(z.string().min(3).max(400))
+  .array(recipient)
   .max(MAX_RECIPIENTS)
   .describe(
-    'Addresses, as "ada@example.com" or "Ada Lovelace <ada@example.com>".',
+    'Addresses, each as "ada@example.com", "Ada Lovelace <ada@example.com>", or {"name": "Ada Lovelace", "email": "ada@example.com"} as get_email gives them.',
+  )
+/** The email a reply answers: PCP's id for it, or its Message-ID. */
+const replyTo = z
+  .string()
+  .min(1)
+  .max(500)
+  .refine((value) => replyTarget(value) !== null, {
+    message:
+      "Give the email's id from search_emails, or its Message-ID, like <abc@example.com>.",
+  })
+  .describe(
+    "The email this replies to: its id as search_emails returns it, or its Message-ID header (as get_email's messageId).",
   )
 const noArgs = () => z.strictObject({})
 
@@ -154,9 +177,7 @@ function composition(kind: MailKind, { draft }: { draft: boolean }) {
     bcc: recipients.optional(),
     subject: z.string().max(MAX_SUBJECT_CHARS),
     text: z.string().max(MAX_SEND_TEXT_CHARS).describe("The body, plain text."),
-    inReplyTo: id
-      .optional()
-      .describe("The id of the email this answers, from search_emails."),
+    inReplyTo: replyTo.optional(),
     attachments: z
       .array(
         z.strictObject({
@@ -336,7 +357,7 @@ const SPECS: readonly MailToolSpec[] = [
     name: "send_email",
     title: "Send an email",
     description:
-      'Sends a plain-text email from this account, and keeps a copy in Sent. To reply, pass the id of the email you answer as inReplyTo: the reply then joins its conversation, and that email is marked answered (answered in the result says whether it could be). To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]: an attachment get_attachment read (from this account or another), or any file a tool answered with. Sending cannot be undone.',
+      'Sends a plain-text email from this account, and keeps a copy in Sent. To reply, pass the email you answer as inReplyTo, by its id or its Message-ID: the reply then joins its conversation, and that email is marked answered (answered in the result says whether it could be). To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]: an attachment get_attachment read (from this account or another), or any file a tool answered with. Sending cannot be undone.',
     args: (kind) => composition(kind, { draft: false }),
     annotations: {
       readOnlyHint: false,
@@ -352,7 +373,7 @@ const SPECS: readonly MailToolSpec[] = [
     name: "create_draft",
     title: "Write a draft",
     description:
-      'Writes a plain-text email into this account\'s Drafts mailbox, marked as a draft, and sends nothing: the owner can read it, change it and send it from their mail app. It takes what send_email takes, with recipients optional. To draft a reply, pass the id of the email it answers as inReplyTo: the draft then joins its conversation. To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]. Answers with the draft\'s id, which get_email reads, and the mailbox it is in.',
+      'Writes a plain-text email into this account\'s Drafts mailbox, marked as a draft, and sends nothing: the owner can read it, change it and send it from their mail app. It takes what send_email takes, with recipients optional. To draft a reply, pass the email it answers as inReplyTo, by its id or its Message-ID: the draft then joins its conversation. To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]. Answers with the draft\'s id, which get_email reads, and the mailbox it is in.',
     args: (kind) => composition(kind, { draft: true }),
     annotations: {
       readOnlyHint: false,
@@ -626,7 +647,14 @@ export function parseRecipients(
 ): Array<{ name: string | null; email: string }> {
   return Array.isArray(values)
     ? values.map((value, index) =>
-        parseRecipient(String(value), `Recipient ${index + 1} in ${field}`),
+        parseRecipient(
+          typeof value === "object" &&
+            value !== null &&
+            typeof (value as { email?: unknown }).email === "string"
+            ? (value as RecipientObject)
+            : String(value),
+          `Recipient ${index + 1} in ${field}`,
+        ),
       )
     : []
 }

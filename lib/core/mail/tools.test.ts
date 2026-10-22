@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest"
 
-import { mailTools, mailToolSpec, parseMailArgs } from "./tools"
+import { replyTarget } from "./addresses"
+import { encodeImapId } from "./imap"
+import {
+  mailTools,
+  mailToolSpec,
+  parseMailArgs,
+  parseRecipients,
+} from "./tools"
 
 function names(options: Parameters<typeof mailTools>[0]): string[] {
   return mailTools(options).map((tool) => tool.name)
@@ -249,6 +256,169 @@ describe("parseMailArgs", () => {
     expect(() =>
       parseMailArgs(spec, "imap", { subject: "s", text: "t", identity: "i1" }),
     ).toThrow(/identity/)
+  })
+})
+
+describe("recipients", () => {
+  const send = mailToolSpec("send_email")!
+
+  it("takes addresses written out, as {name, email} objects, or both mixed", () => {
+    const args = parseMailArgs(send, "imap", {
+      to: [
+        { name: "Charles Babbage", email: "charles@example.com" },
+        "Ada Lovelace <ada@example.com>",
+      ],
+      cc: [{ name: null, email: "news@example.com" }, "x@example.com"],
+      bcc: [{ email: "archive@example.com" }],
+      subject: "s",
+      text: "t",
+    })
+
+    expect(parseRecipients(args.to, "to")).toEqual([
+      { name: "Charles Babbage", email: "charles@example.com" },
+      { name: "Ada Lovelace", email: "ada@example.com" },
+    ])
+    expect(parseRecipients(args.cc, "cc")).toEqual([
+      { name: null, email: "news@example.com" },
+      { name: null, email: "x@example.com" },
+    ])
+    expect(parseRecipients(args.bcc, "bcc")).toEqual([
+      { name: null, email: "archive@example.com" },
+    ])
+  })
+
+  it("takes back what get_email gives, an empty name included", () => {
+    expect(
+      parseRecipients([{ name: "", email: " ada@example.com " }], "to"),
+    ).toEqual([{ name: null, email: "ada@example.com" }])
+  })
+
+  it("refuses an object with other fields, no email, or a bad one", () => {
+    for (const to of [
+      [{ name: "Ada", email: "ada@example.com", address: "x" }],
+      [{ name: "Ada" }],
+      [{ email: 42 }],
+      [{ name: "x".repeat(201), email: "ada@example.com" }],
+    ]) {
+      expect(() =>
+        parseMailArgs(send, "jmap", { to, subject: "s", text: "t" }),
+      ).toThrow(/send_email: .*to/)
+    }
+
+    // The schema has the shape; the address itself is checked after.
+    expect(() =>
+      parseRecipients([{ name: "Ada", email: "not an address" }], "to"),
+    ).toThrow("Recipient 1 in to is not an email address.")
+    expect(() =>
+      parseRecipients(
+        ["ada@example.com", { name: "Eve\r\nBcc: eve", email: "e@x.com" }],
+        "cc",
+      ),
+    ).toThrow("Recipient 2 in cc cannot have line breaks")
+    expect(() =>
+      parseRecipients([{ name: "<Eve>", email: "e@example.com" }], "to"),
+    ).toThrow(/cannot have <, > or quotes/)
+  })
+
+  it("still counts at most 50, objects or not", () => {
+    expect(() =>
+      parseMailArgs(send, "jmap", {
+        to: Array.from({ length: 51 }, (_, n) => ({
+          email: `a${n}@example.com`,
+        })),
+        subject: "s",
+        text: "t",
+      }),
+    ).toThrow(/send_email: .*to/)
+  })
+
+  it("says in the schema that both forms are taken", () => {
+    const tool = mailTools({
+      kind: "jmap",
+      readOnly: false,
+      canSend: true,
+    }).find((candidate) => candidate.name === "send_email")!
+    const to = (
+      tool.inputSchema as {
+        properties: Record<string, { description?: string; items?: unknown }>
+      }
+    ).properties.to!
+
+    expect(to.description).toMatch(/\{"name": "Ada Lovelace", "email"/)
+    expect(to.items).toMatchObject({
+      anyOf: [
+        { type: "string" },
+        {
+          type: "object",
+          required: ["email"],
+          additionalProperties: false,
+        },
+      ],
+    })
+  })
+})
+
+describe("inReplyTo", () => {
+  const draft = mailToolSpec("create_draft")!
+  const reply = (inReplyTo: unknown) =>
+    parseMailArgs(draft, "imap", { subject: "s", text: "t", inReplyTo })
+
+  it("takes an email's id or its Message-ID, with or without brackets", () => {
+    for (const value of [
+      "e1",
+      "1.7.SU5CT1g",
+      "<engine-1@example.com>",
+      "engine-1@example.com",
+      "CAF=x+y_z.1@mail.gmail.com",
+    ]) {
+      expect(reply(value)).toMatchObject({ inReplyTo: value })
+    }
+  })
+
+  it("refuses what is neither", () => {
+    for (const value of [
+      "<e1>",
+      "<a@example.com",
+      "a b@example.com",
+      "<a@example.com> <b@example.com>",
+      "a@b@example.com",
+      "a@example.com\r\nBcc: eve@example.com",
+      "",
+    ]) {
+      expect(() => reply(value)).toThrow(/create_draft: .*inReplyTo/)
+    }
+  })
+
+  it("tells them apart by shape", () => {
+    expect(replyTarget("e1")).toEqual({ id: "e1" })
+    expect(replyTarget(encodeImapId(1, 7n, "INBOX"))).toEqual({
+      id: encodeImapId(1, 7n, "INBOX"),
+    })
+    expect(replyTarget("<engine-1@example.com>")).toEqual({
+      messageId: "engine-1@example.com",
+    })
+    expect(replyTarget(" engine-1@example.com ")).toEqual({
+      messageId: "engine-1@example.com",
+    })
+    expect(replyTarget("<e1>")).toBeNull()
+  })
+
+  it("is described as taking both", () => {
+    const tool = mailTools({
+      kind: "imap",
+      readOnly: false,
+      canSend: true,
+    }).find((candidate) => candidate.name === "send_email")!
+
+    expect(
+      (
+        tool.inputSchema as {
+          properties: Record<string, { description?: string }>
+        }
+      ).properties.inReplyTo!.description,
+    ).toBe(
+      "The email this replies to: its id as search_emails returns it, or its Message-ID header (as get_email's messageId).",
+    )
   })
 })
 

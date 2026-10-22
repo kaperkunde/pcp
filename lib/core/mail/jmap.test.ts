@@ -454,6 +454,79 @@ describe("the mail tools' work", () => {
     ).toMatchObject({ $answered: true })
   })
 
+  it.each(["<engine-3@example.com>", "engine-3@example.com"])(
+    "replies to an email found by its Message-ID (%s), and marks that one answered",
+    async (messageId) => {
+      const { mail, fake } = await backend()
+
+      const sent = await mail.sendEmail!({
+        to: [{ name: null, email: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "Re: The engine",
+        text: "Thursday suits me.",
+        inReplyTo: messageId,
+      })
+
+      const stored = fake.emails.find((email) => email.id === sent.id)!
+      expect(stored).toMatchObject({
+        inReplyTo: ["engine-3@example.com"],
+        references: ["engine-1@example.com", "engine-3@example.com"],
+      })
+      expect(sent.answered).toBe(true)
+      expect(
+        fake.emails.find((email) => email.id === "e3")!.keywords,
+      ).toMatchObject({ $answered: true })
+      expect(
+        fake.emails.find((email) => email.id === "e1")!.keywords.$answered,
+      ).toBeUndefined()
+      // Looked up with the header filter, its brackets on, in the same
+      // request as the rest.
+      expect(JSON.stringify(fake.requests)).toContain(
+        JSON.stringify({ header: ["Message-ID", "<engine-3@example.com>"] }),
+      )
+    },
+  )
+
+  it("drafts a reply to an email named by its Message-ID", async () => {
+    const { mail, fake } = await backend()
+
+    const draft = await mail.createDraft({
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: "<engine-1@example.com>",
+    })
+
+    expect(fake.emails.find((email) => email.id === draft.id)).toMatchObject({
+      inReplyTo: ["engine-1@example.com"],
+      references: ["engine-1@example.com"],
+    })
+    expect(fake.emails.find((email) => email.id === "e1")!.keywords).toEqual({})
+  })
+
+  it("refuses a Message-ID no email in the account has, and sends nothing", async () => {
+    const { mail, fake } = await backend()
+
+    for (const write of [mail.sendEmail!, mail.createDraft]) {
+      await expect(
+        write({
+          to: [{ name: null, email: "charles@example.com" }],
+          cc: [],
+          bcc: [],
+          subject: "Re: nothing",
+          text: "t",
+          inReplyTo: "<nobody-9@example.com>",
+        }),
+      ).rejects.toThrow("No email with that Message-ID in this account.")
+    }
+
+    expect(fake.sent).toEqual([])
+    expect(fake.emails).toHaveLength(3)
+  })
+
   it("sends when the server will not move the email to Sent, and says it is left in Drafts", async () => {
     for (const onSuccessUpdate of ["refuse", "error"] as const) {
       const { mail, fake } = await backend({ onSuccessUpdate })
