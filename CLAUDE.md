@@ -96,6 +96,43 @@ so in the summary; the bump itself waits for the request.
   only the owner sets that mark, and an assistant's change to an always
   memory it keeps clears it, so every text in the instructions is one the
   owner read. Never a token's own memory the owner did not mark.
+- Skills (`lib/core/skills.ts`) are procedures the owner approved, kept as
+  SKILL.md (frontmatter with a `version`, other tools' keys kept as they
+  are), encrypted under `skill:<id>`. An assistant reads the ones its token
+  sees through `search` and `describe`, and proposes a change only through
+  the `memory` tool's `/skills/…` paths: a `skill_change` request that shows
+  the whole skill and its diff and writes only that, while the skill is
+  still at the version the owner was shown. A change to the SKILL.md shape
+  stays backward compatible.
+- `call_tool` and `call_read_only_tool` take only a `call_handle` from
+  `describe` (`lib/core/call-handles.ts`: an HMAC under the vault key over
+  the token, the tool and its schema's hash), and check the arguments against
+  the schema before anything runs or asks the owner. run_code's `pcp.call`
+  keeps names.
+- Pacing (`lib/core/pacing/`) applies only in `upstream.ts callServerTool`
+  (the browser by the tab's site, in `browser/call.ts`) and web fetch's
+  request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
+  is paced: call_tool, run_code, wrappers and flows, owner-approved calls.
+  New defaults and bounds go in `pacing/limits.ts`, by class of action;
+  nothing names a site or vendor. The owner's overrides are the vault's
+  `pacing` setting, never a host setting.
+- Linked repositories (`lib/core/repos/`) share items, never secrets, and
+  are never a backup. Their documents carry `pcp_format` and change only
+  backward compatibly (add fields with defaults, never repurpose one).
+  `github.ts` is the only client: GitHub's REST API, and github.com for the
+  device flow only; no redirect, public addresses only, every answer bounded
+  (`repos/limits.ts`) and read against a schema, every file checked against
+  its git id. It never reads a secret: `upstream.ts githubCredential` hands
+  it the header, from a text secret or PCP's own sign-in (`oauth/github`).
+  A push is one commit per item, fast-forward only. From a trusted
+  repository only a `textOnly` change applies by itself; everything else
+  waits on the item (`pending`, named by its git id) and applies only as
+  the owner was shown it, while its `basis` holds. Nothing syncs without a
+  request's key: `runDueSyncs` runs only through `after()` from `/mcp` and
+  the owner's pages; never a timer, a webhook or a stored key. An assistant
+  (manage-endpoints only) helps through `search`, `describe` and
+  `/repos/<id>/` in the memory tool, as one `repo_change` request. A new
+  way in gets a test against `fake-github.ts`.
 - Tool levels an assistant proposes for its token (`propose_tool_access`,
   `lib/core/access-requests.ts`) are written only by the owner's save on the
   request's page (`applyAccessRequest`), with what they chose there. No
@@ -441,7 +478,10 @@ CalDAV are a "calendar account" ("Calendar accounts" in the UI); a server
 whose tools are programs over the
 others is a "wrapper" ("Wrappers" in the UI); a note an
 assistant keeps between conversations is a "memory", "shared" when every
-assistant reads it; what web_fetch reaches is a "site" (a host), and a level
+assistant reads it; a procedure the owner approved for assistants to follow
+is a "skill" ("Skills" in the UI); a wrapper whose tools drive the browser
+is a "browser flow"; a GitHub repository PCP shares items with is a "linked
+repository"; what web_fetch reaches is a "site" (a host), and a level
 every token follows is "for all tokens" ("All tokens" in the UI); unlocking
 or confirming with a fingerprint in the Mac app is "Touch ID". No operator
 vocabulary in the UI: no "DEK", "grant", "KEK" outside code comments and
