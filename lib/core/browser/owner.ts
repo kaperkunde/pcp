@@ -4,6 +4,7 @@ import { db } from "../db"
 import { PcpError } from "../errors"
 import { isPcpSite } from "../fetch/fetch"
 import { resolvePrivateAccess } from "../fetch/rules"
+import { waitingHandovers, type WaitingHandover } from "../permissions"
 import { loadSharedFetchRules } from "../web-fetch"
 import { giveTab, pageUrl } from "./call"
 import { chromiumExecutable } from "./executable"
@@ -299,7 +300,51 @@ export type BrowserOverview = {
   }
   status: BrowserStatus
   profile: ProfileSummary | null
-  tabs: TabView[]
+  tabs: OverviewTab[]
+}
+
+/** A tab in the tabs view: who has it, and what it waits on you for. */
+export type OverviewTab = TabView & {
+  /** The name of the token whose tab it is; null for none (yours alone). */
+  tokenName: string | null
+  /** The hand-over its assistant asked you for, while it waits. */
+  waiting: WaitingHandover | null
+}
+
+/**
+ * The open tabs as the tabs view lists them: each with its token's name and
+ * the oldest hand-over still waiting about it.
+ */
+async function overviewTabs(ctx: VaultContext): Promise<OverviewTab[]> {
+  const tabs = await listTabs(ctx.vaultId)
+  const asked = [...(runningBrowser(ctx.vaultId)?.tabs.values() ?? [])].flatMap(
+    (tab) => [...tab.handoverRequests],
+  )
+  const tokenIds = [
+    ...new Set(tabs.flatMap((tab) => (tab.tokenId ? [tab.tokenId] : []))),
+  ]
+  const [handovers, tokens] = await Promise.all([
+    waitingHandovers(ctx, asked),
+    tokenIds.length > 0
+      ? db().apiToken.findMany({
+          where: { vaultId: ctx.vaultId, id: { in: tokenIds } },
+          select: { id: true, name: true },
+        })
+      : [],
+  ])
+  const names = new Map(tokens.map((token) => [token.id, token.name]))
+  const waiting = new Map<string, WaitingHandover>()
+
+  // Oldest first: a tab shows the first of its hand-overs.
+  for (const handover of handovers) {
+    if (!waiting.has(handover.tabId)) waiting.set(handover.tabId, handover)
+  }
+
+  return tabs.map((tab) => ({
+    ...tab,
+    tokenName: tab.tokenId ? (names.get(tab.tokenId) ?? null) : null,
+    waiting: waiting.get(tab.id) ?? null,
+  }))
 }
 
 export async function browserOverview(
@@ -311,7 +356,7 @@ export async function browserOverview(
     installedChromium(dataDir()),
     olderChromiumInstalled(dataDir()),
     profileSummary(ctx.vaultId),
-    listTabs(ctx.vaultId),
+    overviewTabs(ctx),
   ])
 
   return {

@@ -22,6 +22,17 @@ export const NAVIGATION_TIMEOUT_MS = 30_000
 export const ACTION_TIMEOUT_MS = 10_000
 /** A page's title, read for an answer or for the list of tabs. */
 export const TITLE_TIMEOUT_MS = 2_000
+/**
+ * A tab's icon, as the page served it to Chromium (favicon.ts): a larger
+ * one is left out, and the list shows the site's first letter instead.
+ */
+export const MAX_FAVICON_BYTES = 16 * 1024
+/**
+ * What Chromium keeps of the responses a tab's DevTools session sees, for
+ * the icon to be read from: a response over MAX_FAVICON_BYTES is not kept
+ * at all, and these at most together.
+ */
+export const FAVICON_BUFFER_BYTES = 512 * 1024
 /** The longest wait_for. */
 export const MAX_WAIT_MS = 30_000
 /** The profile (the sign-ins) as JSON, before encryption. */

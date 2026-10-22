@@ -3,7 +3,10 @@ import { expect, test } from "@playwright/test"
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, initialize, toolText, type McpResponse } from "../lib/mcp"
 import {
+  allClear,
   allowAllTools,
+  answerEverythingWaiting,
+  clickHydrated,
   createToken,
   openTokenAdvanced,
   setPrivateAddresses,
@@ -13,9 +16,11 @@ import {
 // its tools and is told how it works; the first page at a site asks the
 // owner; the assistant reads and acts on the page by refs; a link to
 // another site stops; the sign-ins outlast the browser and are forgotten
-// on request. The fake upstream is on 127.0.0.1, so the token is allowed
-// private addresses first. The live view, hand_over and Cloudflare checks
-// are covered by lib/core/browser's unit tests.
+// on request; the tabs view settles a hand-over on its tab, takes the old
+// links there and closes a tab nobody needs. The fake upstream is on
+// 127.0.0.1, so the token is allowed private addresses first. The owner's
+// input in the live view and Cloudflare checks are covered by
+// lib/core/browser's unit tests.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -215,4 +220,76 @@ test("the sign-ins outlast the browser, and are gone once forgotten", async ({
     url: `${upstream.browserUrl}/cookie`,
   })
   expect(toolText(forgotten)).toContain("Cookie: none")
+})
+
+test("the tabs view: a hand-over answered on its tab, old links led there, a stale tab closed", async ({
+  page,
+  baseURL,
+}) => {
+  // What earlier projects left waiting, out of the way: this hand-over is
+  // then the last thing waiting.
+  await answerEverythingWaiting(page)
+  const opened = toolText(
+    await browse(baseURL!, "tabs", {
+      action: "open",
+      url: `${upstream.browserUrl}/form`,
+    }),
+  )
+  const tab = opened.match(/Opened a new tab: (\S+)\./)?.[1] ?? tabOf(opened)
+  const row = page.locator(`[data-tab-id="${tab}"]`)
+  const inView = new RegExp(`/browser\\?tab=${tab}$`)
+
+  // The assistant hands the tab over; its link leads to the tab itself.
+  const asked = toolText(
+    await browse(baseURL!, "hand_over", {
+      tab,
+      message: "Please sign in for me.",
+    }),
+  )
+  expect(asked).toContain("Not done yet")
+  const id = asked.match(/\/permissions\/([\w-]+)/)?.[1]
+  expect(id, asked).toBeTruthy()
+
+  await page.goto(`/permissions/${id}`)
+  await expect(page).toHaveURL(inView)
+  const waiting = row.getByRole("group", { name: "Waiting for you" })
+  await expect(waiting).toContainText("Waiting for you: Please sign in for me.")
+  await expect(row.getByTestId("tab-state")).toHaveText("With you")
+  await expect(row).toHaveAttribute("aria-current", "true")
+  await expect(page.getByTestId("browser-frame")).toBeVisible()
+
+  // Done, on the tab: it goes back to the assistant, and nothing waits on it.
+  await clickHydrated(waiting.getByRole("button", { name: "Done" }))
+  await expect(
+    page.getByRole("region", { name: "Your last answer" }),
+  ).toContainText("An assistant needs you in the browser")
+  await expect(allClear(page)).toBeVisible()
+  await expect(page).toHaveURL(inView)
+  await expect(waiting).toHaveCount(0)
+  await expect(row.getByTestId("tab-state")).toHaveText("Idle")
+  expect(
+    toolText(await callTool(baseURL!, token, "check_permission", { id })),
+  ).toContain(`The owner is done in tab ${tab}`)
+
+  // The old links: a tab's own page leads into the view; an answered
+  // hand-over's page says how it ended.
+  await page.goto(`/browser/tabs/${tab}`)
+  await expect(page).toHaveURL(inView)
+  await page.goto(`/permissions/${id}`)
+  await expect(page).toHaveURL(new RegExp(`/permissions/${id}$`))
+  await expect(page.getByText("You allowed this and it ran.")).toBeVisible()
+
+  // A tab nobody needs any more is closed from the list.
+  await page.goto("/browser")
+  await row.getByRole("button", { name: /^Close / }).click()
+  await expect(row).toHaveCount(0)
+  expect(toolText(await browse(baseURL!, "snapshot", { tab }))).toContain(
+    `There is no tab ${tab}`,
+  )
+
+  // A tab that is gone says so where its link leads.
+  await page.goto(`/browser?tab=${tab}`)
+  await expect(
+    page.getByRole("region", { name: "Live tab" }).getByRole("alert"),
+  ).toContainText("This tab is closed")
 })

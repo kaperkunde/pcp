@@ -12,7 +12,9 @@ import { createApiToken, resolveApiToken, revokeApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { startTestApi, type TestApi } from "../openapi/test-api"
+import { nextPendingRequest } from "../owner-queue"
 import {
+  decidePermission,
   listPendingRequests,
   withdrawPermission,
   withPermission,
@@ -52,6 +54,11 @@ import { isOwnerNeeded, type OwnerNeeded } from "./types"
 
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
+/** A page's icon: a PNG of one pixel. */
+const ICON = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "base64",
+)
 
 let cleanup: () => Promise<void>
 let api: TestApi
@@ -76,7 +83,16 @@ beforeEach(async () => {
     where: { id: (await createBrowserServer(ctx)).id },
   })
   const pages: Parameters<typeof startTestApi>[0] = (request, res) => {
+    if (request.url === "/icon.png") {
+      res.setHeader("content-type", "image/png")
+      res.end(ICON)
+      return
+    }
     res.setHeader("content-type", "text/html")
+    if (request.url === "/iconic") {
+      res.end('<title>Iconic</title><link rel="icon" href="/icon.png">')
+      return
+    }
     if (request.url === "/login") {
       res.setHeader("set-cookie", "session=signed-in; Max-Age=3600")
     }
@@ -322,6 +338,87 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     await stopBrowser(ctx)
     expect(await statusOf(closedBrowser)).toBe("closed")
     expect((await listPendingRequests(ctx, PUBLIC_URL)).total).toBe(0)
+  })
+
+  it("lists every tab with its icon, its token and the hand-over waiting on it, answered there", async () => {
+    const scope = { ctx, tokenId, publicUrl: PUBLIC_URL }
+    const opened = await performNavigate(
+      { ...scope, serverId: server.id },
+      { tabId: null, url: `${api.origin}/iconic` },
+      { allowedByOwner: true },
+    )
+    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+    const own = await openOwnerTab(ctx, {
+      url: `${api.origin}/plain`,
+      publicUrl: PUBLIC_URL,
+    })
+    const listed = async (id: string) =>
+      (await browserOverview(ctx)).tabs.find((tab) => tab.id === id)
+
+    // The icon the page names, as Chromium loaded it for the page, once it
+    // has: a data: address, so the owner's page asks the site for nothing.
+    await vi.waitFor(
+      async () =>
+        expect((await listed(tabId))?.favicon).toBe(
+          `data:image/png;base64,${ICON.toString("base64")}`,
+        ),
+      { timeout: 10_000, interval: 200 },
+    )
+    expect(await listed(tabId)).toMatchObject({
+      openedBy: "Claude",
+      tokenName: "Claude",
+      control: "assistant",
+      busy: false,
+      waiting: null,
+    })
+    // A page with no icon of its own has none: the list shows a letter.
+    expect(await listed(own.id)).toMatchObject({
+      favicon: null,
+      openedBy: "owner",
+      tokenId: null,
+      tokenName: null,
+      control: "owner",
+    })
+
+    // The assistant hands its tab over: the hand-over waits on the tab, and
+    // every link to it (the bell, Home, the walk on) leads there.
+    const needed: unknown = await call("hand_over", {
+      tab: tabId,
+      message: "Please sign in.",
+    }).catch((error: unknown) => error)
+    expect(isOwnerNeeded(needed)).toBe(true)
+    await withPermission(scope, (needed as OwnerNeeded).ask)
+    const { id } = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "browser_handover", status: "pending" },
+    })
+    expect(await listed(tabId)).toMatchObject({
+      control: "owner",
+      handover: true,
+      waiting: {
+        id,
+        tabId,
+        message: "Please sign in.",
+        tokenName: "Claude",
+        decisions: [
+          { value: "allow_once", label: "Done" },
+          { value: "decline", label: "Not now" },
+        ],
+      },
+    })
+    const href = `/browser?tab=${tabId}`
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).requests).toEqual([
+      expect.objectContaining({ id, href }),
+    ])
+    expect(await nextPendingRequest(ctx)).toBe(href)
+
+    // Done, from the tab: it is the assistant's again, and nothing waits.
+    await decidePermission(ctx, id, "allow_once", { publicUrl: PUBLIC_URL })
+    expect(await listed(tabId)).toMatchObject({
+      control: "assistant",
+      handover: false,
+      waiting: null,
+    })
+    expect(await nextPendingRequest(ctx)).toBeNull()
   })
 
   it("hands a tab to another token without the sites allowed for the one before", async () => {

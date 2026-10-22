@@ -1,5 +1,6 @@
 import type { Prisma } from "@/lib/generated/prisma/client"
 
+import { handoverTabOf } from "./browser/runtime"
 import type { PermissionKind } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
@@ -51,6 +52,8 @@ export type QueueEntry =
       id: string
       kind: PermissionKind
       since: Date
+      /** A hand-over's tab, while it is open (`handoverTab`). */
+      tabId: string | null
     }
   | {
       source: "repo"
@@ -61,14 +64,39 @@ export type QueueEntry =
 
 /**
  * Where the owner answers an entry. The one place that says so: the bell,
- * Home and the walk to the next request all link through it.
+ * Home and the walk to the next request all link through it. A hand-over
+ * is answered on its tab, in the Browser page's tabs view, while the tab is
+ * open (`tabId`); once it is gone, on the request's own page, which says
+ * how it ended.
  */
 export function queueHref(
-  entry: Pick<QueueEntry, "source" | "id"> & { kind?: PermissionKind },
+  entry: Pick<QueueEntry, "source" | "id"> & {
+    kind?: PermissionKind
+    tabId?: string | null
+  },
 ): string {
-  return entry.source === "repo"
-    ? repoChangeHref(entry.id)
-    : `/permissions/${encodeURIComponent(entry.id)}`
+  if (entry.source === "repo") {
+    return repoChangeHref(entry.id)
+  }
+
+  if (entry.kind === "browser_handover" && entry.tabId) {
+    return `/browser?tab=${encodeURIComponent(entry.tabId)}`
+  }
+
+  return `/permissions/${encodeURIComponent(entry.id)}`
+}
+
+/**
+ * The open tab a request is about, for `queueHref`: a hand-over's, while
+ * its tab is open in the vault's browser; null for any other request.
+ */
+export function handoverTab(
+  ctx: VaultContext,
+  request: { id: string; kind: string },
+): string | null {
+  return request.kind === "browser_handover"
+    ? handoverTabOf(ctx.vaultId, request.id)
+    : null
 }
 
 /** The changes linked repositories left for the owner, oldest first. */
@@ -132,6 +160,7 @@ export async function ownerQueue(
       id: row.id,
       kind: row.kind as PermissionKind,
       since: row.createdAt,
+      tabId: handoverTab(ctx, row),
     })),
     ...repos.filter((entry) => entry.id !== skip).slice(0, limit),
   ].sort(bySince)

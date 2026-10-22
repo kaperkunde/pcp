@@ -11,10 +11,10 @@ import {
 } from "lucide-react"
 import type { Metadata } from "next"
 import Link from "next/link"
+import { redirect } from "next/navigation"
 
 import { AccessReview } from "@/components/access-review"
 import { AllClearAfter, AnsweredBefore } from "@/components/answer-queue"
-import { BrowserTabView } from "@/components/browser-tab-view"
 import { RelativeDate } from "@/components/local-date"
 import { MemoryReview } from "@/components/memory-review"
 import { PageHeader } from "@/components/page-header"
@@ -80,7 +80,9 @@ const UNANSWERED = new Set(["expired", "withdrawn", "closed"])
 /**
  * Where an assistant sends you to answer something it asked PCP for
  * (lib/core/permissions.ts): when its app cannot show the question itself,
- * or you would rather decide here.
+ * or you would rather decide here. A hand-over whose tab is open is
+ * answered on the tab, in the Browser page's tabs view, which this sends
+ * you on to; once answered, or with its tab gone, it is shown here.
  */
 export default async function PermissionPage({
   params,
@@ -115,16 +117,20 @@ export default async function PermissionPage({
       view.status === "failed" ||
       (memory && view.status === "declined")) &&
     view.outcome
+
+  // A hand-over is answered on its tab while the tab is open.
+  if (
+    view.kind === "browser_handover" &&
+    pending &&
+    view.browserTabId &&
+    (await tabFor(ctx, view.browserTabId))
+  ) {
+    redirect(`/browser?tab=${encodeURIComponent(view.browserTabId)}`)
+  }
+
   const proposal = access && pending ? await getAccessProposal(ctx, id) : null
-  // A tab handed to the owner is shown here, live, to do what was asked.
-  const handedTab =
-    view.kind === "browser_handover" && pending && view.browserTabId
-      ? await tabFor(ctx, view.browserTabId)
-      : null
-  // A live tab, a long list of levels, a wrapper's programs or a skill
-  // want room.
+  // A long list of levels, a wrapper's programs or a skill want room.
   const roomy = Boolean(
-    handedTab ||
     (access && pending) ||
     view.wrapper !== null ||
     view.skill !== null ||
@@ -224,14 +230,7 @@ export default async function PermissionPage({
           </>
         ) : pending ? (
           <>
-            <PendingNote view={view} handedTab={handedTab !== null} />
-            {handedTab ? (
-              <BrowserTabView
-                tabId={handedTab.id}
-                initial={handedTab}
-                mode="handover"
-              />
-            ) : null}
+            <PendingNote view={view} />
             <PermissionDecision
               id={view.id}
               decisions={view.decisions}
@@ -320,13 +319,7 @@ function RequestTile({ view }: { view: PermissionView }) {
 }
 
 /** What the answers do, in the owner's words, before the buttons. */
-function PendingNote({
-  view,
-  handedTab,
-}: {
-  view: PermissionView
-  handedTab: boolean
-}) {
+function PendingNote({ view }: { view: PermissionView }) {
   const note = "text-[13px] leading-relaxed text-muted-foreground"
 
   switch (view.kind) {
@@ -367,27 +360,15 @@ function PendingNote({
         </p>
       )
     case "browser_handover":
-      return handedTab ? (
+      // Its tab is open no longer: an open one is answered on the tab.
+      return (
         <p className={note}>
-          Do what the assistant asks in the tab below, then say Done. It is
-          yours until you answer.
-        </p>
-      ) : (
-        <p className={note}>
-          {view.browserTabId ? (
-            <>
-              <Link
-                href={`/browser/tabs/${view.browserTabId}`}
-                className="underline"
-              >
-                Open the tab
-              </Link>
-              , do what the assistant asks there, then come back and say Done.
-            </>
-          ) : (
-            "Do what the assistant asks in the tab, then say Done."
-          )}{" "}
-          The tab is yours until you answer.
+          The tab this is about is closed, or the browser has closed since, so
+          there is nothing left to do in it: say Not now. The{" "}
+          <Link href="/browser" className="underline">
+            Browser
+          </Link>{" "}
+          page lists the tabs that are open.
         </p>
       )
     case "secret_use":

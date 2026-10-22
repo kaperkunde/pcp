@@ -2034,8 +2034,32 @@ still be sent elsewhere or closed. The tabs share one profile, so the
 sign-ins are every token's; the eight tabs are shared too, and a token
 told the browser is full learns only how many are its own.
 
+**The tabs view** (`app/(dashboard)/browser/page.tsx`,
+`components/browser-tabs.tsx`, `browserOverview` in `owner.ts`). The
+Browser page lists every open tab, every token's and the owner's: its icon,
+title and site, who opened it and whose it is (the token's name), and its
+state (idle, in use while a call holds its lane, or with you). The icon is
+the one Chromium fetched for the page itself, through the tab and the
+proxy as every request is: the tab's DevTools session follows the main
+frame's responses of type Other (`favicon.ts`, with Network buffers bounded
+by `MAX_FAVICON_BYTES`), reads the body of an image one once it has
+arrived, and keeps it as a data: address, dropped when the main frame loads
+another document. PCP fetches nothing for it, runs nothing in the page, and
+the owner's own browser asks the site for nothing; a page without one shows
+its site's first letter. `/browser?tab=<id>` shows that tab live under the
+list; it is where `tabLink` points, and `/browser/tabs/<id>`, the tab's page
+before the view, redirects there. A hand-over still waiting
+(`waitingHandovers`, from the requests noted on the tab) shows on its tab
+with the assistant's message and Done and Not now, answered through
+`decidePermission` and the owner's queue like any request: `queueHref`
+sends a `browser_handover` to `/browser?tab=<id>` while its tab is open
+(`handoverTabOf`), and to its request's page once it is gone, and that page
+redirects a pending hand-over whose tab is open to the tab. Its link to the
+assistant stays the request's address, so it says how it ended once
+answered.
+
 **The owner's control.** A tab is driven by its assistant or by the owner.
-Take over on the tab's page makes it the owner's, and every browser tool
+Take over in the tabs view makes it the owner's, and every browser tool
 refuses it until Hand back. A tab the owner opens is theirs, seen by no
 token, until they hand it to one. Hand back gives the tab to the token the
 owner picks (`handBackTab`, `giveTab`): one of the vault's tokens that is
@@ -2047,7 +2071,7 @@ counts as one the owner allowed for that tab, as Allow once does; handed to
 another token than before, the tab first drops the sites allowed for the
 one before, which were that token's. `hand_over` makes the tab the
 owner's and throws `OwnerNeeded` for a `browser_handover` request, which
-shows the assistant's message and the tab live; Done (or Not now) gives it
+the tabs view shows on the tab, with the assistant's message; Done (or Not now) gives it
 back to the token that handed it over, saves the profile, and is what
 `check_permission` reports. A hand-over nobody answers goes back when its
 request expires, or when the assistant withdraws it. The request is noted
@@ -2057,7 +2081,7 @@ hand-overs still waiting for it (status `closed`), so none stays in the
 bell for a tab that is gone.
 
 **The live view** (`app/api/browser/tabs/[id]/`, `screencast.ts`,
-`input.ts`, `components/browser-tab-view.tsx`). The tab's page draws
+`input.ts`, `components/browser-tab-view.tsx`). The tab chosen in the tabs view draws
 Chromium's screencast (a JPEG each time the page repaints, shared by
 everyone watching) on a canvas, streamed as server-sent events by a route
 handler. The stream sends on only when its connection has room, keeping

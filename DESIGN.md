@@ -40,8 +40,8 @@ the items in one scrolling row.
 A page under another (a server's page under Servers) has a back link above
 its title, not an entry in the sidebar. The browser is the exception once
 it is added and enabled: its tabs (who opened them, who has them) are worth
-one click, so it has an item of its own and its page and its tabs' pages
-highlight Browser. Before that it is only a kind of server: the page where
+one click, so it has an item of its own and its page (the tabs view, with
+the tab chosen there live) highlights Browser. Before that it is only a kind of server: the page where
 it is added highlights Servers and links back to them.
 
 "Assistants" is the menu's name for API tokens: each assistant connects
@@ -147,6 +147,14 @@ Reuse these before writing a new one; each settles a question once.
   requests (a token's) keeps the owner there; a request whose page still
   needs them (a server to connect) stays put. It only opens the next page:
   nothing is answered for the owner.
+- **Answering where the thing is** (`components/browser-tabs.tsx`): a
+  request about something with a page of its own (a hand-over, about a
+  browser tab) is answered there, with the request's words and decision
+  buttons on the item itself, amber, and the item first in its list. The
+  queue (`queueHref`) leads to it, the request's own page sends you on to
+  it while it waits, and `AnsweredBefore alone` at the top of the page says
+  what came of the answer. Once answered, the request's page shows the
+  outcome as for any request.
 - **A server's form** (`components/server-form-parts.tsx`): the frame,
   sections, name and short name, a choice field (segmented or select),
   switch groups, More options and the footer, shared by the MCP server,

@@ -152,8 +152,9 @@ function failed(result: CallToolResult): CallToolResult {
   return { ...result, isError: true }
 }
 
+/** A tab in the Browser page's tabs view, live, for the owner to watch or take over. */
 export function tabLink(publicUrl: string, tabId: string): string {
-  return `${publicUrl.replace(/\/+$/, "")}/browser/tabs/${encodeURIComponent(tabId)}`
+  return `${publicUrl.replace(/\/+$/, "")}/browser?tab=${encodeURIComponent(tabId)}`
 }
 
 function firstLine(error: unknown): string {

@@ -207,6 +207,7 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/wrappers/`                 | Wrappers: definition, run, secret placeholders, requests              |
 | `lib/core/repos/`                    | Shared items as repository files: layout, documents, review, apply    |
 | `sandbox/`                           | The sandbox container: its runner and the `pcp` command               |
+| `components/browser-tabs.tsx`        | The tabs view: every tab, its state, its hand-over answered on it     |
 | `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input             |
 | `components/browser-tab-view.tsx`    | The live view: frames on a canvas, timed input sent back              |
 | `lib/browser-keyboard.ts`            | A phone's keyboard as input: edits of a hidden box into keys          |

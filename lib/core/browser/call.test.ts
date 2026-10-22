@@ -350,7 +350,7 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     expect(opened.isError, text).toBeUndefined()
     expect(text).toContain(`Address: ${api.origin}/form`)
     expect(text).toMatch(
-      /The owner can watch it or take over at http:\/\/pcp\.test\/browser\/tabs\/\S+/,
+      /The owner can watch it or take over at http:\/\/pcp\.test\/browser\?tab=\S+/,
     )
     expect(text).toContain('textbox "Name"')
     expect(api.requests[0]!.headers["user-agent"]).not.toContain("Headless")
