@@ -310,6 +310,31 @@ export function summarize(description: string, max = 140): string {
   return `${sentence.slice(0, max - 1).trimEnd()}…`
 }
 
+/**
+ * The owner's notes on the servers and skills among a search's results, one
+ * line each, in the order they first come up: what the owner said about
+ * this one (which host, what it is for). `notes` is by server slug, and by
+ * skill ref (skill:<name>).
+ */
+export function ownerNotesFor(
+  refs: string[],
+  notes: ReadonlyMap<string, string>,
+): string[] {
+  const lines: string[] = []
+  const seen = new Set<string>()
+
+  for (const ref of refs) {
+    const key = ref.split("/")[0]!
+
+    if (key && !seen.has(key) && notes.has(key)) {
+      seen.add(key)
+      lines.push(`Owner's note on ${key}: ${notes.get(key)}`)
+    }
+  }
+
+  return lines
+}
+
 /** How many tools one list_tools answer names. */
 export const LIST_PAGE_SIZE = 200
 
@@ -331,10 +356,23 @@ export function listTools(
   {
     offset = 0,
     size = LIST_PAGE_SIZE,
-  }: { offset?: number; size?: number } = {},
+    about,
+  }: {
+    offset?: number
+    size?: number
+    /** The server's name, description and the owner's note, said first. */
+    about?: { name: string; description: string; note?: string | null }
+  } = {},
 ): string {
+  const lead = about
+    ? [
+        `${server} (${about.name})${about.description ? `: ${summarize(about.description, 300)}` : ""}`,
+        ...(about.note ? [`Owner's note: ${about.note}`] : []),
+      ]
+    : []
+
   if (tools.length === 0) {
-    return `${server} has no tools you can see.`
+    return [...lead, `${server} has no tools you can see.`].join("\n")
   }
 
   const sorted = tools.slice().sort((a, b) => a.name.localeCompare(b.name))
@@ -348,6 +386,7 @@ export function listTools(
   const end = offset + page.length
 
   return [
+    ...lead,
     `${server}: ${sorted.length} tool${sorted.length === 1 ? "" : "s"}, ${allowed} allowed and ${sorted.length - allowed} ask the owner first.${
       offset > 0 || end < sorted.length
         ? ` These are ${offset + 1}–${end}.`

@@ -144,9 +144,11 @@ import {
   resolveKind,
   type RegisterKind,
 } from "./register-rules"
+import { clipNote, ownerNoteLine, readServerNote } from "./personal-notes"
 import {
   LIST_PAGE_SIZE,
   listTools,
+  ownerNotesFor,
   searchEverything,
   searchTools,
   summarize,
@@ -469,7 +471,7 @@ export function skillInstructions(skills: InstructionSkill[] | null): string[] {
   let room = SKILL_INSTRUCTIONS_CHARS
 
   for (const skill of skills.slice(0, MAX_INSTRUCTION_SKILLS)) {
-    const full = `- ${SKILL_REF}${skill.name}: ${skill.description}`
+    const full = `- ${SKILL_REF}${skill.name}: ${skill.description}${skill.note ? ` ${ownerNoteLine(clipNote(skill.note))}` : ""}`
 
     if (full.length <= room) {
       lines.push(full)
@@ -562,7 +564,9 @@ export function buildInstructions(
   const lines = servers.map((server) => {
     const summary = summarize(server.description || "", 120)
     const count = listedTools(server).length
-    return `- ${server.slug}: ${summary || server.name} (${count} tool${count === 1 ? "" : "s"})`
+    // The owner's own words about this one: which host, what it is for.
+    const note = server.note ? ` ${ownerNoteLine(clipNote(server.note))}` : ""
+    return `- ${server.slug}: ${summary || server.name} (${count} tool${count === 1 ? "" : "s"})${note}`
   })
   const browser = servers.find(
     (server) => server.kind === "browser" && visibleTools(server).length > 0,
@@ -645,12 +649,30 @@ function problemsLead(problems: SchemaProblem[]): string {
   ].join("\n")
 }
 
+/** The owner's notes, by server slug and by skill ref, for search's answers. */
+function ownerNotes(
+  servers: GatewayServer[],
+  skills: Array<{ name: string; note: string | null }>,
+): Map<string, string> {
+  return new Map([
+    ...servers.flatMap((server): Array<[string, string]> =>
+      server.note ? [[server.slug, server.note]] : [],
+    ),
+    ...skills.flatMap((skill): Array<[string, string]> =>
+      skill.note ? [[`${SKILL_REF}${skill.name}`, skill.note]] : [],
+    ),
+  ])
+}
+
 function candidates(servers: GatewayServer[]): ToolCandidate[] {
   return servers.flatMap((server) =>
     listedTools(server).map((tool) => ({
       server: server.slug,
       serverName: server.name,
-      serverDescription: server.description,
+      // The owner's note counts for finding a server, as its description does.
+      serverDescription: server.note
+        ? `${server.description} ${server.note}`
+        : server.description,
       name: tool.name,
       title: tool.title,
       description: tool.descriptionOverride ?? tool.description,
@@ -967,8 +989,12 @@ export function buildGatewayServer(
       (match) =>
         `${match.server}/${match.name}${match.title ? ` (${match.title})` : ""} — ${summarize(match.description) || "no description"}`,
     )
+    const notes = ownerNotesFor(
+      matches.map((match) => match.server),
+      ownerNotes(servers, []),
+    )
 
-    return text(lines.join("\n"))
+    return text([...lines, ...(notes.length ? ["", ...notes] : [])].join("\n"))
   }
 
   const searchLimit = z
@@ -1072,12 +1098,18 @@ export function buildGatewayServer(
           )
         }
 
+        const notes = ownerNotesFor(
+          results.map((result) => result.ref),
+          ownerNotes(servers, skills),
+        )
+
         return text(
           [
             ...results.map(
               (result) =>
                 `${result.kind} ${result.ref}${result.title ? ` (${result.title})` : ""} — ${result.description}`,
             ),
+            ...(notes.length ? ["", ...notes] : []),
             ...(args.kind
               ? []
               : repoResults.map(
@@ -1152,7 +1184,18 @@ export function buildGatewayServer(
             description: tool.descriptionOverride ?? tool.description,
             access: tool.access === "allowed" ? "allowed" : "ask",
           })),
-          { offset: args.offset },
+          {
+            offset: args.offset,
+            // Said once, on the first page.
+            about:
+              (args.offset ?? 0) === 0
+                ? {
+                    name: entry.name,
+                    description: entry.description,
+                    note: entry.note,
+                  }
+                : undefined,
+          },
         ),
       )
     }),
@@ -1229,6 +1272,7 @@ export function buildGatewayServer(
     return text(
       [
         SKILL_FRAME,
+        ...(skill.note ? ["", ownerNoteLine(skill.note)] : []),
         "",
         skillText(skill).trimEnd(),
         ...(skill.files.length
@@ -1462,6 +1506,12 @@ export function buildGatewayServer(
       {
         call_handle: handleFor(entry, row),
         server: entry.slug,
+        serverName: entry.name,
+        ...(entry.description
+          ? { serverDescription: summarize(entry.description, 300) }
+          : {}),
+        // The owner's own words about this server: which host, what for.
+        ...(entry.note ? { ownerNote: entry.note } : {}),
         tool: tool.name,
         title: tool.title ?? undefined,
         description: tool.descriptionOverride ?? tool.description,
@@ -1871,7 +1921,8 @@ export function buildGatewayServer(
         })
       }
 
-      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${(row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}`
+      const note = readServerNote(scope.ctx, row)
+      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${(row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
 
       return {
         content: [{ type: "text", text: said }],

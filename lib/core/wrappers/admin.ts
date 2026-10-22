@@ -7,6 +7,11 @@ import type { GatewayServer } from "../gateway-servers"
 import { newId } from "../ids"
 import { canonicalJson } from "../permission-rules"
 import { createSecretNamedAfter, findTextSecretByName } from "../secrets"
+import {
+  ensureDefinition,
+  shareDescription,
+  siblingInstances,
+} from "../definition-rows"
 import { deleteServer, slugify, uniqueSlug, WRAPPER_URL } from "../servers"
 
 import { syncWrapperTools } from "./catalogue"
@@ -758,6 +763,7 @@ async function createWrapperRow(
     }),
   ])
   await syncWrapperTools({ id })
+  await ensureDefinition(id)
 
   return id
 }
@@ -780,6 +786,39 @@ async function writeWrapper(
     }),
   ])
   await syncWrapperTools({ id })
+  await shareWrapper(id)
+}
+
+/**
+ * Gives every other instance of a wrapper's definition its program and
+ * description, and rebuilds their tools: what a wrapper is, is the
+ * definition's.
+ */
+async function shareWrapper(id: string): Promise<void> {
+  await shareDescription(id)
+
+  const siblings = (await siblingInstances(id)).filter(
+    (sibling) => sibling.kind === "wrapper",
+  )
+
+  if (siblings.length === 0) {
+    return
+  }
+
+  const spec = await db().wrapperSpec.findUniqueOrThrow({
+    where: { serverId: id },
+  })
+
+  for (const sibling of siblings) {
+    const { count } = await db().wrapperSpec.updateMany({
+      where: { serverId: sibling.id, hash: { not: spec.hash } },
+      data: { definition: spec.definition, hash: spec.hash },
+    })
+
+    if (count > 0) {
+      await syncWrapperTools({ id: sibling.id })
+    }
+  }
 }
 
 /**

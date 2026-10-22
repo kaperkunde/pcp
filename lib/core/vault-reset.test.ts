@@ -124,6 +124,7 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(Object.values(before).some((count) => count > 0)).toBe(true)
     expect(before.repo).toBe(1)
     expect(before.repo_item).toBe(1)
+    expect(before.server_definition).toBe(1)
 
     await deleteVault(ctx)
 

@@ -20,6 +20,7 @@ import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { diffLines, type DiffLine } from "./line-merge"
 import { hiddenCharacter, withoutPresentation } from "./memories"
+import { readSkillNote } from "./personal-notes"
 import { canonicalJson } from "./permission-rules"
 import { readStrictYaml } from "./strict-yaml"
 
@@ -101,6 +102,11 @@ export type SkillBody = {
 export type SkillEntry = SkillBody & {
   id: string
   author: SkillAuthor
+  /**
+   * The owner's own note on the skill (lib/core/personal-notes.ts): not part
+   * of its SKILL.md, never in a repository, read by assistants beside it.
+   */
+  note: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -597,6 +603,7 @@ function unseal(ctx: VaultContext, row: Skill): SkillEntry {
     files: body.files ?? [],
     extra: body.extra ?? {},
     author: row.author === "assistant" ? "assistant" : "owner",
+    note: readSkillNote(ctx, row),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -653,16 +660,20 @@ export function skillText(skill: SkillBody): string {
 }
 
 /** What the gateway's instructions name of the skills a token sees. */
-export type InstructionSkill = { name: string; description: string }
+export type InstructionSkill = {
+  name: string
+  description: string
+  /** The owner's note on it, when they wrote one. */
+  note?: string | null
+}
 
 export async function instructionSkills(
   ctx: VaultContext,
   skillIds: string[] | null,
 ): Promise<InstructionSkill[]> {
-  return (await skillsFor(ctx, skillIds)).map(({ name, description }) => ({
-    name,
-    description,
-  }))
+  return (await skillsFor(ctx, skillIds)).map(
+    ({ name, description, note }) => ({ name, description, note }),
+  )
 }
 
 // ---- The owner's own changes ------------------------------------------------

@@ -25,6 +25,7 @@ import {
   type ScryptParams,
 } from "./crypto"
 import { db } from "./db"
+import { cloneServer, readServerNote, setPersonalNote } from "./definitions"
 import { createDeviceKey, unlockWithDeviceKey } from "./device-keys"
 import { getHostJson, setHostJson } from "./host-settings"
 import { getTokenInstructions, saveTokenInstructions } from "./instructions"
@@ -472,6 +473,71 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(
       await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } }),
     ).toMatchObject({ syncVersion: null })
+  })
+
+  it("carries definitions and the owner's notes, and gives each server of a file from before them a definition of its own", async () => {
+    const { ctx, serverId } = await populate()
+    const { id: cloneId } = await cloneServer(ctx, serverId, {
+      name: "Upstream staging",
+      url: "https://staging.upstream.example/mcp",
+      authType: "none",
+      note: "staging copy",
+    })
+    const skill = await createSkill(ctx, {
+      name: "deploy",
+      description: "Deploy.",
+      body: "Steps.",
+      tools: [],
+    })
+    await setPersonalNote(ctx, "skill", skill.id, "weekdays only")
+    const shared = (
+      await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })
+    ).definitionId
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    const clone = await db().mcpServer.findUniqueOrThrow({
+      where: { id: cloneId },
+    })
+    expect(clone.definitionId).toBe(shared)
+    expect(readServerNote(ctx, clone)).toBe("staging copy")
+    expect((await listSkills(ctx))[0]!.note).toBe("weekdays only")
+    expect(await db().serverDefinition.count()).toBe(1)
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    delete (older.tables as Record<string, unknown>).serverDefinitions
+    for (const row of older.tables.servers as Record<string, unknown>[]) {
+      delete row.definitionId
+      delete row.personalNote
+    }
+    for (const row of older.tables.skills as Record<string, unknown>[]) {
+      delete row.personalNote
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    const servers = await db().mcpServer.findMany({ orderBy: { name: "asc" } })
+    expect(servers.map((row) => row.definitionId)).toEqual([serverId, cloneId])
+    expect(
+      (await db().serverDefinition.findMany({ orderBy: { name: "asc" } })).map(
+        (row) => [row.id, row.slug, row.kind],
+      ),
+    ).toEqual([
+      [serverId, "upstream", "mcp"],
+      [cloneId, "upstream-staging", "mcp"],
+    ])
+    expect(servers.every((row) => row.personalNote === null)).toBe(true)
   })
 
   it("carries a token's instructions as they are, and restores a file from before them as not set yet", async () => {

@@ -42,6 +42,7 @@ model Vault {
   browserProfile     BrowserProfile?
   oauthCredentials   OAuthCredential[]
   repos              Repo[]
+  serverDefinitions  ServerDefinition[]
 
   @@map("vault")
 }
@@ -394,6 +395,12 @@ model Skill {
   /// AES-256-GCM under the vault's data key with "skill:<id>" as associated
   /// data. Names are unique per vault by checking, as memory paths are.
   ciphertext Bytes
+  /// The owner's own note on the skill (its one instance), at most 300
+  /// characters on one line: AES-256-GCM under the vault's data key with
+  /// "skill:<id>:note" as associated data. Assistants that see the skill
+  /// read it as the owner's note; it is never synced or shared
+  /// (lib/core/definitions.ts).
+  personalNote Bytes? @map("personal_note")
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
@@ -570,6 +577,20 @@ model McpServer {
   /// writes a changed document.
   syncVersion    Int?    @map("sync_version")
 
+  /// mcp, openapi, wrapper: the definition this server is an instance of
+  /// (lib/core/definitions.ts). Servers that share one share its
+  /// description, schema and edits, wrapper program and tool descriptions;
+  /// everything else on this row is the instance's own. Null for the other
+  /// kinds, and for a row restored from an older export until it is given
+  /// one.
+  definitionId   String?           @map("definition_id")
+  definition     ServerDefinition? @relation(fields: [definitionId], references: [id], onDelete: SetNull)
+  /// The owner's own note on this server, at most 300 characters on one
+  /// line: AES-256-GCM under the vault's data key with "mcp_server:<id>" as
+  /// associated data. Assistants read it as the owner's note beside the
+  /// description; it is never synced or shared.
+  personalNote   Bytes?            @map("personal_note")
+
   tools              McpTool[]
   tokens             ApiTokenServer[]
   oauthStates        OAuthState[]
@@ -584,7 +605,39 @@ model McpServer {
   repoItems          RepoItem[]
 
   @@unique([vaultId, slug])
+  @@index([definitionId])
   @@map("mcp_server")
+}
+
+/// What servers that are the same thing share (lib/core/definitions.ts):
+/// an MCP server, API endpoint or wrapper as it could be shared, without
+/// an address, a secret or anything of the owner's. Its instances (the
+/// mcp_server rows that name it) each hold a copy of the shared content
+/// (description, schema and edits, wrapper program, tool descriptions),
+/// which definitions.ts keeps the same on every one of them: a change to it
+/// through any instance is written to all, and each rebuilds its tools.
+model ServerDefinition {
+  id            String   @id
+  vaultId       String   @map("vault_id")
+  vault         Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// mcp | openapi | wrapper: the kind of every instance.
+  kind          String
+  /// The definition's own short name, unique in the vault: the first
+  /// instance's when it was made. Instances keep their own slugs.
+  slug          String
+  name          String
+  /// The description every instance carries (mcp_server.description).
+  description   String   @default("")
+  /// The shape of the definition as shared; 1 until a change to it is not
+  /// backward compatible.
+  formatVersion Int      @default(1) @map("format_version")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  instances McpServer[]
+
+  @@unique([vaultId, slug])
+  @@map("server_definition")
 }
 
 /// header auth: a further header carrying a secret, sent with the one on
