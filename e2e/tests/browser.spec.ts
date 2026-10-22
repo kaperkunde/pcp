@@ -45,6 +45,13 @@ function browse(
   })
 }
 
+/** The tab an answer is about ("Tab abc: title"). */
+function tabOf(text: string): string {
+  const id = text.match(/^Tab (\S+):/m)?.[1]
+  expect(id, text).toBeTruthy()
+  return id!
+}
+
 function refOf(text: string, pattern: RegExp): string {
   const line = text.split("\n").find((candidate) => pattern.test(candidate))
   const ref = line?.match(/\[ref=((?:f\d+)?e\d+)\]/)?.[1]
@@ -111,7 +118,13 @@ test("the first page at a site asks the owner, and the assistant then reads and 
   baseURL,
 }) => {
   const host = new URL(upstream.browserUrl).host
-  const asked = await browse(baseURL!, "navigate", {
+  // Every tool but tabs' open and list names its tab, and is refused
+  // without one.
+  const unnamed = await browse(baseURL!, "snapshot")
+  expect(toolText(unnamed)).toContain("needs the tab to act on (tab)")
+
+  const asked = await browse(baseURL!, "tabs", {
+    action: "open",
     url: `${upstream.browserUrl}/form`,
   })
   expect(toolText(asked)).toContain("Not done yet")
@@ -126,19 +139,40 @@ test("the first page at a site asks the owner, and the assistant then reads and 
     'textbox "Name"',
   )
 
-  const opened = await browse(baseURL!, "snapshot")
+  // The answer the owner allowed names the new tab first.
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "Opened a new tab:",
+  )
+  const tab = (await page
+    .getByTestId("permission-outcome")
+    .textContent())!.match(/Opened a new tab: (\S+)\./)![1]!
+
+  const opened = await browse(baseURL!, "snapshot", { tab })
   const text = toolText(opened)
+  expect(tabOf(text)).toBe(tab)
   await browse(baseURL!, "type", {
+    tab,
     ref: refOf(text, /textbox "Name"/),
     text: "Ada",
   })
+  // By role and name, as a program without refs would.
   const clicked = await browse(baseURL!, "click", {
-    ref: refOf(text, /button "Say hello"/),
+    tab,
+    target: { role: "button", name: "Say hello" },
   })
   expect(toolText(clicked)).toContain("Hello, Ada")
 
+  // find answers elements as JSON.
+  const found = JSON.parse(
+    toolText(await browse(baseURL!, "find", { tab, text: "Hello" })),
+  ) as { matches: Array<{ role: string; name?: string }> }
+  expect(found.matches).toContainEqual(
+    expect.objectContaining({ role: "heading", name: "Hello, Ada" }),
+  )
+
   // A link to another site stops there, and the site is the token's to decide.
   const followed = await browse(baseURL!, "click", {
+    tab,
     ref: refOf(toolText(clicked), /link "Elsewhere"/),
   })
   const other = `localhost:${new URL(upstream.browserUrl).port}`
@@ -160,7 +194,8 @@ test("the sign-ins outlast the browser, and are gone once forgotten", async ({
   await page.getByRole("button", { name: "Close the browser" }).click()
   await expect(page.getByText(/Not running/)).toBeVisible()
 
-  const again = await browse(baseURL!, "navigate", {
+  const again = await browse(baseURL!, "tabs", {
+    action: "open",
     url: `${upstream.browserUrl}/cookie`,
   })
   // The cookie the form set before the browser closed.
@@ -173,7 +208,8 @@ test("the sign-ins outlast the browser, and are gone once forgotten", async ({
     "Nothing kept yet.",
   )
 
-  const forgotten = await browse(baseURL!, "navigate", {
+  const forgotten = await browse(baseURL!, "tabs", {
+    action: "open",
     url: `${upstream.browserUrl}/cookie`,
   })
   expect(toolText(forgotten)).toContain("Cookie: none")
