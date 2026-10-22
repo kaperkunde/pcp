@@ -72,6 +72,8 @@ export async function decidePermissionAction(
   always?: boolean,
   /** "Allow for": how long, in minutes. */
   minutes?: number,
+  /** A secret for the browser: the sites the owner left in. */
+  origins?: string[],
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -98,6 +100,9 @@ export async function decidePermissionAction(
             typeof secretValue === "string" ? secretValue : undefined,
           always: always === true,
           minutes: typeof minutes === "number" ? minutes : undefined,
+          origins: Array.isArray(origins)
+            ? origins.filter((origin) => typeof origin === "string")
+            : undefined,
         },
       )
       const message = outcome.content
@@ -114,6 +119,7 @@ export async function decidePermissionAction(
   )
 
   revalidateAnswered()
+  revalidatePath("/secrets")
 
   return result
 }

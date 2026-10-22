@@ -88,6 +88,12 @@ export type AllowForMinutes = (typeof ALLOW_FOR_MINUTES)[number]
 /** What the owner's page offers first. */
 export const DEFAULT_ALLOW_FOR_MINUTES: AllowForMinutes = 60
 
+/**
+ * How long "Allow for" lets the browser type a secret at a site
+ * (lib/core/browser-secrets.ts): an hour, not a choice.
+ */
+export const SECRET_ALLOW_MINUTES = 60
+
 export function allowForLabel(minutes: number): string {
   return minutes < 60
     ? `${minutes} minutes`
@@ -106,6 +112,8 @@ export type PermissionKind =
   | "fetch"
   | "browse"
   | "browser_handover"
+  | "secret_use"
+  | "secret_request"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"

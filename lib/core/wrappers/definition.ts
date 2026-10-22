@@ -11,7 +11,11 @@ import { hiddenCharacter, withoutPresentation } from "../memories"
 import { outlineSchema } from "../openapi/outline"
 import { parsePointer } from "../openapi/patch"
 import { canonicalJson } from "../permission-rules"
-import { findTextSecretByName, validateSecretName } from "../secrets"
+import {
+  findOwnerSecretByName,
+  findTextSecretByName,
+  validateSecretName,
+} from "../secrets"
 import { normalizeNameAndDescription } from "../servers"
 import type { CatalogueTool } from "../catalogue"
 
@@ -671,9 +675,19 @@ export async function resolveDefinition(
       `The secret "${secretName}"`,
     )
 
-    if (server.kind === "browser") {
+    // The browser takes a secret only as type's text, typed as it is, and
+    // only where the owner allows it at the moment of typing
+    // (lib/core/browser-secrets.ts): the binding says the wrapper may.
+    if (
+      server.kind === "browser" &&
+      (tool !== "type" ||
+        String(binding.argument ?? "") !== "/text" ||
+        (binding.template !== undefined &&
+          binding.template !== null &&
+          String(binding.template) !== SECRET_PLACEHOLDER))
+    ) {
       throw invalid(
-        `A secret cannot go to the browser: what is typed stays on the page.`,
+        `A secret goes to the browser only as type's text, as it is: browser/type, argument "/text", and no template. PCP types it where the owner allows it.`,
       )
     }
 
@@ -732,7 +746,24 @@ export async function resolveDefinition(
 
     visible(template, `How the secret "${secretName}" is written`)
 
-    const existing = await findTextSecretByName(ctx, secretName)
+    const existing =
+      server.kind === "browser"
+        ? await findOwnerSecretByName(ctx, secretName)
+        : await findTextSecretByName(ctx, secretName)
+
+    // A name taken by a secret that goes nowhere but the browser (one-time
+    // codes) or PCP's own: never sent, and never typed in anew over it.
+    if (
+      !existing &&
+      (await db().secret.findUnique({
+        where: { vaultId_name: { vaultId: ctx.vaultId, name: secretName } },
+        select: { id: true },
+      }))
+    ) {
+      throw invalid(
+        `The secret "${secretName}" is not one PCP sends to ${binding.tool}: it is one-time codes, which only the browser types, or one PCP keeps for a server.`,
+      )
+    }
 
     if (!existing) {
       if (!allowNewSecret) {

@@ -49,7 +49,12 @@ export type WaitingRequest = {
     exists: boolean
     optional: boolean
     clientId: string | null
+    login?: string | null
+    kind?: "text" | "totp"
+    origins?: string[]
   } | null
+  /** "Allow for" has one length (a secret the browser types: an hour). */
+  allowForFixed?: boolean
   /** A memory to share: the toggle for reading it in every conversation. */
   every: { asked: boolean } | null
 }
@@ -64,6 +69,26 @@ export type AllowanceItem =
       until: string
     }
   | { kind: "site"; host: string; until: string }
+  | {
+      kind: "secret"
+      secretId: string
+      secretName: string
+      origin: string
+      /** Null: always. */
+      until: string | null
+      once: boolean
+    }
+
+function allowanceKey(allowance: AllowanceItem): string {
+  switch (allowance.kind) {
+    case "site":
+      return `site:${allowance.host}`
+    case "secret":
+      return `secret:${allowance.secretId}:${allowance.origin}`
+    default:
+      return `tool:${allowance.serverId}/${allowance.toolName}`
+  }
+}
 
 /**
  * What an assistant using this token asked for and still waits on, first on
@@ -116,6 +141,7 @@ export function TokenWaiting({ waiting }: { waiting: WaitingRequest[] }) {
                 every={item.every}
                 // The page lists them all: answered, the owner stays here.
                 advance={false}
+                allowForFixed={item.allowForFixed}
               />
             )}
           </li>
@@ -143,11 +169,17 @@ export function TokenAllowances({
           tokenId,
           allowance.kind === "site"
             ? { kind: "site", host: allowance.host }
-            : {
-                kind: "tool",
-                serverId: allowance.serverId,
-                toolName: allowance.toolName,
-              },
+            : allowance.kind === "secret"
+              ? {
+                  kind: "secret",
+                  secretId: allowance.secretId,
+                  origin: allowance.origin,
+                }
+              : {
+                  kind: "tool",
+                  serverId: allowance.serverId,
+                  toolName: allowance.toolName,
+                },
         ),
       )
     })
@@ -156,30 +188,40 @@ export function TokenAllowances({
   return (
     <ListSection
       title="Allowed for now"
-      description="What you allowed for a while when an assistant using this token asked. Until then it goes ahead without asking you; afterwards its levels decide again. A blocked tool or site stays blocked."
+      description="What you allowed when an assistant using this token asked: tools and sites for a while, and secrets the browser types at a site once, for a while or always. Until then it goes ahead without asking you; afterwards its levels decide again. A blocked tool or site stays blocked."
       footer={result.status === "error" ? result.error : undefined}
     >
       <List as="ul">
         {allowances.map((allowance) => (
           <ListRow
             as="li"
-            key={
-              allowance.kind === "site"
-                ? `site:${allowance.host}`
-                : `tool:${allowance.serverId}/${allowance.toolName}`
-            }
+            key={allowanceKey(allowance)}
             title={
               <span className="break-words">
                 {allowance.kind === "site"
                   ? allowance.host
-                  : `${allowance.serverName} · ${allowance.toolName}`}
+                  : allowance.kind === "secret"
+                    ? `${allowance.secretName} · ${allowance.origin}`
+                    : `${allowance.serverName} · ${allowance.toolName}`}
               </span>
             }
             description={
-              <>
-                {allowance.kind === "site" ? "Site" : "Tool"}, until{" "}
-                <LocalDate value={allowance.until} />
-              </>
+              allowance.kind === "secret" ? (
+                allowance.until === null ? (
+                  "Secret typed by the browser, always"
+                ) : (
+                  <>
+                    Secret typed by the browser,{" "}
+                    {allowance.once ? "its next use, until " : "until "}
+                    <LocalDate value={allowance.until} />
+                  </>
+                )
+              ) : (
+                <>
+                  {allowance.kind === "site" ? "Site" : "Tool"}, until{" "}
+                  <LocalDate value={allowance.until} />
+                </>
+              )
             }
             trailing={
               <Button

@@ -209,6 +209,11 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           memories: (await tx.memory.findMany(byVault)).map(rowJson),
           skills: (await tx.skill.findMany(byVault)).map(rowJson),
           secrets: (await tx.secret.findMany(byVault)).map(rowJson),
+          secretBrowserOrigins: (
+            await tx.secretBrowserOrigin.findMany({
+              where: { secret: { vaultId } },
+            })
+          ).map(rowJson),
           servers: (await tx.mcpServer.findMany(byVault)).map(rowJson),
           serverAuthHeaders: (await tx.serverAuthHeader.findMany(byServer)).map(
             rowJson,
@@ -463,6 +468,9 @@ async function writeExport(
         await inChunks(keyGrants, (data) => tx.keyGrant.createMany({ data }))
         await inChunks(apiTokens, (data) => tx.apiToken.createMany({ data }))
         await inChunks(tables.secrets, (data) => tx.secret.createMany({ data }))
+        await inChunks(tables.secretBrowserOrigins, (data) =>
+          tx.secretBrowserOrigin.createMany({ data }),
+        )
         await inChunks(tables.servers, (data) =>
           tx.mcpServer.createMany({ data }),
         )
@@ -559,6 +567,7 @@ export async function wipeVault(
   // for the tokens this restore replaces, and over within hours.
   await tx.apiTokenToolAllowance.deleteMany(byToken)
   await tx.apiTokenSiteAllowance.deleteMany(byToken)
+  await tx.apiTokenSecretAllowance.deleteMany(byToken)
   await tx.memory.deleteMany(byVault)
   await tx.repoItem.deleteMany({ where: { repo: { vaultId } } })
   await tx.repo.deleteMany(byVault)
@@ -578,6 +587,7 @@ export async function wipeVault(
   await tx.mcpTool.deleteMany(byServer)
   await tx.serverAuthHeader.deleteMany(byServer)
   await tx.mcpServer.deleteMany(byVault)
+  await tx.secretBrowserOrigin.deleteMany({ where: { secret: { vaultId } } })
   await tx.secret.deleteMany(byVault)
   await tx.apiToken.deleteMany(byVault)
   await tx.session.deleteMany(byVault)

@@ -194,3 +194,12 @@ export const DOWNLOAD_DEADLINE_MS =
  * a popup in as a tab, closing the browser (its profile saved first).
  */
 export const BROWSER_LOCK_DEADLINE_MS = 30_000
+/**
+ * The frames of a page whose password fields are read to mask their
+ * values in a snapshot (snapshot.ts): more than any page has.
+ */
+export const MAX_MASKED_FRAMES = 50
+/** The most sites request_secret names for a new secret. */
+export const MAX_SECRET_REQUEST_ORIGINS = 10
+/** How long request_secret's purpose may be. */
+export const MAX_SECRET_PURPOSE_CHARS = 500

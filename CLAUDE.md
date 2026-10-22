@@ -50,9 +50,11 @@ so in the summary; the bump itself waits for the request.
   `lib/core/constants.ts` and `import type`. Anything else drags Prisma into
   the browser bundle and the build fails in webpack, not in the dev server.
 - Secrets are decrypted in `lib/core/secrets.ts` and used in
-  `lib/core/upstream.ts` (headers, and a wrapper's bound placeholders).
-  Nothing returns a secret value to an assistant;
-  `revealSecret` is for the owner's own screen. An API endpoint's calls
+  `lib/core/upstream.ts` (headers, a wrapper's bound placeholders, and a
+  secret the browser types). Nothing returns a secret value to an assistant;
+  `revealSecret` and `revealTotpCode` are for the owner's own screen. A
+  `totp` secret's seed never leaves `secrets.ts`: only the code of the
+  moment is typed, and only by the browser. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
   header by `upstream.ts` and never read a secret; `openapi/call.ts` scrubs
   the secret from what the API answers.
@@ -208,8 +210,9 @@ so in the summary; the bump itself waits for the request.
   upload, its token live, every use in the request log, never exported, and
   pruned by the cleanup. Nothing else serves a kept result over HTTP.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:
-  tool, server, upstream tool, time, outcome, and the permission request an
-  ask made. Never arguments, results, sites or a secret; the Log page
+  tool, server, upstream tool, time, outcome, the permission request an
+  ask made, and for a secret the browser typed, its name and the origin.
+  Never arguments, results, other sites or a secret's value; the Log page
   (`lib/core/activity.ts`) reads only the vault's own lines. A new way a call
   can ask the owner calls `noteOwnerAsked`. The cleanup
   (`lib/core/cleanup/`) deletes rows and log days by their dates, needs no
@@ -278,7 +281,9 @@ so in the summary; the bump itself waits for the request.
   secret goes in only as `{"$secret": name}` where a binding the owner
   approved names that tool (by server id), argument and address: matched
   and written in `upstream.ts`, scrubbed from the answer, errors and status
-  there, refused in an assistant's own call and never put into the browser.
+  there, and refused in an assistant's own call. Into the browser it goes
+  only as `type`'s text (a binding for `browser/type` at `/text`, no
+  template), through the browser's own gate below.
   An assistant's create, change and delete are a permission request
   (`wrapper_change`) that shows every program, schema, call, replaced tool
   and secret place in full and writes only that, to the wrapper as it was
@@ -317,6 +322,25 @@ so in the summary; the bump itself waits for the request.
   only by the owner's click (`browser/install.ts`), only from the addresses
   Playwright pins for that version, in PCP's process: never with a child
   process, which the desktop app's fuses forbid.
+- A secret goes into a page (`lib/core/browser-secrets.ts`) only as the
+  browser's `type` text `{"$secret": name}` (from an assistant's call,
+  run_code or a wrapper's binding), never in another tool or argument, and
+  only through `upstream.ts callBrowser`, which hands the browser a typer,
+  never a value. The browser asks for it only at the moment of typing, for
+  an input or textarea whose frame is the page's own origin; the typer lets
+  it through only where the token has an allowance for that secret at that
+  origin (once, an hour, or always while the origin is the secret's
+  `SecretBrowserOrigin`), or else asks the owner (`secret_use`, with
+  `noteOwnerAsked`), whose answer never changes a tool's level; an API
+  endpoint's use of the secret never counts. It is typed with CDP
+  `Input.insertText` once the field has the focus. While a field holds it
+  (`browser/held.ts`, a keyed hash, never the value), every answer shows it
+  as `[secret: name]` and `screenshot` is refused; a password field's value
+  never shows. The value is scrubbed from answers and errors, and the
+  request log has the secret's name and origin, never the value.
+  `request_secret` asks the owner to type a new one on PCP's page and never
+  writes over a name PCP holds. Allowances are not exported; origins are.
+  Add a test for each new way in.
 - PCP's own authorization server (`lib/core/oauth-server/`), for apps that
   sign in to `/mcp` with a URL alone (claude.ai's connectors, ChatGPT), is
   PCP's and never a relay's: whoever issues the tokens could mint one for

@@ -5,8 +5,11 @@ import {
   allNodes,
   findInSnapshot,
   landmarkOf,
+  maskFields,
   nodeByRef,
   parseSnapshot,
+  PASSWORD_MASK,
+  secretMask,
 } from "./snapshot"
 
 // Playwright's AI snapshot read into elements: what find answers with, and
@@ -168,5 +171,34 @@ describe("find", () => {
 
     expect(matches).toHaveLength(MAX_FIND_MATCHES)
     expect(total).toBe(MAX_FIND_MATCHES + 7)
+  })
+})
+
+describe("a snapshot's masked fields", () => {
+  const TREE = `- generic [ref=e1]:
+  - textbox "Email" [ref=e2]: ada@example.com
+  - textbox "Password" [active] [ref=e3]: hunter2
+  - 'textbox "Key: main" [ref=e4]': "hunter2"
+  - searchbox "Find" [ref=e5]: hunter2
+  - paragraph [ref=e6]: hunter2
+  - text: hunter2`
+
+  it("shows a field's value as its mask, and leaves the rest of the page as it is", () => {
+    expect(maskFields(TREE, new Map([["hunter2", PASSWORD_MASK]]))).toBe(
+      `- generic [ref=e1]:
+  - textbox "Email" [ref=e2]: ada@example.com
+  - textbox "Password" [active] [ref=e3]: [password]
+  - 'textbox "Key: main" [ref=e4]': [password]
+  - searchbox "Find" [ref=e5]: [password]
+  - paragraph [ref=e6]: hunter2
+  - text: hunter2`,
+    )
+  })
+
+  it("names the secret a field holds", () => {
+    expect(
+      maskFields(TREE, new Map([["ada@example.com", secretMask("Mail")]])),
+    ).toContain('textbox "Email" [ref=e2]: [secret: Mail]')
+    expect(maskFields(TREE, new Map())).toBe(TREE)
   })
 })

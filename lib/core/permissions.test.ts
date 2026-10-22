@@ -746,7 +746,9 @@ describe("the owner's answer", () => {
       serverName: "Postcards",
       toolName: "add_numbers",
     })
-    expect(allowance!.until.getTime() - Date.now()).toBeGreaterThan(59 * 60_000)
+    expect(allowance!.until!.getTime() - Date.now()).toBeGreaterThan(
+      59 * 60_000,
+    )
 
     expect(await levelOf(new Date())).toBe("allowed")
     // Only that tool.

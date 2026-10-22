@@ -16,6 +16,7 @@ import type {
   Repo,
   RepoItem,
   Secret,
+  SecretBrowserOrigin,
   ServerAuthHeader,
   Setting,
   Skill,
@@ -254,6 +255,15 @@ const SecretRow = z.strictObject({
   lastUsedAt: dateOrNull,
 })
 
+// The sites a secret is typed at in the browser, added with typed secrets:
+// absent from older files. A token's allowances to have one typed are not
+// exported.
+const SecretBrowserOriginRow = z.strictObject({
+  secretId: id,
+  origin: str,
+  createdAt: date,
+})
+
 const McpServerRow = z.strictObject({
   id,
   vaultId: id,
@@ -435,6 +445,7 @@ export const PayloadSchema = z.strictObject({
     memories: z.array(MemoryRow),
     skills: z.array(SkillRow).default([]),
     secrets: z.array(SecretRow),
+    secretBrowserOrigins: z.array(SecretBrowserOriginRow).default([]),
     servers: z.array(McpServerRow),
     serverAuthHeaders: z.array(ServerAuthHeaderRow),
     tools: z.array(McpToolRow),
@@ -688,6 +699,10 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(repo.secretId, secrets, "a repository's secret")
   }
 
+  for (const site of tables.secretBrowserOrigins) {
+    pointsAt(site.secretId, secrets, "a secret's site")
+  }
+
   for (const item of tables.repoItems) {
     pointsAt(item.repoId, repos, "a repository")
     pointsAt(item.skillId, skills, "a linked skill")
@@ -741,7 +756,9 @@ export function previewOf(
         .length,
       wrappers: tables.servers.filter((row) => row.kind === "wrapper").length,
       tools: tables.tools.length,
-      secrets: tables.secrets.filter((row) => row.kind === "text").length,
+      secrets: tables.secrets.filter(
+        (row) => row.kind === "text" || row.kind === "totp",
+      ).length,
       tokens: tokens.filter((token) => token.status === "works").length,
       memories: tables.memories.length,
       skills: tables.skills.length,
@@ -811,6 +828,10 @@ export const FORMAT_COVERS_SCHEMA: {
   memory: Covers<Memory, z.output<typeof MemoryRow>>
   skill: Covers<Skill, z.output<typeof SkillRow>>
   secret: Covers<Secret, z.output<typeof SecretRow>>
+  secretBrowserOrigin: Covers<
+    SecretBrowserOrigin,
+    z.output<typeof SecretBrowserOriginRow>
+  >
   server: Covers<McpServer, z.output<typeof McpServerRow>>
   serverAuthHeader: Covers<
     ServerAuthHeader,
@@ -837,6 +858,7 @@ export const FORMAT_COVERS_SCHEMA: {
   memory: true,
   skill: true,
   secret: true,
+  secretBrowserOrigin: true,
   server: true,
   serverAuthHeader: true,
   tool: true,

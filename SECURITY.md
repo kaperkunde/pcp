@@ -148,7 +148,18 @@ through PCP's proxy, which checks the address it dials, so a page, a
 redirect or a script on it cannot reach your network either. No tool runs a
 script, reads cookies or storage, or downloads a file. The sign-ins are kept
 in your vault, encrypted, and shared by every token that reaches the
-browser; **Forget all sites** signs it out of everything.
+browser; **Forget all sites** signs it out of everything. It never sees your
+secrets, but it can have PCP type one into a page (`type` with
+`{"$secret": name}`): only at a site you allowed for that secret and that
+token (the first use at a site asks you, with the secret's name, the site and
+the tab; you allow it once, for an hour or always), only into a field of the
+page's own site and not a frame from another, typed by PCP at that moment.
+The value is in no answer, error or log line: the field reads as
+`[secret: name]`, every password field's value is hidden, and screenshots of
+the tab are refused while a field holds it. That an API endpoint sends a
+secret does not let the browser type it. A one-time codes (TOTP) secret types
+the code of the moment; its seed never leaves PCP. A secret it asks you for
+(`request_secret`) you type on PCP's page, and it is told only the name.
 
 **Someone with your session cookie but not your password** can use PCP as you
 while the session lasts (30 days from sign-in). They cannot make an API token
@@ -257,6 +268,11 @@ Not defended against:
   request. PCP's own address is the one the site sees, so a site that trusts
   PCP's network more than the assistant's trusts this too, and where you
   allowed private addresses, the devices on your network are in reach.
+- **A secret typed into a page.** PCP types it only where you allowed it,
+  but the page has it then: the site, or a script on it, can send it
+  anywhere, and a page that shows it back in a way PCP does not look for (in
+  an image, or changed) can show it to the assistant. Allow a secret only at
+  the site it belongs to, and check the site on the request.
 - **Pages the browser opens.** A page is someone else's text, and an
   assistant reading it can be steered by it, while it acts as you where the
   browser is signed in. Keep its tools at Ask you first where a click could

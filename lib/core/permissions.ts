@@ -97,7 +97,7 @@ import {
   type ExtraAuthHeader,
   type ServerInput,
 } from "./servers"
-import { writeToolAccess } from "./tool-access"
+import { effectiveAccess, loadToolAccess, writeToolAccess } from "./tool-access"
 import { noteOwnerAsked } from "./request-log"
 import { collectHandleIds } from "./result-handles"
 import {
@@ -111,13 +111,29 @@ import { finishHandover, performNavigate } from "./browser/call"
 import { noteHandoverRequest } from "./browser/runtime"
 import { closePendingRequests } from "./permission-close"
 import { RUN_COMMAND, stdinAsText } from "./ssh/tools"
-import { describeBrowseAsk, describeHandoverAsk } from "./browser/describe"
+import {
+  describeBrowseAsk,
+  describeHandoverAsk,
+  describeSecretRequestAsk,
+  describeSecretUseAsk,
+} from "./browser/describe"
 import type { fetchThroughBrowser } from "./browser/solve"
 import {
   isOwnerNeeded,
   type BrowseAsk,
   type HandoverAsk,
+  type SecretRequestAsk,
+  type SecretUseAsk,
 } from "./browser/types"
+import {
+  applySecretRequest,
+  checkSecretAnswer,
+  dropOnceAllowance,
+  findTypableSecret,
+  grantSecretUse,
+  isBoundOrigin,
+  type SecretUseLevel,
+} from "./browser-secrets"
 import { resourceLimits } from "./resources/state"
 import { namesInWords, secretUses } from "./secret-uses"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
@@ -222,6 +238,13 @@ export type PermissionAsk =
   | { kind: "fetch"; input: FetchArgs }
   | { kind: "browse"; input: BrowseAsk }
   | { kind: "browser_handover"; input: HandoverAsk }
+  | { kind: "secret_use"; input: SecretUseAsk }
+  | { kind: "secret_request"; input: SecretRequestAsk }
+
+/** The requests about a secret the browser types (browser-secrets.ts). */
+function isSecretKind(kind: string): kind is "secret_use" | "secret_request" {
+  return kind === "secret_use" || kind === "secret_request"
+}
 
 /** Runs what the owner allowed. Tests swap in a stub. */
 export type PermissionExecutor = {
@@ -298,6 +321,13 @@ export type PermissionView = {
     clientId: string | null
     /** Set when it is the password for this user name (basic authentication). */
     login: string | null
+    /**
+     * A secret the browser types (request_secret): "totp" when it is the
+     * seed of one-time codes, and the sites it is typed at, which the owner
+     * can change before saving.
+     */
+    kind?: "text" | "totp"
+    origins?: string[]
   } | null
 }
 
@@ -635,6 +665,16 @@ function describeAsk(ask: PermissionAsk): {
         target: `handover:${ask.input.tabId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "secret_use":
+      return {
+        target: `secret_use:${ask.input.secretName}\n${ask.input.origin}\n${ask.input.tabId}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "secret_request":
+      return {
+        target: `secret_request:${ask.input.name}`,
+        args: ask.input as Record<string, unknown>,
+      }
   }
 }
 
@@ -660,6 +700,10 @@ function toolNameOf(ask: PermissionAsk): string {
       return ask.input.toolName
     case "browser_handover":
       return "hand_over"
+    case "secret_use":
+      return "type"
+    case "secret_request":
+      return "request_secret"
     // A skill is changed through the memory tool, as a memory is.
     case "skill_change":
     default:
@@ -854,6 +898,22 @@ async function summarizeRow(
 
   if (row.kind === "browser_handover") {
     const asked = describeHandoverAsk(args as HandoverAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "secret_use") {
+    const ask = args as SecretUseAsk
+    const secret = await findTypableSecret(ctx, ask.secretName)
+    const asked = describeSecretUseAsk(ask, {
+      bound: secret ? await isBoundOrigin(secret.id, ask.origin) : false,
+    })
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "secret_request") {
+    const asked = describeSecretRequestAsk(args as SecretRequestAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1259,7 +1319,11 @@ function browserTabOf(
   ctx: VaultContext,
   row: PermissionRequest,
 ): string | null {
-  if (row.kind !== "browse" && row.kind !== "browser_handover") {
+  if (
+    row.kind !== "browse" &&
+    row.kind !== "browser_handover" &&
+    row.kind !== "secret_use"
+  ) {
     return null
   }
 
@@ -1276,7 +1340,22 @@ function newSecretOf(
   optional: boolean
   clientId: string | null
   login: string | null
+  kind?: "text" | "totp"
+  origins?: string[]
 } | null {
+  if (row.kind === "secret_request") {
+    const asked = readArgs(ctx, row) as SecretRequestAsk
+
+    return {
+      name: asked.name,
+      optional: false,
+      clientId: null,
+      login: null,
+      kind: asked.kind,
+      origins: asked.origins,
+    }
+  }
+
   if (row.kind === "wrapper_change") {
     const { newSecret } = readArgs(ctx, row) as WrapperChangeAsk
 
@@ -1311,7 +1390,10 @@ async function secretToEnter(
   return secret
     ? {
         ...secret,
-        exists: (await findTextSecretByName(ctx, secret.name)) !== null,
+        exists:
+          row.kind === "secret_request"
+            ? (await findTypableSecret(ctx, secret.name)) !== null
+            : (await findTextSecretByName(ctx, secret.name)) !== null,
       }
     : null
 }
@@ -1433,7 +1515,9 @@ export async function withPermission(
             ? ask.server.id
             : ask.kind === "endpoint_change" ||
                 ask.kind === "browse" ||
-                ask.kind === "browser_handover"
+                ask.kind === "browser_handover" ||
+                ask.kind === "secret_use" ||
+                ask.kind === "secret_request"
               ? ask.input.serverId
               : null,
         toolName: toolNameOf(ask),
@@ -1500,11 +1584,14 @@ export async function decidePermission(
     secretValue,
     always,
     minutes,
+    origins,
   }: {
     publicUrl: string
     tokenId?: string
     /** The value of a new server's secret, typed in on PCP's page. */
     secretValue?: string
+    /** request_secret: the sites the owner left in, on PCP's page. */
+    origins?: string[]
     /** A memory to share: read it in every conversation, ticked on the page. */
     always?: boolean
     /** "Allow for": how long, one of ALLOW_FOR_MINUTES. */
@@ -1530,7 +1617,11 @@ export async function decidePermission(
   // Only a tool call (for the tool) and a web request (for the site) have
   // "always", "allow_for" and "block": any other answer is about this one
   // request.
-  const settles = kind === "call" || kind === "fetch" || kind === "browse"
+  const settles =
+    kind === "call" ||
+    kind === "fetch" ||
+    kind === "browse" ||
+    isSecretKind(kind)
   const choice: PermissionDecision = !settles
     ? decision === "always" || decision === "allow_for"
       ? "allow_once"
@@ -1543,7 +1634,11 @@ export async function decidePermission(
     return text("That is not one of the answers to this request.", true)
   }
 
-  const allowFor = choice === "allow_for" ? parseAllowForMinutes(minutes) : null
+  // A secret's "Allow for" is an hour, not a choice (SECRET_ALLOW_MINUTES).
+  const allowFor =
+    choice === "allow_for" && !isSecretKind(kind)
+      ? parseAllowForMinutes(minutes)
+      : null
 
   if (!tokenIsLive(row.token)) {
     return finishUnrun(
@@ -1619,7 +1714,20 @@ export async function decidePermission(
   // may be left empty, for a client without one.
   const newSecret = newSecretOf(ctx, row)
 
-  if (newSecret) {
+  // A secret for the browser: its value (or one the owner added since) and
+  // the sites, checked before anything is written, so a mistyped seed can
+  // be typed again.
+  if (kind === "secret_request") {
+    const problem = await checkSecretAnswer(
+      ctx,
+      readArgs(ctx, row) as SecretRequestAsk,
+      { value: secretValue, origins },
+    )
+
+    if (problem) {
+      return text(problem, true)
+    }
+  } else if (newSecret) {
     const problem =
       secretValue ||
       !(newSecret.optional || (await findTextSecretByName(ctx, newSecret.name)))
@@ -1631,7 +1739,10 @@ export async function decidePermission(
     }
   }
 
-  if (choice === "always" && host) {
+  // A secret's answer is about the secret, never the browser tool's level.
+  if (isSecretKind(kind)) {
+    // Written by executeSecretUse and applySecretRequest below.
+  } else if (choice === "always" && host) {
     await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
   } else if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
@@ -1694,13 +1805,34 @@ export async function decidePermission(
                     ? await executeBrowse(ctx, row, publicUrl, executor)
                     : kind === "browser_handover"
                       ? await executeHandover(ctx, row)
-                      : await executeRegister(
-                          ctx,
-                          row,
-                          publicUrl,
-                          executor,
-                          secretValue,
-                        )
+                      : kind === "secret_use"
+                        ? await executeSecretUse(
+                            ctx,
+                            row,
+                            secretLevel(choice),
+                            publicUrl,
+                            executor,
+                          )
+                        : kind === "secret_request"
+                          ? text(
+                              await applySecretRequest(
+                                ctx,
+                                row.tokenId,
+                                readArgs(ctx, row) as SecretRequestAsk,
+                                {
+                                  value: secretValue,
+                                  origins,
+                                  level: secretLevel(choice),
+                                },
+                              ),
+                            )
+                          : await executeRegister(
+                              ctx,
+                              row,
+                              publicUrl,
+                              executor,
+                              secretValue,
+                            )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -1810,6 +1942,87 @@ async function executeBrowse(
     { tabId: asked.tabId, url: asked.url },
     { allowedByOwner: true },
   )
+}
+
+/** How the owner let a secret be typed: the next use, an hour, or always. */
+function secretLevel(choice: PermissionDecision): SecretUseLevel {
+  return choice === "always"
+    ? "always"
+    : choice === "allow_for"
+      ? "hour"
+      : "once"
+}
+
+/**
+ * A secret the owner let the browser type: their answer kept for the token
+ * (browser-secrets.ts grantSecretUse; Always allow adds the site to the
+ * secret's), then the type call made again through upstream.ts, where the
+ * same gate lets it through. A once answer that the call did not use (the
+ * tab moved elsewhere) goes with it.
+ */
+async function executeSecretUse(
+  ctx: VaultContext,
+  row: Row,
+  level: SecretUseLevel,
+  publicUrl: string,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  if (!row.server || row.server.kind !== "browser") {
+    return text("The browser was removed from PCP, so nothing was typed.", true)
+  }
+
+  if (!row.server.enabled) {
+    return text(
+      "The browser is switched off in PCP, so nothing was typed.",
+      true,
+    )
+  }
+
+  // An answer about a secret never lifts a block: a type tool blocked for
+  // the token since it asked stays so.
+  if (
+    effectiveAccess(
+      await loadToolAccess(ctx.vaultId, row.tokenId),
+      row.server.id,
+      "type",
+    ) === "blocked"
+  ) {
+    return text(
+      `${row.server.slug}/type is blocked for this token, so nothing was typed.`,
+      true,
+    )
+  }
+
+  const asked = readArgs(ctx, row) as SecretUseAsk
+  const secret = await findTypableSecret(ctx, asked.secretName)
+
+  if (!secret) {
+    return text(
+      `The secret "${asked.secretName}" is no longer in PCP, so nothing was typed.`,
+      true,
+    )
+  }
+
+  const use = {
+    tokenId: row.tokenId,
+    secretId: secret.id,
+    origin: asked.origin,
+  }
+  await grantSecretUse(ctx, { ...use, level })
+
+  try {
+    return await runCall(
+      ctx,
+      row.server,
+      "type",
+      { ...asked.call, text: { $secret: secret.name } },
+      { publicUrl, tokenId: row.tokenId, ownerAllowed: true, executor },
+    )
+  } finally {
+    if (level === "once") {
+      await dropOnceAllowance(use)
+    }
+  }
 }
 
 /** The owner is done in a tab an assistant handed them. */

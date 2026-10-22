@@ -15,7 +15,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
-import { Input, Textarea } from "@/components/ui/input"
+import { Input, Select, Textarea } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import {
   createSecretAction,
@@ -43,6 +43,7 @@ export function SecretAddDialog() {
 }
 
 function AddSecretForm({ onSaved }: { onSaved: () => void }) {
+  const [kind, setKind] = useState<"text" | "totp">("text")
   const [state, action] = useActionState<SecretActionResult, FormData>(
     async (previous, formData) => {
       const result = await createSecretAction(previous, formData)
@@ -62,8 +63,9 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
         <DialogTitle>Add a secret</DialogTitle>
         <DialogDescription>
           An API key, a personal access token, a password: whatever an MCP
-          server needs to be sent. It is encrypted, and only ever sent to the
-          server that uses it.
+          server needs to be sent, or the browser types into a page. It is
+          encrypted, and only ever sent to the server that uses it or typed at
+          the sites you name.
         </DialogDescription>
       </div>
       <Field label="Name" htmlFor="secret-name">
@@ -83,7 +85,36 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
           placeholder="Personal access token, repo scope"
         />
       </Field>
-      <Field label="Value" htmlFor="secret-value">
+      <Field
+        label="Kind"
+        htmlFor="secret-kind"
+        hint={
+          kind === "totp"
+            ? "The seed of a sign-in's one-time codes. The browser types the code of the moment; you can see it here with Code."
+            : undefined
+        }
+      >
+        <Select
+          id="secret-kind"
+          name="kind"
+          value={kind}
+          onChange={(event) =>
+            setKind(event.target.value === "totp" ? "totp" : "text")
+          }
+        >
+          <option value="text">A value (a key, a token, a password)</option>
+          <option value="totp">One-time codes (TOTP)</option>
+        </Select>
+      </Field>
+      <Field
+        label={kind === "totp" ? "Seed" : "Value"}
+        htmlFor="secret-value"
+        hint={
+          kind === "totp"
+            ? "The base32 text, or the otpauth:// link of the QR code, that the site showed when you set up its codes."
+            : undefined
+        }
+      >
         <Textarea
           id="secret-value"
           name="value"
@@ -91,6 +122,19 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
           autoComplete="off"
           spellCheck={false}
           className="min-h-16 font-mono"
+        />
+      </Field>
+      <Field
+        label="Sites for the browser (optional)"
+        htmlFor="secret-origins"
+        hint="Where the browser may type it into a page, one a line: https://example.com. Each token still needs your yes there."
+      >
+        <Textarea
+          id="secret-origins"
+          name="origins"
+          autoComplete="off"
+          spellCheck={false}
+          className="min-h-12 font-mono"
         />
       </Field>
       <FormError error={state.status === "error" ? state.error : null} />

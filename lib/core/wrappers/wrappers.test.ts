@@ -1198,6 +1198,102 @@ describe("a browser flow", () => {
     expect(read.text).toContain('"flow": true')
   })
 
+  it("may type a secret with the browser's type, as its text and nowhere else", async () => {
+    const { id } = await createSecret(ctx, {
+      name: "Chat password",
+      value: "hunter2-chat",
+    })
+    await createSecret(ctx, {
+      name: "Chat codes",
+      value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      kind: "totp",
+    })
+    const flow = {
+      ...FLOW_TOOL,
+      program: FLOW_TOOL.program.replace(
+        "text: args.text",
+        'text: { $secret: "Chat password" }',
+      ),
+    }
+    const propose = (binding: Record<string, unknown>) =>
+      call("create_wrapper", {
+        name: "Chat",
+        description: "The chat, one call at a time.",
+        tools: [flow],
+        secrets: [{ secret: "Chat password", ...binding }],
+      })
+
+    for (const binding of [
+      { tool: "browser/click", argument: "/target" },
+      { tool: "browser/type", argument: "/tab" },
+      {
+        tool: "browser/type",
+        argument: "/text",
+        template: "Bearer {{secret}}",
+      },
+    ]) {
+      const refused = await propose(binding)
+      expect(refused.isError, JSON.stringify(binding)).toBe(true)
+      expect(refused.text).toContain("only as type's text")
+    }
+
+    // A one-time codes secret goes to the browser only, never to an API.
+    const toApi = await call("create_wrapper", {
+      name: "Lookup",
+      description: "Things, simpler.",
+      tools: [ECHO_TOOL],
+      secrets: [
+        { secret: "Chat codes", tool: "things/echo", argument: "/key" },
+      ],
+    })
+    expect(toApi.isError).toBe(true)
+    expect(toApi.text).toContain('"Chat codes" is not one PCP sends')
+
+    await approved([flow], {
+      secrets: [
+        { secret: "Chat password", tool: "browser/type", argument: "/text" },
+      ],
+    })
+    const definition = readDefinition(
+      (await db().wrapperSpec.findFirstOrThrow()).definition,
+    )
+    expect(definition.secrets).toEqual([
+      expect.objectContaining({
+        secret: "Chat password",
+        secretId: id,
+        tool: "type",
+        argument: "/text",
+        template: "{{secret}}",
+      }),
+    ])
+  })
+
+  it("takes a secret from an assistant only as the browser's type text", async () => {
+    const browser = await db().mcpServer.findFirstOrThrow({
+      where: { kind: "browser" },
+    })
+    await writeToolAccess(scope.tokenId, browser.id, "type", "allowed")
+    await writeToolAccess(scope.tokenId, browser.id, "press_key", "allowed")
+
+    const pressed = await call("call_tool", {
+      server: "browser",
+      tool: "press_key",
+      arguments: { tab: "t1", key: { $secret: "Chat password" } },
+    })
+    expect(pressed.isError).toBe(true)
+    expect(pressed.text).toContain("not taken from you here")
+
+    // Through to the browser, which has no such tab: nothing was refused
+    // for the secret on the way.
+    const typed = await call("call_tool", {
+      server: "browser",
+      tool: "type",
+      arguments: { tab: "t1", ref: "e1", text: { $secret: "Chat password" } },
+    })
+    expect(typed.text).not.toContain("not taken from you")
+    expect(typed.text).toContain("There is no tab t1")
+  })
+
   it("is not one without a browser call", async () => {
     const { view } = await approved([PLAIN_TOOL])
 

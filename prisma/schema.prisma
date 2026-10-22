@@ -174,6 +174,7 @@ model ApiToken {
   oauthCredentials   OAuthCredential[]
   toolAllowances     ApiTokenToolAllowance[]
   siteAllowances     ApiTokenSiteAllowance[]
+  secretAllowances   ApiTokenSecretAllowance[]
 
   @@index([vaultId])
   @@map("api_token")
@@ -252,6 +253,28 @@ model ApiTokenSiteAllowance {
   @@id([tokenId, host])
   @@index([until])
   @@map("api_token_site_allowance")
+}
+
+/// A secret the owner let one token have typed into pages at one origin
+/// (lib/core/browser-secrets.ts): for an hour, for one use (`once`), or
+/// always (`until` null). Asked for per secret, origin and token on the
+/// owner's page; it never lifts a blocked tool, and is not exported.
+model ApiTokenSecretAllowance {
+  tokenId   String    @map("token_id")
+  token     ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  secretId  String    @map("secret_id")
+  secret    Secret    @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  /// https://host[:port], as URL.origin writes it.
+  origin    String
+  /// Null: always, until the owner ends it.
+  until     DateTime?
+  /// The next use only: it goes once a use takes it.
+  once      Boolean   @default(false)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@id([tokenId, secretId, origin])
+  @@index([until])
+  @@map("api_token_secret_allowance")
 }
 
 /// A tool's level for every token of the vault ("All tokens" on a token's
@@ -411,16 +434,17 @@ model Skill {
   @@map("skill")
 }
 
-/// One encrypted value. `text` secrets are entered by the owner; `oauth`
-/// secrets hold the token set (and registered client) PCP obtained for an
-/// MCP server and are managed by the server that owns them.
+/// One encrypted value. `text` and `totp` secrets are entered by the owner
+/// (a `totp` one holds a one-time code's seed, base32 or an otpauth:// link);
+/// `oauth` secrets hold the token set (and registered client) PCP obtained
+/// for an MCP server and are managed by the server that owns them.
 model Secret {
   id          String   @id
   vaultId     String   @map("vault_id")
   vault       Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   name        String
   description String   @default("")
-  /// text | oauth | ssh_key (PCP's own private key for an SSH server)
+  /// text | totp | oauth | ssh_key (PCP's own private key for an SSH server)
   kind        String   @default("text")
   /// nonce || ciphertext || tag, AES-256-GCM under the vault's data key
   /// with the secret id as associated data.
@@ -435,9 +459,27 @@ model Secret {
   oauthClientFor McpServer[] @relation("ServerOAuthClientSecret")
   oauthTokensFor McpServer[] @relation("ServerOAuthTokens")
   repos          Repo[]
+  browserOrigins SecretBrowserOrigin[]
+  allowances     ApiTokenSecretAllowance[]
 
   @@unique([vaultId, name])
   @@map("secret")
+}
+
+/// An origin where the browser may type a secret (lib/core/browser-secrets.ts):
+/// the owner's "Always allow" on a page there, or theirs on the secret's
+/// row. A secret is typed into a page only at an origin it is bound to, or
+/// where the owner allowed it on a request; an API endpoint's use of the
+/// secret never counts. Origins are not secret, and are exported.
+model SecretBrowserOrigin {
+  secretId  String   @map("secret_id")
+  secret    Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  /// https://host[:port], as URL.origin writes it.
+  origin    String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@id([secretId, origin])
+  @@map("secret_browser_origin")
 }
 
 /// Something the gateway can reach on the owner's behalf, with how to

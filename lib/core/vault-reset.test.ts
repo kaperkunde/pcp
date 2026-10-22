@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
+import { grantSecretUse } from "./browser-secrets"
 import { storeTools } from "./catalogue"
 import { db } from "./db"
 import { createDeviceKey, unlockWithDeviceKey } from "./device-keys"
@@ -91,6 +92,12 @@ async function populate() {
     mediaType: "text/plain",
   })
   await receiveFile(ctx, { tokenId, publicUrl: "https://pcp.example" })
+  await grantSecretUse(ctx, {
+    tokenId,
+    secretId: secret.id,
+    origin: "https://shop.example",
+    level: "always",
+  })
   await createMemory(ctx, { path: "notes.md", text: "Remember this." })
   const skill = await createSkill(ctx, {
     name: "release-notes",
@@ -124,6 +131,8 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(Object.values(before).some((count) => count > 0)).toBe(true)
     expect(before.repo).toBe(1)
     expect(before.repo_item).toBe(1)
+    expect(before.secret_browser_origin).toBe(1)
+    expect(before.api_token_secret_allowance).toBe(1)
 
     await deleteVault(ctx)
 
