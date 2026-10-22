@@ -141,6 +141,14 @@ model ApiToken {
   /// empty, and the key travels in its OAuth credentials.
   oauthClientId   String?   @map("oauth_client_id")
   oauthClientName String?   @map("oauth_client_name")
+  /// The owner's instructions for this assistant, given at the start of
+  /// every conversation (lib/core/instructions.ts): ciphertext under the
+  /// vault's key with "api_token:<id>" as associated data. Null until the
+  /// owner saves some; a new token starts from PCP's suggested ones.
+  instructions     Bytes?
+  /// The version of PCP's suggested instructions (instructions-defaults.ts)
+  /// the text was copied or merged from. Null with no instructions.
+  instructionsBase Int?    @map("instructions_base")
 
   servers            ApiTokenServer[]
   toolAccess         ApiTokenToolAccess[]

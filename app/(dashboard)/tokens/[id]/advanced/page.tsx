@@ -1,16 +1,22 @@
 import type { Metadata } from "next"
+import Link from "next/link"
 
 import { LocalDate } from "@/components/local-date"
 import { PageColumn } from "@/components/page-column"
 import { PageHeader } from "@/components/page-header"
 import { TokenCopyAccess } from "@/components/token-detail"
+import { TokenInstructionsEditor } from "@/components/token-instructions"
 import { TOKEN_OPTIONS, TokenOptionRow } from "@/components/token-options"
 import { TokenSettingsForm } from "@/components/token-settings-form"
 import { TokenTools } from "@/components/token-tools"
 import { WebFetchCard } from "@/components/web-fetch-card"
+import { Card } from "@/components/ui/card"
+import { Disclosure } from "@/components/ui/disclosure"
 import { Input, Select } from "@/components/ui/input"
 import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
 import { listApiTokens } from "@/lib/core/api-tokens"
+import { instructionsPreview } from "@/lib/core/gateway"
+import { getTokenInstructions } from "@/lib/core/instructions"
 import { listTokenToolAccess } from "@/lib/core/tool-access"
 import { getVault } from "@/lib/core/vault"
 import { listFetchRules } from "@/lib/core/web-fetch"
@@ -37,12 +43,15 @@ export default async function TokenAdvancedPage({
   const ctx = await requireContext()
   const { id } = await params
   const { token, kinds, browser, locked, expired } = await loadToken(ctx, id)
-  const [access, tokens, fetchRules, vault] = await Promise.all([
-    listTokenToolAccess(ctx, id),
-    listApiTokens(ctx),
-    token.webFetch || browser ? listFetchRules(ctx, id) : null,
-    getVault(ctx.vaultId),
-  ])
+  const [access, tokens, fetchRules, vault, instructions, preview] =
+    await Promise.all([
+      listTokenToolAccess(ctx, id),
+      listApiTokens(ctx),
+      token.webFetch || browser ? listFetchRules(ctx, id) : null,
+      getVault(ctx.vaultId),
+      getTokenInstructions(ctx, id),
+      instructionsPreview(ctx, id),
+    ])
   const otherTokens = tokens
     .filter((other) => other.id !== id)
     .map(({ id, name }) => ({ id, name }))
@@ -146,6 +155,38 @@ export default async function TokenAdvancedPage({
             }
           />
         </List>
+      </ListSection>
+
+      <ListSection
+        title="Instructions"
+        description="What this assistant is told at the start of every conversation, before anything else PCP says. Write it as you would to a person."
+        action={
+          instructions.outdated ? (
+            <Link
+              href="/tokens/instructions"
+              className="text-[13px] text-warning"
+            >
+              PCP&apos;s suggestion changed
+            </Link>
+          ) : undefined
+        }
+      >
+        <Card>
+          <TokenInstructionsEditor
+            tokenId={id}
+            text={instructions.text}
+            saved={instructions.saved}
+            locked={locked}
+          />
+        </Card>
+        <Disclosure
+          title="What it receives"
+          description="Exactly what PCP gives this assistant when a conversation starts, as it would be now."
+        >
+          <pre className="max-h-[28rem] overflow-auto rounded-lg bg-field p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap">
+            {preview}
+          </pre>
+        </Disclosure>
       </ListSection>
 
       <TokenTools

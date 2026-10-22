@@ -3,7 +3,7 @@ import type { ReactNode } from "react"
 import { AppSidebar } from "@/components/app-sidebar"
 import { SiteFooter } from "@/components/site-footer"
 import { findBrowserServer } from "@/lib/core/browser/server"
-import { networkNotices } from "@/lib/core/network/runtime"
+import { listOwnerNotices } from "@/lib/core/owner-notices"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { availableUpdate } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
@@ -27,7 +27,7 @@ export default async function DashboardLayout({
   const [vault, pending, notices, update, browser] = await Promise.all([
     getVault(ctx.vaultId),
     publicUrlFor(ctx).then((publicUrl) => listPendingRequests(ctx, publicUrl)),
-    networkNotices(),
+    listOwnerNotices(ctx),
     availableUpdate(),
     findBrowserServer(ctx),
   ])

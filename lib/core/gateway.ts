@@ -11,6 +11,8 @@ import { z } from "zod"
 import type { McpServer as McpServerRow } from "@/lib/generated/prisma/client"
 
 import { resolveAccessChanges, type AccessChange } from "./access-requests"
+import { resolveTokenForOwner } from "./api-tokens"
+import type { VaultContext } from "./context"
 import {
   listedTools,
   loadGatewayServers,
@@ -37,6 +39,7 @@ import {
 } from "./endpoint-admin"
 import { MAX_FIELDS, readFields } from "./answers"
 import { isPcpError } from "./errors"
+import { instructionsBlock } from "./instructions-block"
 import { receiveFile, shareResult } from "./file-links"
 import {
   DEFAULT_FETCH_LENGTH,
@@ -47,6 +50,7 @@ import {
 import { prepareFetch, type FetchInput } from "./fetch/request"
 import { isPcpSite } from "./fetch/fetch"
 import {
+  instructionMemories,
   isMemoryWrite,
   MEMORY_ROOT,
   runMemoryCommand,
@@ -402,6 +406,7 @@ export function buildInstructions(
     runCode = false,
     manageWrappers = false,
     shareFiles = false,
+    ownerInstructions = null,
   }: {
     manageEndpoints?: boolean
     manageWrappers?: boolean
@@ -410,11 +415,20 @@ export function buildInstructions(
     memories?: InstructionMemories | null
     webFetch?: boolean
     runCode?: boolean
+    /** The owner's instructions for this assistant (instructions.ts). */
+    ownerInstructions?: string | null
   } = {},
 ): string {
+  // Clients cut instructions short: the owner's own come right after what
+  // must be said first.
+  const lead = [
+    ...memoryLead(memories),
+    ...instructionsBlock(ownerInstructions),
+  ]
+
   if (servers.length === 0) {
     return [
-      ...memoryLead(memories),
+      ...lead,
       "PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts, but this token has no servers to reach yet. Ask the owner to add one in PCP, or propose one with register_server (an MCP server by its address, an API from its OpenAPI document, a mail account over JMAP or IMAP, or a calendar account over CalDAV).",
       ...(manageEndpoints ? [MANAGE_INSTRUCTIONS] : []),
       ...memoryInstructions(memories),
@@ -435,7 +449,7 @@ export function buildInstructions(
   )
 
   return [
-    ...memoryLead(memories),
+    ...lead,
     "PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts. Tool names are not listed here: call search_tools with a few words about what you need, then describe_tool for the exact input schema and the tool's call_handle, then call_tool with that call_handle and the arguments to run it (call_read_only_tool for one describe_tool marks read-only); list_tools names every tool on one server. call_tool takes no server or tool name, only the call_handle, and checks the arguments before anything runs. Refer to tools as server/tool.",
     "The owner decides per tool what you may run. A tool they have not allowed yet answers \"Not done yet\" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.",
     'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email or create_draft attachment, and PCP puts the value there, so it never has to pass through you.',
@@ -449,6 +463,43 @@ export function buildInstructions(
     ...(shareFiles ? [FILES_INSTRUCTIONS] : []),
     ...(manageWrappers ? [WRAPPER_INSTRUCTIONS] : []),
   ].join("\n")
+}
+
+/** The instructions the gateway gives one token, with what it reaches. */
+function tokenInstructions(
+  scope: Omit<GatewayScope, "publicUrl">,
+  servers: GatewayServer[],
+  memories: InstructionMemories | null,
+): string {
+  return buildInstructions(servers, {
+    manageEndpoints: scope.manageEndpoints,
+    memories: scope.keepMemories
+      ? (memories ?? { shared: [], always: [] })
+      : null,
+    webFetch: scope.webFetch,
+    runCode: scope.runCode,
+    manageWrappers: scope.manageWrappers,
+    shareFiles: scope.shareFiles,
+    ownerInstructions: scope.instructions,
+  })
+}
+
+/**
+ * Exactly what a token is told at the start of a conversation, for the
+ * owner's page: the servers and memories as they are now, read with the
+ * owner's key. The catalogue is not read again for it.
+ */
+export async function instructionsPreview(
+  ctx: VaultContext,
+  tokenId: string,
+): Promise<string> {
+  const token = await resolveTokenForOwner(ctx, tokenId)
+
+  return tokenInstructions(
+    token,
+    await loadGatewayServers(token),
+    token.keepMemories ? await instructionMemories(ctx, tokenId) : null,
+  )
 }
 
 /** Mistakes PCP found in a schema being registered, briefly. */
@@ -636,16 +687,7 @@ export function buildGatewayServer(
       icons: gatewayIcons(scope.publicUrl),
     },
     {
-      instructions: buildInstructions(servers, {
-        manageEndpoints: scope.manageEndpoints,
-        memories: scope.keepMemories
-          ? (memories ?? { shared: [], always: [] })
-          : null,
-        webFetch: scope.webFetch,
-        runCode: scope.runCode,
-        manageWrappers: scope.manageWrappers,
-        shareFiles: scope.shareFiles,
-      }),
+      instructions: tokenInstructions(scope, servers, memories),
     },
   )
 

@@ -835,6 +835,47 @@ another one reads:
   vault's memories, as `search.ts` scores every tool. A memory outlives the
   token that wrote it (`token_id` is set to null) and is then the owner's.
 
+## Instructions for an assistant
+
+Every token has instructions of its own, the owner's words to that
+assistant (`lib/core/instructions.ts`). They are text on the token row,
+`api_token.instructions`, encrypted under the vault's key with
+`api_token:<id>` as associated data, and `api_token.instructions_base`, the
+version of PCP's suggested instructions they were copied or merged from.
+
+- **A copy of a suggestion.** `lib/core/instructions-defaults.ts` lists
+  PCP's suggested instructions by version, oldest first, and keeps every
+  version. A new token, made on PCP's page or by an app's sign-in
+  (`createApiToken`, `createOAuthApiToken`), gets a copy of the latest and
+  its version. A token from before instructions has neither: its page shows
+  the suggestion as not set yet, and it gets nothing until the owner saves.
+  Nothing is copied into existing rows by a migration.
+- **Given first.** `liveToken` decrypts them into `ResolvedToken`, and the
+  gateway's instructions carry them right after the memory lead, under "The
+  owner's instructions for this assistant:" (at most 4,000 characters,
+  `MAX_INSTRUCTIONS_CHARS`), since clients cut instructions short. For a
+  token that keeps memories, `read_memory every` opens with the same block.
+  `search_tools`' description carries the one rule that matters most:
+  describe a tool before calling it and pass its call_handle; check before
+  retrying anything that may have happened.
+- **The owner's to change.** The token's Advanced page has the editor and,
+  folded, exactly what the token is told at the start of a conversation
+  (`instructionsPreview`, the same `buildInstructions` call as `/mcp`).
+  Text with characters that do not show on screen is refused, as for a
+  memory, and so is text still holding a merge's conflict markers. Only the
+  owner writes them; no gateway tool does, and `updateApiToken` leaves them
+  alone.
+- **When the suggestion changes.** A token whose base is older than the
+  latest version is a notice for the owner (`lib/core/owner-notices.ts`,
+  worked out when the bell is read; nothing is stored for it). The notice's
+  page lists those tokens: **Keep mine** moves the base to the latest,
+  **Take PCP's** replaces the text, and **Save merged** saves an editor
+  that starts from a three-way line merge (`lib/core/line-merge.ts`: base
+  the version the token followed, one side its text, the other the latest
+  suggestion), with the places both sides changed marked for the owner to
+  settle. An export carries both columns as they are; an older file
+  restores them as not set yet.
+
 ## Web fetch
 
 A token made with "fetch web pages" (`api_token.web_fetch`, off unless the

@@ -65,7 +65,8 @@ export function usePendingRequests(initial: PendingRequestsState) {
 /**
  * The bell: how many requests from assistants are waiting for the owner,
  * and a list of them that leads to each one's page. Above them, what PCP
- * itself needs looked at (HTTPS that stopped renewing).
+ * itself needs looked at (lib/core/owner-notices.ts: HTTPS that stopped
+ * renewing, suggested instructions that changed).
  */
 export function PendingRequests({
   state,
@@ -114,10 +115,19 @@ export function PendingRequests({
             href={notice.href}
             className="flex-col items-start gap-0.5"
           >
-            <span className="font-medium text-destructive">{notice.title}</span>
-            <span className="text-xs text-muted-foreground">
-              Open Settings to see why
+            <span
+              className={cn(
+                "font-medium",
+                notice.kind === "network" ? "text-destructive" : "text-warning",
+              )}
+            >
+              {notice.title}
             </span>
+            {notice.detail ? (
+              <span className="text-xs text-muted-foreground">
+                {notice.detail}
+              </span>
+            ) : null}
           </MenuLinkItem>
         ))}
         <MenuNote className="pb-1 font-semibold">

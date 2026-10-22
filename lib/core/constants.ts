@@ -175,6 +175,13 @@ export const MAX_MEMORY_CHARS = 10_000
  */
 export const MAX_SHARED_MEMORY_CHARS = 2_000
 
+/**
+ * The longest instructions the owner gives one assistant
+ * (lib/core/instructions.ts): short enough to sit at the start of every
+ * conversation.
+ */
+export const MAX_INSTRUCTIONS_CHARS = 4_000
+
 /** The longest memory path, without the leading /memories/. */
 export const MAX_MEMORY_PATH = 200
 
