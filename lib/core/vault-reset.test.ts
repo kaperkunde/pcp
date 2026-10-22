@@ -133,6 +133,7 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.repo_item).toBe(1)
     expect(before.secret_browser_origin).toBe(1)
     expect(before.api_token_secret_allowance).toBe(1)
+    expect(before.server_definition).toBe(1)
 
     await deleteVault(ctx)
 

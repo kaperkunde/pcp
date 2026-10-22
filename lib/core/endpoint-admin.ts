@@ -7,6 +7,7 @@ import type { SyncResult } from "./catalogue"
 import { MAX_SPEC_BYTES } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import { disableOtherInstances, siblingInstances } from "./definition-rows"
 import {
   changeEndpoint,
   createEndpoint,
@@ -164,10 +165,47 @@ export type EndpointDetails = {
   note?: string
 }
 
-type EndpointRow = McpServer & { tools: McpTool[] }
+/**
+ * An endpoint row, and whether another instance of its definition is the
+ * owner's: what that instance shares (description, schema, edits, tool
+ * descriptions) is then theirs too, so the assistant can only ask.
+ */
+type Owned = McpServer & { sharesWithOwner?: boolean }
+type EndpointRow = Owned & { tools: McpTool[] }
 
-function belongsTo(server: McpServer): "assistant" | "owner" {
-  return server.publicOnly && server.authType === "none" ? "assistant" : "owner"
+function ownersAlone(server: McpServer): boolean {
+  return !(server.publicOnly && server.authType === "none")
+}
+
+function belongsTo(server: Owned): "assistant" | "owner" {
+  return ownersAlone(server) || server.sharesWithOwner ? "owner" : "assistant"
+}
+
+/** Marks the rows that share their definition with an endpoint of the owner's. */
+async function withSharers<T extends McpServer>(
+  rows: T[],
+): Promise<Array<T & { sharesWithOwner: boolean }>> {
+  const definitionIds = [
+    ...new Set(rows.map((row) => row.definitionId).filter((id) => id !== null)),
+  ]
+  const owned = new Set<string>()
+
+  if (definitionIds.length > 0) {
+    const instances = await db().mcpServer.findMany({
+      where: { definitionId: { in: definitionIds } },
+    })
+
+    for (const instance of instances) {
+      if (ownersAlone(instance)) {
+        owned.add(instance.definitionId!)
+      }
+    }
+  }
+
+  return rows.map((row) => ({
+    ...row,
+    sharesWithOwner: row.definitionId !== null && owned.has(row.definitionId),
+  }))
 }
 
 function inScope(scope: EndpointScope, id: string): boolean {
@@ -191,14 +229,16 @@ function withoutQuery(address: string | null): string | null {
 }
 
 async function visibleEndpoints(scope: EndpointScope) {
-  const rows = await db().mcpServer.findMany({
-    where: {
-      vaultId: scope.ctx.vaultId,
-      kind: "openapi",
-      ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
-    },
-    orderBy: { slug: "asc" },
-  })
+  const rows = await withSharers(
+    await db().mcpServer.findMany({
+      where: {
+        vaultId: scope.ctx.vaultId,
+        kind: "openapi",
+        ...(scope.serverIds ? { id: { in: scope.serverIds } } : {}),
+      },
+      orderBy: { slug: "asc" },
+    }),
+  )
 
   // An endpoint the owner configured and then disabled is theirs alone: the
   // assistant cannot see that it is there.
@@ -209,10 +249,11 @@ async function findEndpoint(
   scope: EndpointScope,
   slug: string,
 ): Promise<EndpointRow> {
-  const row = await db().mcpServer.findUnique({
+  const found = await db().mcpServer.findUnique({
     where: { vaultId_slug: { vaultId: scope.ctx.vaultId, slug } },
     include: { tools: { orderBy: { name: "asc" } } },
   })
+  const [row] = found ? await withSharers([found]) : [null]
 
   if (
     !row ||
@@ -901,6 +942,11 @@ export async function updateEndpointDetails(
         ignored.push(tool)
       }
     }
+
+    // Tool descriptions are shared: every instance now shows them.
+    if (disables) {
+      await disableOtherInstances(server.id)
+    }
   }
 
   const fresh = await findEndpoint(scope, slug)
@@ -1149,8 +1195,18 @@ async function proposeChange(
     return what.length > 0 ? [`${tool.name} (${what.join(", ")})`] : []
   })
   const writes = added.filter((tool) => tool.operation.method !== "GET")
+  // The words, schema and edits are its definition's: say who else shows them.
+  const others =
+    description !== undefined || editsChange || fetched || toolEdits.length > 0
+      ? await siblingInstances(server.id)
+      : []
   const lines = [
     `Endpoint: ${server.name} (${server.url})`,
+    ...(others.length > 0
+      ? [
+          `Shared: this changes ${others.length + 1} servers: ${[server, ...others].map((other) => other.slug).join(", ")}`,
+        ]
+      : []),
     ...(name !== undefined ? [`New name: ${name}`] : []),
     ...(description !== undefined
       ? [`New description:\n${description || "(none)"}`]

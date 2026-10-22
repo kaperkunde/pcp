@@ -84,6 +84,17 @@ so in the summary; the bump itself waits for the request.
   which writes only the columns it is given and never the credential. Keep
   all of that when adding to it, and add a test for each new field an
   assistant can set.
+- Definitions (`lib/core/definitions.ts`, `definition-rows.ts`): an MCP
+  server, endpoint or wrapper is an instance of a `server_definition`, and
+  what instances share (description, schema and edits, wrapper program, tool
+  descriptions) is copied on each of them. Anything that writes shared
+  content goes through `endpoints.ts applySpec`, `shareDescription`,
+  `setToolDescription` or `writeWrapper`, so every instance gets it and
+  rebuilds its tools; a server made on a definition takes its content, never
+  its own. An endpoint shares the owner's rules with its siblings: it is the
+  assistant's only while every instance is. Clone, detach, merge and the
+  owner's note (`personal-notes.ts`: one line, at most 300 characters,
+  encrypted, never in a repository document) are the owner's alone.
 - Memories (`lib/core/memories.ts`): an assistant writes its own
   (`/memories/…`) without asking, but anything other assistants would read
   (`/memories/shared/…`: creating, sharing, changing, renaming, deleting) is a

@@ -61,7 +61,9 @@ associated data (a ciphertext cannot be moved to another row):
 - the private key PCP makes for each SSH server (a `secret` row of kind
   `ssh_key`, owned by the server),
 - the browser's sign-ins (`browser_profile`, bound to the vault's id, as
-  there is one per vault).
+  there is one per vault),
+- the owner's note on a server or a skill (`mcp_server.personal_note`,
+  `skill.personal_note` with `skill:<id>:note`).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -455,6 +457,117 @@ give, and tools ask first by default. And it can have PCP download a public
 address it names, as a schema: what it learns back is whether that was an
 OpenAPI document and, if so, what the owner would be asked, which matters
 only for a service that trusts PCP's own address more than the assistant's.
+
+## Definitions and instances
+
+The same server can be in a vault more than once: one Coolify API on two
+hosts, with two keys. What makes it that API is shared; where it is and how
+PCP signs in there is not. So every MCP server, API endpoint and wrapper is
+an **instance** of a **definition** (`server_definition`, `lib/core/
+definitions.ts`), alone at first.
+
+- **Definition:** what the server is, as it could be shared, without an
+  address, a secret or anything of the owner's: its own slug and name, the
+  description, an endpoint's schema, its edits and where it is read from, a
+  wrapper's programs, the tools' descriptions in the owner's words, and a
+  `format_version` (1 until a change to the shape is not backward
+  compatible).
+- **Instance:** an `mcp_server` row with `definition_id`: its name and
+  short name (what assistants call it), its address, its credential and
+  secrets, its levels, whether it is on, its pace, read-only and
+  public-only, and the owner's note.
+
+**Where the shared content lives.** Each instance keeps a copy of what its
+definition holds, where it was before definitions existed: the description
+on its row, the schema and edits in its `openapi_spec`, a wrapper's program
+in its `wrapper_spec`, tool descriptions on its `mcp_tool` rows. So every
+reader (the gateway, the catalogue, calls, linked repositories, the export)
+reads one row as it always did, and no data moved in the migration, which
+only added the table and two columns and gave every existing server a
+definition of its own (with the server's id). The definition row is the
+identity and the description's authority. The cost is that every writer of
+shared content must reach all instances, and they all go through
+`definition-rows.ts` or the code that calls it:
+
+- `endpoints.ts applySpec` (every way an endpoint's schema or edits are
+  written: the owner's form, `changeEndpoint`, a re-read, a repository's
+  change) gives the other instances the schema, the edits and where they
+  are read from (`shareSpec`), and each rebuilds its tools with its own
+  read-only setting and credential headers (`rebuildFromCopy`); then
+  `shareDescription`.
+- `servers.ts updateServer`, `changeEndpoint` and `wrappers/admin.ts
+writeWrapper` share the description; a wrapper's program goes to the
+  others' `wrapper_spec` and their tools are rebuilt.
+- `servers.ts setToolDescription` (the owner's, an assistant's approved
+  change, a repository's) writes the tool's description on every instance
+  that has the tool, and `catalogue.ts storeTools` starts a tool new to an
+  instance with the description the others have for it.
+- A server made on a definition (`createServer`, `createEndpoint` with
+  `definitionId`) takes the definition's description and, for an endpoint,
+  the schema, edits and schema address another instance holds, never the
+  ones it was given. Any other new server gets a definition of its own
+  (`ensureDefinition`), as does a row that has none (an older export's).
+- Deleting the last instance deletes its definition.
+
+Mail and calendar accounts, SSH servers and the browser have no definition:
+nothing of theirs is the same thing elsewhere but their address. Skills
+have one implicit instance: the skill itself, which carries the owner's
+note too.
+
+**Clone** (the owner's alone, from an item's About card) makes another
+instance of an MCP server or an endpoint: it asks for the name, the address,
+how it signs in there (the source's way, with a secret of its own; a secret
+goes only to the address typed on that page) and the note, and copies the
+source's levels, for each token and for all tokens. A token limited to some
+servers reaches it only once the owner adds it, as any new server. **Detach**
+gives an instance a definition of its own with what it has now; there are
+no per-instance overrides of shared content, so detaching is how one
+instance differs. Editing shared content of a server with siblings says
+first which servers it changes ("This changes 2 servers: gaaf, plekde") and
+points at Detach.
+
+**Merging.** Endpoints added before definitions (or separately since) are
+offered as one: `findIdenticalDefinitions` groups endpoint definitions whose
+schema hash, edits and tool descriptions are the same (only a schema hash
+seen twice is looked at closer, as the bell reads this on every page), and
+the bell says "Two API endpoints have the same schema: merge them?". The
+merge page shows each definition and its servers; the owner picks the one
+kept and its name, and `mergeDefinitions` makes the others' servers its
+instances (they take its description and schema address; addresses,
+credentials, levels and notes stay) only while the group is still what the
+page showed (its key). "Keep them apart" stores the group's key in a
+setting and the offer goes away.
+
+**An assistant's endpoint.** Text and edits on an endpoint reach every
+assistant, so `endpoint-admin.ts` counts an endpoint as the assistant's only
+while it and every other instance of its definition send no secret and are
+limited to public addresses: one shared with an endpoint of the owner's is
+the owner's, and a change to what they share is an `endpoint_change`
+request that names every server it changes. A change to the shared content
+of an assistant's own endpoints, made switched off, switches every instance
+off. Clone, Detach, merging and the note have no gateway tool.
+
+**The owner's note** (`personal-notes.ts`) is one line of at most 300
+characters, nothing in it that does not show on screen, encrypted under the
+DEK with `mcp_server:<id>` (a server) or `skill:<id>:note` (a skill) as
+associated data, and written only from the owner's pages. It is never in a
+repository document or anything else shared, and not part of a skill's
+SKILL.md. Assistants that see the server or skill read it as the owner's
+note, after the description: the instructions' server and skill lines
+(`… (N tools) Owner's note: …`, cut to 120 characters), a line per server
+or skill under `search` and `search_tools` results (it counts toward
+finding the server, too), the head of `list_tools`, `describe`
+(`ownerNote`, beside `serverName` and `serverDescription`; a skill's under
+its frame) and `check_server`. The owner wrote it, so it may stand in the
+instructions as the descriptions do.
+
+**About card** (`item-about.ts`, `components/item-about.tsx`): every item's
+page (a server of any kind, a skill) says its type and definition, its
+source (made here, or the linked repository and path), its sync (local
+only, or the link's state, schedule and last sync), its sharing (private),
+its instances with Clone and Detach, and the note. Source, Sync and Sharing
+read what linked repositories hold today; `sourceOf`, `syncOf` and
+`sharingOf` are where sharing per item extends them.
 
 ## Mail accounts
 

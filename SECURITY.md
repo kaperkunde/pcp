@@ -23,7 +23,8 @@ ciphertext and SHA-256 hashes. The vault's data key is stored only wrapped
 under keys derived from your password (scrypt, 64 MiB), the recovery key, a
 session cookie, an API token or what an app that signed in holds (its access
 and refresh tokens) — none of which are on the disk. The browser's
-sign-ins and kept results are in the vault too, encrypted the same way. See
+sign-ins, kept results and your notes on servers and skills are in the vault
+too, encrypted the same way. See
 [ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
 session cookie and the Touch ID key do sit in the app's folder, but encrypted
 under a key in your login keychain, which a copy of the disk does not open.

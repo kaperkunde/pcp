@@ -18,6 +18,7 @@ import type {
   Secret,
   SecretBrowserOrigin,
   ServerAuthHeader,
+  ServerDefinition,
   Setting,
   Skill,
   Vault,
@@ -238,6 +239,8 @@ const SkillRow = z.strictObject({
   vaultId: id,
   author: str,
   ciphertext: bytes,
+  // The owner's note, added with definitions: absent from older files.
+  personalNote: bytesOrNull.default(null),
   createdAt: date,
   updatedAt: date,
 })
@@ -319,6 +322,23 @@ const McpServerRow = z.strictObject({
   // The version of its document in a linked repository, added with them:
   // absent from older exports, which never synced one.
   syncVersion: z.number().int().nullable().default(null),
+  // Definitions and the owner's note, added together: absent from older
+  // exports, whose servers each get a definition of their own on restore.
+  definitionId: id.nullable().default(null),
+  personalNote: bytesOrNull.default(null),
+})
+
+// Definitions, added with the owner's notes: absent from older exports.
+const ServerDefinitionRow = z.strictObject({
+  id,
+  vaultId: id,
+  kind: str,
+  slug: str,
+  name: str,
+  description: str,
+  formatVersion: z.number().int(),
+  createdAt: date,
+  updatedAt: date,
 })
 
 const ServerAuthHeaderRow = z.strictObject({
@@ -446,6 +466,7 @@ export const PayloadSchema = z.strictObject({
     skills: z.array(SkillRow).default([]),
     secrets: z.array(SecretRow),
     secretBrowserOrigins: z.array(SecretBrowserOriginRow).default([]),
+    serverDefinitions: z.array(ServerDefinitionRow).default([]),
     servers: z.array(McpServerRow),
     serverAuthHeaders: z.array(ServerAuthHeaderRow),
     tools: z.array(McpToolRow),
@@ -577,6 +598,7 @@ export function checkReferences(payload: ExportPayload): void {
   const tokens = idsOf(tables.apiTokens, "token")
   const secrets = idsOf(tables.secrets, "secret")
   const servers = idsOf(tables.servers, "server")
+  const definitions = idsOf(tables.serverDefinitions, "server definition")
   idsOf(tables.keyGrants, "key")
   idsOf(tables.tools, "tool")
   idsOf(tables.memories, "memory")
@@ -616,6 +638,7 @@ export function checkReferences(payload: ExportPayload): void {
   ownedBy(tables.skills, "skill")
   ownedBy(tables.secrets, "secret")
   ownedBy(tables.servers, "server")
+  ownedBy(tables.serverDefinitions, "server definition")
   ownedBy(tables.settings, "setting")
   ownedBy(tables.browserProfiles, "browser profile")
   ownedBy(tables.repos, "repository")
@@ -676,6 +699,7 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(server.authSecretId, secrets, "a server's secret")
     pointsAt(server.oauthClientSecretId, secrets, "a server's client secret")
     pointsAt(server.oauthTokensId, secrets, "a server's OAuth tokens")
+    pointsAt(server.definitionId, definitions, "a server's definition")
   }
 
   for (const header of tables.serverAuthHeaders) {
@@ -833,6 +857,10 @@ export const FORMAT_COVERS_SCHEMA: {
     z.output<typeof SecretBrowserOriginRow>
   >
   server: Covers<McpServer, z.output<typeof McpServerRow>>
+  serverDefinition: Covers<
+    ServerDefinition,
+    z.output<typeof ServerDefinitionRow>
+  >
   serverAuthHeader: Covers<
     ServerAuthHeader,
     z.output<typeof ServerAuthHeaderRow>
@@ -860,6 +888,7 @@ export const FORMAT_COVERS_SCHEMA: {
   secret: true,
   secretBrowserOrigin: true,
   server: true,
+  serverDefinition: true,
   serverAuthHeader: true,
   tool: true,
   openApiSpec: true,

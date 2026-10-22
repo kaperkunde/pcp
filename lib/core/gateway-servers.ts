@@ -7,6 +7,7 @@ import { allowanceHolds, loadToolAllowances } from "./allowances"
 import type { ResolvedToken } from "./api-tokens"
 import type { ToolAccess } from "./constants"
 import { db } from "./db"
+import { readServerNote } from "./personal-notes"
 import { accessKey, effectiveAccess, loadToolAccess } from "./tool-access"
 import { readWrapperOperation } from "./wrappers/definition"
 
@@ -36,7 +37,14 @@ export type GatewayTool = Pick<
   hiddenBy?: string
 }
 
-export type GatewayServer = McpServerRow & { tools: GatewayTool[] }
+export type GatewayServer = McpServerRow & {
+  tools: GatewayTool[]
+  /**
+   * The owner's own note on the server (lib/core/personal-notes.ts),
+   * opened: what assistants read as "Owner's note" beside its description.
+   */
+  note?: string | null
+}
 
 const STRICTNESS: Record<ToolAccess, number> = {
   allowed: 0,
@@ -89,6 +97,7 @@ export async function loadGatewayServers(
 
   const loaded: GatewayServer[] = servers.map((server) => ({
     ...server,
+    note: readServerNote(scope.ctx, server),
     tools: server.tools.map((tool) => {
       const level = effectiveAccess(stored, server.id, tool.name)
       const until = allowances.get(accessKey(server.id, tool.name))

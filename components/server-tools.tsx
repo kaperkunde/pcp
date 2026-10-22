@@ -5,6 +5,10 @@ import Link from "next/link"
 import { useActionState, useId, useState } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
+import {
+  changesServers,
+  useSharedInstances,
+} from "@/components/shared-definition"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -152,6 +156,9 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
     { status: "idle" },
   )
   const replaced = tool.replacedBy && tool.replacedBy.length > 0
+  // A tool's description is its definition's, on every server of it.
+  const instances = useSharedInstances()
+  const shared = instances.length > 1
 
   return (
     <li className="flex flex-col gap-1.5 px-4 py-3 text-sm">
@@ -189,7 +196,20 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
         </Button>
       </div>
       {editing ? (
-        <form action={action} className="flex flex-col gap-2">
+        <form
+          action={action}
+          onSubmit={(event) => {
+            if (
+              shared &&
+              !window.confirm(
+                `${changesServers(instances)}. Save this description for all of them?`,
+              )
+            ) {
+              event.preventDefault()
+            }
+          }}
+          className="flex flex-col gap-2"
+        >
           <input type="hidden" name="serverId" value={serverId} />
           <input type="hidden" name="tool" value={tool.name} />
           <Textarea
@@ -201,6 +221,7 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
           <p className="text-xs text-muted-foreground">
             What assistants read about it. Leave it empty to go back to the
             original description.
+            {shared ? ` ${changesServers(instances)}.` : null}
           </p>
           <FormError error={state.status === "error" ? state.error : null} />
           <div>

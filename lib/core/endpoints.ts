@@ -7,6 +7,14 @@ import type { McpServer } from "@/lib/generated/prisma/client"
 import { storeTools, type SyncResult } from "./catalogue"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import {
+  contentInstance,
+  definitionForNew,
+  disableOtherInstances,
+  ensureDefinition,
+  shareDescription,
+  siblingInstances,
+} from "./definition-rows"
 import { invalid, isPcpError, PcpError } from "./errors"
 import { newId } from "./ids"
 import { executeCall } from "./openapi/call"
@@ -118,6 +126,13 @@ export type EndpointInput = {
   oauthClientSecretValue?: string | null
   oauthScope?: string | null
   oauthAuthorizeParams?: string | null
+  /**
+   * Makes the endpoint an instance of this definition (lib/core/
+   * definitions.ts): its schema, edits, where the schema is read from and
+   * its description are the definition's, and the ones in this input are
+   * not used. Left out, a new endpoint gets a definition of its own.
+   */
+  definitionId?: string | null
 }
 
 /** The header an OAuth endpoint's token, or a login, goes in. */
@@ -445,7 +460,113 @@ async function applySpec(
   )
   await setServerStatus(server.id, "ok", message, { lastSyncedAt: fetchedAt })
 
+  // The schema, its edits and the description are the definition's: every
+  // other instance takes them and rebuilds its tools.
+  await shareSpec(server, { text, hash, patches: edits, fetchedAt })
+  await shareDescription(server.id)
+
   return { status: "ok", message, toolCount }
+}
+
+/**
+ * Gives every other instance of an endpoint's definition the schema and
+ * edits it was just built from, with where the schema is read from, and
+ * rebuilds their tools, each with its own settings (read-only, the headers
+ * its credential takes). An instance that already has them is left alone.
+ * One that does not build keeps its tools and says why in its status.
+ */
+async function shareSpec(
+  server: McpServer,
+  spec: { text: string; hash: string; patches: string; fetchedAt: Date },
+): Promise<void> {
+  const siblings = (await siblingInstances(server.id)).filter(
+    (sibling) => sibling.kind === "openapi",
+  )
+
+  for (const sibling of siblings) {
+    const shared = {
+      specSource: server.specSource,
+      specUrl: server.specUrl,
+      specUrlFromAssistant: server.specUrlFromAssistant,
+    }
+
+    if (
+      sibling.specSource !== shared.specSource ||
+      sibling.specUrl !== shared.specUrl ||
+      sibling.specUrlFromAssistant !== shared.specUrlFromAssistant
+    ) {
+      await db().mcpServer.update({ where: { id: sibling.id }, data: shared })
+    }
+
+    const stored = await db().openApiSpec.findUnique({
+      where: { serverId: sibling.id },
+      select: { hash: true, patches: true },
+    })
+
+    if (stored?.hash === spec.hash && stored.patches === spec.patches) {
+      continue
+    }
+
+    const columns = {
+      text: spec.text,
+      hash: spec.hash,
+      patches: spec.patches,
+      fetchedAt: spec.fetchedAt,
+      builtWith: null,
+    }
+    await db().openApiSpec.upsert({
+      where: { serverId: sibling.id },
+      create: { serverId: sibling.id, ...columns },
+      update: columns,
+    })
+    await rebuildFromCopy({ ...sibling, ...shared })
+  }
+}
+
+/**
+ * Rebuilds one endpoint's tools from the copy of its schema PCP holds, and
+ * says how that went in its status. Nothing is shared from here.
+ */
+async function rebuildFromCopy(server: McpServer): Promise<void> {
+  try {
+    const spec = await storedSpec(server.id)
+
+    if (!spec) {
+      throw invalid("PCP has no copy of this schema.")
+    }
+
+    const generated = generateEndpointTools(spec.text, {
+      readOnly: server.readOnly,
+      authHeaderNames: await authHeaderNames(server),
+      patches: spec.patches,
+    })
+
+    await storeGenerated(server.id, generated)
+    await db().openApiSpec.update({
+      where: { serverId: server.id },
+      data: { builtWith: PCP_VERSION },
+    })
+    await setServerStatus(
+      server.id,
+      "ok",
+      statusNotes(
+        server,
+        await authHeaderNames(server),
+        generated,
+        schemaServerUrl(generated, server.specUrl),
+      ),
+      { lastSyncedAt: new Date() },
+    )
+  } catch (error) {
+    await setServerStatus(
+      server.id,
+      "error",
+      (isPcpError(error)
+        ? error.message
+        : `The shared schema did not build here: ${error instanceof Error ? error.message : String(error)}`
+      ).slice(0, 500),
+    )
+  }
 }
 
 /**
@@ -621,13 +742,51 @@ export function previewEndpoint(
   }
 }
 
+/**
+ * What an endpoint made on a definition takes from it, as input: the
+ * description, and the schema, its edits and where it is read from as
+ * another instance holds them (the copy, not a new download).
+ */
+async function definitionContent(definition: {
+  id: string
+  description: string
+}): Promise<Partial<EndpointInput>> {
+  const source = await contentInstance(definition.id)
+  const spec = source ? await storedSpec(source.id) : null
+
+  if (!source || !spec) {
+    throw invalid(
+      "That definition has no schema to make an endpoint from. Add the endpoint on its own instead.",
+    )
+  }
+
+  const fromUrl = source.specSource === "url" && source.specUrl !== null
+
+  return {
+    description: definition.description,
+    specSource: fromUrl ? "url" : "upload",
+    specUrl: fromUrl ? source.specUrl : null,
+    specText: fromUrl ? null : spec.text,
+    fetched: fromUrl ? { text: spec.text, url: source.specUrl! } : null,
+    patches: spec.patches,
+    specUrlFromAssistant: source.specUrlFromAssistant,
+  }
+}
+
 export async function createEndpoint(
   ctx: VaultContext,
-  input: EndpointInput,
+  given: EndpointInput,
 ): Promise<{ id: string; sync: SyncResult }> {
+  const definition = given.definitionId
+    ? await definitionForNew(ctx, given.definitionId, "openapi")
+    : null
+  const input = definition
+    ? { ...given, ...(await definitionContent(definition)) }
+    : given
   const data = await normalizeEndpoint(ctx, input)
   let text: string
   let fetchedFrom: string | null = null
+  const patches = input.patches ?? []
 
   if (data.specSource === "upload") {
     if (!input.specText?.trim()) {
@@ -644,7 +803,6 @@ export async function createEndpoint(
 
   // Everything that can be wrong with the schema is found before a row
   // exists, so a bad one leaves nothing behind.
-  const patches = input.patches ?? []
   const generated = generateEndpointTools(text, {
     readOnly: data.readOnly,
     authHeaderNames: sentHeaders(data),
@@ -679,6 +837,7 @@ export async function createEndpoint(
         publicOnly: data.publicOnly,
         specUrlFromAssistant:
           data.specSource === "url" && input.specUrlFromAssistant === true,
+        definitionId: definition?.id ?? null,
         authType: data.authType,
         authUsername: data.authUsername,
         authHeaderName: data.authHeaderName,
@@ -694,10 +853,16 @@ export async function createEndpoint(
     })
 
     try {
-      return {
-        id,
-        sync: await applySpec(server, text, patches, generated, fetchedFrom),
-      }
+      const sync = await applySpec(
+        server,
+        text,
+        patches,
+        generated,
+        fetchedFrom,
+      )
+      await ensureDefinition(id)
+
+      return { id, sync }
     } catch (error) {
       // The row exists only for the tools that did not get stored: do not
       // leave an endpoint with none, and a status that says nothing.
@@ -975,11 +1140,28 @@ export async function changeEndpoint(
     changes.patches !== undefined ||
     readOnly !== existing.readOnly
 
+  // A change to what every instance shares, made switched off, switches
+  // every instance off before any of them says what was changed.
+  const shared =
+    changes.description !== undefined ||
+    changes.specText !== undefined ||
+    changes.fetched !== undefined ||
+    changes.patches !== undefined
+  const offEverywhere = changes.disable === true && shared
+
   if (!regenerate) {
     const server =
       Object.keys(data).length || changes.unchanged
         ? await writeChange(id, data, changes.unchanged)
         : existing
+
+    if (offEverywhere) {
+      await disableOtherInstances(id)
+    }
+
+    if (data.description !== undefined) {
+      await shareDescription(id)
+    }
 
     return {
       sync: {
@@ -1004,6 +1186,10 @@ export async function changeEndpoint(
     patches,
   })
   const server = await writeChange(id, { ...data, readOnly }, changes.unchanged)
+
+  if (offEverywhere) {
+    await disableOtherInstances(id)
+  }
 
   return {
     sync: await applySpec(

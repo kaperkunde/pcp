@@ -212,6 +212,13 @@ export const MAX_SKILL_TOOLS = 30
 export const MAX_SKILLS = 200
 
 /**
+ * The owner's own note on a server or skill (lib/core/definitions.ts): one
+ * line, short enough that it sits beside the description in what an
+ * assistant reads.
+ */
+export const MAX_PERSONAL_NOTE = 300
+
+/**
  * Dynamic DNS services PCP can keep pointed at this machine
  * (lib/core/network/ddns.ts). DuckDNS is the one the setup page suggests:
  * free, and a single token.

@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 
+import { ItemAboutRows } from "@/components/item-about"
 import { RelativeDate } from "@/components/local-date"
 import { PageColumn } from "@/components/page-column"
 import { PageHeader } from "@/components/page-header"
@@ -9,14 +10,17 @@ import {
   SkillEditForm,
   SkillFiles,
 } from "@/components/skill-editor"
+import { List, ListSection } from "@/components/ui/list"
 import { isPcpError } from "@/lib/core/errors"
+import { itemAbout } from "@/lib/core/item-about"
 import { getSkill, type SkillSummary } from "@/lib/core/skills"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Skill" }
 
 /**
- * One skill: its fields to edit, the reference files it carries, its whole
+ * One skill: About (what it is, where it came from, how it syncs, your
+ * note), its fields to edit, the reference files it carries, its whole
  * SKILL.md as assistants read it, and deleting it, last.
  */
 export default async function SkillPage({
@@ -38,6 +42,8 @@ export default async function SkillPage({
     throw error
   }
 
+  const about = await itemAbout(ctx, "skill", skill.id)
+
   return (
     <PageColumn width="narrow">
       <PageHeader
@@ -53,6 +59,11 @@ export default async function SkillPage({
           </>
         }
       />
+      <ListSection title="About">
+        <List>
+          <ItemAboutRows about={about} />
+        </List>
+      </ListSection>
       <SkillEditForm
         key={skill.version}
         skill={{

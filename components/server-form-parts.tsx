@@ -3,6 +3,7 @@
 import type { FormEvent, ReactNode } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
+import { useSharedChangeGuard } from "@/components/shared-definition"
 import { SubmitButton } from "@/components/submit-button"
 import { ButtonLink } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -38,10 +39,16 @@ export function ServerFormFrame({
   action: (formData: FormData) => void
   children: ReactNode
 }) {
+  // Editing a server that shares its definition, saving a change to what
+  // they share asks first.
+  const guard = useSharedChangeGuard(editing)
+
   const form = (
     <form
+      ref={guard.ref}
       action={action}
       onInvalidCapture={openFoldedField}
+      onSubmit={guard.onSubmit}
       className="flex flex-col gap-5"
     >
       {children}

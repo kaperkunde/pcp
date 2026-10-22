@@ -1,4 +1,5 @@
 import type { VaultContext } from "./context"
+import { findIdenticalDefinitions } from "./definitions"
 import { countOutdatedInstructions } from "./instructions"
 import { networkNotices } from "./network/runtime"
 import { repoNotices } from "./repos/notices"
@@ -17,6 +18,8 @@ export type OwnerNoticeKind =
   | "instructions"
   /** A linked repository's change waits for review, or is a conflict. */
   | "repos"
+  /** API endpoints with the same schema, which could share one definition. */
+  | "definitions"
 
 export type OwnerNotice = {
   id: string
@@ -53,7 +56,34 @@ async function instructions(ctx: VaultContext): Promise<OwnerNotice[]> {
     : []
 }
 
-const SOURCES: NoticeSource[] = [network, instructions, repoNotices]
+const COUNT_WORDS = ["", "One", "Two", "Three", "Four", "Five", "Six"]
+
+/** Endpoints that hold the same schema: merge them into one definition? */
+export async function definitionNotices(
+  ctx: VaultContext,
+): Promise<OwnerNotice[]> {
+  return (await findIdenticalDefinitions(ctx)).map((group) => {
+    const servers = group.definitions.flatMap((definition) =>
+      definition.instances.map((instance) => instance.slug),
+    )
+    const count = group.definitions.length
+
+    return {
+      id: `definitions:${group.key}`,
+      kind: "definitions" as const,
+      title: `${COUNT_WORDS[count] ?? count} API endpoints have the same schema: merge them?`,
+      href: `/servers/merge/${group.key}`,
+      detail: servers.join(", "),
+    }
+  })
+}
+
+const SOURCES: NoticeSource[] = [
+  network,
+  instructions,
+  repoNotices,
+  definitionNotices,
+]
 
 /** Every notice for the owner now, the machine's first. */
 export async function listOwnerNotices(

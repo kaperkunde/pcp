@@ -36,6 +36,7 @@ import {
 } from "./crypto"
 import { withBrowserClosed } from "./browser/runtime"
 import { db } from "./db"
+import { backfillDefinitions } from "./definition-rows"
 import { invalid, isPcpError, PcpError } from "./errors"
 import { listMigrations } from "./migrate"
 import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
@@ -214,6 +215,9 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
               where: { secret: { vaultId } },
             })
           ).map(rowJson),
+          serverDefinitions: (await tx.serverDefinition.findMany(byVault)).map(
+            rowJson,
+          ),
           servers: (await tx.mcpServer.findMany(byVault)).map(rowJson),
           serverAuthHeaders: (await tx.serverAuthHeader.findMany(byServer)).map(
             rowJson,
@@ -471,9 +475,14 @@ async function writeExport(
         await inChunks(tables.secretBrowserOrigins, (data) =>
           tx.secretBrowserOrigin.createMany({ data }),
         )
+        await inChunks(tables.serverDefinitions, (data) =>
+          tx.serverDefinition.createMany({ data }),
+        )
         await inChunks(tables.servers, (data) =>
           tx.mcpServer.createMany({ data }),
         )
+        // A file from before definitions: each server its own.
+        await backfillDefinitions(tx, vault.id)
         await inChunks(tables.serverAuthHeaders, (data) =>
           tx.serverAuthHeader.createMany({ data }),
         )
@@ -588,6 +597,7 @@ export async function wipeVault(
   await tx.serverAuthHeader.deleteMany(byServer)
   await tx.mcpServer.deleteMany(byVault)
   await tx.secretBrowserOrigin.deleteMany({ where: { secret: { vaultId } } })
+  await tx.serverDefinition.deleteMany(byVault)
   await tx.secret.deleteMany(byVault)
   await tx.apiToken.deleteMany(byVault)
   await tx.session.deleteMany(byVault)
