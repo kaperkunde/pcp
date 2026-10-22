@@ -87,7 +87,11 @@ build's checkout only. The images are pushed as `<version>` and `develop`
 `PCP_TAG=develop` with compose pull. A pre-release is never GitHub's latest
 release, so the stable channel, the README's links and the app's updater keep
 to `main`'s releases; an owner on the develop channel (Settings → Updates) is
-offered each build, then the release. Only the newest five builds stay on the
+offered each build, then the release. So a release later than every build of
+`develop` moves the `develop` tag as well as `latest` (`release.yml`,
+`scripts/version.mjs leads`): the fast-forward of `develop` builds nothing,
+and that channel would otherwise be offered the release and pull the build it
+already runs. Only the newest five builds stay on the
 release page. `release.yml` and `develop.yml` share the app and image builds
 (`build-desktop.yml`, `build-images.yml`), and `release.yml` ignores the `-dev`
 tags, so merging `develop` into `main` still releases.

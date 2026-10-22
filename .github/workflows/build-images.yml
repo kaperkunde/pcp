@@ -4,7 +4,9 @@
 # channel's tag is `latest` for a release from main (release.yml), which
 # install.sh and docker-compose.yaml pull, and `develop` for a build of
 # develop (develop.yml), which they pull with PCP_CHANNEL=develop and
-# PCP_TAG=develop.
+# PCP_TAG=develop. A release later than every build of develop moves
+# `develop` too (release.yml's develop-tag): the develop channel is offered
+# that release, so its tag has to carry it.
 #
 # The version is written into the checkout's package.json before the build,
 # as build-desktop.yml does: the image reads it from there.
@@ -22,6 +24,13 @@ on:
         description: The moving tag beside the version, latest or develop.
         required: true
         type: string
+      develop-tag:
+        description: >-
+          Also move the develop tag: a release later than every build of
+          develop, which the develop channel is offered as well.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,11 +46,16 @@ jobs:
       - name: Check the tag
         env:
           CHANNEL_TAG: ${{ inputs.channel-tag }}
+          DEVELOP_TAG: ${{ inputs.develop-tag }}
         run: |
           case "$CHANNEL_TAG" in
             latest | develop) ;;
             *) echo "::error::Not a channel's tag: $CHANNEL_TAG"; exit 1 ;;
           esac
+          if [ "$DEVELOP_TAG" = true ] && [ "$CHANNEL_TAG" != latest ]; then
+            echo "::error::Only a release moves the develop tag beside its own."
+            exit 1
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: v${{ inputs.version }}
@@ -68,6 +82,7 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ inputs.version }}
             ghcr.io/${{ github.repository }}:${{ inputs.channel-tag }}
+            ${{ inputs.develop-tag && format('ghcr.io/{0}:develop', github.repository) || '' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ inputs.version }}
@@ -86,6 +101,7 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}-sandbox:${{ inputs.version }}
             ghcr.io/${{ github.repository }}-sandbox:${{ inputs.channel-tag }}
+            ${{ inputs.develop-tag && format('ghcr.io/{0}-sandbox:develop', github.repository) || '' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ inputs.version }}
