@@ -1,6 +1,7 @@
 import {
   BookOpen,
   ChevronLeft,
+  FolderGit2,
   Globe,
   ListChecks,
   Server,
@@ -19,6 +20,7 @@ import { PageColumn } from "@/components/page-column"
 import { PermissionDecision } from "@/components/permission-decision"
 import { PermissionLines } from "@/components/permission-lines"
 import { PermissionOutcome } from "@/components/permission-outcome"
+import { RepoReview } from "@/components/repo-review"
 import { buttonVariants } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { IconTile } from "@/components/ui/icon-tile"
@@ -115,7 +117,8 @@ export default async function PermissionPage({
     handedTab ||
     (access && pending) ||
     view.wrapper !== null ||
-    view.skill !== null,
+    view.skill !== null ||
+    view.repo !== null,
   )
 
   return (
@@ -189,6 +192,7 @@ export default async function PermissionPage({
           </p>
         ) : null}
         {view.wrapper ? <WrapperReview shown={view.wrapper} /> : null}
+        {view.repo ? <RepoReview shown={view.repo} /> : null}
         {pending && proposal ? (
           <>
             <p className="text-muted-foreground">
@@ -280,6 +284,8 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={BookOpen} className={tile} />
     case "skill_change":
       return <IconTile size="lg" icon={ListChecks} className={tile} />
+    case "repo_change":
+      return <IconTile size="lg" icon={FolderGit2} className={tile} />
     case "access":
       return <IconTile size="lg" icon={SlidersHorizontal} className={tile} />
     case "fetch":
@@ -371,6 +377,18 @@ function PendingNote({
           under{" "}
           <Link href="/skills" className="underline">
             Skills
+          </Link>
+          .
+        </p>
+      )
+    case "repo_change":
+      return (
+        <p className={note}>
+          Applying it writes the item exactly as shown above, and only if
+          neither your vault&apos;s item nor the repository&apos;s change moved
+          since the assistant asked. Linked repositories are under{" "}
+          <Link href="/settings/repositories" className="underline">
+            Settings › Repositories
           </Link>
           .
         </p>

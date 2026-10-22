@@ -96,7 +96,13 @@ export function SkillReview({ skill }: { skill: SkillShown }) {
 }
 
 /** Lines in and out, each marked with + or − as well as its colour. */
-function Diff({ lines, testId }: { lines: DiffLine[]; testId?: string }) {
+export function Diff({
+  lines,
+  testId,
+}: {
+  lines: DiffLine[]
+  testId?: string
+}) {
   return (
     <div
       className="max-h-[28rem] overflow-auto rounded-xl bg-field py-2 font-mono text-[12px] leading-relaxed"

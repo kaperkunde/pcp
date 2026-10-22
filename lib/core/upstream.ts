@@ -27,6 +27,8 @@ import { invalid, isPcpError, PcpError } from "./errors"
 import { callCalendarTool, syncCalendarTools } from "./caldav/accounts"
 import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
+import type { GitHubCredential } from "./repos/github"
+import { GITHUB_SIGNIN_SECRET } from "./repos/limits"
 import type { SshIdentity } from "./ssh/client"
 import { callSshTool, syncSshTools } from "./ssh/hosts"
 import {
@@ -81,7 +83,9 @@ import {
  * or login this module builds, or an OAuth token it renews; calendar
  * accounts (kind "caldav") to lib/core/caldav/accounts.ts, the same way;
  * SSH servers (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the
- * server, decrypted here.
+ * server, decrypted here. Linked repositories' GitHub client
+ * (lib/core/repos/github.ts) gets its Authorization header from
+ * githubCredential, the same way.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -882,6 +886,65 @@ async function credential(
   }
 
   return { headers, redact, login: null }
+}
+
+/**
+ * What PCP signs in to GitHub with for a linked repository
+ * (lib/core/repos/github.ts): the Authorization header made from the secret
+ * the owner chose for it, and the values to keep out of what is repeated.
+ * Only a text secret (a personal access token) or the token of PCP's own
+ * GitHub sign-in is sent: no other server's OAuth tokens ever go to GitHub.
+ * Null for a repository read without one.
+ */
+export async function githubCredential(
+  ctx: VaultContext,
+  secretId: string | null,
+): Promise<GitHubCredential | null> {
+  if (!secretId) {
+    return null
+  }
+
+  const row = await db().secret.findFirst({
+    where: { id: secretId, vaultId: ctx.vaultId },
+    select: { kind: true, name: true },
+  })
+
+  if (
+    !row ||
+    !(
+      row.kind === "text" ||
+      (row.kind === "oauth" && row.name === GITHUB_SIGNIN_SECRET)
+    )
+  ) {
+    throw new PcpError(
+      "state",
+      "The repository's secret is gone or is not one PCP sends to GitHub. Choose its sign-in again.",
+    )
+  }
+
+  const value = await readSecretValue(ctx, secretId)
+  let token = value.trim()
+
+  if (row.kind === "oauth") {
+    try {
+      token = String(
+        (JSON.parse(value) as { access_token?: unknown }).access_token ?? "",
+      )
+    } catch {
+      token = ""
+    }
+  }
+
+  if (!token || /[\u0000-\u001f\u007f\s]/.test(token)) {
+    throw new PcpError(
+      "state",
+      "The repository's secret is empty or has a character a header cannot carry. Check its value.",
+    )
+  }
+
+  const header = `Bearer ${token}`
+
+  return { headers: { Authorization: header }, redact: [token, header, value] }
 }
 
 async function basicCredential(

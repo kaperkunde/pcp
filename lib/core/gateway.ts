@@ -178,6 +178,15 @@ import {
   proposeWrapperDelete,
 } from "./wrappers/admin"
 import { markedReadOnly } from "./read-only"
+import {
+  describeRepoChange,
+  isRepoPath,
+  REPO_REF,
+  REPO_ROOT,
+  runRepoCommand,
+  searchRepoChanges,
+  type RepoOutcome,
+} from "./repos/assist"
 import { readWrapperOperation } from "./wrappers/definition"
 import {
   FLOW_RUN_TIMEOUT_MS,
@@ -772,6 +781,14 @@ export function buildGatewayServer(
   const slugs = servers.map((entry) => entry.slug)
   const bySlug = new Map(servers.map((entry) => [entry.slug, entry]))
 
+  /** What linked repositories' changes this token may help with. */
+  const repoScope = () => ({
+    ctx: scope.ctx,
+    tokenId: scope.tokenId,
+    tokenName: scope.tokenName,
+    manageEndpoints: scope.manageEndpoints,
+  })
+
   /**
    * What runs a call: a wrapper's tool runs its program, whose calls follow
    * this token's levels and never ask the owner on their own.
@@ -984,9 +1001,17 @@ export function buildGatewayServer(
             `Only tools, on one server: ${slugs.length ? slugs.join(", ") : "(none)"}.`,
           ),
         kind: z
-          .enum(["tool", "skill", "memory"])
+          .enum(
+            scope.manageEndpoints
+              ? ["tool", "skill", "memory", "repo"]
+              : ["tool", "skill", "memory"],
+          )
           .optional()
-          .describe("Only one kind of result."),
+          .describe(
+            scope.manageEndpoints
+              ? "Only one kind of result. repo: changes from linked repositories waiting for the owner (a conflict, or a change to review), which you can help with."
+              : "Only one kind of result.",
+          ),
         limit: searchLimit,
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -995,12 +1020,37 @@ export function buildGatewayServer(
       async (args: {
         query: string
         server?: string
-        kind?: SearchKind
+        kind?: SearchKind | "repo"
         limit?: number
       }) => {
         if (args.server && !bySlug.has(args.server)) {
           return failure(
             `No server called ${args.server}. Servers: ${slugs.join(", ") || "(none)"}.`,
+          )
+        }
+
+        // Changes from linked repositories: only a token that may manage
+        // endpoints sees them, all of them when it asks for that kind.
+        const repoResults =
+          scope.manageEndpoints && !args.server
+            ? await searchRepoChanges(
+                repoScope(),
+                args.kind === "repo" ? null : args.query,
+              )
+            : []
+
+        if (args.kind === "repo") {
+          return text(
+            repoResults.length === 0
+              ? "No change from a linked repository is waiting for the owner."
+              : [
+                  ...repoResults.map(
+                    (result) =>
+                      `repo ${result.ref} (${result.title}) — ${result.description}`,
+                  ),
+                  "",
+                  "describe takes a ref as it is here.",
+                ].join("\n"),
           )
         }
 
@@ -1016,7 +1066,7 @@ export function buildGatewayServer(
           { limit: args.limit ?? 10, server: args.server, kind: args.kind },
         )
 
-        if (results.length === 0) {
+        if (results.length === 0 && repoResults.length === 0) {
           return text(
             `Nothing matches "${args.query}". Try other words, or list_tools for every tool on a server.`,
           )
@@ -1028,6 +1078,12 @@ export function buildGatewayServer(
               (result) =>
                 `${result.kind} ${result.ref}${result.title ? ` (${result.title})` : ""} — ${result.description}`,
             ),
+            ...(args.kind
+              ? []
+              : repoResults.map(
+                  (result) =>
+                    `repo ${result.ref} (${result.title}) — ${result.description}`,
+                )),
             "",
             "describe takes a ref as it is here.",
           ].join("\n"),
@@ -1232,6 +1288,26 @@ export function buildGatewayServer(
       return failure(
         "Give a ref as search gives it: server/tool, skill:<name>, or a memory's path.",
       )
+    }
+
+    if (ref.startsWith(REPO_REF)) {
+      if (!scope.manageEndpoints) {
+        return failure(
+          "Changes from linked repositories are for tokens the owner lets manage endpoints.",
+        )
+      }
+
+      try {
+        return text(
+          await describeRepoChange(repoScope(), ref.slice(REPO_REF.length)),
+        )
+      } catch (error) {
+        if (isPcpError(error)) {
+          return failure(error.message)
+        }
+
+        throw error
+      }
     }
 
     if (ref.startsWith(SKILL_REF) || isSkillPath(ref)) {
@@ -3137,7 +3213,39 @@ export function buildGatewayServer(
     /** A command on a memory, or on a skill when its path is one. */
     const runCommand = async (
       args: MemoryCommand,
-    ): Promise<MemoryOutcome | SkillOutcome | { refused: string }> => {
+    ): Promise<
+      MemoryOutcome | SkillOutcome | RepoOutcome | { refused: string }
+    > => {
+      if (isRepoPath(args.path) || isRepoPath(args.new_path)) {
+        if (!scope.manageEndpoints) {
+          return {
+            refused: `${REPO_ROOT}/ is for tokens the owner lets manage endpoints: this one does not.`,
+          }
+        }
+
+        if (args.command === "rename" || args.command === "every") {
+          return {
+            refused: `${REPO_ROOT}/ takes view, create, str_replace and delete.`,
+          }
+        }
+
+        if (args.command === "search" || args.command === "insert") {
+          return {
+            refused: `${REPO_ROOT}/ takes view, create, str_replace and delete; search with search, kind repo.`,
+          }
+        }
+
+        try {
+          return await runRepoCommand(repoScope(), args)
+        } catch (error) {
+          if (isPcpError(error)) {
+            return { refused: error.message }
+          }
+
+          throw error
+        }
+      }
+
       const skillish = isSkillPath(args.path)
 
       if (!skillish && !isSkillPath(args.new_path)) {
@@ -3214,7 +3322,9 @@ export function buildGatewayServer(
       "memory",
       {
         title: "Memory",
-        description: MEMORY_TOOL_DESCRIPTION,
+        description: scope.manageEndpoints
+          ? `${MEMORY_TOOL_DESCRIPTION} A change from a linked repository that waits for the owner (search kind repo, then describe its ref) is at ${REPO_ROOT}/<id>/: write the files as they should be, then ${REPO_ROOT}/<id>/REVIEW.md with your safety review, which asks the owner once.`
+          : MEMORY_TOOL_DESCRIPTION,
         inputSchema: z.object({
           command: z.enum([
             "every",
