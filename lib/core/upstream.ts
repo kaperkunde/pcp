@@ -1289,6 +1289,12 @@ export type CallOptions = {
   /** The run_code or wrapper run the call is made for (code/runs.ts). */
   runId?: string
   /**
+   * Told the id of the run a wrapper's tool starts for this call
+   * (wrappers/run.ts), so the calling run's trace names it. Only a
+   * wrapper's tool looks at it.
+   */
+  onRun?: (runId: string) => void
+  /**
    * Aborts when the run the call is made for is over (its own limit, or it
    * ended), never because its client went away. The browser honours it: a
    * call waiting its turn on a tab, or running, stops waiting, is rejected

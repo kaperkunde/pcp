@@ -7,15 +7,17 @@ import { ServerList } from "@/components/server-list"
 import { ListSection } from "@/components/ui/list"
 import { listApiTokens } from "@/lib/core/api-tokens"
 import { listServers } from "@/lib/core/servers"
+import { flowWrapperIds } from "@/lib/core/wrappers/definition"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Servers" }
 
 export default async function ServersPage() {
   const ctx = await requireContext()
-  const [servers, tokens] = await Promise.all([
+  const [servers, tokens, flows] = await Promise.all([
     listServers(ctx),
     listApiTokens(ctx),
+    flowWrapperIds(ctx),
   ])
   const now = new Date()
   const hasToken = tokens.some(
@@ -51,6 +53,7 @@ export default async function ServersPage() {
               status: server.status,
               connected: server.connected,
               toolCount: server.toolCount,
+              flow: flows.has(server.id),
             }))}
           />
         </ListSection>

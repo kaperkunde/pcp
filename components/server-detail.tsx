@@ -62,6 +62,8 @@ export type ServerDetailProps = {
     oauthConnection: OAuthConnection | null
     /** OAuth: what the sign-in adds to its address, as the owner set it. */
     oauthAuthorizeParams: string
+    /** A wrapper whose tools drive the browser (a browser flow). */
+    flow?: boolean
   }
   tools: ServerTool[]
   notice: { kind: "ok" | "error"; message: string } | null
@@ -164,6 +166,9 @@ export function ServerDetail({
             </span>
             {(endpoint || mail || calendar) && server.readOnly ? (
               <Badge variant="secondary">Read-only</Badge>
+            ) : null}
+            {wrapper && server.flow ? (
+              <Badge variant="secondary">Browser flow</Badge>
             ) : null}
             {/* An endpoint says so under Advanced, with its other facts. */}
             {server.kind === "mcp" && server.publicOnly ? (

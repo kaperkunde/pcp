@@ -734,6 +734,26 @@ describe("how a run says it ended", () => {
     expect(text).not.toContain("zebra")
   })
 
+  it("names the step each call was made in, and the step that failed", async () => {
+    await connect()
+    const { isError, text } = await run(`
+      await pcp.step("file it\\naway", async () => {
+        await pcp.call("postcards", "archive", { label: "zebra" })
+      })
+      await pcp.step("send it", async () => {
+        await pcp.call("postcards", "send_postcard_x", {}).catch(() => {})
+        throw new Error("no stamp")
+      })
+    `)
+
+    expect(isError).toBe(true)
+    expect(text).toContain("Error: failed at step 'send it': no stamp")
+    // A step's name is kept to one line in the trace.
+    expect(text).toMatch(
+      /- postcards\/archive \(step 'file it away'\): ok, \d+\.\d s/,
+    )
+  })
+
   it("says nothing may have taken effect when only reads ran", async () => {
     await connect()
     const { text } = await run(
