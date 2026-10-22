@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/page-header"
 import { AddItemsButton } from "@/components/repo-forms"
 import { RepoFilesReview } from "@/components/repo-review"
 import { Badge } from "@/components/ui/badge"
+import { ButtonLink } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { isPcpError } from "@/lib/core/errors"
 import { resolveItem, type ResolvedItem } from "@/lib/core/repos/apply"
@@ -31,6 +32,18 @@ type Shown = {
   review: ItemReview | null
   resolved: ResolvedItem | null
   problem: string | null
+}
+
+/**
+ * A new MCP server or endpoint is added on a page of its own: the
+ * repository has its definition, and the owner gives their server's own
+ * address, sign-in and note there.
+ */
+function needsInstance(entry: Shown): boolean {
+  return (
+    !!entry.review?.isNew &&
+    (entry.review.ref.kind === "endpoint" || entry.review.ref.kind === "server")
+  )
 }
 
 function listOf(value: string | string[] | undefined): string[] {
@@ -104,7 +117,9 @@ export default async function AddPage({
             )
           }
 
-          const resolved = await resolveItem(ctx, fetched.document)
+          const resolved = await resolveItem(ctx, fetched.document, {
+            onto: current !== null,
+          })
 
           return {
             root,
@@ -133,7 +148,9 @@ export default async function AddPage({
     failure = error.message
   }
 
-  const ready = shown.filter((entry) => entry.fetched && !entry.problem)
+  const ready = shown.filter(
+    (entry) => entry.fetched && !entry.problem && !needsInstance(entry),
+  )
 
   return (
     <PageColumn width="narrow">
@@ -174,7 +191,26 @@ export default async function AddPage({
               {entry.problem} It is left out.
             </p>
           ) : null}
-          {entry.resolved && entry.resolved.missingSecrets.length > 0 ? (
+          {entry.fetched && !entry.problem && needsInstance(entry) ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-field p-3 text-sm">
+              <span className="text-muted-foreground">
+                The repository has what it is. Where yours is and how it signs
+                in are yours to give.
+              </span>
+              <ButtonLink
+                href={`/settings/repositories/${id}/import?${new URLSearchParams(
+                  { commit, root: entry.root },
+                )}`}
+                variant="secondary"
+                size="sm"
+              >
+                Add with your address
+              </ButtonLink>
+            </div>
+          ) : null}
+          {entry.resolved &&
+          entry.resolved.missingSecrets.length > 0 &&
+          !needsInstance(entry) ? (
             <p className="text-sm text-warning" role="note">
               It names secrets your vault does not have:{" "}
               {entry.resolved.missingSecrets

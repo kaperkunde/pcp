@@ -2,11 +2,16 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, isPcpError, PcpError } from "../errors"
 
-import { applyItem, resolveItem, type ResolvedItem } from "./apply"
-import { refOf, type ItemDocument } from "./documents"
+import {
+  applyItem,
+  resolveItem,
+  type InstanceInput,
+  type ResolvedItem,
+} from "./apply"
+import type { ItemDocument } from "./documents"
 import { commitAt, type GitHub } from "./github"
 import { localHash } from "./hash"
-import { itemRoot, type ItemKind, type ItemRef } from "./layout"
+import type { ItemRef } from "./layout"
 import {
   MAX_SYNC_ITEMS_PER_RUN,
   SYNC_BUDGET_MS,
@@ -30,6 +35,7 @@ import {
   getRepoItem,
   linkItem,
   listRepoItems,
+  refreshVisibility,
   saveItem,
   type Pending,
   type RepoItemData,
@@ -45,10 +51,13 @@ import {
  * then.
  *
  * - Neither changed: nothing.
- * - Only the repository's: it is pulled. From a trusted repository a change
- *   that is text only (review.ts `textOnly`) is applied at once; anything
- *   else, and everything from an untrusted repository, waits for the owner
- *   as a review (the item's `pending`, named by its git id).
+ * - Only the repository's: it is pulled. From a trusted repository the owner
+ *   pushes to (read and write), a change that is text only (review.ts
+ *   `textOnly`) is applied at once; anything else, everything from an
+ *   untrusted repository, and every change to an item imported from a
+ *   read-only one, waits for the owner as a review (the item's `pending`,
+ *   named by its git id): an import stays at the commit the owner reviewed
+ *   until they take the update.
  * - Only the vault's, with two-way sync on: it is pushed. Otherwise it stays
  *   as a local change.
  * - Both: a conflict. Nothing is applied or pushed; the owner keeps theirs,
@@ -135,7 +144,12 @@ export async function syncItem(
         })
 
         return save(
-          { ...cleared(data), remoteSha: pushed.sha, localHash: localNow },
+          {
+            ...cleared(data),
+            remoteSha: pushed.sha,
+            localHash: localNow,
+            commit: pushed.commit ?? data.commit ?? null,
+          },
           "ok",
           { outcome: "pushed", message: "Your change was pushed." },
         )
@@ -178,7 +192,13 @@ export async function syncItem(
       )
     }
 
-    if (kind === "review" && repo.trust === "trusted" && review.textOnly) {
+    // Only from a repository the owner pushes to: an import is pinned.
+    if (
+      kind === "review" &&
+      repo.trust === "trusted" &&
+      repo.access === "write" &&
+      review.textOnly
+    ) {
       await applyItem(ctx, fetched.document, { id: item.itemId })
       const after = await localOf(ctx, item)
 
@@ -188,6 +208,7 @@ export async function syncItem(
           remoteSha: remote.sha,
           localHash: localHash(after.document),
           declinedSha: null,
+          commit: listing.head.commit,
         },
         "ok",
         {
@@ -215,9 +236,11 @@ export async function syncItem(
           ? "Both your vault and the repository changed it: nothing was applied."
           : review.flags.length > 0
             ? `It changes ${plural(review.flags.length, "thing")} that reach further: it waits for you.`
-            : repo.trust === "trusted"
-              ? "The change waits for you."
-              : "The repository is not one you trust, so the change waits for you.",
+            : repo.access !== "write"
+              ? "An update is available: what you added stays as you reviewed it until you take it."
+              : repo.trust === "trusted"
+                ? "The change waits for you."
+                : "The repository is not one you trust, so the change waits for you.",
     })
   } catch (error) {
     if (!isPcpError(error)) {
@@ -249,10 +272,11 @@ export async function syncRepo(
 
   const gh = await clientFor(ctx, repo)
   const listing = await listRemote(gh, repo, repo.branch)
+  const fresh = await refreshVisibility(ctx, repo, gh)
   const results: SyncResult[] = []
 
   for (const item of items) {
-    results.push(await syncItem(ctx, item.id, { gh, listing, repo }))
+    results.push(await syncItem(ctx, item.id, { gh, listing, repo: fresh }))
   }
 
   return results
@@ -342,7 +366,8 @@ export async function runDueSyncs(
       try {
         const repo = await getRepo(ctx, repoId)
         const gh = await clientFor(ctx, repo)
-        given = { repo, gh, listing: await listRemote(gh, repo, repo.branch) }
+        const listing = await listRemote(gh, repo, repo.branch)
+        given = { repo: await refreshVisibility(ctx, repo, gh), gh, listing }
       } catch (error) {
         if (!isPcpError(error)) {
           throw error
@@ -437,7 +462,7 @@ export async function pendingChange(
     local,
     incoming,
     review: reviewItem(local, incoming.document),
-    resolved: await resolveItem(ctx, incoming.document),
+    resolved: await resolveItem(ctx, incoming.document, { onto: true }),
   }
 }
 
@@ -625,10 +650,20 @@ export async function applyMerged(
 
 // ---- Adding and pushing items ---------------------------------------------------
 
-export type AddChoice = { root: string; hash: string }
+export type AddChoice = {
+  root: string
+  hash: string
+  /**
+   * A new server or endpoint's first instance, as the owner gave it on the
+   * page that adds it: its name, address, sign-in and note.
+   */
+  instance?: InstanceInput
+}
 
 export type AddResult = {
   root: string
+  /** The vault's item it became: the skill's id, or the server row's. */
+  id?: string
   ok: boolean
   message: string
   notes: string[]
@@ -686,6 +721,7 @@ export async function addFromRepo(
 
       const applied = await applyItem(ctx, fetched.document, {
         id: found?.id ?? null,
+        instance: found ? undefined : choice.instance,
       })
       const kind = fetched.document.kind
       const after = await localItem(ctx, kind, applied.id)
@@ -696,10 +732,12 @@ export async function addFromRepo(
         path: remote.root,
         remoteSha: remote.sha,
         localHash: localHash(after.document),
+        commit: listing.head.commit,
       })
 
       results.push({
         root: choice.root,
+        id: applied.id,
         ok: true,
         message: found ? "Updated from the repository." : "Added.",
         notes: applied.notes,
@@ -715,79 +753,6 @@ export async function addFromRepo(
         message: error.message,
         notes: [],
       })
-    }
-  }
-
-  return results
-}
-
-export type PushResult = {
-  name: string
-  ok: boolean
-  message: string
-}
-
-/**
- * Pushes items of the vault the owner chose to a read-write repository,
- * one commit each, and links them (two-way, daily) where they went.
- */
-export async function pushItems(
-  ctx: VaultContext,
-  repoId: string,
-  items: Array<{ kind: ItemKind; id: string }>,
-): Promise<PushResult[]> {
-  if (items.length === 0) {
-    throw invalid("Choose at least one item to push.")
-  }
-
-  const repo = await getRepo(ctx, repoId)
-  const gh = await clientFor(ctx, repo)
-  const linked = await listRepoItems(ctx)
-  const results: PushResult[] = []
-
-  for (const choice of items) {
-    let name = choice.id
-
-    try {
-      const local = await localItem(ctx, choice.kind, choice.id)
-      name = local.document.name
-      const link = linked.find((entry) => entry.itemId === choice.id)
-
-      if (link && link.repoId !== repoId) {
-        throw new PcpError(
-          "conflict",
-          "It is linked to another repository: unlink it there first.",
-        )
-      }
-
-      const root = link?.data.path ?? itemRoot(refOf(local.document))
-      const pushed = await pushDocument(gh, repo, local.document, {
-        root,
-        proposer: { by: "owner" },
-      })
-
-      await linkItem(ctx, repoId, {
-        kind: local.document.kind,
-        itemId: choice.id,
-        path: root,
-        remoteSha: pushed.sha,
-        localHash: localHash(local.document),
-        bidirectional: link?.bidirectional ?? true,
-      })
-
-      results.push({
-        name,
-        ok: true,
-        message: pushed.commit
-          ? `Pushed to ${root}.`
-          : `${root} was the same already.`,
-      })
-    } catch (error) {
-      if (!isPcpError(error)) {
-        throw error
-      }
-
-      results.push({ name, ok: false, message: error.message })
     }
   }
 

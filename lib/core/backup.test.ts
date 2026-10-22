@@ -44,7 +44,13 @@ import { createServer } from "./servers"
 import { createSkill, deleteSkill, listSkills, setTokenSkills } from "./skills"
 import { saveWrapperByOwner } from "./wrappers/admin"
 import { addLinkedRepo } from "./repos/test-vault"
-import { listRepoItems, listRepos } from "./repos/store"
+import {
+  getRepo,
+  listExclusions,
+  listRepoItems,
+  listRepos,
+  setExcluded,
+} from "./repos/store"
 import { createSession, resolveSession } from "./sessions"
 import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
@@ -744,6 +750,64 @@ describe("restoring", { timeout: 60_000 }, () => {
     await expect(
       readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
     ).rejects.toThrow(/names no item/)
+  })
+
+  it("carries what is kept out of a repository and whether it is private, and restores a file from before them", async () => {
+    const { ctx, secretId } = await populate()
+    const { id: skillId } = await createSkill(ctx, {
+      name: "release-notes",
+      description: "Write release notes.",
+      body: "List the changes.",
+      tools: [],
+    })
+    const { id: other } = await createSkill(ctx, {
+      name: "private-notes",
+      description: "Mine alone.",
+      body: "Keep them.",
+      tools: [],
+    })
+    const { repoId } = await addLinkedRepo(ctx, { skillId, secretId })
+    await db().repo.update({ where: { id: repoId }, data: { private: true } })
+    await setExcluded(ctx, repoId, { kind: "skill", id: other }, true)
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const raw = await openRaw(file, EXPORT_PASSWORD)
+    expect(raw.tables.repoExclusions).toHaveLength(1)
+
+    const { payload } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await listExclusions(ctx, repoId)).toEqual(
+      new Set([`skill:${other}`]),
+    )
+    expect((await getRepo(ctx, repoId)).visibility).toBe("private")
+
+    // A file from before them: nothing kept out, visibility not asked yet.
+    const older = structuredClone(raw)
+    delete (older.tables as Record<string, unknown>).repoExclusions
+    for (const repo of older.tables.repos ?? []) {
+      delete (repo as Record<string, unknown>).private
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().repoExclusion.count()).toBe(0)
+    expect((await getRepo(ctx, repoId)).visibility).toBe("unknown")
+
+    // One that names no item, or two, is refused.
+    const broken = structuredClone(raw)
+    broken.tables.repoExclusions![0]!.skillId = null
+    await expect(
+      readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow(/excluded item names no item/)
   })
 
   it("carries the sites a secret is typed at, never a token's allowance there, and restores a file from before them", async () => {

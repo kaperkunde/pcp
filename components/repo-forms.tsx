@@ -16,7 +16,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
-import { Checkbox, Input, Select } from "@/components/ui/input"
+import { Input, Select } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import {
@@ -25,7 +25,7 @@ import {
   createRepoAction,
   deleteRepoAction,
   pollGitHubSignInAction,
-  pushItemsAction,
+  setExcludedAction,
   setItemSyncAction,
   startGitHubSignInAction,
   syncItemAction,
@@ -83,11 +83,13 @@ function TrustWarning() {
         className="mt-0.5 size-4 shrink-0 text-warning"
       />
       <span>
-        Sync then changes a skill&apos;s text from this repository without
-        asking you: whoever can push to it can put instructions in front of your
-        assistants (prompt injection). Trust only a repository you or people you
-        trust control. Anything that reaches further than text still waits for
-        you.
+        When you can push to it too (read and write), sync then changes a
+        skill&apos;s text from this repository without asking you: whoever can
+        push to it can put instructions in front of your assistants (prompt
+        injection). Trust only a repository you or people you trust control.
+        Anything that reaches further than text still waits for you, and what
+        you add from a read-only repository stays as you reviewed it until you
+        take an update.
       </span>
     </p>
   )
@@ -612,83 +614,57 @@ export function AddItemsButton({
   )
 }
 
-/** The push page: the owner's items, some or all, one commit each. */
-export function PushChooser({
+/**
+ * Keeps an item out of the repository on purpose (Excluded), or takes it
+ * back in (Not pushed).
+ */
+export function ExcludeButton({
   repoId,
-  items,
+  item,
+  excluded,
+  label,
 }: {
   repoId: string
-  items: Array<{ kind: string; id: string; label: string; note: string | null }>
+  /** "kind:id". */
+  item: string
+  excluded: boolean
+  label: string
 }) {
-  const [chosen, setChosen] = useState<Set<string>>(new Set())
   const [state, setState] = useState<RepoActionResult>(IDLE)
   const [pending, start] = useTransition()
-  const key = (item: { kind: string; id: string }) => `${item.kind}:${item.id}`
 
   return (
-    <div className="flex flex-col gap-4">
-      <ul className="flex flex-col gap-2" aria-label="Your items">
-        {items.map((item) => (
-          <li key={key(item)} className="flex items-start gap-3">
-            <Checkbox
-              id={`push-${key(item)}`}
-              checked={chosen.has(key(item))}
-              onChange={(event) => {
-                const next = new Set(chosen)
-                if (event.target.checked) next.add(key(item))
-                else next.delete(key(item))
-                setChosen(next)
-              }}
-            />
-            <label
-              htmlFor={`push-${key(item)}`}
-              className="flex flex-col text-sm"
-            >
-              <span>{item.label}</span>
-              {item.note ? (
-                <span className="text-xs text-muted-foreground">
-                  {item.note}
-                </span>
-              ) : null}
-            </label>
-          </li>
-        ))}
-      </ul>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          variant="plain"
-          size="sm"
-          onClick={() => setChosen(new Set(items.map(key)))}
-        >
-          Choose all
-        </Button>
-        <Button
-          type="button"
-          disabled={pending || chosen.size === 0}
-          onClick={() =>
-            start(async () =>
-              setState(
-                await pushItemsAction(
-                  repoId,
-                  items
-                    .filter((item) => chosen.has(key(item)))
-                    .map(({ kind, id }) => ({ kind, id })),
-                ),
-              ),
-            )
-          }
-        >
-          {pending
-            ? "Pushing…"
-            : `Push ${chosen.size === 1 ? "1 item" : `${chosen.size} items`}`}
-        </Button>
-      </div>
-      <ResultLines state={state} />
-    </div>
+    <span className="flex flex-col items-end gap-1">
+      <Button
+        type="button"
+        variant="plain"
+        size="sm"
+        disabled={pending}
+        aria-label={`${excluded ? "Include" : "Exclude"} ${label}`}
+        onClick={() =>
+          start(async () =>
+            setState(await setExcludedAction(repoId, item, !excluded)),
+          )
+        }
+      >
+        {excluded ? "Include" : "Exclude"}
+      </Button>
+      <FormError error={state.status === "error" ? state.error : null} />
+    </span>
   )
 }
 
+/** Sync now for one linked item, with what it said. */
+export function SyncItemButton({ linkId }: { linkId: string }) {
+  return (
+    <ActionButton
+      label="Sync now"
+      pendingLabel="Syncing…"
+      variant="ghost"
+      run={() => syncItemAction(linkId)}
+    />
+  )
+}
 /** The answers to a change sync left for the owner. */
 export function ChangeAnswer({
   itemId,

@@ -436,6 +436,7 @@ model Skill {
 
   tokens    ApiTokenSkill[]
   repoItems RepoItem[]
+  repoExclusions RepoExclusion[]
 
   @@index([vaultId])
   @@map("skill")
@@ -691,7 +692,8 @@ model ServerDefinition {
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
-  instances McpServer[]
+  instances      McpServer[]
+  repoExclusions RepoExclusion[]
 
   @@unique([vaultId, slug])
   @@map("server_definition")
@@ -1005,10 +1007,15 @@ model Repo {
   /// public repository read without one.
   secretId   String?  @map("secret_id")
   secret     Secret?  @relation(fields: [secretId], references: [id], onDelete: SetNull)
+  /// What GitHub said of it when PCP last asked (linking it, a sync, a
+  /// push's review): true private, false public; null not asked yet, which
+  /// reads as public wherever that is the careful side.
+  private    Boolean?
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
-  items RepoItem[]
+  items      RepoItem[]
+  exclusions RepoExclusion[]
 
   @@index([vaultId])
   @@map("repo")
@@ -1045,4 +1052,23 @@ model RepoItem {
 
   @@index([repoId])
   @@map("repo_item")
+}
+
+/// An item the owner keeps out of a linked repository on purpose: a skill,
+/// or a server's definition (every instance of it). The repository's page
+/// lists it under Excluded, and Include takes it back. Ids only, nothing to
+/// encrypt.
+model RepoExclusion {
+  id           String            @id
+  repoId       String            @map("repo_id")
+  repo         Repo              @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  skillId      String?           @map("skill_id")
+  skill        Skill?            @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  definitionId String?           @map("definition_id")
+  definition   ServerDefinition? @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime          @default(now()) @map("created_at")
+
+  @@unique([repoId, skillId])
+  @@unique([repoId, definitionId])
+  @@map("repo_exclusion")
 }

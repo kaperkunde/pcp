@@ -2,6 +2,7 @@
 
 import { Lock } from "lucide-react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import { useId, useState, useTransition } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
@@ -10,11 +11,13 @@ import { Button, ButtonLink } from "@/components/ui/button"
 import { serverKindLabel } from "@/components/ui/icon-tile"
 import { Input } from "@/components/ui/input"
 import { ListRow, RowValue } from "@/components/ui/list"
+import { Switch } from "@/components/ui/switch"
 import {
   detachServerAction,
   setNoteAction,
   type DefinitionActionResult,
 } from "@/lib/actions/definitions"
+import { syncItemAction, type RepoActionResult } from "@/lib/actions/repos"
 import { MAX_PERSONAL_NOTE } from "@/lib/core/constants"
 import type { ItemAbout } from "@/lib/core/item-about"
 import type { ServerKind } from "@/lib/core/servers"
@@ -46,40 +49,56 @@ export function ItemAboutRows({ about }: { about: ItemAbout }) {
           </RowValue>
         }
       />
-      <ListRow
-        title="Source"
-        trailing={
-          about.source.kind === "repo" ? (
-            <Link
-              href={`/settings/repositories/${about.source.repoId}`}
-              className="text-[13px] break-all text-primary hover:underline"
-            >
-              {about.source.repo} · {about.source.path}
-            </Link>
-          ) : (
-            <RowValue>Made here</RowValue>
-          )
-        }
-      />
+      <SourceRow about={about} />
       <SyncRow about={about} />
-      <ListRow
-        title="Sharing"
-        description="Only in this vault: no one else reads it."
-        trailing={<RowValue>Private</RowValue>}
-      />
+      <SharingRow about={about} />
       {about.definition ? <InstancesRow about={about} /> : null}
       <NoteRow about={about} />
     </>
   )
 }
 
-const SYNC_STATE: Record<string, string> = {
-  ok: "In step",
-  review: "A change waits for you",
-  conflict: "Conflict",
-  local: "Your change is not pushed",
-  missing: "Not in the repository",
-  error: "Sync failed",
+/** Where the item came from: made here, or its place in a repository. */
+function SourceRow({ about }: { about: ItemAbout }) {
+  const source = about.source
+
+  if (source.kind === "local") {
+    return <ListRow title="Source" trailing={<RowValue>Local</RowValue>} />
+  }
+
+  return (
+    <ListRow
+      title="Source"
+      description={
+        <Link
+          href={`/settings/repositories/${source.repoId}`}
+          className="break-all hover:underline"
+        >
+          {source.imported
+            ? `Imported from ${source.repo}@${source.ref}`
+            : `${source.repo}/${source.path}`}
+        </Link>
+      }
+      trailing={
+        <a
+          href={source.url}
+          className="text-[13px] text-primary hover:underline"
+          rel="noreferrer"
+          target="_blank"
+        >
+          View in repo
+        </a>
+      }
+    />
+  )
+}
+
+const SYNC_STATUS: Record<string, string> = {
+  synced: "Synced",
+  pending_review: "Pending review",
+  modified: "Modified locally",
+  update_available: "Update available",
+  error: "Sync error",
 }
 
 const FREQUENCY: Record<string, string> = {
@@ -89,18 +108,43 @@ const FREQUENCY: Record<string, string> = {
   weekly: "weekly",
 }
 
+/** Where the item stands with its repository, and what moves it on. */
 function SyncRow({ about }: { about: ItemAbout }) {
   const sync = about.sync
+  const router = useRouter()
+  const [pending, startTransition] = useTransition()
+  const [result, setResult] = useState<RepoActionResult>({ status: "idle" })
 
   if (sync.kind === "local") {
     return <ListRow title="Sync" trailing={<RowValue>Local only</RowValue>} />
   }
 
+  const pushHref =
+    about.sharing.itemKind &&
+    sync.writable &&
+    sync.status === "modified" &&
+    !sync.changeHref
+      ? `/settings/repositories/${sync.repoId}/share?item=${encodeURIComponent(`${about.sharing.itemKind}:${about.id}`)}`
+      : null
+  const warn = sync.status !== "synced"
+
   return (
-    <ListRow
-      title="Sync"
-      description={
-        <>
+    <div className="flex min-h-14 flex-wrap items-center gap-x-3.5 gap-y-2 px-4 py-2.5 text-sm">
+      <div className="flex min-w-0 flex-1 basis-56 flex-col gap-0.5">
+        <span className="flex flex-wrap items-center gap-2 text-[15px] leading-snug">
+          Sync
+          <span
+            className={
+              warn
+                ? "text-[13px] text-warning"
+                : "text-[13px] text-muted-foreground"
+            }
+            data-testid="sync-status"
+          >
+            {SYNC_STATUS[sync.status] ?? sync.status}
+          </span>
+        </span>
+        <span className="text-xs leading-relaxed text-muted-foreground">
           Syncs {FREQUENCY[sync.frequency] ?? sync.frequency}
           {sync.bidirectional ? ", both ways" : ""}
           {sync.lastSyncAt ? (
@@ -109,10 +153,120 @@ function SyncRow({ about }: { about: ItemAbout }) {
               · last <RelativeDate value={sync.lastSyncAt} />
             </>
           ) : null}
-        </>
-      }
-      trailing={<RowValue>{SYNC_STATE[sync.state] ?? sync.state}</RowValue>}
-    />
+          {sync.status === "error" && sync.note ? ` · ${sync.note}` : ""}
+        </span>
+        <FormError error={result.status === "error" ? result.error : null} />
+        <FormNote
+          message={result.status === "ok" ? (result.message ?? null) : null}
+        />
+      </div>
+      <span className="flex items-center gap-1">
+        {sync.changeHref ? (
+          <ButtonLink href={sync.changeHref} variant="ghost" size="sm">
+            {sync.status === "update_available" ? "Pull update" : "Review"}
+          </ButtonLink>
+        ) : null}
+        {pushHref ? (
+          <ButtonLink href={pushHref} variant="ghost" size="sm">
+            Review and push
+          </ButtonLink>
+        ) : null}
+        <Button
+          variant="plain"
+          size="sm"
+          disabled={pending}
+          onClick={() =>
+            startTransition(async () => {
+              setResult(await syncItemAction(sync.linkId))
+              router.refresh()
+            })
+          }
+        >
+          {pending ? "Syncing…" : "Sync now"}
+        </Button>
+      </span>
+    </div>
+  )
+}
+
+/**
+ * Whether anyone else reads it, and Share: which opens the review of
+ * pushing it to a public repository the owner pushes to. Greyed out, with
+ * why, when there is none.
+ */
+function SharingRow({ about }: { about: ItemAbout }) {
+  const sharing = about.sharing
+  const id = useId()
+  const [choosing, setChoosing] = useState(false)
+  const router = useRouter()
+
+  if (!sharing.itemKind) {
+    return (
+      <ListRow
+        title="Sharing"
+        description="Only in this vault: what it holds is yours alone, and never shared."
+        trailing={<RowValue>Private</RowValue>}
+      />
+    )
+  }
+
+  const shared = sharing.kind === "public"
+  const targets = sharing.targets
+  const hrefOf = (repoId: string) =>
+    `/settings/repositories/${repoId}/share?item=${encodeURIComponent(`${sharing.itemKind}:${about.id}`)}`
+  const disabled = shared || targets.length === 0 || sharing.repo !== null
+
+  return (
+    <div className="flex min-h-14 flex-col gap-2 px-4 py-2.5 text-sm">
+      <div className="flex items-center gap-3.5">
+        <label htmlFor={id} className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="flex flex-wrap items-center gap-2 text-[15px] leading-snug">
+            Sharing
+            <span className="text-[13px] text-muted-foreground">
+              {shared ? "Public" : "Private"}
+            </span>
+          </span>
+          <span className="text-xs leading-relaxed text-muted-foreground">
+            {shared
+              ? `In ${sharing.repo}, which anyone can read. To stop sharing it, take it out there.`
+              : sharing.repo
+                ? `In ${sharing.repo}, which is private: only the people GitHub lets read it see it.`
+                : targets.length === 0
+                  ? "Only in this vault. To share it, link a public repository you can push to under Settings › Repositories."
+                  : "Only in this vault. Share opens the review: every file, what stays private, and what looks personal, before anything goes."}
+          </span>
+        </label>
+        <Switch
+          id={id}
+          aria-label="Share"
+          checked={shared || choosing}
+          disabled={disabled}
+          onChange={(event) => {
+            if (!event.target.checked) {
+              setChoosing(false)
+            } else if (targets.length === 1) {
+              router.push(hrefOf(targets[0]!.repoId))
+            } else {
+              setChoosing(true)
+            }
+          }}
+        />
+      </div>
+      {choosing ? (
+        <ul className="flex flex-col gap-1" aria-label="Share to">
+          {targets.map((target) => (
+            <li key={target.repoId}>
+              <Link
+                href={hrefOf(target.repoId)}
+                className="text-primary hover:underline"
+              >
+                Share to {target.repo}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   )
 }
 

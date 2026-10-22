@@ -229,6 +229,9 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           repoItems: (
             await tx.repoItem.findMany({ where: { repo: { vaultId } } })
           ).map(rowJson),
+          repoExclusions: (
+            await tx.repoExclusion.findMany({ where: { repo: { vaultId } } })
+          ).map(rowJson),
           settings: settings.map(rowJson),
           browserProfiles: (await tx.browserProfile.findMany(byVault)).map(
             rowJson,
@@ -529,6 +532,9 @@ async function writeExport(
           (data) => tx.repoItem.createMany({ data }),
           RESTORE_SPEC_CHUNK_ROWS,
         )
+        await inChunks(tables.repoExclusions, (data) =>
+          tx.repoExclusion.createMany({ data }),
+        )
         await inChunks(tables.settings, (data) =>
           tx.setting.createMany({ data }),
         )
@@ -579,6 +585,7 @@ export async function wipeVault(
   await tx.apiTokenSecretAllowance.deleteMany(byToken)
   await tx.memory.deleteMany(byVault)
   await tx.repoItem.deleteMany({ where: { repo: { vaultId } } })
+  await tx.repoExclusion.deleteMany({ where: { repo: { vaultId } } })
   await tx.repo.deleteMany(byVault)
   await tx.apiTokenSkill.deleteMany(byToken)
   await tx.skill.deleteMany(byVault)

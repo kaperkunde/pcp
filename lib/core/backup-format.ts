@@ -14,6 +14,7 @@ import type {
   OpenApiSpec,
   PermissionRequest,
   Repo,
+  RepoExclusion,
   RepoItem,
   Secret,
   SecretBrowserOrigin,
@@ -390,6 +391,9 @@ const RepoRow = z.strictObject({
   trust: str,
   access: str,
   secretId: id.nullable(),
+  // Whether GitHub says it is private, added with sharing per item: absent
+  // from older files, read as not asked yet.
+  private: z.boolean().nullable().default(null),
   createdAt: date,
   updatedAt: date,
 })
@@ -407,6 +411,16 @@ const RepoItemRow = z.strictObject({
   state: str.default("ok"),
   createdAt: date,
   updatedAt: date,
+})
+
+// Items kept out of a repository, added with sharing per item: absent from
+// older files.
+const RepoExclusionRow = z.strictObject({
+  id,
+  repoId: id,
+  skillId: id.nullable(),
+  definitionId: id.nullable(),
+  createdAt: date,
 })
 
 const SettingRow = z.strictObject({ vaultId: id, key: str, value: str })
@@ -474,6 +488,7 @@ export const PayloadSchema = z.strictObject({
     wrapperSpecs: z.array(WrapperSpecRow).default([]),
     repos: z.array(RepoRow).default([]),
     repoItems: z.array(RepoItemRow).default([]),
+    repoExclusions: z.array(RepoExclusionRow).default([]),
     settings: z.array(SettingRow),
     browserProfiles: z.array(BrowserProfileRow).default([]),
   }),
@@ -608,6 +623,7 @@ export function checkReferences(payload: ExportPayload): void {
   idsOf(tables.serverAuthHeaders, "header")
   const repos = idsOf(tables.repos, "repository")
   idsOf(tables.repoItems, "linked item")
+  idsOf(tables.repoExclusions, "excluded item")
 
   for (const grant of tables.keyGrants) {
     if (!GRANT_KINDS.has(grant.kind)) {
@@ -734,6 +750,16 @@ export function checkReferences(payload: ExportPayload): void {
 
     if ((item.skillId === null) === (item.serverId === null)) {
       throw problem("a linked item names no item, or two")
+    }
+  }
+
+  for (const exclusion of tables.repoExclusions) {
+    pointsAt(exclusion.repoId, repos, "a repository")
+    pointsAt(exclusion.skillId, skills, "an excluded skill")
+    pointsAt(exclusion.definitionId, definitions, "an excluded definition")
+
+    if ((exclusion.skillId === null) === (exclusion.definitionId === null)) {
+      throw problem("an excluded item names no item, or two")
     }
   }
 }
@@ -870,6 +896,7 @@ export const FORMAT_COVERS_SCHEMA: {
   wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
   repo: Covers<Repo, z.output<typeof RepoRow>>
   repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
+  repoExclusion: Covers<RepoExclusion, z.output<typeof RepoExclusionRow>>
   setting: Covers<Setting, z.output<typeof SettingRow>>
   browserProfile: Covers<BrowserProfile, z.output<typeof BrowserProfileRow>>
   hostSetting: Covers<HostSetting, z.output<typeof HostSettingRow>>
@@ -895,6 +922,7 @@ export const FORMAT_COVERS_SCHEMA: {
   wrapperSpec: true,
   repo: true,
   repoItem: true,
+  repoExclusion: true,
   setting: true,
   browserProfile: true,
   hostSetting: true,
