@@ -259,6 +259,7 @@ test("a token reads and changes endpoints only when the owner says so", async ({
   for (const [name, args] of [
     ["update_endpoint", { endpoint: SLUG, name: "Hijacked" }],
     ["get_endpoint", { endpoint: SLUG }],
+    ["list_secrets", {}],
   ] as const) {
     const refused = await callTool(baseURL!, token, name, args)
     expect(
@@ -278,6 +279,7 @@ test("a token reads and changes endpoints only when the owner says so", async ({
     ...GATEWAY_TOOLS,
     "update_endpoint",
     "get_endpoint",
+    "list_secrets",
   ])
   expect(manager.instructions).toContain("get_endpoint reads one")
 })

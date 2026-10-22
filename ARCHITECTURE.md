@@ -397,6 +397,18 @@ change an endpoint decides where PCP sends requests:
   given and never the credential, the schema's source, or public-only, so an
   owner changing those at the same moment is not overwritten and the rules
   above cannot be got around by what is passed in.
+- **Secret names, never values.** The same option adds `list_secrets`: the
+  vault's secrets by name, with their descriptions, their kind and what uses
+  each (a server through its secret, a further header, its OAuth client or
+  its tokens, and a wrapper whose definition has a place for it:
+  `lib/core/secret-uses.ts`), so an assistant proposing an endpoint names a
+  secret the owner already has instead of inventing one they would type in
+  again. It reads no ciphertext and no dates, and a query and a cap bound
+  it. Only a text secret is reused by its name; the name of an OAuth sign-in
+  or an SSH key in `register_server` still means a new secret. When a
+  registration reuses one, the owner's page says what already uses it, and
+  so does the assistant's answer for a token with this option; for any other
+  token that line is the owner's alone.
 - **Public addresses only.** What an assistant registers has `public_only`
   set, and only the owner can clear it. Such an endpoint refuses loopback,
   private, link-local, carrier-grade NAT and multicast addresses, cloud

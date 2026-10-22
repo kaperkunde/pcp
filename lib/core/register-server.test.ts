@@ -8,6 +8,8 @@ import { invalid } from "./errors"
 import { buildGatewayServer, buildInstructions } from "./gateway"
 import type { JmapProbe } from "./mail/probe"
 import { getPermissionView } from "./permissions"
+import { createSecret, writeManagedSecret } from "./secrets"
+import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 
@@ -647,5 +649,126 @@ describe("what register_server has always taken", () => {
         /MCP server sends a secret in a header or signs in with OAuth/,
       ),
     })
+  })
+})
+
+describe("a secret the owner already has", () => {
+  /** The gateway again, for a token that may or may not manage endpoints. */
+  async function connectAs(manageEndpoints: boolean) {
+    await client.close()
+    const { token } = await createApiToken(ctx, {
+      name: manageEndpoints ? "Manager" : "Helper",
+      allowAllServers: true,
+      serverIds: [],
+      manageEndpoints,
+    })
+    const scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(scope, [], {
+      lookupHost: async () => ["203.0.114.7"],
+    }).connect(serverSide)
+    client = new Client({ name: "test", version: "1.0.0" })
+    await client.connect(clientSide)
+  }
+
+  async function linearKey() {
+    const key = await createSecret(ctx, {
+      name: "Linear API key",
+      value: "lin_live_0123456789",
+    })
+    for (const [name, url] of [
+      ["Linear", "https://mcp.linear.example/mcp"],
+      ["Linear staging", "https://staging.linear.example/mcp"],
+    ]) {
+      await createServer(ctx, {
+        name: name!,
+        url: url!,
+        authType: "header",
+        authSecretId: key.id,
+      })
+    }
+  }
+
+  const proposal = {
+    name: "Linear issues",
+    openapi_schema: PETS,
+    url: "https://api.example.com/v1",
+    auth_type: "header",
+    header_name: "X-API-Key",
+    value_template: "{{secret}}",
+    secret: "Linear API key",
+  }
+  const REUSED =
+    'Reuses your secret "Linear API key", already used by Linear and Linear staging: you do not enter it again'
+
+  it("tells the owner and a token that manages endpoints what already uses it", async () => {
+    await linearKey()
+    await connectAs(true)
+
+    const asked = await register(proposal)
+
+    expect(asked.isError).toBe(false)
+    expect(asked.text).toContain(REUSED)
+    expect(asked.text).not.toContain("They type")
+    expect(asked.text).not.toContain("lin_live_0123456789")
+    const view = await shown()
+    expect(view.secretToEnter).toBeNull()
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        'Authentication: sends your secret "Linear API key" in the X-API-Key header',
+        REUSED,
+      ]),
+    )
+  })
+
+  it("says so when nothing uses it yet", async () => {
+    await createSecret(ctx, { name: "Linear API key", value: "lin_live_0" })
+    await connectAs(true)
+
+    expect((await register(proposal)).text).toContain(
+      'Reuses your secret "Linear API key", not used by anything yet: you do not enter it again',
+    )
+  })
+
+  it("shows what uses it to the owner alone when the token does not manage endpoints", async () => {
+    await linearKey()
+    await connectAs(false)
+
+    const asked = await register(proposal)
+
+    expect(asked.isError).toBe(false)
+    expect(asked.text).not.toContain("Linear staging")
+    expect((await shown()).lines).toContain(REUSED)
+  })
+
+  it("treats the name of a secret PCP manages as a new secret", async () => {
+    await writeManagedSecret(ctx, {
+      name: "Build box SSH key",
+      description: "PCP's SSH key for Build box.",
+      value: "-----BEGIN OPENSSH PRIVATE KEY-----",
+      kind: "ssh_key",
+    })
+    await writeManagedSecret(ctx, {
+      name: "Calendar sign-in",
+      description: "OAuth tokens",
+      value: "{}",
+      kind: "oauth",
+    })
+    await connectAs(true)
+
+    for (const name of ["Build box SSH key", "Calendar sign-in"]) {
+      const asked = await register({ ...proposal, secret: name })
+
+      expect(asked.isError).toBe(false)
+      expect(asked.text).toContain(
+        `They type the value of the secret "${name}" in there`,
+      )
+      expect(asked.text).not.toContain("Reuses your secret")
+      const view = await shown()
+      expect(view.secretToEnter?.name).toBe(name)
+      expect(view.lines).toContain(
+        `Authentication: sends a new secret, saved as "${name}", in the X-API-Key header; you enter its value here when you agree`,
+      )
+    }
   })
 })
