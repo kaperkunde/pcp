@@ -166,8 +166,9 @@ from one endpoint could be built on it. What that would take:
    `datasource` block; a Postgres host generates its own migration history
    (`prisma migrate dev` against Postgres) and runs migrations as a deploy
    step instead of at boot (`instrumentation.ts` → `applyMigrations()` is
-   for a single instance). Rate limits (`lib/core/rate-limit.ts`) are
-   per-process and would move to a shared store.
+   for a single instance). Rate limits (`lib/core/rate-limit.ts`) and
+   pacing's state (`lib/core/pacing/pace.ts`) are per-process and would
+   move to a shared store.
 5. **None of it lives in this repository.** No admin API, no "create vault"
    endpoint, no tenant switch in the UI: PCP stays single-user.
 
@@ -1610,6 +1611,74 @@ and the page follows its progress. The install is looked for by the
 revision `patchright-core` drives, so after an update to a newer one the
 page offers to install that, which removes the older build. Nothing runs
 until the owner clicks.
+
+## Pacing
+
+Assistants act far faster than a person, and a site that sees a quick run of
+automated actions can take the owner's account for a robot and flag it; a
+small server or a busy page can be overloaded by one. The rate limits
+(`lib/core/rate-limit.ts`) only refuse past a count; pacing
+(`lib/core/pacing/`) spaces actions out, the same way whatever made them.
+
+**Where it applies.** At two places, which every way of calling passes:
+
+- `callServerTool` (`upstream.ts`), for a server's tools: MCP servers, API
+  endpoints, mail and calendar accounts and SSH servers, paced by the
+  server. call_tool and call_read_only_tool, run_code's `pcp.call`, a
+  wrapper's calls and a call the owner allowed all end there. The browser's
+  actions go through it too, and are paced in `browser/call.ts` by the tab's
+  site (for a navigation, the site it opens), before the call queues on its
+  tab: a wait for the site holds no lane and counts toward no deadline. A
+  wrapper's own tool is not paced; the calls its program makes are.
+- Web fetch's request path: `fetch/fetch.ts` paces each request it sends,
+  every redirect it follows on the site included, and `web-fetch.ts`
+  `runFetch` the read through the browser (`browser/solve.ts`), by the
+  site. The owner's answer to a `fetch` request runs `runFetch` too.
+
+Nothing at the gateway paces on its own: a new way in that reaches a server
+or a site goes through one of these, and so is paced.
+
+**Classes and defaults** (`pacing/limits.ts`, with why each is what it is).
+`browser_act` (navigate, back, click, type, press_key, select_option,
+upload_file, download, handle_dialog, scroll): 1.5 seconds between actions
+on a site and up to 2.5 more at random. `web_fetch`: a second and up to 0.75
+more. `server_change` (a tool its server does not mark read-only,
+`read-only.ts markedReadOnly`): no pause, at most 30 a minute per server.
+`server_read`: at most 300 a minute. The browser's reading tools (snapshot,
+find, read_page, screenshot, wait_for, tabs, hand_over) are never paced:
+they send the site nothing. Nothing names a site or a vendor.
+
+**How a call waits** (`pacing/pace.ts`). State is in memory, per vault and
+destination (`server:<id>` or `site:<host>`; web fetch and the browser share
+a site's), on `globalThis`. A caller is given its slot the moment it asks,
+in order (the last slot, the pause, and a random extra wait; then the burst
+cap), so two callers never share one, and waits for it. A wait up to 30
+seconds (`PACING_MAX_WAIT_MS`) is served; past it the call is answered at
+once with a tool error ("Paced: <destination> takes its next action in N s;
+try again then.") and takes no slot. A caller whose signal aborts (a
+run_code run that ended) stops waiting and gives its slot back when no
+later caller took one.
+
+**The owner's own pace** (`pacing/config.ts`) is the vault's setting
+`pacing` (the `setting` table), not the machine's: it names the owner's
+sites and servers, travels with an export and goes with a deleted vault.
+It holds overrides only: per class, per server (by id, on the server's
+Advanced) and per site (a host, optionally with its subdomains), each a
+pace or "unpaced". A call follows the most specific: the site's, then the
+server's, then the class's, then PCP's default; bounds are checked in core
+(`PACING_BOUNDS`), and a stored value that does not read as one counts as
+none. Settings → Upkeep → Pacing shows the classes, a reset to PCP's
+defaults, and the sites, folded.
+
+`PCP_PACING=off` turns it off for a process: the unit and end-to-end suites
+set it (`vitest.config.mts`, `playwright.config.ts`), and the tests that
+check pacing turn it back on with a pretend clock (`setPacingClock`).
+
+**A tab a program has.** A call that arrives while a run_code or wrapper
+run's call has the tab (`Tab.running`, set for the lane's turn), from
+another run or from none, is answered with one line first: "A running
+program (run <id>) is acting on this tab right now; what you see may change
+under it." It still runs.
 
 ## Data on disk
 

@@ -12,6 +12,7 @@ import { sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
 import { bareType, fileMediaType } from "../media-types"
 import { hiddenCharacter, withoutPresentation } from "../memories"
+import { browserToolPaced, paceSite } from "../pacing"
 import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "../rate-limit"
 import { loadResourceLimits } from "../resources/state"
@@ -92,10 +93,19 @@ import { OwnerNeeded, type BrowseAsk } from "./types"
  * whose tab it is. Nor does a token act on a page its lines no longer let
  * it open.
  *
+ * An action on a page (a click, typing, opening a page; not a read of what
+ * the tab has) is paced by its site first (lib/core/pacing/): the tab's
+ * site, or for a navigation the site it opens. The wait comes before the
+ * call queues on its tab, so it holds no lane and counts toward no
+ * deadline.
+ *
  * Calls on one tab wait their turn in its lane (queue.ts), each for at most
  * its deadline; a tab that passes it is reopened at its address, and the
- * call is told so. A page's open dialog is said at once rather than waited
- * on: nothing on the page answers until it is handled.
+ * call is told so. A call that arrives while a run_code program's call
+ * (another run's, or any while this one is no run's) has the tab is told
+ * that in one line first: what it reads may change under it. A page's open
+ * dialog is said at once rather than waited on: nothing on the page answers
+ * until it is handled.
  *
  * Refusals that name a site or an address are tool errors, never thrown
  * PcpErrors: the request log keeps the text of the latter, and which sites
@@ -110,6 +120,8 @@ export type BrowserScope = {
   serverId: string
   /** The caller gave up (a run_code run stopped): its calls stop waiting. */
   signal?: AbortSignal
+  /** The run_code or wrapper run the call is made for. */
+  runId?: string
 }
 
 function text(value: string, isError = false): CallToolResult {
@@ -607,32 +619,18 @@ function onLane(
   work: () => Promise<CallToolResult>,
 ): Promise<CallToolResult> {
   const gone = () => vault.tabs.get(tab.id) !== tab
+  const holder = { runId: scope.runId ?? null }
 
   return inLane(
     tab.lane,
     async () => {
-      if (browserHeld(vault.vaultId)) {
-        throw new PcpError(
-          "state",
-          "The vault is being restored from an export. Try again in a moment.",
-        )
+      tab.running = holder
+
+      try {
+        return await turn()
+      } finally {
+        if (tab.running === holder) tab.running = null
       }
-
-      await tab.reopening?.catch(() => {})
-
-      if (gone()) {
-        return noTab(tab.id)
-      }
-
-      if (tab.unresponsive) {
-        return reopenedResult(
-          tab,
-          await reopenTab(vault, tab).catch(() => null),
-          "crash",
-        )
-      }
-
-      return work()
     },
     {
       deadlineMs,
@@ -650,6 +648,100 @@ function onLane(
       },
     },
   )
+
+  async function turn(): Promise<CallToolResult> {
+    if (browserHeld(vault.vaultId)) {
+      throw new PcpError(
+        "state",
+        "The vault is being restored from an export. Try again in a moment.",
+      )
+    }
+
+    await tab.reopening?.catch(() => {})
+
+    if (gone()) {
+      return noTab(tab.id)
+    }
+
+    if (tab.unresponsive) {
+      return reopenedResult(
+        tab,
+        await reopenTab(vault, tab).catch(() => null),
+        "crash",
+      )
+    }
+
+    return work()
+  }
+}
+
+/**
+ * The line a call is told first when a run_code program's call has the
+ * tab as it arrives: another run's, or any run's while this call is none.
+ */
+function holderNote(scope: BrowserScope, tab: Tab): string | null {
+  const runId = tab.running?.runId
+
+  return runId && runId !== scope.runId
+    ? `A running program (run ${runId}) is acting on this tab right now; what you see may change under it.`
+    : null
+}
+
+/** The answer with one line in front of everything it says. */
+function withLead(result: CallToolResult, line: string | null): CallToolResult {
+  if (!line) {
+    return result
+  }
+
+  const first = result.content[0]
+
+  if (first?.type === "text") {
+    return {
+      ...result,
+      content: [
+        { ...first, text: `${line}\n${first.text}` },
+        ...result.content.slice(1),
+      ],
+    }
+  }
+
+  return {
+    ...result,
+    content: [{ type: "text", text: line }, ...result.content],
+  }
+}
+
+/** The site a tab's page is on, or null for one that is none (about:blank). */
+function tabSite(tab: Tab): string | null {
+  try {
+    const url = new URL(tab.page.url())
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? siteKey(url)
+      : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Waits for the site's turn under pacing (lib/core/pacing/), before the
+ * call queues on its tab; the tool error to answer with when that turn is
+ * too far off.
+ */
+async function paceAction(
+  scope: BrowserScope,
+  site: string | null,
+): Promise<CallToolResult | null> {
+  if (!site) {
+    return null
+  }
+
+  const paced = await paceSite(scope.ctx.vaultId, site, "browser_act", {
+    serverId: scope.serverId,
+    signal: scope.signal,
+  })
+
+  return paced ? text(paced, true) : null
 }
 
 /**
@@ -679,6 +771,17 @@ export async function performNavigate(
     return ownerHolds(tab)
   }
 
+  const note = tab ? holderNote(scope, tab) : null
+  const paced = await paceAction(scope, siteKey(url))
+
+  if (paced) {
+    return withLead(paced, note)
+  }
+
+  if (tab && vault.tabs.get(tab.id) !== tab) {
+    tab = null
+  }
+
   if (!tab) {
     const opened = await withVault(vault, () => newTab(scope, vault))
 
@@ -696,7 +799,7 @@ export async function performNavigate(
 
   const current = tab
 
-  return onLane(scope, vault, current, TAB_DEADLINE_MS, async () => {
+  const answer = onLane(scope, vault, current, TAB_DEADLINE_MS, async () => {
     await driveAs(vault, current, scope)
 
     if (current.dialog) {
@@ -751,6 +854,8 @@ export async function performNavigate(
     await saveVaultProfile(scope.ctx, vault, { force: true })
     return report(scope, current, { first })
   })
+
+  return withLead(await answer, note)
 }
 
 /** tabs open and navigate: decided per site before anything opens. */
@@ -883,8 +988,17 @@ async function onTab(
   }
 
   touch(scope.ctx.vaultId)
+  const note = holderNote(scope, picked)
 
-  return onLane(
+  if (browserToolPaced(spec.name)) {
+    const paced = await paceAction(scope, tabSite(picked))
+
+    if (paced) {
+      return withLead(paced, note)
+    }
+  }
+
+  const answer = await onLane(
     scope,
     vault!,
     picked,
@@ -925,6 +1039,8 @@ async function onTab(
       return result
     },
   )
+
+  return withLead(answer, note)
 }
 
 function staleRef(ref: string): CallToolResult {
@@ -1341,6 +1457,7 @@ export async function callBrowserTool(
     open,
     keepBytes,
     signal,
+    runId,
   }: {
     tokenId: string
     publicUrl: string
@@ -1360,8 +1477,8 @@ export async function callBrowserTool(
      */
     signal?: AbortSignal
     /**
-     * The run_code run the call is made from, when it is one's. Taken so
-     * a run's calls can be told apart; the browser does not act on it.
+     * The run_code or wrapper run the call is made from, when it is one's:
+     * another call that arrives while it has the tab is told so.
      */
     runId?: string
   },
@@ -1382,6 +1499,7 @@ export async function callBrowserTool(
     publicUrl,
     serverId: server.id,
     signal,
+    runId,
   }
   const listsOrOpens =
     spec.name === "tabs" &&

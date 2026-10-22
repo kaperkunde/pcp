@@ -7,6 +7,7 @@ import { CopyableValue } from "@/components/copyable-value"
 import { DeleteVaultCard } from "@/components/delete-vault-card"
 import { FormNote } from "@/components/form-status"
 import { PageColumn } from "@/components/page-column"
+import { PacingCard } from "@/components/pacing-card"
 import { PageHeader } from "@/components/page-header"
 import { ResourcesCard } from "@/components/resources-card"
 import {
@@ -23,6 +24,7 @@ import { cleanupOverview } from "@/lib/core/cleanup/runtime"
 import { deviceKeyInfo } from "@/lib/core/device-keys"
 import { isLocalAddress } from "@/lib/core/local-address"
 import { networkNotices, networkOverview } from "@/lib/core/network/runtime"
+import { pacingOverview } from "@/lib/core/pacing/config"
 import { resourcesOverview } from "@/lib/core/resources/state"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { updatesOverview } from "@/lib/core/updates/state"
@@ -58,6 +60,7 @@ export default async function SettingsPage({
     touchId,
     cleanup,
     resources,
+    pacing,
   ] = await Promise.all([
     getSetting(ctx, SETTING_PUBLIC_URL),
     requestOrigin(),
@@ -69,6 +72,7 @@ export default async function SettingsPage({
     deviceKeyInfo(ctx.vaultId),
     cleanupOverview(),
     resourcesOverview(),
+    pacingOverview(ctx),
   ])
 
   return (
@@ -137,6 +141,7 @@ export default async function SettingsPage({
         <List>
           <CleanupCard overview={cleanup} />
           <ResourcesCard overview={resources} />
+          <PacingCard overview={pacing} />
         </List>
       </ListSection>
 
