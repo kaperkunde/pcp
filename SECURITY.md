@@ -113,6 +113,9 @@ would read (a shared memory, or one read in every conversation) is yours to
 agree to: you are shown the whole text, nothing is written before you answer,
 and text with characters that do not show on screen is refused, so what you
 read is all there is. The right to keep memories is off unless you tick it.
+Its memory migration (moving what its app keeps about you into PCP) asks you
+before it moves anything and again before it deletes the originals; the
+assistant can only turn it off, and only you turn it on.
 
 **An assistant with a token that may fetch web pages** can have PCP request
 public addresses, as far as the token's method and site levels allow: a site

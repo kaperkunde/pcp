@@ -120,6 +120,12 @@ model ApiToken {
   /// its own, and the shared ones the owner agreed to. Sharing one always
   /// asks the owner. Off unless the owner turns it on.
   keepMemories    Boolean   @default(false) @map("keep_memories")
+  /// While on (and keepMemories is), the instructions ask the assistant to
+  /// offer to move the memories and skills its client keeps elsewhere into
+  /// PCP, asking the owner before it moves them and again before it deletes
+  /// the originals. The assistant turns it off when it is done (the memory
+  /// tool's migration_done); only the owner turns it on. On for a new token.
+  memoryMigration Boolean   @default(true) @map("memory_migration")
   /// Whether the assistant may fetch web pages through the gateway
   /// (web_fetch), following the token's site and method levels
   /// (WebFetchRule). Off unless the owner turns it on.

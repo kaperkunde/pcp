@@ -66,6 +66,8 @@ export type MemoryScope = {
   tokenId: string
   /** The owner's instructions for the assistant, given with every. */
   instructions?: string | null
+  /** Memory migration is on for the token: every gives its steps. */
+  memoryMigration?: boolean
 }
 
 export type MemoryBody = { path: string; text: string }
@@ -133,6 +135,8 @@ export type MemoryCommand = {
     | "delete"
     | "rename"
     | "search"
+    /** Ends the token's memory migration; takes nothing else. */
+    | "migration_done"
   path?: string
   view_range?: number[]
   file_text?: string
@@ -145,6 +149,35 @@ export type MemoryCommand = {
   /** create, under /memories/shared/: ask to have it read in every conversation. */
   every?: boolean
 }
+
+/**
+ * Where a token that keeps memories is told they live: in PCP, not in the
+ * client's own memory, so they follow the owner from one assistant to the
+ * next. PCP's own words, the same for every token, in the instructions and
+ * the memory tool's description.
+ */
+export const MEMORY_HOME =
+  "The owner keeps their memories and skills in PCP. Store new memories and skills here with the memory tool, not in this client's own memory system."
+
+/**
+ * The steps a token with memory migration on is given, in the instructions
+ * and again with every (clients cut instructions short): offer to move what
+ * the client keeps about the owner into PCP, asking before moving anything
+ * and again before deleting the originals, then end it with migration_done.
+ * PCP's own words, the same for every token. The skill's path is skills.ts's
+ * SKILL_ROOT and SKILL_FILE, written out because skills.ts imports this
+ * module (memories.test.ts pins that they agree).
+ */
+export const MEMORY_MIGRATION_STEPS = [
+  `MEMORY MIGRATION (on for this token until you call memory with command "migration_done"): the owner wants the memories their assistants keep about them elsewhere moved into PCP, once.`,
+  "1. Look for what this client keeps for the owner outside PCP: its own memory or saved preferences, a memory snapshot in your context, the owner's personal instruction files (a user-level CLAUDE.md or the like), skills of their own. Leave what belongs to a project, such as a repository's CLAUDE.md or skills, where it is. If you can see none, call migration_done and stop here.",
+  "2. Tell the owner briefly what you found and ask whether to move it into PCP. Move nothing until they say yes; if they say no, call migration_done.",
+  `3. Move each with the memory tool, keeping its structure: a memory per file or topic under ${MEMORY_ROOT}/…, what every assistant should read under ${MEMORY_ROOT}/${SHARED}/… (which asks the owner), a skill as /skills/<name>/SKILL.md (which asks the owner). Never a secret or a password.`,
+  "4. Read each one back with read_memory and check it says what the original did.",
+  "5. Ask the owner again before deleting the originals, and delete nothing without that second yes.",
+  "6. Then delete the client's copies if this client lets you; if it does not, tell the owner exactly what to remove, and where.",
+  `7. Call memory with command "migration_done": it turns this off for this token, and only the owner can turn it on again.`,
+]
 
 const WRITES = new Set<MemoryCommand["command"]>([
   "create",
@@ -655,6 +688,9 @@ function every(entries: Entry[], scope: MemoryScope): string {
     "",
     "The rest are notes: view the ones that bear on what you were asked.",
     listing(entries, scope),
+    // The same as in the gateway's instructions, for a client that cut
+    // those short.
+    ...(scope.memoryMigration ? ["", ...MEMORY_MIGRATION_STEPS] : []),
   ].join("\n")
 }
 
@@ -954,6 +990,38 @@ async function rename(
 }
 
 /**
+ * migration_done: the assistant has moved what its client kept into PCP,
+ * or found nothing to move, or the owner said no. It turns the token's own
+ * memory migration off, and nothing else: no command or argument turns it
+ * on, which is the owner's alone (the token's page).
+ */
+async function endMigration(
+  scope: MemoryScope,
+  args: MemoryCommand,
+): Promise<string> {
+  const others = Object.entries(args).filter(
+    ([key, value]) => key !== "command" && value !== undefined,
+  )
+
+  if (others.length > 0) {
+    throw invalid("migration_done takes no other arguments.")
+  }
+
+  const { count } = await db().apiToken.updateMany({
+    where: {
+      id: scope.tokenId,
+      vaultId: scope.ctx.vaultId,
+      memoryMigration: true,
+    },
+    data: { memoryMigration: false },
+  })
+
+  return count > 0
+    ? "Memory migration is off for this token. Only the owner can turn it on again, in PCP."
+    : "Memory migration was already off for this token. Only the owner can turn it on again, in PCP."
+}
+
+/**
  * One call of the gateway's memory tool. Reads and the token's own memories
  * are done here; anything that touches a shared memory comes back as an ask
  * for the owner, which the gateway hands to permissions.ts. Asking writes
@@ -965,6 +1033,10 @@ export async function runMemoryCommand(
 ): Promise<MemoryOutcome> {
   if (args.every === true && args.command !== "create") {
     throw invalid("every goes with create.")
+  }
+
+  if (args.command === "migration_done") {
+    return { text: await endMigration(scope, args) }
   }
 
   const entries = await load(scope.ctx, scope.tokenId)

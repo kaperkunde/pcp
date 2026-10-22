@@ -17,6 +17,7 @@ import {
 import { CountBadge } from "@/components/ui/badge"
 import { Button, ButtonLink } from "@/components/ui/button"
 import { Select } from "@/components/ui/input"
+import { SwitchRow } from "@/components/ui/switch"
 import { List, ListRow, ListSection } from "@/components/ui/list"
 import {
   copyTokenAccessAction,
@@ -198,7 +199,9 @@ export function TokenAllowances({
 
 /**
  * "Reaches" and "Can also": the servers a token reaches and what it may do
- * besides running tools, saved together with one button.
+ * besides running tools, saved together with one button. Under "Keep
+ * memories", once that is saved on, the memory migration switch: the
+ * assistant turns it off when it is done, and only this turns it on.
  */
 export function TokenReachForm({
   token,
@@ -206,7 +209,7 @@ export function TokenReachForm({
   locked,
   sites,
 }: {
-  token: TokenSettings
+  token: TokenSettings & { memoryMigration: boolean }
   servers: Array<{ id: string; name: string; kind?: ServerKind }>
   locked: boolean
   /** Where its web sites are listed, and how many; null when it has none. */
@@ -236,6 +239,23 @@ export function TokenReachForm({
             id="token-memories"
             defaultChecked={token.keepMemories}
           />
+          {token.keepMemories ? (
+            <>
+              {/* What it was: the save changes it only if you did. */}
+              <input
+                type="hidden"
+                name="memoryMigrationWas"
+                value={token.memoryMigration ? "on" : "off"}
+              />
+              <SwitchRow
+                id="token-memory-migration"
+                name="memoryMigration"
+                label="Memory migration"
+                description="While on, its assistant offers to move the memories and skills it keeps elsewhere into PCP, asking you before it moves them and again before it deletes the originals, then turns this off. Turn it on to have it look again."
+                defaultChecked={token.memoryMigration}
+              />
+            </>
+          ) : null}
           <TokenOptionRow
             option="webFetch"
             id="token-fetch"

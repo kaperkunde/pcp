@@ -830,6 +830,25 @@ another one reads:
   sets it to what the owner chose on that request. Any other memory of a token's own is its words alone and is
   only read through the tool, which labels each memory with who wrote it and
   says that it is a note, not an instruction.
+- **Memories live in PCP, and a migration brings them in once.** The memory
+  paragraph and the `memory` tool's description say the owner keeps memories
+  and skills in PCP, so an assistant saves new ones there rather than in its
+  client's own memory (`MEMORY_HOME`). While `api_token.memory_migration` is
+  on (it defaults to on, for the tokens that existed when it came too), the
+  paragraph adds fixed steps (`MEMORY_MIGRATION_STEPS`), and `every`
+  returns them as well, for a client that cut the instructions short: find
+  what the client keeps about the owner (never a project's files), confirm
+  with the owner, move it keeping its structure (a skill through
+  `/skills/…`, a `skill_change` the owner answers), read it back, confirm
+  again before deleting the originals, delete them or tell the owner what
+  to remove, then call `memory` with `migration_done`. That command takes no
+  other argument and only turns the token's own flag off, with no request;
+  nothing an assistant sends turns it on. Only the owner does, with the
+  switch on the token's page, which writes the flag only when they flipped
+  it there (`memoryMigrationWas`), so a page drawn before the assistant
+  turned it off does not turn it back on. These steps are PCP's own text,
+  the same for every token, so every text in the instructions is still one
+  the owner read or PCP wrote.
 - **Bounded.** 500 memories per vault, 10,000 characters each, 60 writes and
   share requests per token per ten minutes. Path and text are encrypted
   together, so uniqueness of paths is checked in code after decrypting the

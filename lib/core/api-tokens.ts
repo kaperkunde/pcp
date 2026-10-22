@@ -34,6 +34,11 @@ export type ApiTokenSummary = {
   manageEndpoints: boolean
   /** May keep memories (the gateway's memory tool). */
   keepMemories: boolean
+  /**
+   * Its assistant is asked to offer to move memories it keeps elsewhere into
+   * PCP (with keepMemories); it turns this off, the owner turns it on.
+   */
+  memoryMigration: boolean
   /** May fetch web pages (the gateway's web_fetch tool). */
   webFetch: boolean
   /** May run programs that call its tools (the gateway's run_code tool). */
@@ -61,6 +66,11 @@ export type TokenInput = {
   manageEndpoints?: boolean
   /** Left alone on an update when undefined. */
   keepMemories?: boolean
+  /**
+   * The owner's switch for the memory migration offer: left alone on an
+   * update when undefined; a new token starts with it on.
+   */
+  memoryMigration?: boolean
   /** Left alone on an update when undefined. */
   webFetch?: boolean
   /** Left alone on an update when undefined. */
@@ -84,6 +94,11 @@ export type ResolvedToken = {
   manageEndpoints: boolean
   /** May keep memories: its own, and the shared ones (memory). */
   keepMemories: boolean
+  /**
+   * With keepMemories: told to offer to move the memories and skills its
+   * client keeps elsewhere into PCP, until it says it is done.
+   */
+  memoryMigration: boolean
   /** May fetch web pages, as its site and method levels say (web_fetch). */
   webFetch: boolean
   /** May run programs whose calls follow its tool levels (run_code). */
@@ -119,6 +134,7 @@ type SummaryRow = {
   allowAllServers: boolean
   manageEndpoints: boolean
   keepMemories: boolean
+  memoryMigration: boolean
   webFetch: boolean
   runCode: boolean
   manageWrappers: boolean
@@ -141,6 +157,7 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     allowAllServers: row.allowAllServers,
     manageEndpoints: row.manageEndpoints,
     keepMemories: row.keepMemories,
+    memoryMigration: row.memoryMigration,
     webFetch: row.webFetch,
     runCode: row.runCode,
     manageWrappers: row.manageWrappers,
@@ -396,6 +413,9 @@ export async function updateApiToken(
         ...(input.keepMemories !== undefined
           ? { keepMemories: input.keepMemories }
           : {}),
+        ...(input.memoryMigration !== undefined
+          ? { memoryMigration: input.memoryMigration }
+          : {}),
         ...(input.webFetch !== undefined ? { webFetch: input.webFetch } : {}),
         ...(input.runCode !== undefined ? { runCode: input.runCode } : {}),
         ...(input.manageWrappers !== undefined
@@ -502,6 +522,7 @@ function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
       : record.skills.map((link) => link.skillId),
     manageEndpoints: record.manageEndpoints,
     keepMemories: record.keepMemories,
+    memoryMigration: record.memoryMigration,
     webFetch: record.webFetch,
     runCode: record.runCode,
     manageWrappers: record.manageWrappers,

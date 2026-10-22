@@ -117,4 +117,52 @@ describe("updateTokenAction", () => {
     ).toMatchObject({ status: "ok" })
     expect((await getApiToken(session.ctx, id)).expiresAt).not.toBeNull()
   })
+
+  it("writes memory migration only when the owner flipped its switch", async () => {
+    const { id } = await createApiToken(session.ctx, {
+      name: "Claude",
+      allowAllServers: true,
+      keepMemories: true,
+    })
+    const fields = {
+      id,
+      name: "Claude",
+      access: "all",
+      expiresIn: "keep",
+      keepMemories: "on",
+    }
+    const migrating = async () =>
+      (await getApiToken(session.ctx, id)).memoryMigration
+    expect(await migrating()).toBe(true)
+
+    // The owner turns it off, and on again.
+    await updateTokenAction(IDLE, form({ ...fields, memoryMigrationWas: "on" }))
+    expect(await migrating()).toBe(false)
+    await updateTokenAction(
+      IDLE,
+      form({ ...fields, memoryMigrationWas: "off", memoryMigration: "on" }),
+    )
+    expect(await migrating()).toBe(true)
+
+    // The assistant turned it off after the page was drawn: saving the
+    // page's other switches leaves it off.
+    await db().apiToken.update({
+      where: { id },
+      data: { memoryMigration: false },
+    })
+    await updateTokenAction(
+      IDLE,
+      form({
+        ...fields,
+        webFetch: "on",
+        memoryMigrationWas: "on",
+        memoryMigration: "on",
+      }),
+    )
+    expect(await migrating()).toBe(false)
+
+    // A form that does not show it leaves it alone.
+    await updateTokenAction(IDLE, form({ ...fields, memoryMigration: "on" }))
+    expect(await migrating()).toBe(false)
+  })
 })
