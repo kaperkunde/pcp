@@ -213,7 +213,11 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
     arguments: { petId: ".." },
   })
   expect(dots.body.result?.isError).toBe(true)
-  expect(toolText(dots)).toContain("between slashes")
+  // petId is an integer, so the schema refuses ".." before the path check
+  // would (openapi/request.test.ts covers "between slashes").
+  expect(toolText(dots)).toContain(
+    '"petId" is string, but the inputSchema says integer',
+  )
   const absent = await callTool(baseURL!, token, "call_tool", {
     server: SLUG,
     tool: "getPet",
