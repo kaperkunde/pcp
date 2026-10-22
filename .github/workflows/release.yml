@@ -29,7 +29,9 @@
 #
 # Pushes made with the workflow token start no workflows, so the release
 # commit does not release itself again, and the fast-forward of develop
-# builds nothing there.
+# builds nothing there. The develop channel is offered the release all the
+# same when it is later than every build of develop, so then the images
+# move the develop tag as well as latest (scripts/version.mjs leads).
 
 name: release
 
@@ -53,6 +55,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       skip: ${{ steps.version.outputs.skip }}
+      develop: ${{ steps.develop.outputs.tag }}
     steps:
       # The tip of main rather than the pushed commit: a run that waited
       # behind another must build on that one's release commit.
@@ -93,6 +96,20 @@ jobs:
         run: |
           git push origin HEAD:develop ||
             echo "::notice::develop has commits main lacks; merge main into develop by hand."
+      - name: Check develop's builds
+        id: develop
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        # The develop channel installs the image's develop tag, and PCP's
+        # update check there offers the latest version among the releases and
+        # develop's builds. A release later than every build is that version,
+        # so the images move the develop tag too: the fast-forward of develop
+        # builds nothing that would.
+        run: |
+          tag="$(node scripts/version.mjs leads "$VERSION")"
+          echo "v$VERSION is later than every build of develop: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Draft the release
         if: steps.version.outputs.skip != 'true'
         env:
@@ -126,6 +143,7 @@ jobs:
     with:
       version: ${{ needs.release.outputs.version }}
       channel-tag: latest
+      develop-tag: ${{ needs.release.outputs.develop == 'true' }}
     permissions:
       contents: read
       packages: write
