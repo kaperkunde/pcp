@@ -111,12 +111,14 @@ export async function openOwnerTab(
   pageUrl(url)
   const vault = await ensureBrowser(ctx, { publicUrl })
   const shared = await loadSharedFetchRules(ctx.vaultId)
-  const tab = await openTab(vault, {
-    openedBy: "owner",
-    tokenId: null,
-    rules: null,
-    privateAllowed: resolvePrivateAccess(shared),
-  })
+  const tab = await withVault(vault, () =>
+    openTab(vault, {
+      openedBy: "owner",
+      tokenId: null,
+      rules: null,
+      privateAllowed: resolvePrivateAccess(shared),
+    }),
+  )
   setControl(tab, "owner")
   await go(tab, url, publicUrl)
   await save(ctx)
@@ -232,9 +234,9 @@ export async function closeOwnerTab(
   ctx: VaultContext,
   tabId: string,
 ): Promise<void> {
-  const vault = runningBrowser(ctx.vaultId)
+  const vault = runningBrowser(ctx.vaultId)!
   const tab = tabOf(ctx, tabId)
-  await closeTab(vault!, tab)
+  await withVault(vault, () => closeTab(vault, tab))
   await save(ctx)
 }
 

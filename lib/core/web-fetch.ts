@@ -393,7 +393,7 @@ async function checkHint(ctx: VaultContext, tokenId: string): Promise<string> {
   const reached = await tokenReachesBrowser(ctx, tokenId)
 
   if (reached) {
-    return `Open it with ${reached.slug}/navigate and call ${reached.slug}/hand_over so the owner can pass the check themselves.`
+    return `Open it in a tab with ${reached.slug}/tabs (action open) and call ${reached.slug}/hand_over with that tab so the owner can pass the check themselves.`
   }
 
   if (await findBrowserServer(ctx)) {

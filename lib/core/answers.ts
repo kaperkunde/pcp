@@ -46,6 +46,19 @@ import { handleOf, type KeptResult, type ResultHandle } from "./tool-results"
 
 /** The most of one answer's text an assistant is given. */
 export const MAX_ANSWER_CHARS = 60_000
+/**
+ * The largest image an answer passes on inline, in base64 characters (about
+ * 290 KB of image); a larger one is kept and passed on as its handle. An
+ * image is not text to read, so it has a budget of its own rather than
+ * MAX_ANSWER_CHARS, which even a 48 KB screenshot passed. This one stays
+ * well inside what MCP clients take: Anthropic's API takes an image of up
+ * to 5 MB, and the strictest clients refuse a tool's answer past about
+ * 1 MB, while with MAX_ANSWER_CHARS of text beside it an answer stays under
+ * half a megabyte. A screenshot of a tab (1280 by 800, JPEG) is commonly 80
+ * to 250 KB, so it fits as it is; the browser makes one that does not
+ * smaller first (browser/screenshot.ts).
+ */
+export const MAX_ANSWER_IMAGE_CHARS = 400_000
 /** Paths one call may ask for, and how long each may be. */
 export const MAX_FIELDS = 50
 const MAX_FIELD_LENGTH = 200
@@ -1004,7 +1017,10 @@ class Handles {
     return handle ? { handle, what: file.what, chars: file.data.length } : null
   }
 
-  /** An image, audio or embedded file block, kept as bytes. */
+  /**
+   * An image, audio or embedded file block, kept as bytes. An image is
+   * passed on up to MAX_ANSWER_IMAGE_CHARS, anything else up to `max`.
+   */
   async block(block: Block, max: number): Promise<Block[]> {
     const kept = await this.keptFile(block)
 
@@ -1013,8 +1029,9 @@ class Handles {
     }
 
     const json = JSON.stringify(kept.handle)
+    const budget = block.type === "image" ? MAX_ANSWER_IMAGE_CHARS : max
 
-    return kept.chars > max
+    return kept.chars > budget
       ? [
           {
             type: "text",

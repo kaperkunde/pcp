@@ -1285,6 +1285,15 @@ export type CallOptions = {
    * are scrubbed from the answer. Without it a placeholder is refused.
    */
   secrets?: SecretGrant
+  /**
+   * The caller gave up (a run_code run stopped or ran out of time). The
+   * browser honours it: a call waiting its turn on a tab, or running,
+   * stops waiting, is rejected with the signal's reason, and its turn
+   * passes on. Other kinds of server do not look at it yet.
+   */
+  signal?: AbortSignal
+  /** The run_code run the call is made from, when it is one's. */
+  runId?: string
 }
 
 export async function callServerTool(
@@ -1376,7 +1385,7 @@ async function dispatchCall(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl, tokenId, keep, keepBytes, open }: CallOptions,
+  { publicUrl, tokenId, keep, keepBytes, open, signal, runId }: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
   if (server.kind === "wrapper") {
@@ -1398,6 +1407,8 @@ async function dispatchCall(
       publicUrl,
       open,
       keepBytes,
+      signal,
+      runId,
     })
   }
 
