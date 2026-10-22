@@ -121,8 +121,13 @@ async function otherToken() {
   }
 }
 
+/** A Mac or Windows machine gives the browser a window of its own. */
+const OWN_WINDOW =
+  process.platform === "darwin" || process.platform === "win32"
+    ? "window"
+    : "headless"
 /** What `PCP_BROWSER_DISPLAY=virtual` asks for: Linux is the only place. */
-const WANTS_VIRTUAL = process.platform === "linux" ? "virtual" : "headless"
+const WANTS_VIRTUAL = process.platform === "linux" ? "virtual" : OWN_WINDOW
 
 describe("the browser overview", () => {
   it("says which mode is wanted on this machine, and none is running", async () => {
@@ -132,7 +137,7 @@ describe("the browser overview", () => {
     for (const [setting, wanted] of [
       ["virtual", WANTS_VIRTUAL],
       ["headless", "headless"],
-      ["auto", "headless"],
+      ["auto", OWN_WINDOW],
     ] as const) {
       vi.stubEnv("PCP_BROWSER_DISPLAY", setting)
       const overview = await browserOverview(ctx)
@@ -147,10 +152,13 @@ describe("the browser overview", () => {
     vi.stubEnv("PCP_CONTAINER", "1")
     expect((await browserOverview(ctx)).chromium.display).toBe(WANTS_VIRTUAL)
 
-    // The desktop app runs on a real screen and starts none.
+    // The desktop app runs on a real screen and starts none: Chromium has a
+    // window of its own there, kept off the screen.
     vi.stubEnv("PCP_DESKTOP", "1")
     vi.stubEnv("PCP_BROWSER_DISPLAY", "virtual")
-    expect((await browserOverview(ctx)).chromium.display).toBe("headless")
+    expect((await browserOverview(ctx)).chromium.display).toBe("window")
+    vi.stubEnv("PCP_BROWSER_DISPLAY", "")
+    expect((await browserOverview(ctx)).chromium.display).toBe("window")
   })
 })
 

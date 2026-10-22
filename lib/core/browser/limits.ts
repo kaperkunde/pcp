@@ -57,6 +57,20 @@ export const VIEWPORT = BROWSER_VIEWPORT
  * Chromium draws its own window around the page.
  */
 export const SCREEN = { width: 1920, height: 1080 } as const
+/**
+ * Where a window of the browser's own (launch.ts, mode "window": the
+ * desktop app) is put, out of the owner's way: far to the left of any
+ * screen, past any row of screens a desk holds, its top on the main
+ * screen's top edge (macOS keeps a window's top edge on a screen, not its
+ * left one). Not -32000, which Windows uses for a minimized window.
+ */
+export const OFF_SCREEN_WINDOW = { x: -20_000, y: 0 } as const
+/**
+ * Where that window tells its page it is (screenX, screenY), on the SCREEN
+ * above: where Chromium puts a first window on a screen of its own, ten
+ * pixels in from the corner.
+ */
+export const SHOWN_WINDOW_POSITION = { x: 10, y: 10 } as const
 /** The virtual display (display.ts) has this long to start. */
 export const DISPLAY_START_TIMEOUT_MS = 10_000
 /** JPEG quality of the live view's frames. */

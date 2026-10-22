@@ -1530,8 +1530,10 @@ proposed for and called like any server, and a long snapshot is kept for
 **What runs** (`runtime.ts`). One Chromium per vault, driven by
 `patchright-core`, started on the first page opened (by an assistant or the
 owner) and closed after fifteen minutes with no tool call, no input and
-nobody watching. It runs headless, or in the container image with windows
-on a virtual display (below). The registry is on `globalThis`, as the network's is,
+nobody watching. How it runs is `launch.ts`'s: in the container image with
+windows on a virtual display, in the desktop app (and on a Mac or Windows
+machine) with a window of its own kept off the screen, both below, and
+headless anywhere else. The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
 Chromium runs with one in-memory context for the vault (and one more,
 made on the first page read for web_fetch, for all of those, below): no
@@ -1583,6 +1585,33 @@ against the patchright-core installed. An Xvfb that does not start leaves the
 browser headless; `PCP_BROWSER_DISPLAY=headless` asks for that. The desktop
 app never uses it: it starts no child process, and runs on a real screen.
 
+**A window of its own** (`launch.ts`). In the desktop app (`PCP_DESKTOP=1`),
+and on a Mac or Windows machine otherwise, Chromium runs with a window on the
+machine's own screen, kept out of the owner's way. `--window-position` puts
+every window Chromium opens by itself far to the left of every screen
+(`OFF_SCREEN_WINDOW`: macOS keeps a window's top edge on a screen, not its
+left one), and `keepOffScreen` moves each tab's window there as PCP takes the
+page in, a popup's too (a popup first opens where its page asked, on the
+screen). It is not minimized: a minimized window's page is hidden to its
+scripts and stops drawing, and the live view with it. An off-screen window
+only counts as covered, and patchright-core's own
+`--disable-backgrounding-occluded-windows`, `--disable-renderer-backgrounding`
+and `--disable-background-timer-throttling` keep its page painting and its
+timers running (a test checks that patchright-core still passes them). Off
+the screen, a page would read its window's place as thousands of pixels left
+of the screen it is told of, so it is told a place on that screen instead
+(`SHOWN_WINDOW_POSITION`), through the device-metrics emulation patchright-core
+tells it the screen with, sent again with the position on the tab's own
+DevTools session (input PCP sends reports a screen position from the page's
+own either way). Chromium is still started by patchright-core, as a child of
+PCP's process (the server's utility process in the desktop app), as it was
+headless; only its switches differ. A window that does not open leaves the
+browser headless, and `PCP_BROWSER_DISPLAY=headless` asks for that anywhere.
+On macOS the windowed Chromium is an app of its own: it shows in the Dock
+while it runs, and Chromium makes it the active app when it opens a window
+(the first tab after it starts, a popup), which takes the keyboard from the
+app the owner was in.
+
 **Sites that check their visitors.** Every context tells pages of a 1920 by
 1080 screen, since headless would otherwise make the screen the 1280 by 800
 viewport itself. It is the full Chromium, headless or windowed: PCP always
@@ -1600,9 +1629,10 @@ vault's profile, as any cookie does. PCP adds no stealth scripts. It drives Chro
 with `patchright-core`, which does not turn on the DevTools `Runtime` domain in
 every frame as stock Playwright does, so those page-level traces are not left
 for a check in a cross-origin iframe (Cloudflare Turnstile's, for one) to find.
-Some tells remain: WebGL is SwiftShader (software rendering), headless the
-window is exactly the viewport (Playwright sizes it so, and Chromium's
-`--window-size` does not change that; on the virtual display it is not),
+Some tells remain: WebGL is SwiftShader (software rendering) headless and on
+the virtual display, headless the window is exactly the viewport (Playwright
+sizes it so, and Chromium's `--window-size` does not change that; with a
+window, on the virtual display or of its own, it is not),
 `screen.availHeight` equals the screen height, and a home address that reaches
 the page through a container's network may not look like a person's. A
 click sent through the DevTools protocol into a cross-site frame (a
@@ -1610,6 +1640,10 @@ Turnstile checkbox) carried the frame's own coordinates as its screen
 position up to about Chromium 141, which a check could tell from a mouse;
 the Chromium that `patchright-core` drives (153) reports a mouse's. The
 strictest checks may still want a person, which is what `hand_over` is for.
+What a page sees is measured by hand, not in CI: `scripts/fingerprint/` has a
+page that records it as JSON (`harness.html`), a script that ranks how two
+browsers differ (`diff.mjs`), and the list of live checks to run again after
+a Chromium or Playwright upgrade (its README).
 
 **The sign-ins** (`profile.ts`). The context starts from the vault's
 `browser_profile`: Playwright's storage state (cookies, local storage,

@@ -6,7 +6,6 @@ import path from "node:path"
 import type {
   Browser,
   BrowserContext,
-  BrowserContextOptions,
   CDPSession,
   Dialog,
   Page,
@@ -18,14 +17,17 @@ import { isPcpSite } from "../fetch/fetch"
 import { resolveFetchAccess, siteKey, type FetchRuleSet } from "../fetch/rules"
 import { isOwnAddress, isPublicAddress } from "../openapi/address"
 import { watchDocuments, type DocumentWatch } from "./challenge"
-import {
-  acquireDisplay,
-  displaySwitches,
-  wantsVirtualDisplay,
-  type VirtualDisplay,
-} from "./display"
+import { acquireDisplay, type VirtualDisplay } from "./display"
 import { openDownloads, watchDownloads, type Downloads } from "./downloads"
 import { chromiumExecutable } from "./executable"
+import {
+  contextOptions,
+  keepOffScreen,
+  launchOptions,
+  modesToTry,
+  wantedMode,
+  type BrowserMode,
+} from "./launch"
 import {
   ACTION_TIMEOUT_MS,
   BROWSER_LOCK_DEADLINE_MS,
@@ -35,9 +37,7 @@ import {
   MAX_TABS,
   NAVIGATION_TIMEOUT_MS,
   PROFILE_SAVE_INTERVAL_MS,
-  SCREEN,
   TITLE_TIMEOUT_MS,
-  VIEWPORT,
 } from "./limits"
 import { loadProfile, saveProfile } from "./profile"
 import {
@@ -51,10 +51,12 @@ import type { TabControl, TabView } from "./types"
 /**
  * The browser's running side: one Chromium per vault, started on first use
  * and closed after IDLE_CLOSE_MS with nothing happening, its tabs, and who
- * drives each. It runs headless, or with windows on PCP's virtual display
- * where there is one (display.ts: the container image). One per process, kept on globalThis because
- * the gateway, the Server Actions and the route handlers are bundled apart
- * and would otherwise each have their own copy of this module.
+ * drives each. It runs with windows on PCP's virtual display where there is
+ * one (display.ts: the container image), with a window of its own kept off
+ * the screen in the desktop app, or headless (launch.ts). One per process,
+ * kept on globalThis because the gateway, the Server Actions and the route
+ * handlers are bundled apart and would otherwise each have their own copy of
+ * this module.
  *
  * The browser keeps nothing on disk: its context is in memory, started
  * from the vault's saved profile (profile.ts) and saved back while a
@@ -164,7 +166,9 @@ export type VaultBrowser = {
   proxy: BrowserProxy
   /** Chromium's own sandbox: off when the machine cannot give it one. */
   sandbox: boolean
-  /** The virtual display its windows are on (display.ts), or headless. */
+  /** How it runs (launch.ts): what started, not what was wanted. */
+  mode: BrowserMode
+  /** The virtual display its windows are on (display.ts), in "virtual". */
   display: string | null
   /** Chromium's folder for what it keeps outside the profile (launch). */
   scratchDir: string
@@ -316,17 +320,6 @@ function verdict(
   return vault.privateAllowed ? "ok" : "private"
 }
 
-function platformToken(): string {
-  switch (process.platform) {
-    case "darwin":
-      return "Macintosh; Intel Mac OS X 10_15_7"
-    case "win32":
-      return "Windows NT 10.0; Win64; x64"
-    default:
-      return "X11; Linux x86_64"
-  }
-}
-
 /**
  * Chromium keeps its crash reporter's database in the user's config folder
  * (~/.config), and when it cannot make one there it can abort as it starts:
@@ -344,6 +337,7 @@ function removeScratchDir(dir: string): void {
 }
 
 async function launch(
+  mode: BrowserMode,
   executablePath: string,
   proxyPort: number,
   sandbox: boolean,
@@ -353,79 +347,51 @@ async function launch(
   const { chromium } = await import("patchright-core")
 
   return chromium.launch({
-    executablePath,
-    // With windows on the virtual display where there is one, as a
-    // desktop's Chrome runs; headless otherwise.
-    headless: display === null,
-    chromiumSandbox: sandbox,
-    env: {
-      ...process.env,
-      XDG_CONFIG_HOME: path.join(scratchDir, "config"),
-      XDG_CACHE_HOME: path.join(scratchDir, "cache"),
-      ...(display
-        ? { DISPLAY: display.display, XAUTHORITY: display.authFile }
-        : {}),
-    },
-    // What tells a page it is being driven: the automation switch and the
-    // webdriver flag. The rest of Chromium is as it is.
-    ignoreDefaultArgs: ["--enable-automation"],
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      ...(display ? displaySwitches() : []),
-      // Two of Playwright's own switches that patchright-core leaves out and
-      // PCP relies on: a page's script may open a window without a click
-      // (the gate decides what loads in it), and a step back loads a
-      // document again (the gate and the check watch see it), rather than
-      // coming from the back-forward cache.
-      "--disable-popup-blocking",
-      "--disable-back-forward-cache",
-      "--disable-dev-shm-usage",
-      // UDP would go around the proxy: no QUIC, and WebRTC only through it.
-      "--disable-quic",
-      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-      "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-    ],
+    ...launchOptions({ mode, executablePath, sandbox, scratchDir, display }),
     proxy: { server: `http://127.0.0.1:${proxyPort}`, bypass: "<-loopback>" },
     timeout: 30_000,
   })
 }
 
 /**
- * What every context starts with, the vault's and web_fetch's alike: a
- * desktop Chrome's user agent without "Headless", a screen larger than the
- * viewport as a desktop's is, the host's locale and time zone.
- *
- * With a window (headless is false) the browser keeps its own user agent:
- * overriding it makes Playwright send client hints built from the string,
- * with an empty platform version, which Chromium's own never has. Headless
- * the user agent says "HeadlessChrome" and has to be replaced.
- *
- * Service workers are not an option here: a service worker can answer a
- * navigation without the network, around the gate, and the gate refuses
- * their scripts itself (isServiceWorkerScript). Playwright's own "block"
- * overwrote navigator.serviceWorker.register in every frame, which a page
- * can tell from the real one and go around through the prototype.
+ * Chromium started in the first of `modes` that starts, with its own
+ * sandbox where the machine gives one.
  */
-function contextOptions(
-  browser: Browser,
-  { headless }: { headless: boolean },
-): BrowserContextOptions {
-  const major = browser.version().split(".")[0] ?? "141"
-  const { locale, timeZone } = Intl.DateTimeFormat().resolvedOptions()
+async function launchFirst(
+  modes: BrowserMode[],
+  executable: string,
+  proxyPort: number,
+  scratchDir: string,
+  display: VirtualDisplay | null,
+): Promise<{ browser: Browser; mode: BrowserMode; sandbox: boolean }> {
+  let failure: unknown = new Error("No mode to start Chromium in.")
 
-  return {
-    viewport: { ...VIEWPORT },
-    screen: { ...SCREEN },
-    deviceScaleFactor: 1,
-    ...(headless
-      ? {
-          userAgent: `Mozilla/5.0 (${platformToken()}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
-        }
-      : {}),
-    locale,
-    timezoneId: timeZone,
-    acceptDownloads: false,
+  for (const [index, mode] of modes.entries()) {
+    const attempt = (sandbox: boolean) =>
+      launch(mode, executable, proxyPort, sandbox, scratchDir, display)
+    const sandbox = sandboxSetting() !== "off"
+
+    try {
+      try {
+        return { browser: await attempt(sandbox), mode, sandbox }
+      } catch (error) {
+        // An unprivileged container, or root, has no sandbox to give.
+        if (!sandbox || sandboxSetting() === "on") throw error
+        return { browser: await attempt(false), mode, sandbox: false }
+      }
+    } catch (error) {
+      failure = error
+
+      if (index < modes.length - 1) {
+        console.error(
+          `[browser] Chromium did not start in its ${mode} mode; it starts ${modes[index + 1]} instead`,
+          error,
+        )
+      }
+    }
   }
+
+  throw failure
 }
 
 function sandboxSetting(): "on" | "off" | "auto" {
@@ -493,27 +459,23 @@ async function start(
       vault ? verdict(vault, address, port, host) : "private",
   })
 
-  let browser: Browser
-  let sandbox = sandboxSetting() !== "off"
   const scratchDir = await makeScratchDir()
-  const screen = wantsVirtualDisplay() ? await acquireDisplay() : null
+  const wanted = wantedMode()
+  const screen = wanted === "virtual" ? await acquireDisplay() : null
   const display = screen?.display ?? null
+  let browser: Browser
+  let mode: BrowserMode
+  let sandbox: boolean
 
   try {
-    try {
-      browser = await launch(
-        executable,
-        proxy.port,
-        sandbox,
-        scratchDir,
-        display,
-      )
-    } catch (error) {
-      // An unprivileged container, or root, has no sandbox to give.
-      if (!sandbox || sandboxSetting() === "on") throw error
-      sandbox = false
-      browser = await launch(executable, proxy.port, false, scratchDir, display)
-    }
+    ;({ browser, mode, sandbox } = await launchFirst(
+      // A virtual display that did not start leaves the browser headless.
+      modesToTry(wanted === "virtual" && !display ? "headless" : wanted),
+      executable,
+      proxy.port,
+      scratchDir,
+      display,
+    ))
   } catch (error) {
     screen?.release()
     await proxy.close()
@@ -548,7 +510,7 @@ async function start(
   }
 
   const context = await browser.newContext({
-    ...contextOptions(browser, { headless: display === null }),
+    ...contextOptions(browser.version(), mode),
     storageState: (await loadProfile(ctx)) ?? undefined,
   })
 
@@ -558,6 +520,7 @@ async function start(
     context,
     proxy,
     sandbox,
+    mode,
     display: display?.display ?? null,
     scratchDir,
     downloads,
@@ -928,6 +891,9 @@ async function pageParts(
   const cdp = await vault.context.newCDPSession(page)
   const { frameTree } = await cdp.send("Page.getFrameTree")
 
+  // Every tab and popup, before PCP lets it load anything.
+  if (vault.mode === "window") await keepOffScreen(cdp)
+
   return { page, cdp, mainFrameId: frameTree.frame.id, documents }
 }
 
@@ -1138,9 +1104,7 @@ export function solveMayOpen(
 
 function fetchContext(vault: VaultBrowser): Promise<BrowserContext> {
   vault.fetchContext ??= vault.browser
-    .newContext(
-      contextOptions(vault.browser, { headless: vault.display === null }),
-    )
+    .newContext(contextOptions(vault.browser.version(), vault.mode))
     .then((context) => {
       // A page read for web_fetch opens no windows: the gate refuses what a
       // popup would load, and the window is closed.
@@ -1182,7 +1146,11 @@ export async function openSolvePage(
     const documents = watchDocuments(page)
     const cdp = await page.context().newCDPSession(page)
     const { frameTree } = await cdp.send("Page.getFrameTree")
-    await cdp.detach().catch(() => {})
+
+    // The window's place is told to the page through this session, which
+    // then lasts as long as the page; otherwise it is not needed.
+    if (vault.mode === "window") await keepOffScreen(cdp)
+    else await cdp.detach().catch(() => {})
     const solve: Solve = {
       page,
       mainFrameId: frameTree.frame.id,
@@ -1292,11 +1260,12 @@ export type BrowserStatus = {
   tabs: number
   startedAt: string | null
   /**
-   * How it runs: with windows on the virtual display, or headless (also
-   * where the display was wanted and did not start). Null when it is not
+   * How it runs (launch.ts): with windows on the virtual display, with a
+   * window of its own kept off the screen, or headless (also where a
+   * display or a window was wanted and did not start). Null when it is not
    * running.
    */
-  display: "virtual" | "headless" | null
+  display: BrowserMode | null
 }
 
 export function browserStatus(vaultId: string): BrowserStatus {
@@ -1307,6 +1276,6 @@ export function browserStatus(vaultId: string): BrowserStatus {
     sandbox: vault?.sandbox ?? null,
     tabs: vault?.tabs.size ?? 0,
     startedAt: vault ? new Date(vault.startedAt).toISOString() : null,
-    display: vault ? (vault.display === null ? "headless" : "virtual") : null,
+    display: vault?.mode ?? null,
   }
 }

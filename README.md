@@ -51,8 +51,8 @@ on its own, what it has to ask you about first, and what it cannot touch.
   the token's tools and filters, counts or passes on what they answer. Every
   call follows the token's levels, and the program reaches nothing else.
 - **A browser that keeps your sign-ins.** Add PCP's browser and an assistant
-  can open pages, read them, click, type and fill in forms in a headless
-  Chromium on the machine PCP runs on, signed in where you signed it in. You
+  can open pages, read them, click, type and fill in forms in a Chromium
+  on the machine PCP runs on, signed in where you signed it in. You
   decide which sites each token opens, watch any tab live in PCP, and take it
   over for a sign-in or a CAPTCHA; an assistant can hand you a tab and wait.
 - **Mail without an MCP server.** Add a mail account over JMAP (Stalwart,

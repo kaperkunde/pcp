@@ -26,12 +26,14 @@ import {
   wantsVirtualDisplay,
 } from "./display"
 import { chromiumExecutable } from "./executable"
+import { OFF_SCREEN_WINDOW, SHOWN_WINDOW_POSITION } from "./limits"
 import {
   browserStatus,
   closeAllBrowsers,
   ensureBrowser,
   openTab,
 } from "./runtime"
+import { subscribeScreencast } from "./screencast"
 
 // The virtual display a server's browser runs on, against the machine's own
 // Xvfb. Skipped where there is none (`apt install xvfb`).
@@ -232,6 +234,18 @@ navigator.userAgentData
 </script>`)
         }
 
+        if (request.url?.startsWith("/place")) {
+          return res.end(`<!doctype html><title>?</title><script>
+document.title = JSON.stringify({
+  place: [screenX, screenY],
+  window: [outerWidth, outerHeight, innerWidth, innerHeight],
+  screen: [screen.width, screen.height],
+  visible: document.visibilityState,
+  userAgent: navigator.userAgent,
+})
+</script>`)
+        }
+
         res.end(`<!doctype html><title>?</title><script>
 const gl = document.createElement("canvas").getContext("webgl")
 document.title = JSON.stringify({
@@ -331,6 +345,112 @@ document.title = JSON.stringify({
       expect(seen).toEqual(own)
       expect(seen.architecture).not.toBe("")
     })
+
+    it("in the desktop app, has a window of its own off the screen, which still paints for the live view", async () => {
+      // The machine's own screen, as the desktop app has one: here a display
+      // of PCP's, handed to Chromium as a desktop session's would be.
+      const screen = await acquireDisplay()
+      vi.stubEnv("DISPLAY", screen!.display.display)
+      vi.stubEnv("XAUTHORITY", screen!.display.authFile)
+      vi.stubEnv("PCP_DESKTOP", "1")
+      vi.stubEnv("PCP_BROWSER_DISPLAY", "")
+
+      try {
+        const vault = await ensureBrowser(ctx)
+        expect(vault.mode).toBe("window")
+        expect(vault.display).toBeNull()
+        expect(browserStatus(ctx.vaultId).display).toBe("window")
+
+        const tab = await openTab(vault, {
+          openedBy: "owner",
+          tokenId: null,
+          rules: null,
+          privateAllowed: true,
+        })
+        const where = async (cdp: typeof tab.cdp) => {
+          const { bounds } = await cdp.send("Browser.getWindowForTarget")
+          return [bounds.left, bounds.top]
+        }
+        expect(await where(tab.cdp)).toEqual([
+          OFF_SCREEN_WINDOW.x,
+          OFF_SCREEN_WINDOW.y,
+        ])
+
+        await tab.page.goto(`${api.origin}/place`)
+        const seen = JSON.parse(await tab.page.title()) as {
+          place: number[]
+          window: number[]
+          screen: number[]
+          visible: string
+          userAgent: string
+        }
+        // The page is told a place on the screen it is told of, not the
+        // window's own, and still counts as seen.
+        expect(seen.place).toEqual([
+          SHOWN_WINDOW_POSITION.x,
+          SHOWN_WINDOW_POSITION.y,
+        ])
+        expect(seen.window[0]).toBeGreaterThan(seen.window[2]!)
+        expect(seen.window[1]).toBeGreaterThan(seen.window[3]!)
+        expect(seen.screen).toEqual([1920, 1080])
+        expect(seen.visible).toBe("visible")
+        expect(seen.userAgent).not.toContain("Headless")
+
+        // The live view's frames keep coming from a window no one sees.
+        const frames: unknown[] = []
+        const viewer = await subscribeScreencast(tab, (frame) => {
+          frames.push(frame)
+          viewer?.took()
+        })
+        await tab.page.evaluate(() => {
+          document.body.style.background = "rgb(1, 2, 3)"
+        })
+        await vi.waitFor(() => expect(frames.length).toBeGreaterThan(0), {
+          timeout: 10_000,
+        })
+        viewer?.stop()
+
+        // A popup opens where its page asks, on the screen, and moves off
+        // it as it becomes a tab.
+        await tab.page.evaluate(() => {
+          window.open("about:blank", "", "popup,left=100,top=100")
+        })
+        await vi.waitFor(() => expect(vault.tabs.size).toBe(2), {
+          timeout: 10_000,
+        })
+        const popup = [...vault.tabs.values()].find((other) => other !== tab)!
+        expect(await where(popup.cdp)).toEqual([
+          OFF_SCREEN_WINDOW.x,
+          OFF_SCREEN_WINDOW.y,
+        ])
+      } finally {
+        await closeAllBrowsers()
+        screen?.release()
+      }
+    })
+
+    it.skipIf(process.platform !== "linux")(
+      "runs headless when its own window does not open",
+      async () => {
+        // Linux with no screen at all: a windowed Chromium stops as it starts.
+        vi.stubEnv("DISPLAY", "")
+        vi.stubEnv("WAYLAND_DISPLAY", "")
+        vi.stubEnv("PCP_DESKTOP", "1")
+        vi.stubEnv("PCP_BROWSER_DISPLAY", "")
+        const log = vi.spyOn(console, "error").mockImplementation(() => {})
+
+        try {
+          const vault = await ensureBrowser(ctx)
+          expect(vault.mode).toBe("headless")
+          expect(browserStatus(ctx.vaultId).display).toBe("headless")
+          expect(String(log.mock.calls[0]?.[0])).toContain(
+            "did not start in its window mode",
+          )
+        } finally {
+          log.mockRestore()
+        }
+      },
+    )
 
     it("is headless where no display is wanted", async () => {
       vi.stubEnv("PCP_BROWSER_DISPLAY", "headless")
