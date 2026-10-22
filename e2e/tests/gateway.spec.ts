@@ -148,6 +148,8 @@ test("finds, describes and calls an upstream tool with the secret added by PCP",
   })
   expect(listed.body.result?.isError ?? false, toolText(listed)).toBe(false)
   expect(toolText(listed).split("\n")).toEqual([
+    // What the server is, as its first page says.
+    `${SLUG} (${SERVER_NAME}): Sends postcards and adds numbers.`,
     `${SLUG}: 3 tools, 3 allowed and 0 ask the owner first.`,
     expect.stringMatching(new RegExp(`^${SLUG}/add_numbers \\[allowed\\]`)),
     expect.stringMatching(new RegExp(`^${SLUG}/echo_auth \\[allowed\\]`)),
