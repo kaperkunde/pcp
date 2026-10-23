@@ -1,6 +1,7 @@
 import { createMcpHandler } from "@modelcontextprotocol/server"
 import { after } from "next/server"
 
+import { afterAnswerScope } from "@/lib/core/after-answer"
 import { resolveApiToken } from "@/lib/core/api-tokens"
 import { clientHello, clientSeen } from "@/lib/core/client-hello"
 import {
@@ -184,14 +185,21 @@ async function handle(request: Request): Promise<Response> {
     publicUrl: await publicUrlFor(resolved.ctx, request),
   }
 
-  const response = await mcpHandler.fetch(request, {
-    authInfo: {
-      token: "",
-      clientId: resolved.tokenId,
-      scopes: [],
-      extra: { scope },
-    },
-  })
+  // What a call hands on to do once it has answered (an IMAP send's look
+  // for its copy in Sent) runs once this answer is sent, inside this
+  // request, with what the request brought.
+  const later = afterAnswerScope()
+  const response = await later.run(() =>
+    mcpHandler.fetch(request, {
+      authInfo: {
+        token: "",
+        clientId: resolved.tokenId,
+        scopes: [],
+        extra: { scope },
+      },
+    }),
+  )
+  after(() => later.drain())
 
   // Linked repositories due a sync are synced once this answer is sent,
   // with the key this request brought: nothing holds one in between.

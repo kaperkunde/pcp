@@ -91,11 +91,15 @@ describe("activityLog", () => {
     await request("r-expired", "pending", earlier)
     await request("r-ran", "executed", earlier)
     await request("r-no", "declined", later)
+    await request("r-withdrawn", "withdrawn", later)
+    await request("r-closed", "closed", later)
     writeLog([
       { asked: true, request: "r-waiting" },
       { asked: true, request: "r-expired" },
       { asked: true, request: "r-ran" },
       { asked: true, request: "r-no" },
+      { asked: true, request: "r-withdrawn" },
+      { asked: true, request: "r-closed" },
       { asked: true, request: "r-pruned" },
       { asked: true },
     ])
@@ -107,6 +111,8 @@ describe("activityLog", () => {
       "expired",
       "allowed",
       "declined",
+      "withdrawn",
+      "closed",
       null,
       null,
     ])

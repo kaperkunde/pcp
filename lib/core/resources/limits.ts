@@ -20,6 +20,11 @@ export const RESOURCE_BOUNDS = {
   fileMb: { min: 1, max: 2048 },
   /** What one token's kept results may hold together, in MB. */
   keptMb: { min: 10, max: 1_000_000 },
+  /**
+   * Minutes the browser stays open with no tool call, no input, nobody
+   * watching and no hand-over waiting. An open Chromium holds memory.
+   */
+  browserIdleMinutes: { min: 5, max: 480 },
 } satisfies Record<string, Bound>
 
 /**
@@ -44,6 +49,11 @@ export const AUTO_KEPT_DISK_SHARE = 1 / 20
 export const AUTO_KEPT_MB: Bound = { min: 50, max: 4096 }
 /** When the disk cannot be read. */
 export const FALLBACK_KEPT_MB = 500
+/**
+ * How long the browser waits idle before it closes: fixed, not read off the
+ * machine, since one Chromium costs about the same anywhere.
+ */
+export const AUTO_BROWSER_IDLE_MINUTES = 60
 
 /**
  * Below what the larger limits never go, whatever the file size: what PCP

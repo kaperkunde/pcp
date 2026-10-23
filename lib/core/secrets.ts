@@ -3,19 +3,30 @@ import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
+import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
 
 /**
  * The secret store. Values are ciphertext under the vault's data key
  * (lib/core/crypto.ts); this module is the only place they are decrypted.
  *
  * `text` secrets are the owner's: API keys, passwords, whatever an MCP
- * server needs to be sent. `oauth` and `ssh_key` secrets are managed: the
+ * server needs to be sent. `totp` secrets are the owner's too: the seed of
+ * a site's one-time codes, of which only the code of the moment ever goes
+ * anywhere (typed into a page by the browser, lib/core/browser-secrets.ts).
+ * `oauth` and `ssh_key` secrets are managed: the
  * token set PCP obtained for a server through OAuth, or the private key PCP
  * made for an SSH server (lib/core/ssh/), kept here so they are encrypted
  * like everything else and show up in the same list.
  */
 
-export type SecretKind = "text" | "oauth" | "ssh_key"
+export type SecretKind = "text" | "totp" | "oauth" | "ssh_key"
+
+/** The kinds the owner enters themselves. */
+export type OwnerSecretKind = "text" | "totp"
+
+export function isOwnerSecretKind(kind: string): kind is OwnerSecretKind {
+  return kind === "text" || kind === "totp"
+}
 
 export type SecretSummary = {
   id: string
@@ -103,16 +114,39 @@ export async function findTextSecretByName(
   })
 }
 
-export function validateSecretValue(value: string): string | null {
+/**
+ * One of the owner's own secrets (text or TOTP) by its name: what the
+ * browser types (lib/core/browser-secrets.ts).
+ */
+export async function findOwnerSecretByName(
+  ctx: VaultContext,
+  name: string,
+): Promise<{ id: string; name: string; kind: OwnerSecretKind } | null> {
+  const row = await db().secret.findUnique({
+    where: { vaultId_name: { vaultId: ctx.vaultId, name: name.trim() } },
+    select: { id: true, name: true, kind: true },
+  })
+
+  return row && isOwnerSecretKind(row.kind)
+    ? { id: row.id, name: row.name, kind: row.kind }
+    : null
+}
+
+export function validateSecretValue(
+  value: string,
+  kind: OwnerSecretKind = "text",
+): string | null {
   if (!value) {
-    return "Enter the secret's value."
+    return kind === "totp"
+      ? "Enter the seed: the base32 text, or the otpauth:// link."
+      : "Enter the secret's value."
   }
 
   if (value.length > MAX_VALUE) {
     return "That value is too large for a secret."
   }
 
-  return null
+  return kind === "totp" ? totpSeedProblem(value) : null
 }
 
 /**
@@ -121,10 +155,11 @@ export function validateSecretValue(value: string): string | null {
  */
 export async function checkNewSecret(
   ctx: VaultContext,
-  input: { name: string; value: string },
+  input: { name: string; value: string; kind?: OwnerSecretKind },
 ): Promise<void> {
   const name = input.name.trim()
-  const problem = validateSecretName(name) ?? validateSecretValue(input.value)
+  const problem =
+    validateSecretName(name) ?? validateSecretValue(input.value, input.kind)
 
   if (problem) {
     throw invalid(problem)
@@ -142,9 +177,15 @@ export async function checkNewSecret(
 
 export async function createSecret(
   ctx: VaultContext,
-  input: { name: string; value: string; description?: string },
+  input: {
+    name: string
+    value: string
+    description?: string
+    kind?: OwnerSecretKind
+  },
 ): Promise<{ id: string }> {
   await checkNewSecret(ctx, input)
+  const kind = input.kind ?? "text"
 
   const name = input.name.trim()
   const description = (input.description ?? "").trim().slice(0, MAX_DESCRIPTION)
@@ -156,8 +197,14 @@ export async function createSecret(
       vaultId: ctx.vaultId,
       name,
       description,
-      kind: "text",
-      ciphertext: asBytes(encryptString(ctx.dek, input.value, aad(id))),
+      kind,
+      ciphertext: asBytes(
+        encryptString(
+          ctx.dek,
+          kind === "totp" ? input.value.trim() : input.value,
+          aad(id),
+        ),
+      ),
     },
   })
 
@@ -220,7 +267,7 @@ export async function updateSecret(
   } = {}
 
   if (input.name !== undefined) {
-    if (row.kind !== "text") {
+    if (!isOwnerSecretKind(row.kind)) {
       throw invalid("Managed secrets keep their name.")
     }
 
@@ -253,19 +300,23 @@ export async function updateSecret(
   }
 
   if (input.value !== undefined) {
-    if (row.kind !== "text") {
+    if (!isOwnerSecretKind(row.kind)) {
       throw invalid("Managed secrets are written by the server they belong to.")
     }
 
-    if (!input.value) {
-      throw invalid("Enter the secret's value.")
+    const problem = validateSecretValue(input.value, row.kind)
+
+    if (problem) {
+      throw invalid(problem)
     }
 
-    if (input.value.length > MAX_VALUE) {
-      throw invalid("That value is too large for a secret.")
-    }
-
-    data.ciphertext = asBytes(encryptString(ctx.dek, input.value, aad(id)))
+    data.ciphertext = asBytes(
+      encryptString(
+        ctx.dek,
+        row.kind === "totp" ? input.value.trim() : input.value,
+        aad(id),
+      ),
+    )
   }
 
   await db().secret.update({ where: { id }, data })
@@ -351,6 +402,66 @@ export async function readSecretValue(
 }
 
 /**
+ * What the browser types for a secret (lib/core/browser-secrets.ts): a text
+ * secret's value, or a TOTP secret's code of the moment, worked out here so
+ * its seed never leaves this module. Records that it was used.
+ */
+export async function readTypedValue(
+  ctx: VaultContext,
+  id: string,
+  now = Date.now(),
+): Promise<string> {
+  const row = await db().secret.findFirst({
+    where: { id, vaultId: ctx.vaultId },
+    select: { kind: true },
+  })
+
+  if (!row || !isOwnerSecretKind(row.kind)) {
+    throw notFound("That secret")
+  }
+
+  const value = await readSecretValue(ctx, id)
+
+  if (row.kind === "text") {
+    return value
+  }
+
+  const seed = parseTotpSeed(value)
+
+  if (typeof seed === "string") {
+    throw invalid(
+      "That secret's seed no longer makes codes. Enter it again on the Secrets page.",
+    )
+  }
+
+  return totpCode(seed, now).code
+}
+
+/** A TOTP secret's code of the moment, for the owner's own screen. */
+export async function revealTotpCode(
+  ctx: VaultContext,
+  id: string,
+  now = Date.now(),
+): Promise<{ code: string; secondsLeft: number; issuer: string | null }> {
+  const row = await db().secret.findFirst({
+    where: { id, vaultId: ctx.vaultId, kind: "totp" },
+    select: { id: true },
+  })
+
+  if (!row) {
+    throw notFound("That one-time code secret")
+  }
+
+  const seed = parseTotpSeed(await revealSecret(ctx, id))
+
+  if (typeof seed === "string") {
+    throw invalid(seed)
+  }
+
+  return { ...totpCode(seed, now), issuer: seed.issuer }
+}
+
+/**
  * Creates or replaces a managed secret (OAuth tokens for a server, or an
  * SSH server's key). Named after the owning server so it cannot collide
  * with the owner's names.
@@ -361,7 +472,7 @@ export async function writeManagedSecret(
     name: string
     description: string
     value: string
-    kind?: Exclude<SecretKind, "text">
+    kind?: Exclude<SecretKind, OwnerSecretKind>
   },
 ): Promise<{ id: string }> {
   const kind = input.kind ?? "oauth"

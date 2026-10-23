@@ -49,6 +49,9 @@ export type RegisterShape = {
   extra_headers?: unknown[]
   client_id?: string
   oauth_scope?: string
+  description?: string
+  /** Another server of a definition the token sees, by a short name. */
+  definition?: string
 }
 
 export function isMailRegistrationKind(
@@ -58,14 +61,20 @@ export function isMailRegistrationKind(
 }
 
 /**
- * The kind a call is for: the one named, else an API when it brings an
+ * The kind a call is for: the one named, else that of the definition it is
+ * made on (an API's or an MCP server's), else an API when it brings an
  * OpenAPI document, else an MCP server, as register_server always did.
  */
 export function resolveKind(
   args: Pick<RegisterShape, "kind" | "openapi_schema" | "openapi_url">,
+  definitionKind?: string | null,
 ): RegisterKind {
   if (args.kind) {
     return args.kind
+  }
+
+  if (definitionKind) {
+    return definitionKind === "openapi" ? "api" : "mcp"
   }
 
   return args.openapi_schema !== undefined || args.openapi_url !== undefined
@@ -101,6 +110,14 @@ export function checkRegisterShape(
   const authType = args.auth_type ?? "none"
   const mail = isMailRegistrationKind(kind)
 
+  if (args.definition !== undefined) {
+    const refused = checkDefinitionShape(kind, args)
+
+    if (refused) {
+      return refused
+    }
+  }
+
   if (
     kind !== "api" &&
     (args.openapi_schema !== undefined ||
@@ -111,7 +128,11 @@ export function checkRegisterShape(
   }
 
   if (kind === "api") {
-    if (args.openapi_schema === undefined && args.openapi_url === undefined) {
+    if (
+      args.definition === undefined &&
+      args.openapi_schema === undefined &&
+      args.openapi_url === undefined
+    ) {
       return "An API is added from its OpenAPI document: pass it in openapi_schema, or its address in openapi_url."
     }
   } else if (!args.url?.trim()) {
@@ -194,6 +215,42 @@ export function checkRegisterShape(
 
   if (authType === "header" && !args.secret?.trim()) {
     return "Header authentication needs the name of a secret the owner stored in PCP, in secret."
+  }
+
+  return null
+}
+
+/**
+ * A server made on a definition (`definition`) is another instance of what
+ * a server the token sees is: an MCP server's or an API's, with an address
+ * of its own. What it is (the description, an API's schema and edits) is
+ * the definition's, so the call brings none of that, only the instance's
+ * own part: its name, address, sign-in, read-only switch and the note.
+ */
+function checkDefinitionShape(
+  kind: RegisterKind,
+  args: RegisterShape,
+): string | null {
+  if (kind !== "mcp" && kind !== "api") {
+    return "definition is for an MCP server or an API (kind mcp or api): a mail or calendar account is not another server of anything."
+  }
+
+  if (
+    args.openapi_schema !== undefined ||
+    args.openapi_url !== undefined ||
+    args.spec_patches !== undefined
+  ) {
+    return "With definition, the schema and its edits are the definition's: leave openapi_schema, openapi_url and spec_patches out."
+  }
+
+  if (args.description !== undefined) {
+    return "With definition, the description is the definition's: leave description out, and put what is particular to this server in note."
+  }
+
+  if (!args.url?.trim()) {
+    return kind === "api"
+      ? "With definition, pass the base URL this server's requests go to in url: each server of a definition has an address of its own."
+      : "With definition, pass this server's address in url: each server of a definition has an address of its own."
   }
 
   return null

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createBrowserServer } from "../browser/server"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { readServerNote, setPersonalNote } from "../definitions"
 import { createEndpoint, storedSpec } from "../endpoints"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
@@ -19,11 +20,12 @@ import {
 } from "./documents"
 import type { RepoFiles } from "./layout"
 import { findLocalItem, localItem, localItems } from "./local"
-import { addSecrets, PETS_SPEC, populate } from "./test-vault"
+import { addSecrets, PETS_SPEC, populate, yamlText } from "./test-vault"
 
 // Applying what the owner approved: names resolved against this vault and
-// never guessed, a secret the vault lacks left out with a note, and the
-// owner's own write paths doing the writing.
+// never guessed, a secret the vault lacks left out with a note, the owner's
+// own write paths doing the writing, and a server's item written as its
+// definition only: never an instance's own address, sign-in or switches.
 
 let cleanup: (() => Promise<void>) | null = null
 
@@ -69,26 +71,85 @@ function find<K extends ItemDocument["kind"]>(
   ) as ByKind[K]
 }
 
+/** A format-1 pcp.yaml for the pet shop, as an older PCP wrote it. */
+function formatOnePets(overrides: Record<string, unknown> = {}): RepoFiles {
+  return {
+    "endpoints/pets/openapi.json": PETS_SPEC,
+    "endpoints/pets/pcp.yaml": yamlText({
+      pcp_format: 1,
+      version: 3,
+      name: "Pets",
+      description: "The pet shop's API.",
+      baseUrl: "https://pets.example.com/v1",
+      readOnly: false,
+      publicOnly: true,
+      auth: {
+        kind: "header",
+        header: "X-Api-Key",
+        template: "{{secret}}",
+        secret: "Pets key",
+      },
+      ...overrides,
+    }),
+  }
+}
+
 describe("applying an item", () => {
-  it("reports a secret the vault does not have, and saves the item without it", async () => {
+  it("asks for a new server's own address, and takes the one the owner gives", async () => {
+    const items = await populatedItems()
+    const ctx = await freshVault()
+    const pets = find(items, "endpoint", "pets")
+
+    expect(pets.instance).toBeNull()
+    await expect(applyItem(ctx, pets, { id: null })).rejects.toThrow(
+      /no base URL of its own/,
+    )
+    await expect(
+      applyItem(ctx, find(items, "server", "docs"), { id: null }),
+    ).rejects.toThrow(/no address of its own/)
+
+    const { id, notes } = await applyItem(ctx, pets, {
+      id: null,
+      instance: {
+        name: "Pets at home",
+        url: "https://pets.home.example/v1",
+        note: "The shop in the garage.",
+        authType: "none",
+      },
+    })
+    expect(notes).toEqual([])
+    const row = await db().mcpServer.findUniqueOrThrow({ where: { id } })
+    expect(row).toMatchObject({
+      name: "Pets at home",
+      slug: "pets-at-home",
+      url: "https://pets.home.example/v1",
+      // An endpoint the owner adds is read-only until they say otherwise.
+      readOnly: true,
+    })
+    expect(readServerNote(ctx, row)).toBe("The shop in the garage.")
+    expect(
+      await db().serverDefinition.findUniqueOrThrow({
+        where: { id: row.definitionId! },
+      }),
+    ).toMatchObject({ slug: "pets", name: "Pets" })
+    expect(
+      await findLocalItem(ctx, { kind: "endpoint", name: "pets" }),
+    ).toEqual({ id, kind: "endpoint" })
+  })
+
+  it("reports a secret a wrapper places that the vault does not have, and saves it without", async () => {
     const items = await populatedItems()
     const ctx = await freshVault()
     await createBrowserServer(ctx)
-
-    const pets = find(items, "endpoint", "pets")
-    expect(await resolveItem(ctx, pets)).toEqual({
-      problems: [],
-      missingSecrets: ["Pets key"],
+    await applyItem(ctx, find(items, "endpoint", "pets"), {
+      id: null,
+      instance: {
+        name: "Pets",
+        url: "https://pets.example.com/v1",
+        readOnly: false,
+        authType: "none",
+      },
     })
-
-    const endpoint = await applyItem(ctx, pets, { id: null })
-    expect(endpoint.notes).toEqual([
-      expect.stringContaining('no secret called "Pets key"'),
-    ])
-    expect(endpoint.notes[0]).toContain("Add the secret under Secrets in PCP")
-    expect(
-      (await localItem(ctx, "endpoint", endpoint.id)).document,
-    ).toMatchObject({ auth: { kind: "none" }, baseUrl: pets.baseUrl })
 
     const wrapper = find(items, "wrapper", "pet-tools")
     expect((await resolveItem(ctx, wrapper)).missingSecrets).toEqual([
@@ -105,27 +166,168 @@ describe("applying an item", () => {
       ).secrets,
     ).toEqual([])
 
-    const docs = await applyItem(ctx, find(items, "server", "docs"), {
-      id: null,
-    })
-    expect(docs.notes).toEqual([
-      expect.stringContaining('no secret called "Pets key"'),
-    ])
+    // No value was made up.
+    expect(await db().secret.count({ where: { kind: "text" } })).toBe(0)
+  })
 
-    const notes = await applyItem(ctx, find(items, "endpoint", "notes"), {
-      id: null,
+  it("fills a first instance in from a format-1 document, and never writes it over a server the vault has", async () => {
+    const ctx = await freshVault()
+    const secrets = await addSecrets(ctx)
+    const [first] = (await readRepo(formatOnePets())).items as [
+      EndpointDocument,
+    ]
+
+    expect(first.instance).toEqual({
+      url: "https://pets.example.com/v1",
+      readOnly: false,
+      publicOnly: true,
     })
-    expect(notes.notes).toEqual([
-      expect.stringContaining('no secret called "Notes client secret"'),
-    ])
-    expect((await localItem(ctx, "endpoint", notes.id)).document).toMatchObject(
-      {
-        auth: { kind: "oauth", clientId: "notes-client", clientSecret: null },
+    const { id } = await applyItem(ctx, first, { id: null })
+    expect(
+      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({
+      url: "https://pets.example.com/v1",
+      readOnly: false,
+      publicOnly: true,
+      authType: "header",
+      authHeaderName: "X-Api-Key",
+      authSecretId: secrets.pets,
+    })
+
+    // The owner moves it, signs it in otherwise and makes it read-only;
+    // a later format-1 document saying otherwise changes none of it.
+    await db().mcpServer.update({
+      where: { id },
+      data: {
+        url: "https://pets.home.example/v1",
+        readOnly: true,
+        publicOnly: false,
+        authHeaderName: "X-Key",
+        authSecretId: secrets.client,
       },
+    })
+    const [later] = (
+      await readRepo(
+        formatOnePets({
+          baseUrl: "https://evil.example/v1",
+          readOnly: false,
+          publicOnly: true,
+          description: "The pet shop's API, now with cats.",
+          auth: { kind: "basic", username: "mallory", secret: "Pets key" },
+        }),
+      )
+    ).items as [EndpointDocument]
+    await applyItem(ctx, later, { id })
+    expect(
+      await db().mcpServer.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({
+      url: "https://pets.home.example/v1",
+      readOnly: true,
+      publicOnly: false,
+      authType: "header",
+      authHeaderName: "X-Key",
+      authSecretId: secrets.client,
+      description: "The pet shop's API, now with cats.",
+    })
+  })
+
+  it("never writes an instance's own name, address, sign-in, switches, levels or note", async () => {
+    const items = await populatedItems()
+    const ctx = await freshVault()
+    const { ids } = await populate(ctx)
+    await setPersonalNote(ctx, "server", ids.docs, "Ours, on the NAS.")
+    await db().mcpServer.update({
+      where: { id: ids.docs },
+      data: {
+        name: "Our docs",
+        url: "https://docs.home.example/mcp",
+        enabled: false,
+        publicOnly: false,
+      },
+    })
+    await db().vaultToolAccess.create({
+      data: {
+        vaultId: ctx.vaultId,
+        serverId: ids.pets,
+        toolName: "list_pets",
+        access: "allow",
+      },
+    })
+    const before = {
+      docs: await db().mcpServer.findUniqueOrThrow({ where: { id: ids.docs } }),
+      pets: await db().mcpServer.findUniqueOrThrow({ where: { id: ids.pets } }),
+    }
+    const docs = find(items, "server", "docs")
+    const pets = find(items, "endpoint", "pets")
+
+    await applyItem(
+      ctx,
+      {
+        ...docs,
+        description: "The team's documents, all of them.",
+        instance: { url: "https://evil.example/mcp", publicOnly: true },
+        auth: { kind: "none" },
+      },
+      { id: ids.docs },
+    )
+    await applyItem(
+      ctx,
+      {
+        ...pets,
+        displayName: "Pet shop",
+        instance: {
+          url: "https://evil.example/v1",
+          readOnly: false,
+          publicOnly: false,
+        },
+        auth: { kind: "none" },
+        toolDescriptions: { list_pets: "Every pet." },
+      },
+      { id: ids.pets },
     )
 
-    // No value was made up for any of them.
-    expect(await db().secret.count({ where: { kind: "text" } })).toBe(0)
+    const instanceFields = [
+      "name",
+      "slug",
+      "url",
+      "enabled",
+      "readOnly",
+      "publicOnly",
+      "authType",
+      "authHeaderName",
+      "authValueTemplate",
+      "authSecretId",
+      "authUsername",
+      "oauthClientId",
+      "oauthClientSecretId",
+      "personalNote",
+    ] as const
+    const after = {
+      docs: await db().mcpServer.findUniqueOrThrow({ where: { id: ids.docs } }),
+      pets: await db().mcpServer.findUniqueOrThrow({ where: { id: ids.pets } }),
+    }
+
+    for (const field of instanceFields) {
+      expect(after.docs[field]).toEqual(before.docs[field])
+      expect(after.pets[field]).toEqual(before.pets[field])
+    }
+
+    expect(after.docs.description).toBe("The team's documents, all of them.")
+    expect(readServerNote(ctx, after.docs)).toBe("Ours, on the NAS.")
+    expect(
+      await db().vaultToolAccess.findMany({ where: { serverId: ids.pets } }),
+    ).toMatchObject([{ toolName: "list_pets", access: "allow" }])
+    // The definition takes the item's name; the instance keeps its own.
+    expect(
+      await db().serverDefinition.findUniqueOrThrow({
+        where: { id: after.pets.definitionId! },
+      }),
+    ).toMatchObject({ name: "Pet shop" })
+    expect(
+      await db().mcpTool.findFirstOrThrow({
+        where: { serverId: ids.pets, name: "list_pets" },
+      }),
+    ).toMatchObject({ descriptionOverride: "Every pet." })
   })
 
   it("reports a server or tool the vault does not have, and writes nothing", async () => {
@@ -144,7 +346,15 @@ describe("applying an item", () => {
     )
     expect(await db().mcpServer.count({ where: { kind: "wrapper" } })).toBe(0)
 
-    await applyItem(ctx, find(items, "endpoint", "pets"), { id: null })
+    await applyItem(ctx, find(items, "endpoint", "pets"), {
+      id: null,
+      instance: {
+        name: "Pets",
+        url: "https://pets.example.com/v1",
+        readOnly: false,
+        authType: "none",
+      },
+    })
     const renamed: WrapperDocument = {
       ...wrapper,
       tools: [{ ...wrapper.tools[0]!, calls: ["pets/list_cats"] }],
@@ -186,20 +396,13 @@ describe("applying an item", () => {
     await expect(
       applyItem(ctx, find(items, "server", "docs"), { id: ids.pets }),
     ).rejects.toThrow(/not a server/)
-    await expect(
-      applyItem(
-        ctx,
-        { ...find(items, "server", "docs"), name: "pets" },
-        { id: ids.docs },
-      ),
-    ).rejects.toThrow(/Another server is called pets/)
     expect(await findLocalItem(ctx, { kind: "server", name: "docs" })).toEqual({
       id: ids.docs,
       kind: "server",
     })
   })
 
-  it("renames a row to the item's name, and carries its version", async () => {
+  it("renames the definition to the item's name, never the server, and carries its version", async () => {
     const items = await populatedItems()
     const ctx = await freshVault()
     const { ids } = await populate(ctx)
@@ -212,13 +415,27 @@ describe("applying an item", () => {
         id: ids.docs,
       },
     )
+    const row = await db().mcpServer.findUniqueOrThrow({
+      where: { id: ids.docs },
+    })
+    expect(row).toMatchObject({ slug: "docs", syncVersion: 7 })
     expect(
-      await db().mcpServer.findUniqueOrThrow({ where: { id: ids.docs } }),
-    ).toMatchObject({ slug: "team-docs", syncVersion: 7 })
+      await db().serverDefinition.findUniqueOrThrow({
+        where: { id: row.definitionId! },
+      }),
+    ).toMatchObject({ slug: "team-docs" })
     expect((await localItem(ctx, "server", ids.docs)).document).toMatchObject({
       name: "team-docs",
       version: 7,
     })
+
+    // A short name another definition has stays the definition's own.
+    await applyItem(ctx, { ...docs, name: "pets" }, { id: ids.docs })
+    expect(
+      await db().serverDefinition.findUniqueOrThrow({
+        where: { id: row.definitionId! },
+      }),
+    ).toMatchObject({ slug: "team-docs" })
   })
 
   it("keeps an endpoint read from a URL at its address, with the approved text as its copy", async () => {

@@ -16,7 +16,14 @@ import {
 
 /** Where a permission request a call made stands now. */
 export type RequestState =
-  "waiting" | "running" | "allowed" | "failed" | "declined" | "expired"
+  | "waiting"
+  | "running"
+  | "allowed"
+  | "failed"
+  | "declined"
+  | "withdrawn"
+  | "closed"
+  | "expired"
 
 export type ActivityEntry = LoggedCall & {
   /** The token's name, or null for one deleted since. */
@@ -71,6 +78,8 @@ function stateOf(
     case "running":
     case "failed":
     case "declined":
+    case "withdrawn":
+    case "closed":
       return row.status
     default:
       return row.expiresAt > now ? "waiting" : "expired"

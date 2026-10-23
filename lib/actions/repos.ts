@@ -4,12 +4,23 @@ import { revalidatePath } from "next/cache"
 import { redirect } from "next/navigation"
 
 import { invalid } from "@/lib/core/errors"
-import type { ItemKind } from "@/lib/core/repos/layout"
+import { nextPendingRequest } from "@/lib/core/owner-queue"
+import { confirmProposedShare } from "@/lib/core/permissions"
+import { ITEM_DIRS, type ItemKind } from "@/lib/core/repos/layout"
+import {
+  confirmShare,
+  keepAddressPrivate,
+  moveToNote,
+  renameShared,
+  REVIEW_CHANGED,
+  setSharedDescription,
+} from "@/lib/core/repos/share-review"
 import { pollGitHubSignIn, startGitHubSignIn } from "@/lib/core/repos/signin"
 import {
   createRepo,
   deleteRepo,
   githubSignInSecret,
+  setExcluded,
   setItemSync,
   unlinkItem,
   updateRepo,
@@ -21,13 +32,23 @@ import {
   approveChange,
   declineChange,
   keepMine,
-  pushItems,
   syncItem,
   syncRepo,
   type AddChoice,
 } from "@/lib/core/repos/sync"
-import { type ActionState, field, guarded } from "@/lib/server/action-state"
+import { getServer } from "@/lib/core/servers"
+import { syncServerTools } from "@/lib/core/upstream"
+import {
+  type ActionState,
+  field,
+  fields,
+  guarded,
+} from "@/lib/server/action-state"
+import { instanceInputFrom } from "@/lib/server/instance-input"
+import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
+
+const ITEM_KINDS = Object.keys(ITEM_DIRS)
 
 /**
  * Settings → Repositories (lib/core/repos/): the owner links GitHub
@@ -39,6 +60,11 @@ export type RepoActionResult = ActionState<{
   id?: string
   message?: string
   lines?: string[]
+  /**
+   * After the owner answered a change: the oldest thing still waiting for
+   * them (lib/core/owner-queue.ts), or null when nothing is.
+   */
+  next?: string | null
 }>
 
 const PAGES = "/settings/repositories"
@@ -239,30 +265,221 @@ export async function addItemsAction(
   return result
 }
 
-export async function pushItemsAction(
+/** "kind:id", as the review's pages name an item. */
+function itemOf(value: string): { kind: ItemKind; id: string } {
+  const at = value.indexOf(":")
+  const kind = value.slice(0, at)
+
+  if (at < 1 || !(ITEM_KINDS as readonly string[]).includes(kind)) {
+    throw invalid("That is not an item PCP shares.")
+  }
+
+  return { kind: kind as ItemKind, id: value.slice(at + 1) }
+}
+
+/** The review of the first item, with the ones after it waiting their turn. */
+function shareHref(
   repoId: string,
-  items: Array<{ kind: string; id: string }>,
+  items: string[],
+  extra: Record<string, string> = {},
+): string {
+  const query = new URLSearchParams()
+
+  for (const item of items) {
+    query.append("item", item)
+  }
+
+  for (const [key, value] of Object.entries(extra)) {
+    query.set(key, value)
+  }
+
+  return `${PAGES}/${encodeURIComponent(repoId)}/share?${query}`
+}
+
+/**
+ * Confirm on the review page: pushes the item exactly as it was shown, then
+ * opens the next item's review, or the repository's page. When anything
+ * changed since the page opened, nothing is pushed and the review opens
+ * again.
+ */
+export async function confirmShareAction(
+  _previous: RepoActionResult,
+  formData: FormData,
+): Promise<RepoActionResult> {
+  const ctx = await requireContext()
+  const repoId = field(formData, "repoId")
+  const items = fields(formData, "item")
+  // An assistant's proposal: pushed as the review shows it, naming the
+  // token, and the request is answered.
+  const request = field(formData, "request")
+  const result = await guarded(async () => {
+    const options = {
+      basis: field(formData, "basis"),
+      acknowledged: fields(formData, "acknowledged"),
+      publicUrl: await publicUrlFor(ctx),
+    }
+    const item = itemOf(items[0] ?? "")
+
+    return request
+      ? confirmProposedShare(ctx, request, { repoId, item, ...options })
+      : confirmShare(ctx, repoId, item, options)
+  })
+
+  revalidate()
+
+  if (result.status === "error" && result.error === REVIEW_CHANGED) {
+    redirect(
+      shareHref(repoId, items, {
+        changed: "1",
+        ...(request ? { request } : {}),
+      }),
+    )
+  }
+
+  if (result.status !== "ok") {
+    return result
+  }
+
+  if (request) {
+    revalidatePath("/", "layout")
+    redirect(`/permissions/${encodeURIComponent(request)}`)
+  }
+
+  const rest = items.slice(1)
+  redirect(
+    rest.length > 0
+      ? shareHref(repoId, rest, { pushed: result.root })
+      : `${PAGES}/${encodeURIComponent(repoId)}?pushed=${encodeURIComponent(result.root)}`,
+  )
+}
+
+/**
+ * A fix the review page offers for something that looks personal: the
+ * description edited, a sentence of it moved to the owner's note, what is
+ * shared renamed, or an endpoint's address left out of its shared schema.
+ * The review opens again with the change in it.
+ */
+export async function shareFixAction(
+  _previous: RepoActionResult,
+  formData: FormData,
+): Promise<RepoActionResult> {
+  const ctx = await requireContext()
+  const repoId = field(formData, "repoId")
+  const items = fields(formData, "item")
+  const result = await guarded(async () => {
+    const item = itemOf(items[0] ?? "")
+
+    switch (field(formData, "fix")) {
+      case "edit_description":
+        await setSharedDescription(ctx, item, field(formData, "description"))
+        break
+      case "move_to_note":
+        await moveToNote(ctx, item, field(formData, "match"))
+        break
+      case "rename":
+        await renameShared(ctx, item.id, {
+          name: field(formData, "name"),
+          slug: field(formData, "slug"),
+        })
+        break
+      case "instance_address":
+        await keepAddressPrivate(ctx, item.id)
+        break
+      default:
+        throw invalid("That is not a fix PCP offers.")
+    }
+
+    return {}
+  })
+
+  if (result.status !== "ok") {
+    return result
+  }
+
+  const request = field(formData, "request")
+
+  revalidatePath("/", "layout")
+  redirect(
+    shareHref(repoId, items, { fixed: "1", ...(request ? { request } : {}) }),
+  )
+}
+
+/** Keeps an item out of a repository on purpose, or takes it back in. */
+export async function setExcludedAction(
+  repoId: string,
+  item: string,
+  excluded: boolean,
 ): Promise<RepoActionResult> {
   const ctx = await requireContext()
   const result = await guarded(async () => {
-    const results = await pushItems(
-      ctx,
-      repoId,
-      items.map((item) => ({
-        kind: item.kind as ItemKind,
-        id: String(item.id),
-      })),
-    )
-
+    await setExcluded(ctx, repoId, itemOf(String(item)), excluded === true)
     return {
-      message: `Pushed ${results.filter((entry) => entry.ok).length} of ${results.length}.`,
-      lines: results.map((entry) => `${entry.name}: ${entry.message}`),
+      message: excluded
+        ? "Kept out of this repository."
+        : "Included again: it is under Not pushed.",
     }
   })
 
   revalidate()
 
   return result
+}
+
+/**
+ * Adds a new MCP server or API endpoint from a repository, as the owner was
+ * shown it at that commit, with its first instance as they gave it: its
+ * name, address, sign-in, switches and note. Opens its page.
+ */
+export async function importItemAction(
+  repoId: string,
+  choice: { commit: string; root: string; hash: string },
+  _previous: RepoActionResult,
+  formData: FormData,
+): Promise<RepoActionResult> {
+  const ctx = await requireContext()
+  const result = await guarded(async () => {
+    const [added] = await addFromRepo(ctx, repoId, {
+      commit: String(choice.commit),
+      items: [
+        {
+          root: String(choice.root),
+          hash: String(choice.hash),
+          instance: {
+            ...instanceInputFrom(formData),
+            // Only where the form showed them (an endpoint's); otherwise
+            // what the item says, or the safe default.
+            ...(field(formData, "switches") === "1"
+              ? {
+                  readOnly: field(formData, "readOnly") === "on",
+                  publicOnly: field(formData, "publicOnly") === "on",
+                }
+              : {}),
+          },
+        },
+      ],
+    })
+
+    if (!added?.ok || !added.id) {
+      throw invalid(added?.message ?? "Nothing was added.")
+    }
+
+    // An MCP server's tools come from it: read them now, as adding one does.
+    const server = await getServer(ctx, added.id)
+
+    if (server.kind === "mcp") {
+      await syncServerTools(ctx, server, { publicUrl: await publicUrlFor(ctx) })
+    }
+
+    return { id: added.id }
+  })
+
+  if (result.status !== "ok") {
+    return result
+  }
+
+  revalidate()
+  revalidatePath("/servers", "layout")
+  redirect(`/servers/${encodeURIComponent(result.id!)}`)
 }
 
 /** The owner's answer to a change sync left for them. */
@@ -274,27 +491,30 @@ export async function answerChangeAction(
   const ctx = await requireContext()
   const result = await guarded(async () => {
     const sha = String(shown.sha)
-
-    switch (answer) {
-      case "approve": {
-        const notes = await approveChange(ctx, itemId, {
-          sha,
-          hash: String(shown.hash),
-        })
-        return { message: "Applied as you were shown it.", lines: notes }
-      }
-      case "keep":
-        return { message: (await keepMine(ctx, itemId, { sha })).message }
-      default:
-        await declineChange(ctx, itemId, { sha })
-        return {
-          message: "Left alone: sync asks again when the repository changes.",
+    const answered = await (async () => {
+      switch (answer) {
+        case "approve": {
+          const notes = await approveChange(ctx, itemId, {
+            sha,
+            hash: String(shown.hash),
+          })
+          return { message: "Applied as you were shown it.", lines: notes }
         }
-    }
+        case "keep":
+          return { message: (await keepMine(ctx, itemId, { sha })).message }
+        default:
+          await declineChange(ctx, itemId, { sha })
+          return {
+            message: "Left alone: sync asks again when the repository changes.",
+          }
+      }
+    })()
+
+    return { ...answered, next: await nextPendingRequest(ctx, itemId) }
   })
 
-  revalidate()
-  revalidatePath("/home")
+  // The bell and Home's count are on every page.
+  revalidatePath("/", "layout")
 
   return result
 }

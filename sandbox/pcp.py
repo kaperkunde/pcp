@@ -16,6 +16,15 @@ command, which is this file:
     pcp read --bytes '{"$result": "…"}' > file.pdf
     pcp keep --bytes --name page.png --type image/png page.png
     pcp tools github | jq -r '.[].name'
+    pcp image --max-width 1200 --grayscale '{"$result": "…"}'
+    pcp frames --count 5 '{"$result": "…"}'
+
+    small = pcp.image(screenshot, max_width=1200, grayscale=True)
+    shots = pcp.frames(video, every=10)
+
+`image` makes a smaller copy of a kept image, which PCP decodes itself;
+`frames` takes frames from a kept video with ffmpeg, here in the sandbox,
+and keeps each as a JPEG. Both hand back handles.
 
 Each request goes to the runner over the socket named in PCP_BRIDGE, and
 from there to PCP, which decides it as it would the assistant's own call:
@@ -27,10 +36,21 @@ tool the owner has to allow first ends the program there.
 import base64
 import json
 import os
+import shutil
 import socket
+import subprocess
 import sys
+import tempfile
 
-__all__ = ["PcpError", "call", "keep", "read", "tools"]
+__all__ = ["PcpError", "call", "frames", "image", "keep", "read", "tools"]
+
+# Frames one `frames` takes at most: PCP's MAX_VIDEO_FRAMES
+# (lib/core/code/limits.ts), and its defaults.
+MAX_FRAMES = 30
+DEFAULT_FRAMES = 5
+DEFAULT_FRAME_WIDTH = 1280
+# How long ffmpeg may take over one look at the video, in seconds.
+FFMPEG_TIMEOUT = 60
 
 
 class PcpError(Exception):
@@ -122,11 +142,152 @@ def tools(server=None):
     return _ask("tools", {"server": server})
 
 
+def _id(handle):
+    return handle.get("$result") if isinstance(handle, dict) else handle
+
+
+def image(handle, *, max_width=None, max_height=None, crop=None, grayscale=None,
+          format=None, quality=None):
+    """A smaller copy of a kept image (PNG, JPEG, WebP or GIF), made by PCP:
+    crop=(x, y, width, height) first, then fit within max_width and
+    max_height, grey, and encoded as format ("jpeg", "webp" or "png") at
+    quality. Returns {"handle", "width", "height", "bytes", "type"}."""
+    options = {}
+    for name, value in (("maxWidth", max_width), ("maxHeight", max_height),
+                        ("grayscale", grayscale), ("format", format),
+                        ("quality", quality)):
+        if value is not None:
+            options[name] = value
+    if crop is not None:
+        if isinstance(crop, dict):
+            options["crop"] = crop
+        else:
+            x, y, width, height = crop
+            options["crop"] = {"x": x, "y": y, "width": width, "height": height}
+    return _ask("media", {"kind": "image", "id": _id(handle), "options": options})
+
+
+def _ffmpeg(arguments):
+    # Files only: a video that names another file or an address (a playlist)
+    # is not followed.
+    try:
+        return subprocess.run(
+            [arguments[0], "-v", "error", "-protocol_whitelist", "file", *arguments[1:]],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=FFMPEG_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise PcpError(f"ffmpeg took longer than {FFMPEG_TIMEOUT} seconds.") from None
+
+
+def _said(done):
+    text = done.stderr.decode("utf-8", "replace").strip().splitlines()
+    return text[-1][:300] if text else f"status {done.returncode}"
+
+
+def frames(handle, *, at=None, every=None, count=None, max_width=None):
+    """Frames of a kept video, taken with ffmpeg here and kept as JPEGs: at
+    the times in at (seconds), every so many seconds, or count of them
+    spread over the video (5 when none is named), each at most max_width
+    pixels wide (1280). Returns {"duration", "width", "height",
+    "frames": [{"t", "handle"}]}."""
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        raise PcpError("ffmpeg is not in this sandbox: update the sandbox's image.")
+    if len([value for value in (at, every, count) if value is not None]) > 1:
+        raise PcpError("Name one of at, every or count.")
+    width_limit = int(max_width if max_width is not None else DEFAULT_FRAME_WIDTH)
+    if not 16 <= width_limit <= 16384:
+        raise PcpError("max_width is 16 to 16384 pixels.")
+
+    data = read(handle, as_="bytes")
+    work = tempfile.mkdtemp(prefix="frames-")
+    try:
+        video = os.path.join(work, "video")
+        with open(video, "wb") as target:
+            target.write(data)
+        del data
+
+        probed = _ffmpeg(["ffprobe", "-select_streams", "v:0", "-show_entries",
+                          "stream=width,height:format=duration", "-of", "json", video])
+        if probed.returncode != 0:
+            raise PcpError(f"ffmpeg cannot read that video: {_said(probed)}")
+        info = json.loads(probed.stdout or b"{}")
+        streams = info.get("streams") or []
+        if not streams:
+            raise PcpError("That file has no video in it.")
+        try:
+            duration = float((info.get("format") or {}).get("duration") or 0)
+        except ValueError:
+            duration = 0.0
+        width = int(streams[0].get("width") or 0)
+        height = int(streams[0].get("height") or 0)
+
+        if at is not None:
+            times = [float(time) for time in at]
+        elif every is not None:
+            step = float(every)
+            if step <= 0:
+                raise PcpError("every is a number of seconds, more than 0.")
+            times, time = [], 0.0
+            while time < max(duration, step / 2) and len(times) <= MAX_FRAMES:
+                times.append(round(time, 3))
+                time += step
+        else:
+            many = int(count if count is not None else DEFAULT_FRAMES)
+            if not 1 <= many <= MAX_FRAMES:
+                raise PcpError(f"count is 1 to {MAX_FRAMES} frames.")
+            times = [round(duration * (index + 0.5) / many, 3) for index in range(many)]
+
+        if not 1 <= len(times) <= MAX_FRAMES:
+            raise PcpError(
+                f"Take 1 to {MAX_FRAMES} frames at once (a longer every, or a count)."
+            )
+        if any(time < 0 or (duration > 0 and time >= duration) for time in times):
+            raise PcpError(f"The video is {duration:.2f} seconds long: ask for times within it.")
+
+        taken = []
+        for index, time in enumerate(times):
+            target = os.path.join(work, f"{index}.jpg")
+            done = _ffmpeg(["ffmpeg", "-nostdin", "-threads", "1", "-ss", f"{time:.3f}",
+                            "-i", video, "-frames:v", "1", "-an", "-sn", "-dn",
+                            "-vf", f"scale='min(iw,{width_limit})':-2", "-q:v", "4",
+                            "-f", "image2", "-c:v", "mjpeg", "-y", target])
+            if done.returncode != 0 or not os.path.exists(target) or os.path.getsize(target) == 0:
+                raise PcpError(f"ffmpeg took no frame at {time:g} seconds: {_said(done)}")
+            with open(target, "rb") as source:
+                frame = source.read()
+            os.remove(target)
+            taken.append({
+                "t": int(time) if time.is_integer() else time,
+                "handle": keep(frame, name=f"frame-{time:g}s.jpg", type="image/jpeg"),
+            })
+
+        return {"duration": duration, "width": width, "height": height, "frames": taken}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 USAGE = """usage:
   pcp call SERVER TOOL [ARGS_JSON | -] [--fields A,B] [--decode A] [--keep A]
   pcp read [--base64 | --bytes] HANDLE_OR_ID
   pcp keep [--name NAME] [--type TYPE] [--bytes] [FILE]
-  pcp tools [SERVER]"""
+  pcp tools [SERVER]
+  pcp image [--max-width N] [--max-height N] [--crop X,Y,W,H] [--grayscale]
+            [--format jpeg|webp|png] [--quality Q] HANDLE_OR_ID
+  pcp frames [--at T,T,… | --every S | --count N] [--max-width N] HANDLE_OR_ID"""
+
+
+def _handle(text):
+    return json.loads(text) if text.lstrip().startswith("{") else text
+
+
+def _number(text, name):
+    try:
+        value = float(text)
+    except ValueError:
+        raise PcpError(f"--{name} is a number.\n{USAGE}") from None
+    return int(value) if value.is_integer() else value
 
 
 def _options(argv, names, flags=()):
@@ -197,6 +358,41 @@ def main(argv=None):
                 raise PcpError(USAGE)
             value = tools(argv[0] if argv else None)
             sys.stdout.write(json.dumps(value, ensure_ascii=False) + "\n")
+        elif command == "image":
+            rest, options = _options(
+                argv, {"max-width", "max-height", "crop", "format", "quality"}, {"grayscale"}
+            )
+            if len(rest) != 1:
+                raise PcpError(USAGE)
+            crop = None
+            if "crop" in options:
+                parts = options["crop"].split(",")
+                if len(parts) != 4:
+                    raise PcpError(f"--crop is X,Y,WIDTH,HEIGHT.\n{USAGE}")
+                crop = tuple(_number(part, "crop") for part in parts)
+            value = image(
+                _handle(rest[0]),
+                max_width=_number(options["max-width"], "max-width") if "max-width" in options else None,
+                max_height=_number(options["max-height"], "max-height") if "max-height" in options else None,
+                crop=crop,
+                grayscale=True if options.get("grayscale") else None,
+                format=options.get("format"),
+                quality=_number(options["quality"], "quality") if "quality" in options else None,
+            )
+            sys.stdout.write(json.dumps(value) + "\n")
+        elif command == "frames":
+            rest, options = _options(argv, {"at", "every", "count", "max-width"})
+            if len(rest) != 1:
+                raise PcpError(USAGE)
+            value = frames(
+                _handle(rest[0]),
+                at=[_number(part, "at") for part in options["at"].split(",") if part]
+                if "at" in options else None,
+                every=_number(options["every"], "every") if "every" in options else None,
+                count=_number(options["count"], "count") if "count" in options else None,
+                max_width=_number(options["max-width"], "max-width") if "max-width" in options else None,
+            )
+            sys.stdout.write(json.dumps(value) + "\n")
         else:
             raise PcpError(USAGE)
     except PcpError as error:

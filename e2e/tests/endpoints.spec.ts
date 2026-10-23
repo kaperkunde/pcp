@@ -250,6 +250,7 @@ const GATEWAY_TOOLS = [
   "call_tool",
   "call_read_only_tool",
   "check_permission",
+  "withdraw_request",
   "check_server",
   "read_result",
   "register_server",

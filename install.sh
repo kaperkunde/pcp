@@ -26,7 +26,7 @@
 # update and the button alike. A request from PCP that names the other
 # channel (the owner chose it under Settings) moves the install to it.
 #
-# Settings, by environment variable. The first seven are remembered in
+# Settings, by environment variable. The first eight are remembered in
 # ~/.config/pcp/install.conf, so a later run without them keeps them (run as
 # root, in /etc/pcp/install.conf instead):
 #
@@ -39,7 +39,9 @@
 #   PCP_UPDATE_BUTTON=0               no "Install and restart" in PCP's Settings
 #   PCP_CHANNEL=stable|develop        releases (the image's latest tag), or
 #                                     develop's builds (its develop tag)
-#   PCP_VERSION=                      an image tag instead of the channel's: a
+#   PCP_GPU=0                         keep the graphics card out of the
+#                                     container (see below)
+#   PCP_VERSION=                    an image tag instead of the channel's: a
 #                                     version (0.4.2) stays put; not remembered
 #   PCP_IMAGE=ghcr.io/kaperkunde/pcp  the image
 #
@@ -48,6 +50,13 @@
 # else from timedatectl, /etc/timezone or /etc/localtime, and LANG from the
 # environment. Neither is remembered; each run looks again. One that is not
 # there, or is not a plain name, is left out.
+#
+# PCP's browser draws with this computer's graphics card when the container
+# has its render node, so where the host has one (/dev/dri/renderD*) the
+# container gets /dev/dri, and the node's group when PCP's user needs it to
+# open it; each run looks again. PCP_GPU=0 leaves the card out: Chromium
+# runs without its own sandbox in the container, and the card's kernel
+# driver is then one more thing a page that broke out of it could reach.
 #
 # Under Podman, root and each user have containers and volumes of their own.
 # Run as root next to a user's PCP (a Quadlet unit of this installer's in
@@ -114,6 +123,7 @@ load_conf() {
       PCP_AUTO_UPDATE) conf_auto=$value ;;
       PCP_UPDATE_BUTTON) conf_button=$value ;;
       PCP_CHANNEL) conf_channel=$value ;;
+      PCP_GPU) conf_gpu=$value ;;
     esac
   done <"$1"
 }
@@ -153,6 +163,7 @@ resolve_settings() {
   conf_auto=
   conf_button=
   conf_channel=
+  conf_gpu=
   read_conf
   PCP_PORT=${PCP_PORT:-${conf_port:-3000}}
   PCP_HTTPS=${PCP_HTTPS:-${conf_https:-0}}
@@ -161,6 +172,7 @@ resolve_settings() {
   PCP_AUTO_UPDATE=${PCP_AUTO_UPDATE:-${conf_auto:-0}}
   PCP_UPDATE_BUTTON=${PCP_UPDATE_BUTTON:-${conf_button:-1}}
   PCP_CHANNEL=${PCP_CHANNEL:-${conf_channel:-stable}}
+  PCP_GPU=${PCP_GPU:-${conf_gpu:-1}}
   PINNED_VERSION=${PCP_VERSION:-}
   PCP_IMAGE=${PCP_IMAGE:-$DEFAULT_IMAGE}
 
@@ -182,6 +194,10 @@ resolve_settings() {
   case "$PCP_CHANNEL" in
     stable | develop) ;;
     *) usage_error "PCP_CHANNEL must be stable or develop, not '$PCP_CHANNEL'." ;;
+  esac
+  case "$PCP_GPU" in
+    0 | 1) ;;
+    *) usage_error "PCP_GPU must be 0 or 1, not '$PCP_GPU'." ;;
   esac
   case "$PCP_RUNTIME" in
     '' | docker | podman) ;;
@@ -232,8 +248,8 @@ make_dir() {
 
 save_conf() {
   make_dir "$(dirname "$CONF")"
-  printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\nPCP_AUTO_UPDATE=%s\nPCP_UPDATE_BUTTON=%s\nPCP_CHANNEL=%s\n' \
-    "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" "$PCP_AUTO_UPDATE" "$PCP_UPDATE_BUTTON" "$PCP_CHANNEL" >"$CONF"
+  printf 'PCP_PORT=%s\nPCP_HTTPS=%s\nPCP_RUNTIME=%s\nPCP_DATA_VOLUME=%s\nPCP_AUTO_UPDATE=%s\nPCP_UPDATE_BUTTON=%s\nPCP_CHANNEL=%s\nPCP_GPU=%s\n' \
+    "$PCP_PORT" "$PCP_HTTPS" "$RUNTIME" "$PCP_DATA_VOLUME" "$PCP_AUTO_UPDATE" "$PCP_UPDATE_BUTTON" "$PCP_CHANNEL" "$PCP_GPU" >"$CONF"
   if [ "$ROOT" = 1 ]; then
     chmod 0644 "$CONF"
   fi
@@ -315,8 +331,8 @@ podman_version() {
   podman --version 2>/dev/null | awk '{print $NF}'
 }
 
-# Quadlet (a .container file systemd turns into a service) exists since 4.4.
-podman_has_quadlet() {
+# Whether Podman is at least version $1.$2.
+podman_at_least() {
   version=$(podman_version)
   major=${version%%.*}
   rest=${version#*.}
@@ -324,7 +340,12 @@ podman_has_quadlet() {
   case "$major$minor" in
     '' | *[!0-9]*) return 1 ;;
   esac
-  [ "$major" -gt 4 ] || { [ "$major" -eq 4 ] && [ "$minor" -ge 4 ]; }
+  [ "$major" -gt "$1" ] || { [ "$major" -eq "$1" ] && [ "$minor" -ge "$2" ]; }
+}
+
+# Quadlet (a .container file systemd turns into a service) exists since 4.4.
+podman_has_quadlet() {
+  podman_at_least 4 4
 }
 
 # systemctl for PCP's unit: the user's manager, or the system's for root.
@@ -456,7 +477,7 @@ check_user_installs() {
     "  journalctl _SYSTEMD_USER_UNIT=$unit.service -f" ""
   set --
   for setting in PCP_PORT PCP_HTTPS PCP_RUNTIME PCP_DATA_VOLUME PCP_AUTO_UPDATE \
-    PCP_UPDATE_BUTTON PCP_CHANNEL PCP_VERSION PCP_IMAGE TZ LANG; do
+    PCP_UPDATE_BUTTON PCP_CHANNEL PCP_GPU PCP_VERSION PCP_IMAGE TZ LANG; do
     eval "given=\${$setting+set}"
     if [ "$given" = set ]; then
       eval "value=\$$setting"
@@ -561,6 +582,83 @@ host_lang() {
   esac
 }
 
+# --- The host's graphics card -----------------------------------------------
+
+# PCP's browser draws with this computer's graphics card when the container
+# has its render node (/dev/dri/renderD128 and on), and in software
+# otherwise, which bot checks read as a sign of automation. So /dev/dri goes
+# in where the host has a render node. PCP runs as a user of its own in the
+# container, which may open the node only when it is open to everyone
+# (crw-rw-rw-, as on Fedora) or when it has the node's group (crw-rw----
+# for render, as elsewhere):
+#   Docker, or Podman as root    the group, by its number
+#   Podman without root          keep-groups, which hands the container
+#                                your own groups (crun only): it helps when
+#                                you are in the node's group
+#   Docker without root          no group can be added
+# A card Mesa has no driver for (NVIDIA's) is passed in all the same, and
+# the browser then draws in software, as without one. Each run looks again.
+host_gpu() {
+  GPU_DEVICE=0
+  GPU_GROUP=
+  GPU_NOTE=
+  [ "$PCP_GPU" = 1 ] || return 0
+  node=
+  for candidate in "${PCP_ROOT_PREFIX:-}"/dev/dri/renderD*; do
+    if [ -e "$candidate" ]; then
+      node=$candidate
+      break
+    fi
+  done
+  [ -n "$node" ] || return 0
+  GPU_DEVICE=1
+  line=$(ls -ln "$node" 2>/dev/null) || return 0
+  case "$line" in
+    # Others may read and write it: no group needed.
+    ???????rw*) return 0 ;;
+  esac
+  gid=$(printf '%s\n' "$line" | awk '{print $4}')
+  # Never root's group: that would reach more than the card.
+  case "$gid" in
+    '' | 0 | *[!0-9]*) return 0 ;;
+  esac
+  named=$(ls -l "$node" 2>/dev/null) || named=
+  group=$(printf '%s\n' "$named" | awk '{print $4}')
+  name=${node#"${PCP_ROOT_PREFIX:-}"}
+  if [ "$RUNTIME" = podman ] && [ "$ROOT" = 0 ]; then
+    case " $(id -G 2>/dev/null) " in
+      *" $gid "*) ;;
+      *)
+        GPU_NOTE="$name is open only to the group $group, which you are not in. To give it the card, run: sudo usermod -aG $group $(id -un), restart the computer, and run this installer again."
+        return 0
+        ;;
+    esac
+    runtime=$(podman info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null || true)
+    if [ "$runtime" != crun ]; then
+      GPU_NOTE="$name is open only to the group $group, and Podman hands your groups to a container only with the crun runtime, not ${runtime:-this one}."
+      return 0
+    fi
+    GPU_GROUP=keep-groups
+  elif [ "$RUNTIME" = docker ] && docker_rootless; then
+    GPU_NOTE="$name is open only to the group $group, which Docker without root cannot hand to a container."
+  else
+    GPU_GROUP=$gid
+  fi
+}
+
+docker_rootless() {
+  case "$(docker info --format '{{.SecurityOptions}}' 2>/dev/null)" in
+    *rootless*) return 0 ;;
+  esac
+  return 1
+}
+
+gpu_note() {
+  if [ -n "$GPU_NOTE" ]; then
+    warn "" "Note: PCP's browser draws in software rather than with this computer's graphics card: $GPU_NOTE"
+  fi
+}
+
 # --- Install ----------------------------------------------------------------
 
 pull_image() {
@@ -608,12 +706,25 @@ install_container() {
   if [ -n "$HOST_LANG" ]; then
     set -- "$@" -e "LANG=$HOST_LANG"
   fi
+  # The browser draws with the graphics card (host_gpu).
+  if [ "$GPU_DEVICE" = 1 ]; then
+    set -- "$@" --device /dev/dri
+  fi
+  if [ -n "$GPU_GROUP" ]; then
+    set -- "$@" --group-add "$GPU_GROUP"
+  fi
   "$RUNTIME" run "$@" -v "$PCP_DATA_VOLUME:/data" "$IMAGE" >/dev/null || start_failed "$LOGS"
   MODE=container
 }
 
 write_unit() {
   mkdir -p "$UNIT_DIR"
+  # Quadlet takes GroupAdd= since Podman 5.1, and refuses a unit with a key
+  # it does not know.
+  if [ -n "$GPU_GROUP" ] && ! podman_at_least 5 1; then
+    GPU_NOTE="the render node is open only to its group, which Podman $(podman_version) cannot add to the unit PCP runs in (5.1 can)."
+    GPU_GROUP=
+  fi
   {
     printf '# PCP. Written by install.sh; running the installer again rewrites it.\n'
     printf '# Logs: %s\n' "$JOURNAL"
@@ -639,6 +750,12 @@ write_unit() {
     fi
     if [ -n "$HOST_LANG" ]; then
       printf 'Environment=LANG=%s\n' "$HOST_LANG"
+    fi
+    if [ "$GPU_DEVICE" = 1 ]; then
+      printf 'AddDevice=/dev/dri\n'
+    fi
+    if [ -n "$GPU_GROUP" ]; then
+      printf 'GroupAdd=%s\n' "$GPU_GROUP"
     fi
     printf '\n'
     printf '[Service]\nRestart=always\n\n'
@@ -1005,6 +1122,7 @@ install() {
   check_privileged_ports
   HOST_TZ=$(host_timezone)
   HOST_LANG=$(host_lang)
+  host_gpu
   if [ "$RUNTIME" = docker ]; then
     install_container
   else
@@ -1012,6 +1130,7 @@ install() {
   fi
   save_conf
   wait_for_health
+  gpu_note
   if [ "$UPDATING" = 1 ]; then
     say "PCP is updated: $IMAGE."
     return 0

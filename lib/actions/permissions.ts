@@ -1,9 +1,13 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
+import { after } from "next/server"
 
+import { afterAnswerScope } from "@/lib/core/after-answer"
+import type { VaultContext } from "@/lib/core/context"
 import { notFound } from "@/lib/core/errors"
 import { listOwnerNotices, type OwnerNotice } from "@/lib/core/owner-notices"
+import { nextPendingRequest } from "@/lib/core/owner-queue"
 import { parseDecision } from "@/lib/core/permission-rules"
 import {
   applyAccessRequest,
@@ -15,10 +19,44 @@ import { type ActionState, guarded } from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
-export type DecidePermissionResult = ActionState<{
-  message: string
-  isError: boolean
-}>
+/**
+ * Where the owner goes once they answered (components/answer-queue.tsx):
+ * the oldest thing still waiting, or null when nothing is. `stay` when the
+ * answered request's own page still needs them (a server to connect).
+ */
+export type QueueStep = { next: string | null; stay: boolean }
+
+export type DecidePermissionResult = ActionState<
+  {
+    message: string
+    isError: boolean
+    /** The request's title, to say on the next page what was answered. */
+    title: string
+  } & QueueStep
+>
+
+/** The step after answering request `id`. */
+async function stepAfter(
+  ctx: VaultContext,
+  id: string,
+  publicUrl: string,
+): Promise<QueueStep> {
+  const answered = await getPermissionView(ctx, id, { publicUrl })
+
+  if (answered?.connect) {
+    return { next: null, stay: true }
+  }
+
+  return { next: await nextPendingRequest(ctx, id), stay: false }
+}
+
+/**
+ * Every page shows what waits for the owner (the bell, Home's count), so an
+ * answer reads them all again; the owner's page itself among them.
+ */
+function revalidateAnswered(): void {
+  revalidatePath("/", "layout")
+}
 
 /**
  * The owner's answer on /permissions/<id> or the token page to something an
@@ -34,37 +72,54 @@ export async function decidePermissionAction(
   always?: boolean,
   /** "Allow for": how long, in minutes. */
   minutes?: number,
+  /** A secret for the browser: the sites the owner left in. */
+  origins?: string[],
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
+  // What the call hands on to do once it has answered (an IMAP send's look
+  // for its copy in Sent) runs once this answer is sent.
+  const later = afterAnswerScope()
+  after(() => later.drain())
 
-  const result = await guarded(async () => {
-    const view = await getPermissionView(ctx, id, { publicUrl })
+  const result = await later.run(() =>
+    guarded(async () => {
+      const view = await getPermissionView(ctx, id, { publicUrl })
 
-    if (!view) {
-      throw notFound("That request")
-    }
+      if (!view) {
+        throw notFound("That request")
+      }
 
-    const outcome = await decidePermission(
-      ctx,
-      id,
-      parseDecision(view.kind, decision),
-      {
-        publicUrl,
-        secretValue: typeof secretValue === "string" ? secretValue : undefined,
-        always: always === true,
-        minutes: typeof minutes === "number" ? minutes : undefined,
-      },
-    )
-    const message = outcome.content
-      .flatMap((part) => (part.type === "text" ? [part.text] : []))
-      .join("\n")
+      const outcome = await decidePermission(
+        ctx,
+        id,
+        parseDecision(view.kind, decision),
+        {
+          publicUrl,
+          secretValue:
+            typeof secretValue === "string" ? secretValue : undefined,
+          always: always === true,
+          minutes: typeof minutes === "number" ? minutes : undefined,
+          origins: Array.isArray(origins)
+            ? origins.filter((origin) => typeof origin === "string")
+            : undefined,
+        },
+      )
+      const message = outcome.content
+        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .join("\n")
 
-    return { message: message || "Done.", isError: outcome.isError === true }
-  })
+      return {
+        message: message || "Done.",
+        isError: outcome.isError === true,
+        title: view.title,
+        ...(await stepAfter(ctx, id, publicUrl)),
+      }
+    }),
+  )
 
-  revalidatePath(`/permissions/${id}`)
-  revalidatePath("/tokens", "layout")
+  revalidateAnswered()
+  revalidatePath("/secrets")
 
   return result
 }
@@ -81,27 +136,39 @@ export async function saveAccessRequestAction(
   const publicUrl = await publicUrlFor(ctx)
 
   const result = await guarded(async () => {
+    const view = await getPermissionView(ctx, id, { publicUrl })
+
+    if (!view) {
+      throw notFound("That request")
+    }
+
     const outcome = await applyAccessRequest(ctx, id, levels, { publicUrl })
     const message = outcome.content
       .flatMap((part) => (part.type === "text" ? [part.text] : []))
       .join("\n")
 
-    return { message: message || "Saved.", isError: outcome.isError === true }
+    return {
+      message: message || "Saved.",
+      isError: outcome.isError === true,
+      title: view.title,
+      ...(await stepAfter(ctx, id, publicUrl)),
+    }
   })
 
-  revalidatePath(`/permissions/${id}`)
-  revalidatePath("/tokens", "layout")
+  revalidateAnswered()
 
   return result
 }
 
 export type PendingRequestsState = {
   total: number
+  /** The oldest first, as the owner is walked through them. */
   requests: Array<{
     id: string
     title: string
     tokenName: string
     createdAt: string
+    href: string
   }>
   /**
    * Not from an assistant: PCP itself needs a look (HTTPS not renewing, new

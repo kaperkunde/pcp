@@ -28,6 +28,7 @@ import type { ServerActionResult } from "@/lib/actions/servers"
 
 type Protocol = "jmap" | "imap"
 type MailAuth = "basic" | "header" | "oauth"
+type SaveSent = "auto" | "always" | "never"
 
 export type MailAccountFormValues = OAuthClientValues & {
   id?: string
@@ -42,6 +43,8 @@ export type MailAccountFormValues = OAuthClientValues & {
   authUsername: string
   authSecretId: string
   mailFrom: string
+  /** IMAP: whether PCP files a copy of what it sends in Sent. */
+  mailSaveSent: SaveSent
 }
 
 export const EMPTY_MAIL_ACCOUNT: MailAccountFormValues = {
@@ -55,6 +58,7 @@ export const EMPTY_MAIL_ACCOUNT: MailAccountFormValues = {
   authUsername: "",
   authSecretId: "",
   mailFrom: "",
+  mailSaveSent: "auto",
   oauthClientId: "",
   oauthClientSecretId: "",
   oauthScope: "",
@@ -72,6 +76,19 @@ const SIGN_IN: ReadonlyArray<{ value: MailAuth; label: string }> = [
   { value: "oauth", label: "OAuth" },
 ]
 
+const SAVE_SENT: ReadonlyArray<{ value: SaveSent; label: string }> = [
+  { value: "auto", label: "Automatic" },
+  { value: "always", label: "Always" },
+  { value: "never", label: "Never" },
+]
+
+const SAVE_SENT_HINT: Record<SaveSent, string> = {
+  auto: "Only when your mail server doesn't file it itself, as Gmail and Outlook do. PCP looks in Sent for a few seconds after each email it sends.",
+  always: "PCP files a copy in Sent after each email it sends.",
+  never:
+    "PCP files no copy. Emails an assistant sends are in Sent only if your mail server files them there.",
+}
+
 const SIGN_IN_HINT: Record<MailAuth, string> = {
   basic: "An app password, if the server offers them, rather than your own.",
   header: "An API token the mail server gave you.",
@@ -82,8 +99,8 @@ const SIGN_IN_HINT: Record<MailAuth, string> = {
  * Add or edit a mail account: a JMAP server (Stalwart, Fastmail and the
  * like) or an IMAP server with SMTP for sending. The password is one of
  * your secrets, chosen here, never typed in. Adding, the protocol, the
- * server and the sign-in come first, the sending address under "More
- * options"; editing, the form sits in the account page's "Advanced" and
+ * server and the sign-in come first, the sending address (and, for IMAP,
+ * the copy in Sent) under "More options"; editing, the form sits in the account page's "Advanced" and
  * shows everything. Fields are held in state so a refused submit keeps what
  * was typed.
  */
@@ -115,7 +132,10 @@ export function MailAccountForm({
   const [username, setUsername] = useState(initial.authUsername)
   const [secretId, setSecretId] = useState(initial.authSecretId)
   const [mailFrom, setMailFrom] = useState(initial.mailFrom)
-  const [moreOpen] = useState(() => Boolean(initial.mailFrom))
+  const [saveSent, setSaveSent] = useState<SaveSent>(initial.mailSaveSent)
+  const [moreOpen] = useState(
+    () => Boolean(initial.mailFrom) || initial.mailSaveSent !== "auto",
+  )
 
   const imap = protocol === "imap"
   const auth: MailAuth = imap ? "basic" : authType
@@ -140,6 +160,18 @@ export function MailAccountForm({
       />
     </Field>
   )
+
+  // Only IMAP: a JMAP server files what it sends itself.
+  const saveSentField = imap ? (
+    <ChoiceField
+      label="Save a copy in Sent"
+      name="mailSaveSent"
+      options={SAVE_SENT}
+      value={saveSent}
+      onValueChange={setSaveSent}
+      hint={SAVE_SENT_HINT[saveSent]}
+    />
+  ) : null
 
   const readOnlyRow = (
     <SwitchRow
@@ -300,7 +332,10 @@ export function MailAccountForm({
         </FormSection>
         <FormSection>{server}</FormSection>
         <FormSection>{signIn}</FormSection>
-        <FormSection>{fromField}</FormSection>
+        <FormSection>
+          {fromField}
+          {saveSentField}
+        </FormSection>
         <SwitchGroup>{readOnlyRow}</SwitchGroup>
         <FormFooter
           editing
@@ -348,10 +383,15 @@ export function MailAccountForm({
       <SwitchGroup>{readOnlyRow}</SwitchGroup>
 
       <MoreOptions
-        description="The address mail is sent from."
+        description={
+          imap
+            ? "The address mail is sent from, and the copy in Sent."
+            : "The address mail is sent from."
+        }
         defaultOpen={moreOpen}
       >
         {fromField}
+        {saveSentField}
       </MoreOptions>
 
       <FormFooter

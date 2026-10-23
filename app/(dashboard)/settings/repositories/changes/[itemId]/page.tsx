@@ -2,6 +2,7 @@ import { TriangleAlert } from "lucide-react"
 import Link from "next/link"
 import type { Metadata } from "next"
 
+import { AllClearAfter, AnsweredBefore } from "@/components/answer-queue"
 import { PageColumn } from "@/components/page-column"
 import { PageHeader } from "@/components/page-header"
 import { ChangeAnswer } from "@/components/repo-forms"
@@ -56,6 +57,8 @@ export default async function ChangePage({
     return (
       <PageColumn width="narrow">
         <PageHeader back={back} title="Change from a repository" />
+        {/* Answered just now: what came of it, and whether more waits. */}
+        <AnsweredBefore alone />
         <p className="text-muted-foreground" role="alert">
           {failure ?? "Nothing waits for you here."}
         </p>
@@ -65,6 +68,7 @@ export default async function ChangePage({
 
   const { repo, pending, review, resolved, incoming, item } = change
   const conflict = pending.kind === "conflict"
+  const update = !conflict && repo.access === "read"
 
   return (
     <PageColumn width="narrow">
@@ -73,18 +77,24 @@ export default async function ChangePage({
         title={
           conflict
             ? `Conflict in ${item.data.path}`
-            : `Change to ${item.data.path}`
+            : update
+              ? `Update available for ${item.data.path}`
+              : `Change to ${item.data.path}`
         }
         description={`From ${repo.owner}/${repo.name} (${repo.branch}), ${repo.trust === "trusted" ? "a repository you trust" : "a repository you do not trust"}.`}
       />
+
+      <AnsweredBefore />
 
       <Card className="flex flex-col gap-5 p-5 ring-1 ring-warning/25">
         <p className="text-sm">
           {conflict
             ? "Both your vault's item and the repository's changed since they last agreed, so nothing was applied. Below is what taking theirs would change in yours."
-            : review.flags.length > 0
-              ? "The repository's change reaches further than text, so it waits for you."
-              : "Changes from this repository wait for you to read them first."}
+            : update
+              ? "What you added from this repository stays at the commit you reviewed. Here is what its newer one would change; nothing changes until you take it."
+              : review.flags.length > 0
+                ? "The repository's change reaches further than text, so it waits for you."
+                : "Changes from this repository wait for you to read them first."}
         </p>
         {repo.trust !== "trusted" ? (
           <p
@@ -160,6 +170,7 @@ export default async function ChangePage({
           />
         ) : null}
       </Card>
+      <AllClearAfter />
     </PageColumn>
   )
 }

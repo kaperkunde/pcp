@@ -26,7 +26,7 @@ pnpm format:check    # Prettier, reporting — what the hook and CI run
 pnpm typecheck       # tsc --noEmit
 pnpm build           # next build
 pnpm test            # unit tests (vitest; the browser's skip without Chromium)
-pnpm test:e2e        # Playwright against a fresh e2e database
+pnpm test:e2e        # Playwright: a production build, then a fresh e2e database
 shellcheck --shell=sh install.sh   # the install script, which the tests run
 ```
 
@@ -165,7 +165,16 @@ Two kinds, held to different bars:
   secrets, adding a server and calling it through the gateway, OAuth, API
   endpoints, mail accounts, calendar accounts, permission requests, memories, web fetch,
   run_code, the browser, updates, Touch ID, recovery, export and restore.
-  One project per spec; `e2e/README.md` has the mechanics.
+  One project per spec; `e2e/README.md` has the mechanics. The suite runs
+  against a production build (`pnpm test:e2e` builds it with
+  `PCP_TEST_BUILD=1`, then serves it as the image does), not the dev server:
+  pages arrive compiled and hydrate at once. Set `PCP_E2E_DEV=1` to run a
+  project against `pnpm dev` while you change the app.
+
+What each test file is kept for, and what was pruned, is in
+[docs/test-review.md](docs/test-review.md). A test earns its place by pinning
+a boundary from CLAUDE.md, a bug that happened, or logic with branches; e2e
+keeps one path per flow; and a test waits on state, never on time.
 
 A bug that regressed gets a test that fails before the fix and passes after
 (red, then green), whichever kind fits. That bar is low on purpose.
@@ -205,8 +214,9 @@ A bug that regressed gets a test that fails before the fix and passes after
 | `lib/core/browser/`                  | Browser: Chromium, proxy, tabs, tools; web_fetch past a check         |
 | `lib/core/code/`                     | run_code: QuickJS, the bridge, the sandbox executor, limits           |
 | `lib/core/wrappers/`                 | Wrappers: definition, run, secret placeholders, requests              |
-| `lib/core/repos/`                    | Shared items as repository files: layout, documents, review, apply    |
+| `lib/core/repos/`                    | Repository items: layout, documents, review, apply, push review       |
 | `sandbox/`                           | The sandbox container: its runner and the `pcp` command               |
+| `components/browser-tabs.tsx`        | The tabs view: every tab, its state, its hand-over answered on it     |
 | `app/api/browser/tabs/[id]/`         | A tab's live view: the frame stream and the owner's input             |
 | `components/browser-tab-view.tsx`    | The live view: frames on a canvas, timed input sent back              |
 | `lib/browser-keyboard.ts`            | A phone's keyboard as input: edits of a hidden box into keys          |

@@ -76,6 +76,44 @@ describe("sniffMediaType", () => {
     }
   })
 
+  it("names WebP, the ISO media files by their brand, and Matroska", () => {
+    const ascii = (text: string) => [...text].map((char) => char.charCodeAt(0))
+    const ftyp = (brand: string) => [0, 0, 0, 0x20, ...ascii(`ftyp${brand}`)]
+    const ebml = (docType: string) => [
+      0x1a,
+      0x45,
+      0xdf,
+      0xa3,
+      0x9f,
+      0x42,
+      0x82,
+      0x84,
+      ...ascii(docType),
+    ]
+    const cases: Array<[number[], string]> = [
+      [[...ascii("RIFF"), 1, 2, 3, 4, ...ascii("WEBPVP8 ")], "image/webp"],
+      [ftyp("isom"), "video/mp4"],
+      [ftyp("mp42"), "video/mp4"],
+      [ftyp("qt  "), "video/quicktime"],
+      [ftyp("heic"), "image/heic"],
+      [ftyp("avif"), "image/avif"],
+      [ftyp("M4A "), "audio/mp4"],
+      [ebml("webm"), "video/webm"],
+      [ebml("matroska"), "video/x-matroska"],
+    ]
+
+    for (const [bytes, type] of cases) {
+      expect(sniffMediaType(Uint8Array.from(bytes)), type).toBe(type)
+    }
+
+    // A RIFF that is not WebP (a WAV) is no image.
+    expect(
+      sniffMediaType(
+        Uint8Array.from([...ascii("RIFF"), 1, 2, 3, 4, ...ascii("WAVE")]),
+      ),
+    ).toBeNull()
+  })
+
   it("answers null for anything else, and for too few bytes", () => {
     expect(sniffMediaType(Buffer.from("hello"))).toBeNull()
     expect(sniffMediaType(Uint8Array.from([0x89, 0x50]))).toBeNull()

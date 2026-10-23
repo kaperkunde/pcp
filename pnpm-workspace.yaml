@@ -9,3 +9,18 @@ allowBuilds:
   "@prisma/engines": true
   better-sqlite3: true
   prisma: true
+
+# sharp (run_code's pcp.image, lib/core/code/media.ts) runs as WebAssembly
+# (@img/sharp-wasm32) in every install: in the container, a checkout and the
+# Mac app alike, with no native code. Its prebuilt native packages are left
+# out, so sharp's loader finds none and takes the WebAssembly build; one for
+# the build machine would also be the wrong one in an app staged for another
+# architecture (desktop/scripts/stage.mjs).
+ignoredOptionalDependencies:
+  - "@img/sharp-darwin-*"
+  - "@img/sharp-freebsd-*"
+  - "@img/sharp-libvips-*"
+  - "@img/sharp-linux-*"
+  - "@img/sharp-linuxmusl-*"
+  - "@img/sharp-webcontainers-*"
+  - "@img/sharp-win32-*"

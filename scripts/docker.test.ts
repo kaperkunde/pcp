@@ -36,6 +36,42 @@ describe("the Docker image's Chromium", () => {
     expect(dockerfile).toMatch(/PCP_CONTAINER=1/)
   })
 
+  // kaperkunde/pcp#38: a site's check read only Playwright's test fonts and
+  // SwiftShader's WebGL.
+  it("has a desktop's fonts, indexed once", () => {
+    const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
+    const install = dockerfile.match(
+      /apt-get install -y --no-install-recommends xvfb([^&]*)&&/,
+    )?.[1]
+
+    for (const font of [
+      "fontconfig",
+      "fonts-dejavu-core",
+      "fonts-noto-core",
+      "fonts-cantarell",
+    ]) {
+      expect(install?.split(/\s+/)).toContain(font)
+    }
+    expect(dockerfile).toMatch(/&& fc-cache -f \\/)
+  })
+
+  it("has Mesa's Vulkan drivers for a GPU the container is given, without its software one", () => {
+    const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
+    const install = dockerfile.match(
+      /apt-get install -y --no-install-recommends xvfb([^&]*)&&/,
+    )?.[1]
+
+    expect(install?.split(/\s+/)).toEqual(
+      expect.arrayContaining(["mesa-vulkan-drivers", "libvulkan1"]),
+    )
+    // Lavapipe would be picked on a card Mesa has no driver for, and
+    // Chromium blocks it as software: no WebGL at all instead of
+    // SwiftShader's.
+    expect(dockerfile).toContain(
+      "&& rm -f /usr/share/vulkan/icd.d/lvp_icd.*.json \\",
+    )
+  })
+
   it("is the full Chromium only: PCP never launches the headless shell", () => {
     const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
 

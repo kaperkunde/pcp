@@ -36,6 +36,7 @@ import {
 } from "./crypto"
 import { withBrowserClosed } from "./browser/runtime"
 import { db } from "./db"
+import { backfillDefinitions } from "./definition-rows"
 import { invalid, isPcpError, PcpError } from "./errors"
 import { listMigrations } from "./migrate"
 import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
@@ -209,6 +210,14 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           memories: (await tx.memory.findMany(byVault)).map(rowJson),
           skills: (await tx.skill.findMany(byVault)).map(rowJson),
           secrets: (await tx.secret.findMany(byVault)).map(rowJson),
+          secretBrowserOrigins: (
+            await tx.secretBrowserOrigin.findMany({
+              where: { secret: { vaultId } },
+            })
+          ).map(rowJson),
+          serverDefinitions: (await tx.serverDefinition.findMany(byVault)).map(
+            rowJson,
+          ),
           servers: (await tx.mcpServer.findMany(byVault)).map(rowJson),
           serverAuthHeaders: (await tx.serverAuthHeader.findMany(byServer)).map(
             rowJson,
@@ -219,6 +228,9 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           repos: (await tx.repo.findMany(byVault)).map(rowJson),
           repoItems: (
             await tx.repoItem.findMany({ where: { repo: { vaultId } } })
+          ).map(rowJson),
+          repoExclusions: (
+            await tx.repoExclusion.findMany({ where: { repo: { vaultId } } })
           ).map(rowJson),
           settings: settings.map(rowJson),
           browserProfiles: (await tx.browserProfile.findMany(byVault)).map(
@@ -463,9 +475,17 @@ async function writeExport(
         await inChunks(keyGrants, (data) => tx.keyGrant.createMany({ data }))
         await inChunks(apiTokens, (data) => tx.apiToken.createMany({ data }))
         await inChunks(tables.secrets, (data) => tx.secret.createMany({ data }))
+        await inChunks(tables.secretBrowserOrigins, (data) =>
+          tx.secretBrowserOrigin.createMany({ data }),
+        )
+        await inChunks(tables.serverDefinitions, (data) =>
+          tx.serverDefinition.createMany({ data }),
+        )
         await inChunks(tables.servers, (data) =>
           tx.mcpServer.createMany({ data }),
         )
+        // A file from before definitions: each server its own.
+        await backfillDefinitions(tx, vault.id)
         await inChunks(tables.serverAuthHeaders, (data) =>
           tx.serverAuthHeader.createMany({ data }),
         )
@@ -511,6 +531,9 @@ async function writeExport(
           tables.repoItems,
           (data) => tx.repoItem.createMany({ data }),
           RESTORE_SPEC_CHUNK_ROWS,
+        )
+        await inChunks(tables.repoExclusions, (data) =>
+          tx.repoExclusion.createMany({ data }),
         )
         await inChunks(tables.settings, (data) =>
           tx.setting.createMany({ data }),
@@ -559,8 +582,10 @@ export async function wipeVault(
   // for the tokens this restore replaces, and over within hours.
   await tx.apiTokenToolAllowance.deleteMany(byToken)
   await tx.apiTokenSiteAllowance.deleteMany(byToken)
+  await tx.apiTokenSecretAllowance.deleteMany(byToken)
   await tx.memory.deleteMany(byVault)
   await tx.repoItem.deleteMany({ where: { repo: { vaultId } } })
+  await tx.repoExclusion.deleteMany({ where: { repo: { vaultId } } })
   await tx.repo.deleteMany(byVault)
   await tx.apiTokenSkill.deleteMany(byToken)
   await tx.skill.deleteMany(byVault)
@@ -578,6 +603,8 @@ export async function wipeVault(
   await tx.mcpTool.deleteMany(byServer)
   await tx.serverAuthHeader.deleteMany(byServer)
   await tx.mcpServer.deleteMany(byVault)
+  await tx.secretBrowserOrigin.deleteMany({ where: { secret: { vaultId } } })
+  await tx.serverDefinition.deleteMany(byVault)
   await tx.secret.deleteMany(byVault)
   await tx.apiToken.deleteMany(byVault)
   await tx.session.deleteMany(byVault)

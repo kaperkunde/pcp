@@ -27,7 +27,7 @@ lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   caldav/            Calendar accounts: calendars and reminders over CalDAV
   fetch/             web_fetch: the request, the page, which level applies
   code/              run_code: QuickJS, the bridge to the tools, the sandbox's socket
-  browser/           The headless Chromium: runtime and gate, proxy, profile, tools, install
+  browser/           The vault's Chromium: runtime and gate, proxy, profile, tools, install
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
   updates/           The daily check for a newer release, and what it found
   oauth-server/      PCP's own OAuth server, for assistants that sign in to /mcp
@@ -61,7 +61,9 @@ associated data (a ciphertext cannot be moved to another row):
 - the private key PCP makes for each SSH server (a `secret` row of kind
   `ssh_key`, owned by the server),
 - the browser's sign-ins (`browser_profile`, bound to the vault's id, as
-  there is one per vault).
+  there is one per vault),
+- the owner's note on a server or a skill (`mcp_server.personal_note`,
+  `skill.personal_note` with `skill:<id>:note`).
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -329,7 +331,10 @@ applies the edits, refuses one that cannot be used, and shows the owner the
 address, where the schema came from, how many edits it has, the tool count
 and operations, whether the tools can change things, and the secret that
 would be sent. Nothing exists until they agree; then `executeRegister` creates the
-endpoint, on, and adds it to the token's scope.
+endpoint, on, and adds it to the token's scope. With `definition` it is
+another server of a definition the token sees, whose schema it takes
+(Definitions and instances, below); `note` proposes the owner's note on
+what it adds.
 
 With OAuth the owner is also shown where they will sign in, where the client
 secret goes and the redirect URI their client needs; the token goes to the
@@ -456,6 +461,157 @@ address it names, as a schema: what it learns back is whether that was an
 OpenAPI document and, if so, what the owner would be asked, which matters
 only for a service that trusts PCP's own address more than the assistant's.
 
+## Definitions and instances
+
+The same server can be in a vault more than once: one Coolify API on two
+hosts, with two keys. What makes it that API is shared; where it is and how
+PCP signs in there is not. So every MCP server, API endpoint and wrapper is
+an **instance** of a **definition** (`server_definition`, `lib/core/
+definitions.ts`), alone at first.
+
+- **Definition:** what the server is, as it could be shared, without an
+  address, a secret or anything of the owner's: its own slug and name, the
+  description, an endpoint's schema, its edits and where it is read from, a
+  wrapper's programs, the tools' descriptions in the owner's words, and a
+  `format_version` (1 until a change to the shape is not backward
+  compatible).
+- **Instance:** an `mcp_server` row with `definition_id`: its name and
+  short name (what assistants call it), its address, its credential and
+  secrets, its levels, whether it is on, its pace, read-only and
+  public-only, and the owner's note.
+
+**Where the shared content lives.** Each instance keeps a copy of what its
+definition holds, where it was before definitions existed: the description
+on its row, the schema and edits in its `openapi_spec`, a wrapper's program
+in its `wrapper_spec`, tool descriptions on its `mcp_tool` rows. So every
+reader (the gateway, the catalogue, calls, linked repositories, the export)
+reads one row as it always did, and no data moved in the migration, which
+only added the table and two columns and gave every existing server a
+definition of its own (with the server's id). The definition row is the
+identity and the description's authority. The cost is that every writer of
+shared content must reach all instances, and they all go through
+`definition-rows.ts` or the code that calls it:
+
+- `endpoints.ts applySpec` (every way an endpoint's schema or edits are
+  written: the owner's form, `changeEndpoint`, a re-read, a repository's
+  change) gives the other instances the schema, the edits and where they
+  are read from (`shareSpec`), and each rebuilds its tools with its own
+  read-only setting and credential headers (`rebuildFromCopy`); then
+  `shareDescription`.
+- `servers.ts updateServer`, `changeEndpoint` and `wrappers/admin.ts
+writeWrapper` share the description; a wrapper's program goes to the
+  others' `wrapper_spec` and their tools are rebuilt.
+- `servers.ts setToolDescription` (the owner's, an assistant's approved
+  change, a repository's) writes the tool's description on every instance
+  that has the tool, and `catalogue.ts storeTools` starts a tool new to an
+  instance with the description the others have for it.
+- A server made on a definition (`createServer`, `createEndpoint` with
+  `definitionId`) takes the definition's description and, for an endpoint,
+  the schema, edits and schema address another instance holds, never the
+  ones it was given. Any other new server gets a definition of its own
+  (`ensureDefinition`), as does a row that has none (an older export's).
+- Deleting the last instance deletes its definition.
+
+Mail and calendar accounts, SSH servers and the browser have no definition:
+nothing of theirs is the same thing elsewhere but their address. Skills
+have one implicit instance: the skill itself, which carries the owner's
+note too.
+
+**Clone** (the owner's alone, from an item's About card) makes another
+instance of an MCP server or an endpoint: it asks for the name, the address,
+how it signs in there (the source's way, with a secret of its own; a secret
+goes only to the address typed on that page) and the note, and copies the
+source's levels, for each token and for all tokens. A token limited to some
+servers reaches it only once the owner adds it, as any new server. **Detach**
+gives an instance a definition of its own with what it has now; there are
+no per-instance overrides of shared content, so detaching is how one
+instance differs. Editing shared content of a server with siblings says
+first which servers it changes ("This changes 2 servers: gaaf, plekde") and
+points at Detach.
+
+**Merging.** Endpoints added before definitions (or separately since) are
+offered as one: `findIdenticalDefinitions` groups endpoint definitions whose
+schema hash, edits and tool descriptions are the same (only a schema hash
+seen twice is looked at closer, as the bell reads this on every page), and
+the bell says "Two API endpoints have the same schema: merge them?". The
+merge page shows each definition and its servers; the owner picks the one
+kept and its name, and `mergeDefinitions` makes the others' servers its
+instances (they take its description and schema address; addresses,
+credentials, levels and notes stay) only while the group is still what the
+page showed (its key). "Keep them apart" stores the group's key in a
+setting and the offer goes away.
+
+**An assistant's endpoint.** Text and edits on an endpoint reach every
+assistant, so `endpoint-admin.ts` counts an endpoint as the assistant's only
+while it and every other instance of its definition send no secret and are
+limited to public addresses: one shared with an endpoint of the owner's is
+the owner's, and a change to what they share is an `endpoint_change`
+request that names every server it changes. A change to the shared content
+of an assistant's own endpoints, made switched off, switches every instance
+off.
+
+**What an assistant may propose.** Merging stays the owner's alone. The rest
+an assistant may ask for, each a permission request (by link, with
+`check_permission`) that writes nothing until the owner agrees and then only
+what they were shown:
+
+- **Another server of a definition** (Clone): `register_server` with
+  `definition` (an MCP server or an endpoint) and `create_wrapper` with
+  `definition` (a wrapper), naming a server the token sees by its short name
+  (or its definition's). The request brings only the instance's own part (a
+  name; for a server its address, sign-in and read-only switch, under the
+  usual register rules: public addresses only, a secret by name typed in by
+  the owner); the description, schema, edits, a wrapper's program and the
+  tool descriptions are the definition's, and the register rules refuse
+  them alongside it. The owner sees which definition and its servers, the
+  tools as the definition's schema makes them (a wrapper's programs in
+  full) and the note. Nothing is copied onto the request but a fingerprint
+  of the definition (`definitions.ts definitionBasis`: description, schema
+  hash and edits, wrapper program, tool descriptions); the server is made on
+  the definition (`createEndpoint`/`createServer` with `definitionId`, the
+  wrapper's row pointed at it) only while that fingerprint holds. Unlike the
+  owner's Clone, no levels are copied: its tools ask first, as any new
+  server's.
+- **Detach**: `detach: true` on `update_endpoint` (an endpoint or an MCP
+  server the token sees) or `update_wrapper`, in a call of its own, as an
+  `endpoint_change` or `wrapper_change` request (action `detach`) that says
+  which servers it shares with and that nothing else changes; approved, it
+  is `detachServer`, only while the server and its definition are as asked.
+- **The owner's note**: `note` on `update_endpoint` (an endpoint or an MCP
+  server; nothing else of an MCP server is an assistant's to change) or
+  `update_wrapper`, in a call of its own, `note` on `register_server` and
+  `create_wrapper` for a new server, and for a skill the memory tool's
+  `/skills/<name>/.note` (create proposes one, delete proposes taking it
+  away; no file of a skill can have that name, and it is never in SKILL.md).
+  A change is a `note_change` request (`personal-notes.ts proposeNote`) that
+  shows the note before and after, whole, checked as the owner's own is; it
+  is written only over the note the owner had when asked.
+
+**The owner's note** (`personal-notes.ts`) is one line of at most 300
+characters, nothing in it that does not show on screen, encrypted under the
+DEK with `mcp_server:<id>` (a server) or `skill:<id>:note` (a skill) as
+associated data, and written only from the owner's pages or, as an
+assistant proposed it, once the owner read it whole and agreed. It is never in a
+repository document or anything else shared, and not part of a skill's
+SKILL.md. Assistants that see the server or skill read it as the owner's
+note, after the description: the instructions' server and skill lines
+(`… (N tools) Owner's note: …`, cut to 120 characters), a line per server
+or skill under `search` and `search_tools` results (it counts toward
+finding the server, too), the head of `list_tools`, `describe`
+(`ownerNote`, beside `serverName` and `serverDescription`; a skill's under
+its frame) and `check_server`. The owner wrote it, so it may stand in the
+instructions as the descriptions do.
+
+**About card** (`item-about.ts`, `components/item-about.tsx`): every item's
+page (a server of any kind, a skill) says its type and definition, its
+source (Local, `owner/repo/path`, or "Imported from owner/repo@commit",
+with View in repo), its sync (Local only, Synced, Pending review, Modified
+locally, Update available or Sync error, with Sync now, Pull update,
+Review, or Review and push), its sharing (Private, or Public while it is in
+a repository GitHub says anyone can read) with a Share switch that opens
+the push's review, its instances with Clone and Detach, and the note. A
+server's link is its definition's: the link of any of its instances counts.
+
 ## Mail accounts
 
 A mail account is a server row of kind `jmap` or `imap` with a fixed set of
@@ -561,8 +717,24 @@ SMTP. A connection that is not encrypted after it is made is dropped, and
 STARTTLS is required, never optional. Each call connects, signs in, works
 and logs out. An email's id is `<uid>.<uidvalidity>.<mailbox path>`, so an id
 from before a mailbox was rebuilt is refused rather than naming another
-email. Sending goes over SMTP and a copy (Bcc kept) is appended to Sent,
-attachments in both, written by nodemailer. A draft is the same message,
+email. Sending goes over SMTP, attachments included, written by nodemailer.
+The copy in Sent (Bcc kept) is the account's setting, `mailSaveSent`:
+`never`, `always` (appended at once), or `auto`, the default: many SMTP
+servers (Gmail's, Outlook's) file their own copy, so PCP first looks for it
+among the newest 15 emails in Sent, by the Message-ID (or Outlook's
+`X-Microsoft-Original-Message-ID`) in their headers rather than a SEARCH,
+which lags on Gmail, at 0, 1, 2, 3, 5, 7.5 and 10 seconds, and appends only
+when it is not there. What it finds is kept as `mailServerFilesSent`, which
+stretches the next look to 15 seconds for a server that files its own and
+shortens it to 3 for one that does not; it is forgotten when the address or
+user name changes. A copy the server files after the look makes two, and
+nothing deletes either. The look runs once the call has answered (`savedTo`
+is `"pending"`), inside the same request: the call hands it to
+`lib/core/after-answer.ts`, whose scope the gateway's route and the owner's
+answer to a request open and drain through Next's `after()`, on a connection
+of its own with the login the call already holds; nothing is stored or timed
+past the request. Where no scope is open, the look runs in the call, for 10
+seconds at most. A draft is the same message,
 appended to Drafts with `\Draft` and `\Seen` and sent nowhere; its id comes
 from APPENDUID, and is null without UIDPLUS.
 
@@ -830,6 +1002,25 @@ another one reads:
   sets it to what the owner chose on that request. Any other memory of a token's own is its words alone and is
   only read through the tool, which labels each memory with who wrote it and
   says that it is a note, not an instruction.
+- **Memories live in PCP, and a migration brings them in once.** The memory
+  paragraph and the `memory` tool's description say the owner keeps memories
+  and skills in PCP, so an assistant saves new ones there rather than in its
+  client's own memory (`MEMORY_HOME`). While `api_token.memory_migration` is
+  on (it defaults to on, for the tokens that existed when it came too), the
+  paragraph adds fixed steps (`MEMORY_MIGRATION_STEPS`), and `every`
+  returns them as well, for a client that cut the instructions short: find
+  what the client keeps about the owner (never a project's files), confirm
+  with the owner, move it keeping its structure (a skill through
+  `/skills/…`, a `skill_change` the owner answers), read it back, confirm
+  again before deleting the originals, delete them or tell the owner what
+  to remove, then call `memory` with `migration_done`. That command takes no
+  other argument and only turns the token's own flag off, with no request;
+  nothing an assistant sends turns it on. Only the owner does, with the
+  switch on the token's page, which writes the flag only when they flipped
+  it there (`memoryMigrationWas`), so a page drawn before the assistant
+  turned it off does not turn it back on. These steps are PCP's own text,
+  the same for every token, so every text in the instructions is still one
+  the owner read or PCP wrote.
 - **Bounded.** 500 memories per vault, 10,000 characters each, 60 writes and
   share requests per token per ten minutes. Path and text are encrypted
   together, so uniqueness of paths is checked in code after decrypting the
@@ -921,13 +1112,23 @@ the GitHub client and sync itself build on it.
   are left alone.
 - **Documents** (`documents.ts`): `serializeItem` writes an item as files,
   the same item always as the same text; `parseItem` and `readRepo` read
-  files back into what they propose. Secrets appear by name only, an OAuth
-  client by its ID; never a value, a token, a row id or an address PCP
-  found itself (a JMAP session's, a token endpoint's). A wrapper's calls
-  are `server/tool` by short name as `get_wrapper` shows them, and its
-  secret places by secret name, tool and argument. `apply.ts resolveItem`
-  says what the names are in this vault: a server or tool with nothing to
-  it is a problem (never a guess), a secret the vault lacks is listed.
+  files back into what they propose. A server's document is its
+  **definition only** (see Definitions and instances): the definition's
+  short name and name, the description, an endpoint's schema, edits and
+  tool descriptions, a wrapper's programs, and how it signs in by kind,
+  header and format (an OAuth scope). Never anything of an instance: its
+  name, address, read-only and public-only switches, which secrets it
+  signs in with, a basic login's user name, its OAuth client, its note,
+  levels, whether it is on or its pace. The vault has one item per
+  definition (`local.ts`; the instance linked to a repository, or the
+  oldest, stands for it). Secrets appear by name only where a wrapper's
+  program needs them (its secret places, by secret name, tool and
+  argument); never a value, a token, a row id or an address PCP found
+  itself (a JMAP session's, a token endpoint's). A wrapper's calls are
+  `server/tool` by short name as `get_wrapper` shows them. `resolveItem`
+  (`apply.ts`) says what the names are in this vault: a server or tool
+  with nothing to it is a problem (never a guess), a secret the vault
+  lacks is listed.
 - **Untrusted input.** A repository with a path that leaves its folder,
   hides a character, or clashes with another but for case is refused
   whole, as is an item past `repos/limits.ts` (files per item, bytes per
@@ -944,7 +1145,15 @@ the GitHub client and sync itself build on it.
   newer PCP"), so an older PCP never half-reads what a newer one wrote. A
   change to a document's shape stays backward compatible: a field is added
   with a default (what a document without it always meant), never
-  repurposed or removed, and `PCP_FORMAT` goes up by one.
+  repurposed, and `PCP_FORMAT` goes up by one. Format 2 took the
+  instance's part out of server documents: a format-2 `pcp.yaml` or
+  `servers/<name>.yaml` that names a `baseUrl`, `url`, `readOnly`,
+  `publicOnly`, a secret, a user name or an OAuth client is refused. A
+  format-1 document still reads; what it says of its server is kept apart
+  (`instance`) and only fills in the first instance when the item is added,
+  never a server the vault has. An MCP server's address is its binding,
+  so a format-2 server document has no address, not even a suggested one:
+  adding it asks for the address, as Clone does.
 - **Versions.** Each document carries `version`, a whole number: a skill's
   own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
   (null reads as 1), which applying an item sets to the document's. PCP's
@@ -958,34 +1167,82 @@ the GitHub client and sync itself build on it.
   file by file (`diffLines`), with a flag for each thing that would reach
   further: a new or changed program, new calls, calls on the wrapper's
   approval instead of the token's levels, a new or changed secret place; an
-  endpoint's base URL, OpenAPI document or edits, read-only turned off, its
-  sign-in or a secret's name; `publicOnly` turned off; an MCP server's
-  address or sign-in; a skill's new tools; a character that does not show
-  on screen anywhere. `textOnly` is true only when an existing skill's
-  description, steps or reference files change and nothing is flagged: the
-  one change sync may apply by itself, from a repository the owner trusts.
+  endpoint's OpenAPI document or edits; how a new endpoint or MCP server
+  signs in; a skill's new tools; a character that does not show on screen
+  anywhere. An instance's address, sign-in and switches never change from
+  a repository, so they are never flagged on a server the vault has.
+  `textOnly` is true only when an existing skill's description, steps or
+  reference files change and nothing is flagged: the one change sync may
+  apply by itself, from a read-and-write repository the owner trusts.
   Everything else waits for the owner.
 - **Apply** (`apply.ts applyItem`) writes what the owner approved with the
   owner's own paths (`saveSkillByOwner`, `saveWrapperByOwner`,
-  `createEndpoint`/`updateEndpoint`, `createServer`/`updateServer`), and
-  gives the row the item's name. An endpoint read from a URL keeps its
-  address, the approved text becoming its copy. A secret the vault lacks is
-  never made up: the item is saved without it (a wrapper without that
-  secret's places, an endpoint or server without that credential) and a
-  note tells the owner to add it on PCP's page.
+  `changeEndpoint`, `shareDescription`, `setToolDescription`,
+  `createEndpoint`, `createServer`). Onto a server the vault has it writes
+  the definition and nothing else: the description, the schema and its
+  edits, the tool descriptions, a wrapper's programs, the definition's name
+  and short name (kept when another definition has that one), and the
+  version on every instance. **Sync never writes an instance's own fields**:
+  its name and short name, address, credential and secrets, read-only and
+  public-only, whether it is on, its pace, levels and note. A new server or
+  endpoint is the definition and its first instance, whose own part the
+  owner gives on the page that adds it (`InstanceInput`, the clone form);
+  a format-1 document's `instance` fills it in otherwise. An endpoint read
+  from a URL keeps its address, the approved text becoming its copy. A
+  secret the vault lacks is never made up: the item is saved without it (a
+  wrapper without that secret's places, a first instance without that
+  credential) and a note tells the owner to add it on PCP's page.
+- **The push's review** (`share-review.ts`, the page
+  `settings/repositories/[id]/share`) is the one way an item of the vault
+  goes to a repository: an item page's Share, Add and "Diff and push" on a
+  repository's page, and an assistant's proposal (below). It
+  shows every file in full and, for a change, its diff against the
+  repository; what stays private (each instance's name, address and sign-in
+  by secret name, the note, the levels, the secrets' values); and what in
+  the files looks personal (`personal-data.ts`, pure: email addresses, the
+  owner's own hosts, domains and machine names, IPs, UUIDs and
+  Coolify-style ids, phone numbers, paths with a user name, token-shaped
+  strings, the owner's name). The owner's facts come from the vault's own
+  plain columns (`vaultOwnerFacts`): PCP's public address, the email
+  addresses the mail and calendar accounts sign in or send with, SSH
+  servers, any domain two servers share (never a mail provider's or a
+  vendor's API the owner merely uses), and the vault's name. Each hit links
+  to its line, and offers the fixes that apply: edit the description, move
+  its sentence to the owner's note, rename what is shared (before it is in
+  a repository), or leave the address out of an endpoint's shared schema
+  (its `servers` go; each instance keeps its own base URL). To a public
+  repository, or one GitHub has not said is private, Confirm waits until
+  every hit is fixed or ticked as fine to publish; to a private one the hits
+  are advice. Confirm pushes exactly what was shown: `basis` is a hash of
+  the repository, its visibility, the item's place and every file, and if
+  any of it changed since the page opened nothing is pushed and the review
+  opens again. One commit, then the item is linked and taken off the
+  repository's excluded list.
 
 ### Linking, sync and trust
 
 The owner links repositories on Settings › Repositories (`repos/store.ts`):
 `repo` holds which one (owner, name, branch: one ciphertext under
 `repo:<id>`), its trust (trusted or not), its access (read-only, or read and
-write) and the secret PCP signs in with, if any. `repo_item` links one
-item of the vault (a skill, or a server row: deleting it deletes the link)
-to its folder or file there, with how often it syncs (off, hourly, daily,
-weekly), whether two-way, and its state; where it is, the hashes sync
-compares, a change waiting for the owner and an assistant's drafts are one
-ciphertext under `repo_item:<id>`. Both are in an export and in
-`wipeVault`.
+write), the secret PCP signs in with, if any, and `private`, what GitHub
+last said of who reads it (asked when it is linked, on every sync of it and
+before every push's review; null, not asked yet, counts as public).
+`repo_item` links one item of the vault (a skill, or a server row standing
+for its definition: deleting it deletes the link) to its folder or file
+there, with how often it syncs (off, hourly, daily, weekly), whether
+two-way, and its state; where it is, the hashes sync compares, the last
+commit PCP knows, a change waiting for the owner and an assistant's drafts
+are one ciphertext under `repo_item:<id>`. `repo_exclusion` keeps an item
+out of a repository on purpose (a skill, or a server's definition, by id
+only), until the owner includes it again or pushes it. All three are in an
+export and in `wipeVault`.
+
+A repository's page (`repos/overview.ts`) is one table of every shareable
+item, grouped by kind, each Pushed (in it and in step), Changed (changed
+in the vault, not pushed), Not pushed, Imported (added from a read-only
+repository) or Excluded, with a summary on top. "Add selected" opens the
+push's review of each chosen item in turn; there is no push of several
+items at once.
 
 - **The GitHub client** (`repos/github.ts`) is fixed and built in: the REST
   API at api.github.com, and github.com only for the device flow. No
@@ -1026,9 +1283,12 @@ ciphertext under `repo_item:<id>`. Both are in an export and in
   otherwise kept. Both: a conflict, nothing applied, and a notice with keep
   mine, take theirs, or let an assistant help. Neither: nothing. The latest
   change wins only when one side changed.
-- **Trust on a pull.** From a trusted repository a change that is text only
-  (`textOnly`) is applied at once. A flag, a new item, or any change from an
-  untrusted repository waits as a review: the item's `pending` names the
+- **Trust on a pull.** From a trusted repository the owner pushes to (read
+  and write), a change that is text only (`textOnly`) is applied at once.
+  An item imported from a read-only repository is **pinned** to the commit
+  the owner reviewed: a newer one is an update available, which waits,
+  text only or not, trusted or not. A flag, a new item, or any change from
+  an untrusted repository waits as a review: the item's `pending` names the
   change by its git id and hash, never a copy of its files, and the owner's
   page reads it again by that id, so Approve applies exactly what they were
   shown, and only while the vault's item is as it was then (`basis`). Not
@@ -1054,6 +1314,23 @@ ciphertext under `repo_item:<id>`. Both are in an export and in
   owner the final files in full, against the vault's and the repository's,
   with every flag; allowing it applies those files, only if neither side
   moved since, and with two-way sync pushes them too.
+- **Assistants proposing a push** (`repos/assist-share.ts`), the same
+  tokens, through the memory tool under `/repos/share/`: `view` lists the
+  repositories PCP pushes to, and then the items of the vault the token sees
+  there (a skill it sees, a server whose definition has an instance it
+  sees), each Pushed, Changed, Not pushed or Excluded; `create
+/repos/share/<owner>/<name>/<item's path>`, with a line for the owner as
+  `file_text`, proposes adding that one item or pushing its changes. It is
+  refused before asking for a read-only repository, an item the token does
+  not see, or one the repository has the same (the push's review runs once,
+  read only), and is otherwise one `repo_share` request that writes and
+  pushes nothing. Its only answer on the permission page is Not now; it
+  links to the push's review with the request's id, and Confirm there
+  (`permissions.ts confirmProposedShare`) is `confirmShare` unchanged (every
+  file, the personal-data check, a public repository waiting on each hit,
+  exactly what was shown) with the token as the commit's proposer; then the
+  request is done and `check_permission` says what was pushed. A refused
+  Confirm leaves the request open. Never more than one item per request.
 
 ## Instructions for an assistant
 
@@ -1234,8 +1511,9 @@ three parts:
   engine has the language and nothing of Node's: no `require`, `process`,
   `fetch`, timers or file system. Two host functions are put on its global
   object, and a prelude takes them off at once and wraps them as `pcp`
-  (`call`, `read`, `keep`) and `console`; only strings cross, both ways, so
-  the host never holds one of the program's objects. Memory is a
+  (`call`, `read`, `keep`, `tools`, `step`, `image`, `video`) and `console`;
+  only strings cross, both ways, so the host never holds one of the
+  program's objects. Memory is a
   `WebAssembly.Memory` made with a maximum (128 MB), which the WebAssembly
   engine enforces; QuickJS's own memory limit counts nothing in these
   builds, which lack `malloc_usable_size`, so it is not used. An interrupt
@@ -1248,8 +1526,9 @@ three parts:
 - **The bridge** (`run.ts`) is everything the program can ask for, as an
   operation name and a JSON payload it checks as untrusted: `call` (a
   server, a tool, its arguments, and call_tool's `fields`, `decode` and
-  `keep`), `read` (one of the token's own kept results, as text) and `keep`
-  (a text kept as a result of the token's, returning its handle). A handle
+  `keep`), `read` (one of the token's own kept results, as text), `keep`
+  (a text kept as a result of the token's, returning its handle), `tools`
+  and `media` (below). A handle
   PCP wrote into an answer is made bare (`{"$result"}`) before a call, so a
   program passes on what it was handed as it is. Limits are in
   `code/limits.ts`: 3 minutes in all, 100 calls with 5 under way at once,
@@ -1271,10 +1550,36 @@ three parts:
   sight, so their bytes never enter the program. An OAuth server to connect
   or a browser site to allow stops the run the same way, with its link.
 
+**Images and videos** (`code/media.ts`, the bridge's `media` operation) are
+there so an assistant looks at a small picture rather than a large one.
+`pcp.image.compress(handle, options)` sends the handle and the options as
+JSON, never the bytes: PCP opens the token's own kept result, checks by its
+first bytes that it is a PNG, JPEG, WebP or GIF of at most
+`MAX_IMAGE_PIXELS` (50 million, from the header, before anything is
+decoded), crops, fits, greys and encodes it as JPEG, WebP or PNG, and keeps
+the result as a new result of the token's, refused when it comes out past
+the largest file. The codec is sharp's WebAssembly build
+(`@img/sharp-wasm32`) in PCP's process: sharp's native packages are left out
+of the install (`ignoredOptionalDependencies` in `pnpm-workspace.yaml`), so
+its loader takes the WebAssembly in the container, a checkout and the Mac app
+alike, with no native code and nothing for `allowBuilds`; the `.wasm` it
+reads by path is named in `outputFileTracingIncludes`
+(`scripts/standalone.test.ts`). Images take turns, one at a time in the
+process, with libvips's cache off, one thread and a 30-second timeout, and
+what it writes has no metadata. `pcp.video.frames` hands the job to the
+sandbox (below): the bridge runs `sandbox/pcp.py`'s `frames` there as a
+Python program, with a bridge of its own that reads only that video and keeps
+only JPEGs, through the run's own `read` and `keep`, so ffmpeg never runs in
+PCP's process; with no runner connected it says video needs one. A program
+already in the sandbox calls `pcp frames` itself (the runner, running it,
+could not take another job for it). Each image and each frame counts as a
+keep, with `MAX_MEDIA_PER_RUN` (20) images and videos a run; like keeps,
+they are not in the request log.
+
 **The sandbox** (`code/sandbox.ts`, `sandbox/`, `docker-compose.sandbox.yaml`)
 is a second executor behind the same bridge, for installs that run PCP in
-Docker or Podman: a container with bash, `jq` and Python 3 where a program in
-`bash` or `python` runs. It has no network (`network_mode: none`), a
+Docker or Podman: a container with bash, `jq`, ffmpeg (Debian's package, for
+`pcp frames`) and Python 3 where a program in `bash` or `python` runs. It has no network (`network_mode: none`), a
 read-only root, every capability dropped but SETUID and SETGID, an init that
 reaps, and memory, CPU and process limits. PCP starts nothing and never
 touches the Docker socket: when `PCP_SANDBOX_SOCKET` is set (only the compose
@@ -1436,13 +1741,16 @@ checkSyntax`), nothing has a character that does not show on screen
   address as approved. `run.ts` hands the call the tool's bindings as a
   grant; `upstream.ts callServerTool` matches every placeholder to one
   (`placeholders.ts`) before anything is read or sent, refuses any other,
-  refuses a server whose address changed since, never puts one into the
-  browser, reads the value (`readSecretValue`) and writes it in. The values
+  refuses a server whose address changed since, puts one into the browser
+  only as `type`'s text and only through the browser's own gate (see
+  Browser, Secrets in pages), reads the value (`readSecretValue`) and writes
+  it in. The values
   are taken out of the answer (`scrubResult`, `openapi/redact.ts`: text,
   structured content, text resources, and an endpoint's or a mail account's
   own redaction), out of errors and out of the status the server page shows,
   before the program or the assistant sees them. A placeholder in an
-  assistant's own call is refused by `resolveCall`. Scrubbing cannot catch a
+  assistant's own call is refused by `resolveCall`, but as the browser's
+  `type` text (Browser, Secrets in pages). Scrubbing cannot catch a
   value a tool transforms or stores and answers with later: the owner's
   review of the place a secret goes is what decides, and the page says so.
 - **Replacing.** A tool listed in `replaces` (it has to be among the
@@ -1466,7 +1774,10 @@ checkSyntax`), nothing has a character that does not show on screen
   asked (`basis`: the definition's hash, name and description), else
   nothing. The request's row names no server, so deleting the wrapper keeps
   its outcome. A binding the owner approved keeps its secret through later
-  changes, even if the secret is renamed. Requests are limited to 20 per
+  changes, even if the secret is renamed. `create_wrapper` with `definition`
+  proposes another wrapper of one the token sees, and `update_wrapper`'s
+  `detach` and `note` ask for a definition of its own and the owner's note
+  (Definitions and instances, above). Requests are limited to 20 per
   token in ten minutes and a vault to 50 wrappers. The owner adds and edits
   wrappers directly on the Servers page (`saveWrapperByOwner`, the same
   checks, with secrets they hold).
@@ -1529,9 +1840,15 @@ proposed for and called like any server, and a long snapshot is kept for
 
 **What runs** (`runtime.ts`). One Chromium per vault, driven by
 `patchright-core`, started on the first page opened (by an assistant or the
-owner) and closed after fifteen minutes with no tool call, no input and
-nobody watching. It runs headless, or in the container image with windows
-on a virtual display (below). The registry is on `globalThis`, as the network's is,
+owner) and closed after the owner's idle minutes (Settings → Resources,
+`resourceLimits().browserIdleMs`: an hour unless set, 5 minutes to 8 hours)
+with no tool call, no input, nobody watching a tab (the live view's tick
+counts, not only a new picture) and no hand-over waiting: a tab held for a
+hand-over whose request can still be answered keeps it open
+(`idle.ts`). How it runs is `launch.ts`'s: in the container image with
+windows on a virtual display, in the desktop app (and on a Mac or Windows
+machine) with a window of its own kept off the screen, both below, and
+headless anywhere else. The registry is on `globalThis`, as the network's is,
 because the gateway, the actions and the route handlers are bundled apart.
 Chromium runs with one in-memory context for the vault (and one more,
 made on the first page read for web_fetch, for all of those, below): no
@@ -1572,16 +1889,72 @@ last one closes. A site's check then sees a browser with a window, not one
 whose window is exactly the page. The display takes only clients that show
 its cookie, kept in a private folder and handed to Chromium alone, so
 another program on the machine cannot watch the browser or type into it.
-WebGL there is Chromium's software renderer, as headless uses by itself
-(`--enable-unsafe-swiftshader`; without it a windowed Chromium with no
-graphics card has no WebGL at all). Chromium's RenderDocument is off there:
+How Chromium draws there is `rendererFor`'s choice, a pure function of
+whether the container has a GPU render node (`/dev/dri/renderD*`) PCP's user
+may read and write (`hasRenderNode`), which `displayRenderer` says in the log
+as "GPU" or "software" and nothing of the device. With one, ANGLE runs on the machine's Vulkan driver (Mesa's radv or
+anv, in the image) with Chromium's documented switches for a GPU without a
+desktop session: `--use-angle=vulkan`, `--enable-features=Vulkan` and
+`--disable-vulkan-surface` (a GPU's Vulkan driver presents to an X server
+only through DRI3, which Xvfb lacks, so frames reach the window by a copy).
+No `--ignore-gpu-blocklist`. Without one, WebGL is Chromium's software
+renderer (SwiftShader), as headless uses by itself. `--enable-unsafe-swiftshader`
+is there either way: it does not force software, it lets WebGL fall back to
+SwiftShader when the GPU does not start (a card Mesa has no driver for,
+NVIDIA's), where it would otherwise be gone. The image takes Mesa's own
+software Vulkan driver (lavapipe) out of the loader's list, since Chromium
+would pick it on such a card, block it as software and leave no WebGL at all.
+The installer passes `/dev/dri` in, with the node's group where PCP's user
+needs it (docs/self-hosting.md). Chromium's RenderDocument is off there:
 with it (Chromium 153) a script that runs while a new document loads often
 reads the window as 0 by 0 at 0,0 until the window's place reaches it, which
 no desktop's Chrome shows. Chromium keeps only the last `--disable-features`
-it is given, so PCP's list carries the driver's own too, and a test checks it
-against the patchright-core installed. An Xvfb that does not start leaves the
+and `--enable-features` it is given, so PCP's lists carry the driver's own
+too, and a test checks them against the patchright-core installed. An Xvfb that does not start leaves the
 browser headless; `PCP_BROWSER_DISPLAY=headless` asks for that. The desktop
 app never uses it: it starts no child process, and runs on a real screen.
+
+**A window of its own** (`launch.ts`). In the desktop app (`PCP_DESKTOP=1`),
+and on a Mac or Windows machine otherwise, Chromium runs with a window on the
+machine's own screen, kept out of the owner's way. `--window-position` puts
+every window Chromium opens by itself far to the left of every screen
+(`OFF_SCREEN_WINDOW`: macOS keeps a window's top edge on a screen, not its
+left one), and `keepOffScreen` moves each tab's window there as PCP takes the
+page in, a popup's too (a popup first opens where its page asked, on the
+screen). It is not minimized: a minimized window's page is hidden to its
+scripts and stops drawing, and the live view with it. An off-screen window
+only counts as covered, and patchright-core's own
+`--disable-backgrounding-occluded-windows`, `--disable-renderer-backgrounding`
+and `--disable-background-timer-throttling` keep its page painting and its
+timers running (a test checks that patchright-core still passes them). Off
+the screen, a page would read its window's place as thousands of pixels left
+of the screen it is told of, so it is told a place on that screen instead
+(`SHOWN_WINDOW_POSITION`), through the device-metrics emulation patchright-core
+tells it the screen with, sent again with the position on the tab's own
+DevTools session (input PCP sends reports a screen position from the page's
+own either way). Chromium is still started by patchright-core, as a child of
+PCP's process (the server's utility process in the desktop app), as it was
+headless; only its switches differ. None of the virtual display's switches
+are among them: a windowed Chromium on the machine's own screen draws with
+its graphics card by itself. A window that does not open leaves the
+browser headless, and `PCP_BROWSER_DISPLAY=headless` asks for that anywhere.
+On macOS the windowed Chromium is an app of its own: it shows in the Dock
+while it runs, and Chromium makes it the active app when it shows a window as
+the active one, which would take the keyboard from the app the owner is
+typing in and could send their keys into a page an assistant drives. So PCP
+opens its own pages (tabs, a reopened tab, web_fetch's pages) in the
+background (`openPage`): with `Target.createTarget` and `background`, which
+shows the window inactive, and `newWindow`, since a background tab in a
+window it shares would be hidden and stop drawing (Playwright's `newPage`
+opened a second tab in the first one's window), at `OFF_SCREEN_WINDOW`. The
+page Playwright makes of that target is picked out by its target id
+(`Target.getTargetInfo` on its own session), and `keepOffScreen` follows as
+for every page. Playwright does not tell a context's id in Chromium, so
+`newBrowserContext` notes the one `Target.getBrowserContexts` lists once the
+context is made. If any of that fails, the page opens as Playwright opens it,
+said once in the log. A popup a page opens is still Chromium's own and may
+take the focus; `keepOffScreen` moves it. Headless and on the virtual display
+there is no focus to take, and pages open as Playwright opens them.
 
 **Sites that check their visitors.** Every context tells pages of a 1920 by
 1080 screen, since headless would otherwise make the screen the 1280 by 800
@@ -1600,9 +1973,14 @@ vault's profile, as any cookie does. PCP adds no stealth scripts. It drives Chro
 with `patchright-core`, which does not turn on the DevTools `Runtime` domain in
 every frame as stock Playwright does, so those page-level traces are not left
 for a check in a cross-origin iframe (Cloudflare Turnstile's, for one) to find.
-Some tells remain: WebGL is SwiftShader (software rendering), headless the
-window is exactly the viewport (Playwright sizes it so, and Chromium's
-`--window-size` does not change that; on the virtual display it is not),
+The image adds a desktop's fonts (DejaVu, Noto Sans and Serif, Cantarell) to
+Playwright's, whose set alone no person's computer has (a check found
+exactly its 36 fonts), and draws with the GPU on the virtual display when
+the container has one (above). Some tells remain: WebGL is SwiftShader
+(software rendering) headless, and on the virtual display without a GPU (or
+with an NVIDIA one), headless the window is exactly the viewport (Playwright
+sizes it so, and Chromium's `--window-size` does not change that; with a
+window, on the virtual display or of its own, it is not),
 `screen.availHeight` equals the screen height, and a home address that reaches
 the page through a container's network may not look like a person's. A
 click sent through the DevTools protocol into a cross-site frame (a
@@ -1610,6 +1988,10 @@ Turnstile checkbox) carried the frame's own coordinates as its screen
 position up to about Chromium 141, which a check could tell from a mouse;
 the Chromium that `patchright-core` drives (153) reports a mouse's. The
 strictest checks may still want a person, which is what `hand_over` is for.
+What a page sees is measured by hand, not in CI: `scripts/fingerprint/` has a
+page that records it as JSON (`harness.html`), a script that ranks how two
+browsers differ (`diff.mjs`), and the list of live checks to run again after
+a Chromium or Playwright upgrade (its README).
 
 **The sign-ins** (`profile.ts`). The context starts from the vault's
 `browser_profile`: Playwright's storage state (cookies, local storage,
@@ -1673,8 +2055,8 @@ Hosts are never logged.
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
 `snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog` and `hand_over`. Every one but `tabs`' open and
-list names its tab (below). An assistant reads a snapshot (Playwright's
+`download`, `handle_dialog`, `hand_over` and `request_secret`. Every one but
+`tabs`' open and list and `request_secret` names its tab (below). An assistant reads a snapshot (Playwright's
 accessibility tree with refs), `find`'s elements of it as JSON (role, name,
 ref, states, and the landmark or region each is in, which tells two lines
 that read the same apart; `within` searches one element), the page as
@@ -1699,6 +2081,51 @@ it with `handle_dialog`, rather than waiting on a page that cannot answer.
 It never gets a cookie or storage and never runs JavaScript. A
 refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
+
+**Secrets in pages** (`lib/core/browser-secrets.ts`, `call.ts`, `held.ts`).
+A secret goes into a page only as `type`'s text, `{"$secret": name}`: in an
+assistant's call (`resolveCall` lets it through there and nowhere else),
+from run_code's `pcp.call`, or from a wrapper or flow whose binding names
+`browser/type` at `/text` with no template (`definition.ts`). Any other
+browser tool or argument is refused, in `resolveCall` and in `upstream.ts`.
+`upstream.ts callBrowser` is the one path: it hands `callBrowserTool` a
+`SecretTyper`, never a value. The browser resolves the field (ref or
+target), checks it is an input or textarea, that the page is at an http(s)
+origin and that the frame the field is in has that same origin (a field in a
+frame from another site is refused), and only then asks the typer for the
+value, with the origin as it is then. The typer is the gate
+(`admitSecretUse`): the secret by name (text or TOTP only), and the token's
+allowance for it at that origin (`ApiTokenSecretAllowance`: once, an hour,
+or always while the origin is the secret's, `SecretBrowserOrigin`). With
+none it throws `OwnerNeeded` for a `secret_use` request: the secret's name,
+the origin, the page, the field and the tab live; Allow once, Allow for 1
+hour and Always allow (which binds the origin) write the allowance and make
+the type call again through the same path (a once allowance the call did not
+use is dropped); there is no Block, and no answer changes the tool's level.
+That an API endpoint sends the secret never counts. Past the gate,
+`secrets.ts readTypedValue` decrypts it (a TOTP secret's code of the moment,
+RFC 6238 in `totp.ts`, the seed never leaving `secrets.ts`); the browser
+clears and focuses the field, checks again that the page, the frame and the
+focus (in the field's frame and each frame around it) are where they were,
+and types it with CDP `Input.insertText`. The page then holds it (`held.ts`:
+the secret's name and an HMAC of the field's value under a key of the
+process, never the value, by page, in memory): while any field of the page
+has that value, every answer to the token shows it as `[secret: name]`
+(the snapshot's field line, and the value wherever else it appears, a title
+included), and `screenshot` is refused (a tool error). It lets go when no
+field has the value any more: the field changed, or a new document does not
+have it. Every password field's value reads as `[password]` in a snapshot,
+typed by anyone. `upstream.ts` scrubs the value from the answer and any error
+too, and the request log notes the secret's name and the origin on the
+call's line (`noteSecretTyped`; a use the owner's answer made gets a line of
+its own), never the value. `request_secret` (name, purpose, origins, kind
+text or totp) checks its arguments and refuses a name PCP holds (no
+assistant writes over a secret), then throws `OwnerNeeded` for a
+`secret_request`: the owner types the value (or the seed) on PCP's page, may
+change the origins, and saves it with the requesting token's allowance at
+each (one use, an hour, or always); the assistant hears the name. Origins
+are exported; allowances are not, are listed with End on the token's page
+and on the secret's row under Secrets, and are pruned once run out.
 
 **Turns and deadlines** (`queue.ts`). The calls on one tab run one at a
 time, in its own lane, so a slow page holds up only its tab. Each has a
@@ -1772,8 +2199,32 @@ still be sent elsewhere or closed. The tabs share one profile, so the
 sign-ins are every token's; the eight tabs are shared too, and a token
 told the browser is full learns only how many are its own.
 
+**The tabs view** (`app/(dashboard)/browser/page.tsx`,
+`components/browser-tabs.tsx`, `browserOverview` in `owner.ts`). The
+Browser page lists every open tab, every token's and the owner's: its icon,
+title and site, who opened it and whose it is (the token's name), and its
+state (idle, in use while a call holds its lane, or with you). The icon is
+the one Chromium fetched for the page itself, through the tab and the
+proxy as every request is: the tab's DevTools session follows the main
+frame's responses of type Other (`favicon.ts`, with Network buffers bounded
+by `MAX_FAVICON_BYTES`), reads the body of an image one once it has
+arrived, and keeps it as a data: address, dropped when the main frame loads
+another document. PCP fetches nothing for it, runs nothing in the page, and
+the owner's own browser asks the site for nothing; a page without one shows
+its site's first letter. `/browser?tab=<id>` shows that tab live under the
+list; it is where `tabLink` points, and `/browser/tabs/<id>`, the tab's page
+before the view, redirects there. A hand-over still waiting
+(`waitingHandovers`, from the requests noted on the tab) shows on its tab
+with the assistant's message and Done and Not now, answered through
+`decidePermission` and the owner's queue like any request: `queueHref`
+sends a `browser_handover` to `/browser?tab=<id>` while its tab is open
+(`handoverTabOf`), and to its request's page once it is gone, and that page
+redirects a pending hand-over whose tab is open to the tab. Its link to the
+assistant stays the request's address, so it says how it ended once
+answered.
+
 **The owner's control.** A tab is driven by its assistant or by the owner.
-Take over on the tab's page makes it the owner's, and every browser tool
+Take over in the tabs view makes it the owner's, and every browser tool
 refuses it until Hand back. A tab the owner opens is theirs, seen by no
 token, until they hand it to one. Hand back gives the tab to the token the
 owner picks (`handBackTab`, `giveTab`): one of the vault's tokens that is
@@ -1785,13 +2236,17 @@ counts as one the owner allowed for that tab, as Allow once does; handed to
 another token than before, the tab first drops the sites allowed for the
 one before, which were that token's. `hand_over` makes the tab the
 owner's and throws `OwnerNeeded` for a `browser_handover` request, which
-shows the assistant's message and the tab live; Done (or Not now) gives it
+the tabs view shows on the tab, with the assistant's message; Done (or Not now) gives it
 back to the token that handed it over, saves the profile, and is what
 `check_permission` reports. A hand-over nobody answers goes back when its
-request expires.
+request expires, or when the assistant withdraws it. The request is noted
+on its tab (`noteHandoverRequest`), and a tab that closes (the owner's
+Close, an assistant's, the page's own, or the browser closing) closes the
+hand-overs still waiting for it (status `closed`), so none stays in the
+bell for a tab that is gone.
 
 **The live view** (`app/api/browser/tabs/[id]/`, `screencast.ts`,
-`input.ts`, `components/browser-tab-view.tsx`). The tab's page draws
+`input.ts`, `components/browser-tab-view.tsx`). The tab chosen in the tabs view draws
 Chromium's screencast (a JPEG each time the page repaints, shared by
 everyone watching) on a canvas, streamed as server-sent events by a route
 handler. The stream sends on only when its connection has room, keeping
@@ -2628,8 +3083,9 @@ skill:<name>` with its description, `memory /memories/…` with the line
 - `search_tools` and `describe_tool`, the old names, stay registered for
   one release and answer exactly as before (tools only; server and tool),
   under one first line naming the new tool.
-- `check_permission(id)`, `check_server(server)`, `register_server(...)`
-  and `propose_tool_access(changes)` belong to the permission flow below.
+- `check_permission(id?)`, `withdraw_request(id)`, `check_server(server)`,
+  `register_server(...)` and `propose_tool_access(changes)` belong to the
+  permission flow below.
 - `check_run(id)`, beside `run_code` for a token that runs code, says how
   one of the token's runs went (Running code, above). It only reads.
 - `read_result(id, offset?, length?, find?)` reads a slice of an answer
@@ -2788,6 +3244,33 @@ owner answers on that page, and only there (the header's bell lists every
 request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
 and runs the call once. "Always allow" and "Block" also write the tool's
 level.
+
+An assistant can take back a request of its own token's while it is still
+pending and unexpired (`withdraw_request`, `withdrawPermission`): one
+update from pending to `withdrawn` (`closePendingRequests` in
+`permission-close.ts`), so it and an answer racing it cannot both win, and
+another token's request reads as none at all. Nothing runs and nothing is
+written for it; in particular a memory to share is not kept for the
+assistant, as the owner's Not now would. A hand-over's tab goes back to the
+browser tools (`finishHandover`). The bell drops it (it lists pending rows
+only), the request's page says "Withdrawn by the assistant", and the Log
+shows the call that asked as withdrawn. `check_permission` with no id lists
+the token's own requests still waiting (id, kind, title, age and link),
+and only reads.
+
+What waits for the owner is one queue, oldest first
+(`lib/core/owner-queue.ts`): the requests from live tokens
+(`waitingRequestsWhere`, `WAITING_ORDER`, which the bell, Home and a
+token's page all read) and the changes linked repositories left for
+review, by when each started waiting. `queueHref` is the one place that
+says where each is answered. Once the owner answers one, the answer's
+action returns `nextPendingRequest` (the oldest other one, or none) and the
+page (`components/answer-queue.tsx`) follows that link, carrying what came
+of the answer above the next request, or says nothing else is waiting. It
+only opens a page: the next request waits for its own answer. The bell's
+count drops the moment the owner answers and comes back if the answer
+fails; every answer revalidates the dashboard's layout, so the count PCP
+reads next agrees.
 
 The page shows a call's arguments one line each, and a long value is cut
 there, saying how long it is; Show everything under the lines has each

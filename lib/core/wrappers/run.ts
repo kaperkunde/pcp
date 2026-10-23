@@ -403,7 +403,9 @@ async function innerCall(
     max: resourceLimits().answerChars,
     executor: base,
     run,
-    ...(secrets.length > 0 ? { secrets } : {}),
+    // Always handed on, empty or not: a wrapper's call carries a secret only
+    // where a binding says so, the browser's type included (upstream.ts).
+    secrets,
     ...shape,
   })
 }

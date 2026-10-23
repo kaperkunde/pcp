@@ -13,6 +13,11 @@ export type TabView = {
   id: string
   url: string
   title: string
+  /**
+   * The page's icon as a data: address, from what Chromium loaded for the
+   * page itself (favicon.ts); null when it has none PCP shows.
+   */
+  favicon: string | null
   /** "owner", or the name of the token that opened it. */
   openedBy: string
   /**
@@ -23,6 +28,8 @@ export type TabView = {
   control: TabControl
   /** Set while the owner holds the tab for an assistant's hand-over. */
   handover: boolean
+  /** A tool call is working in it now. */
+  busy: boolean
   lastUsedAt: string
 }
 
@@ -45,9 +52,72 @@ export type HandoverAsk = {
   title: string
 }
 
+/** The type call that carried a secret, as it is made again once allowed. */
+export type SecretTypeCall = {
+  tab: string
+  ref?: string
+  target?: Record<string, unknown>
+  submit?: boolean
+}
+
+/**
+ * Typing one of the owner's secrets into a page where the token has no
+ * allowance for it (lib/core/browser-secrets.ts): its name, never its
+ * value, and the page it would go into.
+ */
+export type SecretUseAsk = {
+  serverId: string
+  tabId: string
+  secretName: string
+  /** https://host[:port] of the page, and of the frame the field is in. */
+  origin: string
+  url: string
+  title: string
+  /** The field, as the call named it: its ref, or its role and name. */
+  field: string
+  call: SecretTypeCall
+}
+
+/**
+ * An assistant asking the owner to store a secret for the browser to type
+ * (request_secret): its name, what it is for and where it goes. The owner
+ * types the value in on PCP's page; nothing of it comes back but the name.
+ */
+export type SecretRequestAsk = {
+  serverId: string
+  name: string
+  purpose: string
+  origins: string[]
+  kind: "text" | "totp"
+}
+
 export type BrowserAsk =
   | { kind: "browse"; input: BrowseAsk }
   | { kind: "browser_handover"; input: HandoverAsk }
+  | { kind: "secret_use"; input: SecretUseAsk }
+  | { kind: "secret_request"; input: SecretRequestAsk }
+
+/** Where a call types a secret: what upstream.ts is told when it is typed. */
+export type SecretUseContext = {
+  tabId: string
+  origin: string
+  url: string
+  title: string
+  field: string
+  call: SecretTypeCall
+}
+
+/**
+ * A stored secret for a type call to put into a page, handed to the browser
+ * by upstream.ts: the browser asks for the value only once the field and
+ * its frame checked out, at the moment of typing, for the origin it found
+ * then. Whether the token may, and the decryption, are upstream.ts's; the
+ * browser never reads a secret itself.
+ */
+export type SecretTyper = {
+  name: string
+  value(use: SecretUseContext): Promise<string>
+}
 
 /**
  * Thrown by a browser tool when the owner has to answer first. The call

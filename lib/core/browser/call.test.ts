@@ -36,11 +36,14 @@ import { isOwnerNeeded, type OwnerNeeded } from "./types"
 // this machine. Skipped where no Chromium is installed (`pnpm exec
 // playwright install chromium`, or PCP_BROWSER_EXECUTABLE). A site's check
 // is given a few seconds rather than twenty: the fake one passes in a third
-// of a second, or never.
+// of a second, or never. An action on an element that never becomes
+// actionable is given three seconds rather than ten: the pages here answer
+// at once.
 
 vi.mock("./limits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./limits")>()),
   CHALLENGE_WAIT_MS: 3_000,
+  ACTION_TIMEOUT_MS: 3_000,
 }))
 
 const executable = await chromiumExecutable()
@@ -350,7 +353,7 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     expect(opened.isError, text).toBeUndefined()
     expect(text).toContain(`Address: ${api.origin}/form`)
     expect(text).toMatch(
-      /The owner can watch it or take over at http:\/\/pcp\.test\/browser\/tabs\/\S+/,
+      /The owner can watch it or take over at http:\/\/pcp\.test\/browser\?tab=\S+/,
     )
     expect(text).toContain('textbox "Name"')
     expect(api.requests[0]!.headers["user-agent"]).not.toContain("Headless")

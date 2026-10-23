@@ -1,20 +1,22 @@
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { shareDescription, uniqueDefinitionSlug } from "../definition-rows"
+import type { CloneInput } from "../definitions"
 import {
   changeEndpoint,
   createEndpoint,
   storedSpec,
-  updateEndpoint,
   type EndpointInput,
 } from "../endpoints"
 import { invalid, PcpError } from "../errors"
+import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import { findTextSecretByName } from "../secrets"
 import {
   createServer,
   getServer,
+  normalizeNameAndDescription,
   renameServerSlug,
   setToolDescription,
-  updateServer,
   type ExtraAuthHeaderInput,
   type ServerInput,
 } from "../servers"
@@ -44,10 +46,20 @@ import { findLocalItem } from "./local"
  * endpoint, servers.ts for an MCP server. Nothing here asks anyone: the
  * review and the owner's answer come first (review.ts; the request is sync's).
  *
+ * A server's item is its definition (definitions.ts). Onto a server the
+ * vault has, it writes what the definition holds and nothing else: the
+ * definition's name, the description, the schema and its edits, the tool
+ * descriptions, a wrapper's programs. Never an instance's own: its name and
+ * short name, address, credential, read-only and public-only switches,
+ * whether it is on, its pace, levels or note. A new one is the definition
+ * and its first instance, whose own part the owner gave on the page that
+ * adds it (`InstanceInput`, as cloning asks for it); without one, what a
+ * format-1 document said of its server (`instance`) fills it in.
+ *
  * A secret is found by its name in this vault. One the vault does not have
  * is never made up: the item is saved without it (a wrapper without that
- * secret's places, an endpoint or server without that credential), and a
- * note says the owner adds it on PCP's page.
+ * secret's places, a server without that credential), and a note says the
+ * owner adds it on PCP's page.
  */
 
 export type ResolvedItem = {
@@ -62,6 +74,16 @@ export type AppliedItem = {
   id: string
   /** What the owner should know: a secret to add, say. */
   notes: string[]
+}
+
+/**
+ * The first instance of a server item, as the owner gave it on the page
+ * that adds it: its name, address, sign-in and note, as a clone asks for
+ * them, and an endpoint's switches.
+ */
+export type InstanceInput = CloneInput & {
+  readOnly?: boolean
+  publicOnly?: boolean
 }
 
 /** A wrapper document as resolveDefinition takes it: other tools by short name. */
@@ -106,6 +128,11 @@ function authSecrets(auth: EndpointAuthDocument): string[] {
   }
 }
 
+/**
+ * The secrets an item names that the vault should hold: a wrapper's secret
+ * places, and the secrets a format-1 server document signs in with (used
+ * only for a first instance).
+ */
 function secretsNamed(document: ItemDocument): string[] {
   switch (document.kind) {
     case "skill":
@@ -208,12 +235,18 @@ async function wrapperProblems(
  * What an item's names are in this vault: the servers and tools a wrapper
  * calls (a name with nothing to it is a problem, never a guess) and the
  * secrets it names (one the vault lacks is listed, for the owner to add).
+ * Onto a server the vault has (`onto`), a server's sign-in is the
+ * instance's own and never applied, so its secrets are not looked for.
  */
 export async function resolveItem(
   ctx: VaultContext,
   document: ItemDocument,
+  { onto = false }: { onto?: boolean } = {},
 ): Promise<ResolvedItem> {
-  const names = secretsNamed(document)
+  const names =
+    onto && (document.kind === "endpoint" || document.kind === "server")
+      ? []
+      : secretsNamed(document)
   const found = await secretIds(ctx, names)
   const missingSecrets = [...new Set(names)].filter((name) => !found.has(name))
   const problems =
@@ -265,21 +298,14 @@ async function target(
     throw invalid(`${row.name} is not a ${document.kind}: nothing was changed.`)
   }
 
-  if (row.slug !== document.name) {
-    const clash = await findLocalItem(ctx, ref)
-
-    if (clash && clash.id !== id) {
-      throw new PcpError(
-        "conflict",
-        `Another server is called ${document.name} in this vault, so ${row.name} cannot take that name: nothing was changed.`,
-      )
-    }
-  }
-
   return id
 }
 
-/** The row goes by the item's name, as the repository has it. */
+/**
+ * The definition goes by the item's short name and name, as the repository
+ * has them, and every instance carries the item's version. A short name
+ * another definition has keeps the definition's own.
+ */
 async function settle(
   ctx: VaultContext,
   id: string,
@@ -287,14 +313,70 @@ async function settle(
 ): Promise<void> {
   const row = await getServer(ctx, id)
 
-  if (row.slug !== document.name) {
-    await renameServerSlug(ctx, id, document.name)
+  if (row.definitionId) {
+    const free =
+      (await uniqueDefinitionSlug(
+        db(),
+        ctx.vaultId,
+        document.name,
+        row.definitionId,
+      )) === document.name
+
+    await db().serverDefinition.update({
+      where: { id: row.definitionId },
+      data: {
+        name: document.displayName,
+        ...(free ? { slug: document.name } : {}),
+      },
+    })
   }
 
-  await db().mcpServer.update({
-    where: { id },
+  await db().mcpServer.updateMany({
+    where: row.definitionId
+      ? { definitionId: row.definitionId, vaultId: ctx.vaultId }
+      : { id },
     data: { syncVersion: document.version },
   })
+}
+
+/** A new first instance takes the item's short name when it was given none. */
+async function firstName(
+  ctx: VaultContext,
+  id: string,
+  document: Exclude<ItemDocument, SkillDocument>,
+  named: boolean,
+): Promise<void> {
+  const row = await getServer(ctx, id)
+
+  if (!named && row.slug !== document.name) {
+    const taken = await db().mcpServer.findUnique({
+      where: { vaultId_slug: { vaultId: ctx.vaultId, slug: document.name } },
+      select: { id: true },
+    })
+
+    if (!taken) {
+      await renameServerSlug(ctx, id, document.name)
+    }
+  }
+}
+
+/** The description every instance carries, written as the definition's. */
+async function writeDescription(
+  ctx: VaultContext,
+  id: string,
+  description: string,
+): Promise<void> {
+  const row = await getServer(ctx, id)
+  const text = normalizeNameAndDescription({
+    name: row.name,
+    description,
+  }).description
+
+  if (row.description !== text) {
+    await db().mcpServer.update({ where: { id }, data: { description: text } })
+  }
+
+  await shareDescription(id)
 }
 
 async function applySkill(
@@ -330,7 +412,17 @@ async function applyWrapper(
     (binding) => !missing.includes(binding.secret),
   )
 
+  if (id !== null) {
+    // The wrapper keeps its own name: only what it does is the definition's.
+    input.name = (await getServer(ctx, id)).name
+  }
+
   const saved = await saveWrapperByOwner(ctx, id, input)
+
+  if (id === null) {
+    await firstName(ctx, saved.id, document, false)
+  }
+
   await settle(ctx, saved.id, document)
 
   return { id: saved.id, notes }
@@ -367,7 +459,7 @@ function credentialInput(
       if (!first) {
         notes.push(
           auth.secret === null
-            ? `${what} sends a secret in ${auth.header}, but the repository names none, so it was saved without a credential. Choose its secret on its page.`
+            ? `${what} sends a secret in ${auth.header}, so it was saved without a credential until you choose its secret on its page.`
             : missingNote(auth.secret, what),
         )
         return { authType: "none" }
@@ -406,11 +498,11 @@ function credentialInput(
     case "basic": {
       const secretId = id(auth.secret)
 
-      if (!secretId) {
+      if (!secretId || auth.username === null) {
         notes.push(
-          auth.secret === null
-            ? `${what} signs in as ${auth.username}, but the repository names no secret for it, so it was saved without a credential.`
-            : missingNote(auth.secret, what),
+          auth.secret !== null && !secretId
+            ? missingNote(auth.secret, what)
+            : `${what} signs in with a user name and password, so it was saved without a credential until you give it yours on its page.`,
         )
         return { authType: "none" }
       }
@@ -440,6 +532,59 @@ function credentialInput(
   }
 }
 
+/** What the owner gave for the first instance, as the server forms take it. */
+function instanceCredential(
+  instance: InstanceInput,
+): Pick<
+  EndpointInput,
+  | "authType"
+  | "authHeaderName"
+  | "authValueTemplate"
+  | "authSecretId"
+  | "authSecretName"
+  | "authSecretValue"
+  | "authUsername"
+  | "authExtraHeaders"
+  | "oauthClientId"
+  | "oauthClientSecretId"
+  | "oauthClientSecretValue"
+  | "oauthScope"
+  | "oauthAuthorizeParams"
+> {
+  return {
+    authType: instance.authType,
+    authHeaderName: instance.authHeaderName,
+    authValueTemplate: instance.authValueTemplate,
+    authSecretId: instance.authSecretId,
+    authSecretName: instance.authSecretName,
+    authSecretValue: instance.authSecretValue,
+    authUsername: instance.authUsername,
+    authExtraHeaders: instance.authExtraHeaders,
+    oauthClientId: instance.oauthClientId,
+    oauthClientSecretId: instance.oauthClientSecretId,
+    oauthClientSecretValue: instance.oauthClientSecretValue,
+    oauthScope: instance.oauthScope,
+    oauthAuthorizeParams: instance.oauthAuthorizeParams,
+  }
+}
+
+function addressOf(
+  document: EndpointDocument | ServerDocument,
+  instance: InstanceInput | undefined,
+): string {
+  const url = instance ? instance.url.trim() : (document.instance?.url ?? "")
+
+  if (!url) {
+    throw invalid(
+      document.kind === "endpoint"
+        ? `${itemRoot(document)} has no base URL of its own: enter the one your server's requests go to.`
+        : `${itemRoot(document)} has no address of its own: enter the MCP server's address.`,
+    )
+  }
+
+  return url
+}
+
 async function setToolDescriptions(
   ctx: VaultContext,
   id: string,
@@ -463,58 +608,60 @@ async function applyEndpoint(
   ctx: VaultContext,
   document: EndpointDocument,
   id: string | null,
+  instance: InstanceInput | undefined,
 ): Promise<AppliedItem> {
   const notes: string[] = []
   const what = `the API endpoint ${document.displayName}`
-  const ids = await secretIds(ctx, authSecrets(document.auth))
-  const common = {
-    name: document.displayName,
-    description: document.description,
-    baseUrl: document.baseUrl,
-    readOnly: document.readOnly,
-    publicOnly: document.publicOnly,
-    patches: document.patches,
-    ...credentialInput(document.auth, ids, what, notes),
-  }
   let serverId: string
 
   if (id === null) {
+    const note = checkPersonalNote(instance?.note)
+    const credential = instance
+      ? instanceCredential(instance)
+      : credentialInput(
+          document.auth,
+          await secretIds(ctx, authSecrets(document.auth)),
+          what,
+          notes,
+        )
+
     serverId = (
       await createEndpoint(ctx, {
-        ...common,
+        name: instance?.name.trim() || document.displayName,
+        description: document.description,
+        baseUrl: addressOf(document, instance),
+        readOnly: instance?.readOnly ?? document.instance?.readOnly ?? true,
+        publicOnly:
+          instance?.publicOnly ?? document.instance?.publicOnly ?? false,
+        patches: document.patches,
         specSource: "upload",
         specText: document.spec.text,
+        ...credential,
       })
     ).id
-  } else {
-    const existing = await getServer(ctx, id)
 
-    if (existing.specSource === "url" && existing.specUrl) {
-      // A schema read from a URL keeps its address: the approved text
-      // becomes its copy, as a new download of it would.
-      const stored = await storedSpec(id)
-
-      if (stored?.text !== document.spec.text) {
-        await changeEndpoint(ctx, id, {
-          fetched: { text: document.spec.text, url: existing.specUrl },
-          patches: document.patches,
-          readOnly: document.readOnly,
-        })
-      }
-
-      await updateEndpoint(ctx, id, {
-        ...common,
-        specSource: "url",
-        specUrl: existing.specUrl,
-      })
-    } else {
-      await updateEndpoint(ctx, id, {
-        ...common,
-        specSource: "upload",
-        specText: document.spec.text,
-      })
+    if (note) {
+      await setPersonalNote(ctx, "server", serverId, note)
     }
 
+    await firstName(ctx, serverId, document, !!instance?.name.trim())
+  } else {
+    // What the definition holds, and nothing of the instance's own.
+    const existing = await getServer(ctx, id)
+    const stored = await storedSpec(id)
+    const newText = stored?.text !== document.spec.text
+
+    await changeEndpoint(ctx, id, {
+      description: document.description,
+      patches: document.patches,
+      ...(newText
+        ? existing.specSource === "url" && existing.specUrl
+          ? // A schema read from a URL keeps its address: the approved text
+            // becomes its copy, as a new download of it would.
+            { fetched: { text: document.spec.text, url: existing.specUrl } }
+          : { specText: document.spec.text }
+        : {}),
+    })
     serverId = id
   }
 
@@ -528,23 +675,49 @@ async function applyServer(
   ctx: VaultContext,
   document: ServerDocument,
   id: string | null,
+  instance: InstanceInput | undefined,
 ): Promise<AppliedItem> {
   const notes: string[] = []
   const what = `the server ${document.displayName}`
-  const ids = await secretIds(ctx, authSecrets(document.auth))
-  const credential = credentialInput(document.auth, ids, what, notes)
-  const input: ServerInput = {
-    name: document.displayName,
-    description: document.description,
-    url: document.url,
-    publicOnly: document.publicOnly,
-    ...credential,
-    authType: credential.authType as ServerInput["authType"],
-  }
-  const serverId = id === null ? (await createServer(ctx, input)).id : id
+  let serverId: string
 
-  if (id !== null) {
-    await updateServer(ctx, id, input)
+  if (id === null) {
+    const note = checkPersonalNote(instance?.note)
+
+    if (instance?.authType === "basic") {
+      throw invalid(
+        "An MCP server signs in with a secret in a header or with OAuth.",
+      )
+    }
+
+    const credential = instance
+      ? instanceCredential(instance)
+      : credentialInput(
+          document.auth,
+          await secretIds(ctx, authSecrets(document.auth)),
+          what,
+          notes,
+        )
+    const input: ServerInput = {
+      name: instance?.name.trim() || document.displayName,
+      description: document.description,
+      url: addressOf(document, instance),
+      publicOnly:
+        instance?.publicOnly ?? document.instance?.publicOnly ?? false,
+      ...credential,
+      authType: credential.authType as ServerInput["authType"],
+    }
+
+    serverId = (await createServer(ctx, input)).id
+
+    if (note) {
+      await setPersonalNote(ctx, "server", serverId, note)
+    }
+
+    await firstName(ctx, serverId, document, !!instance?.name.trim())
+  } else {
+    await writeDescription(ctx, id, document.description)
+    serverId = id
   }
 
   await settle(ctx, serverId, document)
@@ -554,18 +727,21 @@ async function applyServer(
 
 /**
  * Applies an item the owner approved: onto the vault's item `id` (its
- * skill's id, or its server row's), or as a new one when `id` is null.
- * Refused, with nothing written, when a name in it is nothing in this vault
- * (resolveItem), when a new item's name is taken, or when `id` is something
- * else. The item's version goes with it: a skill's own, a server row's
- * syncVersion.
+ * skill's id, or the server row standing for its definition), or as a new
+ * one when `id` is null, with `instance` the first instance of a new server
+ * or endpoint. Refused, with nothing written, when a name in it is nothing
+ * in this vault (resolveItem), when a new item's name is taken, or when
+ * `id` is something else. The item's version goes with it: a skill's own,
+ * a server's syncVersion on every instance.
  */
 export async function applyItem(
   ctx: VaultContext,
   document: ItemDocument,
-  { id }: { id: string | null },
+  { id, instance }: { id: string | null; instance?: InstanceInput },
 ): Promise<AppliedItem> {
-  const { problems, missingSecrets } = await resolveItem(ctx, document)
+  const { problems, missingSecrets } = await resolveItem(ctx, document, {
+    onto: id !== null,
+  })
 
   if (problems.length > 0) {
     throw invalid(problems.join(" "))
@@ -580,8 +756,8 @@ export async function applyItem(
     case "flow":
       return applyWrapper(ctx, document, into, missingSecrets)
     case "endpoint":
-      return applyEndpoint(ctx, document, into)
+      return applyEndpoint(ctx, document, into, instance)
     case "server":
-      return applyServer(ctx, document, into)
+      return applyServer(ctx, document, into, instance)
   }
 }

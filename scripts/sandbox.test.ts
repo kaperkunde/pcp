@@ -84,6 +84,19 @@ describe("docker-compose.sandbox.yaml", () => {
 
     expect(runnerProtocol).toBe(pcpProtocol)
   })
+
+  it("has ffmpeg for videos, taking as many frames as PCP allows", () => {
+    expect(read("sandbox/Dockerfile")).toMatch(
+      /apt-get install -y --no-install-recommends[^&]*\bffmpeg\b/,
+    )
+
+    const pcpFrames = read("lib/core/code/limits.ts").match(
+      /export const MAX_VIDEO_FRAMES = (\d+)/,
+    )![1]
+    const sandboxFrames = read("sandbox/pcp.py").match(/MAX_FRAMES = (\d+)/)![1]
+
+    expect(sandboxFrames).toBe(pcpFrames)
+  })
 })
 
 // The launcher's `clean` removes what a program leaves in the container's IPC

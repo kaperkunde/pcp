@@ -3,6 +3,7 @@ import type { Locator } from "patchright-core"
 
 import type { McpServer } from "@/lib/generated/prisma/client"
 
+import { checkSecretRequest, originOf } from "../browser-secrets"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, PcpError } from "../errors"
@@ -19,8 +20,10 @@ import { loadResourceLimits } from "../resources/state"
 import { missingResultMessage, resolveHandles } from "../result-handles"
 import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
 import { decideSite, loadFetchRules } from "../web-fetch"
+import { parseSecretPlaceholder, scrubResult } from "../wrappers/placeholders"
 import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
 import { failureReason } from "./failures"
+import { heldSecret, heldValues, holdSecret } from "./held"
 import {
   ACTION_TIMEOUT_MS,
   BROWSER_ACTIONS,
@@ -64,6 +67,7 @@ import {
   nodeByRef,
   parseSnapshot,
   resolveRef,
+  secretMask,
   snapshotTree,
 } from "./snapshot"
 import { resolveTarget, type Target } from "./target"
@@ -73,7 +77,12 @@ import {
   type BrowserToolName,
   type BrowserToolSpec,
 } from "./tools"
-import { OwnerNeeded, type BrowseAsk } from "./types"
+import {
+  OwnerNeeded,
+  type BrowseAsk,
+  type SecretTypeCall,
+  type SecretTyper,
+} from "./types"
 
 /**
  * Running a browser tool for an assistant: which tab, whether the site may
@@ -111,6 +120,14 @@ import { OwnerNeeded, type BrowseAsk } from "./types"
  * PcpErrors: the request log keeps the text of the latter, and which sites
  * an assistant opened is the owner's to see on the token's page, not the
  * log's.
+ *
+ * A secret is typed only by type, with text {"$secret": name}, through the
+ * SecretTyper upstream.ts hands in (lib/core/browser-secrets.ts decides,
+ * secrets.ts decrypts): into an input or textarea whose frame is the page's
+ * own origin, asked for at the moment of typing, and typed with CDP's
+ * Input.insertText into the field once it has the focus. While a field of
+ * the page holds it (held.ts), answers show it as [secret: name] and
+ * screenshot is refused.
  */
 
 export type BrowserScope = {
@@ -135,8 +152,9 @@ function failed(result: CallToolResult): CallToolResult {
   return { ...result, isError: true }
 }
 
+/** A tab in the Browser page's tabs view, live, for the owner to watch or take over. */
 export function tabLink(publicUrl: string, tabId: string): string {
-  return `${publicUrl.replace(/\/+$/, "")}/browser/tabs/${encodeURIComponent(tabId)}`
+  return `${publicUrl.replace(/\/+$/, "")}/browser?tab=${encodeURIComponent(tabId)}`
 }
 
 function firstLine(error: unknown): string {
@@ -1043,6 +1061,182 @@ async function onTab(
   return withLead(answer, note)
 }
 
+/**
+ * An answer with what the token's tabs hold of a secret PCP typed shown as
+ * [secret: name], wherever it appears (held.ts): a page can repeat a field's
+ * value in its text or its title.
+ */
+async function maskHeld(
+  { ctx, tokenId }: Pick<BrowserScope, "ctx" | "tokenId">,
+  result: CallToolResult,
+): Promise<CallToolResult> {
+  const vault = runningBrowser(ctx.vaultId)
+  let masked = result
+
+  for (const tab of vault?.tabs.values() ?? []) {
+    if (tab.tokenId !== tokenId) {
+      continue
+    }
+
+    for (const { name, value } of (await heldValues(tab.page)).values) {
+      masked = scrubResult(masked, [value], { replacement: secretMask(name) })
+    }
+  }
+
+  return masked
+}
+
+/** The type call as it is made again once the owner allows the secret. */
+function secretCall(args: Record<string, unknown>): SecretTypeCall {
+  return {
+    tab: args.tab as string,
+    ...(args.ref ? { ref: args.ref as string } : {}),
+    ...(args.target ? { target: args.target as Record<string, unknown> } : {}),
+    ...(args.submit ? { submit: true } : {}),
+  }
+}
+
+/** The origin of the frame an element is in; null for one that is no site's. */
+async function frameOriginOf(
+  handle: Awaited<ReturnType<Locator["elementHandle"]>>,
+): Promise<string | null> {
+  const frame = await handle.ownerFrame().catch(() => null)
+  return frame ? originOf(frame.url()) : null
+}
+
+/**
+ * type with a stored secret: into an input or textarea of the page's own
+ * site (not a frame from another), the value asked for only then, for the
+ * page's origin as it is now, and typed once the field has the focus and
+ * the page and frame are still where they were. Nothing of the value is in
+ * the answer: the field reads as [secret: name] from then on.
+ */
+async function typeSecret(
+  scope: BrowserScope,
+  tab: Tab,
+  { locator, label }: { locator: Locator; label: string },
+  args: Record<string, unknown>,
+  typer: SecretTyper,
+): Promise<CallToolResult> {
+  const origin = originOf(tab.page.url())
+
+  if (!origin) {
+    return text(
+      `Tab ${tab.id} shows no page at a site, so the secret "${typer.name}" was not typed.`,
+      true,
+    )
+  }
+
+  const handle = await locator.elementHandle({ timeout: ACTION_TIMEOUT_MS })
+
+  try {
+    const frameOrigin = await frameOriginOf(handle)
+
+    if (frameOrigin !== origin) {
+      return text(
+        `${label} is in a frame from ${frameOrigin ?? "an address that is no site's"}, not from ${origin}, the page's own site, so the secret "${typer.name}" was not typed. PCP types a secret only into a field of the page's own site.`,
+        true,
+      )
+    }
+
+    const field = await handle
+      .evaluate((element) => {
+        const field = element as HTMLInputElement
+        const typed = [
+          "text",
+          "password",
+          "email",
+          "tel",
+          "number",
+          "search",
+          "url",
+        ]
+
+        return (
+          (element.tagName === "TEXTAREA" ||
+            (element.tagName === "INPUT" && typed.includes(field.type))) &&
+          !field.disabled &&
+          !field.readOnly
+        )
+      })
+      .catch(() => false)
+
+    if (!field) {
+      return text(
+        `${label} is not a text field (an input or a text area) that can be typed into, so the secret "${typer.name}" was not typed.`,
+        true,
+      )
+    }
+
+    const value = await typer.value({
+      tabId: tab.id,
+      origin,
+      url: tab.page.url(),
+      title: await tabTitle(tab),
+      field: label,
+      call: secretCall(args),
+    })
+
+    await locator.fill("", { timeout: ACTION_TIMEOUT_MS })
+    await locator.focus({ timeout: ACTION_TIMEOUT_MS })
+
+    // Again at the last moment: the page and the field's frame are where
+    // they were, and the field has the focus, in its frame and every frame
+    // around it, so the text goes nowhere else.
+    const focused = await handle
+      .evaluate((element) => {
+        let node: Element = element
+        let doc = element.ownerDocument
+
+        for (;;) {
+          if (doc.activeElement !== node) return false
+          const around = doc.defaultView?.frameElement
+          if (!around) return true
+          node = around
+          doc = around.ownerDocument
+        }
+      })
+      .catch(() => false)
+
+    if (
+      !focused ||
+      originOf(tab.page.url()) !== origin ||
+      (await frameOriginOf(handle)) !== origin
+    ) {
+      return text(
+        `The page moved on, or ${label} lost the focus, before the secret "${typer.name}" could be typed, so it was not. Take a snapshot and call again.`,
+        true,
+      )
+    }
+
+    await bounded(
+      tab.cdp.send("Input.insertText", { text: value }),
+      ACTION_TIMEOUT_MS,
+      "Input.insertText",
+    )
+    holdSecret(
+      tab.page,
+      typer.name,
+      await handle
+        .inputValue({ timeout: ACTION_TIMEOUT_MS })
+        .catch(() => value),
+    )
+
+    if (args.submit) {
+      await locator.press("Enter", { timeout: ACTION_TIMEOUT_MS })
+    }
+  } finally {
+    await handle.dispose().catch(() => {})
+  }
+
+  await settle(tab)
+  return report(scope, tab, {
+    lead: [
+      `Typed the secret "${typer.name}" into ${label}. It shows as ${secretMask(typer.name)}, and the tab takes no screenshots while a field holds it.`,
+    ],
+  })
+}
+
 function staleRef(ref: string): CallToolResult {
   return text(
     `There is no element ${ref} on the page now: refs hold until the next snapshot. Take a new snapshot and use its refs.`,
@@ -1442,11 +1636,28 @@ function untilAborted<T>(
   ])
 }
 
+type BrowserCallOptions = Parameters<typeof runBrowserTool>[4]
+
 /**
  * Runs one browser tool for an assistant. `serverId` is the browser's row;
- * `publicUrl` makes the links to PCP's page for each tab.
+ * `publicUrl` makes the links to PCP's page for each tab. Whatever the
+ * tool, nothing of a secret PCP typed in the token's tabs goes out with
+ * the answer.
  */
 export async function callBrowserTool(
+  ctx: VaultContext,
+  server: Pick<McpServer, "id" | "name">,
+  toolName: string,
+  rawArgs: Record<string, unknown>,
+  options: BrowserCallOptions,
+): Promise<CallToolResult> {
+  return maskHeld(
+    { ctx, tokenId: options.tokenId },
+    await runBrowserTool(ctx, server, toolName, rawArgs, options),
+  )
+}
+
+async function runBrowserTool(
   ctx: VaultContext,
   server: Pick<McpServer, "id" | "name">,
   toolName: string,
@@ -1458,6 +1669,7 @@ export async function callBrowserTool(
     keepBytes,
     signal,
     runId,
+    secret,
   }: {
     tokenId: string
     publicUrl: string
@@ -1481,6 +1693,11 @@ export async function callBrowserTool(
      * another call that arrives while it has the tab is told so.
      */
     runId?: string
+    /**
+     * The secret a type call carries as {"$secret": name}, from upstream.ts:
+     * the only way one reaches a page.
+     */
+    secret?: SecretTyper
   },
 ): Promise<CallToolResult> {
   const spec = browserToolSpec(toolName)
@@ -1502,8 +1719,9 @@ export async function callBrowserTool(
     runId,
   }
   const listsOrOpens =
-    spec.name === "tabs" &&
-    (rawArgs.action === "open" || rawArgs.action === "list")
+    spec.name === "request_secret" ||
+    (spec.name === "tabs" &&
+      (rawArgs.action === "open" || rawArgs.action === "list"))
 
   if (!listsOrOpens && (rawArgs.tab == null || rawArgs.tab === "")) {
     return missingTab(scope, spec.name)
@@ -1587,10 +1805,23 @@ export async function callBrowserTool(
         await settle(current)
         return report(scope, current)
       })
-    case "type":
+    case "type": {
+      const named = parseSecretPlaceholder(args.text)
+
+      if (named !== null && secret?.name !== named) {
+        throw invalid(
+          'A secret goes into a page only through PCP: {"$secret": …} was not placed.',
+        )
+      }
+
       return onTab(scope, tab, spec, async (current) => {
         const found = await element(current, args)
         if (!isElement(found)) return found
+
+        if (named !== null) {
+          return typeSecret(scope, current, found, args, secret!)
+        }
+
         await found.locator.fill(args.text as string, {
           timeout: ACTION_TIMEOUT_MS,
         })
@@ -1600,6 +1831,7 @@ export async function callBrowserTool(
         await settle(current)
         return report(scope, current)
       })
+    }
     case "press_key":
       return onTab(scope, tab, spec, async (current) => {
         await bounded(
@@ -1690,6 +1922,15 @@ export async function callBrowserTool(
           return report(scope, current, { snapshot: false })
         }
 
+        const held = await heldSecret(current.page)
+
+        if (held) {
+          return text(
+            `A field in tab ${current.id} holds the secret "${held}", which PCP typed, so the tab takes no screenshots until the field changes or the page moves on. Take a snapshot to see the page: it shows the field as ${secretMask(held)}.`,
+            true,
+          )
+        }
+
         let label: string | null = null
         let locator: Locator | undefined
 
@@ -1744,6 +1985,27 @@ export async function callBrowserTool(
         await settle(current)
         return report(scope, current)
       })
+    case "request_secret": {
+      let input
+
+      try {
+        input = await checkSecretRequest(ctx, server.id, {
+          name: args.name as string,
+          purpose: args.purpose as string,
+          origins: args.origins as string[],
+          kind: args.kind as string | undefined,
+        })
+      } catch (error) {
+        // Its refusals can name a site: a tool error, out of the log.
+        if (error instanceof PcpError) {
+          return text(error.message, true)
+        }
+
+        throw error
+      }
+
+      throw new OwnerNeeded({ kind: "secret_request", input })
+    }
     case "hand_over":
       return onTab(scope, tab, spec, async (current) => {
         const message = withoutPresentation(args.message as string).trim()

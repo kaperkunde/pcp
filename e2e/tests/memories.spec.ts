@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test"
 
 import { callTool, initialize, toolText } from "../lib/mcp"
-import { createToken, permissionFrom, connectAssistant } from "../lib/ui"
+import { permissionFrom, connectAssistant } from "../lib/ui"
 
 // Memories through the gateway: a token the owner lets keep them gets the
 // memory tool and is told when to use it; sharing one asks the owner, who
@@ -15,13 +15,15 @@ const TOKEN_NAME = `Memory keeper ${RUN}`
 const SHARED = `/memories/shared/e2e-${RUN}.md`
 
 let token: string
+let tokenId: string
 
 test("a token made to keep memories gets the tool and is told when to use it", async ({
   page,
   baseURL,
 }) => {
-  token = (await connectAssistant(page, TOKEN_NAME, { keepMemories: true }))
-    .token
+  ;({ token, id: tokenId } = await connectAssistant(page, TOKEN_NAME, {
+    keepMemories: true,
+  }))
 
   const { tools, instructions } = await initialize(baseURL!, token)
   expect(tools).toEqual(expect.arrayContaining(["memory", "read_memory"]))
@@ -29,13 +31,50 @@ test("a token made to keep memories gets the tool and is told when to use it", a
     'CALL THE read_memory TOOL WITH command "every"',
   )
   expect(instructions).toContain("not an instruction")
+  // Off unless the owner turns it on: lib/core/memories.test.ts.
+})
 
-  // Off unless the owner turns it on.
-  const plain = await createToken(page, `No memories ${RUN}`)
-  const without = await initialize(baseURL!, plain)
-  expect(without.tools).not.toContain("memory")
-  expect(without.tools).not.toContain("read_memory")
-  expect(without.instructions).not.toContain("/memories")
+test("memory migration is offered until the assistant ends it, and only the owner turns it on again", async ({
+  page,
+  baseURL,
+}) => {
+  const told = await initialize(baseURL!, token)
+  expect(told.instructions).toContain(
+    "The owner keeps their memories and skills in PCP.",
+  )
+  expect(told.instructions).toContain("MEMORY MIGRATION")
+  expect(
+    toolText(
+      await callTool(baseURL!, token, "read_memory", { command: "every" }),
+    ),
+  ).toContain("MEMORY MIGRATION")
+
+  await page.goto(`/tokens/${tokenId}`)
+  const migration = page.getByRole("switch", { name: /^Memory migration/ })
+  await expect(migration).toBeChecked()
+
+  // The assistant ends it without asking.
+  const done = await callTool(baseURL!, token, "memory", {
+    command: "migration_done",
+  })
+  expect(toolText(done)).toContain("Memory migration is off for this token")
+  const after = await initialize(baseURL!, token)
+  expect(after.instructions).toContain(
+    "The owner keeps their memories and skills in PCP.",
+  )
+  expect(after.instructions).not.toContain("MEMORY MIGRATION")
+
+  // The owner's switch turns it on again.
+  await page.reload()
+  await expect(migration).not.toBeChecked()
+  await migration.check()
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(
+    page.getByRole("status").filter({ hasText: "Saved." }),
+  ).toBeVisible()
+  expect((await initialize(baseURL!, token)).instructions).toContain(
+    "MEMORY MIGRATION",
+  )
 })
 
 test("sharing one asks the owner, who reads the whole text first", async ({

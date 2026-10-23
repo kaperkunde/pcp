@@ -1,10 +1,13 @@
 import type { Locator, Page } from "patchright-core"
 
+import { heldValues } from "./held"
 import {
   ACTION_TIMEOUT_MS,
   MAX_ELEMENT_NAME_CHARS,
   MAX_FIND_MATCHES,
+  MAX_MASKED_FRAMES,
 } from "./limits"
+import { bounded } from "./queue"
 
 /**
  * The page as an assistant reads it: Playwright's accessibility snapshot
@@ -17,8 +20,102 @@ import {
 /** e12, or f1e12 for an element after the page was replaced or in a frame. */
 export const REF_PATTERN = /^(f\d{1,4})?e\d{1,7}$/
 
-export function snapshotTree(page: Page): Promise<string> {
-  return page.ariaSnapshot({ mode: "ai", timeout: ACTION_TIMEOUT_MS })
+/**
+ * The page's snapshot, with what its fields must not show masked
+ * (`fieldMasks`): a field holding a secret PCP typed reads as
+ * [secret: name], and a password field as [password]. Playwright's
+ * snapshot writes every field's value as it is, a password's too.
+ */
+export async function snapshotTree(page: Page): Promise<string> {
+  const tree = await page.ariaSnapshot({
+    mode: "ai",
+    timeout: ACTION_TIMEOUT_MS,
+  })
+
+  return maskFields(tree, await fieldMasks(page))
+}
+
+/** What stands for a password field's value in a snapshot. */
+export const PASSWORD_MASK = "[password]"
+
+export function secretMask(name: string): string {
+  return `[secret: ${name}]`
+}
+
+/**
+ * The values the page's fields must not show, each with what is shown
+ * instead: those of fields holding a secret PCP typed (held.ts), then the
+ * page's password fields', in every frame. Read for the answer being made
+ * and forgotten with it.
+ */
+export async function fieldMasks(page: Page): Promise<Map<string, string>> {
+  const masks = new Map<string, string>()
+
+  for (const { name, value } of (await heldValues(page)).values) {
+    masks.set(value, secretMask(name))
+  }
+
+  for (const frame of page.frames().slice(0, MAX_MASKED_FRAMES)) {
+    const values = await bounded(
+      frame
+        .locator("input[type=password i]")
+        .evaluateAll((fields) =>
+          fields.map((field) => (field as HTMLInputElement).value),
+        ),
+      ACTION_TIMEOUT_MS,
+      "password fields",
+    ).catch(() => [] as string[])
+
+    for (const value of values) {
+      if (value && !masks.has(value)) {
+        masks.set(value, PASSWORD_MASK)
+      }
+    }
+  }
+
+  return masks
+}
+
+/** The roles a field that holds a value has in a snapshot. */
+const FIELD_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"])
+
+/**
+ * The snapshot with each field whose value is one of `masks`' showing its
+ * mask instead (`- textbox "Password" [ref=e3]: [password]`). Only a
+ * field's own value is touched: the same text elsewhere on the page stays.
+ */
+export function maskFields(
+  tree: string,
+  masks: ReadonlyMap<string, string>,
+): string {
+  if (masks.size === 0) {
+    return tree
+  }
+
+  return tree
+    .split("\n")
+    .map((line) => {
+      const match = line.match(/^(\s*)- (.*)$/)
+
+      if (!match) {
+        return line
+      }
+
+      const entry = match[2]!.trimEnd()
+      const { key, value } = splitEntry(entry.trim())
+      const role = key.match(/^[a-zA-Z][\w-]*/)?.[0]
+
+      if (value === null || !role || !FIELD_ROLES.has(role)) {
+        return line
+      }
+
+      const mask = masks.get(scalar(value))
+
+      return mask && entry.endsWith(value)
+        ? `${match[1]}- ${entry.slice(0, entry.length - value.length)}${mask}`
+        : line
+    })
+    .join("\n")
 }
 
 export function byRef(page: Page, ref: string): Locator {

@@ -151,6 +151,9 @@ function askOf(outcome: SkillOutcome): SkillAsk {
   if (!("ask" in outcome)) {
     throw new Error(`expected an ask, got: ${outcome.text}`)
   }
+  if (outcome.ask.kind !== "skill_change") {
+    throw new Error(`expected a skill's change, got: ${outcome.ask.kind}`)
+  }
   return outcome.ask
 }
 
@@ -673,6 +676,101 @@ describe("an assistant's change to a skill", () => {
         }),
       ),
     ).toContain("Nothing changed")
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+})
+
+describe("the owner's note on a skill, as an assistant proposes it", () => {
+  const notePath = "/skills/send-postcards/.note"
+
+  it("is the memory tool's .note: shown whole, written only as shown, never a file of the skill", async () => {
+    const { id } = await ownerSkill()
+    const before = await getSkill(ctx, id)
+
+    expect(
+      said(
+        await runSkillCommand(skillScope(), {
+          command: "view",
+          path: notePath,
+        }),
+      ),
+    ).toContain("has no note of the owner's")
+
+    const outcome = await runSkillCommand(skillScope(), {
+      command: "create",
+      path: notePath,
+      file_text: "For the family ones only.",
+    })
+    if (!("ask" in outcome) || outcome.ask.kind !== "note_change") {
+      throw new Error("expected a note's request")
+    }
+    expect(outcome.ask.input).toMatchObject({
+      target: "skill",
+      id,
+      via: "memory",
+      note: "For the family ones only.",
+    })
+    expect(textOf(await withPermission(scope, outcome.ask))).toContain(
+      "Save this as your note on send-postcards?",
+    )
+    const requestId = await onlyRequestId()
+    const view = await getPermissionView(ctx, requestId, web)
+    expect(view?.kind).toBe("note_change")
+    expect(view?.tool).toBe("memory")
+    expect(view?.lines).toContain(
+      "Your note after, which every assistant that sees this skill reads as yours:\nFor the family ones only.",
+    )
+    expect((await getSkill(ctx, id)).note).toBeNull()
+
+    await decidePermission(ctx, requestId, "allow_once", web)
+
+    const after = await getSkill(ctx, id)
+    expect(after.note).toBe("For the family ones only.")
+    // The skill itself is as it was: no file, no new version.
+    expect(after.files).toEqual(before.files)
+    expect(after.version).toBe(before.version)
+    expect(skillText(after)).not.toContain("family ones")
+    expect(
+      said(
+        await runSkillCommand(skillScope(), {
+          command: "view",
+          path: notePath,
+        }),
+      ),
+    ).toContain("For the family ones only.")
+
+    const away = await runSkillCommand(skillScope(), {
+      command: "delete",
+      path: notePath,
+    })
+    expect("ask" in away && away.ask.kind).toBe("note_change")
+  })
+
+  it("is refused when it is not one line that fits, and is never a file's name", async () => {
+    await ownerSkill()
+
+    await expect(
+      runSkillCommand(skillScope(), {
+        command: "create",
+        path: notePath,
+        file_text: "One\nTwo",
+      }),
+    ).rejects.toThrow(/one line/)
+    await expect(
+      runSkillCommand(skillScope(), {
+        command: "str_replace",
+        path: notePath,
+        old_str: "a",
+        new_str: "b",
+      }),
+    ).rejects.toThrow(/takes view, create/)
+    await expect(
+      runSkillCommand(skillScope(), {
+        command: "rename",
+        path: "/skills/send-postcards/addresses.md",
+        new_path: notePath,
+      }),
+    ).rejects.toThrow(/the owner's note, not a file/)
     expect(await db().permissionRequest.count()).toBe(0)
   })
 })

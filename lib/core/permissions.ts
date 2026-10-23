@@ -28,6 +28,15 @@ import type { PermissionDecision, PermissionKind } from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { definitionBasis } from "./definitions"
+import {
+  applyNoteChange,
+  setPersonalNote,
+  type NoteChangeAsk,
+} from "./personal-notes"
+import { shareReviewHref, type RepoShareAsk } from "./repos/assist-share"
+import type { ItemKind } from "./repos/layout"
+import { confirmShare, type ShareResult } from "./repos/share-review"
 import {
   applyEndpointChange,
   createApprovedEndpoint,
@@ -58,6 +67,12 @@ import {
   type ConnectLinks,
   type ServerState,
 } from "./connect"
+import {
+  handoverTab,
+  queueHref,
+  WAITING_ORDER,
+  waitingRequestsWhere,
+} from "./owner-queue"
 import { waitForOwner } from "./owner-wait"
 import {
   argsInFull,
@@ -96,7 +111,7 @@ import {
   type ExtraAuthHeader,
   type ServerInput,
 } from "./servers"
-import { writeToolAccess } from "./tool-access"
+import { effectiveAccess, loadToolAccess, writeToolAccess } from "./tool-access"
 import { noteOwnerAsked } from "./request-log"
 import { collectHandleIds } from "./result-handles"
 import {
@@ -107,14 +122,32 @@ import {
   resultOpener,
 } from "./tool-results"
 import { finishHandover, performNavigate } from "./browser/call"
+import { noteHandoverRequest } from "./browser/runtime"
+import { closePendingRequests } from "./permission-close"
 import { RUN_COMMAND, stdinAsText } from "./ssh/tools"
-import { describeBrowseAsk, describeHandoverAsk } from "./browser/describe"
+import {
+  describeBrowseAsk,
+  describeHandoverAsk,
+  describeSecretRequestAsk,
+  describeSecretUseAsk,
+} from "./browser/describe"
 import type { fetchThroughBrowser } from "./browser/solve"
 import {
   isOwnerNeeded,
   type BrowseAsk,
   type HandoverAsk,
+  type SecretRequestAsk,
+  type SecretUseAsk,
 } from "./browser/types"
+import {
+  applySecretRequest,
+  checkSecretAnswer,
+  dropOnceAllowance,
+  findTypableSecret,
+  grantSecretUse,
+  isBoundOrigin,
+  type SecretUseLevel,
+} from "./browser-secrets"
 import { resourceLimits } from "./resources/state"
 import { namesInWords, secretUses } from "./secret-uses"
 import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
@@ -199,6 +232,21 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
    * address, for the owner. Missing on requests from before it was looked up.
    */
   privateAddress?: string | null
+  /**
+   * Another server of this definition (an MCP server's or an endpoint's):
+   * its description, schema, edits and tool descriptions are the
+   * definition's, and it is made only while the definition is as the owner
+   * was shown it (`basis`, definitions.ts definitionBasis).
+   */
+  definition?: {
+    id: string
+    name: string
+    basis: string
+    /** Its servers when asked, by short name. */
+    instances: string[]
+  }
+  /** The owner's note it gets, which they read whole. */
+  note?: string | null
 }
 
 export type PermissionAsk =
@@ -213,12 +261,21 @@ export type PermissionAsk =
   | { kind: "endpoint_change"; input: EndpointChangeAsk }
   | { kind: "wrapper_change"; input: WrapperChangeAsk }
   | { kind: "repo_change"; input: RepoChangeAsk }
+  | { kind: "repo_share"; input: RepoShareAsk }
+  | { kind: "note_change"; input: NoteChangeAsk }
   | MemoryAsk
   | SkillAsk
   | AccessAsk
   | { kind: "fetch"; input: FetchArgs }
   | { kind: "browse"; input: BrowseAsk }
   | { kind: "browser_handover"; input: HandoverAsk }
+  | { kind: "secret_use"; input: SecretUseAsk }
+  | { kind: "secret_request"; input: SecretRequestAsk }
+
+/** The requests about a secret the browser types (browser-secrets.ts). */
+function isSecretKind(kind: string): kind is "secret_use" | "secret_request" {
+  return kind === "secret_use" || kind === "secret_request"
+}
 
 /** Runs what the owner allowed. Tests swap in a stub. */
 export type PermissionExecutor = {
@@ -273,6 +330,11 @@ export type PermissionView = {
   repo: RepoShown | null
   /** The browser tab a request is about, for the page to show it live. */
   browserTabId: string | null
+  /**
+   * A proposed push: its review's page, where the owner reads every file
+   * and confirms it (there is no other way to agree).
+   */
+  shareHref: string | null
   url: string
   createdAt: Date
   expiresAt: Date
@@ -295,6 +357,13 @@ export type PermissionView = {
     clientId: string | null
     /** Set when it is the password for this user name (basic authentication). */
     login: string | null
+    /**
+     * A secret the browser types (request_secret): "totp" when it is the
+     * seed of one-time codes, and the sites it is typed at, which the owner
+     * can change before saving.
+     */
+    kind?: "text" | "totp"
+    origins?: string[]
   } | null
 }
 
@@ -617,6 +686,16 @@ function describeAsk(ask: PermissionAsk): {
         target: `repo:${ask.input.repoItemId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "repo_share":
+      return {
+        target: `repo_share:${ask.input.repoId}\n${ask.input.item.kind}:${ask.input.item.id}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "note_change":
+      return {
+        target: `note:${ask.input.target}:${ask.input.id}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "fetch":
       return {
         target: `fetch:${ask.input.method} ${ask.input.url}`,
@@ -630,6 +709,16 @@ function describeAsk(ask: PermissionAsk): {
     case "browser_handover":
       return {
         target: `handover:${ask.input.tabId}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "secret_use":
+      return {
+        target: `secret_use:${ask.input.secretName}\n${ask.input.origin}\n${ask.input.tabId}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "secret_request":
+      return {
+        target: `secret_request:${ask.input.name}`,
         args: ask.input as Record<string, unknown>,
       }
   }
@@ -650,13 +739,21 @@ function toolNameOf(ask: PermissionAsk): string {
     case "endpoint_change":
       return "update_endpoint"
     case "wrapper_change":
-      return `${ask.input.action}_wrapper`
+      return ask.input.action === "detach"
+        ? "update_wrapper"
+        : `${ask.input.action}_wrapper`
+    case "note_change":
+      return ask.input.via
     case "fetch":
       return "web_fetch"
     case "browse":
       return ask.input.toolName
     case "browser_handover":
       return "hand_over"
+    case "secret_use":
+      return "type"
+    case "secret_request":
+      return "request_secret"
     // A skill is changed through the memory tool, as a memory is.
     case "skill_change":
     default:
@@ -841,6 +938,23 @@ async function summarizeRow(
     return { ...asked, lines: [...asked.lines, asker], repo: input.shown }
   }
 
+  if (row.kind === "repo_share") {
+    const { shown } = args as RepoShareAsk
+
+    return {
+      title: shown.title,
+      lines: [...shown.lines, ...shown.ownerOnly, asker],
+      warning: shown.warning,
+      ownerOnly: shown.ownerOnly,
+    }
+  }
+
+  if (row.kind === "note_change") {
+    const { shown } = args as NoteChangeAsk
+
+    return { ...shown, lines: [...shown.lines, asker] }
+  }
+
   if (row.kind === "browse") {
     const asked = describeBrowseAsk(args as BrowseAsk, {
       privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
@@ -851,6 +965,22 @@ async function summarizeRow(
 
   if (row.kind === "browser_handover") {
     const asked = describeHandoverAsk(args as HandoverAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "secret_use") {
+    const ask = args as SecretUseAsk
+    const secret = await findTypableSecret(ctx, ask.secretName)
+    const asked = describeSecretUseAsk(ask, {
+      bound: secret ? await isBoundOrigin(secret.id, ask.origin) : false,
+    })
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "secret_request") {
+    const asked = describeSecretRequestAsk(args as SecretRequestAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -928,6 +1058,21 @@ async function summarizeRow(
       : input.calendar
         ? "this calendar server"
         : "this address"
+    // Another server of a definition: what it shares, and that its levels
+    // start afresh.
+    const bound = input.definition
+    const boundLines = bound
+      ? [
+          `Another server of ${bound.name}, beside ${bound.instances.join(", ") || "(none)"}: it shares their description${input.endpoint ? ", schema, edits" : ""} and tool descriptions, so a change to those changes every one of them`,
+          "Its tools ask you first, for every token, as a new server's do",
+        ]
+      : []
+    // The owner's words once they agree: shown whole.
+    const noteLines = input.note
+      ? [
+          `Your note on it, which every assistant that sees it reads as yours:\n${input.note}`,
+        ]
+      : []
     const warning =
       input.authType === "basic"
         ? `PCP will send the user name ${login} and the secret "${input.secretName ?? "?"}" to ${where} with every call. Only add it if you trust the address.`
@@ -972,6 +1117,7 @@ async function summarizeRow(
             : "Can change things: its tools may send as you where the server allows it, move and flag mail, and delete into the Trash (never for good)",
           ...(mailFrom ? [`From address: ${mailFrom}`] : []),
           ...(input.description ? [`Description: ${input.description}`] : []),
+          ...noteLines,
           asker,
         ],
         warning,
@@ -1003,6 +1149,7 @@ async function summarizeRow(
             ? "Read-only: only the tools that read calendars and reminders"
             : "Can change things: its tools may add, change, move and delete events and reminders, and make calendars; they invite nobody",
           ...(input.description ? [`Description: ${input.description}`] : []),
+          ...noteLines,
           asker,
         ],
         warning,
@@ -1019,15 +1166,18 @@ async function summarizeRow(
         lines: [
           `Address: ${input.url}`,
           ...(preview.privateAddress ? [preview.privateAddress] : []),
-          specUrl
-            ? `Schema: downloaded from ${specUrl}; a later change to it waits for you`
-            : "Schema: supplied as text",
+          ...boundLines,
+          bound
+            ? "Schema: the one they share"
+            : specUrl
+              ? `Schema: downloaded from ${specUrl}; a later change to it waits for you`
+              : "Schema: supplied as text",
           ...(edits > 0
             ? [
                 `Edits: ${edits} change${edits === 1 ? "" : "s"} to the schema, applied before the tools are made`,
               ]
             : []),
-          `Tools: ${preview.toolCount} from the OpenAPI schema it supplied (${preview.methods})`,
+          `Tools: ${preview.toolCount} from the OpenAPI schema ${bound ? "they share" : "it supplied"} (${preview.methods})`,
           `Operations: ${preview.operations.join(", ")}${preview.more > 0 ? `, and ${preview.more} more` : ""}`,
           ...(preview.skipped ? [`Left out: ${preview.skipped}`] : []),
           readOnly
@@ -1037,6 +1187,7 @@ async function summarizeRow(
           ...reused,
           ...oauthLines.slice(1),
           ...(input.description ? [`Description: ${input.description}`] : []),
+          ...noteLines,
           asker,
         ],
         warning,
@@ -1053,10 +1204,12 @@ async function summarizeRow(
       lines: [
         `Address: ${input.url}`,
         ...(flagged ? [flagged] : []),
+        ...boundLines,
         auth,
         ...reused,
         ...oauthLines.slice(1),
         ...(input.description ? [`Description: ${input.description}`] : []),
+        ...noteLines,
         asker,
       ],
       warning,
@@ -1237,6 +1390,10 @@ async function toView(
     wrapper,
     repo,
     browserTabId: browserTabOf(ctx, row),
+    shareHref:
+      kind === "repo_share"
+        ? shareReviewHref(readArgs(ctx, row) as RepoShareAsk, row.id)
+        : null,
     url: permissionUrl(publicUrl, row.id),
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
@@ -1256,7 +1413,11 @@ function browserTabOf(
   ctx: VaultContext,
   row: PermissionRequest,
 ): string | null {
-  if (row.kind !== "browse" && row.kind !== "browser_handover") {
+  if (
+    row.kind !== "browse" &&
+    row.kind !== "browser_handover" &&
+    row.kind !== "secret_use"
+  ) {
     return null
   }
 
@@ -1273,7 +1434,22 @@ function newSecretOf(
   optional: boolean
   clientId: string | null
   login: string | null
+  kind?: "text" | "totp"
+  origins?: string[]
 } | null {
+  if (row.kind === "secret_request") {
+    const asked = readArgs(ctx, row) as SecretRequestAsk
+
+    return {
+      name: asked.name,
+      optional: false,
+      clientId: null,
+      login: null,
+      kind: asked.kind,
+      origins: asked.origins,
+    }
+  }
+
   if (row.kind === "wrapper_change") {
     const { newSecret } = readArgs(ctx, row) as WrapperChangeAsk
 
@@ -1308,7 +1484,10 @@ async function secretToEnter(
   return secret
     ? {
         ...secret,
-        exists: (await findTextSecretByName(ctx, secret.name)) !== null,
+        exists:
+          row.kind === "secret_request"
+            ? (await findTypableSecret(ctx, secret.name)) !== null
+            : (await findTextSecretByName(ctx, secret.name)) !== null,
       }
     : null
 }
@@ -1337,6 +1516,15 @@ function outcomeOf(view: PermissionView): CallToolResult {
       return text(view.outcome ?? "The owner said no, so nothing ran.")
     case "running":
       return text("The owner allowed it; it is running now.")
+    case "withdrawn":
+      return text(
+        "You withdrew this request, so the owner was not asked any more and nothing ran.",
+      )
+    case "closed":
+      return text(
+        "The tab this was about was closed (or the browser closed) before the owner was done, so there is nothing to go on from. Open the page again if it is still needed.",
+        true,
+      )
     case "expired":
       return text(
         "This request expired without an answer, so nothing ran. Ask again if it is still wanted.",
@@ -1421,9 +1609,13 @@ export async function withPermission(
             ? ask.server.id
             : ask.kind === "endpoint_change" ||
                 ask.kind === "browse" ||
-                ask.kind === "browser_handover"
+                ask.kind === "browser_handover" ||
+                ask.kind === "secret_use" ||
+                ask.kind === "secret_request"
               ? ask.input.serverId
-              : null,
+              : ask.kind === "note_change" && ask.input.target === "server"
+                ? ask.input.id
+                : null,
         toolName: toolNameOf(ask),
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
@@ -1440,6 +1632,11 @@ export async function withPermission(
   }
 
   noteOwnerAsked(id)
+
+  // Closed with the tab it is about, if that closes before the owner answers.
+  if (ask.kind === "browser_handover") {
+    noteHandoverRequest(scope.ctx.vaultId, ask.input.tabId, id)
+  }
 
   const row = await loadRow({ id, vaultId: scope.ctx.vaultId })
   // The assistant hears which tools it named, to check its own patterns;
@@ -1483,11 +1680,14 @@ export async function decidePermission(
     secretValue,
     always,
     minutes,
+    origins,
   }: {
     publicUrl: string
     tokenId?: string
     /** The value of a new server's secret, typed in on PCP's page. */
     secretValue?: string
+    /** request_secret: the sites the owner left in, on PCP's page. */
+    origins?: string[]
     /** A memory to share: read it in every conversation, ticked on the page. */
     always?: boolean
     /** "Allow for": how long, one of ALLOW_FOR_MINUTES. */
@@ -1513,7 +1713,11 @@ export async function decidePermission(
   // Only a tool call (for the tool) and a web request (for the site) have
   // "always", "allow_for" and "block": any other answer is about this one
   // request.
-  const settles = kind === "call" || kind === "fetch" || kind === "browse"
+  const settles =
+    kind === "call" ||
+    kind === "fetch" ||
+    kind === "browse" ||
+    isSecretKind(kind)
   const choice: PermissionDecision = !settles
     ? decision === "always" || decision === "allow_for"
       ? "allow_once"
@@ -1526,7 +1730,11 @@ export async function decidePermission(
     return text("That is not one of the answers to this request.", true)
   }
 
-  const allowFor = choice === "allow_for" ? parseAllowForMinutes(minutes) : null
+  // A secret's "Allow for" is an hour, not a choice (SECRET_ALLOW_MINUTES).
+  const allowFor =
+    choice === "allow_for" && !isSecretKind(kind)
+      ? parseAllowForMinutes(minutes)
+      : null
 
   if (!tokenIsLive(row.token)) {
     return finishUnrun(
@@ -1539,7 +1747,10 @@ export async function decidePermission(
 
   // A repository change is a manage-endpoints token's to propose; one that
   // lost that since asking gets nothing applied.
-  if (kind === "repo_change" && !row.token.manageEndpoints) {
+  if (
+    (kind === "repo_change" || kind === "repo_share") &&
+    !row.token.manageEndpoints
+  ) {
     return finishUnrun(
       ctx,
       row,
@@ -1598,11 +1809,30 @@ export async function decidePermission(
     return text("Tool levels are saved on the request's page in PCP.", true)
   }
 
+  // A proposed push is confirmed on its review (confirmProposedShare), where
+  // the owner reads every file; decisionsFor offers nothing else.
+  if (kind === "repo_share") {
+    return text("A push is confirmed on its review in PCP.", true)
+  }
+
   // A secret PCP does not hold yet is typed in on PCP's page; a client's
   // may be left empty, for a client without one.
   const newSecret = newSecretOf(ctx, row)
 
-  if (newSecret) {
+  // A secret for the browser: its value (or one the owner added since) and
+  // the sites, checked before anything is written, so a mistyped seed can
+  // be typed again.
+  if (kind === "secret_request") {
+    const problem = await checkSecretAnswer(
+      ctx,
+      readArgs(ctx, row) as SecretRequestAsk,
+      { value: secretValue, origins },
+    )
+
+    if (problem) {
+      return text(problem, true)
+    }
+  } else if (newSecret) {
     const problem =
       secretValue ||
       !(newSecret.optional || (await findTextSecretByName(ctx, newSecret.name)))
@@ -1614,7 +1844,10 @@ export async function decidePermission(
     }
   }
 
-  if (choice === "always" && host) {
+  // A secret's answer is about the secret, never the browser tool's level.
+  if (isSecretKind(kind)) {
+    // Written by executeSecretUse and applySecretRequest below.
+  } else if (choice === "always" && host) {
     await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
   } else if (choice === "always" && row.serverId) {
     await writeToolAccess(row.tokenId, row.serverId, row.toolName, "allowed")
@@ -1671,19 +1904,47 @@ export async function decidePermission(
                       readArgs(ctx, row) as RepoChangeAsk,
                     ),
                   )
-                : kind === "fetch"
-                  ? await executeFetch(ctx, row, publicUrl, executor)
-                  : kind === "browse"
-                    ? await executeBrowse(ctx, row, publicUrl, executor)
-                    : kind === "browser_handover"
-                      ? await executeHandover(ctx, row)
-                      : await executeRegister(
-                          ctx,
-                          row,
-                          publicUrl,
-                          executor,
-                          secretValue,
-                        )
+                : kind === "note_change"
+                  ? text(
+                      await applyNoteChange(
+                        ctx,
+                        readArgs(ctx, row) as NoteChangeAsk,
+                      ),
+                    )
+                  : kind === "fetch"
+                    ? await executeFetch(ctx, row, publicUrl, executor)
+                    : kind === "browse"
+                      ? await executeBrowse(ctx, row, publicUrl, executor)
+                      : kind === "browser_handover"
+                        ? await executeHandover(ctx, row)
+                        : kind === "secret_use"
+                          ? await executeSecretUse(
+                              ctx,
+                              row,
+                              secretLevel(choice),
+                              publicUrl,
+                              executor,
+                            )
+                          : kind === "secret_request"
+                            ? text(
+                                await applySecretRequest(
+                                  ctx,
+                                  row.tokenId,
+                                  readArgs(ctx, row) as SecretRequestAsk,
+                                  {
+                                    value: secretValue,
+                                    origins,
+                                    level: secretLevel(choice),
+                                  },
+                                ),
+                              )
+                            : await executeRegister(
+                                ctx,
+                                row,
+                                publicUrl,
+                                executor,
+                                secretValue,
+                              )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -1793,6 +2054,87 @@ async function executeBrowse(
     { tabId: asked.tabId, url: asked.url },
     { allowedByOwner: true },
   )
+}
+
+/** How the owner let a secret be typed: the next use, an hour, or always. */
+function secretLevel(choice: PermissionDecision): SecretUseLevel {
+  return choice === "always"
+    ? "always"
+    : choice === "allow_for"
+      ? "hour"
+      : "once"
+}
+
+/**
+ * A secret the owner let the browser type: their answer kept for the token
+ * (browser-secrets.ts grantSecretUse; Always allow adds the site to the
+ * secret's), then the type call made again through upstream.ts, where the
+ * same gate lets it through. A once answer that the call did not use (the
+ * tab moved elsewhere) goes with it.
+ */
+async function executeSecretUse(
+  ctx: VaultContext,
+  row: Row,
+  level: SecretUseLevel,
+  publicUrl: string,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  if (!row.server || row.server.kind !== "browser") {
+    return text("The browser was removed from PCP, so nothing was typed.", true)
+  }
+
+  if (!row.server.enabled) {
+    return text(
+      "The browser is switched off in PCP, so nothing was typed.",
+      true,
+    )
+  }
+
+  // An answer about a secret never lifts a block: a type tool blocked for
+  // the token since it asked stays so.
+  if (
+    effectiveAccess(
+      await loadToolAccess(ctx.vaultId, row.tokenId),
+      row.server.id,
+      "type",
+    ) === "blocked"
+  ) {
+    return text(
+      `${row.server.slug}/type is blocked for this token, so nothing was typed.`,
+      true,
+    )
+  }
+
+  const asked = readArgs(ctx, row) as SecretUseAsk
+  const secret = await findTypableSecret(ctx, asked.secretName)
+
+  if (!secret) {
+    return text(
+      `The secret "${asked.secretName}" is no longer in PCP, so nothing was typed.`,
+      true,
+    )
+  }
+
+  const use = {
+    tokenId: row.tokenId,
+    secretId: secret.id,
+    origin: asked.origin,
+  }
+  await grantSecretUse(ctx, { ...use, level })
+
+  try {
+    return await runCall(
+      ctx,
+      row.server,
+      "type",
+      { ...asked.call, text: { $secret: secret.name } },
+      { publicUrl, tokenId: row.tokenId, ownerAllowed: true, executor },
+    )
+  } finally {
+    if (level === "once") {
+      await dropOnceAllowance(use)
+    }
+  }
 }
 
 /** The owner is done in a tab an assistant handed them. */
@@ -1921,6 +2263,19 @@ async function executeRegister(
   secretValue?: string,
 ): Promise<CallToolResult> {
   const asked = readArgs(ctx, row) as RegisterArgs
+
+  // Another server of a definition shares what the owner was shown of it,
+  // or nothing is made.
+  if (
+    asked.definition &&
+    (await definitionBasis(asked.definition.id)) !== asked.definition.basis
+  ) {
+    throw new PcpError(
+      "state",
+      `${asked.definition.name} has changed since this was asked (or is gone), so nothing was added. The assistant can ask again.`,
+    )
+  }
+
   const secret = await secretForRegister(ctx, asked, secretValue)
   let created: { id: string; sync?: SyncResult }
 
@@ -1937,6 +2292,7 @@ async function executeRegister(
           authExtraHeaders: asked.authExtraHeaders,
           ...secretFields(asked, secret.id),
           endpoint: asked.endpoint,
+          definitionId: asked.definition?.id ?? null,
         })
       : asked.mail
         ? await createMailAccount(ctx, {
@@ -1973,6 +2329,7 @@ async function executeRegister(
               // The address is the assistant's: public ones only, until the
               // owner allows private addresses on the server's page.
               publicOnly: true,
+              definitionId: asked.definition?.id ?? null,
             })
   } catch (error) {
     // The secret was typed in for this server alone.
@@ -1984,6 +2341,12 @@ async function executeRegister(
   }
 
   const { id } = created
+
+  // The note the owner read, as their own.
+  if (asked.note) {
+    await setPersonalNote(ctx, "server", id, asked.note)
+  }
+
   const token = await db().apiToken.findUniqueOrThrow({
     where: { id: row.tokenId },
     select: { allowAllServers: true },
@@ -2135,21 +2498,68 @@ export async function getPermissionView(
   return row ? toView(ctx, row, publicUrl) : null
 }
 
-/** A token's requests still waiting for an answer, oldest first. */
+/** A hand-over waiting for the owner, as its tab shows it in the tabs view. */
+export type WaitingHandover = {
+  id: string
+  tabId: string
+  /** The assistant's words: what it asks the owner to do in the tab. */
+  message: string
+  tokenName: string
+  createdAt: string
+  decisions: Array<{ value: PermissionDecision; label: string }>
+}
+
+/**
+ * The hand-overs among `ids` (the requests asked about the open tabs) that
+ * still wait for the owner, oldest first, with what each asks: the tabs
+ * view shows them on their tabs and answers them through decidePermission,
+ * as the request's own page would.
+ */
+export async function waitingHandovers(
+  ctx: VaultContext,
+  ids: string[],
+): Promise<WaitingHandover[]> {
+  if (ids.length === 0) {
+    return []
+  }
+
+  const rows = await db().permissionRequest.findMany({
+    where: {
+      ...waitingRequestsWhere(ctx),
+      kind: "browser_handover",
+      id: { in: ids },
+    },
+    include: ROW_INCLUDE,
+    orderBy: WAITING_ORDER,
+  })
+
+  return rows.map((row) => {
+    const ask = readArgs(ctx, row) as HandoverAsk
+
+    return {
+      id: row.id,
+      tabId: ask.tabId,
+      message: visible(ask.message),
+      tokenName: row.token.name,
+      createdAt: row.createdAt.toISOString(),
+      decisions: decisionsFor("browser_handover"),
+    }
+  })
+}
+
+/**
+ * A token's requests still waiting for an answer, oldest first, as the
+ * bell and Home list them (owner-queue.ts).
+ */
 export async function listOpenPermissions(
   ctx: VaultContext,
   tokenId: string,
   publicUrl: string,
 ): Promise<PermissionView[]> {
   const rows = await db().permissionRequest.findMany({
-    where: {
-      vaultId: ctx.vaultId,
-      tokenId,
-      status: "pending",
-      expiresAt: { gt: new Date() },
-    },
+    where: waitingRequestsWhere(ctx, { tokenId }),
     include: ROW_INCLUDE,
-    orderBy: { createdAt: "asc" },
+    orderBy: WAITING_ORDER,
   })
 
   return Promise.all(rows.map((row) => toView(ctx, row, publicUrl)))
@@ -2161,34 +2571,28 @@ export type PendingRequest = {
   title: string
   tokenName: string
   createdAt: Date
+  /** Where the owner answers it (owner-queue.ts `queueHref`). */
+  href: string
 }
 
 /**
- * Every request in the vault still waiting for the owner, newest first: how
- * many there are, and the first `limit` of them with their titles.
+ * Every request in the vault still waiting for the owner, oldest first (the
+ * order the owner is walked through them in, owner-queue.ts): how many
+ * there are, and the first `limit` of them with their titles.
  */
 export async function listPendingRequests(
   ctx: VaultContext,
   publicUrl: string,
   { limit = 10 }: { limit?: number } = {},
 ): Promise<{ total: number; requests: PendingRequest[] }> {
-  const now = new Date()
   // A revoked or expired token's requests can no longer be answered.
-  const where = {
-    vaultId: ctx.vaultId,
-    status: "pending",
-    expiresAt: { gt: now },
-    token: {
-      revokedAt: null,
-      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-    },
-  }
+  const where = waitingRequestsWhere(ctx)
   const [total, rows] = await Promise.all([
     db().permissionRequest.count({ where }),
     db().permissionRequest.findMany({
       where,
       include: ROW_INCLUDE,
-      orderBy: { createdAt: "desc" },
+      orderBy: WAITING_ORDER,
       take: limit,
     }),
   ])
@@ -2201,6 +2605,12 @@ export async function listPendingRequests(
         title: visible(title),
         tokenName: row.token.name,
         createdAt: row.createdAt,
+        href: queueHref({
+          source: "request",
+          id: row.id,
+          kind: row.kind as PermissionKind,
+          tabId: handoverTab(ctx, row),
+        }),
       }
     }),
   )
@@ -2297,6 +2707,105 @@ export async function checkPermission(
 }
 
 /**
+ * check_permission with no id: the token's own requests still waiting for
+ * the owner, oldest first, each with its id, kind, title, age and link.
+ * Only reads.
+ */
+export async function listOwnOpenRequests(
+  scope: PermissionScope,
+  now = new Date(),
+): Promise<CallToolResult> {
+  const views = await listOpenPermissions(
+    scope.ctx,
+    scope.tokenId,
+    scope.publicUrl,
+  )
+
+  if (views.length === 0) {
+    return text("You have no requests waiting for the owner.")
+  }
+
+  const lines = views.map(
+    (view) =>
+      `- ${view.id} (${view.kind}, asked ${ageText(now.getTime() - view.createdAt.getTime())}): ${view.title}\n  ${view.url}`,
+  )
+  const count =
+    views.length === 1
+      ? "1 request of yours is"
+      : `${views.length} requests of yours are`
+
+  return text(
+    `${count} waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need.\n\n${lines.join("\n")}`,
+  )
+}
+
+/**
+ * withdraw_request: the token takes back one of its own requests while it
+ * still waits for the owner, in one update that an answer racing it either
+ * wins first or finds closed. Nothing runs and nothing is written for it (a
+ * memory to share stays unwritten, not kept for the assistant as the
+ * owner's Not now does); a hand-over gives the tab back to the browser
+ * tools. Another token's request reads as no request at all.
+ */
+export async function withdrawPermission(
+  scope: PermissionScope,
+  id: string,
+): Promise<CallToolResult> {
+  const where = { id, vaultId: scope.ctx.vaultId, tokenId: scope.tokenId }
+  const row = await loadRow(where)
+
+  if (!row) {
+    return text("There is no permission request with that id.", true)
+  }
+
+  if (isOpen(row) && (await closePendingRequests(where, "withdrawn")) === 1) {
+    if (row.kind === "browser_handover") {
+      await finishHandover(
+        scope.ctx,
+        (readArgs(scope.ctx, row) as HandoverAsk).tabId,
+      ).catch((error) =>
+        console.error("[permissions] giving a tab back failed", error),
+      )
+    }
+
+    const { title } = await summarizeRow(scope.ctx, row, scope.publicUrl)
+
+    return text(
+      `Withdrawn: the owner no longer sees request ${row.id} (${visible(title)}), and nothing ran for it.`,
+    )
+  }
+
+  // Not open, or answered while this looked: say how it stands.
+  const status = ((await loadRow(where)) ?? row).status
+  const reason =
+    status === "withdrawn"
+      ? "You already withdrew this request."
+      : status === "pending"
+        ? "This request expired without an answer, so there is nothing to withdraw; nothing ran."
+        : status === "closed"
+          ? "This request was closed already (its tab was closed), so there is nothing to withdraw."
+          : status === "running"
+            ? "The owner allowed this request and it is running now, so it can no longer be withdrawn. Call check_permission with its id for the result."
+            : "The owner already answered this request, so it can no longer be withdrawn. Call check_permission with its id for how it went."
+
+  return text(reason, true)
+}
+
+/** How long ago, in the largest whole unit: "just now", "5 minutes ago". */
+function ageText(ms: number): string {
+  const minutes = Math.floor(ms / 60_000)
+
+  if (minutes < 1) {
+    return "just now"
+  }
+
+  const [amount, unit] =
+    minutes < 60 ? [minutes, "minute"] : [Math.floor(minutes / 60), "hour"]
+
+  return `${amount} ${unit}${amount === 1 ? "" : "s"} ago`
+}
+
+/**
  * A pending proposal of tool levels, with what its page shows: the tools
  * the token reaches and the proposed levels still about them. Null when
  * there is no such request or it is no longer open.
@@ -2319,6 +2828,121 @@ export async function getAccessProposal(
     tokenId: row.tokenId,
     ...(await accessReview(ctx, row.tokenId, levels)),
   }
+}
+
+/** A proposed push still waiting for the owner, for its review's page. */
+export type OpenShareRequest = {
+  id: string
+  tokenName: string
+  message: string
+  repoId: string
+  item: { kind: ItemKind; id: string }
+}
+
+/** The open repo_share request by its id, or null when there is none. */
+export async function openShareRequest(
+  ctx: VaultContext,
+  id: string,
+): Promise<OpenShareRequest | null> {
+  const row = await loadRow({ id, vaultId: ctx.vaultId })
+
+  if (!row || row.kind !== "repo_share" || !isOpen(row)) {
+    return null
+  }
+
+  const ask = readArgs(ctx, row) as RepoShareAsk
+
+  return {
+    id: row.id,
+    tokenName: row.token.name,
+    message: ask.message,
+    repoId: ask.repoId,
+    item: ask.item,
+  }
+}
+
+/**
+ * The owner's Confirm on the push's review of an assistant's proposal
+ * (repo_share): pushes what the review shows, as every push does
+ * (share-review.ts confirmShare: exactly what was shown, the personal-data
+ * check for a public repository), naming the token in the commit; then the
+ * request is done and the assistant hears what was pushed. A refusal (the
+ * review changed since it opened, a hit not fixed or ticked) leaves the
+ * request open. Only the signed-in owner's page calls this.
+ */
+export async function confirmProposedShare(
+  ctx: VaultContext,
+  id: string,
+  {
+    repoId,
+    item,
+    basis,
+    acknowledged,
+    publicUrl,
+  }: {
+    repoId: string
+    item: { kind: ItemKind; id: string }
+    basis: string
+    acknowledged: string[]
+    publicUrl: string
+  },
+): Promise<ShareResult> {
+  const row = await loadRow({ id, vaultId: ctx.vaultId })
+
+  if (!row || row.kind !== "repo_share") {
+    throw notFound("That request")
+  }
+
+  if (!isOpen(row)) {
+    throw new PcpError(
+      "state",
+      "This request is no longer open, so nothing was pushed.",
+    )
+  }
+
+  const ask = readArgs(ctx, row) as RepoShareAsk
+
+  if (
+    ask.repoId !== repoId ||
+    ask.item.kind !== item.kind ||
+    ask.item.id !== item.id
+  ) {
+    throw invalid("That is not the item this request is about.")
+  }
+
+  if (!tokenIsLive(row.token) || !row.token.manageEndpoints) {
+    const message =
+      "The token that asked is no longer valid, or may no longer manage endpoints, so nothing was pushed."
+    await finishUnrun(ctx, row, publicUrl, message)
+    throw new PcpError("state", message)
+  }
+
+  const result = await confirmShare(ctx, repoId, item, {
+    basis,
+    acknowledged,
+    publicUrl,
+    proposer: { by: "assistant", tokenName: row.token.name },
+  })
+  const claimed = await claim(row.id)
+
+  if (claimed.count === 1) {
+    const told = result.commit
+      ? `The owner reviewed it and pushed ${ask.root} to ${ask.repo}, as commit ${result.commit.slice(0, 12)}.`
+      : `The owner reviewed it; ${ask.root} in ${ask.repo} was the same already, so nothing new was pushed.`
+
+    await db().permissionRequest.update({
+      where: { id: row.id },
+      data: {
+        status: "executed",
+        resultIsError: false,
+        resultCiphertext: asBytes(
+          encryptString(ctx.dek, told, `${aad(row.id)}:result`),
+        ),
+      },
+    })
+  }
+
+  return result
 }
 
 /**

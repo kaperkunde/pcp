@@ -14,6 +14,11 @@ import {
   readExport,
   restoreExport,
 } from "./backup"
+import {
+  bindOrigin,
+  grantSecretUse,
+  listBrowserOrigins,
+} from "./browser-secrets"
 import { EXPORT_AAD, type ExportPayloadJson } from "./backup-format"
 import { storeTools } from "./catalogue"
 import {
@@ -25,6 +30,7 @@ import {
   type ScryptParams,
 } from "./crypto"
 import { db } from "./db"
+import { cloneServer, readServerNote, setPersonalNote } from "./definitions"
 import { createDeviceKey, unlockWithDeviceKey } from "./device-keys"
 import { getHostJson, setHostJson } from "./host-settings"
 import { getTokenInstructions, saveTokenInstructions } from "./instructions"
@@ -38,7 +44,13 @@ import { createServer } from "./servers"
 import { createSkill, deleteSkill, listSkills, setTokenSkills } from "./skills"
 import { saveWrapperByOwner } from "./wrappers/admin"
 import { addLinkedRepo } from "./repos/test-vault"
-import { listRepoItems, listRepos } from "./repos/store"
+import {
+  getRepo,
+  listExclusions,
+  listRepoItems,
+  listRepos,
+  setExcluded,
+} from "./repos/store"
 import { createSession, resolveSession } from "./sessions"
 import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
@@ -260,6 +272,11 @@ describe("restoring", { timeout: 60_000 }, () => {
       authUsername: "ada@example.com",
       authSecretId: secretId,
       mailFrom: "Ada <ada@example.com>",
+      mailSaveSent: "never",
+    })
+    await db().mcpServer.update({
+      where: { id: imap.id },
+      data: { mailServerFilesSent: true },
     })
     const jmap = await createMailAccount(ctx, {
       protocol: "jmap",
@@ -407,6 +424,8 @@ describe("restoring", { timeout: 60_000 }, () => {
         "mailSubmission",
         "smtpUrl",
         "mailFrom",
+        "mailSaveSent",
+        "mailServerFilesSent",
       ]) {
         delete row[column]
       }
@@ -431,6 +450,8 @@ describe("restoring", { timeout: 60_000 }, () => {
       mailSubmission: false,
       smtpUrl: null,
       mailFrom: null,
+      mailSaveSent: "auto",
+      mailServerFilesSent: null,
     })
   })
 
@@ -472,6 +493,109 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(
       await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } }),
     ).toMatchObject({ syncVersion: null })
+  })
+
+  it("carries a token's memory migration, and restores a file from before it as on", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    await db().apiToken.update({
+      where: { id: tokenId },
+      data: { memoryMigration: false },
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    await db().apiToken.update({
+      where: { id: tokenId },
+      data: { memoryMigration: true },
+    })
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect((await resolveApiToken(token))!.memoryMigration).toBe(false)
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    for (const row of older.tables.apiTokens as Record<string, unknown>[]) {
+      delete row.memoryMigration
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    // As for the tokens of a vault that updated: the offer is made once.
+    expect((await resolveApiToken(token))!.memoryMigration).toBe(true)
+  })
+
+  it("carries definitions and the owner's notes, and gives each server of a file from before them a definition of its own", async () => {
+    const { ctx, serverId } = await populate()
+    const { id: cloneId } = await cloneServer(ctx, serverId, {
+      name: "Upstream staging",
+      url: "https://staging.upstream.example/mcp",
+      authType: "none",
+      note: "staging copy",
+    })
+    const skill = await createSkill(ctx, {
+      name: "deploy",
+      description: "Deploy.",
+      body: "Steps.",
+      tools: [],
+    })
+    await setPersonalNote(ctx, "skill", skill.id, "weekdays only")
+    const shared = (
+      await db().mcpServer.findUniqueOrThrow({ where: { id: serverId } })
+    ).definitionId
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    const clone = await db().mcpServer.findUniqueOrThrow({
+      where: { id: cloneId },
+    })
+    expect(clone.definitionId).toBe(shared)
+    expect(readServerNote(ctx, clone)).toBe("staging copy")
+    expect((await listSkills(ctx))[0]!.note).toBe("weekdays only")
+    expect(await db().serverDefinition.count()).toBe(1)
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    delete (older.tables as Record<string, unknown>).serverDefinitions
+    for (const row of older.tables.servers as Record<string, unknown>[]) {
+      delete row.definitionId
+      delete row.personalNote
+    }
+    for (const row of older.tables.skills as Record<string, unknown>[]) {
+      delete row.personalNote
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    const servers = await db().mcpServer.findMany({ orderBy: { name: "asc" } })
+    expect(servers.map((row) => row.definitionId)).toEqual([serverId, cloneId])
+    expect(
+      (await db().serverDefinition.findMany({ orderBy: { name: "asc" } })).map(
+        (row) => [row.id, row.slug, row.kind],
+      ),
+    ).toEqual([
+      [serverId, "upstream", "mcp"],
+      [cloneId, "upstream-staging", "mcp"],
+    ])
+    expect(servers.every((row) => row.personalNote === null)).toBe(true)
   })
 
   it("carries a token's instructions as they are, and restores a file from before them as not set yet", async () => {
@@ -626,6 +750,113 @@ describe("restoring", { timeout: 60_000 }, () => {
     await expect(
       readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
     ).rejects.toThrow(/names no item/)
+  })
+
+  it("carries what is kept out of a repository and whether it is private, and restores a file from before them", async () => {
+    const { ctx, secretId } = await populate()
+    const { id: skillId } = await createSkill(ctx, {
+      name: "release-notes",
+      description: "Write release notes.",
+      body: "List the changes.",
+      tools: [],
+    })
+    const { id: other } = await createSkill(ctx, {
+      name: "private-notes",
+      description: "Mine alone.",
+      body: "Keep them.",
+      tools: [],
+    })
+    const { repoId } = await addLinkedRepo(ctx, { skillId, secretId })
+    await db().repo.update({ where: { id: repoId }, data: { private: true } })
+    await setExcluded(ctx, repoId, { kind: "skill", id: other }, true)
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const raw = await openRaw(file, EXPORT_PASSWORD)
+    expect(raw.tables.repoExclusions).toHaveLength(1)
+
+    const { payload } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await listExclusions(ctx, repoId)).toEqual(
+      new Set([`skill:${other}`]),
+    )
+    expect((await getRepo(ctx, repoId)).visibility).toBe("private")
+
+    // A file from before them: nothing kept out, visibility not asked yet.
+    const older = structuredClone(raw)
+    delete (older.tables as Record<string, unknown>).repoExclusions
+    for (const repo of older.tables.repos ?? []) {
+      delete (repo as Record<string, unknown>).private
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().repoExclusion.count()).toBe(0)
+    expect((await getRepo(ctx, repoId)).visibility).toBe("unknown")
+
+    // One that names no item, or two, is refused.
+    const broken = structuredClone(raw)
+    broken.tables.repoExclusions![0]!.skillId = null
+    await expect(
+      readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow(/excluded item names no item/)
+  })
+
+  it("carries the sites a secret is typed at, never a token's allowance there, and restores a file from before them", async () => {
+    const { ctx, secretId, token } = await populate()
+    const tokenId = (await resolveApiToken(token))!.tokenId
+    await bindOrigin(ctx, secretId, "https://shop.example")
+    await grantSecretUse(ctx, {
+      tokenId,
+      secretId,
+      origin: "https://shop.example",
+      level: "always",
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const raw = await openRaw(file, EXPORT_PASSWORD)
+    expect(raw.tables.secretBrowserOrigins).toMatchObject([
+      { secretId, origin: "https://shop.example" },
+    ])
+    expect(JSON.stringify(raw)).not.toContain("api_token_secret_allowance")
+
+    const { payload } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await listBrowserOrigins(ctx)).toEqual(
+      new Map([[secretId, ["https://shop.example"]]]),
+    )
+    expect(await db().apiTokenSecretAllowance.count()).toBe(0)
+
+    const older = structuredClone(raw)
+    delete (older.tables as Record<string, unknown>).secretBrowserOrigins
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().secretBrowserOrigin.count()).toBe(0)
+
+    // A site of a secret the file does not hold is refused.
+    const broken = structuredClone(raw)
+    broken.tables.secretBrowserOrigins![0]!.secretId = "missing"
+    await expect(
+      readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow(/a secret's site is missing/)
   })
 
   it("carries skills and which tokens see them, and restores a file from before skills", async () => {

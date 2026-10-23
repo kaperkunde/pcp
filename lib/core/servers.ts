@@ -9,6 +9,13 @@ import {
 } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
+import {
+  definitionForNew,
+  ensureDefinition,
+  forgetUnusedDefinition,
+  shareDescription,
+  shareToolDescription,
+} from "./definition-rows"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { normalizeAuthorizeParams } from "./oauth-client"
@@ -177,6 +184,12 @@ export type ServerInput = {
    * on a server an assistant proposed; the owner's form sets or clears it.
    */
   publicOnly?: boolean
+  /**
+   * Makes the server an instance of this definition (lib/core/
+   * definitions.ts), with its description in place of `description`. Left
+   * out, a new server gets a definition of its own.
+   */
+  definitionId?: string | null
 }
 
 export type ServerSummary = {
@@ -882,6 +895,9 @@ export async function createServer(
   input: ServerInput,
 ): Promise<{ id: string }> {
   const { data, authExtraHeaders, newSecret } = await normalizeInput(ctx, input)
+  const definition = input.definitionId
+    ? await definitionForNew(ctx, input.definitionId, "mcp")
+    : null
   const id = newId()
 
   await withNewSecret(ctx, newSecret, async (secretId) =>
@@ -891,6 +907,9 @@ export async function createServer(
         vaultId: ctx.vaultId,
         slug: await uniqueSlug(ctx.vaultId, slugify(data.name)),
         ...data,
+        ...(definition
+          ? { definitionId: definition.id, description: definition.description }
+          : {}),
         ...secretColumns(data, secretId),
         authHeaders: extraAuthHeadersWrite(authExtraHeaders, {
           replace: false,
@@ -898,6 +917,7 @@ export async function createServer(
       },
     }),
   )
+  await ensureDefinition(id)
 
   return { id }
 }
@@ -959,6 +979,9 @@ export async function updateServer(
   if (dropTokens && existing.oauthTokensId) {
     await deleteManagedSecret(ctx, existing.oauthTokensId)
   }
+
+  // The description is the definition's: every instance carries it.
+  await shareDescription(id)
 
   return {
     reconnect:
@@ -1103,6 +1126,8 @@ export async function setServerEnabled(
 export async function deleteServer(ctx: VaultContext, id: string) {
   const existing = await getServer(ctx, id)
   await db().mcpServer.delete({ where: { id } })
+  // The last instance takes its definition with it; others keep it.
+  await forgetUnusedDefinition(existing.definitionId)
 
   if (existing.oauthTokensId) {
     await deleteManagedSecret(ctx, existing.oauthTokensId)
@@ -1127,6 +1152,8 @@ export async function setToolDescription(
     where: { serverId_name: { serverId, name: toolName } },
     data: { descriptionOverride: trimmed },
   })
+  // A tool's description is the definition's: every instance gets it.
+  await shareToolDescription(serverId, toolName, trimmed)
 }
 
 export async function setServerStatus(

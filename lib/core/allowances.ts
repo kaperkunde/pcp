@@ -1,4 +1,5 @@
 import { requireToken } from "./api-tokens"
+import { endSecretAllowance, listSecretAllowances } from "./browser-secrets"
 import { ALLOW_FOR_MINUTES, type AllowForMinutes } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
@@ -19,6 +20,11 @@ import { accessKey } from "./tool-access"
  * sends names a conversation, so a time is what "for now" can mean.
  * Allowances are not exported: like kept results, they are short-lived and
  * bound to the tokens a restore replaces.
+ *
+ * A secret the browser types has allowances of its own, per secret and site
+ * (lib/core/browser-secrets.ts): listed and ended here with the rest, on
+ * the token's page, and pruned with them once they run out ("always" ones
+ * do not run out).
  */
 
 export type TokenAllowance =
@@ -30,6 +36,16 @@ export type TokenAllowance =
       until: Date
     }
   | { kind: "site"; host: string; until: Date }
+  | {
+      kind: "secret"
+      secretId: string
+      secretName: string
+      origin: string
+      /** Null: always. */
+      until: Date | null
+      /** Its next use only. */
+      once: boolean
+    }
 
 /** The owner's choice of how long, or why not. */
 export function parseAllowForMinutes(value: unknown): AllowForMinutes {
@@ -130,7 +146,7 @@ export async function listTokenAllowances(
 ): Promise<TokenAllowance[]> {
   await requireToken(ctx, tokenId)
 
-  const [tools, sites] = await Promise.all([
+  const [tools, sites, secrets] = await Promise.all([
     db().apiTokenToolAllowance.findMany({
       where: { tokenId, until: { gt: now } },
       include: { server: { select: { name: true } } },
@@ -138,6 +154,7 @@ export async function listTokenAllowances(
     db().apiTokenSiteAllowance.findMany({
       where: { tokenId, until: { gt: now } },
     }),
+    listSecretAllowances(ctx, { tokenId }, now),
   ])
 
   return [
@@ -153,7 +170,19 @@ export async function listTokenAllowances(
       host: row.host,
       until: row.until,
     })),
-  ].sort((a, b) => a.until.getTime() - b.until.getTime())
+    ...secrets.map((row): TokenAllowance => ({
+      kind: "secret",
+      secretId: row.secretId,
+      secretName: row.secretName,
+      origin: row.origin,
+      until: row.until,
+      once: row.once,
+    })),
+  ].sort(
+    (a, b) =>
+      (a.until?.getTime() ?? Number.MAX_SAFE_INTEGER) -
+      (b.until?.getTime() ?? Number.MAX_SAFE_INTEGER),
+  )
 }
 
 /** The owner ends an allowance before its time: that tool or site asks again. */
@@ -162,11 +191,18 @@ export async function endAllowance(
   tokenId: string,
   target:
     | { kind: "tool"; serverId: string; toolName: string }
-    | { kind: "site"; host: string },
+    | { kind: "site"; host: string }
+    | { kind: "secret"; secretId: string; origin: string },
 ): Promise<void> {
   await requireToken(ctx, tokenId)
 
-  if (target.kind === "tool") {
+  if (target.kind === "secret") {
+    await endSecretAllowance(ctx, {
+      tokenId,
+      secretId: target.secretId,
+      origin: target.origin,
+    })
+  } else if (target.kind === "tool") {
     await db().apiTokenToolAllowance.deleteMany({
       where: { tokenId, serverId: target.serverId, toolName: target.toolName },
     })
@@ -180,10 +216,12 @@ export async function endAllowance(
 /** Deletes allowances that have run out. */
 export async function pruneAllowances(now = new Date()): Promise<number> {
   const where = { until: { lte: now } }
-  const [tools, sites] = await Promise.all([
+  const [tools, sites, secrets] = await Promise.all([
     db().apiTokenToolAllowance.deleteMany({ where }),
     db().apiTokenSiteAllowance.deleteMany({ where }),
+    // "Always" ones have no end, and stay.
+    db().apiTokenSecretAllowance.deleteMany({ where }),
   ])
 
-  return tools.count + sites.count
+  return tools.count + sites.count + secrets.count
 }

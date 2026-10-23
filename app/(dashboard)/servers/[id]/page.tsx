@@ -30,6 +30,7 @@ import {
 import { sshServerView } from "@/lib/core/ssh/hosts"
 import { describeOAuthConnection } from "@/lib/core/upstream"
 import { getWrapper, replacedTools } from "@/lib/core/wrappers/admin"
+import { itemAbout } from "@/lib/core/item-about"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -65,6 +66,7 @@ export default async function ServerPage({
   const ssh = kind === "ssh" ? sshServerView(server) : null
   const wrapper = kind === "wrapper" ? await getWrapper(ctx, { id }) : null
   const replaced = await replacedTools(ctx, server.id)
+  const about = await itemAbout(ctx, "server", server.id)
   const spec = endpoint
     ? await db().openApiSpec.findUnique({
         where: { serverId: server.id },
@@ -166,6 +168,10 @@ export default async function ServerPage({
         authUsername: server.authUsername ?? "",
         authSecretId: server.authSecretId ?? "",
         mailFrom: server.mailFrom ?? "",
+        mailSaveSent:
+          server.mailSaveSent === "always" || server.mailSaveSent === "never"
+            ? server.mailSaveSent
+            : "auto",
         oauthClientId: server.oauthClientId ?? "",
         oauthClientSecretId: server.oauthClientSecretId ?? "",
         oauthScope: server.oauthScope ?? "",
@@ -293,6 +299,7 @@ export default async function ServerPage({
         redirectUrl={redirectUrl}
         settings={settings}
         pacing={pacing}
+        about={about}
       >
         {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}
       </ServerDetail>

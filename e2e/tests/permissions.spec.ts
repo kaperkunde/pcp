@@ -11,6 +11,10 @@ import {
 } from "../lib/mcp"
 import {
   acceptNextDialog,
+  allClear,
+  answerAndAdvance,
+  answerEverythingWaiting,
+  bell,
   chooseProposedLevel,
   createToken,
   expectLevel,
@@ -21,6 +25,7 @@ import {
   proposedLevel,
   showServerSettings,
   showTools,
+  clickHydrated,
 } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
@@ -140,6 +145,10 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   })
   expect(panel.body.result?.contents ?? []).toEqual([])
 
+  // The bell lists the oldest first: what earlier projects left waiting is
+  // answered, so this test's request is among those it shows.
+  await answerEverythingWaiting(page)
+
   const args = {
     server: SLUG,
     tool: "add_numbers",
@@ -168,7 +177,10 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   await page.goto("/servers")
   await openRequestFromBell(page, new RegExp(`Allow ${SLUG}/add_numbers\\?`))
   await expect(page).toHaveURL(new RegExp(`${path}$`))
-  await expect(page.getByText(`Allow ${SLUG}/add_numbers?`)).toBeVisible()
+  // The page's heading: the bell's item says the same while its menu closes.
+  await expect(
+    page.getByRole("heading", { name: `Allow ${SLUG}/add_numbers?` }),
+  ).toBeVisible()
   await expect(
     page.getByTestId("permission-lines").getByText("19", { exact: true }),
   ).toBeVisible()
@@ -216,6 +228,45 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   expect(answer).toContain("[redacted]")
   expect(answer).not.toContain(upstream.expectedToken)
   expect(callsOf("echo_auth")).toBe(1)
+})
+
+test("an assistant lists its open requests and withdraws one it no longer needs", async ({
+  page,
+  baseURL,
+}) => {
+  const asked = await callTool(baseURL!, token, "call_tool", {
+    server: SLUG,
+    tool: "send_postcard",
+    arguments: { to: "Bob", message: "Never mind" },
+  })
+  const { path, id } = permissionFrom(toolText(asked))
+
+  const open = toolText(await callTool(baseURL!, token, "check_permission", {}))
+  expect(open).toContain(
+    `- ${id} (call, asked just now): Allow ${SLUG}/send_postcard?`,
+  )
+  expect(open).not.toContain("Bob")
+
+  const withdrawn = await callTool(baseURL!, token, "withdraw_request", { id })
+  expect(withdrawn.body.result?.isError ?? false).toBe(false)
+  expect(toolText(withdrawn)).toContain("Withdrawn")
+  expect(
+    toolText(await callTool(baseURL!, token, "check_permission", {})),
+  ).not.toContain(id)
+
+  // The owner's page says so, with nothing left to answer; nothing ran.
+  await page.goto(path)
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "Withdrawn by the assistant",
+  )
+  await expect(page.getByRole("button", { name: "Allow once" })).toHaveCount(0)
+  await expect(page.getByText("Tell the assistant that asked")).toHaveCount(0)
+  expect(callsOf("send_postcard")).toBe(0)
+
+  // Once withdrawn, it stays so.
+  const again = await callTool(baseURL!, token, "withdraw_request", { id })
+  expect(again.body.result?.isError).toBe(true)
+  expect(toolText(again)).toContain("already withdrew")
 })
 
 test("a blocked tool is hidden from the assistant and refused; a copy of the access keeps it blocked", async ({
@@ -547,4 +598,89 @@ test("an OAuth server an assistant proposes is connected through a link", async 
     "[redacted]",
   )
   expect(upstream.calls.at(-1)?.authorization).toMatch(/^Bearer access-/)
+})
+
+test("answering a request takes you to the next one waiting, oldest first, until none is left", async ({
+  page,
+  baseURL,
+}) => {
+  const walker = await createToken(page, `Queue walker ${RUN}`)
+  const ask = async (tool: string, args: Record<string, unknown>) =>
+    permissionFrom(
+      toolText(
+        await callTool(baseURL!, walker, "call_tool", {
+          server: SLUG,
+          tool,
+          arguments: args,
+        }),
+      ),
+    )
+  const ours = () =>
+    page.getByRole("menuitem").filter({ hasText: `Allow ${SLUG}/` })
+  const title = (tool: string) => `Allow ${SLUG}/${tool}?`
+
+  await answerEverythingWaiting(page)
+  const echoes = callsOf("echo_auth")
+  const postcards = callsOf("send_postcard")
+  const first = await ask("add_numbers", { a: 20, b: 22 })
+  const second = await ask("echo_auth", {})
+  const third = await ask("send_postcard", { to: "Grace", message: "Hi" })
+
+  // The bell lists them oldest first, and leads to the oldest.
+  await page.goto("/servers")
+  await clickHydrated(bell(page))
+  await expect(ours()).toHaveCount(3)
+  await expect(ours().nth(0)).toContainText(title("add_numbers"))
+  await expect(ours().nth(1)).toContainText(title("echo_auth"))
+  await expect(ours().nth(2)).toContainText(title("send_postcard"))
+  await ours().nth(0).click()
+  await expect(page).toHaveURL(new RegExp(`${first.path}$`))
+
+  // Answered, it runs, and PCP opens the next one with what came of the
+  // first above it. The next one waits for its own answer.
+  await answerAndAdvance(page, page.getByRole("button", { name: "Allow once" }))
+  await expect(page).toHaveURL(new RegExp(`${second.path}$`))
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `You answered: ${title("add_numbers")}`,
+  )
+  await expect(page.getByTestId("permission-outcome")).toContainText("42")
+  await expect(
+    page.getByRole("heading", { name: title("echo_auth") }),
+  ).toBeVisible()
+  expect(callsOf("echo_auth")).toBe(echoes)
+
+  // The bell no longer has the one answered.
+  await clickHydrated(bell(page))
+  await expect(ours()).toHaveCount(2)
+  await page.keyboard.press("Escape")
+
+  await answerAndAdvance(page, page.getByRole("button", { name: "Not now" }))
+  await expect(page).toHaveURL(new RegExp(`${third.path}$`))
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    `You answered: ${title("echo_auth")}`,
+  )
+
+  // The last one answered, PCP says so where it was answered.
+  await answerAndAdvance(page, page.getByRole("button", { name: "Not now" }))
+  await expect(allClear(page)).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`${third.path}$`))
+  await expect(page.getByText("You said no, so nothing ran.")).toBeVisible()
+  expect(callsOf("echo_auth")).toBe(echoes)
+  expect(callsOf("send_postcard")).toBe(postcards)
+
+  // A link opens its own request first, newest or not, then goes on with
+  // the oldest still waiting.
+  const older = await ask("add_numbers", { a: 1, b: 1 })
+  const newer = await ask("send_postcard", { to: "Ada", message: "Again" })
+  await page.goto(newer.path)
+  await answerAndAdvance(page, page.getByRole("button", { name: "Not now" }))
+  await expect(page).toHaveURL(new RegExp(`${older.path}$`))
+  await answerAndAdvance(page, page.getByRole("button", { name: "Not now" }))
+  await expect(allClear(page)).toBeVisible()
+
+  // Nothing of theirs waits any more.
+  await page.goto("/home")
+  await expect(
+    page.getByRole("link", { name: "Review", exact: true }),
+  ).toHaveCount(0)
 })

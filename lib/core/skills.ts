@@ -20,6 +20,11 @@ import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { diffLines, type DiffLine } from "./line-merge"
 import { hiddenCharacter, withoutPresentation } from "./memories"
+import {
+  proposeNote,
+  readSkillNote,
+  type NoteChangeAsk,
+} from "./personal-notes"
 import { canonicalJson } from "./permission-rules"
 import { readStrictYaml } from "./strict-yaml"
 
@@ -101,6 +106,11 @@ export type SkillBody = {
 export type SkillEntry = SkillBody & {
   id: string
   author: SkillAuthor
+  /**
+   * The owner's own note on the skill (lib/core/personal-notes.ts): not part
+   * of its SKILL.md, never in a repository, read by assistants beside it.
+   */
+  note: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -597,6 +607,7 @@ function unseal(ctx: VaultContext, row: Skill): SkillEntry {
     files: body.files ?? [],
     extra: body.extra ?? {},
     author: row.author === "assistant" ? "assistant" : "owner",
+    note: readSkillNote(ctx, row),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -653,16 +664,20 @@ export function skillText(skill: SkillBody): string {
 }
 
 /** What the gateway's instructions name of the skills a token sees. */
-export type InstructionSkill = { name: string; description: string }
+export type InstructionSkill = {
+  name: string
+  description: string
+  /** The owner's note on it, when they wrote one. */
+  note?: string | null
+}
 
 export async function instructionSkills(
   ctx: VaultContext,
   skillIds: string[] | null,
 ): Promise<InstructionSkill[]> {
-  return (await skillsFor(ctx, skillIds)).map(({ name, description }) => ({
-    name,
-    description,
-  }))
+  return (await skillsFor(ctx, skillIds)).map(
+    ({ name, description, note }) => ({ name, description, note }),
+  )
 }
 
 // ---- The owner's own changes ------------------------------------------------
@@ -1001,7 +1016,18 @@ export type SkillChangeAsk = {
 
 export type SkillAsk = { kind: "skill_change"; input: SkillChangeAsk }
 
-export type SkillOutcome = { text: string } | { ask: SkillAsk; lead: string }
+export type SkillOutcome =
+  | { text: string }
+  | { ask: SkillAsk; lead: string }
+  | { ask: { kind: "note_change"; input: NoteChangeAsk }; lead: string }
+
+/**
+ * The owner's note on a skill, as the memory tool names it: not a file of
+ * the skill (no file's path can start with a dot) and never in its
+ * SKILL.md. Creating it proposes a note, deleting it proposes taking it
+ * away; either asks the owner, who reads the note whole.
+ */
+export const NOTE_FILE = ".note"
 
 /** What the owner's page shows of a skill request, in full. */
 export type SkillShown = {
@@ -1187,8 +1213,8 @@ function parseSkillPath(input: string): SkillPath {
     file:
       file === null
         ? null
-        : file === SKILL_FILE
-          ? SKILL_FILE
+        : file === SKILL_FILE || file === NOTE_FILE
+          ? file
           : checkSkillFilePath(file),
   }
 }
@@ -1408,6 +1434,56 @@ export type SkillCommand = {
 }
 
 /**
+ * /skills/<name>/.note: the owner's note on the skill. view reads it;
+ * create proposes one and delete proposes taking it away, each a
+ * note_change request the owner reads whole (personal-notes.ts).
+ */
+async function noteCommand(
+  scope: SkillScope,
+  entry: SkillEntry,
+  args: SkillCommand,
+): Promise<SkillOutcome> {
+  const path = skillPath(entry.name, NOTE_FILE)
+
+  if (args.command === "view") {
+    return {
+      text: entry.note
+        ? `${path}: the owner's note on the skill ${entry.name}, which every assistant that sees it reads as theirs.\n${entry.note}`
+        : `The skill ${entry.name} has no note of the owner's. Create ${path} to propose one.`,
+    }
+  }
+
+  if (args.command !== "create" && args.command !== "delete") {
+    throw invalid(
+      `${NOTE_FILE} takes view, create (to propose the owner's note) and delete (to propose taking it away).`,
+    )
+  }
+
+  const row = await db().skill.findFirstOrThrow({
+    where: { id: entry.id, vaultId: scope.ctx.vaultId },
+    select: { id: true, personalNote: true },
+  })
+
+  return {
+    ask: {
+      kind: "note_change",
+      input: proposeNote(
+        scope.ctx,
+        {
+          kind: "skill",
+          row,
+          name: entry.name,
+          label: skillPath(entry.name),
+        },
+        args.command === "create" ? required(args.file_text, "file_text") : "",
+        "memory",
+      ),
+    },
+    lead: "The note is the owner's words, so it asks them. Nothing is written until they answer, and they read the whole note.",
+  }
+}
+
+/**
  * One memory tool command on a /skills path. Reads are answered here; every
  * write comes back as an ask for the owner, which the gateway hands to
  * permissions.ts. Only the skills the token sees can be read or changed.
@@ -1432,6 +1508,19 @@ export async function runSkillCommand(
     }
 
     return entry
+  }
+
+  // The owner's note: never a file of the skill, every change theirs.
+  if (target.file === NOTE_FILE) {
+    return noteCommand(scope, needEntry(), args)
+  }
+
+  if (
+    args.new_path !== undefined &&
+    isSkillPath(args.new_path) &&
+    parseSkillPath(args.new_path).file === NOTE_FILE
+  ) {
+    throw invalid(`${NOTE_FILE} is the owner's note, not a file of the skill.`)
   }
 
   switch (args.command) {

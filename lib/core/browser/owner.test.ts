@@ -12,6 +12,13 @@ import { createApiToken, resolveApiToken, revokeApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { startTestApi, type TestApi } from "../openapi/test-api"
+import { nextPendingRequest } from "../owner-queue"
+import {
+  decidePermission,
+  listPendingRequests,
+  withdrawPermission,
+  withPermission,
+} from "../permissions"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import {
@@ -25,6 +32,7 @@ import { chromiumExecutable } from "./executable"
 import {
   browserOverview,
   browserTokens,
+  closeOwnerTab,
   forgetSites,
   handBackTab,
   openOwnerTab,
@@ -37,7 +45,7 @@ import {
 import { loadProfile } from "./profile"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
-import { isOwnerNeeded } from "./types"
+import { isOwnerNeeded, type OwnerNeeded } from "./types"
 
 // What the owner does from PCP's pages, against a real Chromium: a tab of
 // their own that no assistant sees until they hand it to a token they
@@ -46,6 +54,11 @@ import { isOwnerNeeded } from "./types"
 
 const executable = await chromiumExecutable()
 const PUBLIC_URL = "http://pcp.test"
+/** A page's icon: a PNG of one pixel. */
+const ICON = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "base64",
+)
 
 let cleanup: () => Promise<void>
 let api: TestApi
@@ -70,7 +83,16 @@ beforeEach(async () => {
     where: { id: (await createBrowserServer(ctx)).id },
   })
   const pages: Parameters<typeof startTestApi>[0] = (request, res) => {
+    if (request.url === "/icon.png") {
+      res.setHeader("content-type", "image/png")
+      res.end(ICON)
+      return
+    }
     res.setHeader("content-type", "text/html")
+    if (request.url === "/iconic") {
+      res.end('<title>Iconic</title><link rel="icon" href="/icon.png">')
+      return
+    }
     if (request.url === "/login") {
       res.setHeader("set-cookie", "session=signed-in; Max-Age=3600")
     }
@@ -121,8 +143,13 @@ async function otherToken() {
   }
 }
 
+/** A Mac or Windows machine gives the browser a window of its own. */
+const OWN_WINDOW =
+  process.platform === "darwin" || process.platform === "win32"
+    ? "window"
+    : "headless"
 /** What `PCP_BROWSER_DISPLAY=virtual` asks for: Linux is the only place. */
-const WANTS_VIRTUAL = process.platform === "linux" ? "virtual" : "headless"
+const WANTS_VIRTUAL = process.platform === "linux" ? "virtual" : OWN_WINDOW
 
 describe("the browser overview", () => {
   it("says which mode is wanted on this machine, and none is running", async () => {
@@ -132,7 +159,7 @@ describe("the browser overview", () => {
     for (const [setting, wanted] of [
       ["virtual", WANTS_VIRTUAL],
       ["headless", "headless"],
-      ["auto", "headless"],
+      ["auto", OWN_WINDOW],
     ] as const) {
       vi.stubEnv("PCP_BROWSER_DISPLAY", setting)
       const overview = await browserOverview(ctx)
@@ -147,10 +174,13 @@ describe("the browser overview", () => {
     vi.stubEnv("PCP_CONTAINER", "1")
     expect((await browserOverview(ctx)).chromium.display).toBe(WANTS_VIRTUAL)
 
-    // The desktop app runs on a real screen and starts none.
+    // The desktop app runs on a real screen and starts none: Chromium has a
+    // window of its own there, kept off the screen.
     vi.stubEnv("PCP_DESKTOP", "1")
     vi.stubEnv("PCP_BROWSER_DISPLAY", "virtual")
-    expect((await browserOverview(ctx)).chromium.display).toBe("headless")
+    expect((await browserOverview(ctx)).chromium.display).toBe("window")
+    vi.stubEnv("PCP_BROWSER_DISPLAY", "")
+    expect((await browserOverview(ctx)).chromium.display).toBe("window")
   })
 })
 
@@ -258,6 +288,137 @@ describe.skipIf(!executable)("the owner's tabs", { timeout: 90_000 }, () => {
     expect(textOf(await other.call("snapshot", { tab: tabId }))).toContain(
       `There is no tab ${tabId}`,
     )
+  })
+
+  it("gives a hand-over's tab back when it is withdrawn, and closes its request with the tab or the browser", async () => {
+    const scope = { ctx, tokenId, publicUrl: PUBLIC_URL }
+    const open = async () =>
+      textOf(
+        await performNavigate(
+          { ...scope, serverId: server.id },
+          { tabId: null, url: `${api.origin}/start` },
+          { allowedByOwner: true },
+        ),
+      ).match(/^Tab (\S+):/m)![1]!
+    const handOver = async (tab: string) => {
+      const needed: unknown = await call("hand_over", {
+        tab,
+        message: "Please sign in.",
+      }).catch((error: unknown) => error)
+      expect(isOwnerNeeded(needed)).toBe(true)
+      await withPermission(scope, (needed as OwnerNeeded).ask)
+      return (
+        await db().permissionRequest.findFirstOrThrow({
+          where: { status: "pending" },
+          orderBy: { createdAt: "desc" },
+        })
+      ).id
+    }
+    const statusOf = async (id: string) =>
+      (await db().permissionRequest.findUniqueOrThrow({ where: { id } })).status
+
+    // Withdrawn: the tab is the assistant's again.
+    const first = await open()
+    const withdrawn = await handOver(first)
+    expect(await tabFor(ctx, first)).toMatchObject({ handover: true })
+    await withdrawPermission(scope, withdrawn)
+    expect(await statusOf(withdrawn)).toBe("withdrawn")
+    expect(await tabFor(ctx, first)).toMatchObject({
+      control: "assistant",
+      handover: false,
+    })
+
+    // The owner closes the tab: nothing is left waiting for it.
+    const closedTab = await handOver(first)
+    await closeOwnerTab(ctx, first)
+    expect(await statusOf(closedTab)).toBe("closed")
+
+    // The browser closes: every tab's hand-over with it.
+    const closedBrowser = await handOver(await open())
+    await stopBrowser(ctx)
+    expect(await statusOf(closedBrowser)).toBe("closed")
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).total).toBe(0)
+  })
+
+  it("lists every tab with its icon, its token and the hand-over waiting on it, answered there", async () => {
+    const scope = { ctx, tokenId, publicUrl: PUBLIC_URL }
+    const opened = await performNavigate(
+      { ...scope, serverId: server.id },
+      { tabId: null, url: `${api.origin}/iconic` },
+      { allowedByOwner: true },
+    )
+    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+    const own = await openOwnerTab(ctx, {
+      url: `${api.origin}/plain`,
+      publicUrl: PUBLIC_URL,
+    })
+    const listed = async (id: string) =>
+      (await browserOverview(ctx)).tabs.find((tab) => tab.id === id)
+
+    // The icon the page names, as Chromium loaded it for the page, once it
+    // has: a data: address, so the owner's page asks the site for nothing.
+    await vi.waitFor(
+      async () =>
+        expect((await listed(tabId))?.favicon).toBe(
+          `data:image/png;base64,${ICON.toString("base64")}`,
+        ),
+      { timeout: 10_000, interval: 200 },
+    )
+    expect(await listed(tabId)).toMatchObject({
+      openedBy: "Claude",
+      tokenName: "Claude",
+      control: "assistant",
+      busy: false,
+      waiting: null,
+    })
+    // A page with no icon of its own has none: the list shows a letter.
+    expect(await listed(own.id)).toMatchObject({
+      favicon: null,
+      openedBy: "owner",
+      tokenId: null,
+      tokenName: null,
+      control: "owner",
+    })
+
+    // The assistant hands its tab over: the hand-over waits on the tab, and
+    // every link to it (the bell, Home, the walk on) leads there.
+    const needed: unknown = await call("hand_over", {
+      tab: tabId,
+      message: "Please sign in.",
+    }).catch((error: unknown) => error)
+    expect(isOwnerNeeded(needed)).toBe(true)
+    await withPermission(scope, (needed as OwnerNeeded).ask)
+    const { id } = await db().permissionRequest.findFirstOrThrow({
+      where: { kind: "browser_handover", status: "pending" },
+    })
+    expect(await listed(tabId)).toMatchObject({
+      control: "owner",
+      handover: true,
+      waiting: {
+        id,
+        tabId,
+        message: "Please sign in.",
+        tokenName: "Claude",
+        decisions: [
+          { value: "allow_once", label: "Done" },
+          { value: "decline", label: "Not now" },
+        ],
+      },
+    })
+    const href = `/browser?tab=${tabId}`
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).requests).toEqual([
+      expect.objectContaining({ id, href }),
+    ])
+    expect(await nextPendingRequest(ctx)).toBe(href)
+
+    // Done, from the tab: it is the assistant's again, and nothing waits.
+    await decidePermission(ctx, id, "allow_once", { publicUrl: PUBLIC_URL })
+    expect(await listed(tabId)).toMatchObject({
+      control: "assistant",
+      handover: false,
+      waiting: null,
+    })
+    expect(await nextPendingRequest(ctx)).toBeNull()
   })
 
   it("hands a tab to another token without the sites allowed for the one before", async () => {

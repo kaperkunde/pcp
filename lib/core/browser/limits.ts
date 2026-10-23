@@ -9,8 +9,10 @@ import { BROWSER_VIEWPORT } from "../constants"
 
 /** Tabs open at once in a vault's browser, assistants' and the owner's. */
 export const MAX_TABS = 8
-/** With no tool call, no input and nobody watching, the browser closes. */
-export const IDLE_CLOSE_MS = 15 * 60_000
+/*
+ * How long the browser stays open with nothing happening is the owner's
+ * (Settings → Resources): `resourceLimits().browserIdleMs`, see idle.ts.
+ */
 /** One page load, with its redirects. */
 export const NAVIGATION_TIMEOUT_MS = 30_000
 /**
@@ -20,6 +22,17 @@ export const NAVIGATION_TIMEOUT_MS = 30_000
 export const ACTION_TIMEOUT_MS = 10_000
 /** A page's title, read for an answer or for the list of tabs. */
 export const TITLE_TIMEOUT_MS = 2_000
+/**
+ * A tab's icon, as the page served it to Chromium (favicon.ts): a larger
+ * one is left out, and the list shows the site's first letter instead.
+ */
+export const MAX_FAVICON_BYTES = 16 * 1024
+/**
+ * What Chromium keeps of the responses a tab's DevTools session sees, for
+ * the icon to be read from: a response over MAX_FAVICON_BYTES is not kept
+ * at all, and these at most together.
+ */
+export const FAVICON_BUFFER_BYTES = 512 * 1024
 /** The longest wait_for. */
 export const MAX_WAIT_MS = 30_000
 /** The profile (the sign-ins) as JSON, before encryption. */
@@ -57,6 +70,20 @@ export const VIEWPORT = BROWSER_VIEWPORT
  * Chromium draws its own window around the page.
  */
 export const SCREEN = { width: 1920, height: 1080 } as const
+/**
+ * Where a window of the browser's own (launch.ts, mode "window": the
+ * desktop app) is put, out of the owner's way: far to the left of any
+ * screen, past any row of screens a desk holds, its top on the main
+ * screen's top edge (macOS keeps a window's top edge on a screen, not its
+ * left one). Not -32000, which Windows uses for a minimized window.
+ */
+export const OFF_SCREEN_WINDOW = { x: -20_000, y: 0 } as const
+/**
+ * Where that window tells its page it is (screenX, screenY), on the SCREEN
+ * above: where Chromium puts a first window on a screen of its own, ten
+ * pixels in from the corner.
+ */
+export const SHOWN_WINDOW_POSITION = { x: 10, y: 10 } as const
 /** The virtual display (display.ts) has this long to start. */
 export const DISPLAY_START_TIMEOUT_MS = 10_000
 /** JPEG quality of the live view's frames. */
@@ -178,3 +205,12 @@ export const DOWNLOAD_DEADLINE_MS =
  * a popup in as a tab, closing the browser (its profile saved first).
  */
 export const BROWSER_LOCK_DEADLINE_MS = 30_000
+/**
+ * The frames of a page whose password fields are read to mask their
+ * values in a snapshot (snapshot.ts): more than any page has.
+ */
+export const MAX_MASKED_FRAMES = 50
+/** The most sites request_secret names for a new secret. */
+export const MAX_SECRET_REQUEST_ORIGINS = 10
+/** How long request_secret's purpose may be. */
+export const MAX_SECRET_PURPOSE_CHARS = 500

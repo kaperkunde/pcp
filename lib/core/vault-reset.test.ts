@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
+import { grantSecretUse } from "./browser-secrets"
 import { storeTools } from "./catalogue"
 import { db } from "./db"
 import { createDeviceKey, unlockWithDeviceKey } from "./device-keys"
@@ -16,6 +17,7 @@ import { createSession, resolveSession } from "./sessions"
 import { SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
 import { keepResult } from "./tool-results"
+import { setExcluded } from "./repos/store"
 import { addLinkedRepo } from "./repos/test-vault"
 import { isSetUp, ownerVault, setupVault, unlockOwnerVault } from "./vault"
 import { deleteVault } from "./vault-reset"
@@ -91,6 +93,12 @@ async function populate() {
     mediaType: "text/plain",
   })
   await receiveFile(ctx, { tokenId, publicUrl: "https://pcp.example" })
+  await grantSecretUse(ctx, {
+    tokenId,
+    secretId: secret.id,
+    origin: "https://shop.example",
+    level: "always",
+  })
   await createMemory(ctx, { path: "notes.md", text: "Remember this." })
   const skill = await createSkill(ctx, {
     name: "release-notes",
@@ -99,7 +107,17 @@ async function populate() {
     tools: [],
   })
   await setTokenSkills(ctx, tokenId, { all: false, skillIds: [skill.id] })
-  await addLinkedRepo(ctx, { skillId: skill.id, secretId: secret.id })
+  const { repoId } = await addLinkedRepo(ctx, {
+    skillId: skill.id,
+    secretId: secret.id,
+  })
+  const kept = await createSkill(ctx, {
+    name: "kept-out",
+    description: "Not for the repository.",
+    body: "Mine.",
+    tools: [],
+  })
+  await setExcluded(ctx, repoId, { kind: "skill", id: kept.id }, true)
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
   await setHostJson(DDNS_CONFIG_KEY, { provider: "duckdns", subdomain: "ada" })
   const { cookieValue } = await createSession(ctx)
@@ -124,6 +142,9 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(Object.values(before).some((count) => count > 0)).toBe(true)
     expect(before.repo).toBe(1)
     expect(before.repo_item).toBe(1)
+    expect(before.secret_browser_origin).toBe(1)
+    expect(before.api_token_secret_allowance).toBe(1)
+    expect(before.server_definition).toBe(1)
 
     await deleteVault(ctx)
 

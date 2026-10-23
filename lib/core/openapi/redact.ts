@@ -50,7 +50,15 @@ export type Redactor = {
   value: (input: unknown) => unknown
 }
 
-export function makeRedactor(values: string[]): Redactor {
+export function makeRedactor(
+  values: string[],
+  {
+    replacement = REDACTED,
+  }: {
+    /** What stands in for a value: "[redacted]" unless said otherwise. */
+    replacement?: string
+  } = {},
+): Redactor {
   const variants = [
     ...new Set(
       values
@@ -68,7 +76,7 @@ export function makeRedactor(values: string[]): Redactor {
 
     for (const variant of variants) {
       if (result.includes(variant)) {
-        result = result.split(variant).join(REDACTED)
+        result = result.split(variant).join(replacement)
       }
     }
 
@@ -82,7 +90,7 @@ export function makeRedactor(values: string[]): Redactor {
           length--
         ) {
           if (result.endsWith(variant.slice(0, length))) {
-            result = `${result.slice(0, -length)}${REDACTED}`
+            result = `${result.slice(0, -length)}${replacement}`
             break
           }
         }

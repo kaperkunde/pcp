@@ -9,6 +9,8 @@ import {
   MAX_READ_CHARS,
   MAX_ROLE_CHARS,
   MAX_SCREENSHOT_QUALITY,
+  MAX_SECRET_PURPOSE_CHARS,
+  MAX_SECRET_REQUEST_ORIGINS,
   MAX_TARGET_NAME_CHARS,
   MAX_TARGET_NTH,
   MAX_TYPE_CHARS,
@@ -31,6 +33,11 @@ import { REF_PATTERN } from "./snapshot"
  * ones into a page, download keeps the one a page offers; no path on the
  * machine is ever named. Arguments are checked here, before the browser is
  * touched.
+ *
+ * A secret goes into a page only as type's text {"$secret": name}, which
+ * PCP types itself where the owner allowed it (lib/core/browser-secrets.ts);
+ * no other argument of any tool takes one. request_secret asks the owner to
+ * store one PCP does not hold yet.
  */
 
 export type BrowserToolName =
@@ -51,6 +58,7 @@ export type BrowserToolName =
   | "download"
   | "handle_dialog"
   | "hand_over"
+  | "request_secret"
 
 type Annotations = {
   readOnlyHint: boolean
@@ -297,13 +305,30 @@ const SPECS: readonly BrowserToolSpec[] = [
     name: "type",
     title: "Type into a field",
     description:
-      "Replaces the text of a field (ref, or target) with text; submit: true presses Enter after it. Answers with the page's snapshot.",
+      'Replaces the text of a field (ref, or target) with text; submit: true presses Enter after it. Answers with the page\'s snapshot. For a password or a one-time code, text is {"$secret": "<name>"}: one of the owner\'s secrets, which PCP types into the field without you seeing it (a one-time code secret types the code of the moment). The field then shows as [secret: name], and screenshot is refused while it holds it. The first use of a secret at a site this token may not type it at yet answers "Not done yet" with a link for the owner, as other requests do; a field in a frame from another site than the page is refused. request_secret asks the owner for a secret PCP does not hold yet.',
     args: z
       .strictObject({
         tab,
         ref: ref.optional(),
         target: target.optional(),
-        text: z.string().max(MAX_TYPE_CHARS),
+        text: z
+          .union([
+            z.string().max(MAX_TYPE_CHARS),
+            z
+              .strictObject({
+                $secret: z
+                  .string()
+                  .min(1)
+                  .max(100)
+                  .describe("The name of one of the owner's secrets."),
+              })
+              .describe(
+                "One of the owner's secrets, which PCP types for you; you never see its value.",
+              ),
+          ])
+          .describe(
+            'The text to type, or {"$secret": "<name>"} for one of the owner\'s secrets.',
+          ),
         submit: z.boolean().optional(),
       })
       .refine(oneOf, REF_OR_TARGET),
@@ -451,6 +476,41 @@ const SPECS: readonly BrowserToolSpec[] = [
     args: z.strictObject({
       tab,
       message: z.string().min(1).max(MAX_HANDOVER_MESSAGE),
+    }),
+    annotations: MOVES,
+    changes: false,
+  },
+  {
+    name: "request_secret",
+    title: "Ask the owner for a secret",
+    description:
+      'Asks the owner to store a secret for the browser to type into pages at the sites you name (a password, or the seed of a sign-in\'s one-time codes), so it never passes through you or the conversation. Answers "Not done yet" with a link: end your reply with it, on a line of its own. The owner types the value on PCP\'s page, checks the sites, and chooses whether this token may use it once, for an hour, or always without asking. Never ask them for the value in the conversation. Once they say they have answered, call check_permission with the id it gave; then type it with type\'s text {"$secret": "<name>"}. A name PCP already holds is refused: type that one instead.',
+    args: z.strictObject({
+      name: z
+        .string()
+        .min(1)
+        .max(100)
+        .describe(
+          "The secret's name, as the owner sees it under Secrets: Example password.",
+        ),
+      purpose: z
+        .string()
+        .min(1)
+        .max(MAX_SECRET_PURPOSE_CHARS)
+        .describe("What it is for, in a sentence, for the owner."),
+      origins: z
+        .array(z.string().min(1).max(MAX_URL_LENGTH))
+        .min(1)
+        .max(MAX_SECRET_REQUEST_ORIGINS)
+        .describe(
+          "The sites it is typed at, like https://example.com (an address there will do).",
+        ),
+      kind: z
+        .enum(["text", "totp"])
+        .optional()
+        .describe(
+          "text (the default): a password or the like. totp: a sign-in's one-time codes, from the seed the site showed when they were set up (base32 or an otpauth:// link); PCP types the code of the moment.",
+        ),
     }),
     annotations: MOVES,
     changes: false,
