@@ -5,7 +5,6 @@ import { callTool, initialize, toolText } from "../lib/mcp"
 import {
   allowAllTools,
   connectAssistant,
-  createToken,
   expectLevel,
   setToolLevel,
   showServerSettings,
@@ -13,7 +12,7 @@ import {
 } from "../lib/ui"
 
 // run_code through the gateway: a token the owner lets run code gets the
-// tool and is told how (a token without it gets neither); a program calls
+// tool and is told how; a program calls
 // the token's tools with the server's secret added by PCP, filters what they
 // answer and moves a picture from one tool to another by its handle, so the
 // answer holds neither; a blocked tool is an error the program catches; a
@@ -25,7 +24,6 @@ const RUN = Date.now().toString(36)
 const SERVER_NAME = `Code postcards ${RUN}`
 const SLUG = `code-${RUN}`
 const TOKEN_NAME = `Programmer ${RUN}`
-const PLAIN_TOKEN_NAME = `No programs ${RUN}`
 
 let upstream: Upstream
 let token: string
@@ -52,7 +50,7 @@ function returned(text: string): unknown {
   return JSON.parse(text.split("It returned:\n")[1]!)
 }
 
-test("a token made to run code gets run_code and is told how, and no other", async ({
+test("a token made to run code gets run_code and is told how", async ({
   page,
   baseURL,
 }) => {
@@ -83,13 +81,7 @@ test("a token made to run code gets run_code and is told how, and no other", asy
   const told = await initialize(baseURL!, token)
   expect(told.tools).toContain("run_code")
   expect(told.instructions).toContain(runCodePart)
-
-  const plain = await initialize(
-    baseURL!,
-    await createToken(page, PLAIN_TOKEN_NAME),
-  )
-  expect(plain.tools).not.toContain("run_code")
-  expect(plain.instructions).not.toContain(runCodePart)
+  // A token without the switch gets neither: lib/core/code/run.test.ts.
 })
 
 test("a program calls the token's tools and hands back only what it kept", async ({

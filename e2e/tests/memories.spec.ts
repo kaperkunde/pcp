@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test"
 
 import { callTool, initialize, toolText } from "../lib/mcp"
-import { createToken, permissionFrom, connectAssistant } from "../lib/ui"
+import { permissionFrom, connectAssistant } from "../lib/ui"
 
 // Memories through the gateway: a token the owner lets keep them gets the
 // memory tool and is told when to use it; sharing one asks the owner, who
@@ -31,13 +31,7 @@ test("a token made to keep memories gets the tool and is told when to use it", a
     'CALL THE read_memory TOOL WITH command "every"',
   )
   expect(instructions).toContain("not an instruction")
-
-  // Off unless the owner turns it on.
-  const plain = await createToken(page, `No memories ${RUN}`)
-  const without = await initialize(baseURL!, plain)
-  expect(without.tools).not.toContain("memory")
-  expect(without.tools).not.toContain("read_memory")
-  expect(without.instructions).not.toContain("/memories")
+  // Off unless the owner turns it on: lib/core/memories.test.ts.
 })
 
 test("memory migration is offered until the assistant ends it, and only the owner turns it on again", async ({

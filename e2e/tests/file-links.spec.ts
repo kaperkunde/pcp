@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test"
 
 import { callTool, initialize, toolText } from "../lib/mcp"
-import { connectAssistant, createToken } from "../lib/ui"
+import { connectAssistant } from "../lib/ui"
 
 // File links: a token the owner lets move files by link gets share_result
-// and receive_file and is told how (a token without it gets neither); a
+// and receive_file and is told how; a
 // file sent to a receive_file link with a plain PUT becomes a kept result
 // of the token's, and a share_result link downloads it again as a file,
 // with its name, a few times and then no more. What the browser does with
@@ -13,20 +13,15 @@ test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
 const TOKEN_NAME = `File mover ${RUN}`
-const PLAIN_TOKEN_NAME = `No file links ${RUN}`
 const NOTE = `A note sent by link, ${RUN}.`
 
 let token: string
 
-test("a token made to move files by link gets the tools, and no other", async ({
+test("a token made to move files by link gets the tools", async ({
   page,
   baseURL,
 }) => {
-  const plain = await createToken(page, PLAIN_TOKEN_NAME)
-  const without = await initialize(baseURL!, plain)
-  expect(without.tools).not.toContain("share_result")
-  expect(without.tools).not.toContain("receive_file")
-
+  // A token without the switch gets neither: lib/core/file-links.test.ts.
   ;({ token } = await connectAssistant(page, TOKEN_NAME, { shareFiles: true }))
   await expect(
     page.getByRole("switch", { name: /^Move files by link/ }),
