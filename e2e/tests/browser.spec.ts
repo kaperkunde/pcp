@@ -142,8 +142,11 @@ test("the first page at a site asks the owner, and the assistant then reads and 
   await expect(page.getByText(`Open ${host} in the browser?`)).toBeVisible()
   await expect(page.getByText(/keeps your sign-ins/)).toBeVisible()
   await page.getByRole("button", { name: "Always allow this site" }).click()
+  // The answer starts Chromium for the first time in the run: a few seconds
+  // when its files are cached, more than ten on a machine that just started.
   await expect(page.getByTestId("permission-outcome")).toContainText(
     'textbox "Name"',
+    { timeout: 30_000 },
   )
 
   // The answer the owner allowed names the new tab first.
