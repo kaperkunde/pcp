@@ -118,7 +118,9 @@ export default async function TokenPage({
                   ? "Review the skill"
                   : request.kind === "repo_change"
                     ? "Review the change"
-                    : null,
+                    : request.kind === "repo_share"
+                      ? "Review the push"
+                      : null,
             title: request.title,
             lines: request.lines,
             full: request.full,

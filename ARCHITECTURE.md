@@ -331,7 +331,10 @@ applies the edits, refuses one that cannot be used, and shows the owner the
 address, where the schema came from, how many edits it has, the tool count
 and operations, whether the tools can change things, and the secret that
 would be sent. Nothing exists until they agree; then `executeRegister` creates the
-endpoint, on, and adds it to the token's scope.
+endpoint, on, and adds it to the token's scope. With `definition` it is
+another server of a definition the token sees, whose schema it takes
+(Definitions and instances, below); `note` proposes the owner's note on
+what it adds.
 
 With OAuth the owner is also shown where they will sign in, where the client
 secret goes and the redirect URI their client needs; the token goes to the
@@ -545,12 +548,50 @@ limited to public addresses: one shared with an endpoint of the owner's is
 the owner's, and a change to what they share is an `endpoint_change`
 request that names every server it changes. A change to the shared content
 of an assistant's own endpoints, made switched off, switches every instance
-off. Clone, Detach, merging and the note have no gateway tool.
+off.
+
+**What an assistant may propose.** Merging stays the owner's alone. The rest
+an assistant may ask for, each a permission request (by link, with
+`check_permission`) that writes nothing until the owner agrees and then only
+what they were shown:
+
+- **Another server of a definition** (Clone): `register_server` with
+  `definition` (an MCP server or an endpoint) and `create_wrapper` with
+  `definition` (a wrapper), naming a server the token sees by its short name
+  (or its definition's). The request brings only the instance's own part (a
+  name; for a server its address, sign-in and read-only switch, under the
+  usual register rules: public addresses only, a secret by name typed in by
+  the owner); the description, schema, edits, a wrapper's program and the
+  tool descriptions are the definition's, and the register rules refuse
+  them alongside it. The owner sees which definition and its servers, the
+  tools as the definition's schema makes them (a wrapper's programs in
+  full) and the note. Nothing is copied onto the request but a fingerprint
+  of the definition (`definitions.ts definitionBasis`: description, schema
+  hash and edits, wrapper program, tool descriptions); the server is made on
+  the definition (`createEndpoint`/`createServer` with `definitionId`, the
+  wrapper's row pointed at it) only while that fingerprint holds. Unlike the
+  owner's Clone, no levels are copied: its tools ask first, as any new
+  server's.
+- **Detach**: `detach: true` on `update_endpoint` (an endpoint or an MCP
+  server the token sees) or `update_wrapper`, in a call of its own, as an
+  `endpoint_change` or `wrapper_change` request (action `detach`) that says
+  which servers it shares with and that nothing else changes; approved, it
+  is `detachServer`, only while the server and its definition are as asked.
+- **The owner's note**: `note` on `update_endpoint` (an endpoint or an MCP
+  server; nothing else of an MCP server is an assistant's to change) or
+  `update_wrapper`, in a call of its own, `note` on `register_server` and
+  `create_wrapper` for a new server, and for a skill the memory tool's
+  `/skills/<name>/.note` (create proposes one, delete proposes taking it
+  away; no file of a skill can have that name, and it is never in SKILL.md).
+  A change is a `note_change` request (`personal-notes.ts proposeNote`) that
+  shows the note before and after, whole, checked as the owner's own is; it
+  is written only over the note the owner had when asked.
 
 **The owner's note** (`personal-notes.ts`) is one line of at most 300
 characters, nothing in it that does not show on screen, encrypted under the
 DEK with `mcp_server:<id>` (a server) or `skill:<id>:note` (a skill) as
-associated data, and written only from the owner's pages. It is never in a
+associated data, and written only from the owner's pages or, as an
+assistant proposed it, once the owner read it whole and agreed. It is never in a
 repository document or anything else shared, and not part of a skill's
 SKILL.md. Assistants that see the server or skill read it as the owner's
 note, after the description: the instructions' server and skill lines
@@ -1154,7 +1195,7 @@ the GitHub client and sync itself build on it.
 - **The push's review** (`share-review.ts`, the page
   `settings/repositories/[id]/share`) is the one way an item of the vault
   goes to a repository: an item page's Share, Add and "Diff and push" on a
-  repository's page, and the review an assistant's proposal will open. It
+  repository's page, and an assistant's proposal (below). It
   shows every file in full and, for a change, its diff against the
   repository; what stays private (each instance's name, address and sign-in
   by secret name, the note, the levels, the secrets' values); and what in
@@ -1273,6 +1314,23 @@ items at once.
   owner the final files in full, against the vault's and the repository's,
   with every flag; allowing it applies those files, only if neither side
   moved since, and with two-way sync pushes them too.
+- **Assistants proposing a push** (`repos/assist-share.ts`), the same
+  tokens, through the memory tool under `/repos/share/`: `view` lists the
+  repositories PCP pushes to, and then the items of the vault the token sees
+  there (a skill it sees, a server whose definition has an instance it
+  sees), each Pushed, Changed, Not pushed or Excluded; `create
+/repos/share/<owner>/<name>/<item's path>`, with a line for the owner as
+  `file_text`, proposes adding that one item or pushing its changes. It is
+  refused before asking for a read-only repository, an item the token does
+  not see, or one the repository has the same (the push's review runs once,
+  read only), and is otherwise one `repo_share` request that writes and
+  pushes nothing. Its only answer on the permission page is Not now; it
+  links to the push's review with the request's id, and Confirm there
+  (`permissions.ts confirmProposedShare`) is `confirmShare` unchanged (every
+  file, the personal-data check, a public repository waiting on each hit,
+  exactly what was shown) with the token as the commit's proposer; then the
+  request is done and `check_permission` says what was pushed. A refused
+  Confirm leaves the request open. Never more than one item per request.
 
 ## Instructions for an assistant
 
@@ -1716,7 +1774,10 @@ checkSyntax`), nothing has a character that does not show on screen
   asked (`basis`: the definition's hash, name and description), else
   nothing. The request's row names no server, so deleting the wrapper keeps
   its outcome. A binding the owner approved keeps its secret through later
-  changes, even if the secret is renamed. Requests are limited to 20 per
+  changes, even if the secret is renamed. `create_wrapper` with `definition`
+  proposes another wrapper of one the token sees, and `update_wrapper`'s
+  `detach` and `note` ask for a definition of its own and the owner's note
+  (Definitions and instances, above). Requests are limited to 20 per
   token in ten minutes and a vault to 50 wrappers. The owner adds and edits
   wrappers directly on the Servers page (`saveWrapperByOwner`, the same
   checks, with secrets they hold).

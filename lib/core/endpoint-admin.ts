@@ -7,7 +7,14 @@ import type { SyncResult } from "./catalogue"
 import { MAX_SPEC_BYTES } from "./constants"
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import { disableOtherInstances, siblingInstances } from "./definition-rows"
+import {
+  contentInstance,
+  disableOtherInstances,
+  ensureDefinition,
+  siblingInstances,
+} from "./definition-rows"
+import { detachServer } from "./definitions"
+import { proposeNote, type NoteChangeAsk } from "./personal-notes"
 import {
   changeEndpoint,
   createEndpoint,
@@ -719,10 +726,76 @@ export async function prepareRegistration(
 }
 
 /**
+ * Another endpoint of a definition, as an assistant proposes it: what the
+ * owner is asked about, worked out from the schema and edits the
+ * definition holds now, with this endpoint's own address, read-only switch
+ * and credential. The schema is the definition's, so none is held on the
+ * request: the endpoint is made from the definition, only while it is what
+ * the owner was shown (`definitionBasis`).
+ */
+export async function prepareInstanceRegistration(
+  ctx: VaultContext,
+  definitionId: string,
+  input: Pick<
+    RegistrationInput,
+    | "baseUrl"
+    | "readOnly"
+    | "authSecretId"
+    | "newSecretName"
+    | "authHeaderNames"
+    | "oauth"
+  >,
+): Promise<{ url: string; registration: EndpointRegistration }> {
+  const source = await contentInstance(definitionId)
+  const stored = source ? await storedSpec(source.id) : null
+
+  if (!source || source.kind !== "openapi" || !stored) {
+    throw invalid(
+      "That API endpoint has no schema to make another of. Register it with its OpenAPI document instead.",
+    )
+  }
+
+  if (!input.baseUrl?.trim()) {
+    throw invalid(
+      "Pass the base URL this endpoint's requests go to in url: each endpoint of a definition has an address of its own.",
+    )
+  }
+
+  await assertRoomForEndpoint(ctx)
+
+  const readOnly = input.readOnly === true
+  const preview = previewEndpoint(stored.text, {
+    readOnly,
+    ownerBaseUrl: validateBaseUrl(input.baseUrl),
+    hasSecret:
+      !input.oauth && Boolean(input.authSecretId || input.newSecretName),
+    authHeaderNames: input.authHeaderNames,
+    oauth: input.oauth ?? undefined,
+    patches: stored.patches,
+  })
+
+  return {
+    url: preview.baseUrl,
+    registration: {
+      // The definition's, read again when the endpoint is made.
+      spec: "",
+      specUrl: null,
+      patches: stored.patches,
+      readOnly,
+      preview: {
+        ...preview,
+        privateAddress: privateAddressNote(preview.baseUrl),
+      },
+    },
+  }
+}
+
+/**
  * Creates what the owner approved. The address is the one they were shown,
  * and an assistant's endpoint reaches public addresses only (the owner can
  * lift that on the endpoint's page); it starts on, because the owner just
- * said yes.
+ * said yes. With `definitionId` it is another endpoint of that definition,
+ * whose schema, edits and description it takes.
  */
 export async function createApprovedEndpoint(
   ctx: VaultContext,
@@ -742,6 +815,7 @@ export async function createApprovedEndpoint(
     oauthClientSecretId?: string | null
     oauthScope?: string | null
     endpoint: EndpointRegistration
+    definitionId?: string | null
   },
 ): Promise<{ id: string; sync: SyncResult }> {
   await assertRoomForEndpoint(ctx)
@@ -749,6 +823,9 @@ export async function createApprovedEndpoint(
   const { endpoint } = asked
 
   return createEndpoint(ctx, {
+    // The definition's schema, edits and description, when it has one;
+    // what follows is then not read.
+    definitionId: asked.definitionId ?? null,
     name: asked.name,
     description: asked.description,
     baseUrl: asked.url,
@@ -1002,6 +1079,12 @@ export type EndpointChangeAsk = {
   /** A new download of the schema URL, by its fingerprint: fetched again when allowed. */
   fetched?: { hash: string }
   toolDescriptions?: Record<string, string | null>
+  /**
+   * A definition of its own, and nothing else: an endpoint's or an MCP
+   * server's (definitions.ts detachServer). The definition it shares now; a
+   * change since refuses.
+   */
+  detach?: { definitionId: string }
   /** What the owner is shown, worked out when it was asked. */
   shown: { title: string; lines: string[]; warning: string | null }
 }
@@ -1264,6 +1347,95 @@ async function proposeChange(
 }
 
 /**
+ * An endpoint the token may read, or an MCP server it sees: what
+ * update_endpoint's note and detach are about. An MCP server has nothing
+ * else an assistant may change.
+ */
+async function findNoteTarget(
+  scope: EndpointScope,
+  slug: string,
+): Promise<McpServer> {
+  const row = await db().mcpServer.findUnique({
+    where: { vaultId_slug: { vaultId: scope.ctx.vaultId, slug } },
+  })
+
+  if (row?.kind === "mcp" && row.enabled && inScope(scope, row.id)) {
+    return row
+  }
+
+  return findEndpoint(scope, slug)
+}
+
+/**
+ * The owner's note on an endpoint or an MCP server, as an assistant
+ * proposes it (personal-notes.ts proposeNote): a note_change request,
+ * whatever the endpoint's owner, since the note is the owner's words.
+ */
+export async function proposeEndpointNote(
+  scope: EndpointScope,
+  slug: string,
+  note: string,
+): Promise<NoteChangeAsk> {
+  const server = await findNoteTarget(scope, slug)
+
+  return proposeNote(
+    scope.ctx,
+    {
+      kind: "server",
+      row: server,
+      name: server.name,
+      label: `${server.name} (${server.slug}, ${server.url})`,
+    },
+    note,
+    "update_endpoint",
+  )
+}
+
+/**
+ * A definition of its own for an endpoint or an MCP server that shares one
+ * with other servers, as an assistant asks for it: an endpoint_change
+ * request that says so and does nothing else, whoever's the endpoint is.
+ */
+export async function proposeEndpointDetach(
+  scope: EndpointScope,
+  slug: string,
+): Promise<EndpointChangeAsk> {
+  const server = await findNoteTarget(scope, slug)
+  const definitionId = await ensureDefinition(server.id)
+  const others = await siblingInstances(server.id)
+
+  if (!definitionId || others.length === 0) {
+    throw invalid(
+      `${slug} is the only server of its definition: there is nothing to detach it from.`,
+    )
+  }
+
+  const shares =
+    server.kind === "openapi"
+      ? "description, schema, edits and tool descriptions"
+      : "description and tool descriptions"
+
+  return {
+    serverId: server.id,
+    basis: basisOf(
+      server,
+      server.kind === "openapi" ? await storedSpec(server.id) : null,
+    ),
+    detach: { definitionId },
+    shown: {
+      title: `Detach ${server.name}?`,
+      lines: [
+        `${server.kind === "openapi" ? "Endpoint" : "Server"}: ${server.name} (${server.url})`,
+        `Shares its ${shares} with: ${others.map((other) => other.slug).join(", ")}`,
+        `It gets a definition of its own, a copy of what it has now. From then on a change to its ${shares} does not reach ${others.length === 1 ? "the other" : "the others"}, and theirs does not reach it`,
+        "Nothing else changes: its address, sign-in, levels and note stay as they are",
+      ],
+      warning: null,
+    },
+  }
+}
+
+/**
  * Makes a change the owner agreed to: exactly what they were shown, to the
  * endpoint as it was then. It stays on, since the owner just said yes.
  */
@@ -1272,7 +1444,12 @@ export async function applyEndpointChange(
   ask: EndpointChangeAsk,
 ): Promise<string> {
   const server = await db().mcpServer.findFirst({
-    where: { id: ask.serverId, vaultId: ctx.vaultId, kind: "openapi" },
+    where: {
+      id: ask.serverId,
+      vaultId: ctx.vaultId,
+      // An MCP server only to detach it.
+      kind: ask.detach ? { in: ["openapi", "mcp"] } : "openapi",
+    },
   })
 
   if (!server) {
@@ -1282,11 +1459,19 @@ export async function applyEndpointChange(
     )
   }
 
-  if (basisOf(server, await storedSpec(server.id)) !== ask.basis) {
+  if (
+    basisOf(server, await storedSpec(server.id)) !== ask.basis ||
+    (ask.detach && server.definitionId !== ask.detach.definitionId)
+  ) {
     throw new PcpError(
       "state",
       `${server.name} has changed since this was asked, so nothing changed. The assistant can ask again.`,
     )
+  }
+
+  if (ask.detach) {
+    await detachServer(ctx, server.id)
+    return `${server.name} (${server.slug}) has a definition of its own now: a change to it reaches no other server, and theirs does not reach it.`
   }
 
   let fetched: { text: string; url: string } | undefined

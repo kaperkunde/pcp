@@ -5,6 +5,7 @@ import { redirect } from "next/navigation"
 
 import { invalid } from "@/lib/core/errors"
 import { nextPendingRequest } from "@/lib/core/owner-queue"
+import { confirmProposedShare } from "@/lib/core/permissions"
 import { ITEM_DIRS, type ItemKind } from "@/lib/core/repos/layout"
 import {
   confirmShare,
@@ -308,22 +309,40 @@ export async function confirmShareAction(
   const ctx = await requireContext()
   const repoId = field(formData, "repoId")
   const items = fields(formData, "item")
-  const result = await guarded(async () =>
-    confirmShare(ctx, repoId, itemOf(items[0] ?? ""), {
+  // An assistant's proposal: pushed as the review shows it, naming the
+  // token, and the request is answered.
+  const request = field(formData, "request")
+  const result = await guarded(async () => {
+    const options = {
       basis: field(formData, "basis"),
       acknowledged: fields(formData, "acknowledged"),
       publicUrl: await publicUrlFor(ctx),
-    }),
-  )
+    }
+    const item = itemOf(items[0] ?? "")
+
+    return request
+      ? confirmProposedShare(ctx, request, { repoId, item, ...options })
+      : confirmShare(ctx, repoId, item, options)
+  })
 
   revalidate()
 
   if (result.status === "error" && result.error === REVIEW_CHANGED) {
-    redirect(shareHref(repoId, items, { changed: "1" }))
+    redirect(
+      shareHref(repoId, items, {
+        changed: "1",
+        ...(request ? { request } : {}),
+      }),
+    )
   }
 
   if (result.status !== "ok") {
     return result
+  }
+
+  if (request) {
+    revalidatePath("/", "layout")
+    redirect(`/permissions/${encodeURIComponent(request)}`)
   }
 
   const rest = items.slice(1)
@@ -377,8 +396,12 @@ export async function shareFixAction(
     return result
   }
 
+  const request = field(formData, "request")
+
   revalidatePath("/", "layout")
-  redirect(shareHref(repoId, items, { fixed: "1" }))
+  redirect(
+    shareHref(repoId, items, { fixed: "1", ...(request ? { request } : {}) }),
+  )
 }
 
 /** Keeps an item out of a repository on purpose, or takes it back in. */

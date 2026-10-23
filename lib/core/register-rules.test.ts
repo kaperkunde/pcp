@@ -321,3 +321,72 @@ describe("a calendar account", () => {
     ).toMatch(/mail_from is for kind jmap or imap/)
   })
 })
+
+describe("another server of a definition (definition)", () => {
+  const bound = { definition: "coolify-gaaf", url: "https://plek.example/v1" }
+
+  it("takes its kind from the definition when none is named", () => {
+    expect(resolveKind({}, "openapi")).toBe("api")
+    expect(resolveKind({}, "mcp")).toBe("mcp")
+    expect(resolveKind({ kind: "mcp" }, "openapi")).toBe("mcp")
+  })
+
+  it("takes the instance's own part: an address, a sign-in, read-only", () => {
+    expect(checkRegisterShape("api", bound)).toBeNull()
+    expect(
+      checkRegisterShape("api", {
+        ...bound,
+        read_only: true,
+        auth_type: "header",
+        secret: "Plek key",
+      }),
+    ).toBeNull()
+    expect(
+      checkRegisterShape("api", {
+        ...bound,
+        auth_type: "basic",
+        username: "ada",
+        secret: "Plek password",
+      }),
+    ).toBeNull()
+    expect(
+      checkRegisterShape("mcp", {
+        definition: "linear",
+        url: "https://mcp.linear.example/mcp",
+        auth_type: "oauth",
+      }),
+    ).toBeNull()
+  })
+
+  it("brings none of what the definition is: no schema, edits or description", () => {
+    for (const extra of [
+      { openapi_schema: "{}" },
+      { openapi_url: "https://example.com/o.json" },
+      { spec_patches: [] },
+    ]) {
+      expect(checkRegisterShape("api", { ...bound, ...extra })).toMatch(
+        /the schema and its edits are the definition's/,
+      )
+    }
+    expect(
+      checkRegisterShape("api", { ...bound, description: "Mine." }),
+    ).toMatch(/the description is the definition's/)
+  })
+
+  it("needs an address of its own, and is not for a mail or calendar account", () => {
+    expect(checkRegisterShape("api", { definition: "coolify-gaaf" })).toMatch(
+      /pass the base URL .* in url/,
+    )
+    expect(checkRegisterShape("mcp", { definition: "linear" })).toMatch(
+      /pass this server's address in url/,
+    )
+    expect(
+      checkRegisterShape("jmap", {
+        ...bound,
+        auth_type: "basic",
+        username: "ada",
+        secret: "x",
+      }),
+    ).toMatch(/definition is for an MCP server or an API/)
+  })
+})

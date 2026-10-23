@@ -92,9 +92,16 @@ so in the summary; the bump itself waits for the request.
   `setToolDescription` or `writeWrapper`, so every instance gets it and
   rebuilds its tools; a server made on a definition takes its content, never
   its own. An endpoint shares the owner's rules with its siblings: it is the
-  assistant's only while every instance is. Clone, detach, merge and the
-  owner's note (`personal-notes.ts`: one line, at most 300 characters,
-  encrypted, never in a repository document) are the owner's alone.
+  assistant's only while every instance is. Merge is the owner's alone. An
+  assistant only proposes the rest, each a permission request that writes
+  nothing until the owner agrees: another server of a definition it sees
+  (`definition` on `register_server` and `create_wrapper`: the instance's
+  own part only, made on the definition while `definitionBasis` holds, no
+  levels copied), detach (`detach` on `update_endpoint`/`update_wrapper`)
+  and the owner's note (`personal-notes.ts`: one line, at most 300
+  characters, encrypted, never in a repository document; `note` there, or
+  `/skills/<name>/.note`, a `note_change` the owner reads whole, written
+  only over the note they had when asked).
 - Memories (`lib/core/memories.ts`): an assistant writes its own
   (`/memories/…`) without asking, but anything other assistants would read
   (`/memories/shared/…`: creating, sharing, changing, renaming, deleting) is a
@@ -155,8 +162,12 @@ so in the summary; the bump itself waits for the request.
   request's key: `runDueSyncs` runs only through `after()` from `/mcp` and
   the owner's pages; never a timer, a webhook or a stored key. An assistant
   (manage-endpoints only) helps through `search`, `describe` and
-  `/repos/<id>/` in the memory tool, as one `repo_change` request. A new
-  way in gets a test against `fake-github.ts`.
+  `/repos/<id>/` in the memory tool, as one `repo_change` request, and
+  proposes one item it sees for a push through `/repos/share/…`
+  (`repos/assist-share.ts`): a `repo_share` request whose only yes is
+  Confirm on the push's review (`confirmProposedShare`, which is
+  `confirmShare` unchanged). A new way in gets a test against
+  `fake-github.ts`.
 - Tool levels an assistant proposes for its token (`propose_tool_access`,
   `lib/core/access-requests.ts`) are written only by the owner's save on the
   request's page (`applyAccessRequest`), with what they chose there. No

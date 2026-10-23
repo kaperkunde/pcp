@@ -117,6 +117,8 @@ export type PermissionKind =
   | "wrapper_change"
   | "skill_change"
   | "repo_change"
+  | "repo_share"
+  | "note_change"
 
 /**
  * The HTTP methods web_fetch has a level for. Each is the default for a

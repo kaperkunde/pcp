@@ -13,6 +13,7 @@ import { Diff } from "@/components/skill-review"
 import { Badge } from "@/components/ui/badge"
 import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
 import { isPcpError } from "@/lib/core/errors"
+import { openShareRequest } from "@/lib/core/permissions"
 import type { ItemKind } from "@/lib/core/repos/layout"
 import { ITEM_DIRS } from "@/lib/core/repos/layout"
 import {
@@ -224,7 +225,25 @@ export default async function SharePage({
   }
 
   const repo = `${review.repo.owner}/${review.repo.name}`
-  const target = { repoId: id, items }
+  // An assistant's proposal this review answers, while it is open and about
+  // this item: Confirm then answers it, and the commit names the token.
+  const asked =
+    typeof query.request === "string"
+      ? await openShareRequest(ctx, query.request)
+      : null
+  const proposal =
+    asked &&
+    asked.repoId === id &&
+    first &&
+    asked.item.kind === first.kind &&
+    asked.item.id === first.id
+      ? asked
+      : null
+  const target = {
+    repoId: id,
+    items: proposal ? items.slice(0, 1) : items,
+    request: proposal?.id ?? null,
+  }
   const fileIndex = new Map(review.files.map((file, at) => [file.path, at]))
   const marks = new Map<
     string,
@@ -296,6 +315,29 @@ export default async function SharePage({
       {query.fixed ? (
         <p className="text-sm text-muted-foreground" role="status">
           Changed in your vault. Here is what would be pushed now.
+        </p>
+      ) : null}
+
+      {proposal ? (
+        <div
+          className="flex flex-col gap-1 rounded-xl bg-card p-4 text-sm ring-1 ring-separator"
+          role="note"
+          data-testid="share-proposal"
+        >
+          <strong>Proposed by the token “{proposal.tokenName}”</strong>
+          {proposal.message ? (
+            <span className="break-words whitespace-pre-wrap text-muted-foreground">
+              {proposal.message}
+            </span>
+          ) : null}
+          <span className="text-muted-foreground">
+            Confirm answers its request: the assistant hears what was pushed.
+          </span>
+        </div>
+      ) : typeof query.request === "string" ? (
+        <p className="text-sm text-muted-foreground" role="status">
+          The assistant&apos;s request for this is no longer open: a push from
+          here is your own.
         </p>
       ) : null}
 
