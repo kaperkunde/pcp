@@ -27,7 +27,7 @@ lib/core/            The domain. No Next.js, no React (ESLint enforces it)
   caldav/            Calendar accounts: calendars and reminders over CalDAV
   fetch/             web_fetch: the request, the page, which level applies
   code/              run_code: QuickJS, the bridge to the tools, the sandbox's socket
-  browser/           The headless Chromium: runtime and gate, proxy, profile, tools, install
+  browser/           The vault's Chromium: runtime and gate, proxy, profile, tools, install
   network/           Optional dynamic DNS and HTTPS: timers, Let's Encrypt, the edge listeners
   updates/           The daily check for a newer release, and what it found
   oauth-server/      PCP's own OAuth server, for assistants that sign in to /mcp

@@ -501,10 +501,15 @@ described further down:
 | `get_endpoint`    | **read and change API endpoints**                   | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.                                                                          |
 | `update_endpoint` | **read and change API endpoints**                   | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again; asks you for your note on it or an MCP server, or to detach one. |
 | `list_secrets`    | **read and change API endpoints**                   | Lists your secrets by name, with what uses each, so an assistant can name one when it proposes an endpoint; never a value.                                                                                  |
+| `get_wrapper`     | **propose wrappers**                                | Reads a wrapper's tools as you approved them: each one's program, schemas, the tools it calls, and where a secret goes in (by name).                                                                        |
+| `create_wrapper`  | **propose wrappers**                                | Proposes a wrapper, a server whose tools are short programs over your other tools, or another wrapper of one it sees (`definition`); you read every program first.                                          |
+| `update_wrapper`  | **propose wrappers**                                | Proposes a change to a wrapper, shown to you in full before and after; asks you for your note on it, or to detach one.                                                                                      |
+| `delete_wrapper`  | **propose wrappers**                                | Proposes deleting a wrapper.                                                                                                                                                                                |
 | `memory`          | **keep memories**                                   | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                                                                                                |
 | `read_memory`     | **keep memories**                                   | Reads those notes (`every`, `view`, `search`) and nothing else.                                                                                                                                             |
 | `web_fetch`       | **fetch web pages**                                 | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.                                                                               |
 | `run_code`        | **run code that calls its tools**                   | Runs a program that calls the token's tools and works on their answers inside PCP.                                                                                                                          |
+| `check_run`       | **run code that calls its tools**                   | Says how one of its runs went, by the run's id: still running, with its calls so far, or how it ended.                                                                                                      |
 | `share_result`    | **move files to and from its own computer by link** | A link the assistant's own computer downloads a file PCP keeps for it from with curl (a browser download, a mail attachment).                                                                               |
 | `receive_file`    | **move files to and from its own computer by link** | A link its own computer sends one file to with curl, and the handle the file is then kept under.                                                                                                            |
 
@@ -743,9 +748,10 @@ read it (`snapshot`, which names each element with a ref; `read_page`; `find`;
 `screenshot`), act on it (`click`, `type`, `select_option`, `press_key`,
 `scroll`, `wait_for`, `handle_dialog`), move files (`upload_file`,
 `download`), `hand_over` a tab to you and ask you for a secret to type
-(`request_secret`). It is
-Chromium without a window on PCP's machine, with up to eight tabs, started with
-the first page and closed after an hour idle (**Settings → Resources** sets
+(`request_secret`). It is Chromium on PCP's machine, kept out of sight (on a
+virtual display in the Docker image, in a window off the screen in the desktop
+app), with up to eight tabs, started with the first page and closed after an
+hour idle (**Settings → Resources** sets
 how long; a tab you watch or one handed over to you keeps it open). The Docker
 image includes it; elsewhere (the desktop app, a checkout), **Install
 Chromium** on the Browser page downloads it, about 200 MB, into PCP's data folder; outside the app,
