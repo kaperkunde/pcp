@@ -34,7 +34,7 @@ import {
  *
  * The addresses are GitHub's. A development server or a test points them
  * at a fake with PCP_GITHUB_API_URL and PCP_GITHUB_URL, which a production
- * build never reads.
+ * build never reads (fakeGitHubAllowed).
  */
 
 export type GitHubCredential = {
@@ -64,9 +64,22 @@ export type RepoCoords = { owner: string; name: string }
 
 export const USER_AGENT = `PCP/${PCP_VERSION}`
 
-/** GitHub's addresses, or a fake's outside a production build. */
+/**
+ * Whether PCP may be pointed at a fake GitHub: outside a production build,
+ * or in one made for the e2e suite. PCP_TEST_BUILD is read when the build
+ * is made, not when it runs: next.config.ts writes its value into the
+ * build, so a release (built without it) never reads the fake's addresses,
+ * whatever its environment says.
+ */
+export function fakeGitHubAllowed(): boolean {
+  return (
+    process.env.NODE_ENV !== "production" || process.env.PCP_TEST_BUILD === "1"
+  )
+}
+
+/** GitHub's addresses, or a fake's where that is allowed. */
 export function githubEndpoints(): GitHubEndpoints {
-  if (process.env.NODE_ENV !== "production") {
+  if (fakeGitHubAllowed()) {
     const api = process.env.PCP_GITHUB_API_URL?.trim()
 
     if (api) {

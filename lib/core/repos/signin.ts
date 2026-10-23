@@ -3,6 +3,7 @@ import { PcpError } from "../errors"
 import { writeManagedSecret } from "../secrets"
 
 import {
+  fakeGitHubAllowed,
   githubEndpoints,
   pollDeviceFlow,
   startDeviceFlow,
@@ -39,7 +40,7 @@ const flows = new Map<string, Flow>()
 
 /** The client id PCP signs in with; empty while the app is not registered. */
 export function githubClientId(): string {
-  if (process.env.NODE_ENV !== "production") {
+  if (fakeGitHubAllowed()) {
     const fake = process.env.PCP_GITHUB_CLIENT_ID?.trim()
 
     if (fake) {

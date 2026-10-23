@@ -48,6 +48,11 @@ const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: path.join(__dirname),
   poweredByHeader: false,
+  // A build for the e2e suite (PCP_TEST_BUILD=1 pnpm build) may be pointed
+  // at the fake GitHub (lib/core/repos/github.ts fakeGitHubAllowed). The
+  // value is written into the build here, so a release, built without it,
+  // ignores the variable when it runs.
+  env: { PCP_TEST_BUILD: process.env.PCP_TEST_BUILD === "1" ? "1" : "" },
   // Required at runtime, not bundled: better-sqlite3 is a native module;
   // acme-client (HTTPS, lib/core/network/tls.ts) brings axios and
   // node-forge, which are happier required than bundled; the mail libraries

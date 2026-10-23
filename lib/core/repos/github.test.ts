@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -81,6 +81,24 @@ describe("names", () => {
       ;(process.env as Record<string, string | undefined>).NODE_ENV = before.env
       if (before.api === undefined) delete process.env.PCP_GITHUB_API_URL
       else process.env.PCP_GITHUB_API_URL = before.api
+    }
+  })
+})
+
+describe("a build for the e2e suite", () => {
+  it("may be pointed at a fake GitHub, which next.config.ts writes into that build alone", () => {
+    vi.stubEnv("NODE_ENV", "production")
+    vi.stubEnv("PCP_TEST_BUILD", "1")
+    vi.stubEnv("PCP_GITHUB_API_URL", "http://127.0.0.1:1/")
+
+    try {
+      expect(githubEndpoints()).toEqual({
+        api: "http://127.0.0.1:1",
+        web: "http://127.0.0.1:1",
+        publicOnly: false,
+      })
+    } finally {
+      vi.unstubAllEnvs()
     }
   })
 })

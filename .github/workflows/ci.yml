@@ -89,6 +89,9 @@ jobs:
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
       - name: Run the suite
+        # Builds the app for the suite (PCP_TEST_BUILD=1, so it may be
+        # pointed at the fake GitHub; the checks job builds the release
+        # one), then serves it as the image does (e2e/scripts/serve.mjs).
         run: pnpm test:e2e
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
