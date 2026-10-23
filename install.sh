@@ -426,7 +426,9 @@ user_installs() {
     case "$uid" in
       '' | *[!0-9]*) continue ;;
     esac
-    [ "$uid" -ge 1000 ] && [ -n "$home" ] || continue
+    if [ "$uid" -lt 1000 ] || [ -z "$home" ]; then
+      continue
+    fi
     if [ -f "$home/.config/containers/systemd/$CONTAINER.container" ]; then
       printf '%s %s\n' "$name" "$uid"
     fi
@@ -476,6 +478,7 @@ check_user_installs() {
   say "PCP is installed for the user $USER_NAME, under rootless Podman. Updating that install, as $USER_NAME; it takes a minute or two. To follow it:" "" \
     "  journalctl _SYSTEMD_USER_UNIT=$unit.service -f" ""
   set --
+  given=
   for setting in PCP_PORT PCP_HTTPS PCP_RUNTIME PCP_DATA_VOLUME PCP_AUTO_UPDATE \
     PCP_UPDATE_BUTTON PCP_CHANNEL PCP_GPU PCP_VERSION PCP_IMAGE TZ LANG; do
     eval "given=\${$setting+set}"
