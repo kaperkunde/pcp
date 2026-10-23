@@ -185,7 +185,10 @@ update PCP by itself once a day. The top of [`install.sh`](install.sh) lists its
 more); it remembers
 them in `~/.config/pcp/install.conf` (`/etc/pcp/install.conf` as root), so a
 later run keeps them. The installer also passes the host's `TZ` and `LANG`
-into the container, which the browser takes as its time zone and locale.
+into the container, which the browser takes as its time zone and locale, and
+the graphics card's render node (`/dev/dri`) where the host has one, so the
+browser draws with an AMD or Intel card rather than in software
+([self-hosting guide](docs/self-hosting.md#the-browser-and-the-graphics-card)).
 `… | sh -s -- uninstall` removes PCP and keeps your data.
 
 From a checkout, `docker compose` does the same with the file in it:

@@ -459,3 +459,42 @@ that is not a plain name is left out. To set them yourself, put them before
 `sh` like the other settings (`TZ=Europe/Berlin LANG=de_DE.UTF-8`). With
 Docker Compose or a platform of your own, set `TZ` and `LANG` there; the
 commented `environment:` block in `docker-compose.yaml` shows how.
+
+## The browser and the graphics card
+
+PCP's browser draws pages with this computer's graphics card when the
+container has the card's render node, and in software otherwise. Software
+drawing is one of the things sites' bot checks look at: the WebGL renderer a
+page reads then names SwiftShader, which few people's browsers do. The image
+has Mesa's drivers for AMD and Intel cards; PCP uses the card when
+`/dev/dri/renderD128` (or another `renderD` node) is there in the container
+and its user may open it, and says in its log which way the browser draws
+("draws with the GPU" or "draws in software").
+
+The installer passes `/dev/dri` in by itself where the host has a render
+node, and looks again on every run; `PCP_GPU=0` leaves it out (remembered
+like the other settings), since Chromium runs without its own sandbox in the
+container and the card's kernel driver is then within reach of a page that
+broke out of it (SECURITY.md). PCP runs as a user of its own in the
+container, so it also needs the node's group when the node is not open to
+everyone. Many systems open it to everyone (`crw-rw-rw-` in `ls -l
+/dev/dri`, as Fedora does); others only to the `render` group
+(`crw-rw----`):
+
+- With Docker, or Podman as root, the installer adds the group by its number.
+- With Podman without root, it adds `keep-groups`, which hands the container
+  your own groups. That helps when you are in the node's group (`id -nG`
+  lists `render`) and Podman runs containers with crun (the default on
+  Fedora and Debian). When you are not in it, the installer says what to run
+  (`sudo usermod -aG render` and your user name), after which you restart
+  the computer and run the installer again. Its Quadlet unit takes the group
+  from Podman 5.1 on.
+- Docker without root cannot hand a container that group; the installer says
+  so, and the browser draws in software unless the node is open to everyone.
+
+With Docker Compose, uncomment `devices:` (and `group_add:` with the number
+`stat -c %g /dev/dri/renderD128` prints, when the node is not open to
+everyone) in `docker-compose.yaml`. To check: `ls -l /dev/dri` on the
+computer, and `docker inspect pcp` (or `podman inspect pcp`) lists
+`/dev/dri` under its devices. NVIDIA cards are not supported yet: Mesa has no
+driver for them in the image, and the browser draws in software as before.

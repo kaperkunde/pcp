@@ -14,6 +14,7 @@ import {
   displaySwitches,
   wantsVirtualDisplay,
   type Environment,
+  type Renderer,
   type VirtualDisplay,
 } from "./display"
 import {
@@ -70,10 +71,16 @@ export function wantedMode(
  * --disable-renderer-backgrounding and --disable-background-timer-throttling.
  * PCP adds none of those again; launch.test.ts checks they are there.
  */
-export function launchArgs(mode: BrowserMode): string[] {
+export function launchArgs(
+  mode: BrowserMode,
+  renderer: Renderer = "software",
+): string[] {
   return [
     "--disable-blink-features=AutomationControlled",
-    ...(mode === "virtual" ? displaySwitches() : []),
+    // The renderer is the virtual display's alone. With a window of its own
+    // (the desktop app) Chromium draws with the machine's graphics card by
+    // itself, and headless as Chromium decides.
+    ...(mode === "virtual" ? displaySwitches(renderer) : []),
     ...(mode === "window" ? windowSwitches() : []),
     // Two of Playwright's own switches that patchright-core leaves out and
     // PCP relies on: a page's script may open a window without a click
@@ -119,6 +126,7 @@ export function launchOptions({
   sandbox,
   scratchDir,
   display,
+  renderer = "software",
   env = process.env,
 }: {
   mode: BrowserMode
@@ -127,6 +135,8 @@ export function launchOptions({
   scratchDir: string
   /** The virtual display, in "virtual" mode. */
   display: VirtualDisplay | null
+  /** How Chromium draws on the virtual display (displayRenderer). */
+  renderer?: Renderer
   env?: Environment
 }): LaunchOptions {
   return {
@@ -144,7 +154,7 @@ export function launchOptions({
     // What tells a page it is being driven: the automation switch and the
     // webdriver flag. The rest of Chromium is as it is.
     ignoreDefaultArgs: ["--enable-automation"],
-    args: launchArgs(mode),
+    args: launchArgs(mode, renderer),
   }
 }
 
