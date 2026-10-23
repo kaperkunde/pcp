@@ -1,7 +1,7 @@
 "use client"
 
 import { Plus } from "lucide-react"
-import { useActionState, useState } from "react"
+import { useActionState, useEffect, useRef, useState } from "react"
 
 import { FormError } from "@/components/form-status"
 import { SubmitButton } from "@/components/submit-button"
@@ -44,8 +44,17 @@ export function SecretAddDialog() {
 
 function AddSecretForm({ onSaved }: { onSaved: () => void }) {
   const [kind, setKind] = useState<"text" | "totp">("text")
+  // What was last sent: React resets a form's fields once its action
+  // returns, and a refused save would otherwise lose what the owner typed.
+  const [typed, setTyped] = useState<Record<string, string>>({})
   const [state, action] = useActionState<SecretActionResult, FormData>(
     async (previous, formData) => {
+      setTyped({
+        name: String(formData.get("name") ?? ""),
+        description: String(formData.get("description") ?? ""),
+        value: String(formData.get("value") ?? ""),
+        origins: String(formData.get("origins") ?? ""),
+      })
       const result = await createSecretAction(previous, formData)
 
       if (result.status === "ok") {
@@ -56,6 +65,15 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
     },
     { status: "idle" },
   )
+  const kindField = useRef<HTMLSelectElement>(null)
+
+  // The reset sets the select back to its first option on screen, while the
+  // kind chosen (and sent, below) stays: show it again.
+  useEffect(() => {
+    if (kindField.current) {
+      kindField.current.value = kind
+    }
+  }, [state, kind])
 
   return (
     <form action={action} className="flex flex-col gap-5">
@@ -72,6 +90,7 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
         <Input
           id="secret-name"
           name="name"
+          defaultValue={typed.name}
           required
           maxLength={100}
           placeholder="GitHub token"
@@ -81,6 +100,7 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
         <Input
           id="secret-description"
           name="description"
+          defaultValue={typed.description}
           maxLength={500}
           placeholder="Personal access token, repo scope"
         />
@@ -96,7 +116,7 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
       >
         <Select
           id="secret-kind"
-          name="kind"
+          ref={kindField}
           value={kind}
           onChange={(event) =>
             setKind(event.target.value === "totp" ? "totp" : "text")
@@ -105,6 +125,9 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
           <option value="text">A value (a key, a token, a password)</option>
           <option value="totp">One-time codes (TOTP)</option>
         </Select>
+        {/* Sent from here, not the select: the form's reset after a refused
+            save sets a select back to its first option. */}
+        <input type="hidden" name="kind" value={kind} />
       </Field>
       <Field
         label={kind === "totp" ? "Seed" : "Value"}
@@ -118,6 +141,7 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
         <Textarea
           id="secret-value"
           name="value"
+          defaultValue={typed.value}
           required
           autoComplete="off"
           spellCheck={false}
@@ -132,6 +156,7 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
         <Textarea
           id="secret-origins"
           name="origins"
+          defaultValue={typed.origins}
           autoComplete="off"
           spellCheck={false}
           className="min-h-12 font-mono"

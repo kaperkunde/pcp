@@ -63,6 +63,9 @@ test("a one-time codes secret takes only a seed, shows its code of the moment, a
   await dialog.getByLabel("Seed").fill("not a seed!")
   await dialog.getByRole("button", { name: "Save secret" }).click()
   await expect(dialog.getByRole("alert")).toHaveText(/base32/)
+  // A refused save keeps what was typed and chosen.
+  await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name)
+  await expect(dialog.getByLabel("Kind")).toHaveValue("totp")
 
   // RFC 6238's seed, "12345678901234567890" in base32.
   await dialog.getByLabel("Seed").fill("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
