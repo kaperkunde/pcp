@@ -200,7 +200,7 @@ export async function openRequestFromBell(page: Page, title: RegExp | string) {
 
 /** What a request's page says once the owner answered the last one waiting. */
 export function allClear(page: Page) {
-  return page.getByText("Nothing else is waiting for you.")
+  return page.getByText("Nothing else is waiting for you.").first()
 }
 
 /**
@@ -251,7 +251,22 @@ export async function answerEverythingWaiting(page: Page) {
   })
 
   for (let step = 0; step < 100; step++) {
-    if (await allClear(page).isVisible()) {
+    // Wait for the page to settle on the next request or on the all-clear,
+    // and decide on what it showed: the all-clear can go for a moment while
+    // the queue is read again, so its absence alone says nothing.
+    let next: "clear" | "answer" | null = null
+    await expect
+      .poll(async () => {
+        next = (await allClear(page).isVisible())
+          ? "clear"
+          : (await no.first().isVisible())
+            ? "answer"
+            : null
+        return next
+      })
+      .not.toBeNull()
+
+    if (next === "clear") {
       return
     }
 
