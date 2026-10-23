@@ -26,7 +26,7 @@ pnpm format:check    # Prettier, reporting — what the hook and CI run
 pnpm typecheck       # tsc --noEmit
 pnpm build           # next build
 pnpm test            # unit tests (vitest; the browser's skip without Chromium)
-pnpm test:e2e        # Playwright against a fresh e2e database
+pnpm test:e2e        # Playwright: a production build, then a fresh e2e database
 shellcheck --shell=sh install.sh   # the install script, which the tests run
 ```
 
@@ -165,7 +165,16 @@ Two kinds, held to different bars:
   secrets, adding a server and calling it through the gateway, OAuth, API
   endpoints, mail accounts, calendar accounts, permission requests, memories, web fetch,
   run_code, the browser, updates, Touch ID, recovery, export and restore.
-  One project per spec; `e2e/README.md` has the mechanics.
+  One project per spec; `e2e/README.md` has the mechanics. The suite runs
+  against a production build (`pnpm test:e2e` builds it with
+  `PCP_TEST_BUILD=1`, then serves it as the image does), not the dev server:
+  pages arrive compiled and hydrate at once. Set `PCP_E2E_DEV=1` to run a
+  project against `pnpm dev` while you change the app.
+
+What each test file is kept for, and what was pruned, is in
+[docs/test-review.md](docs/test-review.md). A test earns its place by pinning
+a boundary from CLAUDE.md, a bug that happened, or logic with branches; e2e
+keeps one path per flow; and a test waits on state, never on time.
 
 A bug that regressed gets a test that fails before the fix and passes after
 (red, then green), whichever kind fits. That bar is low on purpose.
