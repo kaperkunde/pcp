@@ -315,8 +315,8 @@ so in the summary; the bump itself waits for the request.
   approved names that tool (by server id), argument and address: matched
   and written in `upstream.ts`, scrubbed from the answer, errors and status
   there, and refused in an assistant's own call. Into the browser it goes
-  only as `type`'s text (a binding for `browser/type` at `/text`, no
-  template), through the browser's own gate below.
+  only as `type`'s text (in a wrapper, a binding for `browser/type` at
+  `/text`, no template), through the browser's own gate below.
   An assistant's create, change and delete are a permission request
   (`wrapper_change`) that shows every program, schema, call, replaced tool
   and secret place in full and writes only that, to the wrapper as it was
@@ -343,7 +343,10 @@ so in the summary; the bump itself waits for the request.
   protocol with each event's own time (`input.ts`), never as page script.
   In the container image Chromium runs with windows on a virtual display PCP
   starts itself (`display.ts`: Xvfb, its own cookie, stopped with the last
-  browser); never in the desktop app, which starts no child process. A
+  browser), with the host's GPU when it has a render node PCP may use and
+  in software otherwise; never in the desktop app, which starts no child
+  process: there Chromium has a window of its own kept off the screen,
+  its pages opened in the background (`launch.ts`). A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
   a permission request (`browse`, `browser_handover`); a site is asked
   about only for the address in the call's arguments, so a call the owner
