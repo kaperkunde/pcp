@@ -88,6 +88,16 @@ jobs:
         run: pnpm db:generate
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
+      - name: Restore the build's cache
+        # Next keeps what it compiled in .next/cache, and the next build
+        # compiles again only what changed. Keyed on the dependencies and
+        # the app's code; an older cache of the same dependencies still helps.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .next/cache
+          key: next-e2e-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ hashFiles('app/**', 'components/**', 'lib/**', 'next.config.ts', 'tsconfig.json') }}
+          restore-keys: |
+            next-e2e-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
       - name: Run the suite
         # Builds the app for the suite (PCP_TEST_BUILD=1, so it may be
         # pointed at the fake GitHub; the checks job builds the release

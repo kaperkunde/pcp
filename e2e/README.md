@@ -29,6 +29,9 @@ the app, or set `PCP_E2E_DEV=1` to run against `pnpm dev` instead, which
 compiles each page on its first visit and is slower and less like what
 people run.
 
+CI runs `pnpm test:e2e` the same way, keeping Next's compiler cache
+(`.next/cache`) between runs so the build compiles again only what changed.
+
 Playwright starts the server itself unless one is already answering on
 :3000. A server you started yourself uses `./data`, not the e2e database,
 so the suite then runs against your own data — start it with
