@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import {
   CryptoError,
@@ -89,6 +89,18 @@ describe("key grants", () => {
       (async () =>
         unwrapDek(wrapped, await deriveKek(token, otherParams), "grant-3"))(),
     ).rejects.toThrow(CryptoError)
+  })
+
+  it("asks 64 MiB of scrypt for a password, which the suite lowers for its speed alone", async () => {
+    const actual = await vi.importActual<typeof import("./crypto")>("./crypto")
+    expect(actual.newScryptParams()).toMatchObject({
+      kdf: "scrypt",
+      N: 1 << 16,
+      r: 8,
+      p: 1,
+    })
+    // vitest.setup.ts: the smallest cost an export file may ask for.
+    expect(newScryptParams().N).toBe(1 << 14)
   })
 
   it("rejects malformed kdf parameters", () => {
