@@ -15,7 +15,7 @@ export async function addSecret(
   }: { name: string; value: string; description?: string },
 ) {
   await page.goto("/secrets")
-  await page.getByRole("button", { name: "Add a secret" }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add a secret" }))
   const dialog = page.getByRole("dialog", { name: "Add a secret" })
   await dialog.getByLabel("Name", { exact: true }).fill(name)
   if (description) {
@@ -194,7 +194,7 @@ export function bell(page: Page) {
 /** Opens the bell and follows the request whose title matches. */
 export async function openRequestFromBell(page: Page, title: RegExp | string) {
   await expect(bell(page)).toBeVisible()
-  await bell(page).click()
+  await clickHydrated(bell(page))
   await page.getByRole("menuitem", { name: title }).click()
 }
 
@@ -231,7 +231,7 @@ export async function answerEverythingWaiting(page: Page) {
     await review.first().click()
   } else if (await bell(page).isVisible()) {
     // Only a linked repository's change, if anything.
-    await bell(page).click()
+    await clickHydrated(bell(page))
     const change = page.getByRole("menuitem", {
       name: /^(Change to review|Conflict) in /,
     })
@@ -328,7 +328,9 @@ export async function startConnecting(
   options: TokenOptions = {},
 ) {
   await page.goto("/tokens")
-  await page.getByRole("button", { name: "Connect an assistant" }).click()
+  await clickHydrated(
+    page.getByRole("button", { name: "Connect an assistant" }),
+  )
   const sheet = page.getByRole("dialog")
   // A token to paste, as Claude Code takes it (a Claude app signs in at PCP
   // instead: oauth-server.spec.ts).
@@ -484,7 +486,7 @@ export async function showServerSettings(page: Page) {
  */
 export async function addServerFromMenu(page: Page, kind: string) {
   await page.goto("/servers")
-  await page.getByRole("button", { name: "Add", exact: true }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add", exact: true }))
   await page.getByRole("menuitem", { name: new RegExp(`^${kind}`) }).click()
 }
 

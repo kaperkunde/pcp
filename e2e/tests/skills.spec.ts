@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test"
 
 import { callTool, initialize, toolText } from "../lib/mcp"
-import { connectAssistant, permissionFrom } from "../lib/ui"
+import { connectAssistant, permissionFrom, clickHydrated } from "../lib/ui"
 
 // Skills: the owner writes one on the Skills page; an assistant is told
 // about it, finds it with search and reads it with describe; its change to
@@ -18,7 +18,7 @@ let token: string
 
 test("the owner writes a skill on the Skills page", async ({ page }) => {
   await page.goto("/skills")
-  await page.getByRole("button", { name: "Add a skill" }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add a skill" }))
   const dialog = page.getByRole("dialog", { name: "Add a skill" })
   await dialog.getByLabel("Name").fill(NAME)
   await dialog.getByLabel("When to use it").fill(DESCRIPTION)

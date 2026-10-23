@@ -25,6 +25,7 @@ import {
   proposedLevel,
   showServerSettings,
   showTools,
+  clickHydrated,
 } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
@@ -624,7 +625,7 @@ test("answering a request takes you to the next one waiting, oldest first, until
 
   // The bell lists them oldest first, and leads to the oldest.
   await page.goto("/servers")
-  await bell(page).click()
+  await clickHydrated(bell(page))
   await expect(ours()).toHaveCount(3)
   await expect(ours().nth(0)).toContainText(title("add_numbers"))
   await expect(ours().nth(1)).toContainText(title("echo_auth"))
@@ -646,7 +647,7 @@ test("answering a request takes you to the next one waiting, oldest first, until
   expect(callsOf("echo_auth")).toBe(echoes)
 
   // The bell no longer has the one answered.
-  await bell(page).click()
+  await clickHydrated(bell(page))
   await expect(ours()).toHaveCount(2)
   await page.keyboard.press("Escape")
 

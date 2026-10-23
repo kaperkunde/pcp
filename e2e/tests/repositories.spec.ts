@@ -50,7 +50,7 @@ test("the owner links a repository from Settings", async ({ page }) => {
     page.getByRole("heading", { name: "Repositories", exact: true }),
   ).toBeVisible()
 
-  await page.getByRole("button", { name: "Add a repository" }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add a repository" }))
   const dialog = page.getByRole("dialog", { name: "Add a repository" })
   await dialog
     .getByLabel("Repository", { exact: true })
@@ -164,7 +164,7 @@ test("pushes a skill of the owner's to a public repository, after its review", a
   await addSecret(page, { name: `GitHub ${RUN}`, value: PAT })
 
   await page.goto("/skills")
-  await page.getByRole("button", { name: "Add a skill" }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add a skill" }))
   const skill = page.getByRole("dialog", { name: "Add a skill" })
   await skill.getByLabel("Name").fill(OWN_SKILL)
   await skill
@@ -175,7 +175,7 @@ test("pushes a skill of the owner's to a public repository, after its review", a
   await expect(page.getByRole("heading", { name: OWN_SKILL })).toBeVisible()
 
   await page.goto("/settings/repositories")
-  await page.getByRole("button", { name: "Add a repository" }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add a repository" }))
   const dialog = page.getByRole("dialog", { name: "Add a repository" })
   await dialog
     .getByLabel("Repository", { exact: true })

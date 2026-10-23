@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test"
 
-import { acceptNextDialog, addSecret } from "../lib/ui"
+import { acceptNextDialog, addSecret, clickHydrated } from "../lib/ui"
 
 // The secret store from the owner's side: a value is hidden until the owner
 // asks for it, and the secret can be renamed, rotated and deleted.
@@ -27,7 +27,7 @@ test("a secret is hidden until revealed, refuses a duplicate name, and can be ro
   await expect(row.getByText("pk_live_hunter2")).toHaveCount(0)
 
   // A second secret under the same name is refused, and the sheet stays open.
-  await page.getByRole("button", { name: "Add a secret" }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add a secret" }))
   const dialog = page.getByRole("dialog", { name: "Add a secret" })
   await dialog.getByLabel("Name", { exact: true }).fill(NAME)
   await dialog.getByLabel("Value").fill("another")
@@ -56,7 +56,7 @@ test("a one-time codes secret takes only a seed, shows its code of the moment, a
 }) => {
   const name = `Shop codes ${RUN}`
   await page.goto("/secrets")
-  await page.getByRole("button", { name: "Add a secret" }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add a secret" }))
   const dialog = page.getByRole("dialog", { name: "Add a secret" })
   await dialog.getByLabel("Name", { exact: true }).fill(name)
   await dialog.getByLabel("Kind").selectOption("totp")
