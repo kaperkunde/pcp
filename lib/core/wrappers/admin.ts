@@ -8,11 +8,25 @@ import { newId } from "../ids"
 import { canonicalJson } from "../permission-rules"
 import { createSecretNamedAfter, findTextSecretByName } from "../secrets"
 import {
+  contentInstance,
+  definitionForNew,
   ensureDefinition,
   shareDescription,
   siblingInstances,
 } from "../definition-rows"
-import { deleteServer, slugify, uniqueSlug, WRAPPER_URL } from "../servers"
+import {
+  definitionBasis,
+  detachServer,
+  type BindableDefinition,
+} from "../definitions"
+import { checkPersonalNote, setPersonalNote } from "../personal-notes"
+import {
+  deleteServer,
+  normalizeNameAndDescription,
+  slugify,
+  uniqueSlug,
+  WRAPPER_URL,
+} from "../servers"
 
 import { syncWrapperTools } from "./catalogue"
 import {
@@ -91,7 +105,8 @@ export type WrapperShown = {
 }
 
 export type WrapperChangeAsk = {
-  action: "create" | "update" | "delete"
+  /** detach: the wrapper gets a definition of its own, and nothing else. */
+  action: "create" | "update" | "delete" | "detach"
   /** The wrapper changed or deleted; null for a new one. */
   serverId: string | null
   /** The wrapper as it was when the owner was asked; null for a new one. */
@@ -102,6 +117,16 @@ export type WrapperChangeAsk = {
   /** A secret PCP does not hold yet, which the owner types in. */
   newSecret: string | null
   shown: WrapperShown
+  /**
+   * create: another wrapper of this definition, made only while the
+   * definition is as the owner was shown it (definitions.ts
+   * definitionBasis).
+   */
+  instanceOf?: { definitionId: string; basis: string }
+  /** detach: the definition it shares now; a change since refuses. */
+  detachFrom?: { definitionId: string }
+  /** create: the owner's note it gets, which they read whole. */
+  note?: string | null
 }
 
 /** What get_wrapper and the owner's form read: other tools by short name. */
@@ -460,6 +485,126 @@ export async function proposeWrapper(
   }
 }
 
+/** A new wrapper's note, for the owner to read whole with the rest. */
+export function withWrapperNote(
+  ask: WrapperChangeAsk,
+  input: string | undefined,
+): WrapperChangeAsk {
+  const note = checkPersonalNote(input)
+
+  if (!note) {
+    return ask
+  }
+
+  return {
+    ...ask,
+    note,
+    shown: {
+      ...ask.shown,
+      lines: [
+        ...ask.shown.lines,
+        `Your note on it, which every assistant that sees it reads as yours:\n${note}`,
+      ],
+    },
+  }
+}
+
+/**
+ * The request for another wrapper of a definition the token sees: the
+ * definition's programs, calls, secret places and descriptions, shown in
+ * full as a new wrapper's are, under a name of its own. Nothing of it comes
+ * from the assistant but the name (and a note, withWrapperNote).
+ */
+export async function proposeWrapperInstance(
+  ctx: VaultContext,
+  bound: Pick<BindableDefinition, "id" | "name" | "basis" | "instances">,
+  input: { name: string },
+): Promise<WrapperChangeAsk> {
+  await assertRoomForWrapper(ctx)
+  const source = await contentInstance(bound.id)
+
+  if (!source || source.kind !== "wrapper") {
+    throw invalid("That wrapper has no program to make another of.")
+  }
+
+  const { server, definition } = await loadWrapper(ctx, { id: source.id })
+  const name = normalizeNameAndDescription({
+    name: input.name,
+    description: "",
+  }).name
+  const shown = await describe(ctx, {
+    action: "create",
+    name,
+    description: server.description,
+    before: null,
+    after: definition,
+    previousName: null,
+  })
+
+  return {
+    action: "create",
+    serverId: null,
+    basis: null,
+    name,
+    description: server.description,
+    definition,
+    newSecret: null,
+    instanceOf: { definitionId: bound.id, basis: bound.basis },
+    shown: {
+      ...shown,
+      title: `Add the wrapper ${name}, another of ${bound.name}?`,
+      lines: [
+        `Another wrapper of ${bound.name}, beside ${bound.instances.map((each) => each.slug).join(", ")}: it shares their programs, calls, secret places and tool descriptions, so a change to those changes every one of them`,
+        "Its tools ask you first, for every token, as a new server's do",
+        ...shown.lines,
+      ],
+    },
+  }
+}
+
+/**
+ * The request to give a wrapper a definition of its own: a copy of what it
+ * shares now, so that a change to it no longer reaches the others, or
+ * theirs it. Nothing else of it changes.
+ */
+export async function proposeWrapperDetach(
+  ctx: VaultContext,
+  slug: string,
+): Promise<WrapperChangeAsk> {
+  const { server, spec, definition } = await loadWrapper(ctx, { slug })
+  const others = await siblingInstances(server.id)
+
+  if (!server.definitionId || others.length === 0) {
+    throw invalid(
+      `${slug} is the only wrapper of its definition: there is nothing to detach it from.`,
+    )
+  }
+
+  return {
+    action: "detach",
+    serverId: server.id,
+    basis: basisOf(server, spec.hash),
+    name: server.name,
+    description: server.description,
+    definition: null,
+    newSecret: null,
+    detachFrom: { definitionId: server.definitionId },
+    shown: {
+      title: `Detach the wrapper ${server.name}?`,
+      lines: [
+        `Wrapper: ${server.name} (${server.slug})`,
+        `Shares its definition with: ${others.map((other) => other.slug).join(", ")}`,
+        `It gets a definition of its own, a copy of the programs, calls, secret places and descriptions it has now. From then on a change to it does not reach ${others.length === 1 ? "the other" : "the others"}, and theirs does not reach it`,
+        "Nothing else changes: its tools, levels and note stay as they are",
+      ],
+      warning: null,
+      callLevels: definition.callLevels ?? "token",
+      tools: [],
+      secrets: [],
+    },
+  }
+}
+
 /** What update_wrapper takes: only what changes. */
 export type WrapperChanges = {
   name?: string
@@ -678,6 +823,19 @@ export async function applyWrapperChange(
 ): Promise<string> {
   if (ask.action === "create") {
     await assertRoomForWrapper(ctx)
+
+    // Another wrapper of a definition: as the owner was shown it, or not.
+    if (
+      ask.instanceOf &&
+      (await definitionBasis(ask.instanceOf.definitionId)) !==
+        ask.instanceOf.basis
+    ) {
+      throw new PcpError(
+        "state",
+        "The wrapper this would be another of has changed since this was asked (or is gone), so nothing was added. Ask again.",
+      )
+    }
+
     const definition = await withSecretIds(ctx, ask.definition!, {
       newSecret: ask.newSecret,
       secretValue,
@@ -689,7 +847,13 @@ export async function applyWrapperChange(
       ask.name,
       ask.description,
       definition,
+      ask.instanceOf?.definitionId ?? null,
     )
+
+    if (ask.note) {
+      await setPersonalNote(ctx, "server", id, ask.note)
+    }
+
     const token = await db().apiToken.findUnique({
       where: { id: tokenId },
       select: { allowAllServers: true },
@@ -722,6 +886,18 @@ export async function applyWrapperChange(
     return `The wrapper ${server.name} was deleted.`
   }
 
+  if (ask.action === "detach") {
+    if (server.definitionId !== ask.detachFrom?.definitionId) {
+      throw new PcpError(
+        "state",
+        `${server.name} has changed since this was asked, so nothing changed. Ask again.`,
+      )
+    }
+
+    await detachServer(ctx, server.id)
+    return `The wrapper ${server.name} (${server.slug}) has a definition of its own now: a change to it reaches no other wrapper.`
+  }
+
   const definition = await withSecretIds(ctx, ask.definition!, {
     newSecret: ask.newSecret,
     secretValue,
@@ -738,8 +914,13 @@ async function createWrapperRow(
   name: string,
   description: string,
   definition: WrapperDefinition,
+  /** Another wrapper of this definition, whose description it takes. */
+  definitionId: string | null = null,
 ): Promise<string> {
   const id = newId()
+  const shared = definitionId
+    ? await definitionForNew(ctx, definitionId, "wrapper")
+    : null
 
   await db().$transaction([
     db().mcpServer.create({
@@ -749,9 +930,10 @@ async function createWrapperRow(
         kind: "wrapper",
         name,
         slug: await uniqueSlug(ctx.vaultId, slugify(name)),
-        description,
+        description: shared?.description ?? description,
         url: WRAPPER_URL,
         authType: "none",
+        definitionId: shared?.id ?? null,
       },
     }),
     db().wrapperSpec.create({

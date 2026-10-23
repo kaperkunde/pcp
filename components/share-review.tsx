@@ -39,6 +39,8 @@ type Target = {
   repoId: string
   /** "kind:id", the item under review first, then the ones waiting. */
   items: string[]
+  /** An assistant's proposal this review answers (a repo_share request). */
+  request?: string | null
 }
 
 function Hidden({ target }: { target: Target }) {
@@ -48,6 +50,9 @@ function Hidden({ target }: { target: Target }) {
       {target.items.map((item) => (
         <input key={item} type="hidden" name="item" value={item} />
       ))}
+      {target.request ? (
+        <input type="hidden" name="request" value={target.request} />
+      ) : null}
     </>
   )
 }

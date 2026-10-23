@@ -281,6 +281,16 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Apply the change",
     decline: "Not now",
   },
+  // An item of the vault an assistant proposed to push: confirmed on the
+  // push's review (confirmProposedShare), never by a decision here.
+  repo_share: {
+    decline: "Not now",
+  },
+  // The owner's note on a server or a skill, as an assistant proposed it.
+  note_change: {
+    allow_once: "Save the note",
+    decline: "Not now",
+  },
   // A site's answer, not the method's: the owner decides where it goes.
   fetch: {
     allow_once: "Allow once",

@@ -337,6 +337,7 @@ export async function runRepoCommand(
                 `  ${REPO_ROOT}/${entry.ref.slice(REPO_REF.length)} — ${entry.title}`,
             )
           : ["  (none)"]),
+        `To propose adding an item of the vault to a repository, or pushing its changes, view ${REPO_ROOT}/share.`,
       ].join("\n"),
     }
   }

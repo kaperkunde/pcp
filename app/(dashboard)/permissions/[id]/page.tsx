@@ -7,6 +7,7 @@ import {
   ListChecks,
   Server,
   SlidersHorizontal,
+  StickyNote,
   TriangleAlert,
 } from "lucide-react"
 import type { Metadata } from "next"
@@ -23,7 +24,7 @@ import { PermissionDecision } from "@/components/permission-decision"
 import { PermissionLines } from "@/components/permission-lines"
 import { PermissionOutcome } from "@/components/permission-outcome"
 import { RepoReview } from "@/components/repo-review"
-import { buttonVariants } from "@/components/ui/button"
+import { ButtonLink, buttonVariants } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { IconTile } from "@/components/ui/icon-tile"
 import { ShownInFull } from "@/components/shown-in-full"
@@ -231,6 +232,14 @@ export default async function PermissionPage({
         ) : pending ? (
           <>
             <PendingNote view={view} />
+            {view.shareHref ? (
+              // A push is agreed to on its review, after every file.
+              <div>
+                <ButtonLink href={view.shareHref} size="lg">
+                  Open the push&apos;s review
+                </ButtonLink>
+              </div>
+            ) : null}
             <PermissionDecision
               id={view.id}
               decisions={view.decisions}
@@ -303,7 +312,10 @@ function RequestTile({ view }: { view: PermissionView }) {
     case "skill_change":
       return <IconTile size="lg" icon={ListChecks} className={tile} />
     case "repo_change":
+    case "repo_share":
       return <IconTile size="lg" icon={FolderGit2} className={tile} />
+    case "note_change":
+      return <IconTile size="lg" icon={StickyNote} className={tile} />
     case "access":
       return <IconTile size="lg" icon={SlidersHorizontal} className={tile} />
     case "fetch":
@@ -420,6 +432,27 @@ function PendingNote({ view }: { view: PermissionView }) {
             Settings › Repositories
           </Link>
           .
+        </p>
+      )
+    case "repo_share":
+      return (
+        <p className={note}>
+          Nothing is pushed from here. The push&apos;s review shows every file
+          in full, what stays private and what looks personal; Confirm there
+          pushes exactly what it shows, as one commit that names the assistant.
+          Linked repositories are under{" "}
+          <Link href="/settings/repositories" className="underline">
+            Settings › Repositories
+          </Link>
+          .
+        </p>
+      )
+    case "note_change":
+      return (
+        <p className={note}>
+          Saving it writes the note exactly as shown above, and only if your
+          note did not change since the assistant asked. It is yours from then
+          on: you can change it on the item&apos;s page.
         </p>
       )
     case "memory_share":

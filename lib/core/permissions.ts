@@ -28,6 +28,15 @@ import type { PermissionDecision, PermissionKind } from "./constants"
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { definitionBasis } from "./definitions"
+import {
+  applyNoteChange,
+  setPersonalNote,
+  type NoteChangeAsk,
+} from "./personal-notes"
+import { shareReviewHref, type RepoShareAsk } from "./repos/assist-share"
+import type { ItemKind } from "./repos/layout"
+import { confirmShare, type ShareResult } from "./repos/share-review"
 import {
   applyEndpointChange,
   createApprovedEndpoint,
@@ -223,6 +232,21 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
    * address, for the owner. Missing on requests from before it was looked up.
    */
   privateAddress?: string | null
+  /**
+   * Another server of this definition (an MCP server's or an endpoint's):
+   * its description, schema, edits and tool descriptions are the
+   * definition's, and it is made only while the definition is as the owner
+   * was shown it (`basis`, definitions.ts definitionBasis).
+   */
+  definition?: {
+    id: string
+    name: string
+    basis: string
+    /** Its servers when asked, by short name. */
+    instances: string[]
+  }
+  /** The owner's note it gets, which they read whole. */
+  note?: string | null
 }
 
 export type PermissionAsk =
@@ -237,6 +261,8 @@ export type PermissionAsk =
   | { kind: "endpoint_change"; input: EndpointChangeAsk }
   | { kind: "wrapper_change"; input: WrapperChangeAsk }
   | { kind: "repo_change"; input: RepoChangeAsk }
+  | { kind: "repo_share"; input: RepoShareAsk }
+  | { kind: "note_change"; input: NoteChangeAsk }
   | MemoryAsk
   | SkillAsk
   | AccessAsk
@@ -304,6 +330,11 @@ export type PermissionView = {
   repo: RepoShown | null
   /** The browser tab a request is about, for the page to show it live. */
   browserTabId: string | null
+  /**
+   * A proposed push: its review's page, where the owner reads every file
+   * and confirms it (there is no other way to agree).
+   */
+  shareHref: string | null
   url: string
   createdAt: Date
   expiresAt: Date
@@ -655,6 +686,16 @@ function describeAsk(ask: PermissionAsk): {
         target: `repo:${ask.input.repoItemId}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "repo_share":
+      return {
+        target: `repo_share:${ask.input.repoId}\n${ask.input.item.kind}:${ask.input.item.id}`,
+        args: ask.input as Record<string, unknown>,
+      }
+    case "note_change":
+      return {
+        target: `note:${ask.input.target}:${ask.input.id}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "fetch":
       return {
         target: `fetch:${ask.input.method} ${ask.input.url}`,
@@ -698,7 +739,11 @@ function toolNameOf(ask: PermissionAsk): string {
     case "endpoint_change":
       return "update_endpoint"
     case "wrapper_change":
-      return `${ask.input.action}_wrapper`
+      return ask.input.action === "detach"
+        ? "update_wrapper"
+        : `${ask.input.action}_wrapper`
+    case "note_change":
+      return ask.input.via
     case "fetch":
       return "web_fetch"
     case "browse":
@@ -893,6 +938,23 @@ async function summarizeRow(
     return { ...asked, lines: [...asked.lines, asker], repo: input.shown }
   }
 
+  if (row.kind === "repo_share") {
+    const { shown } = args as RepoShareAsk
+
+    return {
+      title: shown.title,
+      lines: [...shown.lines, ...shown.ownerOnly, asker],
+      warning: shown.warning,
+      ownerOnly: shown.ownerOnly,
+    }
+  }
+
+  if (row.kind === "note_change") {
+    const { shown } = args as NoteChangeAsk
+
+    return { ...shown, lines: [...shown.lines, asker] }
+  }
+
   if (row.kind === "browse") {
     const asked = describeBrowseAsk(args as BrowseAsk, {
       privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
@@ -996,6 +1058,21 @@ async function summarizeRow(
       : input.calendar
         ? "this calendar server"
         : "this address"
+    // Another server of a definition: what it shares, and that its levels
+    // start afresh.
+    const bound = input.definition
+    const boundLines = bound
+      ? [
+          `Another server of ${bound.name}, beside ${bound.instances.join(", ") || "(none)"}: it shares their description${input.endpoint ? ", schema, edits" : ""} and tool descriptions, so a change to those changes every one of them`,
+          "Its tools ask you first, for every token, as a new server's do",
+        ]
+      : []
+    // The owner's words once they agree: shown whole.
+    const noteLines = input.note
+      ? [
+          `Your note on it, which every assistant that sees it reads as yours:\n${input.note}`,
+        ]
+      : []
     const warning =
       input.authType === "basic"
         ? `PCP will send the user name ${login} and the secret "${input.secretName ?? "?"}" to ${where} with every call. Only add it if you trust the address.`
@@ -1040,6 +1117,7 @@ async function summarizeRow(
             : "Can change things: its tools may send as you where the server allows it, move and flag mail, and delete into the Trash (never for good)",
           ...(mailFrom ? [`From address: ${mailFrom}`] : []),
           ...(input.description ? [`Description: ${input.description}`] : []),
+          ...noteLines,
           asker,
         ],
         warning,
@@ -1071,6 +1149,7 @@ async function summarizeRow(
             ? "Read-only: only the tools that read calendars and reminders"
             : "Can change things: its tools may add, change, move and delete events and reminders, and make calendars; they invite nobody",
           ...(input.description ? [`Description: ${input.description}`] : []),
+          ...noteLines,
           asker,
         ],
         warning,
@@ -1087,15 +1166,18 @@ async function summarizeRow(
         lines: [
           `Address: ${input.url}`,
           ...(preview.privateAddress ? [preview.privateAddress] : []),
-          specUrl
-            ? `Schema: downloaded from ${specUrl}; a later change to it waits for you`
-            : "Schema: supplied as text",
+          ...boundLines,
+          bound
+            ? "Schema: the one they share"
+            : specUrl
+              ? `Schema: downloaded from ${specUrl}; a later change to it waits for you`
+              : "Schema: supplied as text",
           ...(edits > 0
             ? [
                 `Edits: ${edits} change${edits === 1 ? "" : "s"} to the schema, applied before the tools are made`,
               ]
             : []),
-          `Tools: ${preview.toolCount} from the OpenAPI schema it supplied (${preview.methods})`,
+          `Tools: ${preview.toolCount} from the OpenAPI schema ${bound ? "they share" : "it supplied"} (${preview.methods})`,
           `Operations: ${preview.operations.join(", ")}${preview.more > 0 ? `, and ${preview.more} more` : ""}`,
           ...(preview.skipped ? [`Left out: ${preview.skipped}`] : []),
           readOnly
@@ -1105,6 +1187,7 @@ async function summarizeRow(
           ...reused,
           ...oauthLines.slice(1),
           ...(input.description ? [`Description: ${input.description}`] : []),
+          ...noteLines,
           asker,
         ],
         warning,
@@ -1121,10 +1204,12 @@ async function summarizeRow(
       lines: [
         `Address: ${input.url}`,
         ...(flagged ? [flagged] : []),
+        ...boundLines,
         auth,
         ...reused,
         ...oauthLines.slice(1),
         ...(input.description ? [`Description: ${input.description}`] : []),
+        ...noteLines,
         asker,
       ],
       warning,
@@ -1305,6 +1390,10 @@ async function toView(
     wrapper,
     repo,
     browserTabId: browserTabOf(ctx, row),
+    shareHref:
+      kind === "repo_share"
+        ? shareReviewHref(readArgs(ctx, row) as RepoShareAsk, row.id)
+        : null,
     url: permissionUrl(publicUrl, row.id),
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
@@ -1524,7 +1613,9 @@ export async function withPermission(
                 ask.kind === "secret_use" ||
                 ask.kind === "secret_request"
               ? ask.input.serverId
-              : null,
+              : ask.kind === "note_change" && ask.input.target === "server"
+                ? ask.input.id
+                : null,
         toolName: toolNameOf(ask),
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
@@ -1656,7 +1747,10 @@ export async function decidePermission(
 
   // A repository change is a manage-endpoints token's to propose; one that
   // lost that since asking gets nothing applied.
-  if (kind === "repo_change" && !row.token.manageEndpoints) {
+  if (
+    (kind === "repo_change" || kind === "repo_share") &&
+    !row.token.manageEndpoints
+  ) {
     return finishUnrun(
       ctx,
       row,
@@ -1713,6 +1807,12 @@ export async function decidePermission(
   // chose on the page; decisionsFor offers nothing else, and this keeps it so.
   if (kind === "access") {
     return text("Tool levels are saved on the request's page in PCP.", true)
+  }
+
+  // A proposed push is confirmed on its review (confirmProposedShare), where
+  // the owner reads every file; decisionsFor offers nothing else.
+  if (kind === "repo_share") {
+    return text("A push is confirmed on its review in PCP.", true)
   }
 
   // A secret PCP does not hold yet is typed in on PCP's page; a client's
@@ -1804,40 +1904,47 @@ export async function decidePermission(
                       readArgs(ctx, row) as RepoChangeAsk,
                     ),
                   )
-                : kind === "fetch"
-                  ? await executeFetch(ctx, row, publicUrl, executor)
-                  : kind === "browse"
-                    ? await executeBrowse(ctx, row, publicUrl, executor)
-                    : kind === "browser_handover"
-                      ? await executeHandover(ctx, row)
-                      : kind === "secret_use"
-                        ? await executeSecretUse(
-                            ctx,
-                            row,
-                            secretLevel(choice),
-                            publicUrl,
-                            executor,
-                          )
-                        : kind === "secret_request"
-                          ? text(
-                              await applySecretRequest(
-                                ctx,
-                                row.tokenId,
-                                readArgs(ctx, row) as SecretRequestAsk,
-                                {
-                                  value: secretValue,
-                                  origins,
-                                  level: secretLevel(choice),
-                                },
-                              ),
-                            )
-                          : await executeRegister(
+                : kind === "note_change"
+                  ? text(
+                      await applyNoteChange(
+                        ctx,
+                        readArgs(ctx, row) as NoteChangeAsk,
+                      ),
+                    )
+                  : kind === "fetch"
+                    ? await executeFetch(ctx, row, publicUrl, executor)
+                    : kind === "browse"
+                      ? await executeBrowse(ctx, row, publicUrl, executor)
+                      : kind === "browser_handover"
+                        ? await executeHandover(ctx, row)
+                        : kind === "secret_use"
+                          ? await executeSecretUse(
                               ctx,
                               row,
+                              secretLevel(choice),
                               publicUrl,
                               executor,
-                              secretValue,
                             )
+                          : kind === "secret_request"
+                            ? text(
+                                await applySecretRequest(
+                                  ctx,
+                                  row.tokenId,
+                                  readArgs(ctx, row) as SecretRequestAsk,
+                                  {
+                                    value: secretValue,
+                                    origins,
+                                    level: secretLevel(choice),
+                                  },
+                                ),
+                              )
+                            : await executeRegister(
+                                ctx,
+                                row,
+                                publicUrl,
+                                executor,
+                                secretValue,
+                              )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -2156,6 +2263,19 @@ async function executeRegister(
   secretValue?: string,
 ): Promise<CallToolResult> {
   const asked = readArgs(ctx, row) as RegisterArgs
+
+  // Another server of a definition shares what the owner was shown of it,
+  // or nothing is made.
+  if (
+    asked.definition &&
+    (await definitionBasis(asked.definition.id)) !== asked.definition.basis
+  ) {
+    throw new PcpError(
+      "state",
+      `${asked.definition.name} has changed since this was asked (or is gone), so nothing was added. The assistant can ask again.`,
+    )
+  }
+
   const secret = await secretForRegister(ctx, asked, secretValue)
   let created: { id: string; sync?: SyncResult }
 
@@ -2172,6 +2292,7 @@ async function executeRegister(
           authExtraHeaders: asked.authExtraHeaders,
           ...secretFields(asked, secret.id),
           endpoint: asked.endpoint,
+          definitionId: asked.definition?.id ?? null,
         })
       : asked.mail
         ? await createMailAccount(ctx, {
@@ -2208,6 +2329,7 @@ async function executeRegister(
               // The address is the assistant's: public ones only, until the
               // owner allows private addresses on the server's page.
               publicOnly: true,
+              definitionId: asked.definition?.id ?? null,
             })
   } catch (error) {
     // The secret was typed in for this server alone.
@@ -2219,6 +2341,12 @@ async function executeRegister(
   }
 
   const { id } = created
+
+  // The note the owner read, as their own.
+  if (asked.note) {
+    await setPersonalNote(ctx, "server", id, asked.note)
+  }
+
   const token = await db().apiToken.findUniqueOrThrow({
     where: { id: row.tokenId },
     select: { allowAllServers: true },
@@ -2700,6 +2828,121 @@ export async function getAccessProposal(
     tokenId: row.tokenId,
     ...(await accessReview(ctx, row.tokenId, levels)),
   }
+}
+
+/** A proposed push still waiting for the owner, for its review's page. */
+export type OpenShareRequest = {
+  id: string
+  tokenName: string
+  message: string
+  repoId: string
+  item: { kind: ItemKind; id: string }
+}
+
+/** The open repo_share request by its id, or null when there is none. */
+export async function openShareRequest(
+  ctx: VaultContext,
+  id: string,
+): Promise<OpenShareRequest | null> {
+  const row = await loadRow({ id, vaultId: ctx.vaultId })
+
+  if (!row || row.kind !== "repo_share" || !isOpen(row)) {
+    return null
+  }
+
+  const ask = readArgs(ctx, row) as RepoShareAsk
+
+  return {
+    id: row.id,
+    tokenName: row.token.name,
+    message: ask.message,
+    repoId: ask.repoId,
+    item: ask.item,
+  }
+}
+
+/**
+ * The owner's Confirm on the push's review of an assistant's proposal
+ * (repo_share): pushes what the review shows, as every push does
+ * (share-review.ts confirmShare: exactly what was shown, the personal-data
+ * check for a public repository), naming the token in the commit; then the
+ * request is done and the assistant hears what was pushed. A refusal (the
+ * review changed since it opened, a hit not fixed or ticked) leaves the
+ * request open. Only the signed-in owner's page calls this.
+ */
+export async function confirmProposedShare(
+  ctx: VaultContext,
+  id: string,
+  {
+    repoId,
+    item,
+    basis,
+    acknowledged,
+    publicUrl,
+  }: {
+    repoId: string
+    item: { kind: ItemKind; id: string }
+    basis: string
+    acknowledged: string[]
+    publicUrl: string
+  },
+): Promise<ShareResult> {
+  const row = await loadRow({ id, vaultId: ctx.vaultId })
+
+  if (!row || row.kind !== "repo_share") {
+    throw notFound("That request")
+  }
+
+  if (!isOpen(row)) {
+    throw new PcpError(
+      "state",
+      "This request is no longer open, so nothing was pushed.",
+    )
+  }
+
+  const ask = readArgs(ctx, row) as RepoShareAsk
+
+  if (
+    ask.repoId !== repoId ||
+    ask.item.kind !== item.kind ||
+    ask.item.id !== item.id
+  ) {
+    throw invalid("That is not the item this request is about.")
+  }
+
+  if (!tokenIsLive(row.token) || !row.token.manageEndpoints) {
+    const message =
+      "The token that asked is no longer valid, or may no longer manage endpoints, so nothing was pushed."
+    await finishUnrun(ctx, row, publicUrl, message)
+    throw new PcpError("state", message)
+  }
+
+  const result = await confirmShare(ctx, repoId, item, {
+    basis,
+    acknowledged,
+    publicUrl,
+    proposer: { by: "assistant", tokenName: row.token.name },
+  })
+  const claimed = await claim(row.id)
+
+  if (claimed.count === 1) {
+    const told = result.commit
+      ? `The owner reviewed it and pushed ${ask.root} to ${ask.repo}, as commit ${result.commit.slice(0, 12)}.`
+      : `The owner reviewed it; ${ask.root} in ${ask.repo} was the same already, so nothing new was pushed.`
+
+    await db().permissionRequest.update({
+      where: { id: row.id },
+      data: {
+        status: "executed",
+        resultIsError: false,
+        resultCiphertext: asBytes(
+          encryptString(ctx.dek, told, `${aad(row.id)}:result`),
+        ),
+      },
+    })
+  }
+
+  return result
 }
 
 /**

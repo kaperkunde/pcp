@@ -125,3 +125,6 @@ export const SYNC_LOOK_INTERVAL_MS = 60_000
 
 /** An assistant's REVIEW.md, in characters. */
 export const MAX_REVIEW_CHARS = 20_000
+
+/** An assistant's line for the owner with a proposed push, in characters. */
+export const MAX_SHARE_MESSAGE_CHARS = 1_000

@@ -8,6 +8,8 @@ import {
   createApprovedEndpoint,
   getEndpoint,
   prepareRegistration,
+  proposeEndpointDetach,
+  proposeEndpointNote,
   updateEndpointDetails as updateOrAsk,
   type EndpointScope,
   type RegistrationInput,
@@ -21,6 +23,11 @@ import {
 } from "./endpoints"
 import { loadGatewayServers } from "./gateway"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
+import {
+  applyNoteChange,
+  readServerNote,
+  setPersonalNote,
+} from "./personal-notes"
 import { createSecret } from "./secrets"
 import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
 import { scratchDatabase } from "./test-db"
@@ -1267,5 +1274,182 @@ describe("what an assistant registers cannot reach the owner's network", () => {
       data: { publicOnly: false, enabled: true },
     })
     expect((await getEndpoint(scope, slug)).belongsTo).toBe("owner")
+  })
+})
+
+describe("the owner's note and detach, as an assistant asks for them", () => {
+  /** Another endpoint of the owner's endpoint's definition. */
+  async function sibling(definitionId: string) {
+    const { id } = await createEndpoint(ctx, {
+      name: "Owner pets two",
+      baseUrl: `${api.origin}/two`,
+      specSource: "upload",
+      specText: spec(api.origin),
+      readOnly: false,
+      authType: "none",
+      definitionId,
+    })
+    return getServer(ctx, id)
+  }
+
+  it("shows a note whole and writes nothing until the owner agrees, on an endpoint or an MCP server", async () => {
+    const { id, slug } = await ownerEndpoint()
+    const asked = await proposeEndpointNote(
+      scope,
+      slug,
+      "  The billing account's endpoint.  ",
+    )
+
+    expect(asked).toMatchObject({
+      target: "server",
+      id,
+      via: "update_endpoint",
+      note: "The billing account's endpoint.",
+    })
+    expect(asked.shown.lines).toContain(
+      "Your note after, which every assistant that sees this server reads as yours:\nThe billing account's endpoint.",
+    )
+    expect(readServerNote(ctx, await getServer(ctx, id))).toBeNull()
+
+    expect(await applyNoteChange(ctx, asked)).toMatch(/saved the note/)
+    expect(readServerNote(ctx, await getServer(ctx, id))).toBe(
+      "The billing account's endpoint.",
+    )
+
+    // Taken away, as asked: "" is no note.
+    const away = await proposeEndpointNote(scope, slug, "")
+    expect(away.shown.title).toBe("Take away your note on Owner pets?")
+    await applyNoteChange(ctx, away)
+    expect(readServerNote(ctx, await getServer(ctx, id))).toBeNull()
+
+    const mcp = await createServer(ctx, {
+      name: "Mcp",
+      url: "https://mcp.example.com/mcp",
+      authType: "none",
+    })
+    const onMcp = await proposeEndpointNote(scope, "mcp", "The team's one.")
+    await applyNoteChange(ctx, onMcp)
+    expect(readServerNote(ctx, await getServer(ctx, mcp.id))).toBe(
+      "The team's one.",
+    )
+    // An MCP server takes nothing else from update_endpoint.
+    await expect(
+      updateOrAsk(scope, "mcp", { name: "Hijacked" }),
+    ).rejects.toThrow(/No API endpoint called mcp/)
+  })
+
+  it("refuses a note that is not one line of plain text that fits, and one the owner changed since", async () => {
+    const { id, slug } = await ownerEndpoint()
+
+    for (const note of [
+      "Two\nlines",
+      "x".repeat(301),
+      "Hidden​thing",
+      "A\ttab",
+    ]) {
+      await expect(proposeEndpointNote(scope, slug, note)).rejects.toThrow()
+    }
+
+    const asked = await proposeEndpointNote(scope, slug, "Proposed.")
+    await setPersonalNote(ctx, "server", id, "The owner's own.")
+    await expect(applyNoteChange(ctx, asked)).rejects.toThrow(
+      /changed since this was asked/,
+    )
+    expect(readServerNote(ctx, await getServer(ctx, id))).toBe(
+      "The owner's own.",
+    )
+  })
+
+  it("does not reach an endpoint or MCP server outside the token's scope", async () => {
+    const { slug } = await ownerEndpoint()
+    await createServer(ctx, {
+      name: "Mcp",
+      url: "https://mcp.example.com/mcp",
+      authType: "none",
+    })
+    const limited: EndpointScope = { ctx, tokenId: "t", serverIds: [] }
+
+    await expect(proposeEndpointNote(limited, slug, "x")).rejects.toThrow(
+      /No API endpoint called/,
+    )
+    await expect(proposeEndpointNote(limited, "mcp", "x")).rejects.toThrow(
+      /No API endpoint called/,
+    )
+    await expect(proposeEndpointDetach(limited, "mcp")).rejects.toThrow(
+      /No API endpoint called/,
+    )
+  })
+
+  it("detaches an endpoint from the others of its definition only when the owner agrees, as it was", async () => {
+    const { id, slug } = await ownerEndpoint()
+    await expect(proposeEndpointDetach(scope, slug)).rejects.toThrow(
+      /only server of its definition/,
+    )
+    const source = await getServer(ctx, id)
+    const two = await sibling(source.definitionId!)
+
+    const asked = await proposeEndpointDetach(scope, slug)
+    expect(asked.detach).toEqual({ definitionId: source.definitionId })
+    expect(asked.shown.lines).toContain(
+      `Shares its description, schema, edits and tool descriptions with: ${two.slug}`,
+    )
+    expect((await getServer(ctx, id)).definitionId).toBe(source.definitionId)
+
+    expect(await applyEndpointChange(ctx, asked)).toMatch(
+      /definition of its own now/,
+    )
+    expect((await getServer(ctx, id)).definitionId).not.toBe(
+      source.definitionId,
+    )
+    expect((await getServer(ctx, two.id)).definitionId).toBe(
+      source.definitionId,
+    )
+    // Everything else is as it was: the address and the credential.
+    expect(await getServer(ctx, id)).toMatchObject({
+      url: source.url,
+      authSecretId: source.authSecretId,
+    })
+  })
+
+  it("detaches nothing when the endpoint changed after the owner was asked, or was detached already", async () => {
+    const { id, slug } = await ownerEndpoint()
+    const source = await getServer(ctx, id)
+    await sibling(source.definitionId!)
+
+    const renamed = await proposeEndpointDetach(scope, slug)
+    await db().mcpServer.update({ where: { id }, data: { name: "Renamed" } })
+    await expect(applyEndpointChange(ctx, renamed)).rejects.toThrow(
+      /has changed since this was asked/,
+    )
+
+    const twice = await proposeEndpointDetach(scope, slug)
+    await applyEndpointChange(ctx, twice)
+    await expect(applyEndpointChange(ctx, twice)).rejects.toThrow(
+      /has changed since this was asked/,
+    )
+  })
+
+  it("detaches an MCP server too", async () => {
+    const one = await createServer(ctx, {
+      name: "Mcp",
+      url: "https://mcp.example.com/mcp",
+      authType: "none",
+    })
+    const first = await getServer(ctx, one.id)
+    await createServer(ctx, {
+      name: "Mcp two",
+      url: "https://two.example.com/mcp",
+      authType: "none",
+      definitionId: first.definitionId,
+    })
+
+    const asked = await proposeEndpointDetach(scope, "mcp")
+    expect(asked.shown.lines).toContain(
+      "Shares its description and tool descriptions with: mcp-two",
+    )
+    await applyEndpointChange(ctx, asked)
+    expect((await getServer(ctx, one.id)).definitionId).not.toBe(
+      first.definitionId,
+    )
   })
 })

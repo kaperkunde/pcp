@@ -17,6 +17,9 @@ import {
 } from "../gateway"
 import { json, startTestApi, type TestApi } from "../openapi/test-api"
 import { decidePermission, getPermissionView } from "../permissions"
+import { readServerNote, setPersonalNote } from "../personal-notes"
+import { serializeItem } from "../repos/documents"
+import { localItem } from "../repos/local"
 import { createSecret } from "../secrets"
 import { scratchDatabase } from "../test-db"
 import { catalogueHandle, withCallHandle } from "../test-handles"
@@ -633,6 +636,243 @@ describe("changing a wrapper", () => {
 
     expect(view!.secretToEnter).toBeNull()
     expect(view!.wrapper!.secrets[0]!.isNew).toBe(false)
+  })
+})
+
+describe("another wrapper of a definition, a definition of its own, and the owner's note", () => {
+  async function approveNewest(secretValue?: string) {
+    const row = await newestRequest()
+    return decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      ...(secretValue ? { secretValue } : {}),
+    })
+  }
+
+  /** The approved wrapper, and another of its definition. */
+  async function twoOfOne() {
+    const first = await approvedWrapper()
+    await call("create_wrapper", { name: "Lookup two", definition: "lookup" })
+    expect((await approveNewest()).isError).not.toBe(true)
+    const second = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Lookup two" },
+    })
+    return { first, second }
+  }
+
+  it("proposes another wrapper of a definition with its programs in full, and makes it as shown", async () => {
+    const first = await approvedWrapper()
+
+    const asked = await call("create_wrapper", {
+      name: "Lookup two",
+      definition: "lookup",
+      note: "For the second account.",
+    })
+
+    expect(asked.text).toContain("Not done yet")
+    expect(await db().mcpServer.count({ where: { kind: "wrapper" } })).toBe(1)
+    const row = await newestRequest()
+    const view = (await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    }))!
+    expect(row.kind).toBe("wrapper_change")
+    expect(view.title).toBe("Add the wrapper Lookup two, another of Lookup?")
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "Another wrapper of Lookup, beside lookup: it shares their programs, calls, secret places and tool descriptions, so a change to those changes every one of them",
+        "Your note on it, which every assistant that sees it reads as yours:\nFor the second account.",
+      ]),
+    )
+    expect(view.wrapper!.tools[0]).toMatchObject({
+      name: "lookup",
+      status: "new",
+      program: ECHO_TOOL.program,
+    })
+    expect(view.wrapper!.secrets[0]).toMatchObject({
+      secret: "Things key",
+      isNew: false,
+    })
+    expect(view.secretToEnter).toBeNull()
+
+    expect((await approveNewest()).isError).not.toBe(true)
+    const second = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Lookup two" },
+      include: { wrapperSpec: true },
+    })
+    const firstSpec = await db().wrapperSpec.findUniqueOrThrow({
+      where: { serverId: first.id },
+    })
+    expect(second.definitionId).toBe(first.definitionId)
+    expect(second.description).toBe("Things, simpler.")
+    expect(second.wrapperSpec!.hash).toBe(firstSpec.hash)
+    expect(readServerNote(ctx, second)).toBe("For the second account.")
+    expect(
+      await db().apiTokenToolAccess.count({ where: { serverId: second.id } }),
+    ).toBe(0)
+  })
+
+  it("takes nothing of the program from the assistant, and makes nothing once the definition changed", async () => {
+    await approvedWrapper()
+
+    for (const extra of [
+      { tools: [ECHO_TOOL] },
+      { description: "Mine." },
+      { callLevels: "token" },
+    ]) {
+      const refused = await call("create_wrapper", {
+        name: "Lookup two",
+        definition: "lookup",
+        ...extra,
+      })
+      expect(refused.isError).toBe(true)
+      expect(refused.text).toContain("are that wrapper's")
+    }
+
+    const unknown = await call("create_wrapper", {
+      name: "Lookup two",
+      definition: "things",
+    })
+    expect(unknown.isError).toBe(true)
+    expect(unknown.text).toMatch(
+      /No wrapper called things that this token sees/,
+    )
+
+    await call("create_wrapper", { name: "Lookup two", definition: "lookup" })
+    await db().mcpServer.updateMany({
+      where: { kind: "wrapper" },
+      data: { description: "Changed by the owner." },
+    })
+    await db().serverDefinition.updateMany({
+      data: { description: "Changed by the owner." },
+    })
+    const stale = await approveNewest()
+    expect(JSON.stringify(stale)).toMatch(/has changed since this was asked/)
+    expect(await db().mcpServer.count({ where: { kind: "wrapper" } })).toBe(1)
+  })
+
+  it("detaches a wrapper only when the owner agrees, and only as it was", async () => {
+    const { first, second } = await twoOfOne()
+
+    const asked = await call("update_wrapper", {
+      wrapper: second.slug,
+      detach: true,
+    })
+    expect(asked.text).toContain("Not done yet")
+    const row = await newestRequest()
+    const view = (await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    }))!
+    expect(row.toolName).toBe("update_wrapper")
+    expect(view.title).toBe("Detach the wrapper Lookup two?")
+    expect(view.lines).toContain("Shares its definition with: lookup")
+    expect(
+      (await db().mcpServer.findUniqueOrThrow({ where: { id: second.id } }))
+        .definitionId,
+    ).toBe(first.definitionId)
+
+    expect((await approveNewest()).isError).not.toBe(true)
+    const detached = await db().mcpServer.findUniqueOrThrow({
+      where: { id: second.id },
+    })
+    expect(detached.definitionId).not.toBe(first.definitionId)
+    expect(
+      (await db().mcpServer.findUniqueOrThrow({ where: { id: first.id } }))
+        .definitionId,
+    ).toBe(first.definitionId)
+
+    const alone = await call("update_wrapper", {
+      wrapper: second.slug,
+      detach: true,
+    })
+    expect(alone.isError).toBe(true)
+    expect(alone.text).toContain("only wrapper of its definition")
+  })
+
+  it("detaches nothing when the wrapper changed after the owner was asked", async () => {
+    const { second } = await twoOfOne()
+    await call("update_wrapper", { wrapper: second.slug, detach: true })
+    await db().mcpServer.update({
+      where: { id: second.id },
+      data: { name: "Renamed by the owner" },
+    })
+
+    const stale = await approveNewest()
+
+    expect(JSON.stringify(stale)).toContain("has changed since")
+  })
+
+  it("proposes the owner's note, writes it only as shown, and never into a repository document", async () => {
+    const wrapper = await approvedWrapper()
+
+    const mixed = await call("update_wrapper", {
+      wrapper: "lookup",
+      note: "Mine.",
+      name: "Other",
+    })
+    expect(mixed.isError).toBe(true)
+    expect(mixed.text).toContain("note goes in a call of its own")
+    const notOne = await call("update_wrapper", {
+      wrapper: "things",
+      note: "Mine.",
+    })
+    expect(notOne.isError).toBe(true)
+    expect(notOne.text).toContain("things is not a wrapper")
+    const twoLines = await call("update_wrapper", {
+      wrapper: "lookup",
+      note: "One\nTwo",
+    })
+    expect(twoLines.isError).toBe(true)
+
+    const asked = await call("update_wrapper", {
+      wrapper: "lookup",
+      note: "The SECRET-ACCOUNT one.",
+    })
+    expect(asked.text).toContain("Not done yet")
+    const row = await newestRequest()
+    expect(row.kind).toBe("note_change")
+    const view = (await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    }))!
+    expect(view.title).toBe("Save this as your note on Lookup?")
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "Your note now: none",
+        "Your note after, which every assistant that sees this server reads as yours:\nThe SECRET-ACCOUNT one.",
+      ]),
+    )
+    expect(
+      readServerNote(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: wrapper.id } }),
+      ),
+    ).toBeNull()
+
+    expect((await approveNewest()).isError).not.toBe(true)
+    expect(
+      readServerNote(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: wrapper.id } }),
+      ),
+    ).toBe("The SECRET-ACCOUNT one.")
+    const { document } = await localItem(ctx, "wrapper", wrapper.id)
+    expect(Object.values(serializeItem(document)).join("\n")).not.toContain(
+      "SECRET-ACCOUNT",
+    )
+  })
+
+  it("writes no note over one the owner changed after being asked", async () => {
+    const wrapper = await approvedWrapper()
+    await call("update_wrapper", { wrapper: "lookup", note: "Proposed." })
+    await setPersonalNote(ctx, "server", wrapper.id, "The owner's own.")
+
+    const stale = await approveNewest()
+
+    expect(JSON.stringify(stale)).toContain("changed since this was asked")
+    expect(
+      readServerNote(
+        ctx,
+        await db().mcpServer.findUniqueOrThrow({ where: { id: wrapper.id } }),
+      ),
+    ).toBe("The owner's own.")
   })
 })
 

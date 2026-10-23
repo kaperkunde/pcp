@@ -574,3 +574,122 @@ export async function mergeDefinitions(
 
   return (await viewOf(ctx, keepId))!
 }
+
+// ---- What an assistant may make another server of ---------------------------
+
+/** A server as far as finding its definition needs it. */
+type Visible = Pick<McpServer, "id" | "slug" | "kind" | "definitionId">
+
+export type BindableDefinition = {
+  id: string
+  kind: DefinitionKind
+  slug: string
+  name: string
+  description: string
+  /** Every server of it, oldest first, for the owner's page. */
+  instances: DefinitionInstance[]
+  /** What the new server would share, as it is now (definitionBasis). */
+  basis: string
+}
+
+/**
+ * The definition a new server an assistant proposes would be another
+ * instance of, named by the short name of a server the token sees, or by
+ * the definition's own short name when the token sees one of its servers.
+ * Only of the kinds given: an assistant never makes a server of a
+ * definition it sees no server of.
+ */
+export async function findBindableDefinition(
+  ctx: VaultContext,
+  named: string,
+  visible: Visible[],
+  kinds: readonly DefinitionKind[],
+): Promise<BindableDefinition> {
+  const name = named.trim()
+  const fitting = visible.filter((server) =>
+    (kinds as readonly string[]).includes(server.kind),
+  )
+  const noun = kinds.includes("wrapper")
+    ? "wrapper"
+    : "MCP server or API endpoint"
+  const byServer = fitting.find((server) => server.slug === name)
+  let definitionId = byServer ? await ensureDefinition(byServer.id) : null
+
+  if (!definitionId && name) {
+    const row = await db().serverDefinition.findUnique({
+      where: { vaultId_slug: { vaultId: ctx.vaultId, slug: name } },
+      select: { id: true },
+    })
+
+    if (row && fitting.some((server) => server.definitionId === row.id)) {
+      definitionId = row.id
+    }
+  }
+
+  const view = definitionId ? await viewOf(ctx, definitionId) : null
+
+  if (!view || !kinds.includes(view.kind)) {
+    throw invalid(
+      `No ${noun} called ${name || "(none)"} that this token sees, to make another server of. Those it sees: ${
+        fitting.map((server) => server.slug).join(", ") || "(none)"
+      }.`,
+    )
+  }
+
+  return {
+    id: view.id,
+    kind: view.kind,
+    slug: view.slug,
+    name: view.name,
+    description: view.description,
+    instances: view.instances,
+    basis: await definitionBasis(view.id),
+  }
+}
+
+/**
+ * What a definition holds now, as one fingerprint: its description, an
+ * endpoint's schema and edits, a wrapper's program and the tools'
+ * descriptions in the owner's words. A server an assistant proposed to
+ * make on a definition is made only while this is what the owner was
+ * shown.
+ */
+export async function definitionBasis(definitionId: string): Promise<string> {
+  const [definition, source] = await Promise.all([
+    db().serverDefinition.findUnique({
+      where: { id: definitionId },
+      select: { kind: true, description: true },
+    }),
+    contentInstance(definitionId),
+  ])
+
+  if (!definition || !source) {
+    return "gone"
+  }
+
+  const [spec, wrapper, tools] = await Promise.all([
+    db().openApiSpec.findUnique({
+      where: { serverId: source.id },
+      select: { hash: true, patches: true },
+    }),
+    db().wrapperSpec.findUnique({
+      where: { serverId: source.id },
+      select: { hash: true },
+    }),
+    db().mcpTool.findMany({
+      where: { serverId: source.id, descriptionOverride: { not: null } },
+      select: { name: true, descriptionOverride: true },
+      orderBy: { name: "asc" },
+    }),
+  ])
+
+  return sha256Hex(
+    canonicalJson({
+      kind: definition.kind,
+      description: definition.description,
+      spec: spec ? [spec.hash, spec.patches] : null,
+      wrapper: wrapper?.hash ?? null,
+      tools: tools.map((tool) => [tool.name, tool.descriptionOverride]),
+    }),
+  )
+}
