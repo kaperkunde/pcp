@@ -49,11 +49,12 @@ import { browserTools } from "./tools"
 // gone from the machine), one a page offers on its own refused and said,
 // and kept results put into a page's file field. Skipped where no Chromium
 // is installed, as call.test.ts is. A click that starts nothing is given a
-// second and a half rather than ten.
+// second and a half rather than ten, and an action three seconds.
 
 vi.mock("./limits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./limits")>()),
   DOWNLOAD_START_MS: 1_500,
+  ACTION_TIMEOUT_MS: 3_000,
 }))
 
 const executable = await chromiumExecutable()
@@ -287,7 +288,9 @@ describe.skipIf(!executable)(
       expect(`${textOf(clicked)}\n${textOf(waited)}`).toContain(
         "The page offered a file to download (invoice-42.pdf)",
       )
-      expect(await leftOnDisk()).toEqual([])
+      // Chromium removes the part of a download it cancelled itself, a
+      // moment after it says so: on a busy machine, after the answer.
+      await expect.poll(leftOnDisk).toEqual([])
       expect(await db().toolResult.count()).toBe(0)
       // Said once.
       expect(textOf(await call("snapshot", { tab }))).not.toContain(
@@ -338,7 +341,8 @@ describe.skipIf(!executable)(
       })
       expect(big.isError).toBe(true)
       expect(textOf(big)).toContain("big.bin is larger than PCP keeps")
-      expect(await leftOnDisk()).toEqual([])
+      // Cancelled past the largest file: Chromium removes its part.
+      await expect.poll(leftOnDisk).toEqual([])
       expect(await db().toolResult.count()).toBe(0)
 
       const page2 = await call("navigate", { tab, url: `${api.origin}/page` })

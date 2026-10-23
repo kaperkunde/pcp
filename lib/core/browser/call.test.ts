@@ -36,11 +36,14 @@ import { isOwnerNeeded, type OwnerNeeded } from "./types"
 // this machine. Skipped where no Chromium is installed (`pnpm exec
 // playwright install chromium`, or PCP_BROWSER_EXECUTABLE). A site's check
 // is given a few seconds rather than twenty: the fake one passes in a third
-// of a second, or never.
+// of a second, or never. An action on an element that never becomes
+// actionable is given three seconds rather than ten: the pages here answer
+// at once.
 
 vi.mock("./limits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./limits")>()),
   CHALLENGE_WAIT_MS: 3_000,
+  ACTION_TIMEOUT_MS: 3_000,
 }))
 
 const executable = await chromiumExecutable()

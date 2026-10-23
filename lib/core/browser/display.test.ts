@@ -237,14 +237,21 @@ navigator.userAgentData
         }
 
         if (request.url?.startsWith("/place")) {
+          // A new window has no outer size for its first moments (more of
+          // them on a busy machine): the page waits for one to report.
           return res.end(`<!doctype html><title>?</title><script>
-document.title = JSON.stringify({
-  place: [screenX, screenY],
-  window: [outerWidth, outerHeight, innerWidth, innerHeight],
-  screen: [screen.width, screen.height],
-  visible: document.visibilityState,
-  userAgent: navigator.userAgent,
-})
+let tries = 0
+function report() {
+  if (outerWidth === 0 && tries++ < 200) return setTimeout(report, 25)
+  document.title = JSON.stringify({
+    place: [screenX, screenY],
+    window: [outerWidth, outerHeight, innerWidth, innerHeight],
+    screen: [screen.width, screen.height],
+    visible: document.visibilityState,
+    userAgent: navigator.userAgent,
+  })
+}
+report()
 </script>`)
         }
 
@@ -379,6 +386,7 @@ document.title = JSON.stringify({
         ])
 
         await tab.page.goto(`${api.origin}/place`)
+        await tab.page.waitForFunction(() => document.title !== "?")
         const seen = JSON.parse(await tab.page.title()) as {
           place: number[]
           window: number[]
@@ -485,6 +493,7 @@ document.title = JSON.stringify({
         // Neither tab is a hidden one of a shared window: both still draw.
         for (const tab of [first, second]) {
           await tab.page.goto(`${api.origin}/place`)
+          await tab.page.waitForFunction(() => document.title !== "?")
           const seen = JSON.parse(await tab.page.title()) as {
             visible: string
           }

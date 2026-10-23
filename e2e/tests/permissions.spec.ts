@@ -25,6 +25,7 @@ import {
   proposedLevel,
   showServerSettings,
   showTools,
+  clickHydrated,
 } from "../lib/ui"
 
 // The owner's say over what an assistant runs: tools ask first, the owner
@@ -176,7 +177,10 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   await page.goto("/servers")
   await openRequestFromBell(page, new RegExp(`Allow ${SLUG}/add_numbers\\?`))
   await expect(page).toHaveURL(new RegExp(`${path}$`))
-  await expect(page.getByText(`Allow ${SLUG}/add_numbers?`)).toBeVisible()
+  // The page's heading: the bell's item says the same while its menu closes.
+  await expect(
+    page.getByRole("heading", { name: `Allow ${SLUG}/add_numbers?` }),
+  ).toBeVisible()
   await expect(
     page.getByTestId("permission-lines").getByText("19", { exact: true }),
   ).toBeVisible()
@@ -624,7 +628,7 @@ test("answering a request takes you to the next one waiting, oldest first, until
 
   // The bell lists them oldest first, and leads to the oldest.
   await page.goto("/servers")
-  await bell(page).click()
+  await clickHydrated(bell(page))
   await expect(ours()).toHaveCount(3)
   await expect(ours().nth(0)).toContainText(title("add_numbers"))
   await expect(ours().nth(1)).toContainText(title("echo_auth"))
@@ -646,7 +650,7 @@ test("answering a request takes you to the next one waiting, oldest first, until
   expect(callsOf("echo_auth")).toBe(echoes)
 
   // The bell no longer has the one answered.
-  await bell(page).click()
+  await clickHydrated(bell(page))
   await expect(ours()).toHaveCount(2)
   await page.keyboard.press("Escape")
 

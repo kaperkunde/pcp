@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test"
 
 import { startUpstream, type Upstream } from "../fixtures/upstream"
 import { callTool, toolText } from "../lib/mcp"
-import { allowAllTools, createToken } from "../lib/ui"
+import { allowAllTools, createToken, clickHydrated } from "../lib/ui"
 
 // An upstream behind OAuth, added from the Servers page's Add menu: PCP
 // discovers the authorization server, registers itself, sends the owner's
@@ -29,7 +29,7 @@ test("an OAuth server added from the Add menu is connected through the browser, 
 
   // The Add menu leads to every kind's own page.
   await page.goto("/servers")
-  await page.getByRole("button", { name: "Add", exact: true }).click()
+  await clickHydrated(page.getByRole("button", { name: "Add", exact: true }))
   const item = (name: string) =>
     page.getByRole("menuitem", { name: new RegExp(`^${name}`) })
   for (const [name, href] of [
