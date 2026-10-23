@@ -1,7 +1,17 @@
 import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { createRequire } from "node:module"
 import net from "node:net"
+import os from "node:os"
+import path from "node:path"
 
 import {
   afterAll,
@@ -19,8 +29,12 @@ import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import {
   acquireDisplay,
+  displayRenderer,
   displaySwitches,
+  hasRenderNode,
   PLAYWRIGHT_DISABLED_FEATURES,
+  playwrightEnabledFeatures,
+  rendererFor,
   runningDisplay,
   setXvfbCommand,
   wantsVirtualDisplay,
@@ -106,6 +120,139 @@ describe("Chromium's switches on the virtual display", () => {
       ...playwrights,
       "RenderDocument",
     ])
+  })
+
+  it("draw in software without a GPU: SwiftShader, as before", () => {
+    expect(rendererFor(false)).toBe("software")
+    expect(displaySwitches("software")).toEqual(displaySwitches())
+
+    const switches = displaySwitches("software")
+    expect(switches[0]).toBe("--enable-unsafe-swiftshader")
+    expect(switches).toHaveLength(2)
+    expect(switches.join(" ")).not.toMatch(/vulkan|--enable-features/i)
+  })
+
+  it("draw with the GPU when there is one: ANGLE on Vulkan, SwiftShader only as the fallback", () => {
+    expect(rendererFor(true)).toBe("gpu")
+
+    const switches = displaySwitches("gpu", {})
+    expect(switches).toEqual(
+      expect.arrayContaining([
+        "--use-angle=vulkan",
+        "--disable-vulkan-surface",
+        // Not a switch to software: WebGL falls back to it only when the
+        // GPU does not start, and without it would be gone.
+        "--enable-unsafe-swiftshader",
+      ]),
+    )
+    // Nothing that makes Chromium draw in software, and no override of the
+    // blocklist.
+    for (const forced of [
+      "--use-angle=swiftshader",
+      "--use-gl=swiftshader",
+      "--disable-gpu",
+      "--ignore-gpu-blocklist",
+    ]) {
+      expect(switches).not.toContain(forced)
+    }
+    // The virtual display's other switches stay.
+    expect(switches).toContain(displaySwitches("software")[1])
+  })
+
+  it("carry the features Playwright turns on with the GPU's, since Chromium keeps only the last list", () => {
+    const bundle = readFileSync(
+      createRequire(import.meta.url).resolve("patchright-core/lib/coreBundle"),
+      "utf8",
+    )
+    const switches = bundle.match(
+      /chromiumSwitches = \(options\) => \[([\s\S]*?)\]\.filter/,
+    )?.[1]
+    expect(switches).toBeDefined()
+    const playwrights = [
+      ...switches!.matchAll(/"--enable-features=([^"]+)"/g),
+    ].flatMap((m) => m[1]!.split(","))
+    expect(playwrights.length).toBeGreaterThan(0)
+    expect(switches).toContain(
+      'process.env.PLAYWRIGHT_LEGACY_SCREENSHOT ? "" : "--enable-features=',
+    )
+    expect(playwrightEnabledFeatures({})).toEqual(playwrights)
+
+    const enable = (env: Record<string, string>) => {
+      const lists = displaySwitches("gpu", env).filter((s) =>
+        s.startsWith("--enable-features="),
+      )
+      expect(lists).toHaveLength(1)
+      return lists[0]!.slice("--enable-features=".length).split(",")
+    }
+    expect(enable({})).toEqual([...playwrights, "Vulkan"])
+    // Playwright leaves its own out with this set, and so does PCP.
+    expect(enable({ PLAYWRIGHT_LEGACY_SCREENSHOT: "1" })).toEqual(["Vulkan"])
+    expect(
+      displaySwitches("gpu", {}).filter((s) =>
+        s.startsWith("--disable-features="),
+      ),
+    ).toHaveLength(1)
+  })
+})
+
+describe("the GPU's render node", () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(os.tmpdir(), "pcp-dri-"))
+  })
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it("is there when the container has one PCP may open", async () => {
+    writeFileSync(path.join(dir, "card0"), "")
+    expect(await hasRenderNode(dir)).toBe(false)
+
+    writeFileSync(path.join(dir, "renderD128"), "")
+    expect(await hasRenderNode(dir)).toBe(true)
+  })
+
+  it("is not without /dev/dri, or with only a node that is not there", async () => {
+    expect(await hasRenderNode(path.join(dir, "missing"))).toBe(false)
+
+    symlinkSync(path.join(dir, "gone"), path.join(dir, "renderD128"))
+    expect(await hasRenderNode(dir)).toBe(false)
+  })
+
+  it.skipIf(process.getuid?.() === 0)(
+    "is not when PCP's user may not read and write it",
+    async () => {
+      writeFileSync(path.join(dir, "renderD128"), "", { mode: 0o600 })
+      chmodSync(path.join(dir, "renderD128"), 0o400)
+      expect(await hasRenderNode(dir)).toBe(false)
+    },
+  )
+
+  it("is said in the log once, as GPU or software, and again only when that changes", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {})
+    try {
+      writeFileSync(path.join(dir, "renderD128"), "")
+      const missing = path.join(dir, "missing")
+
+      expect(await displayRenderer(dir)).toBe("gpu")
+      expect(await displayRenderer(dir)).toBe("gpu")
+      expect(await displayRenderer(missing)).toBe("software")
+      expect(await displayRenderer(missing)).toBe("software")
+
+      const lines = log.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes("virtual display draws"))
+      expect(lines).toEqual([
+        "[browser] Chromium on the virtual display draws with the GPU",
+        "[browser] Chromium on the virtual display draws in software (no GPU render node it may use)",
+      ])
+      // Nothing of the device.
+      expect(lines.join("\n")).not.toContain("renderD")
+    } finally {
+      log.mockRestore()
+    }
   })
 })
 
@@ -257,10 +404,12 @@ report()
 
         res.end(`<!doctype html><title>?</title><script>
 const gl = document.createElement("canvas").getContext("webgl")
+const info = gl && gl.getExtension("WEBGL_debug_renderer_info")
 document.title = JSON.stringify({
   window: [outerWidth, outerHeight, innerWidth, innerHeight],
   screen: [screen.width, screen.height],
   webgl: gl ? gl.getParameter(gl.RENDERER) : null,
+  renderer: info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : null,
 })
 </script>`)
       })
@@ -291,6 +440,7 @@ document.title = JSON.stringify({
         window: number[]
         screen: number[]
         webgl: string | null
+        renderer: string | null
       }
 
       expect(seen.window[2]).toBe(1280)
@@ -298,6 +448,10 @@ document.title = JSON.stringify({
       expect(seen.window[1]).toBeGreaterThan(seen.window[3]!)
       expect(seen.screen).toEqual([1920, 1080])
       expect(seen.webgl).toBeTruthy()
+      // Without a GPU render node, WebGL is SwiftShader's, as before.
+      if (!(await hasRenderNode())) {
+        expect(seen.renderer).toContain("SwiftShader")
+      }
 
       // Every document sees the window as its script runs, not only the
       // first: a new document once read 0 by 0 until the window reached it.

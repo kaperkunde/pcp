@@ -84,11 +84,102 @@ export const PLAYWRIGHT_DISABLED_FEATURES = [
 ] as const
 
 /**
+ * The features Playwright turns on (chromiumSwitches.ts), which a list of
+ * PCP's own has to carry for the same reason: Chromium keeps only the last
+ * --enable-features. Playwright leaves its one out when
+ * PLAYWRIGHT_LEGACY_SCREENSHOT is set, and so does this.
+ */
+export function playwrightEnabledFeatures(
+  env: Environment = process.env,
+): string[] {
+  return env.PLAYWRIGHT_LEGACY_SCREENSHOT ? [] : ["CDPScreenshotNewSurface"]
+}
+
+/**
+ * How Chromium draws on the virtual display: with the machine's graphics
+ * card, when the container was given one, or in software.
+ */
+export type Renderer = "gpu" | "software"
+
+/** The GPU when a render node PCP may use is there; software otherwise. */
+export function rendererFor(renderNode: boolean): Renderer {
+  return renderNode ? "gpu" : "software"
+}
+
+/**
+ * Whether the container has a GPU render node (/dev/dri/renderD128 and on)
+ * that PCP's user may read and write: what the GPU's Vulkan driver opens.
+ * The installer passes /dev/dri in where the host has one; a node PCP may
+ * not open (no group of its) is as good as none.
+ */
+export async function hasRenderNode(dir = "/dev/dri"): Promise<boolean> {
+  const names = await fs.readdir(dir).catch(() => [] as string[])
+
+  for (const name of names) {
+    if (!/^renderD\d+$/.test(name)) continue
+    try {
+      await fs.access(
+        path.join(dir, name),
+        fs.constants.R_OK | fs.constants.W_OK,
+      )
+      return true
+    } catch {
+      // Not this one; perhaps another.
+    }
+  }
+  return false
+}
+
+const RENDERER_LOGGED = Symbol.for("pcp.browser.rendererLogged")
+
+/**
+ * The renderer for a browser on the virtual display, said in the log the
+ * first time and whenever it changes: "GPU" or "software", nothing of the
+ * device.
+ */
+export async function displayRenderer(dir?: string): Promise<Renderer> {
+  const renderer = rendererFor(await hasRenderNode(dir))
+  const holder = globalThis as unknown as {
+    [RENDERER_LOGGED]?: Renderer
+  }
+
+  if (holder[RENDERER_LOGGED] !== renderer) {
+    holder[RENDERER_LOGGED] = renderer
+    console.log(
+      renderer === "gpu"
+        ? "[browser] Chromium on the virtual display draws with the GPU"
+        : "[browser] Chromium on the virtual display draws in software (no GPU render node it may use)",
+    )
+  }
+  return renderer
+}
+
+/**
  * Chromium's switches for a window on the virtual display.
  *
- * WebGL on Chromium's software renderer, which headless uses by itself:
- * without it a windowed Chromium on a display with no graphics card has no
- * WebGL at all.
+ * WebGL on Chromium's software renderer (SwiftShader), which headless uses
+ * by itself: without it a windowed Chromium on a display with no graphics
+ * card has no WebGL at all. With the GPU it stays as the fallback: it does
+ * not make Chromium draw in software, it only lets WebGL fall back to
+ * SwiftShader when the GPU does not start (no Vulkan driver for it, as an
+ * NVIDIA card in the image has none), where WebGL would otherwise be gone.
+ *
+ * With the GPU ("gpu"), Chromium's documented switches for a Linux GPU
+ * without a desktop session (Chrome's "Supercharge Web AI testing", the
+ * same three):
+ * - --use-angle=vulkan: WebGL through ANGLE on the system's Vulkan driver
+ *   (Mesa's radv for AMD, anv for Intel, on the render node) rather than on
+ *   OpenGL, which on Xvfb is only Mesa's llvmpipe, software again, and
+ *   which Chromium's blocklist turns off.
+ * - --enable-features=Vulkan: Chromium composites with Vulkan too, so...
+ * - --disable-vulkan-surface: ...it hands each frame to the window by a
+ *   copy (bit blit) instead of a Vulkan swapchain. A GPU's Vulkan driver
+ *   presents to an X server only through DRI3, which Xvfb does not have.
+ * No --ignore-gpu-blocklist: the blocklist leaves AMD and Intel on current
+ * Mesa alone, and what it does block (software drivers, crash-prone ones)
+ * falls back to SwiftShader as before. Mesa's own software Vulkan driver
+ * (lavapipe), which it blocks with no fallback, is not in the image's
+ * loader list (Dockerfile).
  *
  * RenderDocument off: with it (Chromium 153), every navigation starts a new
  * document in a new frame, and a script that runs while that document loads
@@ -96,9 +187,19 @@ export const PLAYWRIGHT_DISABLED_FEATURES = [
  * screenY) until the window's place reaches it a moment later. A site's
  * check reads those as it loads, and 0 is what no desktop's Chrome shows.
  */
-export function displaySwitches(): string[] {
+export function displaySwitches(
+  renderer: Renderer = "software",
+  env: Environment = process.env,
+): string[] {
   return [
     "--enable-unsafe-swiftshader",
+    ...(renderer === "gpu"
+      ? [
+          "--use-angle=vulkan",
+          `--enable-features=${[...playwrightEnabledFeatures(env), "Vulkan"].join(",")}`,
+          "--disable-vulkan-surface",
+        ]
+      : []),
     `--disable-features=${[...PLAYWRIGHT_DISABLED_FEATURES, "RenderDocument"].join(",")}`,
   ]
 }

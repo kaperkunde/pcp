@@ -1889,14 +1889,28 @@ last one closes. A site's check then sees a browser with a window, not one
 whose window is exactly the page. The display takes only clients that show
 its cookie, kept in a private folder and handed to Chromium alone, so
 another program on the machine cannot watch the browser or type into it.
-WebGL there is Chromium's software renderer, as headless uses by itself
-(`--enable-unsafe-swiftshader`; without it a windowed Chromium with no
-graphics card has no WebGL at all). Chromium's RenderDocument is off there:
+How Chromium draws there is `rendererFor`'s choice, a pure function of
+whether the container has a GPU render node (`/dev/dri/renderD*`) PCP's user
+may read and write (`hasRenderNode`), which `displayRenderer` says in the log
+as "GPU" or "software" and nothing of the device. With one, ANGLE runs on the machine's Vulkan driver (Mesa's radv or
+anv, in the image) with Chromium's documented switches for a GPU without a
+desktop session: `--use-angle=vulkan`, `--enable-features=Vulkan` and
+`--disable-vulkan-surface` (a GPU's Vulkan driver presents to an X server
+only through DRI3, which Xvfb lacks, so frames reach the window by a copy).
+No `--ignore-gpu-blocklist`. Without one, WebGL is Chromium's software
+renderer (SwiftShader), as headless uses by itself. `--enable-unsafe-swiftshader`
+is there either way: it does not force software, it lets WebGL fall back to
+SwiftShader when the GPU does not start (a card Mesa has no driver for,
+NVIDIA's), where it would otherwise be gone. The image takes Mesa's own
+software Vulkan driver (lavapipe) out of the loader's list, since Chromium
+would pick it on such a card, block it as software and leave no WebGL at all.
+The installer passes `/dev/dri` in, with the node's group where PCP's user
+needs it (docs/self-hosting.md). Chromium's RenderDocument is off there:
 with it (Chromium 153) a script that runs while a new document loads often
 reads the window as 0 by 0 at 0,0 until the window's place reaches it, which
 no desktop's Chrome shows. Chromium keeps only the last `--disable-features`
-it is given, so PCP's list carries the driver's own too, and a test checks it
-against the patchright-core installed. An Xvfb that does not start leaves the
+and `--enable-features` it is given, so PCP's lists carry the driver's own
+too, and a test checks them against the patchright-core installed. An Xvfb that does not start leaves the
 browser headless; `PCP_BROWSER_DISPLAY=headless` asks for that. The desktop
 app never uses it: it starts no child process, and runs on a real screen.
 
@@ -1920,7 +1934,9 @@ tells it the screen with, sent again with the position on the tab's own
 DevTools session (input PCP sends reports a screen position from the page's
 own either way). Chromium is still started by patchright-core, as a child of
 PCP's process (the server's utility process in the desktop app), as it was
-headless; only its switches differ. A window that does not open leaves the
+headless; only its switches differ. None of the virtual display's switches
+are among them: a windowed Chromium on the machine's own screen draws with
+its graphics card by itself. A window that does not open leaves the
 browser headless, and `PCP_BROWSER_DISPLAY=headless` asks for that anywhere.
 On macOS the windowed Chromium is an app of its own: it shows in the Dock
 while it runs, and Chromium makes it the active app when it shows a window as
@@ -1957,8 +1973,12 @@ vault's profile, as any cookie does. PCP adds no stealth scripts. It drives Chro
 with `patchright-core`, which does not turn on the DevTools `Runtime` domain in
 every frame as stock Playwright does, so those page-level traces are not left
 for a check in a cross-origin iframe (Cloudflare Turnstile's, for one) to find.
-Some tells remain: WebGL is SwiftShader (software rendering) headless and on
-the virtual display, headless the window is exactly the viewport (Playwright
+The image adds a desktop's fonts (DejaVu, Noto Sans and Serif, Cantarell) to
+Playwright's, whose set alone no person's computer has (a check found
+exactly its 36 fonts), and draws with the GPU on the virtual display when
+the container has one (above). Some tells remain: WebGL is SwiftShader
+(software rendering) headless, and on the virtual display without a GPU (or
+with an NVIDIA one), headless the window is exactly the viewport (Playwright
 sizes it so, and Chromium's `--window-size` does not change that; with a
 window, on the virtual display or of its own, it is not),
 `screen.availHeight` equals the screen height, and a home address that reaches

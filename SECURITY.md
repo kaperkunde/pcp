@@ -307,7 +307,11 @@ Not defended against:
   PCP's own user in PCP's container, with the data directory (the vault's
   ciphertext, the request log, host settings, TLS keys) and the container's
   network, loopback and PCP's own port included, in reach. PCP's proxy and
-  address checks do not hold against code running in the renderer. What
+  address checks do not hold against code running in the renderer. Where the
+  installer gave the container the graphics card's render node (`/dev/dri`,
+  so pages are drawn with the card), the card's kernel driver is in reach of
+  such code too; `PCP_GPU=0` for the installer, or no `devices:` with
+  Compose, keeps it out. What
   limits it: the browser is off until you add it on the Browser page, and
   Chromium starts only when a page is opened (by an assistant you let use
   its tools, by you, or by web fetch reading past a Cloudflare check when the

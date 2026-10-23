@@ -19,7 +19,12 @@ import { resolveFetchAccess, siteKey, type FetchRuleSet } from "../fetch/rules"
 import { isOwnAddress, isPublicAddress } from "../openapi/address"
 import { loadResourceLimits, resourceLimits } from "../resources/state"
 import { watchDocuments, type DocumentWatch } from "./challenge"
-import { acquireDisplay, type VirtualDisplay } from "./display"
+import {
+  acquireDisplay,
+  displayRenderer,
+  type Renderer,
+  type VirtualDisplay,
+} from "./display"
 import { openDownloads, watchDownloads, type Downloads } from "./downloads"
 import { chromiumExecutable } from "./executable"
 import { watchFavicon } from "./favicon"
@@ -364,11 +369,19 @@ async function launch(
   sandbox: boolean,
   scratchDir: string,
   display: VirtualDisplay | null,
+  renderer: Renderer,
 ): Promise<Browser> {
   const { chromium } = await import("patchright-core")
 
   return chromium.launch({
-    ...launchOptions({ mode, executablePath, sandbox, scratchDir, display }),
+    ...launchOptions({
+      mode,
+      executablePath,
+      sandbox,
+      scratchDir,
+      display,
+      renderer,
+    }),
     proxy: { server: `http://127.0.0.1:${proxyPort}`, bypass: "<-loopback>" },
     timeout: 30_000,
   })
@@ -384,12 +397,21 @@ async function launchFirst(
   proxyPort: number,
   scratchDir: string,
   display: VirtualDisplay | null,
+  renderer: Renderer,
 ): Promise<{ browser: Browser; mode: BrowserMode; sandbox: boolean }> {
   let failure: unknown = new Error("No mode to start Chromium in.")
 
   for (const [index, mode] of modes.entries()) {
     const attempt = (sandbox: boolean) =>
-      launch(mode, executable, proxyPort, sandbox, scratchDir, display)
+      launch(
+        mode,
+        executable,
+        proxyPort,
+        sandbox,
+        scratchDir,
+        display,
+        renderer,
+      )
     const sandbox = sandboxSetting() !== "off"
 
     try {
@@ -486,6 +508,8 @@ async function start(
   const wanted = wantedMode()
   const screen = wanted === "virtual" ? await acquireDisplay() : null
   const display = screen?.display ?? null
+  // The machine's GPU on the virtual display, when the container has one.
+  const renderer: Renderer = display ? await displayRenderer() : "software"
   let browser: Browser
   let mode: BrowserMode
   let sandbox: boolean
@@ -498,6 +522,7 @@ async function start(
       proxy.port,
       scratchDir,
       display,
+      renderer,
     ))
   } catch (error) {
     screen?.release()

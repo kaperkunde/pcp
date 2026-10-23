@@ -127,6 +127,30 @@ describe("what Chromium is started with", () => {
     })
   })
 
+  it("on the virtual display, the GPU's switches when there is one", () => {
+    const gpu = launchOptions({ ...base, mode: "virtual", renderer: "gpu" })
+    expect(gpu.args).toEqual(expect.arrayContaining(displaySwitches("gpu")))
+    expect(gpu.args).toContain("--use-angle=vulkan")
+
+    // Software, as before, when there is none (the default).
+    const software = launchOptions({ ...base, mode: "virtual" })
+    expect(software.args).toEqual(launchArgs("virtual", "software"))
+    expect(software.args).not.toContain("--use-angle=vulkan")
+  })
+
+  it("the renderer is the virtual display's alone: a window of its own and headless get none of it", () => {
+    for (const mode of ["window", "headless"] as const) {
+      const args = launchArgs(mode, "gpu")
+      expect(args, mode).toEqual(launchArgs(mode, "software"))
+      for (const flag of [
+        ...displaySwitches("gpu"),
+        ...displaySwitches("software"),
+      ]) {
+        expect(args, mode).not.toContain(flag)
+      }
+    }
+  })
+
   it("headless: nothing of a window", () => {
     const options = launchOptions({ ...base, mode: "headless", display: null })
 
