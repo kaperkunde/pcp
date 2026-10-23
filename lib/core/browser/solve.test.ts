@@ -1,5 +1,13 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest"
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest"
 
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -36,7 +44,14 @@ import {
 
 // web_fetch's read through the browser, against a real headless Chromium
 // and a fake Cloudflare check served on this machine. Skipped where no
-// Chromium is installed.
+// Chromium is installed. The check is given a few seconds rather than
+// twenty, as in call.test.ts: the fake one passes in a third of a second,
+// or never.
+
+vi.mock("./limits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./limits")>()),
+  CHALLENGE_WAIT_MS: 3_000,
+}))
 
 const executable = await chromiumExecutable()
 
