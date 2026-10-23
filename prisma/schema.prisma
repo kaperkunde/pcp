@@ -338,7 +338,7 @@ model PermissionRequest {
   token            ApiToken   @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   /// call | register | memory_share | memory_change | access | endpoint_change
   /// | fetch | browse | browser_handover | wrapper_change | skill_change
-  /// | repo_change
+  /// | repo_change | secret_use | secret_request | note_change | repo_share
   kind             String
   serverId         String?    @map("server_id")
   server           McpServer? @relation(fields: [serverId], references: [id], onDelete: Cascade)
