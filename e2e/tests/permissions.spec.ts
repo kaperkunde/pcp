@@ -177,7 +177,10 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   await page.goto("/servers")
   await openRequestFromBell(page, new RegExp(`Allow ${SLUG}/add_numbers\\?`))
   await expect(page).toHaveURL(new RegExp(`${path}$`))
-  await expect(page.getByText(`Allow ${SLUG}/add_numbers?`)).toBeVisible()
+  // The page's heading: the bell's item says the same while its menu closes.
+  await expect(
+    page.getByRole("heading", { name: `Allow ${SLUG}/add_numbers?` }),
+  ).toBeVisible()
   await expect(
     page.getByTestId("permission-lines").getByText("19", { exact: true }),
   ).toBeVisible()
