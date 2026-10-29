@@ -278,6 +278,23 @@ async function findEndpoint(
   return row
 }
 
+/**
+ * The names update_endpoint's arguments have (snake_case), for what an
+ * assistant is told: the changes are read here in the code's own names.
+ */
+const ARGUMENT_NAMES: Record<string, string> = {
+  addPatches: "add_patches",
+  refreshSpec: "refresh_spec",
+  baseUrl: "base_url",
+  readOnly: "read_only",
+  toolDescriptions: "tool_descriptions",
+}
+
+/** A change's name as update_endpoint takes it. */
+export function argumentName(key: string): string {
+  return ARGUMENT_NAMES[key] ?? key
+}
+
 /** What a token may change on this endpoint, in words for the assistant. */
 function describeChanges(server: McpServer): Record<string, string> {
   if (belongsTo(server) === "owner") {
@@ -289,15 +306,15 @@ function describeChanges(server: McpServer): Record<string, string> {
     return {
       name: asks,
       description: asks,
-      toolDescriptions: asks,
+      tool_descriptions: asks,
       patches: asks,
-      refreshSpec:
+      refresh_spec:
         server.specSource === "url"
           ? asks
           : "no: the schema was given as text, so there is no URL to read",
       spec: theirs,
-      baseUrl: theirs,
-      readOnly: server.readOnly
+      base_url: theirs,
+      read_only: server.readOnly
         ? "already on"
         : "yes, on only; turning it off is the owner's",
       authentication: "no: only the owner attaches or changes a secret",
@@ -310,18 +327,18 @@ function describeChanges(server: McpServer): Record<string, string> {
   return {
     name: disables,
     description: disables,
-    toolDescriptions: disables,
+    tool_descriptions: disables,
     spec:
       server.specSource === "upload"
         ? `yes, as OpenAPI text; ${disables.slice(5)}`
         : "no: the schema is read from a URL; change it with patches",
     patches: `yes, as a JSON Patch applied to the schema; ${disables.slice(5)}`,
-    refreshSpec:
+    refresh_spec:
       server.specSource === "url"
         ? "yes; when the document has changed, the endpoint is disabled again until the owner enables it"
         : "no: the schema was given as text, so there is no URL to read",
-    baseUrl: `yes, to a public address; ${disables.slice(5)}`,
-    readOnly:
+    base_url: `yes, to a public address; ${disables.slice(5)}`,
+    read_only:
       "yes; turning it on takes effect at once, turning it off disables the endpoint until the owner enables it",
     authentication: "no: only the owner attaches or changes a secret",
   }
@@ -449,7 +466,7 @@ async function detailsOf(
       details.spec = spec.text
     } else {
       notes.push(
-        `The stored schema is ${spec.text.length} characters, too long to include here. Read it a part at a time with specPointer, starting with "" or "/paths".`,
+        `The stored schema is ${spec.text.length} characters, too long to include here. Read it a part at a time with spec_pointer, starting with "" or "/paths".`,
       )
     }
   }
@@ -475,7 +492,7 @@ async function detailsOf(
     }
     if (problems.some((problem) => problem.fix)) {
       notes.push(
-        "Each fix is a list of edits for update_endpoint's addPatches; check one with specPointer before sending it.",
+        "Each fix is a list of edits for update_endpoint's add_patches; check one with spec_pointer before sending it.",
       )
     }
   }
@@ -889,13 +906,13 @@ export async function updateEndpointDetails(
 
   if (given.length === 0) {
     throw invalid(
-      "Nothing to change. Pass at least one of name, description, spec, patches, addPatches, refreshSpec, baseUrl, readOnly or toolDescriptions.",
+      "Nothing to change. Pass at least one of name, description, spec, patches, add_patches, refresh_spec, base_url, read_only or tool_descriptions.",
     )
   }
 
   if (changes.patches !== undefined && changes.addPatches !== undefined) {
     throw invalid(
-      "Pass patches to replace every edit, or addPatches to add to them, not both.",
+      "Pass patches to replace every edit, or add_patches to add to them, not both.",
     )
   }
 
@@ -913,7 +930,7 @@ export async function updateEndpointDetails(
     if (refused.length > 0) {
       throw new PcpError(
         "forbidden",
-        `This endpoint is the owner's: it sends a secret, or reaches private addresses they allowed. You can read it, turn read-only on, and ask the owner to change its name, description, edits or tool descriptions, or to read its schema again, but ${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} theirs to change.`,
+        `This endpoint is the owner's: it sends a secret, or reaches private addresses they allowed. You can read it, turn read-only on, and ask the owner to change its name, description, edits or tool descriptions, or to read its schema again, but ${refused.map(argumentName).join(", ")} ${refused.length === 1 ? "is" : "are"} theirs to change.`,
       )
     }
 
@@ -926,7 +943,7 @@ export async function updateEndpointDetails(
   if (changes.spec !== undefined && server.specSource !== "upload") {
     throw new PcpError(
       "forbidden",
-      "This endpoint reads its schema from a URL: change it with patches or addPatches, or read the URL again with refreshSpec.",
+      "This endpoint reads its schema from a URL: change it with patches or add_patches, or read the URL again with refresh_spec.",
     )
   }
 

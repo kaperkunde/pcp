@@ -88,12 +88,12 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
       {
         name: "lookup",
         description: "Looks a text up; the key is filled in.",
-        inputSchema: {
+        input_schema: {
           type: "object",
           properties: { text: { type: "string" } },
           required: ["text"],
         },
-        outputSchema: { type: "string" },
+        output_schema: { type: "string" },
         program: `return await pcp.call("${SLUG}", "keyed_echo", { api_key: { $secret: "${KEY_NAME}" }, text: args.text })`,
         calls: [`${SLUG}/keyed_echo`],
         replaces: [`${SLUG}/keyed_echo`],

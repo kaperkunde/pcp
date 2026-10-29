@@ -101,10 +101,8 @@ test("issues an API token and describes the servers behind it", async ({
   const { instructions, tools } = await initialize(baseURL!, token)
   expect(tools).toEqual([
     "search",
-    "search_tools",
     "list_tools",
     "describe",
-    "describe_tool",
     "call_tool",
     "call_read_only_tool",
     "check_permission",

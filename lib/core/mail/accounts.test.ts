@@ -1094,6 +1094,9 @@ describe("OAuth", () => {
       {},
       { ...PUBLIC, tokenId },
     )
-    expect((result.structuredContent as { kind?: string }).kind).toBe("connect")
+    expect(result.structuredContent).toMatchObject({
+      kind: "needs_owner",
+      reason: "connect",
+    })
   })
 })

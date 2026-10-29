@@ -21,7 +21,9 @@ describe("connectResult", () => {
       'When they say they have, call check_server with server "mail"',
     )
     expect(result.structuredContent).toMatchObject({
-      kind: "connect",
+      kind: "needs_owner",
+      reason: "connect",
+      url: "https://pcp.x/servers/s1",
       connect: { startUrl: "https://pcp.x/api/servers/s1/oauth/start" },
     })
     expect(isConnectResult(result)).toBe(true)
@@ -43,6 +45,12 @@ describe("connectResult", () => {
     expect(isConnectResult({ content: [] })).toBe(false)
     expect(
       isConnectResult({ content: [], structuredContent: { kind: "done" } }),
+    ).toBe(false)
+    expect(
+      isConnectResult({
+        content: [],
+        structuredContent: { kind: "needs_owner", reason: "permission" },
+      }),
     ).toBe(false)
   })
 })

@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { noteOwnerAsked } from "./request-log"
+import type { ConnectLinks, NeedsOwner, ServerState } from "./tools/outcome"
 import { oauthStartUrl } from "./upstream"
 
 /**
@@ -9,27 +10,11 @@ import { oauthStartUrl } from "./upstream"
  * starts the sign-in (it needs the owner's PCP session, which that page
  * asks for first), to end its reply with, and check_server to call once the
  * owner says they have connected it. `structuredContent`
- * carries the same in fields, for clients that read them.
+ * carries the same in fields, as every call that waits for the owner does
+ * (tools/outcome.ts NEEDS_OWNER, reason "connect").
  */
 
-export type ConnectLinks = {
-  serverId: string
-  slug: string
-  name: string
-  /** PCP's OAuth start route, which Connect on the server's page opens. */
-  startUrl: string
-  /** The server's page in PCP: Connect, or what to set up first. */
-  pageUrl: string
-}
-
-export type ServerState = {
-  id: string
-  name: string
-  slug: string
-  connected: boolean
-  status: string
-  toolCount: number
-}
+export type { ConnectLinks, ServerState }
 
 export function connectLinks(
   server: { id: string; slug: string; name: string },
@@ -73,20 +58,25 @@ export function connectResult(
       ? `${lead}: ${server.name} needs an OAuth client from the owner before it can be connected, because it does not let PCP register itself. The page at the link below, opened signed in to PCP, says what to create with the provider and where to enter it; then they choose Connect. ${wait}\n\n${linkLastText(connect.pageUrl)}`
       : `${lead}: ${server.name} needs connecting before its tools can be used. The owner opens the link below signed in to PCP and chooses Connect. ${wait}\n\n${linkLastText(connect.pageUrl)}`
 
+  const owner: NeedsOwner = {
+    kind: "needs_owner",
+    reason: "connect",
+    url: connect.pageUrl,
+    label: `Connect ${server.name} in PCP`,
+    connect,
+    ...(state ? { server: state } : {}),
+  }
+
   return {
     content: [{ type: "text", text: said }],
-    structuredContent: {
-      kind: "connect",
-      connect,
-      ...(state ? { server: state } : {}),
-    },
+    structuredContent: owner,
   }
 }
 
 /** Whether a result is connectResult's: the call did not reach the server. */
 export function isConnectResult(result: CallToolResult): boolean {
-  return (
-    (result.structuredContent as { kind?: unknown } | undefined)?.kind ===
-    "connect"
-  )
+  const structured = result.structuredContent as
+    { kind?: unknown; reason?: unknown } | undefined
+
+  return structured?.kind === "needs_owner" && structured.reason === "connect"
 }

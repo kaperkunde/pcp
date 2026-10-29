@@ -1,5 +1,5 @@
 /**
- * Ranking for the gateway's search: tools (search_tools ranks those alone),
+ * Ranking for the gateway's search: tools (searchTools ranks those alone),
  * and beside them the skills and memories a token reads. Pure: takes the
  * rows, returns the best matches. A vault has tens to a few hundred tools
  * and skills, so scoring every row per query is cheaper than keeping an

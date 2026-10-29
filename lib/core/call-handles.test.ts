@@ -440,6 +440,49 @@ describe("call_tool with a call handle", () => {
     expect(ran).toEqual([])
   })
 
+  it("checks lengths, patterns and formats too, before the owner is asked", async () => {
+    await db().mcpTool.updateMany({
+      where: { name: "ask_postcard" },
+      data: {
+        inputSchema: JSON.stringify({
+          type: "object",
+          properties: {
+            to: { type: "string", maxLength: 5 },
+            code: { type: "string", pattern: "^[A-Z]{2}$" },
+            on: { type: "string", format: "date" },
+          },
+          required: ["to"],
+          additionalProperties: false,
+        }),
+      },
+    })
+    const client = await connect()
+    const handle = await describedHandle(client, "postcards", "ask_postcard")
+
+    const wrong = await call(client, "call_tool", {
+      call_handle: handle,
+      arguments: { to: "Grace Hopper", code: "nl", on: "tomorrow" },
+    })
+
+    expect(wrong.isError).toBe(true)
+    expect(wrong.text).toContain("nothing was run or asked")
+    expect(wrong.text).toContain('"to" is 12 characters long')
+    expect(wrong.text).toContain('"code" does not match')
+    expect(wrong.text).toContain('"on" is not a valid date')
+    expect(await db().permissionRequest.count()).toBe(0)
+    // The log says the arguments did not fit, never what they were.
+    expect(
+      JSON.stringify(vi.mocked(appendRequestLog).mock.calls),
+    ).not.toContain("Grace")
+
+    const fits = await call(client, "call_tool", {
+      call_handle: handle,
+      arguments: { to: "Grace", code: "NL", on: "2026-11-01" },
+    })
+    expect(fits.text).toContain("Not done yet")
+    expect(await db().permissionRequest.count()).toBe(1)
+  })
+
   it("runs a read-only tool through call_read_only_tool, and nothing else", async () => {
     const client = await connect()
     const list = await describedHandle(client, "postcards", "list_cards")

@@ -1093,7 +1093,7 @@ describe("a tool's output schema", () => {
     expect(described.text).toContain('"returns": "{got: string}"')
 
     const read = await call("get_wrapper", { wrapper: "lookup" })
-    expect(read.text).toContain('"outputSchema"')
+    expect(read.text).toContain('"output_schema"')
 
     const result = await call("call_tool", {
       server: "lookup",
@@ -1308,7 +1308,7 @@ describe("whose levels a wrapper's calls follow", () => {
     expect(changed!.warning).toContain("things/echo")
 
     const read = await call("get_wrapper", { wrapper: "lookup" })
-    expect(read.text).toContain('"callLevels": "token"')
+    expect(read.text).toContain('"call_levels": "token"')
   })
 
   it("refuses a mode that is neither", async () => {
