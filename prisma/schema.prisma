@@ -510,7 +510,8 @@ model McpServer {
   /// imaps://host:port, or imap://host:port for STARTTLS. ssh:
   /// ssh://host:port. caldav: the CalDAV server PCP finds the calendars
   /// from (https://caldav.icloud.com/). browser: the fixed "pcp:browser", which no request is
-  /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise.
+  /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise. service: the
+  /// fixed "pcp:service": where it runs is in service_spec.
   url         String
   enabled     Boolean @default(true)
 
@@ -560,7 +561,8 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  /// mcp | openapi | jmap | imap | ssh | caldav | browser | wrapper. An openapi
+  /// mcp | openapi | jmap | imap | ssh | caldav | browser | wrapper |
+  /// service. An openapi
   /// server is an HTTP API described by an OpenAPI schema; its tools are the
   /// schema's operations and PCP calls them directly (lib/core/endpoints.ts).
   /// jmap and imap are mail accounts with a fixed set of mail tools
@@ -569,7 +571,9 @@ model McpServer {
   /// over CalDAV with a fixed set of tools (lib/core/caldav/); browser is
   /// the vault's headless browser, with its own
   /// (lib/core/browser/). A wrapper's tools are programs the owner approved
-  /// that call the vault's other tools (lib/core/wrappers/).
+  /// that call the vault's other tools (lib/core/wrappers/). A service is a
+  /// container PCP runs with the owner's Docker or Podman on one of their
+  /// SSH servers (lib/core/services/), with tools to see and run it.
   kind       String  @default("mcp")
   /// openapi: where the schema came from, url | upload.
   specSource String? @map("spec_source")
@@ -635,7 +639,7 @@ model McpServer {
   /// writes a changed document.
   syncVersion    Int?    @map("sync_version")
 
-  /// mcp, openapi, wrapper: the definition this server is an instance of
+  /// mcp, openapi, wrapper, service: the definition this server is an instance of
   /// (lib/core/definitions.ts). Servers that share one share its
   /// description, schema and edits, wrapper program and tool descriptions;
   /// everything else on this row is the instance's own. Null for the other
@@ -658,6 +662,9 @@ model McpServer {
   permissionRequests PermissionRequest[]
   spec               OpenApiSpec?
   wrapperSpec        WrapperSpec?
+  serviceSpec        ServiceSpec?        @relation("ServiceOwn")
+  servicesHosted     ServiceSpec[]       @relation("ServiceHost")
+  registeredBy       ServiceSpec?        @relation("ServiceRegistered")
   authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
   repoItems          RepoItem[]
@@ -678,7 +685,7 @@ model ServerDefinition {
   id            String   @id
   vaultId       String   @map("vault_id")
   vault         Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  /// mcp | openapi | wrapper: the kind of every instance.
+  /// mcp | openapi | wrapper | service: the kind of every instance.
   kind          String
   /// The definition's own short name, unique in the vault: the first
   /// instance's when it was made. Instances keep their own slugs.
@@ -785,6 +792,50 @@ model WrapperSpec {
   updatedAt  DateTime  @updatedAt @map("updated_at")
 
   @@map("wrapper_spec")
+}
+
+/// service: a container PCP runs with the owner's Docker or Podman engine on
+/// one of their SSH servers, through the engine's command line over SSH exec
+/// (lib/core/services/). Its own server row (kind "service") carries the
+/// tools to see and run it; what it serves is registered as an API endpoint
+/// or MCP server of its own (registeredId). Kept apart from the server row
+/// like a wrapper's program.
+model ServiceSpec {
+  serverId      String     @id @map("server_id")
+  server        McpServer  @relation("ServiceOwn", fields: [serverId], references: [id], onDelete: Cascade)
+  /// What the definition's instances share, as JSON
+  /// (lib/core/services/definition.ts): the image by digest, its ports, the
+  /// names of its environment variables, its named volumes, the health
+  /// check and what it registers. Names no secret and no address.
+  definition    String
+  /// SHA-256 of the definition's canonical JSON, hex.
+  hash          String
+  /// The SSH server the container runs on. Null once that server is
+  /// deleted: the container stays there, and PCP no longer reaches it.
+  hostId        String?    @map("host_id")
+  host          McpServer? @relation("ServiceHost", fields: [hostId], references: [id], onDelete: SetNull)
+  /// docker | podman: the engine PCP found on the host.
+  engine        String
+  /// The engine's version as it reported it, for the owner.
+  engineVersion String     @default("") @map("engine_version")
+  /// The container's name on the host: pcp-<name>.
+  containerName String     @map("container_name")
+  /// Where the container's ports are published on the host, as JSON:
+  /// {"address": "0.0.0.0", "ports": [{"container": 5001, "host": 5001}]}.
+  publish       String     @default("{}")
+  /// Which secret each environment variable takes, as JSON
+  /// {"NAME": "<secret id>"}: by id, never a value. The values reach the
+  /// host over standard input only (upstream.ts builds them).
+  env           String     @default("{}")
+  /// The API endpoint or MCP server launching it registered; null when it
+  /// registers nothing, or once that server is deleted.
+  registeredId  String?    @unique @map("registered_id")
+  registered    McpServer? @relation("ServiceRegistered", fields: [registeredId], references: [id], onDelete: SetNull)
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  @@index([hostId])
+  @@map("service_spec")
 }
 
 /// An OAuth authorization in flight: the state parameter sent to the

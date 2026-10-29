@@ -190,7 +190,7 @@ import {
   RESULT_PAGE_CHARS,
 } from "./tool-results"
 import { resultUri } from "./answers"
-import { needsConnecting, syncServerTools } from "./upstream"
+import { needsConnecting, serviceStateLine, syncServerTools } from "./upstream"
 import { PCP_VERSION } from "./version"
 import { decideFetch, runFetch } from "./web-fetch"
 import {
@@ -2019,7 +2019,9 @@ export function buildGatewayServer(
       }
 
       const note = readServerNote(scope.ctx, row)
-      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${(row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
+      // A service, or a server one serves: its state on the SSH server now.
+      const service = await serviceStateLine(scope.ctx, row, scope.publicUrl)
+      const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${service ? ` ${service}` : (row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
 
       return {
         content: [{ type: "text", text: said }],
