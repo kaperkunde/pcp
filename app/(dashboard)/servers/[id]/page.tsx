@@ -9,6 +9,8 @@ import { PageColumn } from "@/components/page-column"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
 import { ServerPacingForm } from "@/components/server-pacing-form"
+import { ServiceCard } from "@/components/service-card"
+import { ServiceSettingsForm } from "@/components/service-form"
 import { SshAccessCard } from "@/components/ssh-access-card"
 import { SshServerForm } from "@/components/ssh-server-form"
 import { WrapperForm } from "@/components/wrapper-form"
@@ -27,6 +29,7 @@ import {
   type AuthType,
   type ServerStatus,
 } from "@/lib/core/servers"
+import { serviceView } from "@/lib/core/services/services"
 import { sshServerView } from "@/lib/core/ssh/hosts"
 import { describeOAuthConnection } from "@/lib/core/upstream"
 import { getWrapper, replacedTools } from "@/lib/core/wrappers/admin"
@@ -65,6 +68,7 @@ export default async function ServerPage({
   const browser = kind === "browser"
   const ssh = kind === "ssh" ? sshServerView(server) : null
   const wrapper = kind === "wrapper" ? await getWrapper(ctx, { id }) : null
+  const service = kind === "service" ? await serviceView(ctx, id) : null
   const replaced = await replacedTools(ctx, server.id)
   const about = await itemAbout(ctx, "server", server.id)
   const spec = endpoint
@@ -97,7 +101,27 @@ export default async function ServerPage({
           }
         : null
 
-  const settings = wrapper ? (
+  const settings = service ? (
+    <ServiceSettingsForm
+      initial={{
+        id: server.id,
+        name: server.name,
+        slug: server.slug,
+        description: server.description,
+        env: Object.fromEntries(
+          service.env
+            .filter((entry) => entry.secretId)
+            .map((entry) => [entry.name, entry.secretId!]),
+        ),
+      }}
+      variables={service.definition.env.map((entry) => ({
+        name: entry.name,
+        required: entry.required,
+        description: entry.description,
+      }))}
+      secrets={secrets}
+    />
+  ) : wrapper ? (
     <WrapperForm
       initial={{
         id: wrapper.id,
@@ -302,6 +326,7 @@ export default async function ServerPage({
         about={about}
       >
         {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}
+        {service ? <ServiceCard view={service} /> : null}
       </ServerDetail>
     </PageColumn>
   )

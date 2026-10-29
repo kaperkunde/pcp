@@ -47,6 +47,8 @@ function about(kind: ServerKind): string {
       return "What an assistant can find with search: the same calendar and reminder tools for every account, less the ones that change things on a read-only account."
     case "ssh":
       return "What an assistant can find with search: run_command, one command per call. Leave it at ask, and you see each command before it runs."
+    case "service":
+      return "What an assistant can find with search: the service's status and logs, and starting, stopping and restarting it. The tools the service itself offers are on the server it serves."
     case "browser":
       return "What an assistant can find with search: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
     case "wrapper":
@@ -67,6 +69,8 @@ function none(kind: ServerKind): string {
       return "No tools yet: PCP offers them once it has signed in and found your calendars. Check the settings under Advanced, then check the account again."
     case "ssh":
       return "No tools yet: check the sign-in again."
+    case "service":
+      return "No tools yet: check the service again."
     case "browser":
       return "No tools yet: check the browser again."
     default:

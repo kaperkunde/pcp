@@ -28,7 +28,15 @@ export type ServerListItem = Pick<
 }
 
 type Filter =
-  "all" | "mcp" | "api" | "mail" | "calendar" | "ssh" | "wrapper" | "browser"
+  | "all"
+  | "mcp"
+  | "api"
+  | "mail"
+  | "calendar"
+  | "ssh"
+  | "service"
+  | "wrapper"
+  | "browser"
 
 const FILTERS: Array<{
   value: Exclude<Filter, "all">
@@ -40,6 +48,7 @@ const FILTERS: Array<{
   { value: "mail", label: "Mail", kinds: ["jmap", "imap"] },
   { value: "calendar", label: "Calendars", kinds: ["caldav"] },
   { value: "ssh", label: "SSH", kinds: ["ssh"] },
+  { value: "service", label: "Services", kinds: ["service"] },
   { value: "wrapper", label: "Wrappers", kinds: ["wrapper"] },
   { value: "browser", label: "Browser", kinds: ["browser"] },
 ]

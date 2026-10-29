@@ -51,6 +51,12 @@ const CHOICES: Array<{
     caption: "Run commands on a machine of yours",
   },
   {
+    kind: "service",
+    href: "/servers/services/new",
+    title: "Service",
+    caption: "A container on one of your SSH servers",
+  },
+  {
     kind: "wrapper",
     href: "/servers/wrappers/new",
     title: "Wrapper",

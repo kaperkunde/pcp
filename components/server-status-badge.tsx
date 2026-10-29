@@ -90,6 +90,18 @@ export function serverStatus({
     }
   }
 
+  // A service is checked by reading its container on its SSH server.
+  if (kind === "service") {
+    switch (status) {
+      case "ok":
+        return ok("Running")
+      case "error":
+        return error("Not running")
+      default:
+        return unchecked
+    }
+  }
+
   // An SSH server is checked by signing in with PCP's key: the server can
   // refuse the key (not added yet), or show another host key than the one
   // PCP pinned.
