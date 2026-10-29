@@ -148,8 +148,15 @@ so in the summary; the bump itself waits for the request.
   A server's document is its definition only (`PCP_FORMAT` 2): sync never
   writes an instance's own fields (name and short name, address,
   credential and secrets, read-only, public-only, enabled, pace, levels,
-  note), and what a format-1 document says of its server only fills in a
-  first instance. A push is one commit per item, fast-forward only, and
+  note; a service's SSH server, publish address, variables' secrets,
+  container, what it registered), and what a format-1 document says of its
+  server only fills in a first instance. Format 3 adds `services/<name>.yaml`
+  (a service's definition); every other kind is still written in the
+  format that first held it (`FORMAT_OF_KIND`), so an older PCP reads them
+  and leaves `services/` alone. PCP's common items,
+  `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
+  linked read-only and untrusted (pinned imports), read without a sign-in.
+  A push is one commit per item, fast-forward only, and
   only through the push's review (`repos/share-review.ts`): every file in
   full, what stays private, and the personal-data check
   (`repos/personal-data.ts`, pure), which a public repository waits on
@@ -242,8 +249,12 @@ so in the summary; the bump itself waits for the request.
   image and labels. Images are pinned by digest; volumes are named volumes,
   never a host path. Only the owner launches, changes, updates or removes
   one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
-  owner's levels (and will propose one as a permission request). Status is
-  read only inside a request (page, `check_server`, a failing call), never
+  owner's levels, and proposes one only through `register_server` (kind
+  `service`, `services/proposals.ts`): a `service_change` request that shows
+  everything it runs in full (image, ports and address, variables and their
+  secrets by name, volumes, health, what it registers, the SSH server) and
+  launches only that once the owner agrees; a new secret is typed in on
+  PCP's page. Status is read only inside a request (page, `check_server`, a failing call), never
   polled; a saved secret remakes the services that take it through
   `after()`. A launch that fails takes back everything it did. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against

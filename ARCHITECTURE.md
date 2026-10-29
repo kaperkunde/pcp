@@ -937,7 +937,7 @@ installs an engine, never reaches its socket (on the SSH server or its own
 machine), and starts no child process: the commands run on the SSH server,
 through the ssh module's client. Only the owner launches, changes and removes
 one (Servers → Add → Service); an assistant uses its tools at the owner's
-levels.
+levels, and proposes one as a permission request (below).
 
 **Rows.** A service is a server row of kind `service` (`url` the fixed
 `pcp:service`), an instance of a definition of kind `service`, with a
@@ -1034,6 +1034,34 @@ makes this instance's container again; other instances show that they run an
 older image. **Remove** (the owner's, on the service's page; `deleteServer`
 refuses a service) removes the container first, its volumes and the server
 it serves as chosen.
+
+**Another of a definition.** A service's page offers Launch another: the
+launch page (`?definition=<id>`) shows the shared definition whole, not to
+be edited, and asks only for the new instance's own part; `launchService`
+takes it with `definitionId` (`serviceOfDefinition`). A definition can also
+come from a linked repository (`services/<name>.yaml`, see Shared items in
+repositories), launched on the import page the same way.
+
+**An assistant's proposal** (`services/proposals.ts`): `register_server`
+with kind `service` takes the definition (`service`), the owner's SSH
+server by short name (`ssh_server`: one the token sees, whose host key the
+owner pinned), where its ports listen (`publish_address`, default
+`0.0.0.0`, and `publish_ports`, default the same numbers) and the secret
+each variable takes, by name (`env_secrets`). `prepareServiceProposal`
+checks all of it before the owner is asked (the definition as a launch
+checks it, the publish address, that PCP can reach what it registers, that
+each required variable and the endpoint's `auth` variable has a secret);
+a stored text secret is reused, and one new name at most is typed in by
+the owner on PCP's page. The request (`service_change`) shows the SSH
+server and its address, the image and its source, the ports and address,
+every variable with its secret by name or fixed value, the volumes,
+arguments, health check, what PCP adds, the note and the definition in
+full; the owner launches it as shown or declines (they change nothing on
+the page). `applyServiceChange` launches exactly that through
+`launchService`, removing a typed secret again when the launch fails, and
+gives a token scoped to chosen servers the service and what it serves.
+With `definition` it is another of a service definition the token sees,
+its own part only, launched while `definitionBasis` holds.
 
 The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
 a real sh that the test SSH server runs each command in, recording the
@@ -1218,7 +1246,7 @@ the owner's or one they read:
 The owner can link GitHub repositories so that what is useful and not
 secret is shared between PCP instances, organizations and people, and
 changed and reviewed in GitHub: skills, wrappers (browser flows among them),
-API endpoints and MCP servers. A repository is never a backup and never
+API endpoints, MCP servers and services. A repository is never a backup and never
 holds a secret or anything else of the vault's. `lib/core/repos/` is the
 file format both ways and what sync needs to review a change; linking,
 the GitHub client and sync itself build on it.
@@ -1230,9 +1258,10 @@ the GitHub client and sync itself build on it.
   `flows/<name>/` likewise for a wrapper that drives the browser
   (`isFlow`); `endpoints/<name>/openapi.json` or `openapi.yaml` (the
   document as PCP holds it, in the format it came in) with `pcp.yaml`;
-  `servers/<name>.yaml` for an MCP server. Names are slugs (a skill's name,
-  a server's short name). Wrappers, flows, endpoints and servers share the
-  vault's server names, so two of them by one name, or two items at one
+  `servers/<name>.yaml` for an MCP server; `services/<name>.yaml` for a
+  service (format 3). Names are slugs (a skill's name, a server's short
+  name). Wrappers, flows, endpoints, servers and services share the vault's
+  server names, so two of them by one name, or two items at one
   path, are refused. Other files (a README, CI, dotfiles) are no item's and
   are left alone.
 - **Documents** (`documents.ts`): `serializeItem` writes an item as files,
@@ -1278,7 +1307,17 @@ the GitHub client and sync itself build on it.
   (`instance`) and only fills in the first instance when the item is added,
   never a server the vault has. An MCP server's address is its binding,
   so a format-2 server document has no address, not even a suggested one:
-  adding it asks for the address, as Clone does.
+  adding it asks for the address, as Clone does. Format 3 added services:
+  `services/<name>.yaml` is `pcp_format`, `version`, `name`, `description`
+  and the service's definition as `services/definition.ts` checks it (the
+  image by digest, `source`, `ports`, `env` names with a description,
+  whether required and a fixed value that is no secret, `volumes`, `args`,
+  `health`, `registers`), defaults left out. Never a service's own part (the
+  SSH server, `publish`, which secret each variable takes, the container,
+  what it registered, the note): a document naming one is refused. Only
+  services needed the new format, so every other kind is still written as
+  format 2 (`FORMAT_OF_KIND`): a PCP that reads format 2 reads them, and
+  leaves `services/` alone as it does any folder its layout has no kind for.
 - **Versions.** Each document carries `version`, a whole number: a skill's
   own version; for a server, endpoint or wrapper, `mcp_server.sync_version`
   (null reads as 1), which applying an item sets to the document's. PCP's
@@ -1293,8 +1332,10 @@ the GitHub client and sync itself build on it.
   further: a new or changed program, new calls, calls on the wrapper's
   approval instead of the token's levels, a new or changed secret place; an
   endpoint's OpenAPI document or edits; how a new endpoint or MCP server
-  signs in; a skill's new tools; a character that does not show on screen
-  anywhere. An instance's address, sign-in and switches never change from
+  signs in; a skill's new tools; a service's image and update source, and
+  each part of its definition that is new or changes (ports, variables,
+  volumes, arguments, health check, what it registers); a character that
+  does not show on screen anywhere. An instance's address, sign-in and switches never change from
   a repository, so they are never flagged on a server the vault has.
   `textOnly` is true only when an existing skill's description, steps or
   reference files change and nothing is flagged: the one change sync may
@@ -1312,7 +1353,13 @@ the GitHub client and sync itself build on it.
   public-only, whether it is on, its pace, levels and note. A new server or
   endpoint is the definition and its first instance, whose own part the
   owner gives on the page that adds it (`InstanceInput`, the clone form);
-  a format-1 document's `instance` fills it in otherwise. An endpoint read
+  a format-1 document's `instance` fills it in otherwise. A new service is
+  launched (`upstream.ts launchService`) with the owner's own part from the
+  launch form on the import page; onto a service the vault has, only its
+  definition (`writeServiceDefinition`) and description are written, and
+  its containers run what they were made with until the owner updates each.
+  What a service registered is shared as the service, never as an endpoint
+  or MCP server of its own (`local.ts`). An endpoint read
   from a URL keeps its address, the approved text becoming its copy. A
   secret the vault lacks is never made up: the item is saved without it (a
   wrapper without that secret's places, a first instance without that
@@ -1323,14 +1370,17 @@ the GitHub client and sync itself build on it.
   repository's page, and an assistant's proposal (below). It
   shows every file in full and, for a change, its diff against the
   repository; what stays private (each instance's name, address and sign-in
-  by secret name, the note, the levels, the secrets' values); and what in
+  by secret name, the note, the levels, the secrets' values; for a service,
+  its SSH server, publish address, container, each variable's secret by
+  name and what it registered); and what in
   the files looks personal (`personal-data.ts`, pure: email addresses, the
   owner's own hosts, domains and machine names, IPs, UUIDs and
   Coolify-style ids, phone numbers, paths with a user name, token-shaped
   strings, the owner's name). The owner's facts come from the vault's own
   plain columns (`vaultOwnerFacts`): PCP's public address, the email
   addresses the mail and calendar accounts sign in or send with, SSH
-  servers, any domain two servers share (never a mail provider's or a
+  servers (the ones services run on among them) and an address of its own
+  a service is published on, any domain two servers share (never a mail provider's or a
   vendor's API the owner merely uses), and the vault's name. Each hit links
   to its line, and offers the fixes that apply: edit the description, move
   its sentence to the owner's note, rename what is shared (before it is in
@@ -1423,6 +1473,17 @@ items at once.
   `permission_request.token_id` is required: making it optional would
   rebuild the table, so sync's reviews stay on the items, and only an
   assistant's proposal is a permission request.
+- **PCP's common items** (`common.ts`): `kaperkunde/pcp-gg-common`
+  (`COMMON_REPOSITORY`) is a public repository pcp.gg (Kaperkunde) keeps in
+  this layout, with shared definitions any PCP can take: Docker services to
+  start, skills and endpoints later. The Repositories page offers it in one
+  click while it is not linked; nothing links it by itself. It is linked
+  read-only and untrusted, on its default branch, so whatever the owner adds
+  from it is pinned at the commit they reviewed and every change there waits
+  for them. Being public, it is read without a sign-in (PCP's GitHub
+  sign-in when the vault has one, for GitHub's larger allowance); it never
+  holds a secret and PCP never pushes to it. Its syncs run as any other's,
+  only after a request.
 - **No background key.** Nothing reads the vault without a credential, so
   sync never runs on its own: no timer, no webhook, no stored key. A due
   sync runs after a request that already held the vault's key was answered
