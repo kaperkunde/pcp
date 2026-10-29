@@ -440,7 +440,7 @@ describe("a running service", { timeout: 30_000 }, () => {
     expect((failure as Error).message).toMatch(/Docs service is stopped/)
     expect((failure as Error).message).toContain(`${service.slug}/start`)
     expect((failure as Error).message).toContain(
-      `http://localhost:3000/servers/${service.id}`,
+      `page in PCP](http://localhost:3000/servers/${service.id})`,
     )
     expect(await serviceStateLine(ctx, endpoint, PUBLIC.publicUrl)).toMatch(
       /stopped/,

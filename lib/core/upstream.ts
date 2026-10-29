@@ -69,6 +69,7 @@ import {
 import { makeRedactor } from "./openapi/redact"
 import { paceServerCall, pacedResult } from "./pacing"
 import { checkedFetch } from "./openapi/transport"
+import { markdownLink } from "./owner-link"
 import {
   applyAuthorizeParams,
   applySignInDefaults,
@@ -1974,7 +1975,7 @@ async function serviceHost(
   if (!target.hostKey) {
     throw new PcpError(
       "state",
-      `PCP has not pinned ${host.name}'s host key yet, so it does not connect: the owner checks the server on its page first.\n${publicUrl.replace(/\/+$/, "")}/servers/${host.id}`,
+      `PCP has not pinned ${host.name}'s host key yet, so it does not connect: the owner checks the server on its page first.\n${markdownLink(`Open ${host.name}'s page in PCP`, `${publicUrl.replace(/\/+$/, "")}/servers/${host.id}`)}`,
     )
   }
 

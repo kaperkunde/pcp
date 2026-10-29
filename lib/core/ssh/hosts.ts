@@ -11,6 +11,7 @@ import { invalid, isPcpError, PcpError } from "../errors"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
 import { makeRedactor } from "../openapi/redact"
+import { markdownLink } from "../owner-link"
 import {
   getServer,
   kindNoun,
@@ -355,9 +356,15 @@ function pinner(server: McpServer) {
   }
 }
 
-/** The server's page in PCP, where its key and host key are. */
+/**
+ * The server's page in PCP, where its key and host key are, as a markdown
+ * link: an app that reads the answer aloud says the label, not the address.
+ */
 function pageOf(server: McpServer, publicUrl: string): string {
-  return `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`
+  return markdownLink(
+    `Open ${server.name}'s page in PCP`,
+    `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`,
+  )
 }
 
 /** Why PCP does not connect to a server whose host key the owner never pinned. */

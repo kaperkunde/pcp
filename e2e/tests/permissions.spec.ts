@@ -166,10 +166,11 @@ test("a tool nobody decided on asks first, through a link, even for a client tha
   expect(permissionFrom(toolText(again)).id).toBe(id)
 
   // The link comes last, on a line of its own: some apps hide what an
-  // assistant writes before its next tool call.
-  expect(toolText(asked)).toContain("End your reply with this link")
+  // assistant writes before its next tool call. A markdown link labelled
+  // with what the owner is asked, so an app reading aloud says the label.
+  expect(toolText(asked)).toContain("never paste the bare address")
   expect(toolText(asked).trim().split("\n").at(-1)).toMatch(
-    new RegExp(`${path}$`),
+    new RegExp(`^\\[Allow ${SLUG}/add_numbers\\?\\]\\(.+${path}\\)$`),
   )
 
   // The owner sees it waiting from any page: the bell has a count, and its

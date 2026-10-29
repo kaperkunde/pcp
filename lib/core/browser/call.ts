@@ -12,6 +12,7 @@ import { isPcpSite } from "../fetch/fetch"
 import { sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
 import { bareType, fileMediaType } from "../media-types"
+import { markdownLink } from "../owner-link"
 import { hiddenCharacter, withoutPresentation } from "../memories"
 import { browserToolPaced, pacedResult, paceSite } from "../pacing"
 import { PERMISSION_TTL_MS } from "../permission-rules"
@@ -309,7 +310,7 @@ async function tabLines(
 
   return open.map(
     ({ view, tab }) =>
-      `- ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""}${tab.unresponsive ? " · not responding" : ""} · ${tabLink(scope.publicUrl, view.id)}`,
+      `- ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""}${tab.unresponsive ? " · not responding" : ""} · ${markdownLink(`Watch tab ${view.id}`, tabLink(scope.publicUrl, view.id))}`,
   )
 }
 
@@ -530,15 +531,16 @@ async function report(
     tree?: string
   } = {},
 ): Promise<CallToolResult> {
+  const title = await tabTitle(tab)
   const lines = [
     ...first,
     ...checkLead(tab),
     ...offeredLead(tab),
     ...lead,
     ...popupLead(scope, tab),
-    `Tab ${tab.id}: ${(await tabTitle(tab)) || "(no title)"}`,
+    `Tab ${tab.id}: ${title || "(no title)"}`,
     `Address: ${tab.page.url()}`,
-    `The owner can watch it or take over at ${tabLink(scope.publicUrl, tab.id)}`,
+    `The owner can watch it or take over: ${markdownLink(`Watch tab ${title || tab.id}`, tabLink(scope.publicUrl, tab.id))}`,
     ...(await blockedNote(scope, tab)),
   ]
   const dialog = dialogNote(tab)
@@ -2099,7 +2101,7 @@ async function runBrowserTool(
           content: [
             {
               type: "text",
-              text: `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab at ${tabLink(publicUrl, current.id)})`,
+              text: `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab: ${markdownLink(`Watch tab ${current.id}`, tabLink(publicUrl, current.id))})`,
             },
             {
               type: "image",

@@ -304,7 +304,7 @@ describe("a program's calls", () => {
     expect(text).toContain(MAY_HAVE_TAKEN_EFFECT)
     expect(text).toContain("It printed:\nsending")
     expect(text).toContain("Not done yet")
-    expect(text.trimEnd()).toMatch(/\/permissions\/[\w-]+$/)
+    expect(text.trimEnd()).toMatch(/\]\(\S+\/permissions\/[\w-]+\)$/)
     expect(ran).toEqual([{ tool: "archive", args: { all: true } }])
 
     const request = await db().permissionRequest.findFirstOrThrow()

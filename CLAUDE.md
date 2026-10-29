@@ -437,7 +437,10 @@ so in the summary; the bump itself waits for the request.
   session).
 - The owner is asked by link only: a result hands the assistant a link to
   PCP's page, to end its reply with (`linkLastText`: nothing after it, or
-  Claude's apps fold it out of sight), and a check to call once the owner
+  Claude's apps fold it out of sight; a markdown link with a short label
+  naming the action, never the bare address, so voice mode reads the label;
+  `owner-link.ts` holds the label rules and the wording instructions and
+  descriptions use), and a check to call once the owner
   says they answered (`check_permission`, `check_server`,
   `lib/core/owner-wait.ts`). The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
