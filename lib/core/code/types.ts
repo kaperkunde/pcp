@@ -12,11 +12,15 @@ export type BridgeOp = "call" | "read" | "keep" | "tools" | "media"
 
 /**
  * The bridge's answer to one request. `ok: false` is an error the program
- * sees and may catch; `stop` ends the run where it is (the owner has to act
- * first), and the executor runs nothing of the program after it.
+ * sees and may catch: with `code` "paced" (a call PCP's pacing refused,
+ * nothing sent) its error carries the code and `retryAfterMs`. `stop` ends
+ * the run where it is (the owner has to act first), and the executor runs
+ * nothing of the program after it.
  */
 export type BridgeReply =
-  { ok: true; value: unknown } | { ok: false; error: string } | { stop: true }
+  | { ok: true; value: unknown }
+  | { ok: false; error: string; code?: "paced"; retryAfterMs?: number }
+  | { stop: true }
 
 export type Bridge = (op: string, payload: unknown) => Promise<BridgeReply>
 

@@ -54,7 +54,17 @@ FFMPEG_TIMEOUT = 60
 
 
 class PcpError(Exception):
-    """PCP refused a request, or the tool answered with an error."""
+    """PCP refused a request, or the tool answered with an error.
+
+    A call PCP's pacing refused (nothing was sent) has code "paced" and
+    retry_after_ms, when the place it calls takes its next action; any
+    other has code None.
+    """
+
+    def __init__(self, message, code=None, retry_after_ms=None):
+        super().__init__(message)
+        self.code = code
+        self.retry_after_ms = retry_after_ms
 
 
 def _ask(op, payload):
@@ -83,6 +93,13 @@ def _ask(op, payload):
     reply = json.loads(b"".join(chunks))
     if reply.get("ok"):
         return reply.get("value")
+    if reply.get("code") == "paced":
+        wait = reply.get("retryAfterMs")
+        raise PcpError(
+            reply.get("error") or "PCP refused that.",
+            code="paced",
+            retry_after_ms=wait if isinstance(wait, int) and not isinstance(wait, bool) else 0,
+        )
     raise PcpError(reply.get("error") or "PCP refused that.")
 
 

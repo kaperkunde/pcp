@@ -29,7 +29,7 @@ import {
   type FetchOptions,
 } from "./fetch/fetch"
 import { MAX_FETCH_RULES } from "./fetch/limits"
-import { paceSite } from "./pacing"
+import { callDeadline, pacedResult, paceSite } from "./pacing"
 import type { FetchArgs } from "./fetch/request"
 import {
   emptyRules,
@@ -334,7 +334,7 @@ export async function writeSiteAccess(
  *
  * Every request waits for the site's turn (lib/core/pacing/): each one
  * fetch/fetch.ts sends, redirects on the site included, and the read
- * through the browser.
+ * through the browser, each up to the one deadline.
  */
 export async function runFetch(
   ctx: VaultContext,
@@ -346,8 +346,14 @@ export async function runFetch(
     solver = fetchThroughBrowser,
     available = solverAvailable,
     clearance = hasClearance,
+    deadline = callDeadline(),
   }: {
     publicUrl: string
+    /**
+     * The latest each request may still go, under pacing: a request
+     * straight from an assistant's call or the owner's answer, by default.
+     */
+    deadline?: number
     fetcher?: (args: FetchArgs, options?: FetchOptions) => Promise<FetchAnswer>
     /** The read through the browser; the real one when left out. */
     solver?: typeof fetchThroughBrowser
@@ -358,7 +364,10 @@ export async function runFetch(
   },
 ): Promise<CallToolResult> {
   const host = fetchHostOf(args)
-  const pace = (site: string) => paceSite(ctx.vaultId, site, "web_fetch")
+  const pace = async (site: string) => {
+    const paced = await paceSite(ctx.vaultId, site, "web_fetch", { deadline })
+    return paced ? pacedResult(paced) : null
+  }
   const options = {
     allowPrivate: await privateAllowedFor(ctx.vaultId, tokenId),
     publicUrl,
@@ -368,10 +377,7 @@ export async function runFetch(
     const paced = await pace(host)
 
     return paced
-      ? {
-          result: { content: [{ type: "text", text: paced }], isError: true },
-          challenged: false,
-        }
+      ? { result: paced, challenged: false }
       : solver(ctx, args, options)
   }
   // Whether the browser can read the page is asked only when it would:

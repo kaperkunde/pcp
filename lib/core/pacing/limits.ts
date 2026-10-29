@@ -101,11 +101,34 @@ export const UNPACED_BROWSER_TOOLS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * The longest a call waits for its turn. A wait is served, not refused, up
- * to this; past it the call is answered at once with when the destination
- * takes its next action, so nothing holds a client for minutes.
+ * How long a call waits for its turn when its caller names no deadline. A
+ * wait is served, not refused, up to its budget; past it the call is
+ * answered at once with when the destination takes its next action, and
+ * nothing is sent.
  */
 export const PACING_MAX_WAIT_MS = 30_000
+
+/**
+ * The budget of a call made straight from an assistant's request:
+ * call_tool and call_read_only_tool, web_fetch, and a call the owner
+ * allowed. The same clock as run_code's RUN_ANSWER_MS (code/limits.ts):
+ * under the minute after which clients give up, with time left for the
+ * call itself.
+ */
+export const PACING_CALL_WAIT_MS = 45_000
+
+/**
+ * What a caller's deadline leaves the call itself once its turn comes: a
+ * run_code program's call waits until this long before the run's end, so
+ * the call has time to run and answer.
+ */
+export const PACING_DEADLINE_MARGIN_MS = 5_000
+
+/**
+ * The longest any call waits for its turn, whatever its deadline: as long
+ * as a run_code run may take (code/limits.ts RUN_TIMEOUT_MS).
+ */
+export const PACING_LONGEST_WAIT_MS = 3 * MINUTE
 
 /** What the owner may set, per field. */
 export const PACING_BOUNDS = {

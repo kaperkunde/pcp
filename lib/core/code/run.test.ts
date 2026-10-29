@@ -1287,6 +1287,76 @@ describe("how a run says it ended", () => {
 
     expect(run).toMatchObject({ state: "failed", reason: "gone" })
   })
+
+  it("hands each call the run's deadline, its caller's run's when that ends first", async () => {
+    await connect()
+    const deadlines: number[] = []
+    const call: Parameters<typeof runProgram>[2]["call"] = async ({ run }) => {
+      deadlines.push(run.deadline)
+      return { ok: true, value: null }
+    }
+    const code = `await pcp.call("a", "b"); return 1`
+
+    const before = Date.now()
+    await runProgram(scope, { code }, { call, timeoutMs: 60_000 })
+    const after = Date.now()
+    expect(deadlines[0]).toBeGreaterThanOrEqual(before + 60_000)
+    expect(deadlines[0]).toBeLessThanOrEqual(after + 60_000)
+
+    const outer = Date.now() + 10_000
+    await runProgram(
+      scope,
+      { code, label: "wrapper" },
+      { call, timeoutMs: 60_000, deadline: outer },
+    )
+    expect(deadlines[1]).toBe(outer)
+  })
+
+  it("throws a paced call's error with its code and when to try again", async () => {
+    await connect()
+    const run = await runProgram(
+      scope,
+      {
+        code: `try { await pcp.call("a", "b") } catch (error) { return [error.code, error.retryAfterMs, error.message] }`,
+      },
+      {
+        call: async () => ({
+          ok: false,
+          refused: true,
+          error: "Paced: A takes its next action in 47 s.",
+          code: "paced",
+          retryAfterMs: 47_000,
+        }),
+      },
+    )
+
+    expect("busy" in run).toBe(false)
+    expect(run).toMatchObject({
+      result: {
+        kind: "done",
+        returned: JSON.stringify([
+          "paced",
+          47_000,
+          "Paced: A takes its next action in 47 s.",
+        ]),
+      },
+    })
+  })
+
+  it("throws a tool's own error with no code", async () => {
+    await connect()
+    const run = await runProgram(
+      scope,
+      {
+        code: `try { await pcp.call("a", "b") } catch (error) { return [error.code ?? null, error.retryAfterMs ?? null] }`,
+      },
+      { call: async () => ({ ok: false, error: "No." }) },
+    )
+
+    expect(run).toMatchObject({
+      result: { kind: "done", returned: JSON.stringify([null, null]) },
+    })
+  })
 })
 
 describe("a run that outlives its call", () => {

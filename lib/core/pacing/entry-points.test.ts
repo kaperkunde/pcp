@@ -18,6 +18,7 @@ import { writeToolAccess } from "../tool-access"
 import { setupVault } from "../vault"
 import { setFetchPrivate, setFetchSite } from "../web-fetch"
 import { setPacingClass, setPacingServer, setPacingSite } from "./config"
+import { PACING_CALL_WAIT_MS } from "./limits"
 import { resetPacing, setPacingClock } from "./pace"
 
 // Pacing holds whatever way a call comes in, because it sits where every
@@ -67,7 +68,8 @@ beforeEach(async () => {
   vi.stubEnv("PCP_PACING", "")
   resetPacing()
   waits = []
-  now = 1_000_000
+  // From the real time: a run's deadline is the real clock's (code/run.ts).
+  now = Date.now()
   setPacingClock({
     now: () => now,
     sleep: async (ms) => {
@@ -143,7 +145,11 @@ async function call(name: string, args: Record<string, unknown>) {
     .map((part) => part.text ?? "")
     .join("")
 
-  return { isError: result.isError === true, text }
+  return {
+    isError: result.isError === true,
+    text,
+    structured: result.structuredContent,
+  }
 }
 
 const COUNT = { server: "things", tool: "count", arguments: {} }
@@ -168,8 +174,65 @@ describe("pacing, whatever the way in", () => {
 
     expect(second.isError).toBe(true)
     expect(second.text).toContain(
-      "Paced: Things takes its next action in 90 s; try again then.",
+      "Paced: Things takes its next action in 90 s, longer than this call can wait (45 s). Nothing was sent and no turn was kept for it; try again in 90 s.",
     )
+    expect(second.structured).toEqual({
+      code: "paced",
+      retry_after_ms: 90_000,
+    })
+    expect(waits).toEqual([])
+    expect(api.requests).toHaveLength(1)
+  })
+
+  it("lets call_tool wait its whole budget, past the default longest wait", async () => {
+    await setPacingServer(ctx, endpointId, {
+      minIntervalMs: PACING_CALL_WAIT_MS,
+      jitterMs: 0,
+      burst: null,
+    })
+    await call("call_tool", COUNT)
+    const second = await call("call_tool", COUNT)
+
+    expect(second.isError).toBe(false)
+    expect(waits).toEqual([PACING_CALL_WAIT_MS])
+    expect(api.requests).toHaveLength(2)
+  })
+
+  it("lets run_code's pcp.call wait for its turn within the run, rather than fail half done", async () => {
+    await setPacingServer(ctx, endpointId, {
+      minIntervalMs: 90_000,
+      jitterMs: 0,
+      burst: null,
+    })
+    const result = await call("run_code", {
+      code: `await pcp.call("things", "count", {}); await pcp.call("things", "count", {}); return "done"`,
+    })
+
+    expect(result.text).toContain("done")
+    expect(waits).toEqual([90_000])
+    expect(api.requests).toHaveLength(2)
+  })
+
+  it("tells run_code's program a call past the run's end was paced, with when to try again", async () => {
+    await setPacingServer(ctx, endpointId, {
+      minIntervalMs: 10 * 60_000,
+      jitterMs: 0,
+      burst: null,
+    })
+    const result = await call("run_code", {
+      code: `await pcp.call("things", "count", {})
+try {
+  await pcp.call("things", "count", {})
+  return "sent"
+} catch (error) {
+  return { code: error.code, retryAfterMs: error.retryAfterMs, message: error.message }
+}`,
+    })
+
+    expect(result.text).toContain('"code":"paced"')
+    expect(result.text).toContain(`"retryAfterMs":${10 * 60_000}`)
+    expect(result.text).toContain("Nothing was sent")
+    expect(waits).toEqual([])
     expect(api.requests).toHaveLength(1)
   })
 
@@ -266,6 +329,30 @@ describe("pacing, whatever the way in", () => {
       "/moved",
       "/count",
     ])
+  })
+
+  it("answers web_fetch past its budget with when to try again, and sends nothing", async () => {
+    const host = new URL(api.origin).host
+    await setFetchSite(ctx, scope.tokenId, host, "allowed")
+    await setFetchPrivate(ctx, scope.tokenId, "allowed")
+    await setPacingSite(ctx, {
+      site: host,
+      subdomains: false,
+      pace: { minIntervalMs: 60_000, jitterMs: 0, burst: null },
+    })
+
+    await call("web_fetch", { url: `${api.origin}/count` })
+    const second = await call("web_fetch", { url: `${api.origin}/count` })
+
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain(
+      `Paced: ${host} takes its next action in 60 s, longer than this call can wait (45 s).`,
+    )
+    expect(second.structured).toEqual({
+      code: "paced",
+      retry_after_ms: 60_000,
+    })
+    expect(api.requests).toHaveLength(1)
   })
 
   it("lets a class the owner left unpaced go at once", async () => {

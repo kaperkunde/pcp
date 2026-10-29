@@ -13,7 +13,7 @@ import { sliceText } from "../fetch/html"
 import { resolvePrivateAccess, siteKey } from "../fetch/rules"
 import { bareType, fileMediaType } from "../media-types"
 import { hiddenCharacter, withoutPresentation } from "../memories"
-import { browserToolPaced, paceSite } from "../pacing"
+import { browserToolPaced, pacedResult, paceSite } from "../pacing"
 import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "../rate-limit"
 import { loadResourceLimits } from "../resources/state"
@@ -137,6 +137,8 @@ export type BrowserScope = {
   serverId: string
   /** The caller gave up (a run_code run stopped): its calls stop waiting. */
   signal?: AbortSignal
+  /** The latest the call may still go: how long it waits under pacing. */
+  deadline?: number
   /** The run_code or wrapper run the call is made for. */
   runId?: string
 }
@@ -743,8 +745,8 @@ function tabSite(tab: Tab): string | null {
 
 /**
  * Waits for the site's turn under pacing (lib/core/pacing/), before the
- * call queues on its tab; the tool error to answer with when that turn is
- * too far off.
+ * call queues on its tab, up to the caller's deadline; the tool error to
+ * answer with when that turn is further off.
  */
 async function paceAction(
   scope: BrowserScope,
@@ -757,9 +759,10 @@ async function paceAction(
   const paced = await paceSite(scope.ctx.vaultId, site, "browser_act", {
     serverId: scope.serverId,
     signal: scope.signal,
+    deadline: scope.deadline,
   })
 
-  return paced ? text(paced, true) : null
+  return paced ? pacedResult(paced) : null
 }
 
 /**
@@ -1668,6 +1671,7 @@ async function runBrowserTool(
     open,
     keepBytes,
     signal,
+    deadline,
     runId,
     secret,
   }: {
@@ -1688,6 +1692,8 @@ async function runBrowserTool(
      * doing on the page cannot be called back, and finishes alone.
      */
     signal?: AbortSignal
+    /** The latest the call may still go: how long it waits under pacing. */
+    deadline?: number
     /**
      * The run_code or wrapper run the call is made from, when it is one's:
      * another call that arrives while it has the tab is told so.
@@ -1716,6 +1722,7 @@ async function runBrowserTool(
     publicUrl,
     serverId: server.id,
     signal,
+    deadline,
     runId,
   }
   const listsOrOpens =
