@@ -93,6 +93,7 @@ import {
   RUN_TIMEOUT_MS,
 } from "./code/limits"
 import {
+  bareHandles,
   checkRun,
   runCode,
   type CodeDescriber,
@@ -108,6 +109,7 @@ import {
 } from "./code/sandbox"
 import type { Executor } from "./code/types"
 import {
+  askCodeCall,
   checkPermission,
   defaultExecutor,
   getPermissionView,
@@ -1855,7 +1857,12 @@ export function buildGatewayServer(
 
     logAs({ server: handled.server.slug, upstreamTool: handled.tool.name })
 
-    const callArgs = args.arguments ?? {}
+    // A handle as PCP wrote it into an answer stands for its value, as in a
+    // program's call: the same call asks (and hashes) the same either way.
+    const callArgs = bareHandles(args.arguments ?? {}) as Record<
+      string,
+      unknown
+    >
     const found = await resolveCall(
       handled.server.slug,
       handled.tool.name,
@@ -1891,7 +1898,7 @@ export function buildGatewayServer(
         kind: "call",
         server: target,
         tool,
-        args: args.arguments ?? {},
+        args: callArgs,
         fields,
         decode,
         keep,
@@ -1900,7 +1907,7 @@ export function buildGatewayServer(
 
     try {
       return passOn(
-        await runCall(scope.ctx, target, tool.name, args.arguments ?? {}, {
+        await runCall(scope.ctx, target, tool.name, callArgs, {
           publicUrl: scope.publicUrl,
           tokenId: scope.tokenId,
           fields,
@@ -4290,16 +4297,16 @@ export function buildGatewayServer(
                   return { ok: false, error: unfit, refused: true }
                 }
 
+                // The owner is asked, unless this is the call they allowed
+                // once a moment ago: then the program gets what it answered.
                 if (found.tool.access === "ask") {
-                  return {
-                    owner: await withPermission(scope, {
-                      kind: "call",
-                      server: found.server,
-                      tool: found.tool,
-                      args: callArgs,
-                      ...shape,
-                    }),
-                  }
+                  return askCodeCall(scope, {
+                    kind: "call",
+                    server: found.server,
+                    tool: found.tool,
+                    args: callArgs,
+                    ...shape,
+                  })
                 }
 
                 // The run's own signal, not the request's: a run that goes

@@ -85,6 +85,9 @@ import {
   PERMISSION_TTL_MS,
   previewArgs,
   requestHash,
+  REUSE_EXECUTED_MS,
+  REUSE_VALUE_MAX_CHARS,
+  reusedNote,
   storedResultText,
   summaryText,
   visible,
@@ -1635,8 +1638,19 @@ export async function withPermission(
 ): Promise<CallToolResult> {
   const { target, args } = describeAsk(ask)
   const argsHash = requestHash(ask.kind, target, args)
-  const key = targetKey(scope.ctx.dek, target)
   const now = new Date()
+
+  // The same call the owner just allowed once, made again (a program run
+  // again after it stopped there): answered with what that run did.
+  if (ask.kind === "call") {
+    const reused = await reuseExecuted(scope, argsHash, now)
+
+    if (reused) {
+      return text(`${reusedNote(reused.ranAt, now)}\n${reused.text}`)
+    }
+  }
+
+  const key = targetKey(scope.ctx.dek, target)
 
   // The same request asked again finds the row it already has, so the owner
   // is not asked twice for one thing.
@@ -1761,6 +1775,181 @@ export async function withPermission(
   )
 
   return text(folded ? `${foldedText(id, ask.kind)}\n\n${pending}` : pending)
+}
+
+type CallAsk = Extract<PermissionAsk, { kind: "call" }>
+
+/**
+ * A program's call to a tool that asks (run_code's pcp.call): the value of
+ * the run the owner allowed once, when this is that same call made again
+ * within REUSE_EXECUTED_MS, and otherwise the owner asked, as for call_tool.
+ */
+export async function askCodeCall(
+  scope: PermissionScope,
+  ask: CallAsk,
+): Promise<CodeCallOutcome> {
+  const { target, args } = describeAsk(ask)
+  const now = new Date()
+  const reused = await reuseExecuted(
+    scope,
+    requestHash(ask.kind, target, args),
+    now,
+  )
+
+  if (reused) {
+    // Too long to keep as a value: the text the assistant would read.
+    return reused.outcome ?? { ok: true, value: reused.text }
+  }
+
+  return { owner: await withPermission(scope, ask) }
+}
+
+type Reused = {
+  ranAt: Date
+  /** The stored text, as check_permission gives it. */
+  text: string
+  /** What a program is handed, when it was short enough to keep. */
+  outcome: Extract<CodeCallOutcome, { ok: boolean }> | null
+}
+
+/**
+ * The run of this same call (same token, same request hash) that the owner
+ * allowed once and that went through, if it ran within REUSE_EXECUTED_MS
+ * and no identical call took its answer yet. Taking it clears it, so it
+ * answers one call: a third asks the owner again. Never another token's,
+ * and never a call allowed for a while or always, which run without asking.
+ */
+async function reuseExecuted(
+  { ctx, tokenId }: PermissionScope,
+  argsHash: string,
+  now: Date,
+): Promise<Reused | null> {
+  const found = await db().permissionRequest.findFirst({
+    where: {
+      vaultId: ctx.vaultId,
+      tokenId,
+      kind: "call",
+      argsHash,
+      status: "executed",
+      resultIsError: false,
+      reuseUntil: { gt: now },
+    },
+    orderBy: { decidedAt: "desc" },
+  })
+
+  if (!found) {
+    return null
+  }
+
+  // One winner, however many identical calls race for it.
+  const { count } = await db().permissionRequest.updateMany({
+    where: { id: found.id, reuseUntil: { gt: now } },
+    data: { reuseUntil: null, resultJsonCiphertext: null },
+  })
+
+  if (count !== 1) {
+    return null
+  }
+
+  return {
+    ranAt: found.decidedAt ?? now,
+    text: readResult(ctx, found) ?? "",
+    outcome: readResultJson(ctx, found),
+  }
+}
+
+function readResultJson(
+  ctx: VaultContext,
+  row: PermissionRequest,
+): Reused["outcome"] {
+  if (!row.resultJsonCiphertext) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(
+      decryptString(
+        ctx.dek,
+        Buffer.from(row.resultJsonCiphertext),
+        `${aad(row.id)}:result_json`,
+      ),
+    ) as { ok?: unknown; value?: unknown; error?: unknown }
+
+    if (parsed.ok === true) {
+      return { ok: true, value: parsed.value ?? null }
+    }
+
+    return typeof parsed.error === "string"
+      ? { ok: false, error: parsed.error }
+      : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The answer a program would have been handed for a call the owner allowed
+ * once, as JSON to keep beside its text, from the upstream's own answer:
+ * shaped as runCodeCall shapes it, files and long texts kept as the token's
+ * results and shown as handles. Null when there is no such answer (the
+ * browser opened a site instead) or it is longer than REUSE_VALUE_MAX_CHARS.
+ */
+async function programAnswer(
+  ctx: VaultContext,
+  row: Row,
+  answer: CallToolResult | undefined,
+): Promise<string | null> {
+  if (!answer || answer.isError) {
+    return null
+  }
+
+  try {
+    const keepers = resultKeepers(ctx, row.tokenId)
+    const context = { serverId: row.serverId ?? "", toolName: row.toolName }
+    const outcome = await answerValue(
+      answer,
+      {
+        fields: readStoredFields(row.fields),
+        decode: readStoredFields(row.decode),
+        keep: readStoredFields(row.keep),
+      },
+      {
+        text: (input) => keepers.text({ ...input, ...context }),
+        bytes: (input) => keepers.bytes({ ...input, ...context }),
+      },
+      { max: resourceLimits().answerChars },
+    )
+    const json = JSON.stringify(
+      outcome.ok
+        ? { ok: true, value: outcome.value }
+        : { ok: false, error: outcome.error },
+    )
+
+    return json.length <= REUSE_VALUE_MAX_CHARS ? json : null
+  } catch {
+    // Nothing to keep (the token's room for kept results is full): an
+    // identical call gets the text instead.
+    return null
+  }
+}
+
+/**
+ * The executor a call the owner allowed is run with, noting the answer of
+ * the call itself (not of the calls a wrapper's program makes, which go to
+ * the executor beneath).
+ */
+function noting(
+  executor: PermissionExecutor,
+  into: { answer?: CallToolResult },
+): PermissionExecutor {
+  return {
+    ...executor,
+    callTool: async (...args) => {
+      const answer = await executor.callTool(...args)
+      into.answer = answer
+      return answer
+    },
+  }
 }
 
 /**
@@ -2013,11 +2202,13 @@ export async function decidePermission(
   }
 
   let result: CallToolResult
+  // A call's own answer, for an identical call to be handed (programAnswer).
+  const answered: { answer?: CallToolResult } = {}
 
   try {
     result =
       kind === "call"
-        ? await executeCall(ctx, row, publicUrl, executor)
+        ? await executeCall(ctx, row, publicUrl, executor, answered)
         : kind === "endpoint_change"
           ? text(
               await applyEndpointChange(
@@ -2115,6 +2306,10 @@ export async function decidePermission(
     part.type === "text" ? [part.text] : [],
   )
   const stored = storedResultText(texts, undefined, resultNotices(texts))
+  // Allowed once and through: the same token's identical call is answered
+  // with this run for a while (reuseExecuted), a program's with its value.
+  const reusable = kind === "call" && choice === "allow_once" && !failed
+  const json = reusable ? await programAnswer(ctx, row, answered.answer) : null
 
   await db().permissionRequest.update({
     where: { id: row.id },
@@ -2124,6 +2319,16 @@ export async function decidePermission(
       resultCiphertext: asBytes(
         encryptString(ctx.dek, stored, `${aad(row.id)}:result`),
       ),
+      ...(reusable
+        ? {
+            reuseUntil: new Date(Date.now() + REUSE_EXECUTED_MS),
+            resultJsonCiphertext: json
+              ? asBytes(
+                  encryptString(ctx.dek, json, `${aad(row.id)}:result_json`),
+                )
+              : null,
+          }
+        : {}),
     },
   })
 
@@ -2135,6 +2340,7 @@ async function executeCall(
   row: Row,
   publicUrl: string,
   executor: PermissionExecutor,
+  answered: { answer?: CallToolResult } = {},
 ): Promise<CallToolResult> {
   if (!row.server) {
     return text(
@@ -2172,7 +2378,7 @@ async function executeCall(
     decode: readStoredFields(row.decode),
     keep: readStoredFields(row.keep),
     ownerAllowed: true,
-    executor: wrapped,
+    executor: noting(wrapped, answered),
   })
 }
 
@@ -3180,6 +3386,19 @@ export async function prunePermissionRequests(
 ): Promise<number> {
   const { count } = await db().permissionRequest.deleteMany({
     where: { expiresAt: { lt: new Date(now.getTime() - PERMISSION_KEEP_MS) } },
+  })
+
+  return count
+}
+
+/**
+ * The answers kept for an identical call (reuseExecuted) once their while
+ * is over, cleared from rows that stay for their outcome. Reads nothing.
+ */
+export async function pruneReusableAnswers(now = new Date()): Promise<number> {
+  const { count } = await db().permissionRequest.updateMany({
+    where: { reuseUntil: { lte: now } },
+    data: { reuseUntil: null, resultJsonCiphertext: null },
   })
 
   return count

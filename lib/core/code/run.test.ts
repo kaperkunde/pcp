@@ -19,7 +19,7 @@ import {
   loadGatewayServers,
   type GatewayScope,
 } from "../gateway"
-import type { PermissionExecutor } from "../permissions"
+import { decidePermission, type PermissionExecutor } from "../permissions"
 import { appendRequestLog } from "../request-log"
 import { createServer } from "../servers"
 import { scratchDatabase } from "../test-db"
@@ -1657,6 +1657,84 @@ describe("the same program again", () => {
       ),
     ).toContain('It returned:\\n\\"sent\\"')
     expect(ran.map((call) => call.tool)).toEqual(["slow_send"])
+  })
+
+  it("gets the call the owner allowed once, run again, from that run, and asks nothing new", async () => {
+    await connect()
+    const program = `return await pcp.call("postcards", "send_postcard", { to: "Grace" })`
+
+    const first = await run(program)
+    expect(first.text).toContain("stopped at postcards/send_postcard")
+    expect(first.text).toContain(
+      "If the owner allows it once, that one call runs right then: don't run the program again for it — check_permission gives its answer (an identical call within 15 minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.",
+    )
+    const request = await db().permissionRequest.findFirstOrThrow()
+    await decidePermission(
+      ctx,
+      request.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(ran).toEqual([{ tool: "send_postcard", args: { to: "Grace" } }])
+
+    const again = await run(program)
+    expect(again.text).toContain("finished")
+    expect(returned(again.text)).toBe("ran send_postcard")
+    expect(ran).toHaveLength(1)
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    // Once: the next run is asked about it again.
+    expect((await run(program, { rerun: true })).text).toContain(
+      "stopped at postcards/send_postcard",
+    )
+    expect(await db().permissionRequest.count()).toBe(2)
+    expect(ran).toHaveLength(1)
+  })
+
+  it("asks about a call with a handle as call_tool asks about it, the handle as PCP wrote it or bare", async () => {
+    await connect()
+    const note = await keepResult(ctx, {
+      tokenId: scope.tokenId,
+      serverId: null,
+      toolName: "list_cards",
+      text: "dear Grace",
+      mediaType: "text/plain",
+    })
+    const written = {
+      $result: note.id,
+      type: "text/plain",
+      length: 10,
+      readableUntil: note.expiresAt.toISOString(),
+    }
+
+    expect(
+      (
+        await run(
+          `await pcp.call("postcards", "send_postcard", { text: ${JSON.stringify(written)} })`,
+        )
+      ).text,
+    ).toContain("stopped at")
+    const request = await db().permissionRequest.findFirstOrThrow()
+
+    const described = await client.callTool({
+      name: "describe",
+      arguments: { server: "postcards", tool: "send_postcard" },
+    })
+    const handle = /"call_handle": "(ch_[a-z0-9_]+)"/.exec(
+      (described.content as Array<{ text?: string }>)
+        .map((part) => part.text ?? "")
+        .join(""),
+    )![1]!
+
+    for (const text of [written, { $result: note.id }]) {
+      const asked = await client.callTool({
+        name: "call_tool",
+        arguments: { call_handle: handle, arguments: { text } },
+      })
+      expect(JSON.stringify(asked.content)).toContain(request.id)
+    }
+    expect(await db().permissionRequest.count()).toBe(1)
   })
 
   it("runs again after it stopped for the owner, as that answer says to", async () => {

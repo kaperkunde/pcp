@@ -16,12 +16,14 @@ import {
 } from "./gateway"
 import { listMemories } from "./memories"
 import {
+  askCodeCall,
   checkPermission,
   decidePermission,
   getPermissionView,
   listOwnOpenRequests,
   listPendingRequests,
   prunePermissionRequests,
+  pruneReusableAnswers,
   runCall,
   withdrawPermission,
   withPermission,
@@ -29,6 +31,8 @@ import {
   type RegisterArgs,
 } from "./permissions"
 import { closePendingRequests } from "./permission-close"
+import { REUSE_VALUE_MAX_CHARS } from "./permission-rules"
+import { decryptString } from "./crypto"
 import { finishHandover } from "./browser/call"
 import { createFakeCalDav } from "./caldav/fake-caldav"
 import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
@@ -2232,6 +2236,232 @@ describe("pruning", () => {
     expect(
       (await db().permissionRequest.findMany()).map((row) => row.id),
     ).toEqual([recent.id])
+  })
+})
+
+describe("a call the owner allowed once, made again", () => {
+  /** The call asked about, allowed once, and run. */
+  async function allowedOnce(
+    executor: PermissionExecutor,
+    args: Record<string, unknown> = { to: "Grace" },
+  ) {
+    const { ctx, scope, server, tokenId } = await setup()
+    await withPermission(scope, call(server, "send_postcard", args))
+    const id = await onlyRequestId()
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    return { ctx, scope, server, tokenId, id }
+  }
+
+  it("answers the identical call with that run's answer, once, without running it again", async () => {
+    const { calls, executor } = stub()
+    const { scope, server, id } = await allowedOnce(executor)
+
+    const again = await withPermission(
+      scope,
+      call(server, "send_postcard", { to: "Grace" }),
+    )
+    expect(again.isError).toBeFalsy()
+    expect(textOf(again)).toBe(
+      "The owner allowed this call once and it already ran less than a minute ago; this is that run's answer (it was not run again).\nran send_postcard",
+    )
+    expect(calls).toHaveLength(1)
+    expect(await db().permissionRequest.count()).toBe(1)
+    expect(
+      await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({ reuseUntil: null, resultJsonCiphertext: null })
+
+    // A third time is a new request for the owner.
+    const third = await withPermission(
+      scope,
+      call(server, "send_postcard", { to: "Grace" }),
+    )
+    expect(textOf(third)).toContain("Not done yet")
+    expect(await db().permissionRequest.count()).toBe(2)
+    expect(calls).toHaveLength(1)
+  })
+
+  it("hands a program's call the value it would have had", async () => {
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [{ type: "text", text: JSON.stringify({ sent: 3 }) }],
+      }),
+    }
+    const { scope, server, ctx, id } = await allowedOnce(executor)
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    expect(row.reuseUntil!.getTime() - Date.now()).toBeGreaterThan(14 * 60_000)
+    // Encrypted under the row's own associated data.
+    expect(
+      decryptString(
+        ctx.dek,
+        Buffer.from(row.resultJsonCiphertext!),
+        `permission_request:${id}:result_json`,
+      ),
+    ).toBe(JSON.stringify({ ok: true, value: { sent: 3 } }))
+
+    expect(
+      await askCodeCall(scope, call(server, "send_postcard", { to: "Grace" })),
+    ).toEqual({ ok: true, value: { sent: 3 } })
+    // Once: the next is asked.
+    expect(
+      await askCodeCall(scope, call(server, "send_postcard", { to: "Grace" })),
+    ).toHaveProperty("owner")
+  })
+
+  it("hands a program the text when the value was too long to keep", async () => {
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ text: "x".repeat(REUSE_VALUE_MAX_CHARS) }),
+          },
+        ],
+      }),
+    }
+    const { scope, server, id } = await allowedOnce(executor)
+    expect(
+      (await db().permissionRequest.findUniqueOrThrow({ where: { id } }))
+        .resultJsonCiphertext,
+    ).toBeNull()
+
+    const outcome = await askCodeCall(
+      scope,
+      call(server, "send_postcard", { to: "Grace" }),
+    )
+    expect(outcome).toMatchObject({ ok: true, value: expect.any(String) })
+  })
+
+  it("asks again once the while is over", async () => {
+    const { executor } = stub()
+    const { scope, server, id } = await allowedOnce(executor)
+    await db().permissionRequest.update({
+      where: { id },
+      data: { reuseUntil: new Date(Date.now() - 1) },
+    })
+
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+  })
+
+  it("asks for other arguments, and for another token", async () => {
+    const { executor } = stub()
+    const { ctx, scope, server } = await allowedOnce(executor)
+
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Ada" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+
+    const { token } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+    })
+    const other = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+    expect(
+      textOf(
+        await withPermission(
+          other,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+    // And the first token still gets its answer.
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("it already ran")
+  })
+
+  it("never answers from a run that failed", async () => {
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [{ type: "text", text: "The printer is on fire." }],
+        isError: true,
+      }),
+    }
+    const { scope, server, id } = await allowedOnce(executor)
+    expect(
+      await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({ status: "failed", reuseUntil: null })
+
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+  })
+
+  it("keeps nothing for a call allowed always or for a while", async () => {
+    for (const decision of ["always", "allow_for"] as const) {
+      const { ctx, scope, server } = await setup()
+      const { executor } = stub()
+      await withPermission(scope, call(server, "send_postcard", { n: 1 }))
+      const { id } = await db().permissionRequest.findFirstOrThrow({
+        where: { tokenId: scope.tokenId },
+      })
+      await decidePermission(
+        ctx,
+        id,
+        decision,
+        { publicUrl: PUBLIC_URL, minutes: 60 },
+        executor,
+      )
+      expect(
+        await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+      ).toMatchObject({
+        status: "executed",
+        reuseUntil: null,
+        resultJsonCiphertext: null,
+      })
+      await cleanup()
+      ;({ cleanup } = await scratchDatabase())
+    }
+  })
+
+  it("is cleared by the cleanup once the while is over", async () => {
+    const { executor } = stub()
+    const { id } = await allowedOnce(executor)
+
+    expect(await pruneReusableAnswers()).toBe(0)
+    expect(await pruneReusableAnswers(new Date(Date.now() + 16 * 60_000))).toBe(
+      1,
+    )
+    expect(
+      await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({
+      status: "executed",
+      reuseUntil: null,
+      resultJsonCiphertext: null,
+    })
   })
 })
 
