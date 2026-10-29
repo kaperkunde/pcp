@@ -206,13 +206,20 @@ export function ServiceCard({ view }: { view: ServiceView }) {
             description={`${view.registered.name} (${view.registered.slug}), ${view.registered.kind === "openapi" ? "an API endpoint" : "an MCP server"}: the service's own tools are there.`}
           />
         ) : null}
+        {view.exit && view.host ? (
+          <ListRow
+            href={`/servers/${view.host.id}`}
+            title="Exit"
+            description={`${view.exit.name}${view.exit.label ? ` (${view.exit.label})` : ""}: web fetch and the browser go out through this VPN for the tokens you allow. Its proxy listens on ${view.host.name}'s 127.0.0.1 only${view.definition.cap_add.length > 0 || view.definition.devices.length > 0 ? `; the container has ${[...view.definition.cap_add, ...view.definition.devices].join(" and ")}` : ""}. Removing the service removes the exit.`}
+          />
+        ) : null}
         {view.env.length > 0 ? (
           <ListRow
             title="Variables"
             description={view.env
               .map(
                 (entry) =>
-                  `${entry.name}: ${entry.secretName ?? "its fixed value or none"}`,
+                  `${entry.name}: ${entry.secretName ?? entry.value ?? "its fixed value or none"}`,
               )
               .join(" · ")}
           />

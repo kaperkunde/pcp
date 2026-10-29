@@ -148,8 +148,8 @@ so in the summary; the bump itself waits for the request.
   A server's document is its definition only (`PCP_FORMAT` 2): sync never
   writes an instance's own fields (name and short name, address,
   credential and secrets, read-only, public-only, enabled, pace, levels,
-  note; a service's SSH server, publish address, variables' secrets,
-  container, what it registered), and what a format-1 document says of its
+  note; a service's SSH server, publish address, variables' secrets and
+  typed values, container, what it registered, its exit), and what a format-1 document says of its
   server only fills in a first instance. Format 3 adds `services/<name>.yaml`
   (a service's definition); every other kind is still written in the
   format that first held it (`FORMAT_OF_KIND`), so an older PCP reads them
@@ -244,19 +244,23 @@ so in the summary; the bump itself waits for the request.
   connection goes through `exits/dial.ts dial`, which looks the name up by
   DNS-over-HTTPS through the exit (`exits/doh.ts`: resolvers by IP, their
   certificates checked, answers cached per exit within bounds), checks
-  every address from the exit's side (`exits/check.ts`: never its loopback
-  or its own address; its private, link-local and metadata ranges only with
-  the token's `private` line; never PCP's own) and opens a channel to the
-  address it checked; a container's exit is a channel to the loopback port
-  PCP published for it, then CONNECT or SOCKS5 (`exits/handshake.ts`) to
-  that address. The SSH connection is pooled per server
+  every address from the exit's side (`exits/check.ts`: never its loopback,
+  its own address, link-local or a cloud metadata address, whatever the
+  levels; its private ranges only with the token's `private` line; never
+  PCP's own) and opens a channel to the address it checked; a container's
+  exit is a channel to the loopback port PCP published for it (on
+  127.0.0.1 only, `parsePublish`), then CONNECT or SOCKS5
+  (`exits/handshake.ts`) to that address, signed in with a random password
+  PCP made for that instance (a managed `proxy_password` secret, decrypted
+  only in `upstream.ts`, handed to the container over standard input). The SSH connection is pooled per server
   (`ssh/client.ts openChannel`), opened only with the key a request handed
   in (`upstream.ts openExit`, a pinned host only), idled out, and never
   reopened in the background: the browser's exit proxy dials keyless. A tab
   with an exit has its own context through its own proxy (`proxy.ts` with
   `connect`), signed in to nothing, saved nowhere, no downloads. Exits are
   vault rows (`exit`), the owner's alone to add, rename or remove (on the SSH
-  server's page); a token's level for one is a `web_fetch_rule` of kind
+  server's page; a VPN exit is made by launching its service, never proposed
+  by an assistant); a token's level for one is a `web_fetch_rule` of kind
   `exit` keyed by its id (own or for all tokens), blocked without one; an
   ask is an `exit_use` request showing the exit, its label and the request.
   The request log names the exit, never the site. Limits go in
@@ -273,14 +277,18 @@ so in the summary; the bump itself waits for the request.
   input as an env file the same command deletes, never on a command line;
   they are scrubbed from logs and errors, and `inspect` reads only state,
   image and labels. Images are pinned by digest; volumes are named volumes,
-  never a host path. Only the owner launches, changes, updates or removes
-  one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
+  never a host path. A container gets nothing beyond the engine's default
+  but an exit's, which may get NET_ADMIN and /dev/net/tun only (`cap_add`
+  and `devices`, allow-lists in `definition.ts`, checked again in
+  `engine.ts`); a variable marked `plain` takes a value the owner types per
+  instance (`service_spec.plain_values`, no secret). Only the owner
+  launches, changes, updates or removes one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
   owner's levels, and proposes one only through `register_server` (kind
   `service`, `services/proposals.ts`): a `service_change` request that shows
   everything it runs in full (image, ports and address, variables and their
   secrets by name, volumes, health, what it registers, the SSH server) and
   launches only that once the owner agrees; a new secret is typed in on
-  PCP's page. Status is read only inside a request (page, `check_server`, a failing call), never
+  PCP's page; never one that adds an exit. Status is read only inside a request (page, `check_server`, a failing call), never
   polled; a saved secret remakes the services that take it through
   `after()`. A launch that fails takes back everything it did. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against

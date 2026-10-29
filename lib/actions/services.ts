@@ -18,7 +18,12 @@ import {
 } from "@/lib/core/upstream"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
-import { envFrom, serviceInputFrom } from "@/lib/server/service-input"
+import {
+  envFrom,
+  serviceInputFrom,
+  valuesFrom,
+  withNewSecrets,
+} from "@/lib/server/service-input"
 import { requireContext } from "@/lib/server/session"
 
 import type { ServerActionResult } from "./servers"
@@ -48,17 +53,21 @@ export async function launchServiceAction(
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
   const result = await guarded(async () => {
-    const launched = await launchService(
-      ctx,
-      {
-        ...serviceInputFrom(formData),
-        description: field(formData, "description"),
-        // Another instance of a service takes its definition from there.
-        ...(field(formData, "definitionId")
-          ? { definitionId: field(formData, "definitionId") }
-          : { definition: field(formData, "definition") }),
-      },
-      { publicUrl },
+    const input = serviceInputFrom(formData)
+    const launched = await withNewSecrets(ctx, formData, input.env, (env) =>
+      launchService(
+        ctx,
+        {
+          ...input,
+          env,
+          description: field(formData, "description"),
+          // Another instance of a service takes its definition from there.
+          ...(field(formData, "definitionId")
+            ? { definitionId: field(formData, "definitionId") }
+            : { definition: field(formData, "definition") }),
+        },
+        { publicUrl },
+      ),
     )
 
     return { id: launched.id, message: launched.message }
@@ -84,6 +93,8 @@ export async function saveServiceSettingsAction(
       name: field(formData, "name"),
       description: field(formData, "description"),
       env: envFrom(formData),
+      // Only a service with plain variables sends them.
+      ...(field(formData, "values") ? { values: valuesFrom(formData) } : {}),
     })
 
     const slug = field(formData, "slug")

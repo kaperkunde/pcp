@@ -1585,3 +1585,47 @@ export async function serviceView(
       : null,
   }
 }
+
+/**
+ * The vault's service definitions that add an exit (VPN containers), for
+ * Add a VPN exit: another of each is launched on its definition.
+ */
+export async function exitServiceDefinitions(
+  ctx: VaultContext,
+): Promise<Array<{ definitionId: string; name: string; image: string }>> {
+  const specs = await db().serviceSpec.findMany({
+    where: { server: { vaultId: ctx.vaultId, definitionId: { not: null } } },
+    select: {
+      definition: true,
+      server: { select: { definitionId: true, name: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  })
+  const found = new Map<string, { name: string; image: string }>()
+
+  for (const spec of specs) {
+    const id = spec.server.definitionId!
+
+    if (found.has(id)) {
+      continue
+    }
+
+    try {
+      const definition = readServiceDefinition(spec.definition)
+
+      if (definition.registers.kind === "exit") {
+        found.set(id, {
+          name: spec.server.name.replace(/ service$/i, ""),
+          image: definition.image,
+        })
+      }
+    } catch {
+      // A stored definition that no longer reads is not offered.
+    }
+  }
+
+  return [...found].map(([definitionId, entry]) => ({
+    definitionId,
+    ...entry,
+  }))
+}

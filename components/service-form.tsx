@@ -26,7 +26,18 @@ import {
 
 type Option = { id: string; name: string }
 
-type Variable = { name: string; required: boolean; description: string }
+type Variable = {
+  name: string
+  required: boolean
+  description: string
+  /** The owner types its value (no secret): a provider's name, a country. */
+  plain: boolean
+  /** Its fixed value, or a plain one's when none is typed. */
+  value: string | null
+}
+
+/** The select's choice that types a new secret in on this form. */
+const NEW_SECRET = "__new__"
 
 export const EXAMPLE_DEFINITION = JSON.stringify(
   {
@@ -57,16 +68,56 @@ export const EXAMPLE_DEFINITION = JSON.stringify(
   2,
 )
 
+/**
+ * A VPN container as an exit, to start from: gluetun's shape (an HTTP proxy
+ * with a login PCP makes, NET_ADMIN and the tunnel device). PCP's common
+ * items have it whole, pinned by digest.
+ */
+const EXAMPLE_EXIT_DEFINITION = JSON.stringify(
+  {
+    image: "docker.io/qmcgaw/gluetun@sha256:<64 hex digits>",
+    source: "docker.io/qmcgaw/gluetun:v3.41",
+    ports: [{ container: 8888 }],
+    env: [
+      { name: "VPN_SERVICE_PROVIDER", plain: true, required: true },
+      { name: "VPN_TYPE", plain: true, value: "openvpn" },
+      { name: "SERVER_COUNTRIES", plain: true },
+      { name: "OPENVPN_USER" },
+      { name: "OPENVPN_PASSWORD" },
+      { name: "HTTPPROXY", value: "on" },
+    ],
+    cap_add: ["NET_ADMIN"],
+    devices: ["/dev/net/tun"],
+    registers: {
+      kind: "exit",
+      port: 8888,
+      protocol: "http",
+      auth: { user_env: "HTTPPROXY_USER", password_env: "HTTPPROXY_PASSWORD" },
+    },
+  },
+  null,
+  2,
+)
+
 /** The ports and variables a definition names, as far as it reads. */
 function readShape(text: string): {
   ports: number[]
   env: Variable[]
+  /** It registers an exit: a VPN's proxy, on the SSH server's loopback. */
+  exit: boolean
   problem: string | null
 } {
   try {
     const value = JSON.parse(text) as {
       ports?: Array<{ container?: unknown }>
-      env?: Array<{ name?: unknown; required?: unknown; description?: unknown }>
+      env?: Array<{
+        name?: unknown
+        required?: unknown
+        description?: unknown
+        plain?: unknown
+        value?: unknown
+      }>
+      registers?: { kind?: unknown }
     }
 
     return {
@@ -80,12 +131,54 @@ function readShape(text: string): {
           required: entry.required === true,
           description:
             typeof entry.description === "string" ? entry.description : "",
+          plain: entry.plain === true,
+          value: typeof entry.value === "string" ? entry.value : null,
         })),
+      exit: value.registers?.kind === "exit",
       problem: null,
     }
   } catch {
-    return { ports: [], env: [], problem: "The definition is not JSON yet." }
+    return {
+      ports: [],
+      env: [],
+      exit: false,
+      problem: "The definition is not JSON yet.",
+    }
   }
+}
+
+/** A plain variable's value, typed here: no secret. */
+function PlainField({
+  variable,
+  value,
+  onChange,
+}: {
+  variable: Variable
+  value: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <Field
+      label={variable.name}
+      htmlFor={`service-value-${variable.name}`}
+      hint={
+        variable.description ||
+        (variable.required ? "The service needs it." : undefined)
+      }
+    >
+      <Input
+        id={`service-value-${variable.name}`}
+        name={`value.${variable.name}`}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={variable.value ?? ""}
+        required={variable.required && variable.value === null}
+        maxLength={4000}
+        spellCheck={false}
+        autoComplete="off"
+      />
+    </Field>
+  )
 }
 
 function SecretSelect({
@@ -93,38 +186,76 @@ function SecretSelect({
   secrets,
   value,
   onChange,
+  allowNew = false,
 }: {
   variable: Variable
   secrets: Option[]
   value: string
   onChange: (value: string) => void
+  /** Offer to type a new secret in, saved in the vault with the launch. */
+  allowNew?: boolean
 }) {
   return (
-    <Field
-      label={variable.name}
-      htmlFor={`service-env-${variable.name}`}
-      hint={
-        variable.description ||
-        (variable.required ? "The service needs it." : undefined)
-      }
-    >
-      <Select
-        id={`service-env-${variable.name}`}
-        name={`env.${variable.name}`}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        required={variable.required}
+    <>
+      <Field
+        label={variable.name}
+        htmlFor={`service-env-${variable.name}`}
+        hint={
+          variable.description ||
+          (variable.required ? "The service needs it." : undefined)
+        }
       >
-        <option value="">
-          {variable.required ? "Choose a secret" : "None (or its fixed value)"}
-        </option>
-        {secrets.map((secret) => (
-          <option key={secret.id} value={secret.id}>
-            {secret.name}
+        <Select
+          id={`service-env-${variable.name}`}
+          name={`env.${variable.name}`}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          required={variable.required}
+        >
+          <option value="">
+            {variable.required
+              ? "Choose a secret"
+              : "None (or its fixed value)"}
           </option>
-        ))}
-      </Select>
-    </Field>
+          {secrets.map((secret) => (
+            <option key={secret.id} value={secret.id}>
+              {secret.name}
+            </option>
+          ))}
+          {allowNew ? <option value={NEW_SECRET}>A new secret…</option> : null}
+        </Select>
+      </Field>
+      {allowNew && value === NEW_SECRET ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label="The new secret's name"
+            htmlFor={`service-new-name-${variable.name}`}
+          >
+            <Input
+              id={`service-new-name-${variable.name}`}
+              name={`newSecret.${variable.name}.name`}
+              required
+              maxLength={100}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </Field>
+          <Field
+            label="Its value"
+            htmlFor={`service-new-value-${variable.name}`}
+            hint="Saved in your vault, encrypted, with the launch."
+          >
+            <Input
+              id={`service-new-value-${variable.name}`}
+              name={`newSecret.${variable.name}.value`}
+              type="password"
+              required
+              autoComplete="new-password"
+            />
+          </Field>
+        </div>
+      ) : null}
+    </>
   )
 }
 
@@ -134,6 +265,8 @@ export function ServiceLaunchForm({
   fixed,
   action: given,
   submitLabel = "Launch",
+  defaultHostId,
+  startFromExit = false,
 }: {
   /** The SSH servers whose host key PCP has pinned. */
   hosts: Array<Option & { address: string }>
@@ -156,6 +289,10 @@ export function ServiceLaunchForm({
     formData: FormData,
   ) => Promise<ServerActionResult>
   submitLabel?: string
+  /** The SSH server chosen to start with (an exit added from its page). */
+  defaultHostId?: string
+  /** The owner starts typing from a VPN exit's definition. */
+  startFromExit?: boolean
 }) {
   const [state, action] = useActionState<ServerActionResult, FormData>(
     given ?? launchServiceAction,
@@ -164,14 +301,22 @@ export function ServiceLaunchForm({
   const [name, setName] = useState(fixed?.name ?? "")
   const [slug, setSlug] = useState("")
   const [description, setDescription] = useState(fixed?.description ?? "")
-  const [hostId, setHostId] = useState(hosts[0]?.id ?? "")
+  const [hostId, setHostId] = useState(
+    hosts.find((host) => host.id === defaultHostId)?.id ?? hosts[0]?.id ?? "",
+  )
   const [definition, setDefinition] = useState(
-    fixed?.definition ?? EXAMPLE_DEFINITION,
+    fixed?.definition ??
+      (startFromExit ? EXAMPLE_EXIT_DEFINITION : EXAMPLE_DEFINITION),
   )
   const [address, setAddress] = useState("0.0.0.0")
   const [hostPorts, setHostPorts] = useState<Record<number, string>>({})
   const [env, setEnv] = useState<Record<string, string>>({})
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [exitName, setExitName] = useState("")
+  const [exitLabel, setExitLabel] = useState("")
   const shape = useMemo(() => readShape(definition), [definition])
+  const plain = shape.env.filter((variable) => variable.plain)
+  const secretVariables = shape.env.filter((variable) => !variable.plain)
 
   return (
     <ServerFormFrame editing={false} action={action}>
@@ -235,7 +380,7 @@ export function ServiceLaunchForm({
           <Field
             label="Definition"
             htmlFor="service-definition"
-            hint="JSON: the image pinned by digest (repository@sha256:…), its ports, the names of its variables, named volumes (never a folder of the server), a health check, and what PCP adds for it: an API endpoint from its schema (openapi), an MCP server (mcp), or nothing (none)."
+            hint="JSON: the image pinned by digest (repository@sha256:…), its ports, the names of its variables (plain ones are typed here, the rest take secrets), named volumes (never a folder of the server), a health check, and what PCP adds for it: an API endpoint from its schema (openapi), an MCP server (mcp), an exit from a VPN's proxy (exit, which alone may add NET_ADMIN and /dev/net/tun), or nothing (none)."
           >
             <Textarea
               id="service-definition"
@@ -252,28 +397,81 @@ export function ServiceLaunchForm({
           <p className="text-xs text-muted-foreground">{shape.problem}</p>
         ) : null}
       </FormSection>
+      {shape.exit ? (
+        <FormSection title="The exit">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            PCP adds this service&apos;s proxy as an exit: web fetch and the
+            browser can then go out through the VPN, for the tokens you allow on
+            their pages. Its port listens on the SSH server&apos;s own 127.0.0.1
+            only, with a password PCP makes for it, and PCP reaches it through
+            the SSH connection.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              label="Exit name"
+              htmlFor="service-exit-name"
+              hint="What assistants name in their calls, like se-vpn."
+            >
+              <Input
+                id="service-exit-name"
+                name="exit.name"
+                value={exitName}
+                onChange={(event) => setExitName(event.target.value)}
+                required
+                maxLength={40}
+                pattern="[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+                spellCheck={false}
+                autoComplete="off"
+                className="font-mono"
+              />
+            </Field>
+            <Field
+              label="Where it comes out"
+              htmlFor="service-exit-label"
+              hint="Your words for it, like Sweden, Mullvad."
+            >
+              <Input
+                id="service-exit-label"
+                name="exit.label"
+                value={exitLabel}
+                onChange={(event) => setExitLabel(event.target.value)}
+                maxLength={80}
+                autoComplete="off"
+              />
+            </Field>
+          </div>
+        </FormSection>
+      ) : null}
       {shape.ports.length > 0 ? (
         <FormSection title="Ports">
-          <Field
-            label="Publish on"
-            htmlFor="service-address"
-            hint="The SSH server's address the ports listen on: 0.0.0.0 for every address, or one of its own. PCP reaches what the service serves there; 127.0.0.1 works only when PCP runs on that machine."
-          >
-            <Input
-              id="service-address"
-              name="address"
-              value={address}
-              onChange={(event) => setAddress(event.target.value)}
-              spellCheck={false}
-              className="font-mono"
-              required
-            />
-          </Field>
+          {shape.exit ? (
+            <input type="hidden" name="address" value="127.0.0.1" />
+          ) : (
+            <Field
+              label="Publish on"
+              htmlFor="service-address"
+              hint="The SSH server's address the ports listen on: 0.0.0.0 for every address, or one of its own. PCP reaches what the service serves there; 127.0.0.1 works only when PCP runs on that machine."
+            >
+              <Input
+                id="service-address"
+                name="address"
+                value={address}
+                onChange={(event) => setAddress(event.target.value)}
+                spellCheck={false}
+                className="font-mono"
+                required
+              />
+            </Field>
+          )}
           <div className="grid gap-4 sm:grid-cols-2">
             {shape.ports.map((port) => (
               <Field
                 key={port}
-                label={`The SSH server's port for ${port}`}
+                label={
+                  shape.exit
+                    ? `The SSH server's loopback port for ${port}`
+                    : `The SSH server's port for ${port}`
+                }
                 htmlFor={`service-port-${port}`}
               >
                 <input type="hidden" name="port.container" value={port} />
@@ -294,22 +492,45 @@ export function ServiceLaunchForm({
           </div>
         </FormSection>
       ) : (
-        <input type="hidden" name="address" value={address} />
+        <input
+          type="hidden"
+          name="address"
+          value={shape.exit ? "127.0.0.1" : address}
+        />
       )}
-      {shape.env.length > 0 ? (
+      {plain.length > 0 ? (
+        <FormSection title="Its settings">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            What you type here is no secret: it is kept with the service and
+            shown on its page.
+          </p>
+          {plain.map((variable) => (
+            <PlainField
+              key={variable.name}
+              variable={variable}
+              value={values[variable.name] ?? ""}
+              onChange={(value) =>
+                setValues({ ...values, [variable.name]: value })
+              }
+            />
+          ))}
+        </FormSection>
+      ) : null}
+      {secretVariables.length > 0 ? (
         <FormSection title="Secrets for its variables">
           <p className="text-xs leading-relaxed text-muted-foreground">
             Each value goes to the engine over the SSH connection&apos;s
             standard input, never on a command line, and assistants never see
             it. Changing a secret later restarts the service with the new value.
           </p>
-          {shape.env.map((variable) => (
+          {secretVariables.map((variable) => (
             <SecretSelect
               key={variable.name}
               variable={variable}
               secrets={secrets}
               value={env[variable.name] ?? ""}
               onChange={(value) => setEnv({ ...env, [variable.name]: value })}
+              allowNew
             />
           ))}
         </FormSection>
@@ -335,6 +556,8 @@ export function ServiceSettingsForm({
     slug: string
     description: string
     env: Record<string, string>
+    /** What was typed for its plain variables. */
+    values?: Record<string, string>
   }
   variables: Variable[]
   secrets: Option[]
@@ -347,6 +570,9 @@ export function ServiceSettingsForm({
   const [slug, setSlug] = useState(initial.slug)
   const [description, setDescription] = useState(initial.description)
   const [env, setEnv] = useState(initial.env)
+  const [values, setValues] = useState(initial.values ?? {})
+  const plain = variables.filter((variable) => variable.plain)
+  const secretVariables = variables.filter((variable) => !variable.plain)
 
   return (
     <ServerFormFrame editing action={action}>
@@ -366,12 +592,30 @@ export function ServiceSettingsForm({
           slugHint="How an assistant refers to the service's own tools (status, logs, start, stop, restart)."
         />
       </FormSection>
-      {variables.length > 0 ? (
+      {plain.length > 0 ? (
+        <FormSection title="Its settings">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Another value here restarts the service with it.
+          </p>
+          <input type="hidden" name="values" value="1" />
+          {plain.map((variable) => (
+            <PlainField
+              key={variable.name}
+              variable={variable}
+              value={values[variable.name] ?? ""}
+              onChange={(value) =>
+                setValues({ ...values, [variable.name]: value })
+              }
+            />
+          ))}
+        </FormSection>
+      ) : null}
+      {secretVariables.length > 0 ? (
         <FormSection title="Secrets for its variables">
           <p className="text-xs leading-relaxed text-muted-foreground">
             Another secret here restarts the service with it.
           </p>
-          {variables.map((variable) => (
+          {secretVariables.map((variable) => (
             <SecretSelect
               key={variable.name}
               variable={variable}

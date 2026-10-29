@@ -4,12 +4,13 @@ import { revalidatePath } from "next/cache"
 
 import {
   createSshExit,
-  deleteExit,
   setExitLevel,
   setExitLevelShared,
   updateExit,
 } from "@/lib/core/exits/exits"
+import { removeExit } from "@/lib/core/upstream"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
+import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
 /**
@@ -61,17 +62,27 @@ export async function updateExitAction(
   return result
 }
 
+/**
+ * Removes an exit; a VPN service's exit takes its service with it when the
+ * owner chose so (its container removed from the SSH server first).
+ */
 export async function deleteExitAction(
   serverId: string,
   exitId: string,
+  choices: { service?: boolean } = {},
 ): Promise<ActionState> {
   const ctx = await requireContext()
-  const result = await guarded(async () => {
-    await deleteExit(ctx, exitId)
-    return {}
-  })
+  const result = await guarded(async () => ({
+    message: await removeExit(
+      ctx,
+      exitId,
+      { service: choices.service === true },
+      { publicUrl: await publicUrlFor(ctx) },
+    ),
+  }))
 
   revalidate(serverId)
+  revalidatePath("/servers")
   return result
 }
 
