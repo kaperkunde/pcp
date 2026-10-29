@@ -28,7 +28,22 @@ import {
 } from "./definition"
 import { FLOW_RUN_TIMEOUT_MS, WRAPPER_RUN_TIMEOUT_MS } from "./limits"
 import type { SecretGrant } from "./placeholders"
-import { checkValue } from "./schema-check"
+import { checkCallArguments } from "../call-arguments"
+import {
+  ok,
+  passOn,
+  toCallToolResult,
+  withLead,
+  type ToolErrorCode,
+} from "../tools/outcome"
+import {
+  argumentsResult,
+  familyError,
+  textAnswer,
+  withNotes,
+  type Rename,
+} from "../tools/family"
+import { argumentsRefusal, validate } from "../tools/validate"
 
 /**
  * A call to a wrapper's tool: its program, run as run_code's are (one
@@ -104,80 +119,28 @@ export async function tokenServerIds(
     : token.servers.map((link) => link.serverId)
 }
 
-function text(value: string, isError = false): CallToolResult {
-  return {
-    content: [{ type: "text", text: value }],
-    ...(isError ? { isError: true } : {}),
-  }
-}
-
-function withLead(lead: string, result: CallToolResult): CallToolResult {
-  const [first, ...rest] = result.content
-
-  return first?.type === "text"
-    ? {
-        ...result,
-        content: [{ ...first, text: `${lead}\n\n${first.text}` }, ...rest],
-      }
-    : { ...result, content: [{ type: "text", text: lead }, ...result.content] }
-}
-
-const JSON_TYPES: Record<string, (value: unknown) => boolean> = {
-  string: (value) => typeof value === "string",
-  number: (value) => typeof value === "number",
-  integer: (value) => Number.isInteger(value),
-  boolean: (value) => typeof value === "boolean",
-  object: (value) =>
-    value !== null && typeof value === "object" && !Array.isArray(value),
-  array: (value) => Array.isArray(value),
-  null: (value) => value === null,
+/** What a run of a wrapper's tool came to, as the one mapping writes it. */
+function failed(
+  message: string,
+  code: ToolErrorCode = "state",
+): CallToolResult {
+  return familyError(message, code)
 }
 
 /**
- * The arguments against the tool's schema, at its top level: the required
- * ones are there and each has its type. The program checks the rest.
+ * The note in front of a wrapper's answer, or the refusal of its call, when
+ * its program calls a tool with an old argument name: what to change, and
+ * with what.
  */
-export function checkArgs(
-  schema: Record<string, unknown>,
-  args: Record<string, unknown>,
-): string | null {
-  const required = Array.isArray(schema.required) ? schema.required : []
+export function renameFix(
+  wrapper: string,
+  tool: string,
+  target: string,
+  { from, to, retired }: Rename,
+): string {
+  const old = from.split(".").at(-1) ?? from
 
-  for (const name of required) {
-    if (typeof name === "string" && !Object.hasOwn(args, name)) {
-      return `The argument "${name}" is required.`
-    }
-  }
-
-  const properties =
-    schema.properties && typeof schema.properties === "object"
-      ? (schema.properties as Record<string, { type?: unknown }>)
-      : {}
-
-  for (const [name, value] of Object.entries(args)) {
-    const property = properties[name]
-
-    if (!property) {
-      if (schema.additionalProperties === false) {
-        return `There is no argument "${name}". Arguments: ${Object.keys(properties).join(", ") || "(none)"}.`
-      }
-
-      continue
-    }
-
-    const types = (
-      Array.isArray(property.type) ? property.type : [property.type]
-    ).filter((type): type is string => typeof type === "string")
-
-    if (
-      types.length > 0 &&
-      !types.some((type) => JSON_TYPES[type]?.(value) ?? true)
-    ) {
-      return `The argument "${name}" is ${types.join(" or ")}.`
-    }
-  }
-
-  return null
+  return `The wrapper ${wrapper}'s tool ${tool} calls ${target} with ${from}, which ${retired ? "is now" : "was renamed to"} ${to}${retired ? "" : " (it works until the next release)"}: fix it with update_wrapper (edit tool ${tool}'s program: replace \`${old}\` with \`${to}\`).`
 }
 
 /**
@@ -215,10 +178,12 @@ async function callWrapperTool(
     throw notFound(`${server.slug}/${toolName}`)
   }
 
-  const problem = checkArgs(tool.inputSchema, args)
+  // The arguments against the tool's inputSchema, by the one validator,
+  // before its program runs or anything is asked.
+  const problems = validate(tool.inputSchema, args)
 
-  if (problem) {
-    return text(`${server.slug}/${toolName}: ${problem}`, true)
+  if (problems.length > 0) {
+    return argumentsResult(`${server.slug}/${toolName}`, problems)
   }
 
   const servers =
@@ -231,12 +196,18 @@ async function callWrapperTool(
   // called it is told its id for its trace, and this run's answer names
   // that one back.
   const runId = newRunId()
+  /** What the run's calls noted: an old argument name a program used. */
+  const notes: string[] = []
   onRun?.(runId)
   const run = await runProgram(
     env,
     { code: tool.program, input: JSON.stringify(args), label: "wrapper" },
     {
-      call: (input) => innerCall(env, base, servers, tool, input, definition),
+      call: (input) =>
+        innerCall(env, base, servers, tool, input, definition, {
+          wrapper: server.slug,
+          notes,
+        }),
       ...(env.signal ? { signal: env.signal } : {}),
       ...(env.codeExecutor ? { executor: env.codeExecutor } : {}),
       timeoutMs: wrapperRunTimeout(flow),
@@ -249,9 +220,23 @@ async function callWrapperTool(
   )
 
   if ("busy" in run) {
-    throw new PcpError("state", run.busy)
+    return failed(run.busy)
   }
 
+  return withNotes(finished(run, { label, tool, parentRunId }), [
+    ...new Set(notes),
+  ])
+}
+
+/** A run of a wrapper's tool, done, as its answer. */
+function finished(
+  run: Extract<Awaited<ReturnType<typeof runProgram>>, { result: unknown }>,
+  {
+    label,
+    tool,
+    parentRunId,
+  }: { label: string; tool: WrapperTool; parentRunId: string | undefined },
+): CallToolResult {
   const { result, stop } = run
   /** What every answer but a plain success says of the run. */
   const report = [
@@ -260,28 +245,29 @@ async function callWrapperTool(
   ]
 
   if (result.kind === "stopped" && stop) {
-    return withLead(
-      [
-        isConnectResult(stop.result)
-          ? `${label} calls ${stop.at}, which the owner has to connect first; nothing after that call ran. Once they have (check_server says when), call ${label} again.`
-          : `${label} calls ${stop.at}, which needs the owner first; nothing after that call ran. Once they have answered below, call ${label} again.`,
-        ...report,
-      ].join("\n\n"),
-      stop.result,
+    return toCallToolResult(
+      withLead(
+        [
+          isConnectResult(stop.result)
+            ? `${label} calls ${stop.at}, which the owner has to connect first; nothing after that call ran. Once they have (check_server says when), call ${label} again.`
+            : `${label} calls ${stop.at}, which needs the owner first; nothing after that call ran. Once they have answered below, call ${label} again.`,
+          ...report,
+        ].join("\n\n"),
+        passOn(stop.result),
+      ),
     )
   }
 
   if (result.kind === "done") {
     if (result.returned === null) {
       return tool.outputSchema
-        ? text(
+        ? failed(
             [
               `${label} returned nothing, but its outputSchema describes an answer.`,
               ...report,
             ].join("\n\n"),
-            true,
           )
-        : text(`${label} finished and returned nothing.`)
+        : textAnswer(`${label} finished and returned nothing.`)
     }
 
     let value: unknown
@@ -292,32 +278,42 @@ async function callWrapperTool(
       value = result.returned
     }
 
-    const mismatch = tool.outputSchema
-      ? checkValue(tool.outputSchema, value)
-      : null
+    if (!tool.outputSchema) {
+      return textAnswer(typeof value === "string" ? value : result.returned)
+    }
 
-    if (mismatch) {
-      return text(
+    // What it says it answers, checked by the one validator, as strictly
+    // as arguments are; then passed on as structuredContent.
+    const mismatch = validate(tool.outputSchema, value, {
+      schemaName: "outputSchema",
+      whole: "The answer",
+      arguments: false,
+      handles: false,
+    })
+
+    if (mismatch.length > 0) {
+      return failed(
         [
-          `${label} returned something its outputSchema does not allow. ${mismatch}`,
+          [
+            `${label} returned something its outputSchema does not allow:`,
+            ...mismatch.map((problem) => `- ${problem}`),
+          ].join("\n"),
           ...report,
         ].join("\n\n"),
-        true,
       )
     }
 
-    return text(typeof value === "string" ? value : result.returned)
+    return toCallToolResult(ok(value), { structured: true })
   }
 
   const printed = result.output.trim()
 
-  return text(
+  return failed(
     [
       `${label} failed: ${result.kind === "error" ? result.message : "it was stopped."}`,
       ...(printed ? [`It printed:\n${printed.slice(0, 4_000)}`] : []),
       ...report,
     ].join("\n\n"),
-    true,
   )
 }
 
@@ -336,6 +332,7 @@ async function innerCall(
     ...shape
   }: Parameters<Parameters<typeof runProgram>[2]["call"]>[0],
   definition: Pick<WrapperDefinition, "secrets" | "callLevels">,
+  { wrapper, notes }: { wrapper: string; notes: string[] },
 ): Promise<CodeCallOutcome> {
   // On the owner's approval the calls are the wrapper's own: any enabled
   // server of the vault, whether or not this token reaches it.
@@ -403,9 +400,44 @@ async function innerCall(
       : [],
   )
 
+  // The one check of a call's arguments, before it runs or asks. A secret
+  // passes it wherever a string may go: whether a binding the owner
+  // approved puts it there is upstream.ts's to say, in its own words. A
+  // program that uses an old argument name is told how to change it, in
+  // the wrapper's answer while the name still works, and in the refusal
+  // once it does not.
+  const row = await db().mcpTool.findUnique({
+    where: { serverId_name: { serverId: target.id, name } },
+    select: { inputSchema: true },
+  })
+  const checked = await checkCallArguments(
+    target,
+    name,
+    row?.inputSchema,
+    args,
+    { secretAt: () => true },
+  )
+  const fixes = checked.renames.map((rename) =>
+    renameFix(wrapper, tool.name, `${slug}/${name}`, rename),
+  )
+
+  if (!checked.fits) {
+    return {
+      ok: false,
+      refused: true,
+      error: [
+        argumentsRefusal(`${slug}/${name}`, checked.problems),
+        fixes.length > 0
+          ? fixes.join("\n")
+          : `The wrapper ${wrapper}'s tool ${tool.name} needs migrating: fix it with update_wrapper (edit tool ${tool.name}'s program so this call fits ${slug}/${name}'s inputSchema, which describe gives).`,
+      ].join("\n\n"),
+    }
+  }
+
+  notes.push(...fixes)
   lookedUp?.(await markedReadOnly(target.id, name))
 
-  return runCodeCall(env.ctx, target, name, args, {
+  return runCodeCall(env.ctx, target, name, checked.args, {
     publicUrl: env.publicUrl,
     tokenId: env.tokenId,
     max: resourceLimits().answerChars,

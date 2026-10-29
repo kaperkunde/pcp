@@ -46,10 +46,10 @@ describe("executeCall", () => {
     expect(outcome.result.isError).toBeUndefined()
   })
 
-  it("wraps an array so structured content stays an object", async () => {
+  it("passes an array on as structured content as it is, not wrapped", async () => {
     api = await startTestApi((_, res) => json(res, 200, [1, 2]))
     const outcome = await executeCall(get("/pets"))
-    expect(outcome.result.structuredContent).toEqual({ value: [1, 2] })
+    expect(outcome.result.structuredContent).toEqual([1, 2])
   })
 
   it("passes text through and describes binary instead of dumping it", async () => {

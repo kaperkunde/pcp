@@ -1468,6 +1468,34 @@ describe("how a run says it ended", () => {
     })
   })
 
+  it("prints a call's note about an old argument name once, beside the value", async () => {
+    await connect()
+    const run = await runProgram(
+      scope,
+      {
+        code: `await pcp.call("mail", "search_emails", { hasAttachment: true }); return (await pcp.call("mail", "search_emails", { hasAttachment: true })).total`,
+      },
+      {
+        call: async () => ({
+          ok: true,
+          value: { total: 2 },
+          notes: [
+            "hasAttachment was renamed to has_attachment; use has_attachment.",
+          ],
+        }),
+      },
+    )
+
+    expect(run).toMatchObject({
+      result: {
+        kind: "done",
+        returned: "2",
+        output:
+          "[PCP] mail/search_emails: hasAttachment was renamed to has_attachment; use has_attachment.\n",
+      },
+    })
+  })
+
   it("throws a tool's own error with no code", async () => {
     await connect()
     const run = await runProgram(

@@ -638,7 +638,7 @@ session offers `vacationresponse`.
 answered and adds or removes keywords, which every summary lists and
 `search_emails` filters on; the keywords the flags carry (`$seen`,
 `$flagged`, `$answered`, `$draft`) are left to the flags. `search_emails` with
-`allMailboxes` looks in every mailbox but Trash and Junk (JMAP:
+`all_mailboxes` looks in every mailbox but Trash and Junk (JMAP:
 `inMailboxOtherThan`; IMAP: All Mail alone where the server has one, else
 each selectable mailbox but the Flagged and Important views in turn, at most
 `MAX_SEARCH_MAILBOXES`, merged by date and paged only to
@@ -2007,17 +2007,20 @@ checkSyntax`), nothing has a character that does not show on screen
   reaches only the tools listed in that tool's `calls`, through
   `runCodeCall` like a run_code call (at the calling token's own levels, or on
   the owner's approval: Levels, below); a call to anything else is an error
-  the program sees. The arguments are checked against the tool's schema at
-  the top level first. What it returns is the tool's answer (a string as it
-  is, anything else as JSON), shaped by `runCall` as any tool's is. When the
-  tool has an `outputSchema`, the return is checked against it first
-  (`schema-check.ts`: type, enum, const, required, properties,
-  additionalProperties, items, anyOf, oneOf and allOf, bounded in values and
-  depth; formats and ranges are not checked, and no schema is compiled to
-  code); one that does not fit is an error naming where, not passed on.
-  `describe` shows the schema as an outline under `returns`
-  (`openapi/outline.ts outlineSchema`), and the owner reads it in full on
-  the request. A `$ref` is refused when it is saved, not followed. Gateway calls and the owner's allowed requests
+  the program sees. The arguments are checked against the tool's schema by
+  the one validator (`tools/validate.ts`) first, and each call the program
+  makes is checked as call_tool's are (`call-arguments.ts`) before it runs:
+  a call that uses an old argument name of a family's tool runs, and the
+  wrapper's answer says what to change in which tool's program with
+  `update_wrapper`; one that no longer fits is refused with what is wrong
+  and that the wrapper needs migrating. What it returns is the tool's answer
+  (a string as it is, anything else as JSON), shaped by `runCall` as any
+  tool's is. When the tool has an `outputSchema`, the return is checked
+  against it by the same validator, as strictly as arguments, and passed on
+  as `structuredContent` with its JSON as the text; one that does not fit is
+  an error naming where, not passed on. `describe` shows the schema as
+  `outputSchema` (`mcp_tool.output_schema`), and the owner reads it in full
+  on the request. A `$ref` is refused when it is saved, not followed. Gateway calls and the owner's allowed requests
   run with `withWrappers(executor)`, which sends a wrapper's tool to its
   program and every other call to the executor underneath, so a program's
   own calls can never reach a wrapper.
@@ -3434,6 +3437,32 @@ connect, as `structuredContent` `{kind: "needs_owner", …}` with the link
 last in the text), or an answer made elsewhere passed on, in which a
 permission link is recognised and marked the same way.
 
+The families behind call_tool are written to the same interface
+(`tools/family.ts`): `defineInnerTool` publishes a browser, mail,
+calendar, SSH or service tool's schema the same way, with its rules across
+arguments ("a ref or a target, one of them") as JSON Schema under the
+root's `allOf`, each refused in its own words, and `check` runs the one
+validator, then zod for what JSON Schema cannot say (a date `Date.parse`
+reads). Old argument names are `aliases` for one release (renamed, with a
+note in front of the answer), then `retired` (refused, naming the new one);
+`synonyms` are other names always taken (find's `query`). A family's
+refusals are tool errors with codes (`not_found`, `forbidden`,
+`invalid_arguments`); only a failure on the way to the server or a sign-in
+it needs is thrown. `call-arguments.ts` is where every path checks a call
+before it runs or asks: a family's tool by its definition (the browser's
+refusal about the tab lists the token's tabs), any other against its
+catalogue row. The catalogue keeps the `outputSchema` a family tool, a
+wrapper tool or an MCP server declares (`output_schema`), and an MCP
+server's tool icons; a name MCP does not allow is kept and named in the
+server's status. A JSON-RPC error an MCP server answers with is a tool
+error in its words: the server is not marked down and the call is not said
+to have maybe gone through, which only a failure on the way says. An API
+endpoint's answer that is not an object is structuredContent as it is.
+An endpoint another PCP version built is built again when describe or a
+call meets it; one whose schema no longer builds keeps its tools and says
+it needs migrating, with the edits `get_endpoint`'s `include_problems`
+proposes for `update_endpoint`.
+
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
@@ -3475,11 +3504,12 @@ message each (`app/mcp/route.ts`). The tools:
   annotations, with no `call_handle`, since it is called directly), or a
   tool. For a tool it returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
-  published it, whether the tool runs at once or asks first, and for an API
-  endpoint's tool, `returns`: an outline of its success answer read from the
-  schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text the
-  schema marks base64 (`format: byte`) shows as `string (base64)`. First
-  in its answer is the tool's `call_handle` (below).
+  published it, whether the tool runs at once or asks first, its
+  `outputSchema` when it declares one (`mcp_tool.output_schema`), and for
+  an API endpoint's tool, `returns`: an outline of its success answer read
+  from the schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text
+  the schema marks base64 (`format: byte`) shows as `string (base64)`.
+  First in its answer is the tool's `call_handle` (below).
 - `call_tool(call_handle, arguments, fields?, decode?, keep?)` takes no
   server or tool name, only the handle `describe` gave, so a tool is
   always described before it is called. It checks the arguments against
@@ -3532,8 +3562,9 @@ and answers, as a tool error and with nothing run or asked:
   gone, off or out of the token's reach): a plain refusal; a blocked one
   says it is blocked.
 
-Then the arguments are checked against the stored inputSchema
-(`lib/core/tools/validate.ts`, strict: types, required, enum, const,
+Then the arguments are checked (`lib/core/call-arguments.ts`: a family's
+tool by its definition, any other against the stored inputSchema, both by
+`lib/core/tools/validate.ts`, strict: types, required, enum, const,
 properties, additionalProperties, patternProperties, lengths, patterns,
 formats, bounds, items and prefixItems, a true `oneOf`, references inside
 the schema) before `withPermission` asks or anything runs: arguments that

@@ -22,6 +22,7 @@ import { checkNewExit, createServiceExit } from "../exits/exits"
 import { httpConnect, socks5Connect, type ProxyAuth } from "../exits/handshake"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
+import { argumentsResult, familyError } from "../tools/family"
 import { makeRedactor } from "../openapi/redact"
 import { markdownLink } from "../owner-link"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
@@ -75,7 +76,7 @@ import {
   HEALTH_REQUEST_TIMEOUT_MS,
   HEALTH_WAIT_MS,
 } from "./limits"
-import { parseServiceCall, serviceTools } from "./tools"
+import { readServiceCall, SERVICE_TOOL_NAMES, serviceTools } from "./tools"
 
 /**
  * Services: containers PCP runs with the owner's own Docker or Podman, on
@@ -1368,7 +1369,20 @@ export async function callServiceTool(
   access: ServiceAccess,
   { publicUrl }: { publicUrl: string },
 ): Promise<CallToolResult> {
-  const call = parseServiceCall(toolName, args)
+  const read = readServiceCall(toolName, args)
+
+  if (!read.fits) {
+    return "unknown" in read
+      ? familyError(
+          `A service has no tool called ${toolName}; it has ${SERVICE_TOOL_NAMES.join(", ")}.`,
+          "not_found",
+        )
+      : argumentsResult(`${loaded.server.slug}/${toolName}`, read.problems, {
+          notes: read.notes,
+        })
+  }
+
+  const { call } = read
   const redact = access.env.redact
 
   try {

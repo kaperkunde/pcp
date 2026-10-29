@@ -147,7 +147,7 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
     server: WRAPPER_SLUG,
     tool: "lookup",
   })
-  expect(toolText(described)).toContain('"returns": "string"')
+  expect(toolText(described)).toMatch(/"outputSchema": \{\s*"type": "string"/)
   const answer = await callTool(baseURL!, token, "call_tool", {
     server: WRAPPER_SLUG,
     tool: "lookup",

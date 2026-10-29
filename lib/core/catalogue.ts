@@ -28,6 +28,10 @@ export type CatalogueTool = {
   operation?: string | null
   /** openapi: what a successful call answers, in outline. */
   output?: string | null
+  /** The JSON Schema of a successful call's structuredContent, if declared. */
+  outputSchema?: unknown
+  /** The icons an MCP server gave the tool. */
+  icons?: unknown
 }
 
 const DELETE_CHUNK = 500
@@ -72,6 +76,14 @@ export async function storeTools(
             : null,
           operation: tool.operation ?? null,
           output: tool.output ?? null,
+          outputSchema:
+            tool.outputSchema === undefined || tool.outputSchema === null
+              ? null
+              : JSON.stringify(tool.outputSchema),
+          icons:
+            tool.icons === undefined || tool.icons === null
+              ? null
+              : JSON.stringify(tool.icons),
         }
 
         await tx.mcpTool.upsert({

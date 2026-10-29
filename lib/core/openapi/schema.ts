@@ -4,7 +4,8 @@ import { entries, isObject, own, type JsonObject } from "./json"
  * An OpenAPI schema object (already inlined) as the JSON Schema an
  * assistant reads in describe. 3.1 schemas are JSON Schema already;
  * 3.0 ones differ in a few keywords (nullable, boolean exclusive bounds,
- * example). Keywords that only matter to code generators are dropped, and
+ * example), and a tuple's items list is 2020-12's prefixItems. Keywords
+ * that only matter to code generators are dropped, and
  * properties marked readOnly are left out: they are what the API sends
  * back, not what a request carries.
  */
@@ -83,9 +84,17 @@ export function toJsonSchema(node: unknown, openapiVersion: string): unknown {
       out.patternProperties = converted
     }
 
+    // A tuple as draft 4 to 2019-09 wrote it (items as a list, the rest
+    // under additionalItems) is prefixItems in 2020-12, the rest items.
     const items = own(value, "items")
-    if (items !== undefined) {
-      out.items = Array.isArray(items) ? items.map(convert) : convert(items)
+    if (Array.isArray(items)) {
+      out.prefixItems = items.map(convert)
+      const rest = own(value, "additionalItems")
+      if (rest !== undefined) {
+        out.items = typeof rest === "boolean" ? rest : convert(rest)
+      }
+    } else if (items !== undefined) {
+      out.items = convert(items)
     }
 
     const additional = own(value, "additionalProperties")
@@ -142,7 +151,7 @@ export function toJsonSchema(node: unknown, openapiVersion: string): unknown {
     if (out.type === undefined) {
       if (out.properties) {
         out.type = "object"
-      } else if (out.items) {
+      } else if (out.items !== undefined || out.prefixItems) {
         out.type = "array"
       }
     }

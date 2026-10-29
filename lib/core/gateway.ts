@@ -259,7 +259,9 @@ import {
   registerTool,
   type ServeHooks,
 } from "./tools/serve"
-import { argumentsRefusal, validate } from "./tools/validate"
+import { argumentsRefusal } from "./tools/validate"
+import { checkCallArguments, familyTool } from "./call-arguments"
+import { endpointMigration } from "./endpoints"
 
 /**
  * The MCP server PCP exposes at /mcp: one per request, built for the token
@@ -331,6 +333,8 @@ const TOOL_ROW = {
   inputSchema: true,
   annotations: true,
   output: true,
+  outputSchema: true,
+  icons: true,
   operation: true,
 } as const
 
@@ -340,6 +344,8 @@ type ToolRow = {
   inputSchema: string
   annotations: string | null
   output: string | null
+  outputSchema: string | null
+  icons: string | null
   operation: string | null
 }
 
@@ -1297,6 +1303,9 @@ export function buildGatewayServer(
       return failure(found.error, "not_found")
     }
 
+    // An endpoint another PCP version built is built again first, or says
+    // how to fix the schema that no longer builds.
+    const migration = await endpointMigration(found.server)
     const row = await toolRow(found.server.id, found.tool.name)
 
     if (!row) {
@@ -1306,7 +1315,11 @@ export function buildGatewayServer(
       )
     }
 
-    return text(described(found, row))
+    return text(
+      migration
+        ? `${migration}\n\n${described(found, row)}`
+        : described(found, row),
+    )
   }
 
   /**
@@ -1560,6 +1573,19 @@ export function buildGatewayServer(
     })
   }
 
+  /** A stored JSON column, parsed; undefined when empty or unreadable. */
+  function parsedOrNothing(json: string | null): unknown {
+    if (!json) {
+      return undefined
+    }
+
+    try {
+      return JSON.parse(json)
+    } catch {
+      return undefined
+    }
+  }
+
   /**
    * describe's answer for a tool, call_handle first so a long schema cut short
    * still carries it. The recovery answers of call_tool give the same.
@@ -1599,6 +1625,9 @@ export function buildGatewayServer(
       inputSchema = row.inputSchema
     }
 
+    const outputSchema = parsedOrNothing(row.outputSchema)
+    const icons = parsedOrNothing(row.icons)
+
     return {
       ...(handle ? { call_handle: handleFor(entry, row) } : {}),
       server: entry.slug,
@@ -1613,8 +1642,15 @@ export function buildGatewayServer(
       description: tool.descriptionOverride ?? tool.description,
       access: tool.access,
       inputSchema,
-      // What a successful call answers, when the API's schema says.
-      ...(row.output ? { returns: row.output } : {}),
+      // What a successful call answers: the JSON Schema of its
+      // structuredContent when the tool declares one, else the outline an
+      // API's schema gives.
+      ...(outputSchema !== undefined
+        ? { outputSchema }
+        : row.output
+          ? { returns: row.output }
+          : {}),
+      ...(icons !== undefined ? { icons } : {}),
       // A wrapper's tool: the tools its program calls.
       ...(entry.kind === "wrapper"
         ? {
@@ -1797,44 +1833,81 @@ export function buildGatewayServer(
    * anything runs or the owner is asked, so a call that cannot work never
    * becomes a request for them.
    */
-  function argumentsUnfit(
+  async function argumentsUnfit(
     target: GatewayServer,
     name: string,
     row: Pick<ToolRow, "inputSchema">,
     args: Record<string, unknown>,
     { fix, showSchema = true }: { fix: string; showSchema?: boolean },
-  ): string | null {
-    let inputSchema: unknown
+  ): Promise<
+    { refusal: string } | { args: Record<string, unknown>; notes: string[] }
+  > {
+    const checked = await checkCallArguments(
+      target,
+      name,
+      row.inputSchema,
+      args,
+      {
+        // The browser's type takes a secret as its text, which PCP types
+        // (resolveCall refuses one anywhere else).
+        ...(target.kind === "browser" && name === "type"
+          ? { secretAt: (pointer: string) => pointer === "/text" }
+          : {}),
+        tabs: {
+          ctx: scope.ctx,
+          tokenId: scope.tokenId,
+          publicUrl: scope.publicUrl,
+        },
+      },
+    )
+
+    if (checked.fits) {
+      return { args: checked.args, notes: checked.notes }
+    }
+
+    const hint = [
+      ...(checked.hint ? [checked.hint] : []),
+      ...(showSchema
+        ? [
+            `${fix} The inputSchema:`,
+            clipDescribed(
+              JSON.stringify(familySchema(target, name, row), null, 1),
+            ),
+          ]
+        : [fix]),
+    ].join("\n")
+
+    return {
+      refusal: [
+        ...checked.notes,
+        argumentsRefusal(`${target.slug}/${name}`, checked.problems, { hint }),
+      ].join("\n\n"),
+    }
+  }
+
+  /** The inputSchema a refusal shows: the family's own, else the row's. */
+  function familySchema(
+    target: GatewayServer,
+    name: string,
+    row: Pick<ToolRow, "inputSchema">,
+  ): unknown {
+    const tool = familyTool(target, name)
+
+    if (tool) {
+      return tool.inputSchema()
+    }
 
     try {
-      inputSchema = JSON.parse(row.inputSchema)
+      return JSON.parse(row.inputSchema)
     } catch {
-      // A schema PCP cannot read checks nothing; the tool decides.
-      return null
+      return row.inputSchema
     }
+  }
 
-    const problems = validate(inputSchema, args)
-
-    if (problems.length === 0) {
-      return null
-    }
-
-    if (!showSchema) {
-      return argumentsRefusal(`${target.slug}/${name}`, problems, {
-        hint: fix,
-      })
-    }
-
-    const schema = JSON.stringify(inputSchema, null, 1)
-
-    return argumentsRefusal(`${target.slug}/${name}`, problems, {
-      hint: [
-        `${fix} The inputSchema:`,
-        schema.length > MAX_DESCRIBED_CHARS
-          ? `${schema.slice(0, MAX_DESCRIBED_CHARS)}\n… (truncated by PCP)`
-          : schema,
-      ].join("\n"),
-    })
+  function clipDescribed(text: string): string {
+    return text.length > MAX_DESCRIBED_CHARS
+      ? `${text.slice(0, MAX_DESCRIBED_CHARS)}\n… (truncated by PCP)`
+      : text
   }
 
   /**
@@ -1898,39 +1971,55 @@ export function buildGatewayServer(
       )
     }
 
-    const unfit = argumentsUnfit(target, tool.name, handled.row, callArgs, {
-      fix: "Fix them and call again with the same call_handle.",
-    })
+    const unfit = await argumentsUnfit(
+      target,
+      tool.name,
+      handled.row,
+      callArgs,
+      { fix: "Fix them and call again with the same call_handle." },
+    )
+    // An endpoint whose schema no longer builds says how to fix it, with
+    // whatever its call comes to.
+    const migration = await endpointMigration(target)
 
-    if (unfit) {
-      return toolError(unfit, {
-        code: "invalid_arguments",
-        logAs: ARGUMENTS_DID_NOT_FIT,
-      })
+    if ("refusal" in unfit) {
+      return toolError(
+        migration ? `${unfit.refusal}\n\n${migration}` : unfit.refusal,
+        { code: "invalid_arguments", logAs: ARGUMENTS_DID_NOT_FIT },
+      )
     }
+
+    // An old argument name, renamed: the call runs, and its answer says so.
+    const leads = [...unfit.notes, ...(migration ? [migration] : [])]
+    const lead = (outcome: Outcome) =>
+      leads.length > 0 ? withLead(leads.join("\n"), outcome) : outcome
 
     if (tool.access === "ask") {
-      return asked({
-        kind: "call",
-        server: target,
-        tool,
-        args: callArgs,
-        fields,
-        decode,
-        keep,
-      })
-    }
-
-    try {
-      return passOn(
-        await runCall(scope.ctx, target, tool.name, callArgs, {
-          publicUrl: scope.publicUrl,
-          tokenId: scope.tokenId,
+      return lead(
+        await asked({
+          kind: "call",
+          server: target,
+          tool,
+          args: unfit.args,
           fields,
           decode,
           keep,
-          executor: callsFor(signal),
         }),
+      )
+    }
+
+    try {
+      return lead(
+        passOn(
+          await runCall(scope.ctx, target, tool.name, unfit.args, {
+            publicUrl: scope.publicUrl,
+            tokenId: scope.tokenId,
+            fields,
+            decode,
+            keep,
+            executor: callsFor(signal),
+          }),
+        ),
       )
     } catch (error) {
       // A call that changes things and failed on its way may have reached
@@ -3493,7 +3582,7 @@ export function buildGatewayServer(
         .record(z.string(), z.unknown())
         .optional()
         .describe(
-          'JSON Schema of what the program returns, e.g. {"type": "object", "properties": {"unread": {"type": "number"}}, "required": ["unread"]}. describe shows it as "returns", and a return that does not fit is an error, so the answer is what you said it would be. Types, required, properties, additionalProperties, items, enum, const, anyOf, oneOf and allOf are checked; $ref is not followed. Leave it out to say nothing.',
+          'JSON Schema of what the program returns, e.g. {"type": "object", "properties": {"unread": {"type": "number"}}, "required": ["unread"]}. describe shows it as "outputSchema", an answer carries the value as structuredContent, and a return that does not fit is an error, so the answer is what you said it would be. It is checked as strictly as arguments are (types, required keys, lengths, patterns, formats, bounds); $ref is refused. Leave it out to say nothing.',
         ),
       annotations: z
         .object({
@@ -4463,44 +4552,62 @@ export function buildGatewayServer(
 
                 // As call_tool's: checked before anything runs or asks.
                 const row = await toolRow(found.server.id, found.tool.name)
-                const unfit =
-                  row &&
-                  argumentsUnfit(found.server, found.tool.name, row, callArgs, {
-                    fix: `Fix them; pcp.describe("${found.server.slug}", "${found.tool.name}") gives its inputSchema.`,
-                    showSchema: false,
-                  })
+                const unfit = row
+                  ? await argumentsUnfit(
+                      found.server,
+                      found.tool.name,
+                      row,
+                      callArgs,
+                      {
+                        fix: `Fix them; pcp.describe("${found.server.slug}", "${found.tool.name}") gives its inputSchema.`,
+                        showSchema: false,
+                      },
+                    )
+                  : { args: callArgs, notes: [] }
 
-                if (unfit) {
-                  return { ok: false, error: unfit, refused: true }
+                if ("refusal" in unfit) {
+                  return { ok: false, error: unfit.refusal, refused: true }
                 }
+
+                const sent = unfit.args
+                // An old argument name, renamed: the program is told, in
+                // what the run prints, what to call it.
+                const noted = <T extends object>(outcome: T) =>
+                  unfit.notes.length > 0 && "ok" in outcome && outcome.ok
+                    ? { ...outcome, notes: unfit.notes }
+                    : outcome
 
                 // The owner is asked, unless this is the call they allowed
                 // once a moment ago: then the program gets what it answered.
                 if (found.tool.access === "ask") {
-                  return askCodeCall(scope, {
-                    kind: "call",
-                    server: found.server,
-                    tool: found.tool,
-                    args: callArgs,
-                    ...shape,
-                  })
+                  return noted(
+                    await askCodeCall(scope, {
+                      kind: "call",
+                      server: found.server,
+                      tool: found.tool,
+                      args: sent,
+                      ...shape,
+                    }),
+                  )
                 }
 
                 // The run's own signal, not the request's: a run that goes
                 // on past its call keeps its calls (and a wrapper's) going.
-                return runCodeCall(
-                  scope.ctx,
-                  found.server,
-                  found.tool.name,
-                  callArgs,
-                  {
-                    publicUrl: scope.publicUrl,
-                    tokenId: scope.tokenId,
-                    max: resourceLimits().answerChars,
-                    executor: callsFor(run.signal),
-                    run,
-                    ...shape,
-                  },
+                return noted(
+                  await runCodeCall(
+                    scope.ctx,
+                    found.server,
+                    found.tool.name,
+                    sent,
+                    {
+                      publicUrl: scope.publicUrl,
+                      tokenId: scope.tokenId,
+                      max: resourceLimits().answerChars,
+                      executor: callsFor(run.signal),
+                      run,
+                      ...shape,
+                    },
+                  ),
                 )
               },
             },

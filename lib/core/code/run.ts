@@ -752,6 +752,8 @@ export async function runProgram(
 
   const started = Date.now()
   const output = new Output()
+  /** Notes already printed, each once a run. */
+  const noted = new Set<string>()
   let calls = 0
   /** A call was refused for being past MAX_CALLS_PER_RUN. */
   let overCalls = false
@@ -932,6 +934,15 @@ export async function runProgram(
       if ("owner" in outcome) {
         halt.stop ??= { at: `${server}/${tool}`, result: outcome.owner }
         return { stop: true }
+      }
+
+      // An old argument name the call used: the run's output says what to
+      // call it, once, where the assistant reads what the program printed.
+      for (const said of outcome.ok ? (outcome.notes ?? []) : []) {
+        if (!noted.has(said)) {
+          noted.add(said)
+          output.write(`[PCP] ${server}/${tool}: ${said}`)
+        }
       }
 
       // The program is told the value or the error, nothing else; a call

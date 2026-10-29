@@ -131,6 +131,7 @@ import { finishHandover, performNavigate } from "./browser/call"
 import { noteHandoverRequest } from "./browser/runtime"
 import { closePendingRequests } from "./permission-close"
 import { RUN_COMMAND, stdinAsText } from "./ssh/tools"
+import { familyError, textAnswer } from "./tools/family"
 import {
   describeBrowseAsk,
   describeHandoverAsk,
@@ -431,11 +432,13 @@ function aad(id: string): string {
   return `permission_request:${id}`
 }
 
+/**
+ * An answer in words, or a refusal of what the request is in (gone,
+ * decided, not this kind), through the one mapping
+ * (lib/core/tools/outcome.ts).
+ */
 function text(value: string, isError = false): CallToolResult {
-  return {
-    content: [{ type: "text", text: value }],
-    ...(isError ? { isError: true } : {}),
-  }
+  return isError ? familyError(value, "state") : textAnswer(value)
 }
 
 export function permissionUrl(publicUrl: string, id: string): string {
@@ -574,7 +577,12 @@ async function ownerFirst(
 
 /** What one call of a program run by run_code came to. */
 export type CodeCallOutcome =
-  | { ok: true; value: unknown }
+  | {
+      ok: true
+      value: unknown
+      /** Said beside the value: an old argument name the call used. */
+      notes?: string[]
+    }
   | {
       ok: false
       error: string

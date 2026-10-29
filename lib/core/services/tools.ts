@@ -1,7 +1,12 @@
 import { z } from "zod"
 
 import type { CatalogueTool } from "../catalogue"
-import { invalid } from "../errors"
+import type { ToolAnnotations } from "../tools/define"
+import {
+  defineInnerTool,
+  type ArgumentCheck,
+  type InnerTool,
+} from "../tools/family"
 import {
   DEFAULT_LOG_LINES,
   MAX_LOG_LINES,
@@ -11,9 +16,10 @@ import {
 /**
  * The tools a service's own server offers: its status and logs, and
  * starting, stopping and restarting it, at the owner's levels like any
- * tool. Their arguments are checked here, before anything connects. None
- * takes an engine command, an image or a variable: what runs is the
- * owner's, on the service's page.
+ * tool. Each is defined on PCP's one tool interface
+ * (lib/core/tools/family.ts), its arguments checked by the one validator
+ * before anything connects. None takes an engine command, an image or a
+ * variable: what runs is the owner's, on the service's page.
  */
 
 export const SERVICE_TOOL_NAMES = [
@@ -53,13 +59,9 @@ type Spec = {
   name: ServiceToolName
   title: string
   description: (where: Where) => string
-  args: () => z.ZodType
-  annotations: {
-    readOnlyHint: boolean
-    destructiveHint: boolean
-    idempotentHint: boolean
-    openWorldHint: boolean
-  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  args: () => z.ZodObject<any>
+  annotations: ToolAnnotations
 }
 
 type Where = { service: string; host: string }
@@ -132,21 +134,28 @@ const SPECS: Spec[] = [
   },
 ]
 
-const BY_NAME = new Map(SPECS.map((spec) => [spec.name, spec]))
+const TOOLS = new Map<string, InnerTool>(
+  SPECS.map((spec) => [
+    spec.name,
+    defineInnerTool({
+      name: spec.name,
+      title: spec.title,
+      description: spec.description({ service: "this", host: "its server" }),
+      input: spec.args(),
+      annotations: spec.annotations,
+    }),
+  ]),
+)
 
-function jsonSchema(schema: z.ZodType): unknown {
-  const generated = z.toJSONSchema(schema) as Record<string, unknown>
-  delete generated.$schema
-  return generated
+/** A service's tool by its name, on PCP's tool interface. */
+export function serviceTool(name: string): InnerTool | undefined {
+  return TOOLS.get(name)
 }
 
 /** The service's tools, for the catalogue. */
 export function serviceTools(where: Where): CatalogueTool[] {
   return SPECS.map((spec) => ({
-    name: spec.name,
-    title: spec.title,
-    description: spec.description(where),
-    inputSchema: jsonSchema(spec.args()),
+    ...TOOLS.get(spec.name)!.listed(spec.description(where)),
     annotations: { title: spec.title, ...spec.annotations },
   }))
 }
@@ -155,37 +164,47 @@ export type ServiceCall =
   | { tool: "status" | "start" | "stop" | "restart" }
   | { tool: "logs"; lines: number; sinceMinutes?: number }
 
-/** A call's tool and arguments, checked; a readable refusal otherwise. */
-export function parseServiceCall(toolName: string, args: unknown): ServiceCall {
-  const spec = BY_NAME.get(toolName as ServiceToolName)
+/**
+ * A call's tool and arguments, checked: what to do, or why not (no such
+ * tool, or every problem with the arguments).
+ */
+export function readServiceCall(
+  toolName: string,
+  args: unknown,
+):
+  | { fits: true; call: ServiceCall; notes: string[] }
+  | { fits: false; unknown: true }
+  | Extract<ArgumentCheck, { fits: false }> {
+  const tool = TOOLS.get(toolName)
 
-  if (!spec) {
-    throw invalid(
-      `A service has no tool called ${toolName}; it has ${SERVICE_TOOL_NAMES.join(", ")}.`,
-    )
+  if (!tool) {
+    return { fits: false, unknown: true }
   }
 
-  const parsed = spec.args().safeParse(args ?? {})
+  const checked = tool.check(args)
 
-  if (!parsed.success) {
-    throw invalid(
-      `${spec.name}: ${z
-        .prettifyError(parsed.error)
-        .replace(/\s*\n\s*/g, " ")
-        .slice(0, 500)}`,
-    )
+  if (!checked.fits) {
+    return checked
   }
 
-  if (spec.name === "logs") {
-    const data = parsed.data as { lines?: number; since_minutes?: number }
+  if (toolName === "logs") {
+    const data = checked.args as { lines?: number; since_minutes?: number }
     return {
-      tool: "logs",
-      lines: data.lines ?? DEFAULT_LOG_LINES,
-      ...(data.since_minutes !== undefined
-        ? { sinceMinutes: data.since_minutes }
-        : {}),
+      fits: true,
+      notes: checked.notes,
+      call: {
+        tool: "logs",
+        lines: data.lines ?? DEFAULT_LOG_LINES,
+        ...(data.since_minutes !== undefined
+          ? { sinceMinutes: data.since_minutes }
+          : {}),
+      },
     }
   }
 
-  return { tool: spec.name as "status" | "start" | "stop" | "restart" }
+  return {
+    fits: true,
+    notes: checked.notes,
+    call: { tool: toolName as "status" | "start" | "stop" | "restart" },
+  }
 }

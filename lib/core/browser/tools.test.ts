@@ -4,8 +4,19 @@ import {
   BROWSER_ARG_ALIASES,
   browserTools,
   browserToolSpec,
-  parseBrowserArgs,
+  type BrowserToolSpec,
 } from "./tools"
+
+/** A tool's arguments through its check: the parsed ones, or every problem. */
+function parseBrowserArgs(spec: BrowserToolSpec, args: unknown) {
+  const checked = spec.check(args)
+
+  if (!checked.fits) {
+    throw new Error(`${spec.name}: ${checked.problems.join(" ")}`)
+  }
+
+  return checked.args
+}
 
 // The browser's fixed catalogue: what an assistant finds, and arguments
 // refused before the browser is touched.
@@ -183,7 +194,7 @@ describe("the browser's tools", () => {
         ref: "e3",
         files: [{ $result: "r1", name: "../../etc/passwd" }],
       }),
-    ).toThrow(/without a path/)
+    ).toThrow(/"files\/0\/name" does not match/)
     expect(() =>
       parse("upload_file", {
         tab: "t1",
@@ -221,7 +232,7 @@ describe("the browser's tools", () => {
     ).toEqual({ tab: "t1", url: "https://example.com" })
     expect(() => parse("navigate", { tab: "t1" })).toThrow(/navigate:/)
     expect(() => parse("click", { tab: "t1", ref: "button" })).toThrow(
-      /ref looks like e12/,
+      /pattern .*like e12/,
     )
     expect(() => parse("tabs", { action: "open" })).toThrow(/open needs a url/)
     expect(() => parse("tabs", { action: "close" })).toThrow(
@@ -231,6 +242,13 @@ describe("the browser's tools", () => {
       /need the tab's id/,
     )
     expect(() => parse("tabs", { action: "select", tab: "t1" })).toThrow()
+    // An exit opens a tab, and a tab keeps it.
+    expect(
+      parse("tabs", { action: "open", url: "https://example.com", exit: "nl" }),
+    ).toEqual({ action: "open", url: "https://example.com", exit: "nl" })
+    expect(() => parse("tabs", { action: "list", exit: "nl" })).toThrow(
+      "exit is only for open: a tab keeps the exit it opened with.",
+    )
     expect(() =>
       parse("scroll", { tab: "t1", direction: "down", ref: "e1" }),
     ).toThrow(/one of them/)
@@ -334,7 +352,7 @@ describe("the browser's tools", () => {
         tab: "t1",
         target: { role: "button", name: "x", within: "main" },
       }),
-    ).toThrow(/ref looks like/)
+    ).toThrow(/"target\/within" does not match/)
     expect(parse("click", { tab: "t1", ref: "e2", force: true })).toEqual({
       tab: "t1",
       ref: "e2",
@@ -377,9 +395,10 @@ describe("the browser's tools", () => {
       tab: "t1",
       text: "Reply",
     })
-    expect(
-      parseBrowserArgs(find, { tab: "t1", query: "Reply", text: "Reply" }),
-    ).toEqual({ tab: "t1", text: "Reply" })
+    expect(find.check({ tab: "t1", query: "Reply" })).toMatchObject({
+      fits: true,
+      notes: [],
+    })
     expect(() =>
       parseBrowserArgs(find, { tab: "t1", query: "Reply", text: "Save" }),
     ).toThrow("find: query is another name for text; give one of them.")
