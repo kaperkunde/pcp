@@ -132,6 +132,23 @@ your secrets or any Authorization or Cookie header, and a redirect to another
 site is reported to it rather than followed. The right is off unless you
 tick it when you make the token or on its page.
 
+**An assistant with a token that reaches an SSH server** can run one
+command per call there with `run_command`, as far as you allowed the tool,
+as the login you gave PCP and nothing more: PCP signs in with a key of its
+own (never a password), only to a host whose key you pinned, and opens no
+terminal, agent, file transfer or forwarding of its own. The one forwarding
+PCP does is for an **exit** you add on the server's page: web fetch and a new
+browser tab can then go out from that server instead of from PCP's own
+address, for the tokens you allow on their pages (blocked unless you do, or
+asking you first when you set it so). The assistant names the exit, never
+where it connects to: PCP looks every name up itself (over HTTPS, through the
+exit) and connects only to addresses it checked from the exit's side, never
+the server's own loopback or own address, and its private network only for
+a token you allowed private addresses. A tab through an exit has none of the
+browser's sign-ins and saves nothing. PCP never asks the server to forward
+connections back to it, to a Unix socket, or for an agent or X11. The request
+log says which exit a call used, never the site.
+
 **An assistant with a token that reaches the browser** (a server you add on
 the Browser page, whose tools ask you first like any other's) drives a
 Chromium on PCP's machine, and acts as you on every site you signed in to

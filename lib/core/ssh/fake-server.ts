@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto"
+import net from "node:net"
 
 import { Server, utils, type Connection } from "ssh2"
 
@@ -36,6 +37,20 @@ export type FakeSshOptions = {
   /** Where to listen; any free port when left out. */
   port?: number
   run: FakeRun
+  /**
+   * Whether direct-tcpip channels open (AllowTcpForwarding). Off unless
+   * set: the server answers "administratively prohibited", as OpenSSH does.
+   */
+  allowForwarding?: boolean
+  /**
+   * Where a channel to `host`:`port` really goes, so a test can name a
+   * public address and reach a server on loopback; as asked when left out.
+   * Null refuses it as unreachable.
+   */
+  connectTo?: (
+    host: string,
+    port: number,
+  ) => { host: string; port: number } | null
 }
 
 export type FakeSsh = {
@@ -46,6 +61,19 @@ export type FakeSsh = {
   logins: string[]
   commands: string[]
   signals: string[]
+  /** direct-tcpip channels the server opened, as host:port. */
+  forwards: string[]
+  /** direct-tcpip channels asked for, opened or refused. */
+  forwardsAsked: () => number
+  /**
+   * Everything else a client asked for that PCP never should: global
+   * requests (tcpip-forward, streamlocal-forward@openssh.com), streamlocal
+   * channels, and session requests other than exec (auth-agent, x11, pty,
+   * shell, subsystem).
+   */
+  requests: string[]
+  /** Connections that signed in, counting each one once. */
+  connections: () => number
   close: () => Promise<void>
 }
 
@@ -68,7 +96,11 @@ export async function startFakeSsh(options: FakeSshOptions): Promise<FakeSsh> {
   const logins: string[] = []
   const commands: string[] = []
   const signals: string[] = []
+  const forwards: string[] = []
+  const requests: string[] = []
   const clients = new Set<Connection>()
+  let connections = 0
+  let forwardsAsked = 0
 
   const server = new Server(
     {
@@ -76,10 +108,28 @@ export async function startFakeSsh(options: FakeSshOptions): Promise<FakeSsh> {
       // ssh2's server answers a signal for a session that is running a
       // command with a refusal, and tells no listener; its debug log is the
       // one place that shows what the client sent.
+      // It is also where every request a client made shows, refused or not.
       debug: (line: string) => {
         const sent = /CHANNEL_REQUEST \(r:\d+, signal: (\w+)\)/.exec(line)
         if (sent) {
           signals.push(sent[1]!.replace(/^SIG/, ""))
+        }
+
+        const global = /Inbound: GLOBAL_REQUEST \(([^)]+)\)/.exec(line)
+        if (global && global[1] !== "keepalive@openssh.com") {
+          requests.push(global[1]!)
+        }
+
+        const channel = /Inbound: CHANNEL_OPEN \(s:\d+, ([^)]+)\)/.exec(line)
+        if (channel?.[1] === "direct-tcpip") {
+          forwardsAsked++
+        } else if (channel && channel[1] !== "session") {
+          requests.push(`channel:${channel[1]}`)
+        }
+
+        const asked = /Inbound: CHANNEL_REQUEST \(r:\d+, ([^:)]+)/.exec(line)
+        if (asked && asked[1] !== "exec" && asked[1] !== "signal") {
+          requests.push(asked[1]!)
         }
       },
     },
@@ -130,6 +180,35 @@ export async function startFakeSsh(options: FakeSshOptions): Promise<FakeSsh> {
       })
 
       client.on("ready", () => {
+        connections++
+
+        // Without a listener, ssh2 answers a direct-tcpip channel with
+        // "administratively prohibited", as OpenSSH does with forwarding off.
+        if (options.allowForwarding) {
+          client.on("tcpip", (accept, reject, info) => {
+            forwards.push(`${info.destIP}:${info.destPort}`)
+
+            const to = options.connectTo
+              ? options.connectTo(info.destIP, info.destPort)
+              : { host: info.destIP, port: info.destPort }
+
+            if (!to) {
+              reject()
+              return
+            }
+
+            const upstream = net.connect(to.port, to.host)
+            upstream.once("error", () => reject())
+            upstream.once("connect", () => {
+              const stream = accept()
+              upstream.removeAllListeners("error")
+              upstream.on("error", () => stream.destroy())
+              stream.on("error", () => upstream.destroy())
+              stream.pipe(upstream).pipe(stream)
+            })
+          })
+        }
+
         client.on("session", (acceptSession) => {
           const session = acceptSession()
 
@@ -193,6 +272,10 @@ export async function startFakeSsh(options: FakeSshOptions): Promise<FakeSsh> {
     logins,
     commands,
     signals,
+    forwards,
+    forwardsAsked: () => forwardsAsked,
+    requests,
+    connections: () => connections,
     close: async () => {
       for (const client of clients) {
         client.end()

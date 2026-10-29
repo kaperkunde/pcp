@@ -114,6 +114,7 @@ export type PermissionKind =
   | "browser_handover"
   | "secret_use"
   | "secret_request"
+  | "exit_use"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"

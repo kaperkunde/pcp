@@ -199,9 +199,16 @@ import {
   RESULT_PAGE_CHARS,
 } from "./tool-results"
 import { resultUri } from "./answers"
-import { needsConnecting, serviceStateLine, syncServerTools } from "./upstream"
+import {
+  needsConnecting,
+  serviceStateLine,
+  syncServerTools,
+  openExitForCall,
+} from "./upstream"
 import { PCP_VERSION } from "./version"
 import { decideFetch, runFetch } from "./web-fetch"
+import { MAX_EXIT_NAME_CHARS } from "./exits/limits"
+import { checkExit } from "./exits/use"
 import {
   getWrapper,
   proposeWrapper,
@@ -803,7 +810,13 @@ export function buildGatewayServer(
     executor,
     codeExecutor,
     runTiming = {},
+    exitNames = [],
   }: {
+    /**
+     * The exits this token may name (allowed, or asking the owner first),
+     * for web_fetch's exit argument (exits/use.ts usableExitNames).
+     */
+    exitNames?: string[]
     /** What to say about memories; read only for a token that keeps them. */
     memories?: InstructionMemories | null
     /** The skills the token sees, for the instructions (instructionSkills). */
@@ -961,6 +974,7 @@ export function buildGatewayServer(
         ...(note.asked ? { asked: true } : {}),
         ...(note.request ? { request: note.request } : {}),
         ...(note.secret ? { secret: note.secret, origin: note.origin } : {}),
+        ...(note.exit ? { exit: note.exit } : {}),
       }),
   }
 
@@ -4183,6 +4197,13 @@ export function buildGatewayServer(
           .describe(
             "Where to start in the text, to read on from an earlier call.",
           ),
+        exit: z
+          .string()
+          .max(MAX_EXIT_NAME_CHARS)
+          .optional()
+          .describe(
+            `An exit's name, to send the request from somewhere else than PCP's own address (an SSH server of the owner's, or a VPN), redirects on the site included. ${exitNames.length > 0 ? `Exits this token may use: ${exitNames.join(", ")}.` : "This token has no exit yet: the owner allows them on its page."} Without it, the request leaves from PCP.`,
+          ),
       }),
       // A POST or a DELETE can change anything on a site.
       annotations: {
@@ -4222,13 +4243,45 @@ export function buildGatewayServer(
           )
         }
 
+        // An exit the token may use only after asking is asked about
+        // with the request itself: the owner sees the exit and the site
+        // in one request, and allowing it once sends this request.
+        const exitCheck = input.exit
+          ? await checkExit(scope.ctx, scope.tokenId, input.exit)
+          : null
+
+        if (exitCheck?.kind === "refused") {
+          return failure(exitCheck.message, "forbidden")
+        }
+
+        if (exitCheck?.kind === "ask") {
+          return asked({
+            kind: "exit_use",
+            input: {
+              exitId: exitCheck.exit.id,
+              exitName: exitCheck.exit.name,
+              exitLabel: exitCheck.exit.label,
+              via: "web_fetch",
+              fetch: input,
+            },
+          })
+        }
+
         if (decided.access === "ask") {
           return asked({ kind: "fetch", input })
         }
 
+        const exit = exitCheck
+          ? await openExitForCall(scope.ctx, scope.tokenId, exitCheck.exit, {
+              publicUrl: scope.publicUrl,
+              tool: "web_fetch",
+            })
+          : null
+
         return passOn(
           await runFetch(scope.ctx, scope.tokenId, input, {
             publicUrl: scope.publicUrl,
+            ...(exit ? { exit: exit.dialer } : {}),
           }),
         )
       },

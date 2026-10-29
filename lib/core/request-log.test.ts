@@ -7,6 +7,7 @@ import { logDir } from "./data-dir"
 import { LOG_SCAN_LINES } from "./log-limits"
 import {
   appendRequestLog,
+  noteExitUsed,
   noteOwnerAsked,
   pruneRequestLog,
   readRequestLog,
@@ -209,5 +210,25 @@ describe("pruneRequestLog", () => {
 
     expect(await pruneRequestLog(1, new Date("2026-10-06T00:00:01Z"))).toBe(1)
     expect(readdirSync(logDir())).toEqual(["mcp-2026-10-06.jsonl"])
+  })
+})
+
+describe("noteExitUsed", () => {
+  it("names the exit on the call's line, or on a line of its own outside a call", async () => {
+    const note = await withLogNote(async (current) => {
+      noteExitUsed({
+        vaultId: "v",
+        tokenId: "t",
+        tool: "web_fetch",
+        exit: "us-vps",
+      })
+      return current
+    })
+    expect(note).toEqual({ exit: "us-vps" })
+
+    noteExitUsed({ vaultId: "v", tokenId: "t", tool: "tabs", exit: "eu-vps" })
+    await expect
+      .poll(async () => (await readRequestLog("v", {})).entries)
+      .toMatchObject([{ tool: "tabs", exit: "eu-vps", ok: true }])
   })
 })

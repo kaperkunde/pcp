@@ -230,11 +230,37 @@ so in the summary; the bump itself waits for the request.
   JavaScript (its native parts stay out of `allowBuilds`), narrowed to the
   algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
   `run_command` (`ssh/tools.ts`), its arguments checked before anything
-  connects: `exec` only, never a terminal, forwarding, an agent or a file
-  transfer. Only the owner adds or changes one; `register_server` has no kind
-  for it. Its limits go in `ssh/limits.ts`, and a change to how a host is
-  trusted or PCP signs in gets a test against the test server
-  (`ssh/client.test.ts`).
+  connects: `exec` only, never a terminal, an agent or a file transfer.
+  Forwarding is open for exits only (`openChannel`, below): outbound
+  direct-tcpip, never remote forwarding (`tcpip-forward`), streamlocal,
+  the agent or X11. Only the owner adds or changes one; `register_server` has
+  no kind for it. Its limits go in `ssh/limits.ts`, and a change to how a host
+  is trusted, PCP signs in or a channel opens gets a test against the test
+  server (`ssh/client.test.ts`).
+- Exits (`lib/core/exits/`) let web_fetch (`exit`) and a new browser tab
+  (`tabs` open with `exit`) go out from somewhere else than PCP's machine:
+  an SSH server PCP holds (kind `ssh`), or a VPN container PCP started on one
+  (kind `service`). An assistant names an exit, never a destination: every
+  connection goes through `exits/dial.ts dial`, which looks the name up by
+  DNS-over-HTTPS through the exit (`exits/doh.ts`: resolvers by IP, their
+  certificates checked, answers cached per exit within bounds), checks
+  every address from the exit's side (`exits/check.ts`: never its loopback
+  or its own address; its private, link-local and metadata ranges only with
+  the token's `private` line; never PCP's own) and opens a channel to the
+  address it checked; a container's exit is a channel to the loopback port
+  PCP published for it, then CONNECT or SOCKS5 (`exits/handshake.ts`) to
+  that address. The SSH connection is pooled per server
+  (`ssh/client.ts openChannel`), opened only with the key a request handed
+  in (`upstream.ts openExit`, a pinned host only), idled out, and never
+  reopened in the background: the browser's exit proxy dials keyless. A tab
+  with an exit has its own context through its own proxy (`proxy.ts` with
+  `connect`), signed in to nothing, saved nowhere, no downloads. Exits are
+  vault rows (`exit`), the owner's alone to add, rename or remove (on the SSH
+  server's page); a token's level for one is a `web_fetch_rule` of kind
+  `exit` keyed by its id (own or for all tokens), blocked without one; an
+  ask is an `exit_use` request showing the exit, its label and the request.
+  The request log names the exit, never the site. Limits go in
+  `exits/limits.ts`.
 - Services (`lib/core/services/`) run with the Docker or Podman the owner
   already has on an SSH server PCP holds, through the engine's command line
   over SSH `exec` only: PCP installs no engine, never touches a socket and

@@ -326,6 +326,7 @@ function RequestTile({ view }: { view: PermissionView }) {
     case "fetch":
     case "browse":
     case "browser_handover":
+    case "exit_use":
       return <IconTile size="lg" icon={Globe} className={tile} />
     case "secret_use":
     case "secret_request":
@@ -370,6 +371,19 @@ function PendingNote({ view }: { view: PermissionView }) {
           Allow once lets this tab open the site&apos;s pages while it is open.
           Allow this site for, Always allow this site and Block this site decide
           for the token, in the browser and in web fetch, as on{" "}
+          <Link href={`/tokens/${view.tokenId}`} className="underline">
+            the token&apos;s page
+          </Link>
+          .
+        </p>
+      )
+    case "exit_use":
+      return (
+        <p className={note}>
+          Allow once sends this one through the exit. Always allow this exit and
+          Block this exit decide for the token&apos;s later requests that name
+          the exit, in web fetch and the browser; sites are still decided on
+          their own, as on{" "}
           <Link href={`/tokens/${view.tokenId}`} className="underline">
             the token&apos;s page
           </Link>

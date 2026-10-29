@@ -22,6 +22,7 @@ import {
 } from "../servers"
 import { deleteManagedSecret, writeManagedSecret } from "../secrets"
 import {
+  closeSshConnections,
   SshAuthError,
   SshHostKeyError,
   sshCheck,
@@ -244,6 +245,8 @@ export async function updateSshServer(
     where: { id },
     data: { ...data, ...(moved ? { sshHostKey: null } : {}) },
   })
+  // An exit's connection is to the server as it was.
+  closeSshConnections(id)
 
   return { reconnect: moved || data.authUsername !== existing.authUsername }
 }
@@ -261,6 +264,7 @@ export async function forgetSshHostKey(
     where: { id },
     data: { sshHostKey: null, status: "unknown", statusMessage: "" },
   })
+  closeSshConnections(id)
 }
 
 /**
@@ -289,6 +293,8 @@ export async function replaceSshKey(
       statusMessage: addKeyNote(existing.authUsername ?? ""),
     },
   })
+  // Signed in with the old key: the next use signs in with the new one.
+  closeSshConnections(id)
 }
 
 /** What the server's page shows: nothing of it is secret. */

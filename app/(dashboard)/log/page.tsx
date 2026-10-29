@@ -199,6 +199,11 @@ function LogLine({ entry }: { entry: ActivityEntry }) {
               {entry.origin ? ` at ${entry.origin}` : ""}
             </span>
           ) : null}
+          {entry.exit ? (
+            <span className="mt-0.5 block">
+              Went out through the exit {entry.exit}
+            </span>
+          ) : null}
           {entry.outcome === "error" && entry.error ? (
             <span className="mt-0.5 block text-destructive">{entry.error}</span>
           ) : null}

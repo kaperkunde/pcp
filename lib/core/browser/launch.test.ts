@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest"
 import { displaySwitches } from "./display"
 import {
   contextOptions,
+  exitContextOptions,
   keepOffScreen,
   launchArgs,
   launchOptions,
@@ -460,5 +461,18 @@ describe("a page of PCP's own", () => {
       vi.useRealTimers()
       delete holder[backgroundWarned]
     }
+  })
+})
+
+describe("exitContextOptions", () => {
+  it("is the tabs' own context, with the exit's proxy and none of the sign-ins", () => {
+    const options = exitContextOptions("153.0.7000.1", "virtual", 41234)
+
+    expect(options).toEqual({
+      ...contextOptions("153.0.7000.1", "virtual"),
+      proxy: { server: "http://127.0.0.1:41234", bypass: "<-loopback>" },
+    })
+    expect(options).not.toHaveProperty("storageState")
+    expect(options.acceptDownloads).toBe(false)
   })
 })

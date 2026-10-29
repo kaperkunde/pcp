@@ -926,6 +926,7 @@ export async function runProgram(
         ...(owner || note.asked ? { asked: true } : {}),
         ...(note.request ? { request: note.request } : {}),
         ...(note.secret ? { secret: note.secret, origin: note.origin } : {}),
+        ...(note.exit ? { exit: note.exit } : {}),
       })
 
       if ("owner" in outcome) {

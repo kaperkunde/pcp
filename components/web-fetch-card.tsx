@@ -16,6 +16,10 @@ import {
 } from "@/components/ui/segmented-control"
 import { SwitchRow } from "@/components/ui/switch"
 import {
+  setExitLevelAction,
+  setExitLevelSharedAction,
+} from "@/lib/actions/exits"
+import {
   addFetchSiteAction,
   removeFetchSiteAction,
   setFetchMethodAction,
@@ -33,6 +37,7 @@ import {
   type FetchSiteLevel,
   type ToolAccess,
 } from "@/lib/core/constants"
+import type { ExitLevelView } from "@/lib/core/exits/exits"
 import type {
   FetchMethodView,
   FetchPrivateView,
@@ -146,6 +151,24 @@ export function WebFetchCard({
             />
           </List>
         </Group>
+
+        {rules.exits.length > 0 ? (
+          <Group
+            title="Exits"
+            caption="Where else a request or a tab may go out from, when an assistant names the exit: an SSH server of yours instead of PCP's own address. Blocked unless you allow it; sites are still decided above. Private addresses are then the exit's own network."
+          >
+            <List as="ul">
+              {rules.exits.map((exit) => (
+                <ExitRow
+                  key={exit.id}
+                  tokenId={tokenId}
+                  exit={exit}
+                  locked={locked}
+                />
+              ))}
+            </List>
+          </Group>
+        ) : null}
       </div>
     </ListSection>
   )
@@ -234,6 +257,67 @@ function MethodRow({
         disabled={locked || pending}
         label={`All tokens for ${label}`}
         sharedLevel={method.shared ? TOOL_ACCESS_LABELS[method.shared] : null}
+        onChange={share}
+      />
+      <FormError error={error} className="basis-full" />
+    </li>
+  )
+}
+
+function ExitRow({
+  tokenId,
+  exit,
+  locked,
+}: {
+  tokenId: string
+  exit: ExitLevelView
+  locked: boolean
+}) {
+  const [pending, startTransition] = useTransition()
+  const [shown, setShown] = useOptimistic({
+    access: exit.access,
+    shared: exit.own === null && exit.shared !== null,
+  })
+  const [error, setError] = useState<string | null>(null)
+
+  function change(access: ToolAccess) {
+    startTransition(async () => {
+      setShown({ access, shared: false })
+      const result = await setExitLevelAction(tokenId, exit.id, access)
+      setError(result.status === "error" ? result.error : null)
+    })
+  }
+
+  function share(shared: boolean) {
+    startTransition(async () => {
+      setShown({ ...shown, shared })
+      const result = await setExitLevelSharedAction(tokenId, exit.id, shared)
+      setError(result.status === "error" ? result.error : null)
+    })
+  }
+
+  return (
+    <li className={rowClassName}>
+      <span className="flex min-w-0 flex-1 basis-48 flex-col gap-0.5">
+        <code className="text-[13px]">{exit.name}</code>
+        <span className="text-xs text-muted-foreground">
+          {exit.label ? `${exit.label} · ` : ""}from {exit.serverName}
+        </span>
+      </span>
+      <SegmentedControl<ToolAccess>
+        name={`exit:${exit.id}`}
+        legend={`Exit ${exit.name}`}
+        size="sm"
+        options={LEVEL_OPTIONS}
+        value={shown.access}
+        onValueChange={change}
+        disabled={locked || pending}
+      />
+      <AllTokensCheckbox
+        checked={shown.shared}
+        disabled={locked || pending}
+        label={`All tokens for the exit ${exit.name}`}
+        sharedLevel={exit.shared ? TOOL_ACCESS_LABELS[exit.shared] : null}
         onChange={share}
       />
       <FormError error={error} className="basis-full" />

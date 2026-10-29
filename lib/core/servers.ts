@@ -18,6 +18,7 @@ import {
 } from "./definition-rows"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
+import { closeSshConnections } from "./ssh/client"
 import { normalizeAuthorizeParams } from "./oauth-client"
 import {
   checkNewSecret,
@@ -1150,7 +1151,22 @@ export async function deleteServer(ctx: VaultContext, id: string) {
       "Remove a service on its own page: PCP removes its container from the SSH server first.",
     )
   }
+  // Its exits go with it (a cascade), and their levels with them.
+  const exits = await db().exit.findMany({
+    where: { OR: [{ serverId: id }, { serviceId: id }] },
+    select: { id: true },
+  })
+  if (exits.length > 0) {
+    await db().webFetchRule.deleteMany({
+      where: {
+        vaultId: ctx.vaultId,
+        kind: "exit",
+        key: { in: exits.map((exit) => exit.id) },
+      },
+    })
+  }
   await db().mcpServer.delete({ where: { id } })
+  if (existing.kind === "ssh") closeSshConnections(id)
   // The last instance takes its definition with it; others keep it.
   await forgetUnusedDefinition(existing.definitionId)
 
