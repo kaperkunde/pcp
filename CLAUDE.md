@@ -492,8 +492,9 @@ so in the summary; the bump itself waits for the request.
   restarts itself. Install and restart in the Linux installer's container is
   a file in the data folder (`updates/host-signal.ts`: an id and a time,
   nothing of the vault) that the installer's `watch` reads through `exec` and
-  checks as untrusted input before it runs its own `update`; PCP never
-  addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
+  checks as untrusted input before it runs its own `update`, which runs the
+  installer read out of the image it pulled (`/app/install.sh`), never out
+  of the running container; PCP never addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
   `.github/workflows/develop.yml` makes on every push to develop) is never
   offered on the stable channel.
 - `desktop/` is a host for the production build, not part of the app. It

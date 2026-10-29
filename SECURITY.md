@@ -415,6 +415,17 @@ Not defended against:
   untrusted, so even a PCP that was taken over could do no more than have
   the published image pulled again, at most once every five minutes.
   `PCP_UPDATE_BUTTON=0` turns it off.
+- The installer's own updates (its daily timer, and Install and restart;
+  not Podman's timer, which only pulls) run the installer the image carries
+  (`/app/install.sh`) once it differs from the copy the installer saved: read out of the image just
+  pulled, by its id, in a throwaway container with no network and nothing
+  mounted, never out of the running PCP. So the host runs what it trusts as
+  much as the image it is about to start, and a PCP that was taken over still
+  cannot change what the host runs. It replaces the saved copy, so the unit
+  follows the version installed (the graphics card, for one). A file that is
+  not an installer that copy takes (no `#!/bin/sh`, no format line it knows,
+  one `sh -n` refuses, over 256 KB), or none at all, leaves the update to the
+  saved copy, with a note.
 - The desktop app installs an update only when you choose **Install and
   restart**, downloading it from PCP's GitHub releases over HTTPS. On a Mac,
   the updater takes only an app signed with the same Developer ID; the

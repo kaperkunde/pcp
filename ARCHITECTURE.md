@@ -3018,6 +3018,26 @@ install is not retried. The new PCP clears the request and the file at boot.
 The host reads the container; PCP never addresses the host and has no Docker
 socket.
 
+**The installer that runs an update is the image's.** The copy the timers
+run was saved at install time, so an update through it would write the unit
+as that installer did, without anything added since (the graphics card,
+#38). The image carries `install.sh` at `/app/install.sh` (root's, `0644`;
+`scripts/docker.test.ts`), and `update`, after the pull, reads it with
+`run --rm --network none --no-healthcheck --entrypoint cat <image id>` from
+the image it just pulled (the pinned one, for a pinned version), never from
+the running container, which PCP could change. It takes the file only when it
+starts with `#!/bin/sh`, holds the line `# pcp-installer-format: 1`, passes
+`sh -n` and is at most 256 KB; then, if it differs from the copy, it moves it
+over the copy and `exec`s it with `update` (not `watch`: the request is
+already noted), the settings it resolved in the environment (so a channel
+the request named holds), and `PCP_UPDATER_REEXEC=1`, which reads no
+installer again and installs even from the same image, since the unit may be
+what changed. Anything else, including an image from before this, leaves the
+update to the copy with a note. With no copy (no timer of PCP's) nothing is
+read: Podman's own auto-update only pulls, and the unit changes when the
+installer next runs. `write_unit` leaves drop-ins in `pcp.container.d/` alone
+and names them, since one may do what the unit now does itself.
+
 ## Cleanup and the log
 
 **The request log** (`lib/core/request-log.ts`) is what assistants did with
