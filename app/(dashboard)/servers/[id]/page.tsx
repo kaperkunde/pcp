@@ -116,11 +116,18 @@ export default async function ServerPage({
             .filter((entry) => entry.secretId)
             .map((entry) => [entry.name, entry.secretId!]),
         ),
+        values: Object.fromEntries(
+          service.env
+            .filter((entry) => entry.value !== null)
+            .map((entry) => [entry.name, entry.value!]),
+        ),
       }}
       variables={service.definition.env.map((entry) => ({
         name: entry.name,
         required: entry.required,
         description: entry.description,
+        plain: entry.plain,
+        value: entry.value ?? null,
       }))}
       secrets={secrets}
     />

@@ -40,9 +40,24 @@ export type ExitView = {
   serverId: string
   serverName: string
   serviceId: string | null
+  /**
+   * A VPN service's exit: the service, and its state as last read (on its
+   * page, a check, a failing call; nothing polls).
+   */
+  service: { name: string; status: string; statusMessage: string } | null
 }
 
-function view(row: Exit & { server: { name: string } }): ExitView {
+type ExitRow = Exit & {
+  server: { name: string }
+  service: { name: string; status: string; statusMessage: string } | null
+}
+
+const INCLUDE = {
+  server: { select: { name: true } },
+  service: { select: { name: true, status: true, statusMessage: true } },
+} as const
+
+function view(row: ExitRow): ExitView {
   return {
     id: row.id,
     name: row.name,
@@ -51,6 +66,13 @@ function view(row: Exit & { server: { name: string } }): ExitView {
     serverId: row.serverId,
     serverName: row.server.name,
     serviceId: row.serviceId,
+    service: row.service
+      ? {
+          name: row.service.name,
+          status: row.service.status,
+          statusMessage: row.service.statusMessage,
+        }
+      : null,
   }
 }
 
@@ -68,7 +90,7 @@ export async function listExits(
 ): Promise<ExitView[]> {
   const rows = await db().exit.findMany({
     where: { vaultId: ctx.vaultId, ...(serverId ? { serverId } : {}) },
-    include: { server: { select: { name: true } } },
+    include: INCLUDE,
     orderBy: { name: "asc" },
   })
 
@@ -84,7 +106,7 @@ export async function findExitByName(
     where: {
       vaultId_name: { vaultId: ctx.vaultId, name: name.trim().toLowerCase() },
     },
-    include: { server: { select: { name: true } } },
+    include: INCLUDE,
   })
 
   return row ? view(row) : null
@@ -96,7 +118,7 @@ export async function getExit(
 ): Promise<ExitView> {
   const row = await db().exit.findFirst({
     where: { id, vaultId: ctx.vaultId },
-    include: { server: { select: { name: true } } },
+    include: INCLUDE,
   })
 
   if (!row) {
@@ -104,6 +126,75 @@ export async function getExit(
   }
 
   return view(row)
+}
+
+/**
+ * A new exit's name and label, checked before anything is made: free in
+ * the vault, and the vault under its limit. A VPN service's launch checks
+ * them before it connects to anything.
+ */
+export async function checkNewExit(
+  ctx: VaultContext,
+  input: { name: string; label?: string },
+): Promise<{ name: string; label: string }> {
+  const name = parseExitName(input.name)
+  const label = parseExitLabel(input.label)
+
+  if (
+    (await db().exit.count({ where: { vaultId: ctx.vaultId } })) >= MAX_EXITS
+  ) {
+    throw invalid(`PCP keeps at most ${MAX_EXITS} exits.`)
+  }
+
+  if (await db().exit.findFirst({ where: { vaultId: ctx.vaultId, name } })) {
+    throw new PcpError("conflict", `There is an exit called ${name} already.`)
+  }
+
+  return { name, label }
+}
+
+/**
+ * The exit of a VPN service PCP just started (services/services.ts
+ * register): it leaves through the container's proxy on the SSH server's
+ * loopback. Made in the launch, by the owner, never on its own.
+ */
+export async function createServiceExit(
+  ctx: VaultContext,
+  input: { serverId: string; serviceId: string; name: string; label?: string },
+): Promise<{ id: string }> {
+  const { name, label } = await checkNewExit(ctx, input)
+  const service = await db().mcpServer.findFirst({
+    where: { id: input.serviceId, vaultId: ctx.vaultId, kind: "service" },
+    select: { serviceSpec: { select: { hostId: true } } },
+  })
+
+  if (!service || service.serviceSpec?.hostId !== input.serverId) {
+    throw notFound("That service")
+  }
+
+  const id = newId()
+
+  try {
+    await db().exit.create({
+      data: {
+        id,
+        vaultId: ctx.vaultId,
+        name,
+        label,
+        kind: "service",
+        serverId: input.serverId,
+        serviceId: input.serviceId,
+      },
+    })
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw new PcpError("conflict", `There is an exit called ${name} already.`)
+    }
+
+    throw error
+  }
+
+  return { id }
 }
 
 /** The owner adds an exit that leaves from one of their SSH servers. */

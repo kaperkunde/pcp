@@ -14,13 +14,15 @@ import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
  * server needs to be sent. `totp` secrets are the owner's too: the seed of
  * a site's one-time codes, of which only the code of the moment ever goes
  * anywhere (typed into a page by the browser, lib/core/browser-secrets.ts).
- * `oauth` and `ssh_key` secrets are managed: the
- * token set PCP obtained for a server through OAuth, or the private key PCP
- * made for an SSH server (lib/core/ssh/), kept here so they are encrypted
- * like everything else and show up in the same list.
+ * `oauth`, `ssh_key` and `proxy_password` secrets are managed: the
+ * token set PCP obtained for a server through OAuth, the private key PCP
+ * made for an SSH server (lib/core/ssh/), or the password PCP made for a
+ * VPN service's proxy (an exit, lib/core/exits/), kept here so they are
+ * encrypted like everything else and show up in the same list.
  */
 
-export type SecretKind = "text" | "totp" | "oauth" | "ssh_key"
+export type SecretKind =
+  "text" | "totp" | "oauth" | "ssh_key" | "proxy_password"
 
 /** The kinds the owner enters themselves. */
 export type OwnerSecretKind = "text" | "totp"
@@ -532,6 +534,10 @@ export async function deleteManagedSecret(
   id: string,
 ): Promise<void> {
   await db().secret.deleteMany({
-    where: { id, vaultId: ctx.vaultId, kind: { in: ["oauth", "ssh_key"] } },
+    where: {
+      id,
+      vaultId: ctx.vaultId,
+      kind: { in: ["oauth", "ssh_key", "proxy_password"] },
+    },
   })
 }

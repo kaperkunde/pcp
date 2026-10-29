@@ -154,6 +154,7 @@ const KIND_SHOWN: Record<SecretKind, string> = {
   totp: "one-time codes (TOTP), typed by the browser only",
   oauth: "OAuth sign-in (kept by PCP for a server)",
   ssh_key: "SSH key (PCP's own, for an SSH server)",
+  proxy_password: "proxy password (PCP's own, for a VPN service's exit)",
 }
 
 export type ListedSecret = {

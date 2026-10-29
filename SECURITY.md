@@ -143,9 +143,17 @@ address, for the tokens you allow on their pages (blocked unless you do, or
 asking you first when you set it so). The assistant names the exit, never
 where it connects to: PCP looks every name up itself (over HTTPS, through the
 exit) and connects only to addresses it checked from the exit's side, never
-the server's own loopback or own address, and its private network only for
-a token you allowed private addresses. A tab through an exit has none of the
-browser's sign-ins and saves nothing. PCP never asks the server to forward
+the server's own loopback or own address, never a link-local or cloud
+metadata address (169.254.169.254 and its kind, where a cloud server keeps
+its own credentials) for any token, and its private network only for a
+token you allowed private addresses. A tab through an exit has none of the
+browser's sign-ins and saves nothing. A **VPN exit** is a VPN client
+(gluetun, from PCP's common items) that PCP runs as a service on that
+server: the only container PCP ever gives more than the engine's default,
+and only the NET_ADMIN capability and the /dev/net/tun device its tunnel
+needs. Its proxy listens on the server's 127.0.0.1 alone, signed in with a
+random password PCP makes for it and keeps among your secrets, and PCP
+reaches it through the SSH connection; an assistant cannot propose one. PCP never asks the server to forward
 connections back to it, to a Unix socket, or for an agent or X11. The request
 log says which exit a call used, never the site.
 

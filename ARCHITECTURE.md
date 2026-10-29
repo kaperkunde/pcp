@@ -963,16 +963,19 @@ levels, and proposes one as a permission request (below).
 - `definition` (shared, JSON, `services/definition.ts`): the image pinned by
   digest (`repository@sha256:…`) and optionally the `source` tag an update
   resolves to a new digest; its container `ports`; its variables (`env`: a
-  name, a description, whether it is required, and optionally a fixed value
-  that is no secret); its `volumes`, named volumes only, made on the host as
+  name, a description, whether it is required, whether the owner types its
+  value per instance (`plain`: a provider, a country; no secret), and
+  optionally a fixed value that is no secret); its `volumes`, named volumes only, made on the host as
   `<container>-<name>` and mounted at an absolute path (never a path on the
   host, so a definition reads and writes none of the host's files); `args`
-  after the image; a `health` check (`{kind: "http", port, path}` or
+  after the image; for an exit's container only, `cap_add` (NET_ADMIN, and
+  nothing else) and `devices` (/dev/net/tun, and nothing else); a `health`
+  check (`{kind: "http", port, path}` or
   `{kind: "none"}`); and what it `registers`: `{kind: "openapi", port,
 specPath, basePath, auth?}` (an API endpoint from the schema it serves,
   `auth` naming the variable whose secret the endpoint sends in a header),
-  `{kind: "mcp", port, path}` or `{kind: "none"}`. The union stays open for
-  an exit next. `hash` is its canonical JSON's SHA-256, and
+  `{kind: "mcp", port, path}`, `{kind: "exit", port, protocol, auth?}` (a
+  VPN's proxy, see [Exits](#exits)) or `{kind: "none"}`. `hash` is its canonical JSON's SHA-256, and
   `definitionBasis` includes it. `writeServiceDefinition` writes it on every
   instance, as `writeWrapper` does a program.
 - The instance's own part: `host_id` (the SSH server; null once that is
@@ -980,8 +983,9 @@ specPath, basePath, auth?}` (an API endpoint from the schema it serves,
   (found at launch), `container_name` (`pcp-<name>`, unique among the
   vault's services on that host), `publish` (`{address, ports: [{container,
 host}]}`, the host's IP address the ports are bound to), `env` (`{NAME:
-secret id}`, never a value) and `registered_id` (the endpoint or MCP
-  server it registered).
+secret id}`, never a value), `plain_values` (`{NAME: value}`, what the
+  owner typed for its plain variables) and `registered_id` (the endpoint
+  or MCP server it registered).
 
 **Commands.** Every command is words built from checked fields (image
 references, ports, names, volume names and paths, arguments, each against a
@@ -1088,13 +1092,46 @@ words it got and the env file it read.
 
 An exit lets web_fetch and a browser tab go out from somewhere else than
 PCP's machine (`lib/core/exits/`). Kind `ssh` leaves from an SSH server PCP
-holds, as direct-tcpip channels; kind `service` (next) from a VPN container
-PCP started there through [Services](#services) (gluetun, wireproxy), as a
-channel to the container's proxy on the server's loopback and then HTTP
-CONNECT or SOCKS5 (`exits/handshake.ts`). An exit is a vault row (`exit`:
-name, label, kind, its SSH server and service), in exports, wiped with the
-vault, and the owner's alone to add, rename or remove, on the SSH server's
-page; deleting the server deletes its exits and their levels.
+holds, as direct-tcpip channels; kind `service` from a VPN container PCP
+started there through [Services](#services) (gluetun, from PCP's common
+items), as a channel to the container's proxy on the server's loopback and
+then HTTP CONNECT or SOCKS5 (`exits/handshake.ts`). An exit is a vault row
+(`exit`: name, label, kind, its SSH server and service), in exports, wiped
+with the vault, and the owner's alone to add, rename or remove, on the SSH
+server's page; deleting the server deletes its exits and their levels.
+
+**VPN exits.** A service whose definition `registers` `{kind: "exit",
+port, protocol: "http" | "socks5", auth?: {user_env, password_env}}` is a
+VPN client; launching it (Exits → Add a VPN exit, or its item in a linked
+repository) makes its exit in the same step, named by the owner, and
+removing the service removes the exit and its levels. Its ports are
+published on the SSH server's 127.0.0.1 only (`parsePublish` refuses any
+other address), so nobody on that server's network can use the proxy, and
+PCP reaches the one published port through the SSH connection
+(`openChannel` to 127.0.0.1, never anything else on that loopback). With
+`auth`, `upstream.ts launchService` makes a random password for the
+instance; the container reads it, with the user `pcp`, from the two
+variables `auth` names (over standard input, scrubbed from logs), it is
+kept as the service's managed `proxy_password` secret (`authSecretId` on
+the service's row), and `openExit` decrypts it to sign in to the proxy.
+Neither variable can be one of the definition's own, so nobody binds or
+types it. Health is the image's own check while it starts or fails, then
+the proxy itself: a CONNECT (or SOCKS5 request) through it to the first
+DNS-over-HTTPS resolver, which is what any call does first; a launch whose
+proxy never connects out takes everything back, the password included. The
+container is the only one PCP gives more than the engine's default:
+`cap_add` and `devices` are allow-lists of one each (NET_ADMIN,
+/dev/net/tun), refused on any definition that does not register an exit,
+and checked again where the command is built. An assistant cannot propose
+such a service (`prepareServiceProposal` refuses it). A provider, a
+country and the like are `plain` variables, typed by the owner per
+instance (`service_spec.plain_values`); the VPN's credentials are secrets.
+
+wireproxy, the other client the owner asked for, is not offered: it reads
+a configuration file whose peer endpoint cannot come from a variable, and a
+service has no way to be given a file (no host path, no shell). gluetun's
+`custom` provider takes a WireGuard server's settings as variables
+instead.
 
 **What an assistant names.** web_fetch takes `exit`, and `tabs` with action
 open takes `exit`: a name, never a destination. Every connection is made by
@@ -1117,12 +1154,15 @@ pointers backwards only; an answer must echo the question. Answers are kept
 per exit for their TTL (10 seconds to 10 minutes, 512 entries).
 
 **From the exit's side** (`exits/check.ts`): never the exit's loopback or
-its own address (where PCP's connection went), whatever the levels say; its
-private, link-local (the metadata service among them) and other non-public
-ranges only for a token whose `private` line allows private addresses;
-never PCP's own addresses; everything public passes. The one way to the
-exit's loopback is the port of a container PCP started, which never comes
-through `dial`.
+its own address (where PCP's connection went), whatever the levels say;
+never a link-local address (169.254.0.0/16, fe80::/10) or a cloud metadata
+service's (169.254.169.254, fd00:ec2::254, 100.100.100.200, 168.63.129.16,
+in their IPv4-mapped and NAT64 spellings too) either, whatever the levels
+say: through an exit those are the exit machine's own, its cloud
+credentials among them; its private and other non-public ranges only for a
+token whose `private` line allows private addresses; never PCP's own
+addresses; everything public passes. The one way to the exit's loopback is
+the port of a container PCP started, which never comes through `dial`.
 
 **Levels.** A token's level for an exit is a `web_fetch_rule` of kind
 `exit` keyed by the exit's id, the token's own or for all tokens (the

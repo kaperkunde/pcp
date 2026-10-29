@@ -47,7 +47,7 @@ import {
 } from "@/lib/server/action-state"
 import { instanceInputFrom } from "@/lib/server/instance-input"
 import { publicUrlFor } from "@/lib/server/public-url"
-import { serviceInputFrom } from "@/lib/server/service-input"
+import { serviceInputFrom, withNewSecrets } from "@/lib/server/service-input"
 import { requireContext } from "@/lib/server/session"
 
 const ITEM_KINDS = Object.keys(ITEM_DIRS)
@@ -515,26 +515,37 @@ export async function importServiceAction(
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
   const result = await guarded(async () => {
-    const [added] = await addFromRepo(ctx, repoId, {
-      commit: String(choice.commit),
-      items: [
-        {
-          root: String(choice.root),
-          hash: String(choice.hash),
-          service: {
-            input: serviceInputFrom(formData),
-            launch: (launchCtx, input) =>
-              launchService(launchCtx, input, { publicUrl }),
-          },
-        },
-      ],
-    })
+    const input = serviceInputFrom(formData)
+    // A launch that fails deletes the secrets typed in for it again.
+    const added = await withNewSecrets(
+      ctx,
+      formData,
+      input.env,
+      async (env) => {
+        const [one] = await addFromRepo(ctx, repoId, {
+          commit: String(choice.commit),
+          items: [
+            {
+              root: String(choice.root),
+              hash: String(choice.hash),
+              service: {
+                input: { ...input, env },
+                launch: (launchCtx, launchInput) =>
+                  launchService(launchCtx, launchInput, { publicUrl }),
+              },
+            },
+          ],
+        })
 
-    if (!added?.ok || !added.id) {
-      throw invalid(added?.message ?? "Nothing was launched.")
-    }
+        if (!one?.ok || !one.id) {
+          throw invalid(one?.message ?? "Nothing was launched.")
+        }
 
-    return { id: added.id }
+        return one
+      },
+    )
+
+    return { id: added.id! }
   })
 
   if (result.status !== "ok") {

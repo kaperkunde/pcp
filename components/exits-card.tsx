@@ -2,9 +2,12 @@
 
 import { useActionState, useState, useTransition } from "react"
 
+import Link from "next/link"
+
 import { FormError, FormNote } from "@/components/form-status"
 import { SubmitButton } from "@/components/submit-button"
-import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Button, ButtonLink } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { List, ListSection } from "@/components/ui/list"
 import {
@@ -44,7 +47,10 @@ export function ExitsCard({
           allow TCP forwarding for the login (<code>AllowTcpForwarding</code>;
           PCP&apos;s key without <code>restrict</code> or{" "}
           <code>no-port-forwarding</code>). Each token may use an exit only once
-          you allow it on the token&apos;s page.
+          you allow it on the token&apos;s page. A VPN exit goes out through a
+          VPN container PCP runs here instead (gluetun, from PCP&apos;s common
+          items, or one of yours), its proxy on this server&apos;s loopback
+          only.
         </>
       }
       data-testid="ssh-exits"
@@ -55,6 +61,19 @@ export function ExitsCard({
         ))}
         <li>
           <AddExitForm serverId={serverId} />
+        </li>
+        <li className={rowClassName}>
+          <span className="min-w-0 flex-1 basis-48 text-xs text-muted-foreground">
+            Or out through a VPN: PCP runs its client here with Docker or
+            Podman, and adds its proxy as an exit.
+          </span>
+          <ButtonLink
+            href={`/servers/services/new?${new URLSearchParams({ exit: "1", host: serverId })}`}
+            variant="secondary"
+            size="sm"
+          >
+            Add a VPN exit
+          </ButtonLink>
         </li>
       </List>
     </ListSection>
@@ -78,13 +97,32 @@ function ExitRow({ serverId, exit }: { serverId: string; exit: ExitView }) {
     )
   }
 
+  const service = exit.kind === "service" ? exit.service : null
+
   return (
     <li className={rowClassName}>
       <span className="flex min-w-0 flex-1 basis-48 flex-col gap-0.5">
-        <code className="text-[13px]">{exit.name}</code>
+        <span className="flex flex-wrap items-center gap-2">
+          <code className="text-[13px]">{exit.name}</code>
+          {exit.kind === "service" ? (
+            <Badge variant="secondary">VPN</Badge>
+          ) : null}
+        </span>
         <span className="text-xs text-muted-foreground">
           {exit.label || "No label"}
         </span>
+        {exit.kind === "service" && exit.serviceId ? (
+          <span className="text-xs text-muted-foreground">
+            Through{" "}
+            <Link
+              href={`/servers/${exit.serviceId}`}
+              className="underline underline-offset-2"
+            >
+              {service?.name ?? "its service"}
+            </Link>
+            {service ? `: ${serviceState(service)}` : ""}
+          </span>
+        ) : null}
       </span>
       <Button
         variant="secondary"
@@ -107,8 +145,18 @@ function ExitRow({ serverId, exit }: { serverId: string; exit: ExitView }) {
             return
           }
 
+          // A VPN exit's service can go with it, or keep running (its
+          // proxy stays on this server's loopback only).
+          const withService =
+            exit.kind === "service" &&
+            window.confirm(
+              `Also remove ${service?.name ?? "its service"}? PCP removes its container from this server. Cancel keeps it running.`,
+            )
+
           startTransition(async () => {
-            const result = await deleteExitAction(serverId, exit.id)
+            const result = await deleteExitAction(serverId, exit.id, {
+              service: withService,
+            })
             setError(result.status === "error" ? result.error : null)
           })
         }}
@@ -118,6 +166,15 @@ function ExitRow({ serverId, exit }: { serverId: string; exit: ExitView }) {
       <FormError error={error} className="basis-full" />
     </li>
   )
+}
+
+/** A VPN service's state as it was last read (nothing polls it). */
+function serviceState(service: { status: string; statusMessage: string }) {
+  if (service.status === "ok") return "running when last checked"
+  if (service.status === "error") {
+    return service.statusMessage || "not running when last checked"
+  }
+  return "not checked yet"
 }
 
 function ExitFields({

@@ -387,6 +387,7 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
         name: entry.name,
         ...(entry.description ? { description: entry.description } : {}),
         ...(entry.required ? { required: true } : {}),
+        ...(entry.plain ? { plain: true } : {}),
         ...(entry.value !== undefined ? { value: entry.value } : {}),
       })),
     ),
@@ -398,6 +399,8 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
       })),
     ),
     ...listed("args", definition.args),
+    ...listed("cap_add", definition.cap_add),
+    ...listed("devices", definition.devices),
     ...(definition.health.kind === "none"
       ? {}
       : {
@@ -413,23 +416,37 @@ function serviceYaml(definition: ServiceDefinition): Record<string, unknown> {
           registers:
             registers.kind === "mcp"
               ? { kind: "mcp", port: registers.port, path: registers.path }
-              : {
-                  kind: "openapi",
-                  port: registers.port,
-                  specPath: registers.specPath,
-                  ...(registers.basePath !== "/"
-                    ? { basePath: registers.basePath }
-                    : {}),
-                  ...(registers.auth
-                    ? {
-                        auth: {
-                          env: registers.auth.env,
-                          header: registers.auth.header,
-                          template: registers.auth.template,
-                        },
-                      }
-                    : {}),
-                },
+              : registers.kind === "exit"
+                ? {
+                    kind: "exit",
+                    port: registers.port,
+                    protocol: registers.protocol,
+                    ...(registers.auth
+                      ? {
+                          auth: {
+                            user_env: registers.auth.user_env,
+                            password_env: registers.auth.password_env,
+                          },
+                        }
+                      : {}),
+                  }
+                : {
+                    kind: "openapi",
+                    port: registers.port,
+                    specPath: registers.specPath,
+                    ...(registers.basePath !== "/"
+                      ? { basePath: registers.basePath }
+                      : {}),
+                    ...(registers.auth
+                      ? {
+                          auth: {
+                            env: registers.auth.env,
+                            header: registers.auth.header,
+                            template: registers.auth.template,
+                          },
+                        }
+                      : {}),
+                  },
         }),
   }
 }
@@ -1423,6 +1440,9 @@ const SERVICE_INSTANCE_KEYS: Record<string, string> = {
   container: "its container's name",
   containerName: "its container's name",
   registered: "what it registered",
+  values: "the values typed for its variables",
+  plainValues: "the values typed for its variables",
+  exit: "the exit it adds",
   note: "the owner's note",
 }
 

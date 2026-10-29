@@ -407,6 +407,8 @@ const ServiceSpecRow = z.strictObject({
   containerName: str,
   publish: str.default("{}"),
   env: str.default("{}"),
+  // Added with exits' VPN services: absent from older files.
+  plainValues: str.default("{}"),
   registeredId: id.nullable(),
   createdAt: date,
   updatedAt: date,

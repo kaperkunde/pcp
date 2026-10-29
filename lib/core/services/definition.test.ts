@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   checkEnvBindings,
+  checkPlainValues,
   parsePublish,
   parseServiceDefinition,
   reachUrl,
@@ -48,6 +49,7 @@ describe("parseServiceDefinition", () => {
       name: "LOG_LEVEL",
       description: "",
       required: false,
+      plain: false,
       value: "info",
     })
     expect(definition.registers).toMatchObject({ basePath: "/" })
@@ -248,5 +250,164 @@ describe("engine commands", () => {
       ),
     ).toBe(`nginx@sha256:${"d".repeat(64)}`)
     expect(() => pickDigest("[]", "nginx:1.27")).toThrow(/digest/)
+  })
+})
+
+describe("an exit's definition (a VPN container)", () => {
+  const EXIT: ServiceDefinitionInput = {
+    image: `docker.io/qmcgaw/gluetun@${DIGEST}`,
+    ports: [{ container: 8888 }],
+    env: [
+      { name: "VPN_SERVICE_PROVIDER", plain: true, required: true },
+      { name: "SERVER_COUNTRIES", plain: true },
+      { name: "OPENVPN_PASSWORD" },
+    ],
+    cap_add: ["NET_ADMIN"],
+    devices: ["/dev/net/tun"],
+    registers: {
+      kind: "exit",
+      port: 8888,
+      protocol: "http",
+      auth: { user_env: "HTTPPROXY_USER", password_env: "HTTPPROXY_PASSWORD" },
+    },
+  }
+  const exit = (change: Record<string, unknown>) => ({ ...EXIT, ...change })
+
+  it("takes NET_ADMIN and /dev/net/tun, and nothing else", () => {
+    const definition = parseServiceDefinition(EXIT)
+    expect(definition.cap_add).toEqual(["NET_ADMIN"])
+    expect(definition.devices).toEqual(["/dev/net/tun"])
+
+    for (const change of [
+      { cap_add: ["SYS_ADMIN"] },
+      { cap_add: ["ALL"] },
+      { cap_add: ["NET_ADMIN", "NET_ADMIN"] },
+      { cap_add: ["net_admin"] },
+      { devices: ["/dev/sda"] },
+      { devices: ["/dev/net/tun:/dev/net/tun"] },
+      { devices: ["/dev/net/tun:rwm"] },
+      { devices: ["/dev/net/../sda"] },
+    ]) {
+      expect(() => parseServiceDefinition(exit(change))).toThrow()
+    }
+  })
+
+  it("gives a capability or a device to an exit's container only", () => {
+    expect(() =>
+      parseServiceDefinition(withChange({ cap_add: ["NET_ADMIN"] })),
+    ).toThrow(/Only an exit's container/)
+    expect(() =>
+      parseServiceDefinition(withChange({ devices: ["/dev/net/tun"] })),
+    ).toThrow(/Only an exit's container/)
+  })
+
+  it("keeps the proxy's login out of the variables anyone binds", () => {
+    expect(() =>
+      parseServiceDefinition(
+        exit({
+          env: [{ name: "HTTPPROXY_PASSWORD" }],
+        }),
+      ),
+    ).toThrow(/PCP makes itself/)
+    expect(() =>
+      parseServiceDefinition(
+        exit({
+          registers: {
+            kind: "exit",
+            port: 8888,
+            protocol: "http",
+            auth: { user_env: "P", password_env: "P" },
+          },
+        }),
+      ),
+    ).toThrow(/two variables/)
+    expect(() =>
+      parseServiceDefinition(
+        exit({
+          registers: { kind: "exit", port: 9999, protocol: "socks4" },
+        }),
+      ),
+    ).toThrow()
+  })
+
+  it("is published on the SSH server's loopback only", () => {
+    const definition = parseServiceDefinition(EXIT)
+    const ports = [{ container: 8888, host: 18888 }]
+
+    expect(parsePublish({ address: "127.0.0.1", ports }, definition)).toEqual({
+      address: "127.0.0.1",
+      ports,
+    })
+    for (const address of ["0.0.0.0", "::", "::1", "127.0.0.2", "10.0.0.5"]) {
+      expect(() => parsePublish({ address, ports }, definition)).toThrow(
+        /127\.0\.0\.1 only/,
+      )
+    }
+  })
+
+  it("passes the capability and the device to the engine as their own words", () => {
+    const words = runWords("docker", {
+      serviceId: "svc1",
+      containerName: "pcp-vpn",
+      definition: parseServiceDefinition(EXIT),
+      publish: {
+        address: "127.0.0.1",
+        ports: [{ container: 8888, host: 18888 }],
+      },
+    })
+    const image = words.indexOf(`docker.io/qmcgaw/gluetun@${DIGEST}`)
+    expect(words.indexOf("--cap-add")).toBeLessThan(image)
+    expect(words[words.indexOf("--cap-add") + 1]).toBe("NET_ADMIN")
+    expect(words[words.indexOf("--device") + 1]).toBe("/dev/net/tun")
+    expect(words).toContain("127.0.0.1:18888:8888")
+    expect(words).not.toContain("--privileged")
+
+    // Refused by the engine's own check too, whatever got past the schema.
+    const forged = {
+      ...parseServiceDefinition(EXIT),
+      cap_add: ["SYS_ADMIN"],
+    } as unknown as ReturnType<typeof parseServiceDefinition>
+    expect(() =>
+      runWords("docker", {
+        serviceId: "svc1",
+        containerName: "pcp-vpn",
+        definition: forged,
+        publish: {
+          address: "127.0.0.1",
+          ports: [{ container: 8888, host: 1 }],
+        },
+      }),
+    ).toThrow(/does not give a container SYS_ADMIN/)
+  })
+
+  it("takes typed values for its plain variables only, one plain line each", () => {
+    const definition = parseServiceDefinition(EXIT)
+
+    expect(
+      checkPlainValues(
+        { VPN_SERVICE_PROVIDER: " mullvad ", SERVER_COUNTRIES: "" },
+        definition,
+      ),
+    ).toEqual({ VPN_SERVICE_PROVIDER: "mullvad" })
+    expect(() =>
+      checkPlainValues({ OPENVPN_PASSWORD: "hunter2" }, definition),
+    ).toThrow(/takes a secret/)
+    expect(() => checkPlainValues({ NOPE: "x" }, definition)).toThrow(
+      /no variable called NOPE/,
+    )
+    expect(() =>
+      checkPlainValues({ SERVER_COUNTRIES: "Sweden\nX=1" }, definition),
+    ).toThrow(/one line/)
+    expect(() =>
+      checkPlainValues({ SERVER_COUNTRIES: "Swe\u200bden" }, definition),
+    ).toThrow(/one line/)
+
+    // A required plain variable is met by a typed value, or a secret.
+    expect(() => checkEnvBindings({}, definition)).toThrow(
+      /Type the value for VPN_SERVICE_PROVIDER/,
+    )
+    expect(
+      checkEnvBindings({}, definition, { VPN_SERVICE_PROVIDER: "mullvad" }),
+    ).toEqual({})
   })
 })

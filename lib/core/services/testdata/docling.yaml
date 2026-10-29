@@ -1,0 +1,24 @@
+pcp_format: 3
+version: 1
+name: Docling
+description: "Docling Serve: turns PDFs, Office documents and images into Markdown, JSON or text, with OCR and table structure, as an API endpoint. CPU image, no GPU needed."
+image: ghcr.io/docling-project/docling-serve-cpu@sha256:7a480a1604fa3b42efeddc7db9527690d9f9bc903226136013e2bfe6b1a4dfb0
+source: ghcr.io/docling-project/docling-serve-cpu:latest
+ports:
+  - container: 5001
+env:
+  - name: DOCLING_SERVE_API_KEY
+    description: The key every request must send in X-Api-Key. PCP sends it for you; choose or type a long random secret.
+    required: true
+health:
+  kind: http
+  port: 5001
+  path: /health
+registers:
+  kind: openapi
+  port: 5001
+  specPath: /openapi.json
+  auth:
+    env: DOCLING_SERVE_API_KEY
+    header: X-Api-Key
+    template: "{{secret}}"

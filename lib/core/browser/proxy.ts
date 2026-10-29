@@ -119,9 +119,13 @@ function parseAuthority(
 function refusalOf(error: unknown): Refused | null {
   if (error instanceof Refused) return error
   const verdict = (error as { verdict?: unknown } | null)?.verdict
+  // An exit's link-local and metadata addresses are refused for every
+  // token, as its own are.
   return verdict === "private" || verdict === "own"
     ? new Refused(verdict)
-    : null
+    : verdict === "local"
+      ? new Refused("own")
+      : null
 }
 
 export async function startBrowserProxy({
@@ -133,7 +137,7 @@ export async function startBrowserProxy({
   /**
    * Dials somewhere else than from PCP's machine (an exit): resolves the
    * name, checks every address and connects, all on the exit's side. An
-   * error with a `verdict` of "private" or "own" is a refusal. Replaces
+   * error with a `verdict` of "private", "own" or "local" is a refusal. Replaces
    * `check` and PCP's own lookup.
    */
   connect?: (host: string, port: number) => Promise<Duplex>

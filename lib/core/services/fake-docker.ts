@@ -34,6 +34,8 @@ export type FakeContainer = {
   args: string[]
   publish: string[]
   volumes: string[]
+  capAdd: string[]
+  devices: string[]
   /** The env file's text as the engine read it. */
   env: string
 }
@@ -97,17 +99,19 @@ if (command === "version") {
   const envPath = option("--env-file")
   const env = fs.readFileSync(envPath, "utf8")
   state.envFiles.push(env)
-  const publish = [], volumes = []
+  const publish = [], volumes = [], capAdd = [], devices = []
   let at = 1, image = null
   while (at < args.length) {
     const word = args[at]
     if (!word.startsWith("--")) { image = word; break }
     if (word === "--publish") publish.push(args[at + 1])
     if (word === "--volume") volumes.push(args[at + 1])
+    if (word === "--cap-add") capAdd.push(args[at + 1])
+    if (word === "--device") devices.push(args[at + 1])
     at += word === "--detach" ? 1 : 2
   }
   const label = (option("--label") || "").replace(/^pcp\.service=/, "") || null
-  state.containers[name] = { name, image, label, state: state.runState, exitCode: state.runState === "exited" ? 1 : 0, health: state.runHealth, args: args.slice(at + 1), publish, volumes, env }
+  state.containers[name] = { name, image, label, state: state.runState, exitCode: state.runState === "exited" ? 1 : 0, health: state.runHealth, args: args.slice(at + 1), publish, volumes, capAdd, devices, env }
   out("c0ffee\n")
 } else if (command === "inspect") {
   const name = args[args.length - 1]

@@ -116,6 +116,14 @@ export async function prepareServiceProposal(
     description = args.description ?? ""
   }
 
+  // An exit is the owner's alone to add (lib/core/exits/): an assistant
+  // names one in its calls, never makes one.
+  if (definition.registers.kind === "exit") {
+    throw invalid(
+      "This service would add an exit (a VPN's way out), which only the owner adds, on their SSH server's page in PCP. Ask them to add it there.",
+    )
+  }
+
   const named = normalizeNameAndDescription({ name: args.name, description })
   const host = await db().mcpServer.findFirst({
     where: { id: args.sshServerId, vaultId: ctx.vaultId, kind: "ssh" },

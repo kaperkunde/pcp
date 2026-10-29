@@ -34,8 +34,14 @@ import {
  *   secrets, bound per instance, or a fixed value that is no secret. Values
  *   reach the host over standard input only.
  * - `registers` is what PCP adds for it in the same step: an API endpoint
- *   from the schema it serves, an MCP server, or nothing. The union stays
- *   open: an exit (`{kind: "exit"}`) is the next.
+ *   from the schema it serves, an MCP server, an exit (a VPN container's
+ *   proxy, lib/core/exits/), or nothing.
+ * - An exit's container is the one kind that may be given more than a
+ *   container gets by default, and only from two allow-lists: the
+ *   capability NET_ADMIN (`cap_add`) and the device /dev/net/tun
+ *   (`devices`), what a VPN client needs for its tunnel. Its ports are
+ *   published on the SSH server's loopback only (parsePublish), where PCP
+ *   reaches its proxy through the SSH connection, never the network.
  */
 
 // ---- Patterns ---------------------------------------------------------------
@@ -88,8 +94,15 @@ const EnvSchema = z.strictObject({
   /** Whether the service needs it: a launch refuses to start without it. */
   required: z.boolean().default(false),
   /**
+   * The owner types its value per instance (a VPN provider's name, a
+   * country): no secret, kept with the instance and shown on its page. A
+   * secret bound to the name still overrides it.
+   */
+  plain: z.boolean().default(false),
+  /**
    * A fixed value that is no secret (`LOG_LEVEL=info`), shared with every
-   * instance; a secret bound to the name overrides it.
+   * instance; a secret bound to the name overrides it. For a `plain`
+   * variable it is the value when the owner types none.
    */
   value: z
     .string()
@@ -135,6 +148,22 @@ const RegisterAuthSchema = z.strictObject({
     }),
 })
 
+/**
+ * The proxy's login, which PCP makes itself for each instance (a random
+ * password, kept as a managed secret): `user_env` and `password_env` are
+ * the variables the container reads them from. Neither is one of the
+ * definition's own variables, so nobody binds or types them.
+ */
+const ExitAuthSchema = z.strictObject({
+  user_env: envName,
+  password_env: envName,
+})
+
+/** The capabilities a definition may add: NET_ADMIN only, for a VPN's tunnel. */
+export const ALLOWED_CAPABILITIES = ["NET_ADMIN"] as const
+/** The devices a definition may pass in: the tunnel device only. */
+export const ALLOWED_DEVICES = ["/dev/net/tun"] as const
+
 const RegistersSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("openapi"),
@@ -146,6 +175,13 @@ const RegistersSchema = z.discriminatedUnion("kind", [
     auth: RegisterAuthSchema.optional(),
   }),
   z.strictObject({ kind: z.literal("mcp"), port, path: httpPath }),
+  /** A VPN container's proxy, which PCP adds as an exit. */
+  z.strictObject({
+    kind: z.literal("exit"),
+    port,
+    protocol: z.enum(["http", "socks5"]),
+    auth: ExitAuthSchema.optional(),
+  }),
   z.strictObject({ kind: z.literal("none") }),
 ])
 
@@ -181,6 +217,24 @@ export const ServiceDefinitionSchema = z
       )
       .max(MAX_SERVICE_ARGS)
       .default([]),
+    /** Capabilities the container gets on top of the engine's default. */
+    cap_add: z
+      .array(
+        z.enum(ALLOWED_CAPABILITIES, {
+          message: "A service can be given NET_ADMIN only, for an exit.",
+        }),
+      )
+      .max(ALLOWED_CAPABILITIES.length)
+      .default([]),
+    /** Devices of the SSH server passed into the container. */
+    devices: z
+      .array(
+        z.enum(ALLOWED_DEVICES, {
+          message: "A service can be given /dev/net/tun only, for an exit.",
+        }),
+      )
+      .max(ALLOWED_DEVICES.length)
+      .default([]),
     health: HealthSchema.default({ kind: "none" }),
     registers: RegistersSchema.default({ kind: "none" }),
   })
@@ -195,6 +249,8 @@ export const ServiceDefinitionSchema = z
       [names, "variable"],
       [volumes, "volume"],
       [paths, "mount path"],
+      [definition.cap_add, "capability"],
+      [definition.devices, "device"],
     ]
 
     for (const [list, what] of lists) {
@@ -222,6 +278,37 @@ export const ServiceDefinitionSchema = z
 
     if (definition.registers.kind !== "none") {
       needsPort("What it registers", definition.registers.port)
+    }
+
+    if (
+      definition.registers.kind !== "exit" &&
+      (definition.cap_add.length > 0 || definition.devices.length > 0)
+    ) {
+      issue.addIssue({
+        code: "custom",
+        message:
+          "Only an exit's container (registers kind exit) is given a capability or a device.",
+      })
+    }
+
+    if (definition.registers.kind === "exit" && definition.registers.auth) {
+      const { user_env, password_env } = definition.registers.auth
+
+      if (user_env === password_env) {
+        issue.addIssue({
+          code: "custom",
+          message: "The proxy's user and password are two variables.",
+        })
+      }
+
+      for (const name of [user_env, password_env]) {
+        if (names.includes(name)) {
+          issue.addIssue({
+            code: "custom",
+            message: `${name} carries the proxy's login, which PCP makes itself: it is not one of the service's variables.`,
+          })
+        }
+      }
     }
 
     if (
@@ -290,6 +377,9 @@ export function serviceDefinitionHash(definition: ServiceDefinition): string {
 
 // ---- The instance's own part ------------------------------------------------
 
+/** Where an exit's proxy is published: the SSH server's loopback, nothing else. */
+export const EXIT_PUBLISH_ADDRESS = "127.0.0.1"
+
 /** Where the container's ports are published on the SSH server. */
 export type ServicePublish = {
   /** The host's address the ports are bound to: an IP literal. */
@@ -324,6 +414,18 @@ export function parsePublish(
   if (isIP(address) === 0) {
     throw invalid(
       "Publish the service on an IP address of the SSH server: 0.0.0.0 for every address, 127.0.0.1 for that machine alone, or one of its own.",
+    )
+  }
+
+  // An exit's proxy is reached through the SSH connection, on the SSH
+  // server's own loopback: anywhere else, anyone on its network could use
+  // it (and the VPN behind it).
+  if (
+    definition.registers.kind === "exit" &&
+    address !== EXIT_PUBLISH_ADDRESS
+  ) {
+    throw invalid(
+      `An exit's proxy is published on ${EXIT_PUBLISH_ADDRESS} only, the SSH server's own loopback: PCP reaches it through the SSH connection.`,
     )
   }
 
@@ -387,13 +489,71 @@ export function readEnvBindings(json: string): ServiceEnvBindings {
   return {}
 }
 
+/** The values the owner typed for a service's plain variables, by name. */
+export type ServicePlainValues = Record<string, string>
+
+export function readPlainValues(json: string): ServicePlainValues {
+  return readEnvBindings(json)
+}
+
+/**
+ * The values typed for plain variables, checked against the definition:
+ * only its plain variables, each one line within bounds, no character that
+ * does not show. The empty ones are left out.
+ */
+export function checkPlainValues(
+  values: ServicePlainValues,
+  definition: ServiceDefinition,
+): ServicePlainValues {
+  const known = new Map(definition.env.map((entry) => [entry.name, entry]))
+  const checked: ServicePlainValues = {}
+
+  for (const [name, raw] of Object.entries(values)) {
+    const value = typeof raw === "string" ? raw.trim() : ""
+
+    if (!value) {
+      continue
+    }
+
+    const entry = known.get(name)
+
+    if (!entry) {
+      throw invalid(`The service has no variable called ${name}.`)
+    }
+
+    if (!entry.plain) {
+      throw invalid(`${name} takes a secret of yours, not a value typed here.`)
+    }
+
+    if (value.length > MAX_ENV_VALUE_CHARS) {
+      throw invalid(
+        `The value for ${name} is at most ${MAX_ENV_VALUE_CHARS} characters.`,
+      )
+    }
+
+    if (
+      /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/.test(
+        value,
+      )
+    ) {
+      throw invalid(`The value for ${name} is one line of plain text.`)
+    }
+
+    checked[name] = value
+  }
+
+  return checked
+}
+
 /**
  * The bindings, checked against the definition: only its variables, and
- * every required one either bound or given a fixed value.
+ * every required one either bound, given a typed value (`values`, its plain
+ * ones) or a fixed value.
  */
 export function checkEnvBindings(
   bindings: ServiceEnvBindings,
   definition: ServiceDefinition,
+  values: ServicePlainValues = {},
 ): ServiceEnvBindings {
   const known = new Map(definition.env.map((entry) => [entry.name, entry]))
   const checked: ServiceEnvBindings = {}
@@ -411,9 +571,16 @@ export function checkEnvBindings(
   }
 
   for (const entry of definition.env) {
-    if (entry.required && !checked[entry.name] && entry.value === undefined) {
+    if (
+      entry.required &&
+      !checked[entry.name] &&
+      !values[entry.name] &&
+      entry.value === undefined
+    ) {
       throw invalid(
-        `Choose the secret for ${entry.name}: the service needs it.`,
+        entry.plain
+          ? `Type the value for ${entry.name}: the service needs it.`
+          : `Choose the secret for ${entry.name}: the service needs it.`,
       )
     }
   }
