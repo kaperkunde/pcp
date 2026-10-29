@@ -226,6 +226,7 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           openApiSpecs: (await tx.openApiSpec.findMany(byServer)).map(rowJson),
           wrapperSpecs: (await tx.wrapperSpec.findMany(byServer)).map(rowJson),
           serviceSpecs: (await tx.serviceSpec.findMany(byServer)).map(rowJson),
+          exits: (await tx.exit.findMany(byVault)).map(rowJson),
           repos: (await tx.repo.findMany(byVault)).map(rowJson),
           repoItems: (
             await tx.repoItem.findMany({ where: { repo: { vaultId } } })
@@ -502,6 +503,7 @@ async function writeExport(
         await inChunks(tables.serviceSpecs, (data) =>
           tx.serviceSpec.createMany({ data }),
         )
+        await inChunks(tables.exits, (data) => tx.exit.createMany({ data }))
         await inChunks(tables.apiTokenServers, (data) =>
           tx.apiTokenServer.createMany({ data }),
         )
@@ -605,6 +607,7 @@ export async function wipeVault(
   await tx.openApiSpec.deleteMany(byServer)
   await tx.wrapperSpec.deleteMany(byServer)
   await tx.serviceSpec.deleteMany(byServer)
+  await tx.exit.deleteMany(byVault)
   await tx.mcpTool.deleteMany(byServer)
   await tx.serverAuthHeader.deleteMany(byServer)
   await tx.mcpServer.deleteMany(byVault)

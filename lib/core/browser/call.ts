@@ -19,6 +19,7 @@ import { checkRateLimit } from "../rate-limit"
 import { loadResourceLimits } from "../resources/state"
 import { missingResultMessage, resolveHandles } from "../result-handles"
 import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
+import type { BrowserExits } from "../exits/use"
 import { decideSite, loadFetchRules } from "../web-fetch"
 import { parseSecretPlaceholder, scrubResult } from "../wrappers/placeholders"
 import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
@@ -51,6 +52,7 @@ import {
   mayOpen,
   openTab,
   recomputePrivate,
+  renewExit,
   reopenTab,
   runningBrowser,
   saveVaultProfile,
@@ -144,6 +146,12 @@ export type BrowserScope = {
   deadline?: number
   /** The run_code or wrapper run the call is made for. */
   runId?: string
+  /**
+   * The exits the token may name, and opening one for a tab
+   * (exits/use.ts browserExits, built where the key is: upstream.ts and
+   * the owner's answers). Without it a tab cannot go through an exit.
+   */
+  exits?: BrowserExits
 }
 
 function text(value: string, isError = false): CallToolResult {
@@ -608,6 +616,7 @@ function navigationFailure(
 async function newTab(
   scope: BrowserScope,
   vault: VaultBrowser,
+  exit?: Awaited<ReturnType<BrowserExits["open"]>>,
 ): Promise<Tab | CallToolResult> {
   if (vault.tabs.size >= MAX_TABS) {
     // Only how many: the other tabs' pages are not this token's to see.
@@ -623,12 +632,58 @@ async function newTab(
     )
   }
 
-  return openTab(vault, {
-    openedBy: await tokenName(scope.tokenId),
-    tokenId: scope.tokenId,
-    rules: null,
-    privateAllowed: false,
-  })
+  return openTab(
+    vault,
+    {
+      openedBy: await tokenName(scope.tokenId),
+      tokenId: scope.tokenId,
+      rules: null,
+      privateAllowed: false,
+    },
+    exit,
+  )
+}
+
+/**
+ * A tab that goes out through an exit: the exit opened again for this call,
+ * which keeps its connection up while the tab is used, and refused once
+ * the token may no longer use it. Null when the call may go on.
+ */
+async function keepExit(
+  scope: BrowserScope,
+  vault: VaultBrowser,
+  tab: Tab,
+): Promise<CallToolResult | null> {
+  if (!tab.exit) {
+    return null
+  }
+
+  if (!scope.exits) {
+    return text(
+      `Tab ${tab.id} goes through the exit ${tab.exit.name}, which this call cannot use. Close it with tabs.`,
+      true,
+    )
+  }
+
+  try {
+    const opened = await scope.exits.open(tab.exit.name)
+
+    if (opened.id !== tab.exit.id) {
+      return text(
+        `The exit ${tab.exit.name} that tab ${tab.id} opened with is gone. Close the tab with tabs and open a new one.`,
+        true,
+      )
+    }
+
+    renewExit(vault, opened.id, opened.dialer)
+    return null
+  } catch (error) {
+    if (error instanceof PcpError) {
+      return text(`${error.message} Close tab ${tab.id} with tabs.`, true)
+    }
+
+    throw error
+  }
 }
 
 /** What the caller is told of a tab that was reopened. */
@@ -807,7 +862,7 @@ async function paceAction(
  */
 export async function performNavigate(
   scope: BrowserScope,
-  ask: Pick<BrowseAsk, "tabId" | "url">,
+  ask: Pick<BrowseAsk, "tabId" | "url" | "exit">,
   { allowedByOwner = false }: { allowedByOwner?: boolean } = {},
 ): Promise<CallToolResult> {
   const url = pageUrl(ask.url)
@@ -838,8 +893,31 @@ export async function performNavigate(
     tab = null
   }
 
+  if (tab) {
+    const closed = await keepExit(scope, vault, tab)
+
+    if (closed) {
+      return withLead(closed, note)
+    }
+  }
+
   if (!tab) {
-    const opened = await withVault(vault, () => newTab(scope, vault))
+    let exit: Awaited<ReturnType<BrowserExits["open"]>> | undefined
+
+    if (ask.exit) {
+      if (!scope.exits) {
+        return text("A tab cannot go through an exit from here.", true)
+      }
+
+      try {
+        exit = await scope.exits.open(ask.exit)
+      } catch (error) {
+        if (error instanceof PcpError) return text(error.message, true)
+        throw error
+      }
+    }
+
+    const opened = await withVault(vault, () => newTab(scope, vault, exit))
 
     if (!isTab(opened)) {
       return opened
@@ -849,7 +927,9 @@ export async function performNavigate(
     first.push(
       ask.tabId
         ? `There is no tab ${ask.tabId} (it was closed, or the browser has closed since), so the page opened in a new tab: ${tab.id}. Name ${tab.id} as tab in the calls that follow.`
-        : `Opened a new tab: ${tab.id}. Name ${tab.id} as tab in the calls that follow.`,
+        : exit
+          ? `Opened a new tab through the exit ${exit.name}: ${tab.id}. It is signed in to nothing, and every page of it comes from the exit. Name ${tab.id} as tab in the calls that follow.`
+          : `Opened a new tab: ${tab.id}. Name ${tab.id} as tab in the calls that follow.`,
     )
   }
 
@@ -920,6 +1000,7 @@ async function openSite(
   tabId: string | null,
   rawUrl: string,
   toolName: BrowseAsk["toolName"],
+  exitName?: string,
 ): Promise<CallToolResult> {
   const url = pageUrl(rawUrl)
 
@@ -945,30 +1026,61 @@ async function openSite(
   // the page opens in a new tab of its own.
   const tab = ownTab(runningBrowser(scope.ctx.vaultId), scope.tokenId, tabId)
   const inTab = tab?.id ?? null
-
-  if (decided.access === "ask" && !tab?.allowedHosts.has(decided.host)) {
-    throw new OwnerNeeded({
-      kind: "browse",
-      input: {
-        serverId: scope.serverId,
-        tabId: inTab,
-        url: url.href,
-        toolName,
-      },
-    })
+  const browse: BrowseAsk = {
+    serverId: scope.serverId,
+    tabId: inTab,
+    url: url.href,
+    toolName,
+    ...(exitName ? { exit: exitName } : {}),
   }
 
-  return performNavigate(scope, { tabId: tabId ?? null, url: url.href })
+  // An exit that asks first is asked about with the site: the owner sees
+  // both in one request, and allowing it once opens this tab.
+  if (exitName) {
+    const exit = scope.exits
+      ? await scope.exits.check(exitName)
+      : ({
+          kind: "refused",
+          message: "A tab cannot go through an exit from here.",
+        } as const)
+
+    if (exit.kind === "refused") {
+      return text(exit.message, true)
+    }
+
+    if (exit.kind === "ask") {
+      throw new OwnerNeeded({
+        kind: "exit_use",
+        input: {
+          exitId: exit.exit.id,
+          exitName: exit.exit.name,
+          exitLabel: exit.exit.label,
+          via: "browser",
+          browse,
+        },
+      })
+    }
+  }
+
+  if (decided.access === "ask" && !tab?.allowedHosts.has(decided.host)) {
+    throw new OwnerNeeded({ kind: "browse", input: browse })
+  }
+
+  return performNavigate(scope, {
+    tabId: tabId ?? null,
+    url: url.href,
+    ...(exitName ? { exit: exitName } : {}),
+  })
 }
 
 async function tabs(
   scope: BrowserScope,
-  args: { action: string; url?: string; tab?: string },
+  args: { action: string; url?: string; tab?: string; exit?: string },
 ): Promise<CallToolResult> {
   const vault = runningBrowser(scope.ctx.vaultId)
 
   if (args.action === "open") {
-    return openSite(scope, null, args.url!, "tabs")
+    return openSite(scope, null, args.url!, "tabs", args.exit)
   }
 
   if (args.action === "list") {
@@ -1045,6 +1157,19 @@ async function onTab(
 
   touch(scope.ctx.vaultId)
   const note = holderNote(scope, picked)
+  const closed = await keepExit(scope, vault!, picked)
+
+  if (closed) {
+    return withLead(closed, note)
+  }
+
+  // Files cross only through the vault's own context (downloads.ts).
+  if (spec.name === "download" && picked.exit) {
+    return text(
+      `Tab ${picked.id} goes through the exit ${picked.exit.name}, and a tab that goes through an exit downloads nothing.`,
+      true,
+    )
+  }
 
   if (browserToolPaced(spec.name)) {
     const paced = await paceAction(scope, tabSite(picked))
@@ -1796,9 +1921,12 @@ async function runBrowserTool(
     deadline,
     runId,
     secret,
+    exits,
   }: {
     tokenId: string
     publicUrl: string
+    /** The exits a new tab may go out through (upstream.ts browserExitsFor). */
+    exits?: BrowserExits
     /**
      * Opens a result the token kept: a handle in the arguments is replaced
      * by what it stands for (a text to type), and upload_file's files are
@@ -1845,6 +1973,7 @@ async function runBrowserTool(
     serverId: server.id,
     signal,
     deadline,
+    ...(exits ? { exits } : {}),
     runId,
   }
   const listsOrOpens =
@@ -1873,7 +2002,10 @@ async function runBrowserTool(
 
   switch (spec.name) {
     case "tabs":
-      return tabs(scope, args as { action: string; url?: string; tab?: string })
+      return tabs(
+        scope,
+        args as { action: string; url?: string; tab?: string; exit?: string },
+      )
     case "navigate":
       return openSite(scope, tab, args.url as string, "navigate")
     case "back":

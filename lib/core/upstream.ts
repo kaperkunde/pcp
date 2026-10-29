@@ -1,3 +1,5 @@
+import { isIP } from "node:net"
+
 import {
   auth,
   Client,
@@ -31,7 +33,16 @@ import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
 import type { GitHubCredential } from "./repos/github"
 import { GITHUB_SIGNIN_SECRET } from "./repos/limits"
-import { sshExec, type SshIdentity } from "./ssh/client"
+import {
+  ensureSshConnection,
+  openChannel,
+  sshConnectionAddress,
+  sshExec,
+  type SshIdentity,
+} from "./ssh/client"
+import { makeExitDialer, type ExitDialer } from "./exits/dial"
+import type { ExitView } from "./exits/exits"
+import { browserExits } from "./exits/use"
 import { callSshTool, sshTarget, syncSshTools } from "./ssh/hosts"
 import type { ServiceDefinition } from "./services/definition"
 import type {
@@ -94,7 +105,7 @@ import {
   renderAuthValue,
   setServerStatus,
 } from "./servers"
-import { noteSecretTyped } from "./request-log"
+import { noteExitUsed, noteSecretTyped } from "./request-log"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
 import { PCP_VERSION } from "./version"
@@ -1209,6 +1220,126 @@ async function sshIdentity(
 }
 
 /**
+ * An exit, ready for one request: the SSH connection it leaves through
+ * opened (or found open) with PCP's key, decrypted here and handed to the
+ * ssh module, never further.
+ *
+ * `dialer` may open the connection again with that key while the request
+ * runs; `background` never does (it is the browser's proxy, which dials
+ * between requests holding no key: when the connection has closed, its
+ * dials fail until the next call that uses the exit opens it again).
+ *
+ * A host whose key the owner has not pinned is not connected to.
+ */
+export type OpenedExit = { dialer: ExitDialer; background: ExitDialer }
+
+export async function openExit(
+  ctx: VaultContext,
+  exit: ExitView,
+  { publicUrl }: { publicUrl: string },
+): Promise<OpenedExit> {
+  if (exit.kind !== "ssh") {
+    throw new PcpError(
+      "state",
+      `The exit ${exit.name} is a kind this version of PCP cannot open yet.`,
+    )
+  }
+
+  const server = await db().mcpServer.findFirst({
+    where: { id: exit.serverId, vaultId: ctx.vaultId },
+  })
+
+  if (!server || !isSshKind(server.kind)) {
+    throw new PcpError(
+      "state",
+      `The exit ${exit.name}'s SSH server is no longer in PCP.`,
+    )
+  }
+
+  const target = sshTarget(server)
+  const page = `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`
+
+  if (!target.hostKey) {
+    throw new PcpError(
+      "state",
+      `PCP has not pinned ${server.name}'s host key yet, so the exit ${exit.name} does not connect: the owner checks the server on its page first.\n${page}`,
+    )
+  }
+
+  if (!server.enabled) {
+    throw new PcpError(
+      "state",
+      `${server.name} is turned off in PCP, so the exit ${exit.name} is closed.`,
+    )
+  }
+
+  const identity = await sshIdentity(ctx, server)
+  let remote: string | null
+
+  try {
+    ;({ remoteAddress: remote } = await ensureSshConnection(
+      server.id,
+      target,
+      identity,
+    ))
+  } catch (error) {
+    throw new PcpError(
+      "upstream",
+      `The exit ${exit.name} could not be opened: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`,
+    )
+  }
+
+  const own = () => {
+    const now = sshConnectionAddress(server.id, target) ?? remote
+    return [now, isIP(target.host) ? target.host : null].filter(
+      (address): address is string => !!address,
+    )
+  }
+  const info = { id: exit.id, name: exit.name, label: exit.label }
+
+  return {
+    dialer: makeExitDialer(info, {
+      own,
+      open: (address, port, signal) =>
+        openChannel(server.id, target, identity, address, port, { signal }),
+    }),
+    background: makeExitDialer(info, {
+      own,
+      open: (address, port, signal) =>
+        openChannel(server.id, target, null, address, port, { signal }),
+    }),
+  }
+}
+
+/**
+ * Opens an exit for a token's call and notes its name on the call's line
+ * in the request log (never the site).
+ */
+export async function openExitForCall(
+  ctx: VaultContext,
+  tokenId: string,
+  exit: ExitView,
+  { publicUrl, tool }: { publicUrl: string; tool: string },
+): Promise<OpenedExit> {
+  const opened = await openExit(ctx, exit, { publicUrl })
+  noteExitUsed({ vaultId: ctx.vaultId, tokenId, tool, exit: exit.name })
+  return opened
+}
+
+/** The exits a browser call may use, opened here when a tab needs one. */
+export function browserExitsFor(
+  ctx: VaultContext,
+  tokenId: string,
+  publicUrl: string,
+  options: { ownerAllowed?: string } = {},
+) {
+  return browserExits(ctx, tokenId, publicUrl, {
+    ...options,
+    open: openExitForCall,
+  })
+}
+
+/**
  * Reads the server's tool list into the catalogue. Tools that disappeared
  * are removed; the owner's description overrides survive a resync.
  */
@@ -1573,6 +1704,7 @@ async function callBrowser(
   try {
     const result = await callBrowserTool(ctx, server, toolName, args, {
       tokenId,
+      exits: browserExitsFor(ctx, tokenId, options.publicUrl),
       publicUrl: options.publicUrl,
       open: options.open,
       keepBytes: options.keepBytes,
@@ -1703,6 +1835,7 @@ async function dispatchKind(
     // as bytes, not as base64.
     return callBrowserTool(ctx, server, toolName, args, {
       tokenId,
+      exits: browserExitsFor(ctx, tokenId, publicUrl),
       publicUrl,
       open,
       keepBytes,

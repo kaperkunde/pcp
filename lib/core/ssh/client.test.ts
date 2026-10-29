@@ -1,6 +1,15 @@
+import net from "node:net"
+import type { Duplex } from "node:stream"
+
 import { afterEach, describe, expect, it } from "vitest"
 
 import {
+  closeAllSshConnections,
+  ensureSshConnection,
+  openChannel,
+  SshForwardingRefusedError,
+  SshNotConnectedError,
+  SshUnpinnedError,
   SshAuthError,
   SshHostKeyError,
   sshCheck,
@@ -22,6 +31,7 @@ const identity = { privateKey: own.privateKey }
 let server: FakeSsh | null = null
 
 afterEach(async () => {
+  closeAllSshConnections()
   await server?.close()
   server = null
 })
@@ -210,5 +220,197 @@ describe("signing in", () => {
     await expect(sshCheck(target, identity, recorder().onSeen)).rejects.toThrow(
       /ECONNREFUSED/,
     )
+  })
+})
+
+/** A server on loopback that answers each line with "echo: " and the line. */
+async function echoServer(): Promise<{
+  port: number
+  close: () => Promise<void>
+}> {
+  const sockets = new Set<net.Socket>()
+  const listener = net.createServer((socket) => {
+    sockets.add(socket)
+    socket.on("close", () => sockets.delete(socket))
+    socket.on("data", (data) => socket.write(`echo: ${data.toString()}`))
+  })
+  await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve))
+  const { port } = listener.address() as net.AddressInfo
+
+  return {
+    port,
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.destroy()
+        listener.close(() => resolve())
+      }),
+  }
+}
+
+function roundTrip(channel: Duplex, text: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    channel.once("data", (data: Buffer) => resolve(data.toString()))
+    channel.once("error", reject)
+    channel.write(text)
+  })
+}
+
+describe("openChannel, for exits", () => {
+  it("opens direct-tcpip channels on one long-lived connection", async () => {
+    const echo = await echoServer()
+
+    try {
+      const { server, target } = await start(
+        {
+          allowForwarding: true,
+          // The test names a public address; the server reaches loopback.
+          connectTo: () => ({ host: "127.0.0.1", port: echo.port }),
+        },
+        "right",
+      )
+
+      const first = await openChannel(
+        "srv",
+        target,
+        identity,
+        "93.184.216.34",
+        80,
+      )
+      expect(await roundTrip(first, "one")).toBe("echo: one")
+      const second = await openChannel(
+        "srv",
+        target,
+        identity,
+        "93.184.216.34",
+        80,
+      )
+      expect(await roundTrip(second, "two")).toBe("echo: two")
+
+      expect(server.forwards).toEqual(["93.184.216.34:80", "93.184.216.34:80"])
+      // One connection, signed in once, for both channels.
+      expect(server.connections()).toBe(1)
+      expect(server.logins).toEqual(["deploy"])
+      first.destroy()
+      second.destroy()
+      // Never remote forwarding, a Unix socket, the agent, X11 or a terminal.
+      expect(server.requests).toEqual([])
+    } finally {
+      await echo.close()
+    }
+  })
+
+  it("says clearly when the server does not allow forwarding", async () => {
+    const { server, target } = await start({ allowForwarding: false }, "right")
+
+    await expect(
+      openChannel("srv", target, identity, "93.184.216.34", 443),
+    ).rejects.toThrow(SshForwardingRefusedError)
+    await expect(
+      openChannel("srv", target, identity, "93.184.216.34", 443),
+    ).rejects.toThrow(/TCP forwarding is off for deploy/)
+    expect(server.forwardsAsked()).toBe(2)
+    expect(server.requests).toEqual([])
+  })
+
+  it("never connects to a host whose key the owner has not pinned", async () => {
+    const { server, target } = await start({ allowForwarding: true }, "none")
+
+    await expect(
+      openChannel("srv", target, identity, "93.184.216.34", 443),
+    ).rejects.toThrow(SshUnpinnedError)
+    await expect(ensureSshConnection("srv", target, identity)).rejects.toThrow(
+      SshUnpinnedError,
+    )
+    expect(server.connections()).toBe(0)
+  })
+
+  it("refuses a host that shows another key than the pinned one", async () => {
+    const { server, target } = await start({ allowForwarding: true }, "wrong")
+
+    await expect(
+      openChannel("srv", target, identity, "93.184.216.34", 443),
+    ).rejects.toThrow(SshHostKeyError)
+    expect(server.logins).toEqual([])
+  })
+
+  it("opens nothing without a key when no connection is open", async () => {
+    const echo = await echoServer()
+
+    try {
+      const { server, target } = await start(
+        {
+          allowForwarding: true,
+          connectTo: () => ({ host: "127.0.0.1", port: echo.port }),
+        },
+        "right",
+      )
+
+      await expect(
+        openChannel("srv", target, null, "93.184.216.34", 80),
+      ).rejects.toThrow(SshNotConnectedError)
+      expect(server.connections()).toBe(0)
+
+      // Once a request opened it with the key, a dial without one uses it.
+      await ensureSshConnection("srv", target, identity)
+      const channel = await openChannel(
+        "srv",
+        target,
+        null,
+        "93.184.216.34",
+        80,
+      )
+      expect(await roundTrip(channel, "x")).toBe("echo: x")
+      channel.destroy()
+
+      // A closed connection is not opened again without the key.
+      closeAllSshConnections()
+      await expect(
+        openChannel("srv", target, null, "93.184.216.34", 80),
+      ).rejects.toThrow(SshNotConnectedError)
+    } finally {
+      await echo.close()
+    }
+  })
+
+  it("reports an address the server could not reach", async () => {
+    const { target } = await start(
+      { allowForwarding: true, connectTo: () => null },
+      "right",
+    )
+
+    await expect(
+      openChannel("srv", target, identity, "93.184.216.34", 81),
+    ).rejects.toThrow(/could not connect to 93\.184\.216\.34:81/)
+  })
+})
+
+describe("the test server's record of what a client asked for", () => {
+  it("shows remote forwarding and a Unix socket, which PCP never asks for", async () => {
+    const { Client } = await import("ssh2")
+    const { server } = await start({}, "right")
+    const client = new Client()
+
+    await new Promise<void>((resolve, reject) => {
+      client.on("ready", () => resolve())
+      client.on("error", reject)
+      client.connect({
+        host: "127.0.0.1",
+        port: server.port,
+        username: "deploy",
+        privateKey: own.privateKey,
+      })
+    })
+    await new Promise<void>((resolve) =>
+      client.forwardIn("127.0.0.1", 0, () => resolve()),
+    )
+    await new Promise<void>((resolve) =>
+      client.openssh_forwardOutStreamLocal("/run/docker.sock", () => resolve()),
+    )
+    client.end()
+
+    expect(server.requests).toEqual([
+      "tcpip-forward",
+      "channel:direct-streamlocal@openssh.com",
+    ])
   })
 })

@@ -309,6 +309,15 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     block: "Block this site",
     decline: "Not now",
   },
+  // An exit (lib/core/exits/) asked about with the request it is for:
+  // Allow once sends that one; Always and Block set the token's own level
+  // for the exit, never for the site.
+  exit_use: {
+    allow_once: "Allow once",
+    always: "Always allow this exit",
+    block: "Block this exit",
+    decline: "Not now",
+  },
   // A tab the assistant handed over: the owner says when they are done.
   browser_handover: {
     allow_once: "Done",

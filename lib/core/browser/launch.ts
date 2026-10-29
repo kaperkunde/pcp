@@ -218,6 +218,24 @@ export function contextOptions(
   }
 }
 
+/**
+ * The options of a context whose tabs go out through an exit
+ * (lib/core/exits/): the tabs' own, with a proxy of its own (PCP's, for
+ * that exit, on loopback) in place of the browser's, and no storage state:
+ * it starts from none of the vault's sign-ins, and nothing of it is saved.
+ */
+export function exitContextOptions(
+  browserVersion: string,
+  mode: BrowserMode,
+  proxyPort: number,
+  platform: NodeJS.Platform = process.platform,
+): BrowserContextOptions {
+  return {
+    ...contextOptions(browserVersion, mode, platform),
+    proxy: { server: `http://127.0.0.1:${proxyPort}`, bypass: "<-loopback>" },
+  }
+}
+
 const warned = Symbol.for("pcp.browser.offScreenWarned")
 const backgroundWarned = Symbol.for("pcp.browser.backgroundWarned")
 

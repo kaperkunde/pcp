@@ -10,6 +10,7 @@ import {
   loadGatewayServers,
   type GatewayScope,
 } from "@/lib/core/gateway"
+import { usableExitNames } from "@/lib/core/exits/use"
 import { instructionMemories } from "@/lib/core/memories"
 import { instructionSkills } from "@/lib/core/skills"
 import { bearerChallenge } from "@/lib/core/oauth-server/metadata"
@@ -59,6 +60,10 @@ const mcpHandler = createMcpHandler(
         ? await instructionMemories(scope.ctx, scope.tokenId)
         : null,
       skills: await instructionSkills(scope.ctx, scope.skillIds),
+      // web_fetch's exit argument names the exits this token may use.
+      exitNames: scope.webFetch
+        ? await usableExitNames(scope.ctx, scope.tokenId)
+        : [],
     })
   },
   {

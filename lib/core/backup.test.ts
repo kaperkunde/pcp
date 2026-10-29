@@ -45,6 +45,8 @@ import { createSecret, deleteSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { createSkill, deleteSkill, listSkills, setTokenSkills } from "./skills"
 import { saveWrapperByOwner } from "./wrappers/admin"
+import { createSshExit, writeExitAccess } from "./exits/exits"
+import { createSshServer } from "./ssh/hosts"
 import { addLinkedRepo } from "./repos/test-vault"
 import {
   getRepo,
@@ -761,6 +763,52 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await db().apiToken.findFirstOrThrow()).toMatchObject({
       manageWrappers: false,
     })
+  })
+
+  it("carries exits and their levels, and restores a file from before exits", async () => {
+    const { ctx } = await populate()
+    const { id: sshId } = await createSshServer(ctx, {
+      name: "VPS",
+      host: "vps.example",
+      username: "deploy",
+    })
+    const { id: exitId } = await createSshExit(ctx, {
+      serverId: sshId,
+      name: "us-vps",
+      label: "US — home VPS",
+    })
+    await writeExitAccess(ctx.vaultId, null, exitId, "ask")
+    const before = await db().exit.findUniqueOrThrow({ where: { id: exitId } })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().exit.findUniqueOrThrow({ where: { id: exitId } }),
+    ).toEqual(before)
+    expect(
+      await db().webFetchRule.findFirstOrThrow({
+        where: { kind: "exit", key: exitId },
+      }),
+    ).toMatchObject({ scope: "all", access: "ask" })
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    delete (older.tables as Record<string, unknown>).exits
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+
+    expect(await db().exit.count()).toBe(0)
   })
 
   it("carries linked repositories and their items, and restores a file from before them", async () => {

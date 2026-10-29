@@ -49,6 +49,8 @@ export type RequestLogEntry = {
    */
   secret?: string
   origin?: string
+  /** The exit the call went out through (lib/core/exits/), by name; never the site. */
+  exit?: string
 }
 
 const FILE = /^mcp-(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -74,6 +76,7 @@ export type LogNote = {
   request?: string
   secret?: string
   origin?: string
+  exit?: string
 }
 
 const notes = new AsyncLocalStorage<LogNote>()
@@ -127,6 +130,34 @@ export function noteSecretTyped(typed: {
   })
 }
 
+/**
+ * The call under way went out through an exit: its name on the call's
+ * line, never the site. A call with no line of its own (one the owner
+ * allowed on PCP's page) gets one.
+ */
+export function noteExitUsed(used: {
+  vaultId: string
+  tokenId: string
+  tool: string
+  exit: string
+}): void {
+  const note = notes.getStore()
+
+  if (note) {
+    note.exit = used.exit
+    return
+  }
+
+  void appendRequestLog({
+    vaultId: used.vaultId,
+    tokenId: used.tokenId,
+    tool: used.tool,
+    ok: true,
+    ms: 0,
+    exit: used.exit,
+  })
+}
+
 // ---- Writing ----------------------------------------------------------------
 
 let pausedUntil = 0
@@ -150,6 +181,7 @@ export async function appendRequestLog(
     request: clamp(entry.request),
     secret: entry.secret?.slice(0, 100),
     origin: entry.origin?.slice(0, 300),
+    exit: clamp(entry.exit),
   })
   const file = fileFor(dayOf(now))
 
@@ -263,6 +295,7 @@ function parseLine(line: string): RequestLogEntry | null {
     request: text("request"),
     secret: text("secret"),
     origin: text("origin"),
+    exit: text("exit"),
   }
 }
 

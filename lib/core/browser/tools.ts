@@ -213,9 +213,19 @@ const SPECS: readonly BrowserToolSpec[] = [
           ),
         url: url.optional().describe("For open: the address to open."),
         tab: tabId.optional().describe("The tab's id, for close and reset."),
+        exit: z
+          .string()
+          .max(40)
+          .optional()
+          .describe(
+            "For open: an exit's name, to open the tab somewhere else than PCP's own address (an SSH server of the owner's, or a VPN). The tab then has a context of its own, signed in to nothing and saved nowhere, and every page of it goes through that exit. Only exits the owner allowed for this token.",
+          ),
       })
       .refine((value) => value.action !== "open" || value.url, {
         message: "open needs a url.",
+      })
+      .refine((value) => value.action === "open" || value.exit === undefined, {
+        message: "exit is only for open: a tab keeps the exit it opened with.",
       })
       .refine(
         (value) =>

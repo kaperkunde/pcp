@@ -137,6 +137,7 @@ import type { fetchThroughBrowser } from "./browser/solve"
 import {
   isOwnerNeeded,
   type BrowseAsk,
+  type ExitUseAsk,
   type HandoverAsk,
   type SecretRequestAsk,
   type SecretUseAsk,
@@ -152,7 +153,13 @@ import {
 } from "./browser-secrets"
 import { resourceLimits } from "./resources/state"
 import { namesInWords, secretUses } from "./secret-uses"
-import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
+import {
+  browserExitsFor,
+  callServerTool,
+  needsConnecting,
+  syncServerTools,
+  openExitForCall,
+} from "./upstream"
 import {
   applyWrapperChange,
   type WrapperChangeAsk,
@@ -166,7 +173,10 @@ import {
   type RepoShown,
 } from "./repos/assist"
 import type { SecretGrant } from "./wrappers/placeholders"
+import { decideExit, getExit, writeExitAccess } from "./exits/exits"
+import { exitTitle } from "./exits/use"
 import {
+  decideFetch,
   describeFetchAsk,
   privateAllowedFor,
   fetchHostOf,
@@ -273,6 +283,7 @@ export type PermissionAsk =
   | { kind: "browser_handover"; input: HandoverAsk }
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
+  | { kind: "exit_use"; input: ExitUseAsk }
 
 /** The requests about a secret the browser types (browser-secrets.ts). */
 function isSecretKind(kind: string): kind is "secret_use" | "secret_request" {
@@ -497,11 +508,18 @@ export async function runCall(
       error.ask.kind === "browse" &&
       collectHandleIds(args).length === 0
     ) {
-      const { tabId, url } = error.ask.input
+      const { tabId, url, exit } = error.ask.input
 
       return (executor.browse ?? performNavigate)(
-        { ctx, tokenId, publicUrl, serverId: server.id, deadline },
-        { tabId, url },
+        {
+          ctx,
+          tokenId,
+          publicUrl,
+          serverId: server.id,
+          deadline,
+          exits: browserExitsFor(ctx, tokenId, publicUrl),
+        },
+        { tabId, url, ...(exit ? { exit } : {}) },
         { allowedByOwner: true },
       )
     }
@@ -747,6 +765,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `secret_request:${ask.input.name}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "exit_use":
+      return {
+        target: `exit_use:${ask.input.exitId}\n${ask.input.via} ${ask.input.fetch ? `${ask.input.fetch.method} ${ask.input.fetch.url}` : (ask.input.browse?.url ?? "")}`,
+        args: ask.input as Record<string, unknown>,
+      }
   }
 }
 
@@ -780,6 +803,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "type"
     case "secret_request":
       return "request_secret"
+    case "exit_use":
+      return ask.input.via === "web_fetch" ? "web_fetch" : "tabs"
     // A skill is changed through the memory tool, as a memory is.
     case "skill_change":
     default:
@@ -1012,7 +1037,20 @@ async function summarizeRow(
   }
 
   if (row.kind === "fetch") {
-    const asked = describeFetchAsk(args as FetchArgs, {
+    const fetchArgs = args as FetchArgs
+    const exit = fetchArgs.exit
+      ? await findExitLabel(ctx, fetchArgs.exit)
+      : undefined
+    const asked = describeFetchAsk(fetchArgs, {
+      privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
+      ...(exit ? { exitLabel: exit } : {}),
+    })
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "exit_use") {
+    const asked = describeExitUseAsk(args as ExitUseAsk, {
       privateAllowed: await privateAllowedFor(ctx.vaultId, row.tokenId),
     })
 
@@ -1708,9 +1746,11 @@ export async function withPermission(
                 ask.kind === "secret_use" ||
                 ask.kind === "secret_request"
               ? ask.input.serverId
-              : ask.kind === "note_change" && ask.input.target === "server"
-                ? ask.input.id
-                : null,
+              : ask.kind === "exit_use"
+                ? (ask.input.browse?.serverId ?? null)
+                : ask.kind === "note_change" && ask.input.target === "server"
+                  ? ask.input.id
+                  : null,
         toolName: toolNameOf(ask),
         fields:
           ask.kind === "call" && ask.fields ? JSON.stringify(ask.fields) : null,
@@ -1865,6 +1905,7 @@ export async function decidePermission(
     kind === "call" ||
     kind === "fetch" ||
     kind === "browse" ||
+    kind === "exit_use" ||
     isSecretKind(kind)
   const choice: PermissionDecision = !settles
     ? decision === "always" || decision === "allow_for"
@@ -1920,6 +1961,25 @@ export async function decidePermission(
       : kind === "browse"
         ? fetchHostOf(readArgs(ctx, row) as BrowseAsk)
         : null
+
+  // An exit's answer is about the exit: never the site, never the tool.
+  const exitId =
+    kind === "exit_use" ? (readArgs(ctx, row) as ExitUseAsk).exitId : null
+
+  if (exitId && choice === "block") {
+    await writeExitAccess(ctx.vaultId, row.tokenId, exitId, "blocked")
+
+    return finishUnrun(
+      ctx,
+      row,
+      publicUrl,
+      "The owner blocked that exit for this token, so nothing was sent.",
+    )
+  }
+
+  if (exitId && choice === "always") {
+    await writeExitAccess(ctx.vaultId, row.tokenId, exitId, "allowed")
+  }
 
   if (choice === "block" || choice === "decline") {
     if (choice === "block" && host) {
@@ -1992,8 +2052,9 @@ export async function decidePermission(
     }
   }
 
-  // A secret's answer is about the secret, never the browser tool's level.
-  if (isSecretKind(kind)) {
+  // A secret's answer is about the secret, never the browser tool's level;
+  // an exit's was written above.
+  if (isSecretKind(kind) || kind === "exit_use") {
     // Written by executeSecretUse and applySecretRequest below.
   } else if (choice === "always" && host) {
     await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
@@ -2073,26 +2134,33 @@ export async function decidePermission(
                               publicUrl,
                               executor,
                             )
-                          : kind === "secret_request"
-                            ? text(
-                                await applySecretRequest(
-                                  ctx,
-                                  row.tokenId,
-                                  readArgs(ctx, row) as SecretRequestAsk,
-                                  {
-                                    value: secretValue,
-                                    origins,
-                                    level: secretLevel(choice),
-                                  },
-                                ),
-                              )
-                            : await executeRegister(
+                          : kind === "exit_use"
+                            ? await executeExitUse(
                                 ctx,
                                 row,
                                 publicUrl,
                                 executor,
-                                secretValue,
                               )
+                            : kind === "secret_request"
+                              ? text(
+                                  await applySecretRequest(
+                                    ctx,
+                                    row.tokenId,
+                                    readArgs(ctx, row) as SecretRequestAsk,
+                                    {
+                                      value: secretValue,
+                                      origins,
+                                      level: secretLevel(choice),
+                                    },
+                                  ),
+                                )
+                              : await executeRegister(
+                                  ctx,
+                                  row,
+                                  publicUrl,
+                                  executor,
+                                  secretValue,
+                                )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -2198,8 +2266,18 @@ async function executeBrowse(
   const asked = readArgs(ctx, row) as BrowseAsk
 
   return (executor.browse ?? performNavigate)(
-    { ctx, tokenId: row.tokenId, publicUrl, serverId: row.server.id },
-    { tabId: asked.tabId, url: asked.url },
+    {
+      ctx,
+      tokenId: row.tokenId,
+      publicUrl,
+      serverId: row.server.id,
+      exits: browserExitsFor(ctx, row.tokenId, publicUrl),
+    },
+    {
+      tabId: asked.tabId,
+      url: asked.url,
+      ...(asked.exit ? { exit: asked.exit } : {}),
+    },
     { allowedByOwner: true },
   )
 }
@@ -2321,11 +2399,224 @@ async function executeFetch(
     )
   }
 
-  return runFetch(ctx, row.tokenId, readArgs(ctx, row) as FetchArgs, {
+  const args = readArgs(ctx, row) as FetchArgs
+  let exit: Awaited<ReturnType<typeof openExitForCall>> | null = null
+
+  // The owner allowed the site; the exit must still be one the token may
+  // use without asking (its level is read now, not when it asked).
+  if (args.exit) {
+    const found = await findExitForRun(ctx, row.tokenId, args.exit)
+
+    if (typeof found === "string") {
+      return text(found, true)
+    }
+
+    exit = await openExitForCall(ctx, row.tokenId, found, {
+      publicUrl,
+      tool: "web_fetch",
+    })
+  }
+
+  return runFetch(ctx, row.tokenId, args, {
     publicUrl,
     fetcher: executor.fetchWeb ?? fetchWeb,
     solver: executor.solveWeb,
+    ...(exit ? { exit: exit.dialer } : {}),
   })
+}
+
+/** An exit's label for the owner's page, or undefined when it has none or is gone. */
+async function findExitLabel(
+  ctx: VaultContext,
+  name: string,
+): Promise<string | undefined> {
+  const exit = await db().exit.findUnique({
+    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+    select: { label: true },
+  })
+
+  return exit?.label || undefined
+}
+
+/**
+ * The exit a request the owner allowed goes out through, if the token may
+ * use it without asking; otherwise why nothing ran.
+ */
+async function findExitForRun(
+  ctx: VaultContext,
+  tokenId: string,
+  name: string,
+): Promise<Awaited<ReturnType<typeof getExit>> | string> {
+  const row = await db().exit.findUnique({
+    where: { vaultId_name: { vaultId: ctx.vaultId, name } },
+    select: { id: true },
+  })
+
+  if (!row) {
+    return `The exit ${name} is no longer in PCP, so nothing was sent.`
+  }
+
+  const decided = await decideExit(ctx.vaultId, tokenId, row.id)
+
+  if (decided.access !== "allowed") {
+    return `The exit ${name} is not allowed for this token (${decided.access === "ask" ? "it asks the owner first" : "blocked"}), so nothing was sent.`
+  }
+
+  return getExit(ctx, row.id)
+}
+
+/** What the owner is shown before a request goes out through an exit. */
+function describeExitUseAsk(
+  ask: ExitUseAsk,
+  { privateAllowed }: { privateAllowed: boolean },
+): {
+  title: string
+  lines: string[]
+  warning: string | null
+  full: ShownText[] | null
+} {
+  const where = exitTitle({ name: ask.exitName, label: ask.exitLabel })
+
+  if (ask.fetch) {
+    const asked = describeFetchAsk(ask.fetch, {
+      privateAllowed,
+      ...(ask.exitLabel ? { exitLabel: ask.exitLabel } : {}),
+    })
+
+    return {
+      ...asked,
+      title: `Send this request through the exit ${where}?`,
+      lines: [
+        `Exit: ${where}. The site sees the request come from there, not from PCP.`,
+        ...asked.lines,
+      ],
+    }
+  }
+
+  const url = ask.browse?.url ?? ""
+  let site = url
+
+  try {
+    site = new URL(url).host
+  } catch {
+    // Shown as it is.
+  }
+
+  return {
+    title: `Open ${site} in a new tab through the exit ${where}?`,
+    lines: [
+      `Exit: ${where}. Every page of the tab comes from there, not from PCP.`,
+      `Address: ${url}`,
+      "A tab of its own, signed in to nothing, and nothing it does is saved",
+      privateAllowed
+        ? "Public addresses, and the exit's own network, since you allowed private addresses for this token"
+        : "Public addresses only",
+    ],
+    warning: null,
+    full: null,
+  }
+}
+
+/**
+ * A request the owner let go out through an exit, once (Always allow wrote
+ * the token's level for the exit before this). The site's own level is
+ * read again: a site blocked since is not reached; one that asks counts as
+ * answered, since the owner saw it in this request.
+ */
+async function executeExitUse(
+  ctx: VaultContext,
+  row: Row,
+  publicUrl: string,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  const ask = readArgs(ctx, row) as ExitUseAsk
+  const exit = await db().exit.findFirst({
+    where: { id: ask.exitId, vaultId: ctx.vaultId },
+    select: { id: true },
+  })
+
+  if (!exit) {
+    return text(
+      `The exit ${ask.exitName} is no longer in PCP, so nothing was sent.`,
+      true,
+    )
+  }
+
+  if (
+    (await decideExit(ctx.vaultId, row.tokenId, exit.id)).access === "blocked"
+  ) {
+    return text(
+      `The exit ${ask.exitName} is blocked for this token now, so nothing was sent.`,
+      true,
+    )
+  }
+
+  const found = await getExit(ctx, exit.id)
+
+  if (ask.via === "web_fetch" && ask.fetch) {
+    const token = await db().apiToken.findUnique({
+      where: { id: row.tokenId },
+      select: { webFetch: true },
+    })
+
+    if (!token?.webFetch) {
+      return text(
+        "This token can no longer fetch web pages (the owner turned it off), so nothing ran.",
+        true,
+      )
+    }
+
+    const site = await decideFetch({ ctx, tokenId: row.tokenId }, ask.fetch)
+
+    if (site.access === "blocked") {
+      return text(
+        `The owner has blocked ${site.host} for this token, so nothing was sent.`,
+        true,
+      )
+    }
+
+    const opened = await openExitForCall(ctx, row.tokenId, found, {
+      publicUrl,
+      tool: "web_fetch",
+    })
+
+    return runFetch(
+      ctx,
+      row.tokenId,
+      { ...ask.fetch, exit: found.name },
+      {
+        publicUrl,
+        fetcher: executor.fetchWeb ?? fetchWeb,
+        exit: opened.dialer,
+      },
+    )
+  }
+
+  if (ask.via === "browser" && ask.browse) {
+    if (!row.server || row.server.kind !== "browser") {
+      return text("The browser was removed from PCP, so nothing ran.", true)
+    }
+
+    if (!row.server.enabled) {
+      return text("The browser is switched off in PCP, so nothing ran.", true)
+    }
+
+    return (executor.browse ?? performNavigate)(
+      {
+        ctx,
+        tokenId: row.tokenId,
+        publicUrl,
+        serverId: row.server.id,
+        exits: browserExitsFor(ctx, row.tokenId, publicUrl, {
+          ownerAllowed: found.id,
+        }),
+      },
+      { tabId: null, url: ask.browse.url, exit: found.name },
+      { allowedByOwner: true },
+    )
+  }
+
+  return text("This request cannot be run.", true)
 }
 
 /**

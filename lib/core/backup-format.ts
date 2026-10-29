@@ -21,6 +21,7 @@ import type {
   ServerAuthHeader,
   ServerDefinition,
   ServiceSpec,
+  Exit,
   Setting,
   Skill,
   Vault,
@@ -403,6 +404,19 @@ const ServiceSpecRow = z.strictObject({
   updatedAt: date,
 })
 
+// Exits, added with exits: absent from older files.
+const ExitRow = z.strictObject({
+  id,
+  vaultId: id,
+  name: str,
+  label: str.default(""),
+  kind: str,
+  serverId: id,
+  serviceId: id.nullable().default(null),
+  createdAt: date,
+  updatedAt: date,
+})
+
 // Linked repositories, added in 0.5: absent from older files.
 const RepoRow = z.strictObject({
   id,
@@ -507,6 +521,7 @@ export const PayloadSchema = z.strictObject({
     openApiSpecs: z.array(OpenApiSpecRow),
     wrapperSpecs: z.array(WrapperSpecRow).default([]),
     serviceSpecs: z.array(ServiceSpecRow).default([]),
+    exits: z.array(ExitRow).default([]),
     repos: z.array(RepoRow).default([]),
     repoItems: z.array(RepoItemRow).default([]),
     repoExclusions: z.array(RepoExclusionRow).default([]),
@@ -763,6 +778,11 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(spec.registeredId, servers, "the server a service registered")
   }
 
+  for (const exit of tables.exits) {
+    pointsAt(exit.serverId, servers, "an exit's SSH server")
+    pointsAt(exit.serviceId, servers, "an exit's service")
+  }
+
   for (const repo of tables.repos) {
     pointsAt(repo.secretId, secrets, "a repository's secret")
   }
@@ -924,6 +944,7 @@ export const FORMAT_COVERS_SCHEMA: {
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
   serviceSpec: Covers<ServiceSpec, z.output<typeof ServiceSpecRow>>
+  exit: Covers<Exit, z.output<typeof ExitRow>>
   repo: Covers<Repo, z.output<typeof RepoRow>>
   repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
   repoExclusion: Covers<RepoExclusion, z.output<typeof RepoExclusionRow>>
@@ -951,6 +972,7 @@ export const FORMAT_COVERS_SCHEMA: {
   openApiSpec: true,
   wrapperSpec: true,
   serviceSpec: true,
+  exit: true,
   repo: true,
   repoItem: true,
   repoExclusion: true,

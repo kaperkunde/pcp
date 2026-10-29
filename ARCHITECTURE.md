@@ -875,7 +875,8 @@ or local address is flagged to the owner alone, as for IMAP.
 An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
 `auth_username` the login) whose one tool, `run_command`, runs one command per
 call with `exec`: no shell session kept between calls, no terminal, no
-forwarding, no agent, no file transfer. Only the owner adds one, on the
+agent, no file transfer, and no forwarding but the outbound channels of an
+exit (below, and [Exits](#exits)). Only the owner adds one, on the
 Servers page; `register_server` has no kind for it, because a shell on a
 machine is more than an assistant should be able to ask for in a sentence.
 `run_command` asks the owner first by default like every tool, and the
@@ -927,6 +928,22 @@ one is answered with the server's page in PCP, for the owner; a server that
 cannot be reached is an error. Limits are in `ssh/limits.ts`. The test server
 (`ssh/fake-server.ts`) is `ssh2`'s own server. The request log keeps the call
 by name like any other, never the command or its output.
+
+**Channels for exits** (`ssh/client.ts openChannel`) are the one forwarding
+PCP does: direct-tcpip channels from the SSH server to an address and port
+the exits module checked from the exit's side, or to the loopback port of an
+exit container PCP started itself, on one long-lived connection per server
+(keepalive every 15 seconds, closed after 5 minutes without a channel, at
+most 128 channels and 32 connections; `ssh/limits.ts`). Never remote
+forwarding (`tcpip-forward`), never a Unix socket (streamlocal), never the
+agent or X11; a channel the server opens towards PCP is refused. A
+connection is made only on a host whose key the owner pinned and only with
+the key a request handed in (`upstream.ts openExit`); without one (the
+browser's exit proxy, between requests) only an open connection is used, so
+nothing reconnects in the background. A server that refuses the channel
+("administratively prohibited": `AllowTcpForwarding no`, or `restrict` /
+`no-port-forwarding` on PCP's key) is said to, in those words. A changed
+address, login, host key or PCP key closes the server's connection.
 
 ## Services
 
@@ -1038,6 +1055,71 @@ it serves as chosen.
 The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
 a real sh that the test SSH server runs each command in, recording the
 words it got and the env file it read.
+
+## Exits
+
+An exit lets web_fetch and a browser tab go out from somewhere else than
+PCP's machine (`lib/core/exits/`). Kind `ssh` leaves from an SSH server PCP
+holds, as direct-tcpip channels; kind `service` (next) from a VPN container
+PCP started there through [Services](#services) (gluetun, wireproxy), as a
+channel to the container's proxy on the server's loopback and then HTTP
+CONNECT or SOCKS5 (`exits/handshake.ts`). An exit is a vault row (`exit`:
+name, label, kind, its SSH server and service), in exports, wiped with the
+vault, and the owner's alone to add, rename or remove, on the SSH server's
+page; deleting the server deletes its exits and their levels.
+
+**What an assistant names.** web_fetch takes `exit`, and `tabs` with action
+open takes `exit`: a name, never a destination. Every connection is made by
+`exits/dial.ts dial(host, port)`: the name is looked up through the exit,
+every address it has is checked from the exit's side, and the exit connects
+to the address that was checked (IPv4 first). The URL's host stays the SNI,
+the certificate check and the Host header; redirects on the site keep the
+exit. A page read through an exit is never read again through PCP's browser
+(the challenge path), which would send it from PCP's address.
+
+**Names through the exit** (`exits/doh.ts`, `exits/dns-wire.ts`): Node's
+resolver cannot be handed a connection, and a lookup from PCP's machine would
+answer for PCP's network and tell PCP's resolver every site. So PCP asks a
+public resolver itself over DNS-over-HTTPS (RFC 8484), through the exit: a
+TLS connection to 1.1.1.1 (certificate checked for cloudflare-dns.com), then
+9.9.9.9 (dns.quad9.net) when that fails, one GET per question, A and AAAA,
+CNAMEs followed (within an answer, and by asking again, at most 8). The
+encoder and decoder are PCP's own, every read bounds-checked and compression
+pointers backwards only; an answer must echo the question. Answers are kept
+per exit for their TTL (10 seconds to 10 minutes, 512 entries).
+
+**From the exit's side** (`exits/check.ts`): never the exit's loopback or
+its own address (where PCP's connection went), whatever the levels say; its
+private, link-local (the metadata service among them) and other non-public
+ranges only for a token whose `private` line allows private addresses;
+never PCP's own addresses; everything public passes. The one way to the
+exit's loopback is the port of a container PCP started, which never comes
+through `dial`.
+
+**Levels.** A token's level for an exit is a `web_fetch_rule` of kind
+`exit` keyed by the exit's id, the token's own or for all tokens (the
+token's own wins), shown under Exits on the token's web pages card. Without
+a line an exit is blocked, and an exit the token was never given is not
+confirmed to exist. Ask is a permission request of kind `exit_use` that
+carries the request it is for (a web_fetch request, or a new tab's site) and
+shows the exit, its label and that request; Allow once sends it (a site that
+asks counts as answered, one blocked since is not reached), Always allow
+and Block write the token's own line for the exit, never the site's. A site
+that asks while the exit is allowed is an ordinary `fetch` or `browse`
+request that carries the exit, and runs only while the exit is still
+allowed.
+
+**The browser.** A tab opened with an exit gets the exit's own context
+(`runtime.ts`), made with its first tab and closed with its last: no storage
+state, never saved, no downloads, its proxy a `proxy.ts` of its own whose
+`connect` dials through the exit (a proxy cannot tell tabs apart, so each
+exit's context has one). Its pages pass the same gate as any tab's. The
+proxy holds the exit's keyless side; each call on one of its tabs opens the
+exit again, which keeps the connection up and refuses an exit no longer
+allowed. Popups of its tabs are tabs of the same exit.
+
+**The request log** names the exit a call went out through (`exit`), never
+the site.
 
 ## Memories
 
@@ -1502,8 +1584,9 @@ version of PCP's suggested instructions they were copied or merged from.
 
 A token made with "fetch web pages" (`api_token.web_fetch`, off unless the
 owner turns it on) gets one more tool, `web_fetch(url, method?, headers?,
-body?, raw?, max_length?, start_index?)`, and a paragraph in the
-instructions. It is the reference fetch server's interface with a method,
+body?, raw?, max_length?, start_index?, exit?)`, and a paragraph in the
+instructions (`exit` sends it from an exit the token may use: see
+[Exits](#exits)). It is the reference fetch server's interface with a method,
 headers and a body added. The code is in `lib/core/fetch/` (the request, the
 page, and which level applies; no database) and `lib/core/web-fetch.ts` (the
 levels as stored, and what the owner does with them).

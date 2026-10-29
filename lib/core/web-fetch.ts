@@ -29,6 +29,8 @@ import {
   type FetchOptions,
 } from "./fetch/fetch"
 import { MAX_FETCH_RULES } from "./fetch/limits"
+import type { ExitDialer } from "./exits/dial"
+import { listExitLevels, type ExitLevelView } from "./exits/exits"
 import { callDeadline, pacedResult, paceSite } from "./pacing"
 import type { FetchArgs } from "./fetch/request"
 import {
@@ -101,6 +103,8 @@ export type TokenFetchRules = {
   methods: FetchMethodView[]
   sites: FetchSiteView[]
   privateAddresses: FetchPrivateView
+  /** Every exit, with this token's level for it (blocked without a line). */
+  exits: ExitLevelView[]
 }
 
 function asAccess(value: string | null): ToolAccess | null {
@@ -347,8 +351,16 @@ export async function runFetch(
     available = solverAvailable,
     clearance = hasClearance,
     deadline = callDeadline(),
+    exit,
   }: {
     publicUrl: string
+    /**
+     * The exit the request goes out through, opened for this call
+     * (exits/use.ts); PCP's own address without. A page read through an
+     * exit is never read again through the browser, which would send it
+     * from PCP's own address.
+     */
+    exit?: ExitDialer
     /**
      * The latest each request may still go, under pacing: a request
      * straight from an assistant's call or the owner's answer, by default.
@@ -372,6 +384,7 @@ export async function runFetch(
     allowPrivate: await privateAllowedFor(ctx.vaultId, tokenId),
     publicUrl,
     pace,
+    ...(exit ? { exit } : {}),
   }
   const solve = async (): Promise<FetchAnswer> => {
     const paced = await pace(host)
@@ -382,7 +395,7 @@ export async function runFetch(
   }
   // Whether the browser can read the page is asked only when it would:
   // most sites never check, and the answer can mean loading Playwright.
-  const reading = args.method === "GET"
+  const reading = args.method === "GET" && !exit
   let answer: FetchAnswer
 
   if (reading && clearance(ctx.vaultId, host) && (await available(ctx))) {
@@ -432,7 +445,14 @@ const CHANGING_METHODS_WARNING =
 /** What the owner is shown before a web request runs. */
 export function describeFetchAsk(
   args: FetchArgs,
-  { privateAllowed = false }: { privateAllowed?: boolean } = {},
+  {
+    privateAllowed = false,
+    exitLabel,
+  }: {
+    privateAllowed?: boolean
+    /** The exit's label, when the request goes out through one. */
+    exitLabel?: string
+  } = {},
 ): {
   title: string
   lines: string[]
@@ -468,9 +488,11 @@ export function describeFetchAsk(
       ...(body
         ? [`Body (${body.length.toLocaleString("en")} characters):\n${clipped}`]
         : []),
-      privateAllowed
-        ? "From PCP's own address, with none of your secrets; your own network too, since you allowed private addresses for this token"
-        : "From PCP's own address, public addresses only, with none of your secrets",
+      args.exit
+        ? `Through the exit ${args.exit}${exitLabel ? ` (${exitLabel})` : ""}, with none of your secrets; ${privateAllowed ? "the exit's own network too, since you allowed private addresses for this token" : "public addresses only"}`
+        : privateAllowed
+          ? "From PCP's own address, with none of your secrets; your own network too, since you allowed private addresses for this token"
+          : "From PCP's own address, public addresses only, with none of your secrets",
     ],
     warning: reading
       ? null
@@ -502,7 +524,10 @@ export function describeFetchAsk(
 
 // What the owner does on a token's page.
 
-function viewRules(rows: WebFetchRule[], tokenId: string): TokenFetchRules {
+function viewRules(
+  rows: WebFetchRule[],
+  tokenId: string,
+): Omit<TokenFetchRules, "exits"> {
   const own = rows.filter((row) => row.scope === tokenId)
   const shared = rows.filter((row) => row.scope === ALL_TOKENS)
   const find = (list: WebFetchRule[], kind: FetchRuleKind, key: string) =>
@@ -565,7 +590,10 @@ export async function listFetchRules(
   tokenId: string,
 ): Promise<TokenFetchRules> {
   await requireToken(ctx, tokenId)
-  return viewRules(await ruleRows(ctx.vaultId, tokenId), tokenId)
+  return {
+    ...viewRules(await ruleRows(ctx.vaultId, tokenId), tokenId),
+    exits: await listExitLevels(ctx, tokenId),
+  }
 }
 
 function parseGroup(value: string): FetchMethodGroup {
