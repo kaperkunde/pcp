@@ -58,7 +58,9 @@ export class ExitAddressError extends AddressBlockedError {
     this.message =
       verdict === "own"
         ? `${host} is, or resolves to, an address of the exit ${exit} itself (its loopback or its own address), which PCP never reaches through it.`
-        : `${host} is, or resolves to, a private or local address on the exit ${exit}'s side, which the owner has not allowed for this token. They can allow private addresses on the token's page in PCP.`
+        : verdict === "local"
+          ? `${host} is, or resolves to, a link-local or cloud metadata address on the exit ${exit}'s side, which PCP never reaches through an exit, for any token.`
+          : `${host} is, or resolves to, a private or local address on the exit ${exit}'s side, which the owner has not allowed for this token. They can allow private addresses on the token's page in PCP.`
   }
 }
 

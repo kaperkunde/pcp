@@ -169,7 +169,11 @@ function SecretRow({ secret }: { secret: SecretItem }) {
           <span className="font-medium">{secret.name}</span>
           {managed ? (
             <Badge variant="secondary">
-              {secret.kind === "ssh_key" ? "SSH key" : "OAuth tokens"}
+              {secret.kind === "ssh_key"
+                ? "SSH key"
+                : secret.kind === "proxy_password"
+                  ? "Proxy password"
+                  : "OAuth tokens"}
             </Badge>
           ) : null}
           {totp ? <Badge variant="secondary">One-time codes</Badge> : null}

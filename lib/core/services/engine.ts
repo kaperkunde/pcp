@@ -1,6 +1,8 @@
 import type { ExecResult } from "../ssh/client"
 import { makeRedactor } from "../openapi/redact"
 import {
+  ALLOWED_CAPABILITIES,
+  ALLOWED_DEVICES,
   ENV_NAME,
   IMAGE_BY_DIGEST,
   IMAGE_BY_TAG,
@@ -282,7 +284,7 @@ export function envFile(env: ServiceEnv): Buffer {
 
 /**
  * The words of `run -d`: the label, restart policy, ports, named volumes,
- * the env file at "$f" (the script's own temporary file), the image and its
+ * an exit's capability and device, the env file at "$f" (the script's own temporary file), the image and its
  * arguments. "$f" is the one word left for the shell to expand.
  */
 export function runWords(engine: ServiceEngine, spec: ContainerSpec): string[] {
@@ -317,6 +319,24 @@ export function runWords(engine: ServiceEngine, spec: ContainerSpec): string[] {
 
   for (const volume of definition.volumes) {
     words.push("--volume", `${volumeOnHost(name, volume.name)}:${volume.path}`)
+  }
+
+  // An exit's VPN client: from the two allow-lists only, checked again here
+  // whatever the definition went through.
+  for (const capability of definition.cap_add) {
+    if (!(ALLOWED_CAPABILITIES as readonly string[]).includes(capability)) {
+      throw new EngineError(`PCP does not give a container ${capability}.`)
+    }
+
+    words.push("--cap-add", capability)
+  }
+
+  for (const device of definition.devices) {
+    if (!(ALLOWED_DEVICES as readonly string[]).includes(device)) {
+      throw new EngineError(`PCP does not pass ${device} into a container.`)
+    }
+
+    words.push("--device", device)
   }
 
   if (!IMAGE_BY_DIGEST.test(definition.image)) {

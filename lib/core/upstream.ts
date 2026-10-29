@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import { isIP } from "node:net"
 
 import {
@@ -40,11 +41,20 @@ import {
   sshExec,
   type SshIdentity,
 } from "./ssh/client"
-import { makeExitDialer, type ExitDialer } from "./exits/dial"
-import type { ExitView } from "./exits/exits"
+import {
+  makeExitDialer,
+  proxiedTransport,
+  type ExitDialer,
+  type ExitTransport,
+} from "./exits/dial"
+import { deleteExit, getExit, type ExitView } from "./exits/exits"
+import type { ProxyAuth } from "./exits/handshake"
 import { browserExits } from "./exits/use"
 import { callSshTool, sshTarget, syncSshTools } from "./ssh/hosts"
-import type { ServiceDefinition } from "./services/definition"
+import {
+  EXIT_PUBLISH_ADDRESS,
+  type ServiceDefinition,
+} from "./services/definition"
 import type {
   ContainerAction,
   ServiceEnv,
@@ -53,6 +63,7 @@ import type {
 import { containerLogs } from "./services/engine"
 import {
   callServiceTool,
+  EXIT_PROXY_USER,
   launchServiceOn,
   loadService,
   prepareLaunch,
@@ -1239,12 +1250,16 @@ export async function openExit(
   exit: ExitView,
   { publicUrl }: { publicUrl: string },
 ): Promise<OpenedExit> {
-  if (exit.kind !== "ssh") {
+  if (exit.kind !== "ssh" && exit.kind !== "service") {
     throw new PcpError(
       "state",
       `The exit ${exit.name} is a kind this version of PCP cannot open yet.`,
     )
   }
+
+  // A VPN service's exit: its container, its proxy and its login, all read
+  // here, before anything connects.
+  const proxy = exit.kind === "service" ? await exitProxy(ctx, exit) : null
 
   const server = await db().mcpServer.findFirst({
     where: { id: exit.serverId, vaultId: ctx.vaultId },
@@ -1298,18 +1313,138 @@ export async function openExit(
   }
   const info = { id: exit.id, name: exit.name, label: exit.label }
 
+  // Kind "ssh": a channel from the SSH server to the checked address.
+  // Kind "service": a channel to the one loopback port PCP published the
+  // container's proxy on, then the proxy's handshake to the checked
+  // address; nothing else on the SSH server's loopback is ever reached.
+  const transport = (key: SshIdentity | null): ExitTransport =>
+    proxy
+      ? proxiedTransport(
+          (signal) =>
+            openChannel(
+              server.id,
+              target,
+              key,
+              EXIT_PUBLISH_ADDRESS,
+              proxy.port,
+              { signal },
+            ),
+          { protocol: proxy.protocol, auth: proxy.auth },
+          own,
+        )
+      : {
+          own,
+          open: (address, port, signal) =>
+            openChannel(server.id, target, key, address, port, { signal }),
+        }
+
   return {
-    dialer: makeExitDialer(info, {
-      own,
-      open: (address, port, signal) =>
-        openChannel(server.id, target, identity, address, port, { signal }),
-    }),
-    background: makeExitDialer(info, {
-      own,
-      open: (address, port, signal) =>
-        openChannel(server.id, target, null, address, port, { signal }),
-    }),
+    dialer: makeExitDialer(info, transport(identity)),
+    background: makeExitDialer(info, transport(null)),
   }
+}
+
+/**
+ * A VPN service's exit as it is dialed: the loopback port its proxy is
+ * published on, its protocol, and the login PCP made for it (the managed
+ * secret, decrypted here). A service that is gone, off, moved or not an
+ * exit's is not dialed.
+ */
+async function exitProxy(
+  ctx: VaultContext,
+  exit: ExitView,
+): Promise<{ port: number; protocol: "http" | "socks5"; auth?: ProxyAuth }> {
+  const loaded = exit.serviceId
+    ? await loadService(ctx, exit.serviceId).catch(() => null)
+    : null
+
+  if (!loaded) {
+    throw new PcpError(
+      "state",
+      `The exit ${exit.name}'s service is no longer in PCP.`,
+    )
+  }
+
+  const registers = loaded.definition.registers
+
+  if (registers.kind !== "exit" || loaded.host?.id !== exit.serverId) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} does not serve the exit ${exit.name} any more.`,
+    )
+  }
+
+  if (!loaded.server.enabled) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} is turned off in PCP, so the exit ${exit.name} is closed.`,
+    )
+  }
+
+  const port = loaded.publish.ports.find(
+    (entry) => entry.container === registers.port,
+  )?.host
+
+  if (port === undefined || loaded.publish.address !== EXIT_PUBLISH_ADDRESS) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name}'s proxy is not published on its SSH server's loopback, so the exit ${exit.name} does not open.`,
+    )
+  }
+
+  return {
+    port,
+    protocol: registers.protocol,
+    ...(registers.auth ? { auth: await exitProxyAuth(ctx, loaded) } : {}),
+  }
+}
+
+/** The login of an exit service's proxy, from the password PCP made for it. */
+async function exitProxyAuth(
+  ctx: VaultContext,
+  loaded: LoadedService,
+): Promise<ProxyAuth> {
+  if (!loaded.server.authSecretId) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name} has lost the password PCP made for its proxy: remove it and launch it again.`,
+    )
+  }
+
+  return {
+    username: EXIT_PROXY_USER,
+    password: await readSecretValue(ctx, loaded.server.authSecretId),
+  }
+}
+
+/**
+ * The owner removes an exit. A VPN service's exit takes its service with
+ * it when asked (its container removed from the SSH server first, then the
+ * service, whose exit and levels go with it); otherwise the service keeps
+ * running, its proxy still on the SSH server's loopback only.
+ */
+export async function removeExit(
+  ctx: VaultContext,
+  exitId: string,
+  { service = false }: { service?: boolean },
+  options: ServiceOptions,
+): Promise<string> {
+  const exit = await getExit(ctx, exitId)
+
+  if (exit.kind === "service" && exit.serviceId && service) {
+    const said = await removeService(
+      ctx,
+      exit.serviceId,
+      { volumes: true, registered: false },
+      options,
+    )
+    return `Removed the exit ${exit.name} and its service. ${said}`
+  }
+
+  await deleteExit(ctx, exitId)
+  return exit.kind === "service" && exit.service
+    ? `Removed the exit ${exit.name}. ${exit.service.name} keeps running: remove it on its page.`
+    : `Removed the exit ${exit.name}.`
 }
 
 /**
@@ -2090,15 +2225,19 @@ export type ServiceOptions = {
 }
 
 /**
- * A way to run commands on an SSH server for a service: PCP's key for it,
- * decrypted here, and its pinned host key. A server whose host key the
- * owner has not pinned is not connected to, whoever asks.
+ * A way to run commands on an SSH server for a service, and a channel to a
+ * port on its own loopback (an exit's proxy, published there only): PCP's
+ * key for it, decrypted here, and its pinned host key. A server whose host
+ * key the owner has not pinned is not connected to, whoever asks.
  */
-async function serviceHost(
+async function serviceConnection(
   ctx: VaultContext,
   host: McpServer,
   { publicUrl }: { publicUrl: string },
-): Promise<ServiceHost> {
+): Promise<{
+  host: ServiceHost
+  loopback: NonNullable<ServiceAccess["loopback"]>
+}> {
   if (!isSshKind(host.kind)) {
     throw invalid("A service runs on one of your SSH servers.")
   }
@@ -2115,16 +2254,23 @@ async function serviceHost(
   const identity = await sshIdentity(ctx, host)
 
   return {
-    name: host.name,
-    address: target.host,
-    exec: (command, { stdin, timeoutMs, maxOutputBytes }) =>
-      // A service's command never pins a host key.
-      sshExec(
-        target,
-        identity,
-        { command, stdin, timeoutMs, maxOutputBytes },
-        async () => {},
-      ),
+    host: {
+      name: host.name,
+      address: target.host,
+      exec: (command, { stdin, timeoutMs, maxOutputBytes }) =>
+        // A service's command never pins a host key.
+        sshExec(
+          target,
+          identity,
+          { command, stdin, timeoutMs, maxOutputBytes },
+          async () => {},
+        ),
+    },
+    // The same pooled connection the exit itself uses (ssh/client.ts).
+    loopback: (port, signal) =>
+      openChannel(host.id, target, identity, EXIT_PUBLISH_ADDRESS, port, {
+        signal,
+      }),
   }
 }
 
@@ -2137,6 +2283,15 @@ async function serviceEnv(
   ctx: VaultContext,
   definition: ServiceDefinition,
   bindings: Record<string, string>,
+  {
+    typed = {},
+    proxyAuth,
+  }: {
+    /** What the owner typed for the plain variables. */
+    typed?: Record<string, string>
+    /** An exit's proxy login, made by PCP, into registers.auth's variables. */
+    proxyAuth?: ProxyAuth
+  } = {},
 ): Promise<ServiceEnv> {
   const values: Record<string, string> = {}
   const redact: string[] = []
@@ -2145,6 +2300,19 @@ async function serviceEnv(
     if (entry.value !== undefined) {
       values[entry.name] = entry.value
     }
+
+    if (entry.plain && typed[entry.name]) {
+      values[entry.name] = typed[entry.name]!
+    }
+  }
+
+  const exitAuth =
+    definition.registers.kind === "exit" ? definition.registers.auth : null
+
+  if (exitAuth && proxyAuth) {
+    values[exitAuth.user_env] = proxyAuth.username
+    values[exitAuth.password_env] = proxyAuth.password
+    redact.push(proxyAuth.password)
   }
 
   for (const [name, secretId] of Object.entries(bindings)) {
@@ -2166,9 +2334,21 @@ async function serviceAccess(
     return null
   }
 
+  const connection = await serviceConnection(ctx, loaded.host, { publicUrl })
+  const exitAuth =
+    loaded.definition.registers.kind === "exit" &&
+    loaded.definition.registers.auth
+  const proxyAuth = exitAuth ? await exitProxyAuth(ctx, loaded) : undefined
+
   return {
-    host: await serviceHost(ctx, loaded.host, { publicUrl }),
-    env: await serviceEnv(ctx, loaded.definition, loaded.env),
+    host: connection.host,
+    env: await serviceEnv(ctx, loaded.definition, loaded.env, {
+      typed: loaded.values,
+      proxyAuth,
+    }),
+    ...(loaded.definition.registers.kind === "exit"
+      ? { loopback: connection.loopback, ...(proxyAuth ? { proxyAuth } : {}) }
+      : {}),
     ...(timing ? { timing } : {}),
   }
 }
@@ -2201,13 +2381,35 @@ export async function launchService(
   options: ServiceOptions,
 ): Promise<LaunchResult & { message: string }> {
   const prepared = await prepareLaunch(ctx, input)
+  const connection = await serviceConnection(ctx, prepared.host, options)
+  const registers = prepared.definition.registers
+  // An exit's proxy gets a login of its own, made here for this instance:
+  // a random password the container reads among its variables and the
+  // exit signs in with; launchServiceOn keeps it as a managed secret.
+  const proxyAuth =
+    registers.kind === "exit" && registers.auth
+      ? {
+          username: EXIT_PROXY_USER,
+          password: randomBytes(24).toString("base64url"),
+        }
+      : undefined
   const access: ServiceAccess = {
-    host: await serviceHost(ctx, prepared.host, options),
-    env: await serviceEnv(ctx, prepared.definition, prepared.env),
+    host: connection.host,
+    env: await serviceEnv(ctx, prepared.definition, prepared.env, {
+      typed: prepared.values,
+      proxyAuth,
+    }),
+    ...(registers.kind === "exit"
+      ? { loopback: connection.loopback, ...(proxyAuth ? { proxyAuth } : {}) }
+      : {}),
     ...(options.timing ? { timing: options.timing } : {}),
   }
   const result = await launchServiceOn(ctx, prepared, access)
   let message = `${prepared.name} is running on ${prepared.host.name}.`
+
+  if (result.exitId && prepared.exit) {
+    message += ` Its exit ${prepared.exit.name} is ready: allow it for a token on the token's page.`
+  }
 
   if (result.registeredId && result.registeredKind === "mcp") {
     const registered = await db().mcpServer.findUniqueOrThrow({

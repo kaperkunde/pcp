@@ -1,3 +1,5 @@
+import type { Duplex } from "node:stream"
+
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import type { McpServer, ServiceSpec } from "@/lib/generated/prisma/client"
@@ -14,11 +16,16 @@ import {
 } from "../definition-rows"
 import { createEndpoint } from "../endpoints"
 import { invalid, isPcpError, notFound, PcpError } from "../errors"
+import { forgetExitAnswers } from "../exits/dial"
+import { DOH_RESOLVERS } from "../exits/doh"
+import { checkNewExit, createServiceExit } from "../exits/exits"
+import { httpConnect, socks5Connect, type ProxyAuth } from "../exits/handshake"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
 import { makeRedactor } from "../openapi/redact"
 import { markdownLink } from "../owner-link"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
+import { writeManagedSecret } from "../secrets"
 import {
   createServer,
   deleteServer,
@@ -31,15 +38,19 @@ import {
 import { parseSshAddress } from "../ssh/hosts"
 import {
   checkEnvBindings,
+  checkPlainValues,
+  EXIT_PUBLISH_ADDRESS,
   parsePublish,
   parseServiceDefinition,
   reachUrl,
   readEnvBindings,
+  readPlainValues,
   readPublish,
   readServiceDefinition,
   serviceDefinitionHash,
   type ServiceDefinition,
   type ServiceEnvBindings,
+  type ServicePlainValues,
   type ServicePublish,
 } from "./definition"
 import {
@@ -94,8 +105,27 @@ export const SERVICE_URL = "pcp:service"
 export type ServiceAccess = {
   host: ServiceHost
   env: ServiceEnv
+  /**
+   * A connection to a port on the SSH server's own loopback, through the
+   * SSH connection: how PCP reaches an exit's proxy, which is published
+   * there and nowhere else.
+   */
+  loopback?: (port: number, signal?: AbortSignal) => Promise<Duplex>
+  /**
+   * An exit's proxy login (registers.auth), which PCP made: handed to the
+   * container among the variables, and used here for its health check.
+   */
+  proxyAuth?: ProxyAuth
   /** Waiting for health; tests shorten it. */
   timing?: { waitMs: number; intervalMs: number }
+}
+
+/** The user name of an exit's proxy; its password is random, per instance. */
+export const EXIT_PROXY_USER = "pcp"
+
+/** The managed secret that keeps an exit service's proxy password. */
+export function proxySecretName(serviceId: string): string {
+  return `proxy/${serviceId}`
 }
 
 export type LoadedService = {
@@ -104,6 +134,8 @@ export type LoadedService = {
   definition: ServiceDefinition
   publish: ServicePublish
   env: ServiceEnvBindings
+  /** What the owner typed for its plain variables. */
+  values: ServicePlainValues
   engine: ServiceEngine
   /** The SSH server it runs on; null once that was deleted. */
   host: McpServer | null
@@ -136,6 +168,7 @@ export async function loadService(
     definition: readServiceDefinition(spec.definition),
     publish: readPublish(spec.publish),
     env: readEnvBindings(spec.env),
+    values: readPlainValues(spec.plainValues),
     engine: engineOf(spec.engine),
     host: host && host.vaultId === ctx.vaultId ? host : null,
   }
@@ -193,6 +226,10 @@ export type ServiceLaunchInput = {
   publish: unknown
   /** Which secret (by id) each variable takes. */
   env: ServiceEnvBindings
+  /** What the owner typed for the definition's plain variables. */
+  values?: ServicePlainValues
+  /** An exit's service: the exit PCP adds for it, named by the owner. */
+  exit?: { name: string; label?: string } | null
   note?: string | null
 }
 
@@ -205,6 +242,9 @@ export type PreparedLaunch = {
   definitionId: string | null
   publish: ServicePublish
   env: ServiceEnvBindings
+  values: ServicePlainValues
+  /** The exit PCP adds for an exit's service, checked free. */
+  exit: { name: string; label: string } | null
   containerName: string
 }
 
@@ -249,7 +289,8 @@ export async function prepareLaunch(
   }
 
   const publish = parsePublish(input.publish, definition)
-  const env = checkEnvBindings(input.env, definition)
+  const values = checkPlainValues(input.values ?? {}, definition)
+  const env = checkEnvBindings(input.env, definition, values)
   const ids = [...new Set(Object.values(env))]
   const secrets = await db().secret.findMany({
     where: { vaultId: ctx.vaultId, id: { in: ids } },
@@ -270,13 +311,29 @@ export async function prepareLaunch(
     }
   }
 
+  // An exit's proxy is reached through the SSH connection instead.
   if (
     definition.registers.kind !== "none" &&
+    definition.registers.kind !== "exit" &&
     !reachUrl(publish, sshHostOf(host), definition.registers.port)
   ) {
     throw invalid(
       `PCP reaches what the service serves at the address its port is published on, and ${publish.address} is ${host.name}'s own loopback. Publish it on an address PCP can reach: 0.0.0.0, or one of ${host.name}'s own.`,
     )
+  }
+
+  let exit: PreparedLaunch["exit"] = null
+
+  if (definition.registers.kind === "exit") {
+    if (!input.exit?.name?.trim()) {
+      throw invalid(
+        "Name the exit PCP adds for the service: assistants name it in their calls.",
+      )
+    }
+
+    exit = await checkNewExit(ctx, input.exit)
+  } else if (input.exit) {
+    throw invalid("Only a service whose definition registers an exit adds one.")
   }
 
   return {
@@ -288,6 +345,8 @@ export async function prepareLaunch(
     definitionId,
     publish,
     env,
+    values,
+    exit,
     containerName: await containerNameFor(ctx, host.id, name),
   }
 }
@@ -354,6 +413,8 @@ export type LaunchResult = {
   /** The API endpoint or MCP server it registered. */
   registeredId: string | null
   registeredKind: "openapi" | "mcp" | null
+  /** The exit it added, for an exit's service. */
+  exitId?: string | null
 }
 
 /**
@@ -385,6 +446,7 @@ export async function launchServiceOn(
 
   let registeredId: string | null = null
   let made = false
+  let credentialId: string | null = null
 
   try {
     const health = await waitHealthy(
@@ -410,6 +472,19 @@ export async function launchServiceOn(
       ? await definitionForNew(ctx, prepared.definitionId, "service")
       : null
 
+    // An exit's proxy password, which upstream.ts made for this container:
+    // kept as the service's own managed secret, for the exit to sign in.
+    if (access.proxyAuth) {
+      credentialId = (
+        await writeManagedSecret(ctx, {
+          name: proxySecretName(id),
+          description: `The password PCP made for ${prepared.name}'s proxy (an exit).`,
+          value: access.proxyAuth.password,
+          kind: "proxy_password",
+        })
+      ).id
+    }
+
     await db().$transaction([
       db().mcpServer.create({
         data: {
@@ -421,6 +496,7 @@ export async function launchServiceOn(
           description: definitionRow?.description ?? prepared.description,
           url: SERVICE_URL,
           authType: "none",
+          authSecretId: credentialId,
           definitionId: definitionRow?.id ?? null,
         },
       }),
@@ -435,6 +511,7 @@ export async function launchServiceOn(
           containerName: prepared.containerName,
           publish: JSON.stringify(prepared.publish),
           env: JSON.stringify(prepared.env),
+          plainValues: JSON.stringify(prepared.values),
         },
       }),
     ])
@@ -449,8 +526,10 @@ export async function launchServiceOn(
       await setPersonalNote(ctx, "server", id, prepared.note)
     }
 
-    const registered = await register(ctx, prepared)
-    registeredId = registered?.id ?? null
+    const registered = await register(ctx, prepared, id)
+    const exitId = registered?.kind === "exit" ? registered.id : null
+    registeredId =
+      registered && registered.kind !== "exit" ? registered.id : null
 
     if (registeredId) {
       await db().serviceSpec.update({
@@ -464,7 +543,9 @@ export async function launchServiceOn(
     return {
       id,
       registeredId,
-      registeredKind: registered?.kind ?? null,
+      registeredKind:
+        registered && registered.kind !== "exit" ? registered.kind : null,
+      exitId,
     }
   } catch (error) {
     const undone = [
@@ -484,6 +565,12 @@ export async function launchServiceOn(
     if (made) {
       await dropServiceRow(id)
       undone.push("took the service out of PCP")
+    } else if (credentialId) {
+      await db()
+        .secret.deleteMany({
+          where: { id: credentialId, kind: "proxy_password" },
+        })
+        .catch(() => {})
     }
 
     const reason = makeRedactor(env.redact).text(
@@ -513,25 +600,63 @@ async function engineCall<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-/** The service's own rows, without touching the host. */
+/**
+ * The service's own rows, without touching the host: its exit goes with it
+ * (a cascade), and every level set for that exit, and its proxy password.
+ */
 async function dropServiceRow(id: string): Promise<void> {
   const row = await db().mcpServer.findUnique({
     where: { id },
-    select: { definitionId: true },
+    select: { definitionId: true, authSecretId: true, vaultId: true },
   })
+  const exits = await db().exit.findMany({
+    where: { serviceId: id },
+    select: { id: true },
+  })
+
+  if (row && exits.length > 0) {
+    await db().webFetchRule.deleteMany({
+      where: {
+        vaultId: row.vaultId,
+        kind: "exit",
+        key: { in: exits.map((exit) => exit.id) },
+      },
+    })
+  }
+
   await db().mcpServer.deleteMany({ where: { id } })
+  exits.forEach((exit) => forgetExitAnswers(exit.id))
+
+  if (row?.authSecretId) {
+    await db().secret.deleteMany({
+      where: { id: row.authSecretId, kind: "proxy_password" },
+    })
+  }
+
   await forgetUnusedDefinition(row?.definitionId ?? null)
 }
 
-/** The endpoint or MCP server the service serves, made as the owner's. */
+/** The endpoint, MCP server or exit the service serves, made as the owner's. */
 async function register(
   ctx: VaultContext,
   prepared: PreparedLaunch,
-): Promise<{ id: string; kind: "openapi" | "mcp" } | null> {
+  serviceId: string,
+): Promise<{ id: string; kind: "openapi" | "mcp" | "exit" } | null> {
   const registers = prepared.definition.registers
 
   if (registers.kind === "none") {
     return null
+  }
+
+  if (registers.kind === "exit") {
+    const { id } = await createServiceExit(ctx, {
+      serverId: prepared.host.id,
+      serviceId,
+      name: prepared.exit!.name,
+      label: prepared.exit!.label,
+    })
+
+    return { id, kind: "exit" }
   }
 
   const origin = reachUrl(
@@ -612,6 +737,59 @@ export async function probeHealth(url: string): Promise<Health> {
   }
 }
 
+/**
+ * One look at an exit's proxy, through the SSH connection to the SSH
+ * server's loopback where it is published: healthy when it opens a
+ * connection to the first DNS-over-HTTPS resolver (exits/doh.ts), the
+ * first thing an exit does. A VPN that is down fails here, as a call would.
+ */
+export async function probeExitProxy(
+  definition: ServiceDefinition,
+  publish: ServicePublish,
+  access: Pick<ServiceAccess, "loopback" | "proxyAuth">,
+): Promise<Health> {
+  const registers = definition.registers
+
+  if (registers.kind !== "exit" || !access.loopback) {
+    return { ok: false, detail: "PCP cannot reach its proxy" }
+  }
+
+  const port = publish.ports.find(
+    (entry) => entry.container === registers.port,
+  )?.host
+
+  if (port === undefined || publish.address !== EXIT_PUBLISH_ADDRESS) {
+    return {
+      ok: false,
+      detail: `its proxy is not published on ${EXIT_PUBLISH_ADDRESS}`,
+    }
+  }
+
+  const resolver = DOH_RESOLVERS[0]!
+  const signal = AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS)
+  let socket: Duplex | null = null
+
+  try {
+    socket = await access.loopback(port, signal)
+    const options = { auth: access.proxyAuth, signal }
+
+    if (registers.protocol === "socks5") {
+      await socks5Connect(socket, resolver.address, 443, options)
+    } else {
+      await httpConnect(socket, resolver.address, 443, options)
+    }
+
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `its proxy did not connect out (${(error instanceof Error ? error.message : String(error)).slice(0, 200)})`,
+    }
+  } finally {
+    socket?.destroy()
+  }
+}
+
 function healthUrl(
   definition: ServiceDefinition,
   publish: ServicePublish,
@@ -634,9 +812,26 @@ async function healthOf(
   definition: ServiceDefinition,
   publish: ServicePublish,
   sshHost: string,
+  access?: Pick<ServiceAccess, "loopback" | "proxyAuth">,
 ): Promise<{ health: ServiceHealth; detail: string | null }> {
   if (state.state !== "running") {
     return { health: "unchecked", detail: null }
+  }
+
+  // An exit: the image's own check while it starts or fails, then its proxy
+  // through the SSH connection, which is what a call goes through.
+  if (definition.registers.kind === "exit" && access?.loopback) {
+    if (
+      state.engineHealth === "starting" ||
+      state.engineHealth === "unhealthy"
+    ) {
+      return { health: state.engineHealth, detail: null }
+    }
+
+    const probe = await probeExitProxy(definition, publish, access)
+    return probe.ok
+      ? { health: "healthy", detail: null }
+      : { health: "unhealthy", detail: probe.detail }
   }
 
   const url = healthUrl(definition, publish, sshHost)
@@ -704,6 +899,7 @@ async function waitHealthy(
         definition,
         publish,
         sshHost,
+        access,
       )
 
       if (health === "healthy" || health === "unchecked") {
@@ -790,6 +986,7 @@ export async function serviceStatusOn(
         loaded.definition,
         loaded.publish,
         access.host.address,
+        access,
       )
   const port =
     loaded.definition.registers.kind !== "none"
@@ -808,8 +1005,10 @@ export async function serviceStatusOn(
     foreign,
     engine: loaded.engine,
     engineVersion: loaded.spec.engineVersion,
+    // An exit's proxy is no address of PCP's to show: it is reached
+    // through the SSH connection only.
     url:
-      port === undefined
+      port === undefined || loaded.definition.registers.kind === "exit"
         ? null
         : reachUrl(loaded.publish, access.host.address, port),
   }
@@ -1037,11 +1236,20 @@ export async function writeServiceDefinition(
 export async function saveServiceSettings(
   ctx: VaultContext,
   id: string,
-  input: { name: string; description?: string; env: ServiceEnvBindings },
+  input: {
+    name: string
+    description?: string
+    env: ServiceEnvBindings
+    /** Left out: the values typed for its plain variables stay. */
+    values?: ServicePlainValues
+  },
 ): Promise<{ envChanged: boolean }> {
   const loaded = await loadService(ctx, id)
   const { name, description } = normalizeNameAndDescription(input)
-  const env = checkEnvBindings(input.env, loaded.definition)
+  const values = input.values
+    ? checkPlainValues(input.values, loaded.definition)
+    : loaded.values
+  const env = checkEnvBindings(input.env, loaded.definition, values)
   const ids = [...new Set(Object.values(env))]
   const found = await db().secret.count({
     where: { vaultId: ctx.vaultId, id: { in: ids }, kind: "text" },
@@ -1051,13 +1259,15 @@ export async function saveServiceSettings(
     throw invalid("Choose text secrets of yours for the service's variables.")
   }
 
-  const envChanged = JSON.stringify(env) !== JSON.stringify(loaded.env)
+  const envChanged =
+    JSON.stringify(env) !== JSON.stringify(loaded.env) ||
+    JSON.stringify(values) !== JSON.stringify(loaded.values)
 
   await db().$transaction([
     db().mcpServer.update({ where: { id }, data: { name, description } }),
     db().serviceSpec.update({
       where: { serverId: id },
-      data: { env: JSON.stringify(env) },
+      data: { env: JSON.stringify(env), plainValues: JSON.stringify(values) },
     }),
   ])
   await shareDescription(id)
@@ -1312,12 +1522,16 @@ export type ServiceView = {
   host: { id: string; name: string } | null
   definition: ServiceDefinition
   publish: ServicePublish
-  /** Variable name → the secret's name. */
+  /** Variable name → the secret's name, or the value typed for a plain one. */
   env: Array<{
     name: string
+    plain: boolean
+    value: string | null
     secretId: string | null
     secretName: string | null
   }>
+  /** The exit it added, for an exit's service. */
+  exit: { id: string; name: string; label: string } | null
   registered: { id: string; name: string; slug: string; kind: string } | null
 }
 
@@ -1334,9 +1548,14 @@ export async function serviceView(
   const registered = loaded.spec.registeredId
     ? await getServer(ctx, loaded.spec.registeredId).catch(() => null)
     : null
+  const exit = await db().exit.findFirst({
+    where: { serviceId: id, vaultId: ctx.vaultId },
+    select: { id: true, name: true, label: true },
+  })
 
   return {
     id,
+    exit,
     definitionId: loaded.server.definitionId,
     name: loaded.server.name,
     containerName: loaded.spec.containerName,
@@ -1349,6 +1568,8 @@ export async function serviceView(
       const secretId = loaded.env[entry.name] ?? null
       return {
         name: entry.name,
+        plain: entry.plain,
+        value: loaded.values[entry.name] ?? null,
         secretId,
         secretName:
           secrets.find((secret) => secret.id === secretId)?.name ?? null,

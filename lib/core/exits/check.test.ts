@@ -33,14 +33,12 @@ describe("exitVerdict: addresses judged from the exit's side", () => {
     expect(exitVerdict("[2001:DB8::7]", 22, side)).toBe("own")
   })
 
-  it("refuses the exit's network and the metadata service without a private line", () => {
+  it("refuses the exit's network without a private line", () => {
     for (const address of [
       "10.0.0.5",
       "192.168.1.1",
       "172.16.0.1",
       "100.64.0.1",
-      "169.254.169.254",
-      "fe80::1",
       "fd00::1",
     ]) {
       expect(exitVerdict(address, 80, side)).toBe("private")
@@ -48,6 +46,31 @@ describe("exitVerdict: addresses judged from the exit's side", () => {
         "ok",
       )
     }
+  })
+
+  it("never reaches link-local or cloud metadata addresses, even with private addresses allowed", () => {
+    for (const address of [
+      "169.254.169.254",
+      "169.254.0.1",
+      "fe80::1",
+      "[FE80::1%eth0]",
+      "fd00:ec2::254",
+      "100.100.100.200",
+      "168.63.129.16",
+      "::ffff:169.254.169.254",
+      "::ffff:a9fe:a9fe",
+      "64:ff9b::a9fe:a9fe",
+    ]) {
+      expect(exitVerdict(address, 80, side)).toBe("local")
+      expect(exitVerdict(address, 80, { ...side, allowPrivate: true })).toBe(
+        "local",
+      )
+    }
+    // Their neighbours are only private.
+    expect(exitVerdict("100.100.100.201", 80, side)).toBe("private")
+    expect(
+      exitVerdict("100.100.100.201", 80, { ...side, allowPrivate: true }),
+    ).toBe("ok")
   })
 
   it("refuses what is not an address", () => {

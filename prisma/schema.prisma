@@ -877,6 +877,9 @@ model ServiceSpec {
   /// {"NAME": "<secret id>"}: by id, never a value. The values reach the
   /// host over standard input only (upstream.ts builds them).
   env           String     @default("{}")
+  /// What the owner typed for the definition's plain variables (a VPN
+  /// provider's name, a country), as JSON {"NAME": "value"}: no secrets.
+  plainValues   String     @default("{}") @map("plain_values")
   /// The API endpoint or MCP server launching it registered; null when it
   /// registers nothing, or once that server is deleted.
   registeredId  String?    @unique @map("registered_id")
