@@ -300,9 +300,18 @@ const PRELUDE = `(() => {
     }
   }
 
+  // A call PCP's pacing refused throws an error with code "paced" and
+  // retryAfterMs, for a program that tells it apart from the tool's own.
   const ask = async (op, payload) => {
     const reply = JSON.parse(await host(op, JSON.stringify(payload)))
-    if (!reply.ok) throw new Error(reply.error)
+    if (!reply.ok) {
+      const error = new Error(reply.error)
+      if (reply.code === "paced") {
+        error.code = "paced"
+        error.retryAfterMs = typeof reply.retryAfterMs === "number" ? reply.retryAfterMs : 0
+      }
+      throw error
+    }
     return reply.value
   }
 
@@ -381,6 +390,7 @@ const PRELUDE = `(() => {
       })
     },
     tools: (server) => ask("tools", { server: server ?? null }),
+    describe: (server, tool) => ask("describe", { server, tool }),
     // Decoded by PCP, not here: the handle and the options go, a handle comes back.
     image: Object.freeze({
       compress: (handle, options) => ask("media", { kind: "image", id: idOf(handle), options: options ?? {} }),

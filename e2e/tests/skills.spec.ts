@@ -6,7 +6,8 @@ import { connectAssistant, permissionFrom, clickHydrated } from "../lib/ui"
 // Skills: the owner writes one on the Skills page; an assistant is told
 // about it, finds it with search and reads it with describe; its change to
 // it waits for the owner, who reads what changes and the whole skill, and is
-// written as the next version only once they agree.
+// written as the next version only once they agree; a second edit while it
+// waits joins the same request.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -84,11 +85,25 @@ test("its change asks the owner, who reads what changes and allows it", async ({
   })
   expect(toolText(early)).toContain("three lines")
 
+  // A second edit while the first waits joins it: one request, both changes.
+  const folded = await callTool(baseURL!, token, "memory", {
+    command: "str_replace",
+    path: `/skills/${NAME}/SKILL.md`,
+    old_str: "1. Ask who it is for.",
+    new_str: "1. Ask who it is for, and where.",
+  })
+  expect(toolText(folded)).toContain(
+    `Folded into the open request ${id} (now shows both changes)`,
+  )
+
   await page.goto(path)
   await expect(page.getByText(`Change the skill ${NAME}?`)).toBeVisible()
   await expect(page.getByText("Version 1 → 2")).toBeVisible()
   await expect(page.getByTestId("skill-diff")).toContainText(
     "2. Write two lines, no more.",
+  )
+  await expect(page.getByTestId("skill-diff")).toContainText(
+    "1. Ask who it is for, and where.",
   )
   await expect(page.getByTestId("skill-text")).toContainText("version: 2")
   await page.getByRole("button", { name: "Allow the change" }).click()

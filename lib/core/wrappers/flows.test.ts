@@ -135,7 +135,7 @@ const POST_MESSAGE = {
   name: "post_message",
   description:
     "Posts a message in the chat thread, unless it is there already. Answers {ok, url}, with already: true when it was.",
-  inputSchema: {
+  input_schema: {
     type: "object",
     properties: {
       url: { type: "string", description: "The thread's address." },
@@ -143,7 +143,7 @@ const POST_MESSAGE = {
     },
     required: ["url", "text"],
   },
-  outputSchema: {
+  output_schema: {
     type: "object",
     properties: {
       ok: { type: "boolean" },

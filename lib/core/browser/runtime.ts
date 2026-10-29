@@ -29,8 +29,10 @@ import { openDownloads, watchDownloads, type Downloads } from "./downloads"
 import { chromiumExecutable } from "./executable"
 import { watchFavicon } from "./favicon"
 import { handoverWaiting, waitIdle } from "./idle"
+import type { ExitDialer } from "../exits/dial"
 import {
   contextOptions,
+  exitContextOptions,
   keepOffScreen,
   launchOptions,
   modesToTry,
@@ -94,7 +96,27 @@ import type { TabControl, TabView } from "./types"
  * of its own, which starts from none of the vault's sign-ins and is never
  * saved, and which the gate lets open its one site and nothing else. Such
  * a page is not a tab: no token or owner sees, drives or lists it.
+ *
+ * A tab opened with an exit (lib/core/exits/) is in a context of the
+ * exit's, made with the first such tab and closed with the last: it starts
+ * from none of the vault's sign-ins, is never saved, and its connections go
+ * through a proxy of its own (proxy.ts with `connect`) that leaves from the
+ * exit. The gate decides its pages like any tab's.
  */
+
+/** The exit a tab goes out through. */
+export type TabExit = { id: string; name: string; label: string }
+
+/** A context whose tabs go out through one exit, and its proxy. */
+export type ExitContext = {
+  exit: TabExit
+  context: Promise<BrowserContext>
+  proxy: BrowserProxy
+  /** The exit's keyless side, renewed by every call on one of its tabs. */
+  dialer: ExitDialer
+  /** Any of its tabs' tokens may reach private addresses (on the exit's side). */
+  privateAllowed: boolean
+}
 
 export type Tab = {
   id: string
@@ -115,6 +137,8 @@ export type Tab = {
   rules: FetchRuleSet | null
   /** That token may reach private addresses. */
   privateAllowed: boolean
+  /** The exit its pages go out through; null for PCP's own address. */
+  exit: TabExit | null
   /** Sites the owner allowed once for this tab, open while it is. */
   allowedHosts: Set<string>
   control: TabControl
@@ -196,6 +220,8 @@ export type VaultBrowser = {
   /** Downloads, refused but while a download call waits (downloads.ts). */
   downloads: Downloads
   tabs: Map<string, Tab>
+  /** The contexts of tabs that go out through an exit, by the exit's id. */
+  exitContexts: Map<string, ExitContext>
   /**
    * The context web_fetch's pages open in: made on the first, from none of
    * the vault's sign-ins, never saved, gone with the browser.
@@ -573,6 +599,7 @@ async function start(
     scratchDir,
     downloads,
     tabs: new Map(),
+    exitContexts: new Map(),
     fetchContext: null,
     solves: new Map(),
     solving: 0,
@@ -617,6 +644,8 @@ function forget(vault: VaultBrowser): Promise<void> {
   vault.tabs.clear()
   vault.solves.clear()
   void vault.proxy.close()
+  for (const entry of vault.exitContexts.values()) void entry.proxy.close()
+  vault.exitContexts.clear()
   return closeHandovers(vault.vaultId, tabs)
 }
 
@@ -729,11 +758,115 @@ function newTabId(): string {
   return randomBytes(6).toString("base64url")
 }
 
-/** The private-address setting the proxy follows: any tab's that has it. */
+/**
+ * The private-address setting each proxy follows: any of its tabs' that
+ * has it (the browser's own for tabs without an exit, an exit's for its).
+ */
 export function recomputePrivate(vault: VaultBrowser): void {
-  vault.privateAllowed = [...vault.tabs.values()].some(
-    (tab) => tab.privateAllowed,
-  )
+  const tabs = [...vault.tabs.values()]
+  vault.privateAllowed = tabs.some((tab) => !tab.exit && tab.privateAllowed)
+
+  for (const [id, entry] of vault.exitContexts ?? []) {
+    entry.privateAllowed = tabs.some(
+      (tab) => tab.exit?.id === id && tab.privateAllowed,
+    )
+  }
+}
+
+/**
+ * The context for tabs that go out through `exit`, made with its proxy on
+ * the first such tab. Its dialer is the newest one a call handed in.
+ */
+async function exitContextFor(
+  vault: VaultBrowser,
+  exit: TabExit & { dialer: ExitDialer },
+): Promise<BrowserContext> {
+  const existing = vault.exitContexts.get(exit.id)
+
+  if (existing) {
+    existing.dialer = exit.dialer
+    existing.exit = { id: exit.id, name: exit.name, label: exit.label }
+    return existing.context
+  }
+
+  let entry: ExitContext | null = null
+  const proxy = await startBrowserProxy({
+    check: () => "private",
+    connect: (host, port) => {
+      if (!entry) return Promise.reject(new Error("closed"))
+      return entry.dialer.dial(host, port, {
+        allowPrivate: entry.privateAllowed,
+      })
+    },
+  })
+  const context = newBrowserContext(
+    vault.browser,
+    vault.mode,
+    exitContextOptions(vault.browser.version(), vault.mode, proxy.port),
+  ).then((made) => {
+    // A popup of one of its tabs is a tab of the same exit (adoptPopup).
+    made.on("page", (page) => {
+      if ([...vault.tabs.values()].some((tab) => tab.page === page)) return
+      void withVault(vault, () => adoptPopup(vault, page)).catch(() =>
+        page.close().catch(() => {}),
+      )
+    })
+    return made
+  })
+
+  entry = {
+    exit: { id: exit.id, name: exit.name, label: exit.label },
+    context,
+    proxy,
+    dialer: exit.dialer,
+    privateAllowed: false,
+  }
+  vault.exitContexts.set(exit.id, entry)
+
+  try {
+    return await context
+  } catch (error) {
+    vault.exitContexts.delete(exit.id)
+    await proxy.close()
+    throw error
+  }
+}
+
+/** Renews the dialer of a tab's exit: a call on the tab opened it again. */
+export function renewExit(
+  vault: VaultBrowser,
+  exitId: string,
+  dialer: ExitDialer,
+): void {
+  const entry = vault.exitContexts.get(exitId)
+  if (entry) entry.dialer = dialer
+}
+
+/** The context a tab's pages are in. */
+async function tabContext(
+  vault: VaultBrowser,
+  tab: Pick<Tab, "exit">,
+): Promise<BrowserContext> {
+  if (!tab.exit) return vault.context
+  const entry = vault.exitContexts.get(tab.exit.id)
+
+  if (!entry) {
+    throw new PcpError("state", "The tab's exit is closed. Open a new tab.")
+  }
+
+  return entry.context
+}
+
+/** Closes an exit's context once none of its tabs is left. */
+function closeUnusedExits(vault: VaultBrowser): void {
+  for (const [id, entry] of vault.exitContexts ?? []) {
+    if ([...vault.tabs.values()].some((tab) => tab.exit?.id === id)) continue
+    vault.exitContexts.delete(id)
+    void entry.context
+      .then((context) => context.close())
+      .catch(() => {})
+      .finally(() => void entry.proxy.close())
+  }
 }
 
 /** Whether the gate lets a tab's main frame open a site. */
@@ -941,7 +1074,8 @@ async function pageParts(
   page.setDefaultTimeout(ACTION_TIMEOUT_MS)
   page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
   const documents = watchDocuments(page)
-  const cdp = await vault.context.newCDPSession(page)
+  // The page's own context: the vault's, or an exit's.
+  const cdp = await page.context().newCDPSession(page)
   const { frameTree } = await cdp.send("Page.getFrameTree")
 
   // Every tab and popup, before PCP lets it load anything.
@@ -997,6 +1131,7 @@ async function listen(
     const listed = vault.tabs.get(tab.id) === tab
     vault.tabs.delete(tab.id)
     recomputePrivate(vault)
+    closeUnusedExits(vault)
     if (listed) void closeHandovers(vault.vaultId, [tab])
   })
 }
@@ -1006,6 +1141,7 @@ async function attach(
   page: Page,
   meta: Pick<Tab, "openedBy" | "tokenId" | "rules" | "privateAllowed"> & {
     allowedHosts?: Iterable<string>
+    exit?: TabExit | null
   },
 ): Promise<Tab> {
   const now = Date.now()
@@ -1016,6 +1152,7 @@ async function attach(
     tokenId: meta.tokenId,
     rules: meta.rules,
     privateAllowed: meta.privateAllowed,
+    exit: meta.exit ?? null,
     allowedHosts: new Set(meta.allowedHosts ?? []),
     control: "assistant",
     handoverSince: null,
@@ -1067,15 +1204,20 @@ async function adoptPopup(vault: VaultBrowser, page: Page): Promise<void> {
     rules: parent.rules,
     privateAllowed: parent.privateAllowed,
     allowedHosts: parent.allowedHosts,
+    exit: parent.exit,
   })
   tab.control = parent.control
   parent.popups.push(tab.id)
 }
 
-/** A new, empty tab. Call it under withVault. */
+/**
+ * A new, empty tab, through `exit` when given (in that exit's context).
+ * Call it under withVault.
+ */
 export async function openTab(
   vault: VaultBrowser,
   meta: Pick<Tab, "openedBy" | "tokenId" | "rules" | "privateAllowed">,
+  exit?: TabExit & { dialer: ExitDialer },
 ): Promise<Tab> {
   if (vault.tabs.size >= MAX_TABS) {
     throw new PcpError(
@@ -1084,8 +1226,19 @@ export async function openTab(
     )
   }
 
-  const page = await openPage(vault.context, vault.mode)
-  return attach(vault, page, meta)
+  const context = exit ? await exitContextFor(vault, exit) : vault.context
+  const page = await openPage(context, vault.mode)
+
+  try {
+    return await attach(vault, page, {
+      ...meta,
+      exit: exit ? { id: exit.id, name: exit.name, label: exit.label } : null,
+    })
+  } catch (error) {
+    await page.close().catch(() => {})
+    closeUnusedExits(vault)
+    throw error
+  }
 }
 
 /** Where a reopened tab is now. */
@@ -1104,7 +1257,7 @@ export function reopenTab(vault: VaultBrowser, tab: Tab): Promise<Reopened> {
     tab.unresponsive = true
     const old = tab.page
     const address = old.url()
-    const page = await openPage(vault.context, vault.mode)
+    const page = await openPage(await tabContext(vault, tab), vault.mode)
 
     try {
       Object.assign(tab, await pageParts(vault, page), { dialog: null })
@@ -1267,6 +1420,7 @@ export async function closeTab(vault: VaultBrowser, tab: Tab): Promise<void> {
   await bounded(tab.page.close(), ACTION_TIMEOUT_MS, "page.close").catch(
     () => {},
   )
+  closeUnusedExits(vault)
 }
 
 /**

@@ -7,6 +7,11 @@ import { ensureDefinition } from "../definition-rows"
 import { invalid, notFound } from "../errors"
 import { storedSpec } from "../endpoints"
 import { extraAuthHeaders } from "../servers"
+import {
+  readEnvBindings,
+  readPublish,
+  readServiceDefinition,
+} from "../services/definition"
 import { listSkills, type SkillEntry } from "../skills"
 import { getWrapper } from "../wrappers/admin"
 import type { WrapperAnnotations } from "../wrappers/definition"
@@ -19,6 +24,7 @@ import {
   type ItemDocument,
   type ServerAuthDocument,
   type ServerDocument,
+  type ServiceDocument,
   type SkillDocument,
   type WrapperDocument,
 } from "./documents"
@@ -26,9 +32,12 @@ import { checkDistinct, itemSlug, type ItemKind } from "./layout"
 
 /**
  * The vault's shareable items as documents (documents.ts): its skills, its
- * wrappers and browser flows, its API endpoints and its MCP servers. Other
- * kinds (mail and calendar accounts, SSH servers, the browser) hold what is
- * the owner's alone and are never shared.
+ * wrappers and browser flows, its API endpoints, its MCP servers and its
+ * services. Other kinds (mail and calendar accounts, SSH servers, the
+ * browser) hold what is the owner's alone and are never shared. The API
+ * endpoint or MCP server a service registered is the service's: it is
+ * shared as the service, never on its own (its address is the owner's
+ * machine).
  *
  * A server's document is its definition (definitions.ts), the same from
  * every instance: the definition's short name and name, the description,
@@ -49,7 +58,7 @@ export type LocalItem = {
 }
 
 /** The server kinds an item can be, by what they are in a repository. */
-const SERVER_KINDS = ["mcp", "openapi", "wrapper"] as const
+const SERVER_KINDS = ["mcp", "openapi", "wrapper", "service"] as const
 
 async function secretNames(
   ctx: VaultContext,
@@ -208,6 +217,67 @@ export async function instanceSignIn(
   }
 }
 
+/**
+ * What a service instance has of its own, in words: the SSH server it runs
+ * on, where it is published, its container, which secret (by name) each
+ * variable takes and what it registered. What stays in the vault when its
+ * definition is shared (share-review.ts's "Stays private").
+ */
+export async function serviceOwnLines(
+  ctx: VaultContext,
+  row: McpServer,
+): Promise<{
+  runsOn: string
+  published: string
+  container: string
+  secrets: string[]
+  registered: string | null
+}> {
+  const spec = await db().serviceSpec.findUnique({
+    where: { serverId: row.id },
+    include: {
+      host: { select: { name: true, vaultId: true } },
+      registered: { select: { name: true, slug: true } },
+    },
+  })
+
+  if (!spec) {
+    return {
+      runsOn: "(none)",
+      published: "(none)",
+      container: "(none)",
+      secrets: [],
+      registered: null,
+    }
+  }
+
+  const bindings = readEnvBindings(spec.env)
+  const names = await secretNames(ctx, Object.values(bindings))
+  const publish = readPublish(spec.publish)
+
+  return {
+    runsOn:
+      spec.host && spec.host.vaultId === ctx.vaultId
+        ? spec.host.name
+        : "(an SSH server since deleted)",
+    published:
+      publish.ports.length > 0
+        ? publish.ports
+            .map(
+              (port) => `${publish.address}:${port.host} (${port.container})`,
+            )
+            .join(", ")
+        : "No ports",
+    container: spec.containerName,
+    secrets: Object.entries(bindings).map(
+      ([name, id]) => `${name} takes "${names.get(id) ?? "(none)"}"`,
+    ),
+    registered: spec.registered
+      ? `${spec.registered.name} (${spec.registered.slug})`
+      : null,
+  }
+}
+
 async function endpointDocument(
   row: McpServer,
   named: Named,
@@ -283,11 +353,44 @@ async function serverDocument(
   }
 }
 
+/**
+ * A service's definition, as every instance of it shares it: never the SSH
+ * server, the published address, the secrets its variables take, its
+ * container or what it registered.
+ */
+async function serviceDocument(
+  row: McpServer,
+  named: Named,
+): Promise<ServiceDocument> {
+  const spec = await db().serviceSpec.findUnique({
+    where: { serverId: row.id },
+    select: { definition: true },
+  })
+
+  if (!spec) {
+    throw invalid(`${row.name} has no service definition to share.`)
+  }
+
+  return {
+    kind: "service",
+    name: named.slug,
+    version: row.syncVersion ?? 1,
+    displayName: named.name,
+    description: row.description,
+    definition: readServiceDefinition(spec.definition),
+  }
+}
+
 async function documentOfRow(
   ctx: VaultContext,
   row: McpServer,
 ): Promise<ItemDocument> {
-  if (row.kind !== "wrapper" && row.kind !== "openapi" && row.kind !== "mcp") {
+  if (
+    row.kind !== "wrapper" &&
+    row.kind !== "openapi" &&
+    row.kind !== "mcp" &&
+    row.kind !== "service"
+  ) {
     throw invalid(`${row.name} is not something PCP shares in a repository.`)
   }
 
@@ -300,6 +403,8 @@ async function documentOfRow(
       return endpointDocument(row, named)
     case "mcp":
       return serverDocument(row, named)
+    case "service":
+      return serviceDocument(row, named)
   }
 }
 
@@ -350,17 +455,30 @@ export function itemKindOfServer(serverKind: string): ItemKind | null {
       ? "endpoint"
       : serverKind === "wrapper"
         ? "wrapper"
-        : null
+        : serverKind === "service"
+          ? "service"
+          : null
 }
 
 /**
  * The instance that stands for each definition: the one linked to a
- * repository, else the oldest. Rows of kinds that are never shared, and
- * instances that do not stand for theirs, are left out.
+ * repository, else the oldest. Rows of kinds that are never shared,
+ * instances that do not stand for theirs, and what a service registered
+ * (shared as the service) are left out.
  */
 async function standingRows(ctx: VaultContext): Promise<McpServer[]> {
+  const registered = (
+    await db().serviceSpec.findMany({
+      where: { server: { vaultId: ctx.vaultId }, registeredId: { not: null } },
+      select: { registeredId: true },
+    })
+  ).map((spec) => spec.registeredId!)
   const rows = await db().mcpServer.findMany({
-    where: { vaultId: ctx.vaultId, kind: { in: [...SERVER_KINDS] } },
+    where: {
+      vaultId: ctx.vaultId,
+      kind: { in: [...SERVER_KINDS] },
+      id: { notIn: registered },
+    },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   })
   const linked = new Set(

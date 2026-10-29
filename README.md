@@ -71,6 +71,11 @@ on its own, what it has to ask you about first, and what it cannot touch.
   there, each one shown to you first unless you allow it. No passwords; PCP
   pins the server's host key the first time it connects and refuses any
   other.
+- **Services on your own machines.** Launch a container on an SSH server
+  that already runs Docker or Podman, and PCP adds the API or MCP server it
+  serves in the same step. Its secrets come from your vault, over the SSH
+  connection, never on a command line; you start, stop, restart and update
+  it from its page, and an assistant can read its status and logs.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
@@ -442,6 +447,17 @@ To remove PCP itself:
    `run_command`, runs a command and returns the exit code, standard output
    and standard error; leave it on **Ask you first** and you see each command
    before it runs. Only you add SSH servers; an assistant cannot propose one.
+   **Services** run on them: **Add → Service** takes a definition (the image
+   pinned by digest, its ports, the names of its variables, named volumes, a
+   health check, and what it serves: an API endpoint from its OpenAPI schema,
+   an MCP server, or nothing), where its ports are published on the SSH
+   server, and a secret for each variable. PCP runs it with the Docker or
+   Podman already there, through its command line over SSH (it installs
+   nothing and never touches the engine's socket), waits for it to be
+   healthy and adds what it serves; if anything fails it takes it all back.
+   Changing a secret it uses restarts it with the new value. Its tools
+   (`status`, `logs`, `start`, `stop`, `restart`) follow your levels; a tool
+   of the server it serves, called while it is stopped, says so.
 7. **API tokens.** Create a token per assistant or machine; PCP asks for your
    password (or Touch ID in the Mac app) to make one. A token can reach every
    server and endpoint or only the ones you pick, and can expire. Revoking it
@@ -536,8 +552,10 @@ its handles as MCP resources (`pcp://results/<id>`), so a client that reads
 resources can open a kept file itself.
 
 A tool you have not decided about answers "Not done yet" and asks you: the
-assistant ends its reply with a link to the request in PCP. Answer there,
-tell it you have, and it carries on. The bell at the top of every page in
+assistant ends its reply with a link to the request in PCP, labelled with
+what it asks (such as "Allow gmail-imap/send_email?"), so an app that reads
+the reply aloud says the label rather than the address. Answer there, tell
+it you have, and it carries on. The bell at the top of every page in
 PCP shows how many requests are waiting and lists them, oldest first, so you
 can answer one without the link; once you answer one, PCP opens the next one
 waiting, with what came of your answer above it, until nothing is left.
@@ -693,7 +711,8 @@ has to build something from them (a MIME message with an attachment). With
 `keep`, a value one tool makes, such as a password a server generates, goes
 into another tool's arguments as a handle, never read by the program or the
 assistant. `pcp.tools()` lists the token's servers and tools, as `list_tools`
-does. The program also has `atob`, `btoa`, `TextEncoder`, `TextDecoder` and
+does, and `pcp.describe(server, tool)` gives one tool's arguments and what
+it returns, as `describe` does. The program also has `atob`, `btoa`, `TextEncoder`, `TextDecoder` and
 `crypto.getRandomValues`, so it can make a strong secret itself.
 
 A large picture costs an assistant far more to look at than a small one, so

@@ -611,7 +611,9 @@ export async function findBindableDefinition(
   )
   const noun = kinds.includes("wrapper")
     ? "wrapper"
-    : "MCP server or API endpoint"
+    : kinds.includes("service")
+      ? "MCP server, API endpoint or service"
+      : "MCP server or API endpoint"
   const byServer = fitting.find((server) => server.slug === name)
   let definitionId = byServer ? await ensureDefinition(byServer.id) : null
 
@@ -667,12 +669,16 @@ export async function definitionBasis(definitionId: string): Promise<string> {
     return "gone"
   }
 
-  const [spec, wrapper, tools] = await Promise.all([
+  const [spec, wrapper, service, tools] = await Promise.all([
     db().openApiSpec.findUnique({
       where: { serverId: source.id },
       select: { hash: true, patches: true },
     }),
     db().wrapperSpec.findUnique({
+      where: { serverId: source.id },
+      select: { hash: true },
+    }),
+    db().serviceSpec.findUnique({
       where: { serverId: source.id },
       select: { hash: true },
     }),
@@ -689,6 +695,8 @@ export async function definitionBasis(definitionId: string): Promise<string> {
       description: definition.description,
       spec: spec ? [spec.hash, spec.patches] : null,
       wrapper: wrapper?.hash ?? null,
+      // Only a service has one: older fingerprints stay as they were.
+      ...(service ? { service: service.hash } : {}),
       tools: tools.map((tool) => [tool.name, tool.descriptionOverride]),
     }),
   )

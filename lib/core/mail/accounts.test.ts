@@ -26,6 +26,12 @@ import { callMailTool, createMailAccount, updateMailAccount } from "./accounts"
 import { createFakeJmap, type FakeJmap } from "./fake-jmap"
 import type { ImapClientLike, ImapDeps } from "./imap"
 
+/** A refusal PCP wrote, with its code: nothing was done. */
+const refused = (code: string) => ({
+  isError: true,
+  _meta: { "gg.pcp/error": { code } },
+})
+
 // Mail accounts end to end in the core: created by the owner, read and
 // called through upstream.ts like any server, against an in-memory JMAP
 // server on 127.0.0.1.
@@ -700,13 +706,13 @@ describe("calling its tools", () => {
     )
     await expect(
       send(Array.from({ length: 11 }, () => ({ $result: kept.id }))),
-    ).rejects.toMatchObject({ code: "validation" })
+    ).resolves.toMatchObject(refused("invalid_arguments"))
     await expect(
       send([{ $result: kept.id }, { $result: kept.id }, { $result: kept.id }]),
     ).rejects.toThrow(/more than 20 MB/)
     await expect(
       send([{ $result: kept.id, name: "../evil" }]),
-    ).rejects.toMatchObject({ code: "validation" })
+    ).resolves.toMatchObject(refused("invalid_arguments"))
     await expect(send([{ $result: kept.id }], false)).rejects.toThrow(
       /cannot read them/,
     )
@@ -745,7 +751,7 @@ describe("calling its tools", () => {
         to: ["Charles Babbage <charles@example.com>"],
         subject: "The drawing",
         text: "As promised.",
-        inReplyTo: "e1",
+        in_reply_to: "e1",
         attachments: [{ $result: id, name: "engine.png" }],
       },
       options,
@@ -801,10 +807,10 @@ describe("calling its tools", () => {
 
     await expect(
       draft({ to: ["a@b.c\r\nBcc: x@y.z"], subject: "", text: "" }),
-    ).rejects.toMatchObject({ code: "validation" })
+    ).resolves.toMatchObject(refused("invalid_arguments"))
     await expect(
       draft({ subject: "", text: "", extra: true }),
-    ).rejects.toMatchObject({ code: "validation" })
+    ).resolves.toMatchObject(refused("invalid_arguments"))
     await expect(
       draft({ subject: "s", text: "t", attachments: [{ $result: "gone" }] }),
     ).rejects.toThrow(
@@ -825,7 +831,7 @@ describe("calling its tools", () => {
 
     await expect(
       callServerTool(ctx, server, "get_email", { id: "e1", extra: 1 }, PUBLIC),
-    ).rejects.toMatchObject({ code: "validation" })
+    ).resolves.toMatchObject(refused("invalid_arguments"))
     await expect(
       callServerTool(
         ctx,
@@ -834,14 +840,14 @@ describe("calling its tools", () => {
         { to: ["a@b.c\r\nBcc: x@y.z"], subject: "", text: "" },
         PUBLIC,
       ),
-    ).rejects.toMatchObject({ code: "validation" })
+    ).resolves.toMatchObject(refused("invalid_arguments"))
 
     for (const args of [
       { to: [{ name: "Eve", email: "not an address" }] },
       { to: [{ name: "Eve\r\nBcc: x@y.z", email: "e@example.com" }] },
       { to: [{ email: "e@example.com", address: "x" }] },
-      { to: ["a@example.com"], inReplyTo: "<e1>" },
-      { to: ["a@example.com"], inReplyTo: "a b@example.com" },
+      { to: ["a@example.com"], in_reply_to: "<e1>" },
+      { to: ["a@example.com"], in_reply_to: "a b@example.com" },
     ]) {
       await expect(
         callServerTool(
@@ -851,7 +857,7 @@ describe("calling its tools", () => {
           { ...args, subject: "s", text: "t" },
           PUBLIC,
         ),
-      ).rejects.toMatchObject({ code: "validation" })
+      ).resolves.toMatchObject(refused("invalid_arguments"))
     }
 
     expect(fake.requests.length).toBe(before)
@@ -881,7 +887,7 @@ describe("calling its tools", () => {
         cc: ["Ada <ada@example.com>"],
         subject: "Re: The engine",
         text: "Thursday suits me.",
-        inReplyTo: email.messageId,
+        in_reply_to: email.messageId,
       },
       PUBLIC,
     )
@@ -908,7 +914,7 @@ describe("calling its tools", () => {
 
     await expect(
       callServerTool(ctx, server, "delete_email", { id: "e1" }, PUBLIC),
-    ).rejects.toMatchObject({ code: "forbidden" })
+    ).resolves.toMatchObject(refused("forbidden"))
     await expect(
       callServerTool(
         ctx,
@@ -917,18 +923,18 @@ describe("calling its tools", () => {
         { subject: "s", text: "t" },
         PUBLIC,
       ),
-    ).rejects.toMatchObject({ code: "forbidden" })
+    ).resolves.toMatchObject(refused("forbidden"))
 
     for (const [tool, args] of [
       ["create_mailbox", { name: "New" }],
       ["rename_mailbox", { mailbox: "Archive", name: "Old" }],
       ["delete_mailbox", { mailbox: "Archive" }],
-      ["mark_email", { ids: ["e1"], addKeywords: ["x"] }],
+      ["mark_email", { ids: ["e1"], add_keywords: ["x"] }],
       ["set_vacation_response", { enabled: true }],
     ] as const) {
       await expect(
         callServerTool(ctx, server, tool, args, PUBLIC),
-      ).rejects.toMatchObject({ code: "forbidden" })
+      ).resolves.toMatchObject(refused("forbidden"))
     }
 
     expect(fake.requests.length).toBe(before)
@@ -956,7 +962,7 @@ describe("calling its tools", () => {
       ctx,
       server,
       "mark_email",
-      { ids: ["e1", "e2", "gone"], addKeywords: ["Paid"] },
+      { ids: ["e1", "e2", "gone"], add_keywords: ["Paid"] },
       PUBLIC,
     )
     expect(several.isError).toBeUndefined()
@@ -1094,6 +1100,9 @@ describe("OAuth", () => {
       {},
       { ...PUBLIC, tokenId },
     )
-    expect((result.structuredContent as { kind?: string }).kind).toBe("connect")
+    expect(result.structuredContent).toMatchObject({
+      kind: "needs_owner",
+      reason: "connect",
+    })
   })
 })

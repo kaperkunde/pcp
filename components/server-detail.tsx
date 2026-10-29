@@ -17,6 +17,7 @@ import { LocalDate, RelativeDate } from "@/components/local-date"
 import { PageHeader } from "@/components/page-header"
 import { ServerStatusBadge } from "@/components/server-status-badge"
 import { ServerTools, type ServerTool } from "@/components/server-tools"
+import { ServiceRemove } from "@/components/service-card"
 import {
   SharedDefinitionNote,
   SharedInstancesProvider,
@@ -149,9 +150,11 @@ export function ServerDetail({
       ? "Check account"
       : ssh
         ? "Check sign-in"
-        : browser
-          ? "Check browser"
-          : "Refresh tools"
+        : server.kind === "service"
+          ? "Check service"
+          : browser
+            ? "Check browser"
+            : "Refresh tools"
   const statusTrouble = server.statusMessage && server.status !== "ok"
   const instances = (about?.instances ?? []).map((instance) => instance.slug)
 
@@ -381,6 +384,8 @@ function advancedSummary(kind: ServerKind): string {
       return "Address, sign-in, read-only, name, pacing"
     case "ssh":
       return "Host, port, login, name, pacing"
+    case "service":
+      return "Name, description, secrets for its variables, pacing"
     case "wrapper":
       return "The whole definition as JSON, short name, name"
     case "browser":
@@ -412,7 +417,8 @@ function SignInRow({
   if (
     server.kind === "browser" ||
     server.kind === "wrapper" ||
-    server.kind === "ssh"
+    server.kind === "ssh" ||
+    server.kind === "service"
   ) {
     return null
   }
@@ -518,6 +524,11 @@ function EndpointFacts({ server }: { server: ServerDetailProps["server"] }) {
 
 /** Last on the page, centred and red, with what it does. */
 function RemoveServer({ server }: { server: ServerDetailProps["server"] }) {
+  // Its container goes first, with choices of what else goes with it.
+  if (server.kind === "service") {
+    return <ServiceRemove serviceId={server.id} name={server.name} />
+  }
+
   const what =
     server.kind === "openapi"
       ? "Deletes the endpoint, its tool list and PCP's copy of its schema. Secrets you added stay."

@@ -1,6 +1,7 @@
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import type { SecretKind } from "./secrets"
+import { readEnvBindings } from "./services/definition"
 import { readDefinition } from "./wrappers/definition"
 
 /**
@@ -9,7 +10,10 @@ import { readDefinition } from "./wrappers/definition"
  * ciphertext, and nothing decrypts.
  */
 
-/** Something that uses a secret: a server that sends it, or a wrapper with a place for it. */
+/**
+ * Something that uses a secret: a server that sends it, a wrapper with a
+ * place for it, or a service whose variable takes it.
+ */
 export type SecretUse = {
   name: string
   slug: string
@@ -25,6 +29,7 @@ const KIND_WORDS: Record<string, string> = {
   caldav: "calendar account",
   ssh: "SSH server",
   wrapper: "wrapper",
+  service: "service",
 }
 
 function kindWords(kind: string): string {
@@ -107,6 +112,17 @@ export async function secretUses(
     }
   }
 
+  const services = await db().serviceSpec.findMany({
+    where: { server: { vaultId: ctx.vaultId } },
+    select: { env: true, server: { select: SERVER } },
+  })
+
+  for (const service of services) {
+    for (const secretId of Object.values(readEnvBindings(service.env))) {
+      add(secretId, service.server)
+    }
+  }
+
   return new Map(
     [...uses].map(([id, found]) => [
       id,
@@ -138,6 +154,7 @@ const KIND_SHOWN: Record<SecretKind, string> = {
   totp: "one-time codes (TOTP), typed by the browser only",
   oauth: "OAuth sign-in (kept by PCP for a server)",
   ssh_key: "SSH key (PCP's own, for an SSH server)",
+  proxy_password: "proxy password (PCP's own, for a VPN service's exit)",
 }
 
 export type ListedSecret = {

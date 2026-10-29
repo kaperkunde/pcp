@@ -27,15 +27,24 @@ export function describeBrowseAsk(
 
   return {
     title: `Open ${host} in the browser?`,
-    lines: [
-      `Address: ${ask.url}`,
-      ask.tabId ? `In tab ${ask.tabId}` : "In a new tab",
-      privateAllowed
-        ? "In PCP's browser, from PCP's own address; your own network too, since you allowed private addresses for this token"
-        : "In PCP's browser, from PCP's own address, public addresses only",
-    ],
-    warning:
-      "The browser keeps your sign-ins: where you have signed in to this site in it, the assistant acts as you there.",
+    lines: ask.exit
+      ? [
+          `Address: ${ask.url}`,
+          `In a new tab through the exit ${ask.exit}: signed in to nothing, and nothing it does is saved`,
+          privateAllowed
+            ? "Public addresses, and the exit's own network, since you allowed private addresses for this token"
+            : "Public addresses only",
+        ]
+      : [
+          `Address: ${ask.url}`,
+          ask.tabId ? `In tab ${ask.tabId}` : "In a new tab",
+          privateAllowed
+            ? "In PCP's browser, from PCP's own address; your own network too, since you allowed private addresses for this token"
+            : "In PCP's browser, from PCP's own address, public addresses only",
+        ],
+    warning: ask.exit
+      ? null
+      : "The browser keeps your sign-ins: where you have signed in to this site in it, the assistant acts as you there.",
   }
 }
 

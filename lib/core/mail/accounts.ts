@@ -9,6 +9,12 @@ import { db } from "../db"
 import { invalid, isPcpError, PcpError } from "../errors"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
+import {
+  argumentsResult,
+  familyError,
+  refusalOf,
+  withNotes,
+} from "../tools/family"
 import { makeRedactor } from "../openapi/redact"
 import {
   getServer,
@@ -63,12 +69,7 @@ import {
   MAX_SEND_ATTACHMENT_BYTES,
   MAX_FULL_BODY_BYTES,
 } from "./limits"
-import {
-  mailToolSpec,
-  mailTools,
-  parseMailArgs,
-  parseRecipients,
-} from "./tools"
+import { mailTool, mailToolSpec, mailTools, parseRecipients } from "./tools"
 import {
   MAIL_SAVE_SENT,
   MailAuthError,
@@ -566,7 +567,7 @@ async function runTool(
 
     case "search_emails": {
       const query: SearchQuery = {
-        ...(args as Partial<SearchQuery>),
+        ...searchQuery(args),
         offset: (args.offset as number | undefined) ?? 0,
         limit: (args.limit as number | undefined) ?? DEFAULT_SEARCH_LIMIT,
       }
@@ -662,8 +663,8 @@ async function runTool(
     case "get_thread": {
       if (!backend.getThread) break
       return {
-        threadId: args.threadId,
-        emails: await backend.getThread(String(args.threadId)),
+        threadId: args.thread_id,
+        emails: await backend.getThread(String(args.thread_id)),
       }
     }
 
@@ -695,11 +696,11 @@ async function runTool(
           ...(args.answered !== undefined
             ? { answered: Boolean(args.answered) }
             : {}),
-          ...(Array.isArray(args.addKeywords)
-            ? { addKeywords: args.addKeywords.map(String) }
+          ...(Array.isArray(args.add_keywords)
+            ? { addKeywords: args.add_keywords.map(String) }
             : {}),
-          ...(Array.isArray(args.removeKeywords)
-            ? { removeKeywords: args.removeKeywords.map(String) }
+          ...(Array.isArray(args.remove_keywords)
+            ? { removeKeywords: args.remove_keywords.map(String) }
             : {}),
         }),
       )
@@ -779,6 +780,27 @@ async function oneOrMany<T>(
   return done[0]
 }
 
+/** search_emails' arguments as the backends take a query. */
+function searchQuery(args: Record<string, unknown>): Partial<SearchQuery> {
+  const {
+    all_mailboxes: allMailboxes,
+    has_attachment: hasAttachment,
+    not_keyword: notKeyword,
+    ...rest
+  } = args
+
+  return {
+    ...(rest as Partial<SearchQuery>),
+    ...(allMailboxes !== undefined
+      ? { allMailboxes: allMailboxes as boolean }
+      : {}),
+    ...(hasAttachment !== undefined
+      ? { hasAttachment: hasAttachment as boolean }
+      : {}),
+    ...(notKeyword !== undefined ? { notKeyword: notKeyword as string } : {}),
+  }
+}
+
 /** The email send_email and create_draft write, from their arguments. */
 function composed(
   args: Record<string, unknown>,
@@ -790,7 +812,7 @@ function composed(
     bcc: parseRecipients(args.bcc, "bcc"),
     subject: String(args.subject ?? ""),
     text: String(args.text ?? ""),
-    ...(args.inReplyTo ? { inReplyTo: String(args.inReplyTo) } : {}),
+    ...(args.in_reply_to ? { inReplyTo: String(args.in_reply_to) } : {}),
     ...(args.identity ? { identity: String(args.identity) } : {}),
     ...(attachments?.length ? { attachments } : {}),
   }
@@ -899,35 +921,57 @@ export async function callMailTool(
 ): Promise<CallToolResult> {
   const kind = server.kind as MailKind
   const spec = mailToolSpec(toolName)
+  const tool = mailTool(kind, toolName)
 
-  if (!spec || !spec.kinds.includes(kind)) {
-    throw new PcpError(
-      "state",
+  if (!spec || !tool) {
+    return familyError(
       `${server.name} has no tool called ${toolName}.`,
+      "not_found",
     )
   }
 
   if (server.readOnly && spec.writes) {
-    throw new PcpError(
-      "forbidden",
+    return familyError(
       `${server.name} is read-only in PCP; ${toolName} would change mail.`,
+      "forbidden",
     )
   }
 
   // Checked before anything is opened: a bad argument never reaches the
   // server. A handle is replaced by what it stands for first, so the limits
   // apply to the real text; an attachment is resolved as bytes, later.
-  const args = parseMailArgs(
-    spec,
-    kind,
+  const checked = tool.check(
     open
       ? await resolveHandles(rawArgs, open, { skip: ["attachments"] })
       : rawArgs,
   )
 
+  if (!checked.fits) {
+    return argumentsResult(`${server.slug}/${toolName}`, checked.problems, {
+      notes: checked.notes,
+    })
+  }
+
+  const args = checked.args
+
   if (COMPOSES.has(toolName)) {
-    for (const key of ["to", "cc", "bcc"] as const) {
-      parseRecipients(args[key], key)
+    const problems = (["to", "cc", "bcc"] as const).flatMap((key) => {
+      try {
+        parseRecipients(args[key], key)
+        return []
+      } catch (error) {
+        if (isPcpError(error) && error.code === "validation") {
+          return [error.message]
+        }
+
+        throw error
+      }
+    })
+
+    if (problems.length > 0) {
+      return argumentsResult(`${server.slug}/${toolName}`, problems, {
+        notes: checked.notes,
+      })
     }
   }
 
@@ -947,10 +991,23 @@ export async function callMailTool(
       scrub,
     })
 
-    return jsonToolResult(value, { redact: credential.redact })
+    return withNotes(
+      jsonToolResult(value, { redact: credential.redact }),
+      checked.notes,
+    )
   } catch (error) {
     if (error instanceof MailRequestError) {
       return errorToolResult(error.message, { redact: credential.redact })
+    }
+
+    const refused = refusalOf(
+      error,
+      `${server.slug}/${toolName}`,
+      checked.notes,
+    )
+
+    if (refused) {
+      return refused
     }
 
     if (isPcpError(error)) {

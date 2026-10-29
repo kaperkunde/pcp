@@ -2,7 +2,7 @@
 
 import { useActionState, useState, useTransition } from "react"
 
-import { FormError } from "@/components/form-status"
+import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate, RelativeDate } from "@/components/local-date"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
@@ -169,7 +169,11 @@ function SecretRow({ secret }: { secret: SecretItem }) {
           <span className="font-medium">{secret.name}</span>
           {managed ? (
             <Badge variant="secondary">
-              {secret.kind === "ssh_key" ? "SSH key" : "OAuth tokens"}
+              {secret.kind === "ssh_key"
+                ? "SSH key"
+                : secret.kind === "proxy_password"
+                  ? "Proxy password"
+                  : "OAuth tokens"}
             </Badge>
           ) : null}
           {totp ? <Badge variant="secondary">One-time codes</Badge> : null}
@@ -323,6 +327,7 @@ function SecretRow({ secret }: { secret: SecretItem }) {
             </form>
           ) : null}
           <FormError error={error} />
+          <FormNote message={state.status === "ok" ? state.message : null} />
         </div>
       ) : null}
     </ListRow>

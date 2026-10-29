@@ -14,7 +14,7 @@ import { newId } from "./ids"
  * What instances share is held on each of them, as before definitions
  * existed: the description on the server row, the schema and its edits in
  * openapi_spec, a wrapper's program in wrapper_spec, the tool descriptions
- * on mcp_tool. Everything that reads a server reads one row as it always
+ * on mcp_tool, a service's in service_spec. Everything that reads a server reads one row as it always
  * did. Everything that writes shared content writes it through here (or
  * the endpoint and wrapper code that calls these), so a change made through
  * one instance reaches every other, and the definition row's description is
@@ -22,7 +22,12 @@ import { newId } from "./ids"
  */
 
 /** The kinds of server that have a definition. */
-export const DEFINITION_KINDS = ["mcp", "openapi", "wrapper"] as const
+export const DEFINITION_KINDS = [
+  "mcp",
+  "openapi",
+  "wrapper",
+  "service",
+] as const
 export type DefinitionKind = (typeof DEFINITION_KINDS)[number]
 
 export function hasDefinition(kind: string): kind is DefinitionKind {
@@ -156,7 +161,7 @@ export async function definitionForNew(
 
   if (definition.kind !== kind) {
     throw invalid(
-      `That definition is for ${definition.kind === "openapi" ? "an API endpoint" : definition.kind === "wrapper" ? "a wrapper" : "an MCP server"}.`,
+      `That definition is for ${definition.kind === "openapi" ? "an API endpoint" : definition.kind === "wrapper" ? "a wrapper" : definition.kind === "service" ? "a service" : "an MCP server"}.`,
     )
   }
 

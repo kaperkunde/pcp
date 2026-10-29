@@ -1,5 +1,9 @@
+import type { CallToolResult } from "@modelcontextprotocol/server"
+
 import {
   MAX_PACED_DESTINATIONS,
+  PACING_DEADLINE_MARGIN_MS,
+  PACING_LONGEST_WAIT_MS,
   PACING_MAX_WAIT_MS,
   PACING_STATE_TTL_MS,
   type PacingPolicy,
@@ -73,6 +77,11 @@ function store(): Store {
 /** Tests: time and chance of their own, or the real ones again with null. */
 export function setPacingClock(clock: Partial<PacingClock> | null): void {
   store().clock = clock ? { ...REAL_CLOCK, ...clock } : REAL_CLOCK
+}
+
+/** Now, on pacing's clock: what a caller's deadline is measured against. */
+export function pacingNow(): number {
+  return store().clock.now()
 }
 
 /** Tests: forget every destination. */
@@ -171,25 +180,99 @@ function prune(state: DestinationState): void {
   if (drop > 0) state.slots.splice(0, drop)
 }
 
+/**
+ * A call whose turn is further off than its caller can wait: nothing was
+ * sent and no slot was taken. `retryAfterMs` is when the destination takes
+ * its next action, for a caller (a program) that reads it.
+ */
+export type PacedRefusal = { message: string; retryAfterMs: number }
+
+/**
+ * A refusal as the tool error a caller answers with: its text, and
+ * `{code: "paced", retry_after_ms}` as structuredContent, which run_code
+ * hands on to the program (answers.ts answerValue).
+ */
+export function pacedResult(refusal: PacedRefusal): CallToolResult {
+  return {
+    content: [{ type: "text", text: refusal.message }],
+    structuredContent: { code: "paced", retry_after_ms: refusal.retryAfterMs },
+    isError: true,
+  }
+}
+
+/** The wait a tool error pacing made names, or null for any other result. */
+export function pacedRetryAfter(result: CallToolResult): number | null {
+  const content = result.structuredContent as
+    { code?: unknown; retry_after_ms?: unknown } | undefined
+  const wait = content?.retry_after_ms
+
+  if (
+    result.isError !== true ||
+    content?.code !== "paced" ||
+    typeof wait !== "number" ||
+    !Number.isFinite(wait)
+  ) {
+    return null
+  }
+
+  return Math.max(0, Math.round(wait))
+}
+
+function wholeSeconds(ms: number): number {
+  return Math.max(1, Math.ceil(ms / 1000))
+}
+
 /** What a call too far from its turn is told, as a tool error. */
-export function pacedMessage(label: string, waitMs: number): string {
-  const seconds = Math.max(1, Math.ceil(waitMs / 1000))
-  return `Paced: ${label} takes its next action in ${seconds} s; try again then.`
+export function pacedMessage(
+  label: string,
+  waitMs: number,
+  budgetMs?: number,
+): string {
+  const seconds = wholeSeconds(waitMs)
+  const budget =
+    budgetMs === undefined
+      ? ""
+      : budgetMs >= 1000
+        ? ` (${Math.floor(budgetMs / 1000)} s)`
+        : " (no time is left)"
+
+  return `Paced: ${label} takes its next action in ${seconds} s, longer than this call can wait${budget}. Nothing was sent and no turn was kept for it; try again in ${seconds} s.`
+}
+
+/**
+ * How long a call may wait for its turn: up to `deadline` (pacing's clock,
+ * in milliseconds) less what the call itself needs, never past
+ * PACING_LONGEST_WAIT_MS, and PACING_MAX_WAIT_MS for a caller that names
+ * no deadline.
+ */
+export function waitBudget(deadline: number | undefined, now: number): number {
+  if (deadline === undefined) {
+    return PACING_MAX_WAIT_MS
+  }
+
+  return Math.max(
+    0,
+    Math.min(
+      deadline - now - PACING_DEADLINE_MARGIN_MS,
+      PACING_LONGEST_WAIT_MS,
+    ),
+  )
 }
 
 /**
  * Waits for the destination's next slot under `policy`, and answers null
- * when the action may go. A slot further off than PACING_MAX_WAIT_MS is not
- * taken: the answer is then what to tell the caller. A signal that aborts
- * while the call waits rejects with its reason, and gives the slot back
- * when no later caller has taken one after it.
+ * when the action may go. A slot further off than the caller can wait
+ * (waitBudget: its deadline, or PACING_MAX_WAIT_MS) is not taken: the
+ * answer is then what to tell the caller. A signal that aborts while the
+ * call waits rejects with its reason, and gives the slot back when no later
+ * caller has taken one after it.
  */
 export async function waitForSlot(
   key: string,
   label: string,
   policy: PacingPolicy,
-  { signal }: { signal?: AbortSignal } = {},
-): Promise<string | null> {
+  { signal, deadline }: { signal?: AbortSignal; deadline?: number } = {},
+): Promise<PacedRefusal | null> {
   signal?.throwIfAborted()
 
   const { clock } = store()
@@ -197,9 +280,13 @@ export async function waitForSlot(
   const state = stateFor(key, now)
   const slot = nextSlot(state, policy, now, clock.random)
   const waitMs = slot - now
+  const budget = waitBudget(deadline, now)
 
-  if (waitMs > PACING_MAX_WAIT_MS) {
-    return pacedMessage(label, waitMs)
+  if (waitMs > budget) {
+    return {
+      message: pacedMessage(label, waitMs, budget),
+      retryAfterMs: waitMs,
+    }
   }
 
   const before = state.last

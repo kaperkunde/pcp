@@ -198,9 +198,13 @@ describe("long answers", () => {
     expect(texts(shaped)).toEqual(['{"id":1}'])
     expect(shaped.structuredContent).toBeUndefined()
 
-    // An API's list is { value } in structured content: still the same.
+    // A list, as it is or as an older SDK wraps it: still the same.
     expect(
-      shapeAnswer({ ...json([1]), structuredContent: { value: [1] } })
+      shapeAnswer({ ...json([1]), structuredContent: [1] as never })
+        .structuredContent,
+    ).toBeUndefined()
+    expect(
+      shapeAnswer({ ...json([1]), structuredContent: { result: [1] } })
         .structuredContent,
     ).toBeUndefined()
   })

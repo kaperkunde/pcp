@@ -1131,3 +1131,61 @@ describe("what one endpoint's tools may add up to", () => {
     expect(bytes).toBeLessThanOrEqual(4_000_000)
   })
 })
+
+describe("JSON Schema 2020-12 in what a tool takes", () => {
+  it("writes a tuple in a body as prefixItems, which 2020-12 has in place of an items list", () => {
+    const generated = generateTools(
+      parseSpecText(
+        JSON.stringify({
+          openapi: "3.1.0",
+          info: { title: "Points", version: "1" },
+          servers: [{ url: "https://points.example.com" }],
+          paths: {
+            "/points": {
+              post: {
+                operationId: "addPoint",
+                requestBody: {
+                  required: true,
+                  content: {
+                    "application/json": {
+                      schema: {
+                        type: "object",
+                        properties: {
+                          at: {
+                            type: "array",
+                            items: [{ type: "number" }, { type: "number" }],
+                            additionalItems: false,
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+                responses: { "204": { description: "Added" } },
+              },
+            },
+          },
+        }),
+      ),
+      OPTIONS,
+    )
+
+    expect(generated.tools[0]!.inputSchema).toMatchObject({
+      additionalProperties: false,
+      properties: {
+        body: {
+          properties: {
+            at: {
+              type: "array",
+              prefixItems: [{ type: "number" }, { type: "number" }],
+              items: false,
+            },
+          },
+        },
+      },
+    })
+    expect(JSON.stringify(generated.tools[0]!.inputSchema)).not.toContain(
+      '"items":[',
+    )
+  })
+})

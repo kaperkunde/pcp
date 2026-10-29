@@ -132,6 +132,31 @@ your secrets or any Authorization or Cookie header, and a redirect to another
 site is reported to it rather than followed. The right is off unless you
 tick it when you make the token or on its page.
 
+**An assistant with a token that reaches an SSH server** can run one
+command per call there with `run_command`, as far as you allowed the tool,
+as the login you gave PCP and nothing more: PCP signs in with a key of its
+own (never a password), only to a host whose key you pinned, and opens no
+terminal, agent, file transfer or forwarding of its own. The one forwarding
+PCP does is for an **exit** you add on the server's page: web fetch and a new
+browser tab can then go out from that server instead of from PCP's own
+address, for the tokens you allow on their pages (blocked unless you do, or
+asking you first when you set it so). The assistant names the exit, never
+where it connects to: PCP looks every name up itself (over HTTPS, through the
+exit) and connects only to addresses it checked from the exit's side, never
+the server's own loopback or own address, never a link-local or cloud
+metadata address (169.254.169.254 and its kind, where a cloud server keeps
+its own credentials) for any token, and its private network only for a
+token you allowed private addresses. A tab through an exit has none of the
+browser's sign-ins and saves nothing. A **VPN exit** is a VPN client
+(gluetun, from PCP's common items) that PCP runs as a service on that
+server: the only container PCP ever gives more than the engine's default,
+and only the NET_ADMIN capability and the /dev/net/tun device its tunnel
+needs. Its proxy listens on the server's 127.0.0.1 alone, signed in with a
+random password PCP makes for it and keeps among your secrets, and PCP
+reaches it through the SSH connection; an assistant cannot propose one. PCP never asks the server to forward
+connections back to it, to a Unix socket, or for an agent or X11. The request
+log says which exit a call used, never the site.
+
 **An assistant with a token that reaches the browser** (a server you add on
 the Browser page, whose tools ask you first like any other's) drives a
 Chromium on PCP's machine, and acts as you on every site you signed in to
@@ -415,6 +440,17 @@ Not defended against:
   untrusted, so even a PCP that was taken over could do no more than have
   the published image pulled again, at most once every five minutes.
   `PCP_UPDATE_BUTTON=0` turns it off.
+- The installer's own updates (its daily timer, and Install and restart;
+  not Podman's timer, which only pulls) run the installer the image carries
+  (`/app/install.sh`) once it differs from the copy the installer saved: read out of the image just
+  pulled, by its id, in a throwaway container with no network and nothing
+  mounted, never out of the running PCP. So the host runs what it trusts as
+  much as the image it is about to start, and a PCP that was taken over still
+  cannot change what the host runs. It replaces the saved copy, so the unit
+  follows the version installed (the graphics card, for one). A file that is
+  not an installer that copy takes (no `#!/bin/sh`, no format line it knows,
+  one `sh -n` refuses, over 256 KB), or none at all, leaves the update to the
+  saved copy, with a note.
 - The desktop app installs an update only when you choose **Install and
   restart**, downloading it from PCP's GitHub releases over HTTPS. On a Mac,
   the updater takes only an app signed with the same Developer ID; the

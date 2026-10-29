@@ -115,6 +115,13 @@ COPY --from=builder --chown=pcp:nodejs /app/.next/static ./.next/static
 # Applied at boot by instrumentation.ts (lib/core/migrate.ts).
 COPY --from=builder /app/prisma/migrations ./prisma/migrations
 COPY docker/start.cjs ./start.cjs
+# The Linux installer (install.sh), for the installer on the host: when it
+# updates PCP, it reads this file out of the image it has just pulled, in a
+# container of its own with no network, and runs it in place of the copy it
+# saved at install time, so the unit is written as this version's installer
+# writes it (kaperkunde/pcp#38: the graphics card). Root's and read-only, and
+# never read out of a running PCP. Nothing in the image runs it.
+COPY --chmod=0644 install.sh ./install.sh
 
 USER pcp
 

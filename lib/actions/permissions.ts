@@ -74,6 +74,8 @@ export async function decidePermissionAction(
   minutes?: number,
   /** A secret for the browser: the sites the owner left in. */
   origins?: string[],
+  /** The request as the owner read it (PermissionView `revision`). */
+  revision?: string,
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -103,6 +105,7 @@ export async function decidePermissionAction(
           origins: Array.isArray(origins)
             ? origins.filter((origin) => typeof origin === "string")
             : undefined,
+          revision: typeof revision === "string" ? revision : undefined,
         },
       )
       const message = outcome.content

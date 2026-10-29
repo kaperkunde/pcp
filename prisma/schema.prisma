@@ -43,6 +43,7 @@ model Vault {
   oauthCredentials   OAuthCredential[]
   repos              Repo[]
   serverDefinitions  ServerDefinition[]
+  exits              Exit[]
 
   @@map("vault")
 }
@@ -295,6 +296,37 @@ model VaultToolAccess {
   @@map("vault_tool_access")
 }
 
+/// A way out to the internet from somewhere else than PCP's machine
+/// (lib/core/exits/): web_fetch and a browser tab can go through one by name.
+/// Kind "ssh" leaves from the SSH server itself (direct-tcpip channels);
+/// kind "service" from a VPN container PCP runs on one. Only the owner adds,
+/// changes or removes one. Its level per token is a web_fetch_rule of kind
+/// "exit" keyed by its id: blocked without one.
+model Exit {
+  id        String     @id
+  vaultId   String     @map("vault_id")
+  vault     Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// What an assistant calls it, unique in the vault.
+  name      String
+  /// The owner's words for where it comes out ("US — home VPS"); may be "".
+  label     String     @default("")
+  /// ssh | service
+  kind      String
+  /// The SSH server it leaves from, or whose loopback its container is on.
+  serverId  String     @map("server_id")
+  server    McpServer  @relation("ExitHost", fields: [serverId], references: [id], onDelete: Cascade)
+  /// The service (a container PCP runs) for kind "service"; null for "ssh".
+  serviceId String?    @map("service_id")
+  service   McpServer? @relation("ExitService", fields: [serviceId], references: [id], onDelete: Cascade)
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  @@unique([vaultId, name])
+  @@index([serverId])
+  @@index([serviceId])
+  @@map("exit")
+}
+
 /// A level web_fetch follows (lib/core/web-fetch.ts): for one HTTP method
 /// (the default for sites without a level of their own) or for one site,
 /// for one token or for all of them. A token's own rule wins over the one
@@ -353,6 +385,12 @@ model PermissionRequest {
   /// sha256 of the kind, the target and the canonical arguments, so the same
   /// request asked twice finds the row it already has.
   argsHash         String     @map("args_hash")
+  /// What the request is about (a skill, a shared memory, a note's item),
+  /// as an HMAC under a key derived from the vault's data key, so the target
+  /// is never stored in the clear: a second change from the same token to
+  /// the same thing folds into the request still waiting, and another
+  /// token's is shown as a conflict. Null on rows from before it existed.
+  targetKey        String?    @map("target_key")
   /// call: the parts of the answer the assistant asked for (call_tool's
   /// fields), as a JSON list of paths. Names, never values.
   fields           String?
@@ -370,11 +408,21 @@ model PermissionRequest {
   /// The result text, clipped, encrypted with "permission_request:<id>:result".
   resultCiphertext Bytes?     @map("result_ciphertext")
   resultIsError    Boolean    @default(false) @map("result_is_error")
+  /// call: the answer as a run_code program is handed it (answers.ts
+  /// answerValue, files and long texts as handles), as JSON, encrypted with
+  /// "permission_request:<id>:result_json". Kept only for a call the owner
+  /// allowed once, and only when short enough (REUSE_VALUE_MAX_CHARS).
+  resultJsonCiphertext Bytes? @map("result_json_ciphertext")
+  /// call allowed once that ran: until when the same token's identical call
+  /// is answered with this run's answer instead of asking again. Cleared
+  /// when that happens, so it answers one such call.
+  reuseUntil       DateTime?  @map("reuse_until")
   createdAt        DateTime   @default(now()) @map("created_at")
   expiresAt        DateTime   @map("expires_at")
   decidedAt        DateTime?  @map("decided_at")
 
   @@index([tokenId, argsHash])
+  @@index([vaultId, targetKey])
   @@index([vaultId, status])
   @@index([expiresAt])
   @@map("permission_request")
@@ -510,7 +558,8 @@ model McpServer {
   /// imaps://host:port, or imap://host:port for STARTTLS. ssh:
   /// ssh://host:port. caldav: the CalDAV server PCP finds the calendars
   /// from (https://caldav.icloud.com/). browser: the fixed "pcp:browser", which no request is
-  /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise.
+  /// ever sent to. wrapper: the fixed "pcp:wrapper", likewise. service: the
+  /// fixed "pcp:service": where it runs is in service_spec.
   url         String
   enabled     Boolean @default(true)
 
@@ -560,7 +609,8 @@ model McpServer {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  /// mcp | openapi | jmap | imap | ssh | caldav | browser | wrapper. An openapi
+  /// mcp | openapi | jmap | imap | ssh | caldav | browser | wrapper |
+  /// service. An openapi
   /// server is an HTTP API described by an OpenAPI schema; its tools are the
   /// schema's operations and PCP calls them directly (lib/core/endpoints.ts).
   /// jmap and imap are mail accounts with a fixed set of mail tools
@@ -569,7 +619,9 @@ model McpServer {
   /// over CalDAV with a fixed set of tools (lib/core/caldav/); browser is
   /// the vault's headless browser, with its own
   /// (lib/core/browser/). A wrapper's tools are programs the owner approved
-  /// that call the vault's other tools (lib/core/wrappers/).
+  /// that call the vault's other tools (lib/core/wrappers/). A service is a
+  /// container PCP runs with the owner's Docker or Podman on one of their
+  /// SSH servers (lib/core/services/), with tools to see and run it.
   kind       String  @default("mcp")
   /// openapi: where the schema came from, url | upload.
   specSource String? @map("spec_source")
@@ -635,7 +687,7 @@ model McpServer {
   /// writes a changed document.
   syncVersion    Int?    @map("sync_version")
 
-  /// mcp, openapi, wrapper: the definition this server is an instance of
+  /// mcp, openapi, wrapper, service: the definition this server is an instance of
   /// (lib/core/definitions.ts). Servers that share one share its
   /// description, schema and edits, wrapper program and tool descriptions;
   /// everything else on this row is the instance's own. Null for the other
@@ -658,9 +710,14 @@ model McpServer {
   permissionRequests PermissionRequest[]
   spec               OpenApiSpec?
   wrapperSpec        WrapperSpec?
+  serviceSpec        ServiceSpec?        @relation("ServiceOwn")
+  servicesHosted     ServiceSpec[]       @relation("ServiceHost")
+  registeredBy       ServiceSpec?        @relation("ServiceRegistered")
   authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
   repoItems          RepoItem[]
+  exits              Exit[]              @relation("ExitHost")
+  exitServices       Exit[]              @relation("ExitService")
 
   @@unique([vaultId, slug])
   @@index([definitionId])
@@ -678,7 +735,7 @@ model ServerDefinition {
   id            String   @id
   vaultId       String   @map("vault_id")
   vault         Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
-  /// mcp | openapi | wrapper: the kind of every instance.
+  /// mcp | openapi | wrapper | service: the kind of every instance.
   kind          String
   /// The definition's own short name, unique in the vault: the first
   /// instance's when it was made. Instances keep their own slugs.
@@ -739,6 +796,13 @@ model McpTool {
   /// openapi: an outline of what a successful call answers, from the
   /// schema; describe_tool shows it. Null when the schema does not say.
   output      String?
+  /// JSON Schema, as JSON text, of what a successful call answers as
+  /// structuredContent, when the tool declares it: an MCP server's
+  /// outputSchema, a family tool's (lib/core/tools/family.ts) or a wrapper
+  /// tool's. describe shows it as outputSchema.
+  outputSchema String? @map("output_schema")
+  /// JSON: the icons an MCP server gave the tool (MCP's Icon objects).
+  icons       String?
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
@@ -785,6 +849,53 @@ model WrapperSpec {
   updatedAt  DateTime  @updatedAt @map("updated_at")
 
   @@map("wrapper_spec")
+}
+
+/// service: a container PCP runs with the owner's Docker or Podman engine on
+/// one of their SSH servers, through the engine's command line over SSH exec
+/// (lib/core/services/). Its own server row (kind "service") carries the
+/// tools to see and run it; what it serves is registered as an API endpoint
+/// or MCP server of its own (registeredId). Kept apart from the server row
+/// like a wrapper's program.
+model ServiceSpec {
+  serverId      String     @id @map("server_id")
+  server        McpServer  @relation("ServiceOwn", fields: [serverId], references: [id], onDelete: Cascade)
+  /// What the definition's instances share, as JSON
+  /// (lib/core/services/definition.ts): the image by digest, its ports, the
+  /// names of its environment variables, its named volumes, the health
+  /// check and what it registers. Names no secret and no address.
+  definition    String
+  /// SHA-256 of the definition's canonical JSON, hex.
+  hash          String
+  /// The SSH server the container runs on. Null once that server is
+  /// deleted: the container stays there, and PCP no longer reaches it.
+  hostId        String?    @map("host_id")
+  host          McpServer? @relation("ServiceHost", fields: [hostId], references: [id], onDelete: SetNull)
+  /// docker | podman: the engine PCP found on the host.
+  engine        String
+  /// The engine's version as it reported it, for the owner.
+  engineVersion String     @default("") @map("engine_version")
+  /// The container's name on the host: pcp-<name>.
+  containerName String     @map("container_name")
+  /// Where the container's ports are published on the host, as JSON:
+  /// {"address": "0.0.0.0", "ports": [{"container": 5001, "host": 5001}]}.
+  publish       String     @default("{}")
+  /// Which secret each environment variable takes, as JSON
+  /// {"NAME": "<secret id>"}: by id, never a value. The values reach the
+  /// host over standard input only (upstream.ts builds them).
+  env           String     @default("{}")
+  /// What the owner typed for the definition's plain variables (a VPN
+  /// provider's name, a country), as JSON {"NAME": "value"}: no secrets.
+  plainValues   String     @default("{}") @map("plain_values")
+  /// The API endpoint or MCP server launching it registered; null when it
+  /// registers nothing, or once that server is deleted.
+  registeredId  String?    @unique @map("registered_id")
+  registered    McpServer? @relation("ServiceRegistered", fields: [registeredId], references: [id], onDelete: SetNull)
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  @@index([hostId])
+  @@map("service_spec")
 }
 
 /// An OAuth authorization in flight: the state parameter sent to the

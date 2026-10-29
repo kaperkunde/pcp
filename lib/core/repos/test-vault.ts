@@ -5,7 +5,14 @@ import type { VaultContext } from "../context"
 import { db } from "../db"
 import { createEndpoint } from "../endpoints"
 import { createSecret, writeManagedSecret } from "../secrets"
+import { ensureDefinition } from "../definition-rows"
 import { createServer, setToolDescription } from "../servers"
+import {
+  parseServiceDefinition,
+  serviceDefinitionHash,
+  type ServiceDefinitionInput,
+} from "../services/definition"
+import { createSshServer } from "../ssh/hosts"
 import { createSkill, saveSkillFile } from "../skills"
 import { saveWrapperByOwner } from "../wrappers/admin"
 import { asBytes, encryptString } from "../crypto"
@@ -315,4 +322,92 @@ export async function addLinkedRepo(
   })
 
   return { repoId, itemId }
+}
+
+export const SERVICE_DIGEST = `sha256:${"c".repeat(64)}`
+
+/** Docling, as a service's definition: an API endpoint behind a key. */
+export const DOCLING: ServiceDefinitionInput = {
+  image: `ghcr.io/docling-project/docling-serve-cpu@${SERVICE_DIGEST}`,
+  source: "ghcr.io/docling-project/docling-serve-cpu:latest",
+  ports: [{ container: 5001 }],
+  env: [
+    {
+      name: "DOCLING_SERVE_API_KEY",
+      required: true,
+      description: "The key every request sends in X-Api-Key.",
+    },
+    { name: "DOCLING_SERVE_ENABLE_UI", value: "false" },
+  ],
+  health: { kind: "http", port: 5001, path: "/health" },
+  registers: {
+    kind: "openapi",
+    port: 5001,
+    specPath: "/openapi.json",
+    auth: {
+      env: "DOCLING_SERVE_API_KEY",
+      header: "X-Api-Key",
+      template: "{{secret}}",
+    },
+  },
+}
+
+/**
+ * A service the owner launched, as rows only (nothing connects): on their
+ * SSH server build.ada-home.net, published on its address 192.168.7.20, its
+ * key in the secret "Docling key", and the API endpoint it registered.
+ */
+export async function addService(
+  ctx: VaultContext,
+  definition: ServiceDefinitionInput = DOCLING,
+): Promise<{ id: string; hostId: string; registeredId: string }> {
+  const { id: hostId } = await createSshServer(ctx, {
+    name: "Build box",
+    host: "build.ada-home.net",
+    port: 22,
+    username: "deploy",
+  })
+  const key = await createSecret(ctx, {
+    name: "Docling key",
+    value: "dk-SERVICE-KEY-31415",
+  })
+  const { id: registeredId } = await createServer(ctx, {
+    name: "Docling",
+    url: "http://192.168.7.20:5001/mcp",
+    authType: "none",
+  })
+  const checked = parseServiceDefinition(definition)
+  const id = newId()
+
+  await db().mcpServer.create({
+    data: {
+      id,
+      vaultId: ctx.vaultId,
+      kind: "service",
+      name: "Docling service",
+      slug: "docling-service",
+      description: "Turns PDFs and images into Markdown.",
+      url: "pcp:service",
+      authType: "none",
+      serviceSpec: {
+        create: {
+          definition: JSON.stringify(checked),
+          hash: serviceDefinitionHash(checked),
+          hostId,
+          engine: "docker",
+          engineVersion: "27.1.1",
+          containerName: "pcp-docling",
+          publish: JSON.stringify({
+            address: "192.168.7.20",
+            ports: [{ container: 5001, host: 5001 }],
+          }),
+          env: JSON.stringify({ DOCLING_SERVE_API_KEY: key.id }),
+          registeredId,
+        },
+      },
+    },
+  })
+  await ensureDefinition(id)
+
+  return { id, hostId, registeredId }
 }

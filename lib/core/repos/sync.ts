@@ -7,6 +7,7 @@ import {
   resolveItem,
   type InstanceInput,
   type ResolvedItem,
+  type ServiceInstance,
 } from "./apply"
 import type { ItemDocument } from "./documents"
 import { commitAt, type GitHub } from "./github"
@@ -658,6 +659,8 @@ export type AddChoice = {
    * page that adds it: its name, address, sign-in and note.
    */
   instance?: InstanceInput
+  /** A new service's own part, and the launch that runs it. */
+  service?: ServiceInstance
 }
 
 export type AddResult = {
@@ -722,6 +725,7 @@ export async function addFromRepo(
       const applied = await applyItem(ctx, fetched.document, {
         id: found?.id ?? null,
         instance: found ? undefined : choice.instance,
+        service: found ? undefined : choice.service,
       })
       const kind = fetched.document.kind
       const after = await localItem(ctx, kind, applied.id)

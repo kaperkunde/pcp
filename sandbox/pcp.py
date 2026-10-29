@@ -8,6 +8,7 @@ command, which is this file:
     text = pcp.read(handle)
     pdf = pcp.read(attachment, as_="bytes")
     names = [tool["name"] for tool in pcp.tools("github")]
+    schema = pcp.describe("github", "list_issues")["inputSchema"]
 
     pcp call github list_issues '{"repo": "pcp"}' | jq '.[].number'
     pcp call github list_issues - --fields number,title < args.json
@@ -16,6 +17,7 @@ command, which is this file:
     pcp read --bytes '{"$result": "…"}' > file.pdf
     pcp keep --bytes --name page.png --type image/png page.png
     pcp tools github | jq -r '.[].name'
+    pcp describe github list_issues | jq .inputSchema
     pcp image --max-width 1200 --grayscale '{"$result": "…"}'
     pcp frames --count 5 '{"$result": "…"}'
 
@@ -42,7 +44,7 @@ import subprocess
 import sys
 import tempfile
 
-__all__ = ["PcpError", "call", "frames", "image", "keep", "read", "tools"]
+__all__ = ["PcpError", "call", "describe", "frames", "image", "keep", "read", "tools"]
 
 # Frames one `frames` takes at most: PCP's MAX_VIDEO_FRAMES
 # (lib/core/code/limits.ts), and its defaults.
@@ -54,7 +56,17 @@ FFMPEG_TIMEOUT = 60
 
 
 class PcpError(Exception):
-    """PCP refused a request, or the tool answered with an error."""
+    """PCP refused a request, or the tool answered with an error.
+
+    A call PCP's pacing refused (nothing was sent) has code "paced" and
+    retry_after_ms, when the place it calls takes its next action; any
+    other has code None.
+    """
+
+    def __init__(self, message, code=None, retry_after_ms=None):
+        super().__init__(message)
+        self.code = code
+        self.retry_after_ms = retry_after_ms
 
 
 def _ask(op, payload):
@@ -83,6 +95,13 @@ def _ask(op, payload):
     reply = json.loads(b"".join(chunks))
     if reply.get("ok"):
         return reply.get("value")
+    if reply.get("code") == "paced":
+        wait = reply.get("retryAfterMs")
+        raise PcpError(
+            reply.get("error") or "PCP refused that.",
+            code="paced",
+            retry_after_ms=wait if isinstance(wait, int) and not isinstance(wait, bool) else 0,
+        )
     raise PcpError(reply.get("error") or "PCP refused that.")
 
 
@@ -140,6 +159,14 @@ def tools(server=None):
     """The servers this program may call, or with a server's name, its tools
     and whether each runs at once ("allowed") or asks the owner ("ask")."""
     return _ask("tools", {"server": server})
+
+
+def describe(server, tool):
+    """One tool as describe gives it, without a call_handle (call takes
+    names): its inputSchema, the arguments call takes, what it returns,
+    whether it runs at once ("allowed") or asks the owner ("ask"), and its
+    annotations."""
+    return _ask("describe", {"server": server, "tool": tool})
 
 
 def _id(handle):
@@ -273,6 +300,7 @@ USAGE = """usage:
   pcp read [--base64 | --bytes] HANDLE_OR_ID
   pcp keep [--name NAME] [--type TYPE] [--bytes] [FILE]
   pcp tools [SERVER]
+  pcp describe SERVER TOOL
   pcp image [--max-width N] [--max-height N] [--crop X,Y,W,H] [--grayscale]
             [--format jpeg|webp|png] [--quality Q] HANDLE_OR_ID
   pcp frames [--at T,T,… | --every S | --count N] [--max-width N] HANDLE_OR_ID"""
@@ -357,6 +385,11 @@ def main(argv=None):
             if len(argv) > 1:
                 raise PcpError(USAGE)
             value = tools(argv[0] if argv else None)
+            sys.stdout.write(json.dumps(value, ensure_ascii=False) + "\n")
+        elif command == "describe":
+            if len(argv) != 2:
+                raise PcpError(USAGE)
+            value = describe(argv[0], argv[1])
             sys.stdout.write(json.dumps(value, ensure_ascii=False) + "\n")
         elif command == "image":
             rest, options = _options(

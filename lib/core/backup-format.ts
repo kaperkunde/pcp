@@ -20,6 +20,8 @@ import type {
   SecretBrowserOrigin,
   ServerAuthHeader,
   ServerDefinition,
+  ServiceSpec,
+  Exit,
   Setting,
   Skill,
   Vault,
@@ -209,6 +211,9 @@ const PermissionRequestRow = z.strictObject({
   toolName: str,
   argsCiphertext: bytes,
   argsHash: str,
+  // Added with folding changes to one skill or memory: absent from older
+  // files, whose requests then fold into nothing and conflict with nothing.
+  targetKey: str.nullable().default(null),
   fields: str.nullable(),
   decode: str.nullable(),
   // Added in 0.2: absent from older files.
@@ -217,6 +222,10 @@ const PermissionRequestRow = z.strictObject({
   via: str.nullable(),
   resultCiphertext: bytesOrNull,
   resultIsError: z.boolean(),
+  // Added with answering an identical call from a run allowed once: absent
+  // from older files, whose calls then answer nothing again.
+  resultJsonCiphertext: bytesOrNull.default(null),
+  reuseUntil: dateOrNull.default(null),
   createdAt: date,
   expiresAt: date,
   decidedAt: dateOrNull,
@@ -362,6 +371,10 @@ const McpToolRow = z.strictObject({
   annotations: str.nullable(),
   operation: str.nullable(),
   output: str.nullable(),
+  // Added after the rest: a tool from an older file declares none until
+  // its server is read again.
+  outputSchema: str.nullable().default(null),
+  icons: str.nullable().default(null),
   createdAt: date,
   updatedAt: date,
 })
@@ -380,6 +393,37 @@ const WrapperSpecRow = z.strictObject({
   serverId: id,
   definition: str,
   hash: str,
+  updatedAt: date,
+})
+
+// Services, added with the service kind: absent from older files.
+const ServiceSpecRow = z.strictObject({
+  serverId: id,
+  definition: str,
+  hash: str,
+  hostId: id.nullable(),
+  engine: str,
+  engineVersion: str.default(""),
+  containerName: str,
+  publish: str.default("{}"),
+  env: str.default("{}"),
+  // Added with exits' VPN services: absent from older files.
+  plainValues: str.default("{}"),
+  registeredId: id.nullable(),
+  createdAt: date,
+  updatedAt: date,
+})
+
+// Exits, added with exits: absent from older files.
+const ExitRow = z.strictObject({
+  id,
+  vaultId: id,
+  name: str,
+  label: str.default(""),
+  kind: str,
+  serverId: id,
+  serviceId: id.nullable().default(null),
+  createdAt: date,
   updatedAt: date,
 })
 
@@ -486,6 +530,8 @@ export const PayloadSchema = z.strictObject({
     tools: z.array(McpToolRow),
     openApiSpecs: z.array(OpenApiSpecRow),
     wrapperSpecs: z.array(WrapperSpecRow).default([]),
+    serviceSpecs: z.array(ServiceSpecRow).default([]),
+    exits: z.array(ExitRow).default([]),
     repos: z.array(RepoRow).default([]),
     repoItems: z.array(RepoItemRow).default([]),
     repoExclusions: z.array(RepoExclusionRow).default([]),
@@ -525,6 +571,7 @@ export type ExportPreview = {
     endpoints: number
     mailAccounts: number
     sshServers: number
+    services: number
     calendarAccounts: number
     wrappers: number
     tools: number
@@ -735,6 +782,17 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(spec.serverId, servers, "a server")
   }
 
+  for (const spec of tables.serviceSpecs) {
+    pointsAt(spec.serverId, servers, "a server")
+    pointsAt(spec.hostId, servers, "a service's SSH server")
+    pointsAt(spec.registeredId, servers, "the server a service registered")
+  }
+
+  for (const exit of tables.exits) {
+    pointsAt(exit.serverId, servers, "an exit's SSH server")
+    pointsAt(exit.serviceId, servers, "an exit's service")
+  }
+
   for (const repo of tables.repos) {
     pointsAt(repo.secretId, secrets, "a repository's secret")
   }
@@ -802,6 +860,7 @@ export function previewOf(
         (row) => row.kind === "jmap" || row.kind === "imap",
       ).length,
       sshServers: tables.servers.filter((row) => row.kind === "ssh").length,
+      services: tables.servers.filter((row) => row.kind === "service").length,
       calendarAccounts: tables.servers.filter((row) => row.kind === "caldav")
         .length,
       wrappers: tables.servers.filter((row) => row.kind === "wrapper").length,
@@ -894,6 +953,8 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: Covers<McpTool, z.output<typeof McpToolRow>>
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
+  serviceSpec: Covers<ServiceSpec, z.output<typeof ServiceSpecRow>>
+  exit: Covers<Exit, z.output<typeof ExitRow>>
   repo: Covers<Repo, z.output<typeof RepoRow>>
   repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
   repoExclusion: Covers<RepoExclusion, z.output<typeof RepoExclusionRow>>
@@ -920,6 +981,8 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: true,
   openApiSpec: true,
   wrapperSpec: true,
+  serviceSpec: true,
+  exit: true,
   repo: true,
   repoItem: true,
   repoExclusion: true,

@@ -1,13 +1,24 @@
+import type { Duplex } from "node:stream"
+
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2"
 
 import { PCP_VERSION } from "../version"
 import { hostKeyLine } from "./keys"
-import { SSH_CONNECT_TIMEOUT_MS } from "./limits"
+import {
+  SSH_CHANNEL_OPEN_TIMEOUT_MS,
+  SSH_CONNECT_TIMEOUT_MS,
+  SSH_EXIT_IDLE_MS,
+  SSH_EXIT_MAX_CHANNELS,
+  SSH_EXIT_MAX_CONNECTIONS,
+  SSH_KEEPALIVE_COUNT,
+  SSH_KEEPALIVE_INTERVAL_MS,
+} from "./limits"
 
 /**
  * PCP's SSH connections, through ssh2: one connection per call, signed in
  * with PCP's own key and nothing else, to a host whose key is the one PCP
- * pinned.
+ * pinned; and, for an exit (lib/core/exits/), one long-lived connection per
+ * SSH server that carries direct-tcpip channels.
  *
  * - The host key is checked against the pin when there is one. Without
  *   one, the key the server shows is taken, but reported as seen only after
@@ -15,8 +26,17 @@ import { SSH_CONNECT_TIMEOUT_MS } from "./limits"
  *   the server's signature, so a key is worth keeping only once the
  *   `handshake` event says the server proved it holds it.
  * - Only publickey: no password, no keyboard-interactive, no agent.
- * - One session channel, one command with `exec`: no terminal, no
- *   forwarding of any kind, no file transfer.
+ * - One session channel, one command with `exec`: no terminal, no file
+ *   transfer.
+ * - Forwarding for exits only, and only outbound: `openChannel` opens a
+ *   direct-tcpip channel to an address and port the exits module checked
+ *   from the exit's side (lib/core/exits/check.ts), or to the loopback port
+ *   of an exit container PCP started itself. Never remote forwarding
+ *   (tcpip-forward), never a Unix socket (streamlocal), never the agent or
+ *   X11: a channel the server opens towards PCP is refused (ssh2 refuses
+ *   every one PCP did not ask for, and PCP asks for none). A channel opens
+ *   only on a host whose key the owner pinned, and a connection is made
+ *   only with the key a request handed in (no reconnect in the background).
  */
 
 /** Modern algorithms only: ssh2's defaults still carry SHA-1 ones. */
@@ -113,6 +133,7 @@ async function open(
   target: SshTarget,
   identity: SshIdentity,
   onSeen: (seen: HostSeen) => Promise<void>,
+  extra: Partial<ConnectConfig> = {},
 ): Promise<Session> {
   const client = new Client()
   const seen: HostSeen = { hostKey: null }
@@ -169,6 +190,7 @@ async function open(
           shown = hostKeyLine(key)
           return target.hostKey === null || shown === target.hostKey
         },
+        ...extra,
       })
     })
   } catch (error) {
@@ -335,4 +357,313 @@ export async function sshExec(
   result.stdout = Buffer.concat(stdout)
   result.stderr = Buffer.concat(stderr)
   return result
+}
+
+// ---- Channels for exits ---------------------------------------------------
+
+/** The server would not open the channel: forwarding is off for PCP's login. */
+export class SshForwardingRefusedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SshForwardingRefusedError"
+  }
+}
+
+/** The owner has not pinned the host's key: no channel opens there. */
+export class SshUnpinnedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SshUnpinnedError"
+  }
+}
+
+/** No connection is open, and the caller had no key to make one with. */
+export class SshNotConnectedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SshNotConnectedError"
+  }
+}
+
+/** One long-lived connection that carries an exit's channels. */
+type Pooled = {
+  key: string
+  client: Client
+  /** The address the socket connected to: the exit's own, from its side too. */
+  remoteAddress: string | null
+  channels: number
+  idleTimer: NodeJS.Timeout | null
+  closed: boolean
+}
+
+type Pool = {
+  open: Map<string, Pooled>
+  /** Connections being made, so two calls at once make one. */
+  opening: Map<string, Promise<Pooled>>
+}
+
+const POOL = Symbol.for("pcp.ssh.channels")
+
+/**
+ * Kept on globalThis: the gateway, the Server Actions and the browser's
+ * proxy are bundled apart and would otherwise each hold a pool of their own.
+ */
+function pool(): Pool {
+  const holder = globalThis as unknown as { [POOL]?: Pool }
+  holder[POOL] ??= { open: new Map(), opening: new Map() }
+  return holder[POOL]
+}
+
+/**
+ * Which connection a channel goes on: the caller's name for it (the SSH
+ * server's id) and everything that would make it another connection. A
+ * changed address, login or pinned key is a new connection, never the old.
+ */
+function poolKey(name: string, target: SshTarget): string {
+  return [
+    name,
+    target.host,
+    target.port,
+    target.username,
+    target.hostKey ?? "",
+  ].join("\n")
+}
+
+function closePooled(entry: Pooled): void {
+  if (entry.closed) return
+  entry.closed = true
+  if (entry.idleTimer) clearTimeout(entry.idleTimer)
+  entry.idleTimer = null
+  if (pool().open.get(entry.key) === entry) pool().open.delete(entry.key)
+  entry.client.end()
+}
+
+/** Closes the connection once it has carried nothing for a while. */
+function idleLater(entry: Pooled): void {
+  if (entry.idleTimer) clearTimeout(entry.idleTimer)
+  entry.idleTimer = null
+
+  if (entry.channels === 0 && !entry.closed) {
+    entry.idleTimer = setTimeout(() => closePooled(entry), SSH_EXIT_IDLE_MS)
+    entry.idleTimer.unref()
+  }
+}
+
+async function connectPooled(
+  key: string,
+  target: SshTarget,
+  identity: SshIdentity,
+): Promise<Pooled> {
+  const state = pool()
+
+  if (state.open.size + state.opening.size >= SSH_EXIT_MAX_CONNECTIONS) {
+    throw new Error(
+      `PCP already keeps ${SSH_EXIT_MAX_CONNECTIONS} exit connections open. Try again in a few minutes.`,
+    )
+  }
+
+  // A call's connection never pins a key: the exit's host has one already.
+  const { client } = await open(target, identity, async () => {}, {
+    keepaliveInterval: SSH_KEEPALIVE_INTERVAL_MS,
+    keepaliveCountMax: SSH_KEEPALIVE_COUNT,
+  })
+  const socket = (client as unknown as { _sock?: { remoteAddress?: string } })
+    ._sock
+  const entry: Pooled = {
+    key,
+    client,
+    remoteAddress: socket?.remoteAddress ?? null,
+    channels: 0,
+    idleTimer: null,
+    closed: false,
+  }
+
+  client.on("error", () => closePooled(entry))
+  client.on("close", () => closePooled(entry))
+  // ssh2 refuses every channel PCP did not ask for (it asks for none), and
+  // hears no other request; these listeners only keep it that way.
+  client.on("tcp connection", (_info, _accept, reject) => reject())
+  client.on("unix connection", (_info, _accept, reject) => reject())
+  client.on("x11", (_info, _accept, reject) => reject())
+  idleLater(entry)
+  return entry
+}
+
+/**
+ * The connection for `name`, made with `identity` if none is open. Without
+ * an identity only an open one is used: the browser's proxy dials between
+ * requests, holding no key, and so never connects on its own.
+ */
+async function pooled(
+  name: string,
+  target: SshTarget,
+  identity: SshIdentity | null,
+): Promise<Pooled> {
+  if (!target.hostKey) {
+    throw new SshUnpinnedError(
+      `PCP has not pinned ${target.host}'s host key yet, so it does not connect: the owner checks the server on its page first.`,
+    )
+  }
+
+  const key = poolKey(name, target)
+  const state = pool()
+  const open = state.open.get(key)
+
+  if (open && !open.closed) {
+    return open
+  }
+
+  if (!identity) {
+    throw new SshNotConnectedError(
+      `PCP's connection to ${target.host} is closed. It opens again with the next call that uses the exit.`,
+    )
+  }
+
+  let opening = state.opening.get(key)
+
+  if (!opening) {
+    opening = connectPooled(key, target, identity).then((entry) => {
+      state.open.set(key, entry)
+      return entry
+    })
+    state.opening.set(key, opening)
+    void opening.finally(() => state.opening.delete(key)).catch(() => {})
+  }
+
+  return opening
+}
+
+/**
+ * Makes sure the connection for `name` is open, with the key a request
+ * handed in, and returns the address PCP connected to (the exit's own).
+ */
+export async function ensureSshConnection(
+  name: string,
+  target: SshTarget,
+  identity: SshIdentity,
+): Promise<{ remoteAddress: string | null }> {
+  const entry = await pooled(name, target, identity)
+  if (entry.channels === 0) idleLater(entry)
+  return { remoteAddress: entry.remoteAddress }
+}
+
+/** The address an open connection for `name` went to; null if none is open. */
+export function sshConnectionAddress(
+  name: string,
+  target: SshTarget,
+): string | null {
+  const entry = pool().open.get(poolKey(name, target))
+  return entry && !entry.closed ? entry.remoteAddress : null
+}
+
+/** Closes every exit connection for `name` (an SSH server changed or went). */
+export function closeSshConnections(name: string): void {
+  for (const entry of [...pool().open.values()]) {
+    if (entry.key.startsWith(`${name}\n`)) closePooled(entry)
+  }
+}
+
+/** Every exit connection: at shutdown, a restore, or between tests. */
+export function closeAllSshConnections(): void {
+  for (const entry of [...pool().open.values()]) closePooled(entry)
+}
+
+/**
+ * Opens a direct-tcpip channel from the SSH server to `host`:`port`, on the
+ * long-lived connection for `name` (made with `identity` when none is open,
+ * and only then). `host` is an address the exits module checked, never a
+ * name an assistant gave. The channel is a Duplex: what is written goes to
+ * the address, what it sends comes back.
+ */
+export async function openChannel(
+  name: string,
+  target: SshTarget,
+  identity: SshIdentity | null,
+  host: string,
+  port: number,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<Duplex> {
+  signal?.throwIfAborted()
+  const entry = await pooled(name, target, identity)
+
+  if (entry.channels >= SSH_EXIT_MAX_CHANNELS) {
+    throw new Error(
+      `PCP already has ${SSH_EXIT_MAX_CHANNELS} connections open through ${target.host}. Try again in a moment.`,
+    )
+  }
+
+  entry.channels++
+  if (entry.idleTimer) clearTimeout(entry.idleTimer)
+  entry.idleTimer = null
+  let counted = true
+  const release = () => {
+    if (!counted) return
+    counted = false
+    entry.channels = Math.max(0, entry.channels - 1)
+    idleLater(entry)
+  }
+
+  try {
+    const channel = await new Promise<ClientChannel>((resolve, reject) => {
+      let settled = false
+      const finish = (error: Error | null, stream?: ClientChannel) => {
+        if (settled) {
+          // Too late: the caller gave up or the time ran out.
+          stream?.destroy()
+          return
+        }
+        settled = true
+        clearTimeout(timer)
+        signal?.removeEventListener("abort", aborted)
+        if (error) reject(error)
+        else resolve(stream!)
+      }
+      const aborted = () =>
+        finish(
+          signal?.reason instanceof Error
+            ? signal.reason
+            : new Error("aborted"),
+        )
+      const timer = setTimeout(
+        () =>
+          finish(
+            new Error(
+              `${target.host} did not open a connection to ${host}:${port} within ${SSH_CHANNEL_OPEN_TIMEOUT_MS / 1000} seconds.`,
+            ),
+          ),
+        SSH_CHANNEL_OPEN_TIMEOUT_MS,
+      )
+      signal?.addEventListener("abort", aborted, { once: true })
+
+      try {
+        entry.client.forwardOut("127.0.0.1", 0, host, port, (error, stream) => {
+          if (!error) {
+            finish(null, stream)
+            return
+          }
+
+          const reason = (error as Error & { reason?: unknown }).reason
+          finish(
+            reason === 1
+              ? new SshForwardingRefusedError(
+                  `${target.host} does not let PCP open connections through it: TCP forwarding is off for ${target.username} (AllowTcpForwarding in its sshd_config, or restrict or no-port-forwarding on PCP's key in authorized_keys).`,
+                )
+              : new Error(
+                  `${target.host} could not connect to ${host}:${port} (${error.message.replace(/^\(SSH\) Channel open failure:\s*/, "") || "refused"}).`,
+                ),
+          )
+        })
+      } catch (error) {
+        // The connection closed under it.
+        closePooled(entry)
+        finish(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+
+    channel.once("close", release)
+    return channel
+  } catch (error) {
+    release()
+    throw error
+  }
 }

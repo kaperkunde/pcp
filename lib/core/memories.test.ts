@@ -40,6 +40,12 @@ import {
   type MemoryOutcome,
   type MemoryScope,
 } from "./memories"
+import {
+  checkPermission,
+  decidePermission,
+  getPermissionView,
+  withPermission,
+} from "./permissions"
 import { SKILL_FILE, SKILL_ROOT } from "./skills"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
@@ -578,6 +584,131 @@ describe("a shared memory", () => {
         new_path: "/memories/units.md",
       }),
     ).rejects.toThrow(/Only the owner can stop sharing/)
+  })
+})
+
+describe("several changes to one shared memory while a request waits", () => {
+  const web = { publicUrl: "http://localhost:3000" }
+  const path = "/memories/shared/units.md"
+  const ask = async (scope: MemoryScope, args: MemoryCommand) =>
+    (
+      await withPermission(
+        { ...scope, publicUrl: web.publicUrl },
+        askOf(await run(scope, args)),
+      )
+    ).content
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("")
+  const pending = async (tokenId: string) =>
+    db().permissionRequest.findMany({ where: { tokenId, status: "pending" } })
+
+  it("folds a second edit into the request still waiting, which the owner approves whole", async () => {
+    const { id } = await createMemory(ctx, {
+      path: "units.md",
+      text: "Metric units.\nCelsius.",
+    })
+
+    await ask(bob, {
+      command: "str_replace",
+      path,
+      old_str: "Metric",
+      new_str: "SI",
+    })
+    const [first] = await pending(bob.tokenId)
+    const told = await ask(bob, {
+      command: "insert",
+      path,
+      insert_line: 2,
+      insert_text: "24-hour clock.",
+    })
+
+    expect(told).toContain(
+      `Folded into the open request ${first!.id} (now shows both changes)`,
+    )
+    expect(await pending(bob.tokenId)).toHaveLength(1)
+    const view = await getPermissionView(ctx, first!.id, web)
+    expect(view?.memory).toMatchObject({
+      before: "Metric units.\nCelsius.",
+      text: "SI units.\nCelsius.\n24-hour clock.",
+    })
+
+    await decidePermission(ctx, first!.id, "allow_once", {
+      ...web,
+      revision: view!.revision,
+    })
+    expect((await listMemories(ctx)).find((m) => m.id === id)?.text).toBe(
+      "SI units.\nCelsius.\n24-hour clock.",
+    )
+  })
+
+  it("folds edits into a memory still waiting to be shared", async () => {
+    await ask(bob, {
+      command: "create",
+      path: "/memories/shared/clock.md",
+      file_text: "12-hour clock.",
+    })
+    await ask(bob, {
+      command: "str_replace",
+      path: "/memories/shared/clock.md",
+      old_str: "12",
+      new_str: "24",
+    })
+    await ask(bob, {
+      command: "create",
+      path: "/memories/shared/clock.md",
+      file_text: "24-hour clock, always.",
+      every: true,
+    })
+
+    const rows = await pending(bob.tokenId)
+    expect(rows).toHaveLength(1)
+    expect(
+      (await getPermissionView(ctx, rows[0]!.id, web))?.memory,
+    ).toMatchObject({ text: "24-hour clock, always.", always: true })
+    await expect(
+      run(bob, { command: "delete", path: "/memories/shared/clock.md" }),
+    ).rejects.toThrow(/not shared yet: your open request/)
+  })
+
+  it("shows another token's request as a conflict, and explains the change that went stale", async () => {
+    await createMemory(ctx, { path: "units.md", text: "Metric units." })
+
+    await ask(bob, {
+      command: "str_replace",
+      path,
+      old_str: "Metric",
+      new_str: "SI",
+    })
+    await ask(alice, {
+      command: "str_replace",
+      path,
+      old_str: "units",
+      new_str: "measures",
+    })
+    const [mine] = await pending(bob.tokenId)
+    const [theirs] = await pending(alice.tokenId)
+
+    expect((await getPermissionView(ctx, mine!.id, web))?.conflicts).toEqual([
+      expect.objectContaining({ id: theirs!.id, tokenName: "Alice" }),
+    ])
+    expect((await getPermissionView(ctx, theirs!.id, web))?.conflicts).toEqual([
+      expect.objectContaining({ id: mine!.id, tokenName: "Bob" }),
+    ])
+
+    await decidePermission(ctx, theirs!.id, "allow_once", web)
+    await decidePermission(ctx, mine!.id, "allow_once", web)
+
+    const told = (
+      await checkPermission(
+        { ctx, tokenId: bob.tokenId, publicUrl: web.publicUrl },
+        mine!.id,
+      )
+    ).content
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("")
+    expect(told).toContain("changed after the owner was asked")
+    expect(told).toContain("propose your change anew on the text it has now")
+    expect((await listMemories(ctx))[0]?.text).toBe("Metric measures.")
   })
 })
 

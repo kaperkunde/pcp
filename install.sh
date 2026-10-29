@@ -76,6 +76,15 @@
 # watcher notes the last request it answered in ~/.local/state/pcp, or as
 # root in /var/lib/pcp. PCP_ROOT_PREFIX puts all of root's paths under another
 # directory; it exists for the tests and nothing else.
+#
+# The image carries this installer too, at /app/install.sh. `update` reads it
+# out of the image it has just pulled (never out of the running PCP), and
+# when it differs from the copy, makes it the copy and runs it instead, so
+# the unit is written as the installer of the version being installed
+# writes it, not as the one saved at install time did. The line below marks
+# a file as this installer, in a shape that copy knows how to run.
+
+# pcp-installer-format: 1
 
 set -eu
 
@@ -83,6 +92,12 @@ SCRIPT_URL="https://raw.githubusercontent.com/kaperkunde/pcp/main/install.sh"
 GUIDE_URL="https://github.com/kaperkunde/pcp/blob/main/docs/self-hosting.md"
 README_URL="https://github.com/kaperkunde/pcp#run-it"
 DEFAULT_IMAGE="ghcr.io/kaperkunde/pcp"
+# Where the Dockerfile puts this installer in the image, and the line that
+# marks a file as one (above). A copy that finds a different format there
+# keeps running itself.
+IMAGE_INSTALLER="/app/install.sh"
+INSTALLER_MARK="# pcp-installer-format: 1"
+INSTALLER_MAX_BYTES=262144
 CONTAINER="pcp"
 PORT_FILE="/proc/sys/net/ipv4/ip_unprivileged_port_start"
 
@@ -766,6 +781,21 @@ write_unit() {
   } >"$UNIT"
 }
 
+# Drop-ins next to the unit (pcp.container.d/) change what this installer
+# writes. They are the owner's, so they stay; the note names them, since one
+# may do what the unit now does itself (a hand-added AddDevice=/dev/dri).
+dropin_note() {
+  [ -d "$UNIT.d" ] || return 0
+  dropins=
+  for dropin in "$UNIT.d"/*; do
+    if [ -e "$dropin" ]; then
+      dropins="$dropins ${dropin##*/}"
+    fi
+  done
+  [ -n "$dropins" ] || return 0
+  warn "" "Note: $UNIT.d holds drop-ins that change PCP's unit:$dropins. This installer leaves them as they are; check that each is still needed, since the unit may now do the same itself (the graphics card, say)."
+}
+
 # Podman 4.4 or newer with systemd: a Quadlet unit, started now and at boot.
 install_quadlet() {
   pull_image
@@ -1009,13 +1039,88 @@ image_id() {
   "$RUNTIME" image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true
 }
 
+# Whether a file read out of the image is this installer: not empty and not
+# overly large, a POSIX sh script with the format line this copy knows, and
+# one sh can parse.
+installer_ok() {
+  size=$(wc -c <"$1" 2>/dev/null) || return 1
+  size=${size##* }
+  case "$size" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "$size" -gt 0 ] && [ "$size" -le "$INSTALLER_MAX_BYTES" ] || return 1
+  [ "$(head -n 1 "$1")" = "#!/bin/sh" ] || return 1
+  grep -qx "$INSTALLER_MARK" "$1" || return 1
+  /bin/sh -n "$1" 2>/dev/null
+}
+
+# The installer in the image just pulled ($1, its id, so it is that image and
+# not whatever the tag names by now), read in a container of its own with no
+# network and nothing mounted. Never out of the running PCP: a PCP that was
+# taken over could change its own files, not an image. When it differs from
+# the copy the timers run, it becomes that copy and runs this update in this
+# copy's place, with the settings this run settled on (a channel the request
+# named among them), so the unit is written as the installer of the version
+# being installed writes it. It runs `update`, never `watch`, whose request
+# was noted as answered already, and PCP_UPDATER_REEXEC=1 keeps it from
+# reading the image again. Without a copy (no timer of PCP's) there is
+# nothing to keep current. Whatever goes wrong leaves the update to this
+# copy, with a note: an image without the file, or one this copy does not
+# take, never stops an update.
+adopt_image_installer() {
+  [ -f "$UPDATER" ] || return 0
+  fresh="$UPDATER.image"
+  if ! "$RUNTIME" run --rm --network none --no-healthcheck --entrypoint cat \
+    "${1:-$IMAGE}" "$IMAGE_INSTALLER" >"$fresh" 2>/dev/null; then
+    rm -f "$fresh"
+    warn "Note: could not read the installer in $IMAGE; updating with the copy in $UPDATER."
+    return 0
+  fi
+  if ! installer_ok "$fresh"; then
+    rm -f "$fresh"
+    warn "Note: $IMAGE_INSTALLER in $IMAGE is not an installer this copy takes; updating with the copy in $UPDATER."
+    return 0
+  fi
+  if cmp -s "$fresh" "$UPDATER"; then
+    rm -f "$fresh"
+    return 0
+  fi
+  if [ "$ROOT" = 1 ]; then
+    chmod 0644 "$fresh"
+  fi
+  if ! mv "$fresh" "$UPDATER"; then
+    rm -f "$fresh"
+    warn "Note: could not replace $UPDATER with the installer in $IMAGE; updating with the copy."
+    return 0
+  fi
+  say "The installer in $IMAGE differs from the copy in $UPDATER; it is the copy now, and goes on with the update."
+  PCP_RUNTIME=$RUNTIME
+  if [ -n "$PINNED_VERSION" ]; then
+    PCP_VERSION=$PINNED_VERSION
+    export PCP_VERSION
+  else
+    unset PCP_VERSION
+  fi
+  PCP_UPDATER_REEXEC=1
+  export PCP_UPDATER_REEXEC PCP_PORT PCP_HTTPS PCP_RUNTIME PCP_DATA_VOLUME \
+    PCP_AUTO_UPDATE PCP_UPDATE_BUTTON PCP_CHANNEL PCP_GPU PCP_IMAGE
+  exec /bin/sh "$UPDATER" update
+}
+
 # What the daily timer runs: fetch the image, and start PCP again only when
-# there is a new one (or PCP is not running).
+# there is a new one (or PCP is not running). A copy run in another's place
+# (PCP_UPDATER_REEXEC=1) finds the image pulled already, and installs: it
+# runs because the installer changed, and its unit may differ.
 update() {
   UPDATING=1
   before=$(image_id)
   "$RUNTIME" pull -q "$IMAGE" >/dev/null || die "Could not pull $IMAGE. Check that this computer reaches ghcr.io."
   after=$(image_id)
+  if [ "${PCP_UPDATER_REEXEC:-}" = 1 ]; then
+    install
+    return 0
+  fi
+  adopt_image_installer "$after"
   if [ -n "$after" ] && [ "$before" = "$after" ] && container_running; then
     say "PCP is up to date: $IMAGE has not changed."
     return 0
@@ -1134,6 +1239,9 @@ install() {
   save_conf
   wait_for_health
   gpu_note
+  if [ "$MODE" = quadlet ]; then
+    dropin_note
+  fi
   if [ "$UPDATING" = 1 ]; then
     say "PCP is updated: $IMAGE."
     return 0

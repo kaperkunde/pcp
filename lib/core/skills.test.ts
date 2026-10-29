@@ -20,11 +20,9 @@ import { db } from "./db"
 import {
   buildGatewayServer,
   buildInstructions,
-  DESCRIBE_TOOL_RENAMED,
   instructionsPreview,
   loadGatewayServers,
   READ_MEMORY_NOTE,
-  SEARCH_TOOLS_RENAMED,
   skillInstructions,
   type GatewayScope,
 } from "./gateway"
@@ -680,6 +678,189 @@ describe("an assistant's change to a skill", () => {
   })
 })
 
+describe("several changes to one skill while a request waits", () => {
+  const path = "/skills/send-postcards/SKILL.md"
+  const edit = (scoped: SkillScope, old_str: string, new_str: string) =>
+    runSkillCommand(scoped, { command: "str_replace", path, old_str, new_str })
+  const ask = async (on: GatewayScope, outcome: SkillOutcome) =>
+    withPermission(on, askOf(outcome))
+
+  async function otherToken(): Promise<GatewayScope> {
+    const { token } = await createApiToken(ctx, {
+      name: "Codex",
+      allowAllServers: true,
+      keepMemories: true,
+    })
+    return { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+  }
+
+  it("folds a second edit into the request still waiting, which the owner approves whole", async () => {
+    const { id } = await ownerSkill()
+
+    await ask(scope, await edit(skillScope(), "1. Look up", "1. First look up"))
+    const first = await onlyRequestId()
+    const folded = textOf(
+      await ask(
+        scope,
+        await edit(skillScope(), "2. Send it", "2. Then send it"),
+      ),
+    )
+
+    expect(folded).toContain(
+      `Folded into the open request ${first} (now shows both changes); the owner approves them together.`,
+    )
+    // The link still ends the answer.
+    expect(folded.trimEnd()).toMatch(new RegExp(`/permissions/${first}\\)?$`))
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    const view = await getPermissionView(ctx, first, web)
+    expect(view?.lines).toContain("Version: 1 → 2")
+    expect(view?.skill?.diff).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "added",
+          text: "1. First look up the address in addresses.md.",
+        },
+        {
+          kind: "added",
+          text: "2. Then send it with postcards/send_postcard.",
+        },
+      ]),
+    )
+
+    const answer = await decidePermission(ctx, first, "allow_once", {
+      ...web,
+      revision: view!.revision,
+    })
+    expect(answer.isError, textOf(answer)).toBeFalsy()
+    expect(await getSkill(ctx, id)).toMatchObject({
+      version: 2,
+      body: expect.stringMatching(/First look up[\s\S]*Then send it/),
+    })
+  })
+
+  it("finds the same request when an edit is asked again, and refuses an answer to what the owner did not read", async () => {
+    await ownerSkill()
+
+    await ask(scope, await edit(skillScope(), "1. Look up", "1. First look up"))
+    const first = await onlyRequestId()
+    const before = (await getPermissionView(ctx, first, web))!.revision
+    await ask(scope, await edit(skillScope(), "1. Look up", "1. First look up"))
+    expect((await getPermissionView(ctx, first, web))!.revision).toBe(before)
+
+    await ask(scope, await edit(skillScope(), "2. Send it", "2. Then send it"))
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    const stale = await decidePermission(ctx, first, "allow_once", {
+      ...web,
+      revision: before,
+    })
+    expect(stale.isError).toBe(true)
+    expect(textOf(stale)).toContain(
+      "added to this request while you had it open",
+    )
+    expect((await getPermissionView(ctx, first, web))?.status).toBe("pending")
+
+    await expect(
+      edit(skillScope(), "2. Send it", "2. Then send it"),
+    ).rejects.toThrow(`Your open request ${first} holds your earlier changes`)
+  })
+
+  it("adds a file to a skill whose adding still waits", async () => {
+    await ask(
+      scope,
+      await runSkillCommand(skillScope(), {
+        command: "create",
+        path,
+        file_text: POSTCARDS,
+      }),
+    )
+    const first = await onlyRequestId()
+    await ask(
+      scope,
+      await runSkillCommand(skillScope(), {
+        command: "create",
+        path: "/skills/send-postcards/addresses.md",
+        file_text: "Grace: 1 Main Street",
+      }),
+    )
+    expect(await db().permissionRequest.count()).toBe(1)
+
+    await expect(
+      runSkillCommand(skillScope(), {
+        command: "delete",
+        path: "/skills/send-postcards",
+      }),
+    ).rejects.toThrow(/not added yet: your open request/)
+
+    await decidePermission(ctx, first, "allow_once", web)
+    const [skill] = await listSkills(ctx)
+    expect(skill).toMatchObject({ name: "send-postcards", version: 1 })
+    expect(skill!.files).toEqual([
+      { path: "addresses.md", text: "Grace: 1 Main Street" },
+    ])
+  })
+
+  it("asks anew once the owner answered, and explains a change that went stale", async () => {
+    await ownerSkill()
+
+    await ask(scope, await edit(skillScope(), "1. Look up", "1. First look up"))
+    const first = await onlyRequestId()
+    await decidePermission(ctx, first, "decline", web)
+
+    await ask(scope, await edit(skillScope(), "2. Send it", "2. Then send it"))
+    const second = await onlyRequestId()
+    expect(second).not.toBe(first)
+    expect((await getSkill(ctx, (await listSkills(ctx))[0]!.id)).version).toBe(
+      1,
+    )
+
+    // Another token's change to the same skill: a request of its own, and
+    // each page says the two conflict.
+    const codex = await otherToken()
+    await ask(
+      codex,
+      await edit(
+        { ctx, tokenId: codex.tokenId, skillIds: codex.skillIds },
+        "1. Look up",
+        "1. Find",
+      ),
+    )
+    const theirs = (await db().permissionRequest.findFirst({
+      where: { tokenId: codex.tokenId },
+    }))!.id
+    const mine = await getPermissionView(ctx, second, web)
+    const other = await getPermissionView(ctx, theirs, web)
+    expect(mine?.conflicts).toEqual([
+      expect.objectContaining({ id: theirs, tokenName: "Codex" }),
+    ])
+    expect(other?.conflicts).toEqual([
+      expect.objectContaining({ id: second, tokenName: "Claude" }),
+    ])
+    // Not the assistant's to read.
+    expect(
+      textOf(
+        await ask(
+          scope,
+          await edit(skillScope(), "2. Send it", "2. Then send it"),
+        ),
+      ),
+    ).not.toContain(theirs)
+
+    await decidePermission(ctx, theirs, "allow_once", web)
+    expect((await getPermissionView(ctx, second, web))?.conflicts).toEqual([])
+
+    const answer = await decidePermission(ctx, second, "allow_once", web)
+    expect(answer.isError).toBe(true)
+    const told = textOf(await checkPermission(scope, second))
+    expect(told).toContain("did not go through")
+    expect(told).toContain(
+      "they were shown a change to version 1; it is at version 2 now",
+    )
+    expect(told).toContain("propose your change anew on top of version 2")
+  })
+})
+
 describe("the owner's note on a skill, as an assistant proposes it", () => {
   const notePath = "/skills/send-postcards/.note"
 
@@ -744,6 +925,31 @@ describe("the owner's note on a skill, as an assistant proposes it", () => {
       path: notePath,
     })
     expect("ask" in away && away.ask.kind).toBe("note_change")
+  })
+
+  it("is proposed again in the request still waiting, the newer note replacing the older", async () => {
+    await ownerSkill()
+    const propose = async (note: string) => {
+      const outcome = await runSkillCommand(skillScope(), {
+        command: "create",
+        path: notePath,
+        file_text: note,
+      })
+      if (!("ask" in outcome)) {
+        throw new Error("expected a note's request")
+      }
+      return textOf(await withPermission(scope, outcome.ask))
+    }
+
+    await propose("For the family ones only.")
+    const first = await onlyRequestId()
+    expect(await propose("For friends and family.")).toContain(
+      `Replaced the note in your open request ${first}`,
+    )
+    expect(await db().permissionRequest.count()).toBe(1)
+    expect((await getPermissionView(ctx, first, web))?.lines).toContain(
+      "Your note after, which every assistant that sees this skill reads as yours:\nFor friends and family.",
+    )
   })
 
   it("is refused when it is not one line that fits, and is never a file's name", async () => {
@@ -947,7 +1153,7 @@ describe("search and describe", () => {
     await client.close()
   })
 
-  it("describes a tool as describe_tool did, by ref or by server and tool, and a memory as view does", async () => {
+  it("describes a tool by ref or by server and tool, and a memory as view does", async () => {
     const client = await connect()
     const byRef = await call(client, "describe", {
       ref: "postcards/send_postcard",
@@ -979,34 +1185,14 @@ describe("search and describe", () => {
     await client.close()
   })
 
-  it("keeps search_tools and describe_tool working as before, each saying what took its place", async () => {
+  it("no longer has search_tools and describe_tool, whose release has passed", async () => {
     const client = await connect()
-    const search = await call(client, "search_tools", { query: "postcard" })
-    const [lead, blank, ...rest] = search.text.split("\n")
+    const names = (await client.listTools()).tools.map((tool) => tool.name)
 
-    expect(lead).toBe(SEARCH_TOOLS_RENAMED)
-    expect(lead).toBe(
-      "search_tools is now search (tools, skills and memories); use search.",
-    )
-    expect(blank).toBe("")
-    expect(rest[0]).toMatch(/^postcards\/send_postcard — /)
-    expect(search.text).not.toContain("skill:")
-
-    const described = await call(client, "describe_tool", {
-      server: "postcards",
-      tool: "send_postcard",
-    })
-    expect(described.text.startsWith(`${DESCRIBE_TOOL_RENAMED}\n\n`)).toBe(true)
-    expect(
-      JSON.parse(described.text.slice(DESCRIBE_TOOL_RENAMED.length + 2)),
-    ).toMatchObject({ tool: "send_postcard" })
-
-    const missing = await call(client, "describe_tool", {
-      server: "postcards",
-      tool: "nope",
-    })
-    expect(missing.isError).toBe(true)
-    expect(missing.text.startsWith(DESCRIBE_TOOL_RENAMED)).toBe(true)
+    expect(names).toContain("search")
+    expect(names).toContain("describe")
+    expect(names).not.toContain("search_tools")
+    expect(names).not.toContain("describe_tool")
     await client.close()
   })
 

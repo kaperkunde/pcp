@@ -195,6 +195,16 @@ export default defineConfig({
       use: signedIn("ssh"),
     },
     {
+      // A service on an SSH server: launched from its page with a secret
+      // for its variable, its API endpoint registered in the same step,
+      // stopped and started again. The engine is a fake docker run by a
+      // real sh on the test SSH server.
+      name: "services",
+      testMatch: /services\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("services"),
+    },
+    {
       // Per-token tool access and the owner's permission: the link (also for
       // a client that offers prompts and panels), Block, copying access,
       // tool levels and servers an assistant proposes.

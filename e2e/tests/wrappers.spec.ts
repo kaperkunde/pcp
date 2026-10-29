@@ -88,12 +88,12 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
       {
         name: "lookup",
         description: "Looks a text up; the key is filled in.",
-        inputSchema: {
+        input_schema: {
           type: "object",
           properties: { text: { type: "string" } },
           required: ["text"],
         },
-        outputSchema: { type: "string" },
+        output_schema: { type: "string" },
         program: `return await pcp.call("${SLUG}", "keyed_echo", { api_key: { $secret: "${KEY_NAME}" }, text: args.text })`,
         calls: [`${SLUG}/keyed_echo`],
         replaces: [`${SLUG}/keyed_echo`],
@@ -147,7 +147,7 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
     server: WRAPPER_SLUG,
     tool: "lookup",
   })
-  expect(toolText(described)).toContain('"returns": "string"')
+  expect(toolText(described)).toMatch(/"outputSchema": \{\s*"type": "string"/)
   const answer = await callTool(baseURL!, token, "call_tool", {
     server: WRAPPER_SLUG,
     tool: "lookup",

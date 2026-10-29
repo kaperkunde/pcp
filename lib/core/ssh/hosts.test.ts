@@ -170,7 +170,10 @@ describe("the host key", () => {
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
 
     expect(sync).toMatchObject({ status: "error", toolCount: 1 })
-    expect(sync.message).toContain(`/servers/${id}`)
+    // A markdown link, so an app reading it aloud says the label.
+    expect(sync.message.split("\n").at(-1)).toBe(
+      `[Open Build box's page in PCP](http://localhost:3000/servers/${id})`,
+    )
     expect(fake.logins).toEqual([])
     const row = await getServer(ctx, id)
     expect(row.sshHostKey).toBeNull()
@@ -306,22 +309,40 @@ describe("running commands", () => {
   it("refuses arguments it does not know before connecting", async () => {
     const id = await readyServer()
 
-    await expect(run(id, { command: "ls", pty: true })).rejects.toThrow(
-      /no argument "pty"/,
+    const refusal = async (
+      answer: Promise<Awaited<ReturnType<typeof run>>>,
+      code = "invalid_arguments",
+    ) => {
+      const result = await answer
+      expect(result.isError).toBe(true)
+      expect(result._meta).toEqual({ "gg.pcp/error": { code } })
+      return JSON.stringify(result.content)
+    }
+
+    expect(await refusal(run(id, { command: "ls", pty: true }))).toMatch(
+      /\\"pty\\" is not an argument of this tool/,
     )
-    await expect(
-      run(id, { command: "ls", timeout_seconds: 3600 }),
-    ).rejects.toThrow(/timeout_seconds/)
-    await expect(run(id, { command: "a\0b" })).rejects.toThrow(/NUL/)
-    await expect(
-      callServerTool(
-        ctx,
-        await getServer(ctx, id),
-        "shell",
-        { command: "ls" },
-        PUBLIC,
+    expect(
+      await refusal(run(id, { command: "ls", timeout_seconds: 3600 })),
+    ).toMatch(/timeout_seconds/)
+    expect(await refusal(run(id, { command: "a\0b" }))).toMatch(/NUL/)
+    expect(
+      await refusal(
+        run(id, { command: "ls", stdin: "a", stdin_base64: "YQ==" }),
       ),
-    ).rejects.toThrow(/no tool called shell/)
+    ).toMatch(/Give stdin or stdin_base64, not both/)
+    expect(
+      await refusal(
+        callServerTool(
+          ctx,
+          await getServer(ctx, id),
+          "shell",
+          { command: "ls" },
+          PUBLIC,
+        ),
+        "not_found",
+      ),
+    ).toMatch(/no tool called shell/)
     expect(fake.logins).toEqual([])
   })
 

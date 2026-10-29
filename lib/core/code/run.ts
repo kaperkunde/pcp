@@ -5,6 +5,7 @@ import { isConnectResult } from "../connect"
 import { isPcpError } from "../errors"
 import { bareType, isTextType } from "../media-types"
 import type { CodeCallOutcome, PermissionScope } from "../permissions"
+import { REUSE_EXECUTED_MS } from "../permission-rules"
 import {
   appendRequestLog,
   noteOwnerAsked,
@@ -84,6 +85,9 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  *   program's or the assistant's) can name in place of the value.
  * - `tools` lists what the gateway's list_tools would: the token's servers,
  *   or one server's tools it can see, at its levels. It reaches no server.
+ * - `describe` gives what the gateway's describe would for one of those
+ *   tools (its inputSchema, what it returns, its access), without the
+ *   call_handle, since `call` takes names. It reaches no server either.
  * - `media` makes a smaller copy of one of the token's kept images
  *   (pcp.image.compress: crop, fit, grey, re-encode), decoded here in PCP's
  *   process (media.ts) and never in the program's engine, or takes frames
@@ -118,10 +122,14 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
 /**
  * The run a program's call is made for. `onRun` is told the id of the run
  * a wrapper's tool starts for it (wrappers/run.ts), for the trace.
+ * `deadline` is when the run's own limit ends it (epoch milliseconds): a
+ * call waits for its turn under pacing until shortly before it
+ * (lib/core/pacing/), rather than be refused with work half done.
  */
 export type CallRun = {
   runId: string
   signal: AbortSignal
+  deadline: number
   onRun?: (runId: string) => void
 }
 
@@ -150,6 +158,16 @@ export type CodeCaller = (
 export type CodeLister = (
   server: string | null,
 ) => { ok: true; value: unknown } | { ok: false; error: string }
+
+/**
+ * How the gateway describes one tool for a program: describe's answer for
+ * a tool the token can see, as a value, with no call_handle. A tool it
+ * cannot see is refused as a call to it would be. Nothing is fetched.
+ */
+export type CodeDescriber = (
+  server: string,
+  tool: string,
+) => Promise<{ ok: true; value: unknown } | { ok: false; error: string }>
 
 /** What run_code shows of each part before keeping the rest. */
 const SHOWN_OUTPUT_CHARS = 20_000
@@ -481,7 +499,7 @@ async function answerFor(
         ...effectLines(trace),
         isConnectResult(stop.result)
           ? "Once the owner has connected it (check_server says when), run the program again."
-          : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow, or Allow for while that lasts).",
+          : `If the owner allows it once, that one call runs right then: don't run the program again for it — check_permission gives its answer (an identical call within ${REUSE_EXECUTED_MS / 60_000} minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.`,
       ].join("\n\n"),
       stop.result,
     )
@@ -634,6 +652,8 @@ export async function checkRun(
 export type RunOptions = {
   call: CodeCaller
   list?: CodeLister
+  /** pcp.describe; absent where pcp.tools is (a wrapper's program). */
+  describe?: CodeDescriber
   /** The request's own: the run stops when it goes away (a wrapper's). */
   signal?: AbortSignal
   executor?: Executor
@@ -642,6 +662,12 @@ export type RunOptions = {
   runId?: string
   /** Where the run's calls are traced, for a caller that reads it as it goes. */
   trace?: TraceEntry[]
+  /**
+   * The latest the caller's own run lasts (a run_code program that called
+   * a wrapper's tool): the run's calls wait under pacing until whichever
+   * of it and the run's own limit comes first.
+   */
+  deadline?: number
 }
 
 /** How one program's run went, before it is put into words. */
@@ -682,11 +708,13 @@ export async function runProgram(
   {
     call,
     list,
+    describe,
     signal,
     executor = runJavaScript,
     timeoutMs = RUN_TIMEOUT_MS,
     runId = newRunId(),
     trace = [],
+    deadline: outerDeadline,
   }: RunOptions,
 ): Promise<ProgramRun> {
   const limits = await loadResourceLimits()
@@ -702,6 +730,8 @@ export async function runProgram(
   const controller = new AbortController()
   /** What ended the run from outside the program, when something did. */
   let abortedFor: "time" | "gone" | null = null
+  /** When the run's limit ends it, or its caller's run before that. */
+  const deadline = Math.min(Date.now() + timeoutMs, outerDeadline ?? Infinity)
   const timer = setTimeout(() => {
     abortedFor ??= "time"
     controller.abort(
@@ -722,6 +752,8 @@ export async function runProgram(
 
   const started = Date.now()
   const output = new Output()
+  /** Notes already printed, each once a run. */
+  const noted = new Set<string>()
   let calls = 0
   /** A call was refused for being past MAX_CALLS_PER_RUN. */
   let overCalls = false
@@ -848,6 +880,7 @@ export async function runProgram(
             run: {
               runId,
               signal: controller.signal,
+              deadline,
               onRun: (inner) => {
                 entry.runId = inner
               },
@@ -895,6 +928,7 @@ export async function runProgram(
         ...(owner || note.asked ? { asked: true } : {}),
         ...(note.request ? { request: note.request } : {}),
         ...(note.secret ? { secret: note.secret, origin: note.origin } : {}),
+        ...(note.exit ? { exit: note.exit } : {}),
       })
 
       if ("owner" in outcome) {
@@ -902,10 +936,26 @@ export async function runProgram(
         return { stop: true }
       }
 
-      // The program is told the value or the error, nothing else.
+      // An old argument name the call used: the run's output says what to
+      // call it, once, where the assistant reads what the program printed.
+      for (const said of outcome.ok ? (outcome.notes ?? []) : []) {
+        if (!noted.has(said)) {
+          noted.add(said)
+          output.write(`[PCP] ${server}/${tool}: ${said}`)
+        }
+      }
+
+      // The program is told the value or the error, nothing else; a call
+      // pacing refused says so, and when to try again.
       return outcome.ok
         ? { ok: true, value: outcome.value }
-        : { ok: false, error: outcome.error }
+        : {
+            ok: false,
+            error: outcome.error,
+            ...(outcome.code === "paced"
+              ? { code: "paced", retryAfterMs: outcome.retryAfterMs ?? 0 }
+              : {}),
+          }
     })
   }
 
@@ -1271,6 +1321,23 @@ export async function runProgram(
     return list(server)
   }
 
+  async function describeTool(payload: unknown): Promise<BridgeReply> {
+    const name = (value: unknown) =>
+      typeof value === "string" && value !== "" && value.length <= 200
+
+    if (!isRecord(payload) || !name(payload.server) || !name(payload.tool)) {
+      return refuse(
+        'pcp.describe takes a server\'s name and a tool\'s, as pcp.tools gives them: pcp.describe("github", "list_issues").',
+      )
+    }
+
+    if (!describe) {
+      return refuse("PCP cannot describe tools here.")
+    }
+
+    return describe(payload.server as string, payload.tool as string)
+  }
+
   const bridge: Bridge = async (op, payload) => {
     switch (op) {
       case "call":
@@ -1281,6 +1348,8 @@ export async function runProgram(
         return keep(payload)
       case "tools":
         return tools(payload)
+      case "describe":
+        return describeTool(payload)
       case "media":
         return mediaOp(payload)
       default:

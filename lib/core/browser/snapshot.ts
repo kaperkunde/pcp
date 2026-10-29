@@ -14,7 +14,9 @@ import { bounded } from "./queue"
  * made for AI use, every element it can act on marked with a ref
  * ("[ref=e12]"), and the locator a ref stands for. The only file that
  * names Playwright's snapshot API, or reads its format, so a change to it
- * is a change here. A ref is good until the next snapshot of the page.
+ * is a change here. The refs Playwright writes are its own, and good only
+ * until its next snapshot of the page; refs.ts turns them into PCP's, which
+ * hold while their element is on the page.
  */
 
 /** e12, or f1e12 for an element after the page was replaced or in a frame. */
@@ -118,18 +120,72 @@ export function maskFields(
     .join("\n")
 }
 
+/** The element one of Playwright's refs stands for in its latest snapshot. */
 export function byRef(page: Page, ref: string): Locator {
   return page.locator(`aria-ref=${ref}`)
 }
 
-/** The element a ref stands for, or null when the page no longer has it. */
-export async function resolveRef(
+/**
+ * The element one of Playwright's refs stands for, or null when its latest
+ * snapshot does not have it or the page no longer does. refs.ts is what
+ * calls this: an assistant's refs are PCP's.
+ */
+export async function resolvePlaywrightRef(
   page: Page,
   ref: string,
 ): Promise<Locator | null> {
   const locator = byRef(page, ref)
   const found = await locator.count().catch(() => 0)
   return found > 0 ? locator : null
+}
+
+/**
+ * The snapshot with each element's ref passed through `map`: the ref it
+ * returns instead, or null to leave the element without one. Only the ref
+ * in an element's own key is touched, never a name or a text that reads
+ * like one.
+ */
+export function mapRefs(
+  tree: string,
+  map: (ref: string) => string | null,
+): string {
+  return tree
+    .split("\n")
+    .map((line) => {
+      const match = line.match(/^(\s*)- (.*)$/)
+
+      if (!match) {
+        return line
+      }
+
+      const entry = match[2]!
+      const { key, value } = splitEntry(entry.trim())
+      const ref = key.startsWith("/") ? null : parseKey(key)?.ref
+
+      if (!ref) {
+        return line
+      }
+
+      const end =
+        value !== null && entry.trimEnd().endsWith(value)
+          ? entry.trimEnd().length - value.length
+          : entry.length
+      const tag = `[ref=${ref}]`
+      const at = entry.slice(0, end).lastIndexOf(tag)
+
+      if (at < 0) {
+        return line
+      }
+
+      const replaced = map(ref)
+      const before = entry.slice(0, at)
+      const after = entry.slice(at + tag.length)
+
+      return replaced === null
+        ? `${match[1]}- ${before.replace(/ $/, "")}${after}`
+        : `${match[1]}- ${before}[ref=${replaced}]${after}`
+    })
+    .join("\n")
 }
 
 /** What an element's state says, where the snapshot gives it. */
@@ -496,4 +552,65 @@ export function findInSnapshot(
   }
 
   return { matches, total }
+}
+
+/** Roles whose name is a label for what they hold, not words of the page. */
+const LABELLED_ROLES = new Set([
+  ...FIELD_ROLES,
+  "checkbox",
+  "radio",
+  "switch",
+  "slider",
+])
+
+/** Roles whose name is all they say: written once, and not looked into. */
+const NAMED_ROLES = new Set(["link", "button", "img", "image", "option", "tab"])
+
+/**
+ * The words of a snapshot (or of a part of it) as lines, for read_page
+ * when a page's HTML holds next to none: one its scripts draw, in shadow
+ * DOM or in frames, which the accessibility tree reads through. Headings
+ * as Markdown's, links with their address, list items as items; no refs,
+ * and no field's value or label.
+ */
+export function snapshotText(nodes: SnapshotNode[]): string {
+  const lines: string[] = []
+  const push = (raw: string | null, prefix = "") => {
+    const line = (raw ?? "").replace(/\s+/g, " ").trim()
+
+    if (line && lines.at(-1) !== `${prefix}${line}`) {
+      lines.push(`${prefix}${line}`)
+    }
+  }
+  const emit = (node: SnapshotNode) => {
+    if (node.role === "text") {
+      push(node.text)
+      return
+    }
+
+    if (LABELLED_ROLES.has(node.role)) {
+      return
+    }
+
+    if (node.role === "heading") {
+      const level = Math.min(Math.max(node.states.level ?? 2, 1), 6)
+      push(node.name ?? node.text, `${"#".repeat(level)} `)
+      if (node.name) return
+    } else if (NAMED_ROLES.has(node.role) && node.name) {
+      push(
+        node.role === "link" && node.url
+          ? `[${node.name}](${node.url})`
+          : node.name,
+      )
+      return
+    } else {
+      push(node.text, node.role === "listitem" ? "- " : "")
+    }
+
+    for (const child of node.children) emit(child)
+  }
+
+  for (const node of nodes) emit(node)
+
+  return lines.join("\n")
 }

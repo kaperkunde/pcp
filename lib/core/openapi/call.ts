@@ -5,7 +5,6 @@ import type { CallToolResult } from "@modelcontextprotocol/client"
 import { PcpError } from "../errors"
 import { AddressBlockedError } from "./address"
 import { describeFetchError, discard, readCapped } from "./http"
-import { isObject } from "./json"
 import {
   CALL_TIMEOUT_MS,
   MAX_ERROR_EXCERPT,
@@ -178,7 +177,7 @@ export async function executeCall(
   }
 
   let text: string | null = null
-  let structured: Record<string, unknown> | null = null
+  let structured: unknown = undefined
 
   if (isJson(type) || isText(type) || type === "") {
     text = decodeUtf8(bytes) ?? (type === "" ? null : bytes.toString("utf8"))
@@ -196,9 +195,10 @@ export async function executeCall(
       // \u00e9) that hid a key from the pass over the raw text.
       const value = scrub.value(JSON.parse(text))
       text = scrub.text(JSON.stringify(value))
-      const wrapped = isObject(value) ? value : { value }
-      if (ok && JSON.stringify(wrapped).length <= MAX_STRUCTURED_CHARS) {
-        structured = wrapped
+      // Any JSON value, as MCP 2026-07-28 takes it: an API's list or
+      // number is passed as it is, not wrapped.
+      if (ok && JSON.stringify(value).length <= MAX_STRUCTURED_CHARS) {
+        structured = value
       }
     } catch {
       // Not the JSON it claimed to be; pass the text on as it is.
@@ -246,7 +246,9 @@ export async function executeCall(
     status,
     result: {
       content: [{ type: "text", text: `${text}${cut}` }],
-      ...(structured ? { structuredContent: structured } : {}),
+      ...(structured !== undefined
+        ? { structuredContent: structured as Record<string, unknown> }
+        : {}),
     },
   }
 }

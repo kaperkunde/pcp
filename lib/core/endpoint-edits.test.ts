@@ -492,10 +492,10 @@ describe("changing an endpoint with edits", () => {
     ).resolves.toMatchObject({ updated: expect.stringMatching(/not changed/) })
 
     expect((await getEndpoint(scope, slug)).changes).toEqual({
-      "name, description, toolDescriptions, patches, refreshSpec":
+      "name, description, tool_descriptions, patches, refresh_spec":
         expect.stringMatching(/^asks the owner/),
-      "spec, baseUrl": expect.stringMatching(/^no: the owner/),
-      readOnly: expect.stringMatching(/on only/),
+      "spec, base_url": expect.stringMatching(/^no: the owner/),
+      read_only: expect.stringMatching(/on only/),
       authentication: expect.stringMatching(/only the owner/),
     })
   })

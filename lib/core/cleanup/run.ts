@@ -3,7 +3,7 @@ import { pruneFileLinks } from "../file-links"
 import { pruneOAuthStates } from "../oauth"
 import { pruneUnusedClients } from "../oauth-server/clients"
 import { pruneOAuthCredentials } from "../oauth-server/tokens"
-import { prunePermissionRequests } from "../permissions"
+import { prunePermissionRequests, pruneReusableAnswers } from "../permissions"
 import { pruneRequestLog } from "../request-log"
 import { pruneExpiredSessions } from "../sessions"
 import { pruneToolResults } from "../tool-results"
@@ -51,7 +51,9 @@ const PARTS: Part[] = [
   {
     key: "requests",
     label: "old permission requests",
-    run: (_, now) => prunePermissionRequests(now),
+    // With the answers kept a little while for a call made again.
+    run: async (_, now) =>
+      (await prunePermissionRequests(now)) + (await pruneReusableAnswers(now)),
   },
   {
     key: "results",

@@ -297,6 +297,16 @@ PCP itself never talks to Docker or Podman. Without a systemd session the
 installer prints its crontab line too. `PCP_UPDATE_BUTTON=0` takes the timer
 and the button away; a pinned `PCP_VERSION` has no button.
 
+Both timers run the installer that comes with the new image: after pulling
+it, the copy reads `install.sh` out of that image (never out of the running
+PCP) and, when it differs, takes it as the copy and lets it finish the
+update, so what a newer installer sets up (the graphics card, say) reaches
+an existing install without running the line again. Podman's own
+`podman-auto-update.timer` only pulls the image; there the unit follows the
+next time the installer runs. If you added drop-ins of your own in
+`~/.config/containers/systemd/pcp.container.d/`, the installer keeps them and
+lists them when it writes the unit, so you can check they are still needed.
+
 **Develop's builds.** Every change to the `develop` branch is built once its
 checks pass and published as a pre-release, `vX.Y.Z-dev.N`, ahead of the
 release it leads to. To follow them, pick **Develop** under **Settings →

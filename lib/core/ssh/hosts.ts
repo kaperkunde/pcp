@@ -10,7 +10,9 @@ import { db } from "../db"
 import { invalid, isPcpError, PcpError } from "../errors"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
+import { argumentsResult, familyError, withNotes } from "../tools/family"
 import { makeRedactor } from "../openapi/redact"
+import { markdownLink } from "../owner-link"
 import {
   getServer,
   kindNoun,
@@ -21,6 +23,7 @@ import {
 } from "../servers"
 import { deleteManagedSecret, writeManagedSecret } from "../secrets"
 import {
+  closeSshConnections,
   SshAuthError,
   SshHostKeyError,
   sshCheck,
@@ -31,7 +34,7 @@ import {
 } from "./client"
 import { fingerprint, generateOwnKey, keyType } from "./keys"
 import { MAX_OUTPUT_BYTES, MAX_USERNAME_CHARS } from "./limits"
-import { parseRunCommand, RUN_COMMAND, sshTools } from "./tools"
+import { readRunCommand, RUN_COMMAND, sshTools } from "./tools"
 
 /**
  * SSH servers: servers of kind "ssh", which an assistant runs commands on.
@@ -243,6 +246,8 @@ export async function updateSshServer(
     where: { id },
     data: { ...data, ...(moved ? { sshHostKey: null } : {}) },
   })
+  // An exit's connection is to the server as it was.
+  closeSshConnections(id)
 
   return { reconnect: moved || data.authUsername !== existing.authUsername }
 }
@@ -260,6 +265,7 @@ export async function forgetSshHostKey(
     where: { id },
     data: { sshHostKey: null, status: "unknown", statusMessage: "" },
   })
+  closeSshConnections(id)
 }
 
 /**
@@ -288,6 +294,8 @@ export async function replaceSshKey(
       statusMessage: addKeyNote(existing.authUsername ?? ""),
     },
   })
+  // Signed in with the old key: the next use signs in with the new one.
+  closeSshConnections(id)
 }
 
 /** What the server's page shows: nothing of it is secret. */
@@ -355,9 +363,15 @@ function pinner(server: McpServer) {
   }
 }
 
-/** The server's page in PCP, where its key and host key are. */
+/**
+ * The server's page in PCP, where its key and host key are, as a markdown
+ * link: an app that reads the answer aloud says the label, not the address.
+ */
 function pageOf(server: McpServer, publicUrl: string): string {
-  return `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`
+  return markdownLink(
+    `Open ${server.name}'s page in PCP`,
+    `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`,
+  )
 }
 
 /** Why PCP does not connect to a server whose host key the owner never pinned. */
@@ -470,10 +484,21 @@ export async function callSshTool(
   },
 ): Promise<CallToolResult> {
   if (toolName !== RUN_COMMAND) {
-    throw invalid(`${server.name} has no tool called ${toolName}.`)
+    return familyError(
+      `${server.name} has no tool called ${toolName}.`,
+      "not_found",
+    )
   }
 
-  const call = parseRunCommand(args)
+  const read = readRunCommand(args)
+
+  if (!read.fits) {
+    return argumentsResult(`${server.slug}/${toolName}`, read.problems, {
+      notes: read.notes,
+    })
+  }
+
+  const { call } = read
   const target = sshTarget(server)
 
   // The first key to answer is trusted only when the owner has seen it.
@@ -499,24 +524,27 @@ export async function callSshTool(
       await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
     }
 
-    return jsonToolResult(
-      {
-        exit_code: result.exitCode,
-        ...(result.signal ? { signal: result.signal } : {}),
-        stdout: result.stdout.toString("utf8"),
-        stderr: result.stderr.toString("utf8"),
-        ...(result.truncated
-          ? {
-              truncated: `The command wrote more than ${MAX_OUTPUT_BYTES / 1024 / 1024} MB: PCP asked the server to end it and disconnected. This is what it wrote first.`,
-            }
-          : {}),
-        ...(result.timedOut
-          ? {
-              timed_out: `The command ran past its ${seconds(call.timeoutMs)}: PCP asked the server to end it and disconnected.`,
-            }
-          : {}),
-      },
-      { redact },
+    return withNotes(
+      jsonToolResult(
+        {
+          exit_code: result.exitCode,
+          ...(result.signal ? { signal: result.signal } : {}),
+          stdout: result.stdout.toString("utf8"),
+          stderr: result.stderr.toString("utf8"),
+          ...(result.truncated
+            ? {
+                truncated: `The command wrote more than ${MAX_OUTPUT_BYTES / 1024 / 1024} MB: PCP asked the server to end it and disconnected. This is what it wrote first.`,
+              }
+            : {}),
+          ...(result.timedOut
+            ? {
+                timed_out: `The command ran past its ${seconds(call.timeoutMs)}: PCP asked the server to end it and disconnected.`,
+              }
+            : {}),
+        },
+        { redact },
+      ),
+      read.notes,
     )
   } catch (error) {
     if (isPcpError(error)) {

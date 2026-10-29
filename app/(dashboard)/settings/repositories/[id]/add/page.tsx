@@ -35,14 +35,17 @@ type Shown = {
 }
 
 /**
- * A new MCP server or endpoint is added on a page of its own: the
+ * A new MCP server, endpoint or service is added on a page of its own: the
  * repository has its definition, and the owner gives their server's own
- * address, sign-in and note there.
+ * address, sign-in and note there (a service's SSH server, where it is
+ * published and its secrets, as it is launched).
  */
 function needsInstance(entry: Shown): boolean {
   return (
     !!entry.review?.isNew &&
-    (entry.review.ref.kind === "endpoint" || entry.review.ref.kind === "server")
+    (entry.review.ref.kind === "endpoint" ||
+      entry.review.ref.kind === "server" ||
+      entry.review.ref.kind === "service")
   )
 }
 
@@ -194,8 +197,9 @@ export default async function AddPage({
           {entry.fetched && !entry.problem && needsInstance(entry) ? (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-field p-3 text-sm">
               <span className="text-muted-foreground">
-                The repository has what it is. Where yours is and how it signs
-                in are yours to give.
+                {entry.review?.ref.kind === "service"
+                  ? "The repository has what it runs. Where it runs, where it is published and its secrets are yours to give."
+                  : "The repository has what it is. Where yours is and how it signs in are yours to give."}
               </span>
               <ButtonLink
                 href={`/settings/repositories/${id}/import?${new URLSearchParams(
@@ -204,7 +208,9 @@ export default async function AddPage({
                 variant="secondary"
                 size="sm"
               >
-                Add with your address
+                {entry.review?.ref.kind === "service"
+                  ? "Launch it"
+                  : "Add with your address"}
               </ButtonLink>
             </div>
           ) : null}

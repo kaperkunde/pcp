@@ -7,6 +7,7 @@ import { logDir } from "./data-dir"
 import { LOG_SCAN_LINES } from "./log-limits"
 import {
   appendRequestLog,
+  noteExitUsed,
   noteOwnerAsked,
   pruneRequestLog,
   readRequestLog,
@@ -92,9 +93,9 @@ describe("a call's note", () => {
 
 describe("readRequestLog", () => {
   it("reads a vault's own lines, newest first across days, and skips what is not a line", async () => {
-    day("2026-09-30", [line({ tool: "search_tools" })])
+    day("2026-09-30", [line({ tool: "search" })])
     day("2026-10-01", [
-      line({ tool: "describe_tool" }),
+      line({ tool: "describe" }),
       line({ tool: "web_fetch", vaultId: "someone-else" }),
       "{not json",
       line({ tool: "call_tool", server: "gmail", upstreamTool: "send" }),
@@ -104,8 +105,8 @@ describe("readRequestLog", () => {
 
     expect(entries.map((entry) => entry.tool)).toEqual([
       "call_tool",
-      "describe_tool",
-      "search_tools",
+      "describe",
+      "search",
     ])
     expect(entries[0]).toMatchObject({
       server: "gmail",
@@ -118,7 +119,7 @@ describe("readRequestLog", () => {
 
   it("filters by token, outcome and tool or server", async () => {
     day("2026-10-01", [
-      line({ tokenId: "a", tool: "search_tools" }),
+      line({ tokenId: "a", tool: "search" }),
       line({ tokenId: "b", tool: "call_tool", server: "Gmail", ok: false }),
       line({ tokenId: "a", tool: "call_tool", asked: true, request: "r1" }),
     ])
@@ -130,7 +131,7 @@ describe("readRequestLog", () => {
 
     expect(await tools({ tokenId: "a" })).toEqual([
       "a:call_tool:asked",
-      "a:search_tools:ok",
+      "a:search:ok",
     ])
     expect(await tools({ outcome: "error" })).toEqual(["b:call_tool:error"])
     expect(await tools({ outcome: "asked" })).toEqual(["a:call_tool:asked"])
@@ -209,5 +210,25 @@ describe("pruneRequestLog", () => {
 
     expect(await pruneRequestLog(1, new Date("2026-10-06T00:00:01Z"))).toBe(1)
     expect(readdirSync(logDir())).toEqual(["mcp-2026-10-06.jsonl"])
+  })
+})
+
+describe("noteExitUsed", () => {
+  it("names the exit on the call's line, or on a line of its own outside a call", async () => {
+    const note = await withLogNote(async (current) => {
+      noteExitUsed({
+        vaultId: "v",
+        tokenId: "t",
+        tool: "web_fetch",
+        exit: "us-vps",
+      })
+      return current
+    })
+    expect(note).toEqual({ exit: "us-vps" })
+
+    noteExitUsed({ vaultId: "v", tokenId: "t", tool: "tabs", exit: "eu-vps" })
+    await expect
+      .poll(async () => (await readRequestLog("v", {})).entries)
+      .toMatchObject([{ tool: "tabs", exit: "eu-vps", ok: true }])
   })
 })

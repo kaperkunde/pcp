@@ -6,6 +6,7 @@ import { useState, useTransition } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
 import { LocalDate } from "@/components/local-date"
+import { PermissionConflicts } from "@/components/permission-conflicts"
 import { PermissionDecision } from "@/components/permission-decision"
 import { ServerScopeFields } from "@/components/server-scope-fields"
 import { ShownInFull } from "@/components/shown-in-full"
@@ -37,6 +38,10 @@ export type WaitingRequest = {
    * page: the button's words that lead there, or null to answer here.
    */
   review: string | null
+  /** The request as shown here, for the answer to name. */
+  revision: string
+  /** Other requests waiting on the same item. */
+  conflicts: Array<{ id: string; tokenName: string }>
   title: string
   lines: string[]
   /** Everything it carries, when the lines cut it short. */
@@ -127,6 +132,7 @@ export function TokenWaiting({ waiting }: { waiting: WaitingRequest[] }) {
                 {item.warning}
               </p>
             ) : null}
+            <PermissionConflicts conflicts={item.conflicts} />
             {item.review ? (
               <div>
                 <ButtonLink href={`/permissions/${item.id}`}>
@@ -136,6 +142,7 @@ export function TokenWaiting({ waiting }: { waiting: WaitingRequest[] }) {
             ) : (
               <PermissionDecision
                 id={item.id}
+                revision={item.revision}
                 decisions={item.decisions}
                 secret={item.secret}
                 every={item.every}

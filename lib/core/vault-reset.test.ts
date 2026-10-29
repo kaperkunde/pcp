@@ -11,6 +11,8 @@ import { createMemory } from "./memories"
 import { DDNS_CONFIG_KEY } from "./network/ddns"
 import { appendRequestLog, logDays } from "./request-log"
 import { createSecret } from "./secrets"
+import { createSshExit, writeExitAccess } from "./exits/exits"
+import { createSshServer } from "./ssh/hosts"
 import { createServer } from "./servers"
 import { createSkill, setTokenSkills } from "./skills"
 import { createSession, resolveSession } from "./sessions"
@@ -78,6 +80,27 @@ async function populate() {
     authValueTemplate: "Bearer {{secret}}",
     authSecretId: secret.id,
   })
+  // A service on an SSH server: rows only, nothing connects here.
+  await db().mcpServer.create({
+    data: {
+      id: "svc1",
+      vaultId,
+      kind: "service",
+      name: "Docs service",
+      slug: "docs-service",
+      url: "pcp:service",
+      serviceSpec: {
+        create: {
+          definition: "{}",
+          hash: "0",
+          engine: "docker",
+          containerName: "pcp-docs",
+          env: JSON.stringify({ API_KEY: secret.id }),
+          registeredId: server.id,
+        },
+      },
+    },
+  })
   await storeTools(server.id, [
     { name: "alpha", description: "First", inputSchema: { type: "object" } },
   ])
@@ -118,6 +141,16 @@ async function populate() {
     tools: [],
   })
   await setExcluded(ctx, repoId, { kind: "skill", id: kept.id }, true)
+  const { id: sshId } = await createSshServer(ctx, {
+    name: "VPS",
+    host: "vps.example",
+    username: "deploy",
+  })
+  const { id: exitId } = await createSshExit(ctx, {
+    serverId: sshId,
+    name: "us-vps",
+  })
+  await writeExitAccess(vaultId, tokenId, exitId, "allowed")
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
   await setHostJson(DDNS_CONFIG_KEY, { provider: "duckdns", subdomain: "ada" })
   const { cookieValue } = await createSession(ctx)
@@ -145,6 +178,8 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.secret_browser_origin).toBe(1)
     expect(before.api_token_secret_allowance).toBe(1)
     expect(before.server_definition).toBe(1)
+    expect(before.service_spec).toBe(1)
+    expect(before.exit).toBe(1)
 
     await deleteVault(ctx)
 

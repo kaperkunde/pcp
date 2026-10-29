@@ -15,20 +15,27 @@ import {
   type GatewayServer,
 } from "./gateway"
 import { listMemories } from "./memories"
+import { OWNER_LINK_RULE } from "./owner-link"
+import { permissionLinkIn } from "./tools/serve"
 import {
+  askCodeCall,
   checkPermission,
   decidePermission,
   getPermissionView,
   listOwnOpenRequests,
   listPendingRequests,
   prunePermissionRequests,
+  pruneReusableAnswers,
   runCall,
   withdrawPermission,
   withPermission,
+  type PermissionAsk,
   type PermissionExecutor,
   type RegisterArgs,
 } from "./permissions"
 import { closePendingRequests } from "./permission-close"
+import { REUSE_VALUE_MAX_CHARS } from "./permission-rules"
+import { decryptString } from "./crypto"
 import { finishHandover } from "./browser/call"
 import { createFakeCalDav } from "./caldav/fake-caldav"
 import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
@@ -139,6 +146,58 @@ async function onlyRequestId(): Promise<string> {
 }
 
 describe("asking the owner", () => {
+  it("ends every kind of request with a markdown link labelled with its title", async () => {
+    const { ctx, scope, server } = await setup()
+    const asks: PermissionAsk[] = [
+      call(server, "send_postcard", { to: "Ada" }),
+      {
+        kind: "memory_share" as const,
+        input: { path: "preferences.md", text: "Metric units." },
+      },
+      {
+        kind: "browser_handover" as const,
+        input: {
+          serverId: server.id,
+          tabId: "tab1",
+          message: "Please sign in.",
+          url: "https://shop.example/login",
+          title: "Sign in",
+        },
+      },
+      {
+        kind: "register" as const,
+        input: {
+          name: "Linear",
+          url: "https://mcp.linear.example/mcp",
+          authType: "none",
+        },
+      },
+    ]
+
+    for (const ask of asks) {
+      const asked = await withPermission(scope, ask)
+      const row = await db().permissionRequest.findFirstOrThrow({
+        orderBy: { createdAt: "desc" },
+      })
+      const view = (await getPermissionView(ctx, row.id, {
+        publicUrl: PUBLIC_URL,
+      }))!
+      const lines = textOf(asked).trimEnd().split("\n")
+
+      expect(lines.at(-2), ask.kind).toContain(OWNER_LINK_RULE)
+      expect(lines.at(-1), ask.kind).toBe(`[${view.title}](${view.url})`)
+      expect(permissionLinkIn(asked as CallToolResult, PUBLIC_URL)).toEqual({
+        kind: "needs_owner",
+        reason: "permission",
+        url: view.url,
+        label: view.title,
+        request: row.id,
+      })
+      // The bare address appears nowhere else for the assistant to paste.
+      expect(textOf(asked).split(view.url)).toHaveLength(2)
+    }
+  })
+
   it("hands out a link, keeps the arguments encrypted and asks once per request", async () => {
     const { scope, server } = await setup()
     const asked = call(server, "send_postcard", { to: "Ada", message: "Hi" })
@@ -150,9 +209,11 @@ describe("asking the owner", () => {
     expect(textOf(first)).toContain(`${PUBLIC_URL}/permissions/${id}`)
     // The link comes last, with nothing after it: some apps hide the text
     // written before a tool call, so check_permission waits for the owner.
-    expect(textOf(first)).toContain("End your reply with this link")
+    // As a markdown link labelled with what the owner is asked, never the
+    // bare address: an app that reads the reply aloud says the label.
+    expect(textOf(first)).toContain(OWNER_LINK_RULE)
     expect(textOf(first).split("\n").at(-1)).toBe(
-      `${PUBLIC_URL}/permissions/${id}`,
+      `[Allow postcards/send_postcard?](${PUBLIC_URL}/permissions/${id})`,
     )
     expect(textOf(first)).toContain(
       `When they say they have answered, call check_permission with id "${id}"`,
@@ -602,7 +663,7 @@ describe("check_permission", () => {
       "call check_permission again when they say they have answered",
     )
     expect(textOf(late).split("\n").at(-1)).toBe(
-      `${PUBLIC_URL}/permissions/${id}`,
+      `[Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${id})`,
     )
 
     const gone = new AbortController()
@@ -974,7 +1035,7 @@ describe("adding a server", () => {
       },
     })
     expect(textOf(asked)).toMatch(
-      /End your reply with this link.*\n.*\/permissions\//,
+      /never paste the bare address.*\n\[Add the server Linear\?\]\(.*\/permissions\/[\w-]+\)$/,
     )
     expect(await db().mcpServer.count()).toBe(1)
 
@@ -999,7 +1060,8 @@ describe("adding a server", () => {
     })
 
     expect(added.structuredContent).toMatchObject({
-      kind: "connect",
+      kind: "needs_owner",
+      reason: "connect",
       connect: {
         serverId: linear.id,
         startUrl: `${PUBLIC_URL}/api/servers/${linear.id}/oauth/start`,
@@ -1027,7 +1089,8 @@ describe("adding a server", () => {
     // owner has signed in, then done.
     const waiting = await checkPermission(scope, id)
     expect(waiting.structuredContent).toMatchObject({
-      kind: "connect",
+      kind: "needs_owner",
+      reason: "connect",
       connect: { serverId: linear.id, slug: linear.slug },
     })
     expect(textOf(waiting)).toContain("Linear needs connecting")
@@ -1528,7 +1591,7 @@ describe("a new secret the owner types in", () => {
       input: await withNewSecret(ctx),
     })
     expect(textOf(asked)).toMatch(
-      /End your reply with this link.*\n.*\/permissions\//,
+      /never paste the bare address.*\n\[Add the API endpoint .+\?\]\(.*\/permissions\/[\w-]+\)$/,
     )
     expect(textOf(asked)).toMatch(
       /type the value of the secret "Pets API key" in there; do not ask them for it here/,
@@ -2144,12 +2207,12 @@ describe("an assistant withdrawing its own request", () => {
 
     const listed = textOf(await listOwnOpenRequests(scope))
     expect(listed.split("\n")).toEqual([
-      "2 requests of yours are waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need.",
+      "2 requests of yours are waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need. Hand a link to the owner as a markdown link with its label, never the bare address.",
       "",
       `- ${first!.id} (call, asked 3 hours ago): Allow postcards/add_numbers?`,
-      `  ${PUBLIC_URL}/permissions/${first!.id}`,
+      `  [Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${first!.id})`,
       `- ${third.id} (call, asked just now): Allow postcards/add_numbers?`,
-      `  ${PUBLIC_URL}/permissions/${third.id}`,
+      `  [Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${third.id})`,
     ])
     // Nothing of the arguments, and nothing of the other token's.
     expect(listed).not.toContain("Ada")
@@ -2230,6 +2293,232 @@ describe("pruning", () => {
     expect(
       (await db().permissionRequest.findMany()).map((row) => row.id),
     ).toEqual([recent.id])
+  })
+})
+
+describe("a call the owner allowed once, made again", () => {
+  /** The call asked about, allowed once, and run. */
+  async function allowedOnce(
+    executor: PermissionExecutor,
+    args: Record<string, unknown> = { to: "Grace" },
+  ) {
+    const { ctx, scope, server, tokenId } = await setup()
+    await withPermission(scope, call(server, "send_postcard", args))
+    const id = await onlyRequestId()
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+
+    return { ctx, scope, server, tokenId, id }
+  }
+
+  it("answers the identical call with that run's answer, once, without running it again", async () => {
+    const { calls, executor } = stub()
+    const { scope, server, id } = await allowedOnce(executor)
+
+    const again = await withPermission(
+      scope,
+      call(server, "send_postcard", { to: "Grace" }),
+    )
+    expect(again.isError).toBeFalsy()
+    expect(textOf(again)).toBe(
+      "The owner allowed this call once and it already ran less than a minute ago; this is that run's answer (it was not run again).\nran send_postcard",
+    )
+    expect(calls).toHaveLength(1)
+    expect(await db().permissionRequest.count()).toBe(1)
+    expect(
+      await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({ reuseUntil: null, resultJsonCiphertext: null })
+
+    // A third time is a new request for the owner.
+    const third = await withPermission(
+      scope,
+      call(server, "send_postcard", { to: "Grace" }),
+    )
+    expect(textOf(third)).toContain("Not done yet")
+    expect(await db().permissionRequest.count()).toBe(2)
+    expect(calls).toHaveLength(1)
+  })
+
+  it("hands a program's call the value it would have had", async () => {
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [{ type: "text", text: JSON.stringify({ sent: 3 }) }],
+      }),
+    }
+    const { scope, server, ctx, id } = await allowedOnce(executor)
+    const row = await db().permissionRequest.findUniqueOrThrow({
+      where: { id },
+    })
+    expect(row.reuseUntil!.getTime() - Date.now()).toBeGreaterThan(14 * 60_000)
+    // Encrypted under the row's own associated data.
+    expect(
+      decryptString(
+        ctx.dek,
+        Buffer.from(row.resultJsonCiphertext!),
+        `permission_request:${id}:result_json`,
+      ),
+    ).toBe(JSON.stringify({ ok: true, value: { sent: 3 } }))
+
+    expect(
+      await askCodeCall(scope, call(server, "send_postcard", { to: "Grace" })),
+    ).toEqual({ ok: true, value: { sent: 3 } })
+    // Once: the next is asked.
+    expect(
+      await askCodeCall(scope, call(server, "send_postcard", { to: "Grace" })),
+    ).toHaveProperty("owner")
+  })
+
+  it("hands a program the text when the value was too long to keep", async () => {
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ text: "x".repeat(REUSE_VALUE_MAX_CHARS) }),
+          },
+        ],
+      }),
+    }
+    const { scope, server, id } = await allowedOnce(executor)
+    expect(
+      (await db().permissionRequest.findUniqueOrThrow({ where: { id } }))
+        .resultJsonCiphertext,
+    ).toBeNull()
+
+    const outcome = await askCodeCall(
+      scope,
+      call(server, "send_postcard", { to: "Grace" }),
+    )
+    expect(outcome).toMatchObject({ ok: true, value: expect.any(String) })
+  })
+
+  it("asks again once the while is over", async () => {
+    const { executor } = stub()
+    const { scope, server, id } = await allowedOnce(executor)
+    await db().permissionRequest.update({
+      where: { id },
+      data: { reuseUntil: new Date(Date.now() - 1) },
+    })
+
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+  })
+
+  it("asks for other arguments, and for another token", async () => {
+    const { executor } = stub()
+    const { ctx, scope, server } = await allowedOnce(executor)
+
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Ada" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+
+    const { token } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+    })
+    const other = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+    expect(
+      textOf(
+        await withPermission(
+          other,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+    // And the first token still gets its answer.
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("it already ran")
+  })
+
+  it("never answers from a run that failed", async () => {
+    const executor: PermissionExecutor = {
+      ...stub().executor,
+      callTool: async () => ({
+        content: [{ type: "text", text: "The printer is on fire." }],
+        isError: true,
+      }),
+    }
+    const { scope, server, id } = await allowedOnce(executor)
+    expect(
+      await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({ status: "failed", reuseUntil: null })
+
+    expect(
+      textOf(
+        await withPermission(
+          scope,
+          call(server, "send_postcard", { to: "Grace" }),
+        ),
+      ),
+    ).toContain("Not done yet")
+  })
+
+  it("keeps nothing for a call allowed always or for a while", async () => {
+    for (const decision of ["always", "allow_for"] as const) {
+      const { ctx, scope, server } = await setup()
+      const { executor } = stub()
+      await withPermission(scope, call(server, "send_postcard", { n: 1 }))
+      const { id } = await db().permissionRequest.findFirstOrThrow({
+        where: { tokenId: scope.tokenId },
+      })
+      await decidePermission(
+        ctx,
+        id,
+        decision,
+        { publicUrl: PUBLIC_URL, minutes: 60 },
+        executor,
+      )
+      expect(
+        await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+      ).toMatchObject({
+        status: "executed",
+        reuseUntil: null,
+        resultJsonCiphertext: null,
+      })
+      await cleanup()
+      ;({ cleanup } = await scratchDatabase())
+    }
+  })
+
+  it("is cleared by the cleanup once the while is over", async () => {
+    const { executor } = stub()
+    const { id } = await allowedOnce(executor)
+
+    expect(await pruneReusableAnswers()).toBe(0)
+    expect(await pruneReusableAnswers(new Date(Date.now() + 16 * 60_000))).toBe(
+      1,
+    )
+    expect(
+      await db().permissionRequest.findUniqueOrThrow({ where: { id } }),
+    ).toMatchObject({
+      status: "executed",
+      reuseUntil: null,
+      resultJsonCiphertext: null,
+    })
   })
 })
 
@@ -2648,9 +2937,10 @@ describe("a mail account an assistant proposes", () => {
     const added = await decidePermission(ctx, id, "allow_once", web, real)
 
     expect(textOf(added)).toMatch(/Added Mail as "mail"/)
-    expect(
-      (added.structuredContent as { kind?: string } | undefined)?.kind,
-    ).toBe("connect")
+    expect(added.structuredContent).toMatchObject({
+      kind: "needs_owner",
+      reason: "connect",
+    })
     expect(
       await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
     ).toMatchObject({

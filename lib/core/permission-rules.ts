@@ -23,6 +23,32 @@ export const PERMISSION_TTL_MS = 24 * 60 * 60_000
 export const PERMISSION_KEEP_MS = 7 * 24 * 60 * 60_000
 
 /**
+ * How long after a call the owner allowed once has run the same token's
+ * identical call is answered with that run's answer instead of asking
+ * again: an assistant that runs its program again after the owner allowed
+ * one call gets what that call did, and the call is not made twice. Once.
+ */
+export const REUSE_EXECUTED_MS = 15 * 60_000
+
+/**
+ * The most characters of JSON kept on the row for a program's identical
+ * call (the value answers.ts answerValue hands it, files and long texts as
+ * handles). A longer one is not kept, and the stored text answers instead.
+ */
+export const REUSE_VALUE_MAX_CHARS = 200_000
+
+/** What an identical call answered from an earlier run says first. */
+export function reusedNote(ranAt: Date, now = new Date()): string {
+  const minutes = Math.max(
+    0,
+    Math.round((now.getTime() - ranAt.getTime()) / 60_000),
+  )
+  const ago = minutes === 0 ? "less than a minute ago" : `${minutes} min ago`
+
+  return `The owner allowed this call once and it already ran ${ago}; this is that run's answer (it was not run again).`
+}
+
+/**
  * `withdrawn`: the assistant that asked took it back (withdraw_request).
  * `closed`: what it was about went away first (a hand-over's tab).
  */
@@ -286,6 +312,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
   repo_share: {
     decline: "Not now",
   },
+  // A service an assistant proposed, launched as the owner saw it whole.
+  service_change: {
+    allow_once: "Launch it",
+    decline: "Not now",
+  },
   // The owner's note on a server or a skill, as an assistant proposed it.
   note_change: {
     allow_once: "Save the note",
@@ -307,6 +338,15 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_for: "Allow this site for",
     always: "Always allow this site",
     block: "Block this site",
+    decline: "Not now",
+  },
+  // An exit (lib/core/exits/) asked about with the request it is for:
+  // Allow once sends that one; Always and Block set the token's own level
+  // for the exit, never for the site.
+  exit_use: {
+    allow_once: "Allow once",
+    always: "Always allow this exit",
+    block: "Block this exit",
     decline: "Not now",
   },
   // A tab the assistant handed over: the owner says when they are done.

@@ -2,6 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/server"
 
 import { invalid, isPcpError } from "./errors"
 import { isTextBytes, sniffMediaType } from "./media-types"
+import { pacedRetryAfter } from "./pacing/pace"
 import { canonicalJson } from "./permission-rules"
 import { handleOf, type KeptResult, type ResultHandle } from "./tool-results"
 
@@ -546,10 +547,11 @@ function prepareAnswer(
     }
 
     sawJson = true
-    // An API's answer that is not an object is passed as { value } there.
+    // An older client's SDK wraps a value that is not an object as
+    // { result }; either way it is the same answer.
     repeatsStructured ||=
       structured !== undefined &&
-      [parsed.value, { value: parsed.value }].some(
+      [parsed.value, { result: parsed.value }].some(
         (candidate) => canonicalJson(candidate) === canonicalJson(structured),
       )
     parts.push({
@@ -1193,23 +1195,31 @@ const MAX_CODE_ERROR_CHARS = 4_000
  *
  * The value is the answer's JSON when it has some (its structuredContent
  * when only that is JSON), its text when it is only text, and a list of
- * its parts otherwise. A tool's error is an error, with its text.
+ * its parts otherwise. A tool's error is an error, with its text, and with
+ * code "paced" and retryAfterMs when PCP's pacing refused the call.
  */
 export async function answerValue(
   result: CallToolResult,
   shape: AnswerShape,
   keepers: AnswerKeepers,
   { max }: { max: number },
-): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; value: unknown }
+  | { ok: false; error: string; code?: "paced"; retryAfterMs?: number }
+> {
   if (result.isError) {
     const text = (result.content ?? [])
       .flatMap((block) => (block.type === "text" ? [block.text] : []))
       .join("\n")
       .trim()
+    // PCP's own pacing refused it (pacing/pace.ts pacedResult): the program
+    // is told when to try again, as fields it can read.
+    const retryAfterMs = pacedRetryAfter(result)
 
     return {
       ok: false,
       error: clip(text || "The tool reported an error.", MAX_CODE_ERROR_CHARS),
+      ...(retryAfterMs === null ? {} : { code: "paced", retryAfterMs }),
     }
   }
 

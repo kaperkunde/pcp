@@ -10,6 +10,7 @@ import {
   type EndpointDocument,
   type ItemDocument,
   type ServerDocument,
+  type ServiceDocument,
   type SkillDocument,
   type WrapperDocument,
 } from "./documents"
@@ -57,6 +58,13 @@ export type FlagKind =
   | "server_auth"
   /** A skill names a tool it did not. */
   | "skill_tools"
+  /** A service runs another image, or a new service's image. */
+  | "service_image"
+  /**
+   * A service's ports, variables, volumes, arguments, health check or what
+   * it registers are new or change.
+   */
+  | "service"
   /** A file has a character that does not show on screen. */
   | "hidden_characters"
   /** A file has a character that does not show on screen. */
@@ -260,6 +268,104 @@ function serverFlags(
 ): ReviewFlag[] {
   return authFlag(current, incoming.auth, itemRoot(ref), "server_auth")
 }
+/**
+ * What a service would run and reach: its image, then each part of its
+ * definition that is new or changes. A new one lists all of it, for the
+ * owner to read before they launch it.
+ */
+function serviceFlags(
+  current: ServiceDocument | null,
+  incoming: ServiceDocument,
+  ref: ItemRef,
+): ReviewFlag[] {
+  const path = itemRoot(ref)
+  const before = current?.definition ?? null
+  const after = incoming.definition
+  const flags: ReviewFlag[] = []
+  const flag = (kind: FlagKind, message: string) =>
+    flags.push({ kind, path, message })
+  const changed = (pick: (definition: typeof after) => unknown) =>
+    before === null ||
+    canonicalJson(pick(before)) !== canonicalJson(pick(after))
+
+  if (changed((definition) => definition.image)) {
+    flag(
+      "service_image",
+      before
+        ? `It runs another image: ${after.image} (was ${before.image}).`
+        : `It runs the image ${after.image}.`,
+    )
+  }
+
+  if (changed((definition) => definition.source ?? null)) {
+    flag(
+      "service_image",
+      after.source
+        ? `An update pulls ${after.source}.`
+        : "It is updated by hand only: it names no image to update from.",
+    )
+  }
+
+  if (changed((definition) => definition.ports)) {
+    flag(
+      "service",
+      after.ports.length > 0
+        ? `It listens on port ${listed(after.ports.map((port) => String(port.container)))}.`
+        : "It publishes no port.",
+    )
+  }
+
+  if (changed((definition) => definition.env)) {
+    flag(
+      "service",
+      after.env.length > 0
+        ? `Its variables: ${listed(after.env.map((entry) => (entry.value !== undefined ? `${entry.name}=${entry.value}` : `${entry.name}${entry.required ? " (needed)" : ""}`)))}.`
+        : "It takes no variables.",
+    )
+  }
+
+  if (changed((definition) => definition.volumes)) {
+    flag(
+      "service",
+      after.volumes.length > 0
+        ? `It keeps data in named volumes: ${listed(after.volumes.map((volume) => `${volume.name} at ${volume.path}`))}.`
+        : "It keeps no volumes.",
+    )
+  }
+
+  if (changed((definition) => definition.args)) {
+    flag(
+      "service",
+      after.args.length > 0
+        ? `It runs with the arguments ${listed(after.args)}.`
+        : "It runs the image's own command.",
+    )
+  }
+
+  if (changed((definition) => definition.health)) {
+    flag(
+      "service",
+      after.health.kind === "http"
+        ? `Its health check is GET ${after.health.path} on port ${after.health.port}.`
+        : "It has no health check.",
+    )
+  }
+
+  if (changed((definition) => definition.registers)) {
+    const registers = after.registers
+    flag(
+      "service",
+      registers.kind === "openapi"
+        ? `PCP adds an API endpoint from ${registers.specPath} on port ${registers.port}${registers.auth ? `, sending ${registers.auth.env}'s secret in ${registers.auth.header}` : ""}.`
+        : registers.kind === "mcp"
+          ? `PCP adds an MCP server at ${registers.path} on port ${registers.port}.`
+          : "PCP adds nothing for it.",
+    )
+  }
+
+  return flags
+}
+
 function skillFlags(
   current: SkillDocument | null,
   incoming: SkillDocument,
@@ -322,6 +428,11 @@ export function reviewItem(
     case "server":
       flags.push(
         ...serverFlags(current as ServerDocument | null, incoming, ref),
+      )
+      break
+    case "service":
+      flags.push(
+        ...serviceFlags(current as ServiceDocument | null, incoming, ref),
       )
       break
   }

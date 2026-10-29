@@ -1,4 +1,5 @@
 import {
+  Box,
   Braces,
   CalendarDays,
   Globe,
@@ -55,6 +56,11 @@ const KINDS: Record<
     icon: Layers,
     className: "bg-tile-wrapper text-tile-wrapper-foreground",
     label: "Wrapper",
+  },
+  service: {
+    icon: Box,
+    className: "bg-tile-ssh text-tile-ssh-foreground",
+    label: "Service",
   },
 }
 
