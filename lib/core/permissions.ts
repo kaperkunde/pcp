@@ -68,6 +68,7 @@ import {
   type ConnectLinks,
   type ServerState,
 } from "./connect"
+import { markdownLink } from "./owner-link"
 import {
   handoverTab,
   queueHref,
@@ -1590,7 +1591,7 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     default:
       return text(
-        `Still waiting for the owner. They can answer until ${view.expiresAt.toISOString()}. When they say they have, call check_permission with id "${view.id}" for the result.\n\n${linkLastText(view.url)}`,
+        `Still waiting for the owner. They can answer until ${view.expiresAt.toISOString()}. When they say they have, call check_permission with id "${view.id}" for the result.\n\n${linkLastText(view.url, view.title)}`,
       )
   }
 }
@@ -1609,7 +1610,7 @@ async function outcomeFromRow(
 
 function pendingText(view: PermissionView, detail?: string): string {
   if (view.kind === "access") {
-    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}${detail ? `\n\n${detail}` : ""}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. When they say they have saved, call check_permission with id "${view.id}": it says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
+    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}${detail ? `\n\n${detail}` : ""}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. When they say they have saved, call check_permission with id "${view.id}": it says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
   }
 
   const typed = view.secretToEnter
@@ -1625,7 +1626,7 @@ function pendingText(view: PermissionView, detail?: string): string {
     lines: view.lines.filter((line) => !view.ownerOnly.includes(line)),
   }
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url)}`
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
 }
 
 /**
@@ -3006,7 +3007,7 @@ export async function checkPermission(
 
   if (view.status === "pending") {
     return text(
-      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer until ${view.expiresAt.toISOString()}. Stop here, and call check_permission again when they say they have answered.\n\n${linkLastText(view.url)}`,
+      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer until ${view.expiresAt.toISOString()}. Stop here, and call check_permission again when they say they have answered.\n\n${linkLastText(view.url, view.title)}`,
     )
   }
 
@@ -3081,7 +3082,7 @@ export async function listOwnOpenRequests(
 
   const lines = views.map(
     (view) =>
-      `- ${view.id} (${view.kind}, asked ${ageText(now.getTime() - view.createdAt.getTime())}): ${view.title}\n  ${view.url}`,
+      `- ${view.id} (${view.kind}, asked ${ageText(now.getTime() - view.createdAt.getTime())}): ${view.title}\n  ${markdownLink(view.title, view.url)}`,
   )
   const count =
     views.length === 1
@@ -3089,7 +3090,7 @@ export async function listOwnOpenRequests(
       : `${views.length} requests of yours are`
 
   return text(
-    `${count} waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need.\n\n${lines.join("\n")}`,
+    `${count} waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need. Hand a link to the owner as a markdown link with its label, never the bare address.\n\n${lines.join("\n")}`,
   )
 }
 

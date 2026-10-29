@@ -280,7 +280,12 @@ describe("PCP's own tools", () => {
       url: expect.stringContaining(`${PUBLIC_URL}/permissions/`),
     })
     const texts = (asked.content as Array<{ text: string }>).map((p) => p.text)
-    expect(texts.at(-1)!.trimEnd().split("\n").at(-1)).toBe(owner.url)
+    expect(texts.at(-1)!.trimEnd().split("\n").at(-1)).toBe(
+      `[Add the server Linear?](${owner.url})`,
+    )
+    expect(asked.structuredContent).toMatchObject({
+      label: "Add the server Linear?",
+    })
 
     const open = await client.callTool({
       name: "check_permission",

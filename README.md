@@ -552,8 +552,10 @@ its handles as MCP resources (`pcp://results/<id>`), so a client that reads
 resources can open a kept file itself.
 
 A tool you have not decided about answers "Not done yet" and asks you: the
-assistant ends its reply with a link to the request in PCP. Answer there,
-tell it you have, and it carries on. The bell at the top of every page in
+assistant ends its reply with a link to the request in PCP, labelled with
+what it asks (such as "Allow gmail-imap/send_email?"), so an app that reads
+the reply aloud says the label rather than the address. Answer there, tell
+it you have, and it carries on. The bell at the top of every page in
 PCP shows how many requests are waiting and lists them, oldest first, so you
 can answer one without the link; once you answer one, PCP opens the next one
 waiting, with what came of your answer above it, until nothing is left.

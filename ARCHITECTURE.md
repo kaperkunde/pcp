@@ -3535,8 +3535,11 @@ has to be the last thing in the assistant's reply, with no tool call after
 it: Claude's apps fold the text an assistant writes before a tool call into
 that call's row and show a summary of their own, so a link followed by
 `check_permission` in the same reply was often never seen. So the result
-says to end the reply with the link (`connect.ts: linkLastText`, the link on
-its own last line) and to call `check_permission` once the owner says they
+says to end the reply with the link (`owner-link.ts: linkLastText`, the link
+on its own last line as a markdown link whose label names the action, such
+as `[Allow gmail-imap/send_email?](…)`: an app that reads the reply aloud
+says the label rather than an address of ids, so the bare address is never
+to be pasted) and to call `check_permission` once the owner says they
 have answered. In case they are still on it, the check holds the call while
 the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
 minute at which clients and proxies give up, checking every second, and

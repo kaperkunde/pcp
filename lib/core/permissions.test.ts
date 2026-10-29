@@ -15,6 +15,8 @@ import {
   type GatewayServer,
 } from "./gateway"
 import { listMemories } from "./memories"
+import { OWNER_LINK_RULE } from "./owner-link"
+import { permissionLinkIn } from "./tools/serve"
 import {
   askCodeCall,
   checkPermission,
@@ -27,6 +29,7 @@ import {
   runCall,
   withdrawPermission,
   withPermission,
+  type PermissionAsk,
   type PermissionExecutor,
   type RegisterArgs,
 } from "./permissions"
@@ -143,6 +146,58 @@ async function onlyRequestId(): Promise<string> {
 }
 
 describe("asking the owner", () => {
+  it("ends every kind of request with a markdown link labelled with its title", async () => {
+    const { ctx, scope, server } = await setup()
+    const asks: PermissionAsk[] = [
+      call(server, "send_postcard", { to: "Ada" }),
+      {
+        kind: "memory_share" as const,
+        input: { path: "preferences.md", text: "Metric units." },
+      },
+      {
+        kind: "browser_handover" as const,
+        input: {
+          serverId: server.id,
+          tabId: "tab1",
+          message: "Please sign in.",
+          url: "https://shop.example/login",
+          title: "Sign in",
+        },
+      },
+      {
+        kind: "register" as const,
+        input: {
+          name: "Linear",
+          url: "https://mcp.linear.example/mcp",
+          authType: "none",
+        },
+      },
+    ]
+
+    for (const ask of asks) {
+      const asked = await withPermission(scope, ask)
+      const row = await db().permissionRequest.findFirstOrThrow({
+        orderBy: { createdAt: "desc" },
+      })
+      const view = (await getPermissionView(ctx, row.id, {
+        publicUrl: PUBLIC_URL,
+      }))!
+      const lines = textOf(asked).trimEnd().split("\n")
+
+      expect(lines.at(-2), ask.kind).toContain(OWNER_LINK_RULE)
+      expect(lines.at(-1), ask.kind).toBe(`[${view.title}](${view.url})`)
+      expect(permissionLinkIn(asked as CallToolResult, PUBLIC_URL)).toEqual({
+        kind: "needs_owner",
+        reason: "permission",
+        url: view.url,
+        label: view.title,
+        request: row.id,
+      })
+      // The bare address appears nowhere else for the assistant to paste.
+      expect(textOf(asked).split(view.url)).toHaveLength(2)
+    }
+  })
+
   it("hands out a link, keeps the arguments encrypted and asks once per request", async () => {
     const { scope, server } = await setup()
     const asked = call(server, "send_postcard", { to: "Ada", message: "Hi" })
@@ -154,9 +209,11 @@ describe("asking the owner", () => {
     expect(textOf(first)).toContain(`${PUBLIC_URL}/permissions/${id}`)
     // The link comes last, with nothing after it: some apps hide the text
     // written before a tool call, so check_permission waits for the owner.
-    expect(textOf(first)).toContain("End your reply with this link")
+    // As a markdown link labelled with what the owner is asked, never the
+    // bare address: an app that reads the reply aloud says the label.
+    expect(textOf(first)).toContain(OWNER_LINK_RULE)
     expect(textOf(first).split("\n").at(-1)).toBe(
-      `${PUBLIC_URL}/permissions/${id}`,
+      `[Allow postcards/send_postcard?](${PUBLIC_URL}/permissions/${id})`,
     )
     expect(textOf(first)).toContain(
       `When they say they have answered, call check_permission with id "${id}"`,
@@ -606,7 +663,7 @@ describe("check_permission", () => {
       "call check_permission again when they say they have answered",
     )
     expect(textOf(late).split("\n").at(-1)).toBe(
-      `${PUBLIC_URL}/permissions/${id}`,
+      `[Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${id})`,
     )
 
     const gone = new AbortController()
@@ -978,7 +1035,7 @@ describe("adding a server", () => {
       },
     })
     expect(textOf(asked)).toMatch(
-      /End your reply with this link.*\n.*\/permissions\//,
+      /never paste the bare address.*\n\[Add the server Linear\?\]\(.*\/permissions\/[\w-]+\)$/,
     )
     expect(await db().mcpServer.count()).toBe(1)
 
@@ -1534,7 +1591,7 @@ describe("a new secret the owner types in", () => {
       input: await withNewSecret(ctx),
     })
     expect(textOf(asked)).toMatch(
-      /End your reply with this link.*\n.*\/permissions\//,
+      /never paste the bare address.*\n\[Add the API endpoint .+\?\]\(.*\/permissions\/[\w-]+\)$/,
     )
     expect(textOf(asked)).toMatch(
       /type the value of the secret "Pets API key" in there; do not ask them for it here/,
@@ -2150,12 +2207,12 @@ describe("an assistant withdrawing its own request", () => {
 
     const listed = textOf(await listOwnOpenRequests(scope))
     expect(listed.split("\n")).toEqual([
-      "2 requests of yours are waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need.",
+      "2 requests of yours are waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need. Hand a link to the owner as a markdown link with its label, never the bare address.",
       "",
       `- ${first!.id} (call, asked 3 hours ago): Allow postcards/add_numbers?`,
-      `  ${PUBLIC_URL}/permissions/${first!.id}`,
+      `  [Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${first!.id})`,
       `- ${third.id} (call, asked just now): Allow postcards/add_numbers?`,
-      `  ${PUBLIC_URL}/permissions/${third.id}`,
+      `  [Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${third.id})`,
     ])
     // Nothing of the arguments, and nothing of the other token's.
     expect(listed).not.toContain("Ada")

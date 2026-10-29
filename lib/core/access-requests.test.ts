@@ -307,7 +307,9 @@ describe("proposing tool levels", () => {
     )
     expect(textOf(asked)).toContain("- billing, to Blocked: delete_invoice")
     expect(textOf(asked)).toContain("- blog, to Allowed: read_post")
-    expect(textOf(asked).trimEnd()).toMatch(/permissions\/[\w-]+\S*$/)
+    expect(textOf(asked).trimEnd().split("\n").at(-1)).toMatch(
+      new RegExp(`^\\[.+\\]\\(${PUBLIC_URL}/permissions/${row.id}\\)$`),
+    )
 
     // The same proposal again finds the same request.
     await propose(scope)

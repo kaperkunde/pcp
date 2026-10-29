@@ -71,8 +71,11 @@ export function permissionLinkIn(
   const last = texts.at(-1)?.text.trimEnd().split("\n").at(-1)?.trim() ?? ""
   const base = publicUrl.replace(/\/+$/, "")
   const prefix = `${base}/permissions/`
-  // The link alone, or as a Markdown link: [label](url).
-  const url = /^\[[^\]]*\]\((.*)\)$/.exec(last)?.[1] ?? last
+  // The link alone, or as a Markdown link: [label](url), whose label it
+  // keeps (linkLastText's: the request's title).
+  const markdown = /^\[([^\]]*)\]\((.*)\)$/.exec(last)
+  const url = markdown?.[2] ?? last
+  const label = markdown?.[1]?.trim() || PERMISSION_LINK_LABEL
 
   if (!url.startsWith(prefix) || /\s/.test(url)) {
     return null
@@ -91,7 +94,7 @@ export function permissionLinkIn(
         kind: "needs_owner",
         reason: "permission",
         url,
-        label: PERMISSION_LINK_LABEL,
+        label,
         request,
       }
     : null

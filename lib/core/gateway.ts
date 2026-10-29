@@ -83,6 +83,7 @@ import {
   type SkillOutcome,
 } from "./skills"
 import { connectResult, type ServerState } from "./connect"
+import { OWNER_LINK_RULE } from "./owner-link"
 import { waitForOwner } from "./owner-wait"
 import {
   MAX_CALLS_PER_RUN,
@@ -630,7 +631,7 @@ export function buildInstructions(
   return [
     ...lead,
     `PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts. Tool names are not listed here: ${discovery(hasSkills, memories !== null)} call_tool takes no server or tool name, only the call_handle, and checks the arguments before anything runs. Refer to tools as server/tool.`,
-    "The owner decides per tool what you may run. A tool they have not allowed yet answers \"Not done yet\" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result; withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.",
+    `The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} Some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result; withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.`,
     'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email or create_draft attachment, and PCP puts the value there, so it never has to pass through you.',
     "Servers:",
     ...lines,
@@ -1937,8 +1938,7 @@ export function buildGatewayServer(
   register({
     name: "call_tool",
     title: "Call a tool",
-    description:
-      'Run a tool on one of the owner\'s servers: takes only the call_handle describe gives for it, with the arguments its inputSchema asks for, which PCP checks before anything runs. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them: end your reply with it, and call check_permission once they say they have answered. A long JSON answer comes back as a preview: pass fields to get only the parts you need, and decode for text an API sends base64-encoded.',
+    description: `Run a tool on one of the owner's servers: takes only the call_handle describe gives for it, with the arguments its inputSchema asks for, which PCP checks before anything runs. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them. ${OWNER_LINK_RULE} Call check_permission once they say they have answered. A long JSON answer comes back as a preview: pass fields to get only the parts you need, and decode for text an API sends base64-encoded.`,
     input: callInput,
     // What it runs is any of the owner's tools.
     annotations: {
@@ -2986,8 +2986,7 @@ export function buildGatewayServer(
   register({
     name: "propose_tool_access",
     title: "Propose tool access",
-    description:
-      'Propose which tools this token may run, many at once and across servers: "allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). This changes nothing by itself: PCP fills your levels in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and a level. Later changes override earlier ones, so set a whole server first and the exceptions after. End your reply with the link it returns, and call check_permission with its id once the owner says they have saved; it says what they saved.',
+    description: `Propose which tools this token may run, many at once and across servers: "allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). This changes nothing by itself: PCP fills your levels in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and a level. Later changes override earlier ones, so set a whole server first and the exceptions after. ${OWNER_LINK_RULE} Call check_permission with its id once the owner says they have saved; it says what they saved.`,
     input: z.object({
       changes: z
         .array(
@@ -3060,8 +3059,7 @@ export function buildGatewayServer(
     register({
       name: "update_endpoint",
       title: "Change an API endpoint",
-      description:
-        "Change an API endpoint: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Change a schema with edits (a JSON Patch kept beside it and applied whenever tools are made, also after the document is read again) rather than sending it whole: add_patches adds to the edits, patches replaces them all. Read the part you are changing first with get_endpoint's spec_pointer. On an endpoint you registered, a change other assistants would see disables it until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: turning read-only on happens at once; its name, description, edits, tool descriptions and a new read of its schema URL are put to the owner, who sees every edit and description in full, and nothing changes until they agree (end your reply with the link, and call check_permission once they say they have answered); its address and document are theirs alone. You can never change a credential. get_endpoint says what you may change. In calls of their own, on an endpoint or an MCP server you see: note proposes the owner's note on it, and detach a definition of its own for one that shares its schema with other servers; both ask the owner.",
+      description: `Change an API endpoint: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Change a schema with edits (a JSON Patch kept beside it and applied whenever tools are made, also after the document is read again) rather than sending it whole: add_patches adds to the edits, patches replaces them all. Read the part you are changing first with get_endpoint's spec_pointer. On an endpoint you registered, a change other assistants would see disables it until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: turning read-only on happens at once; its name, description, edits, tool descriptions and a new read of its schema URL are put to the owner, who sees every edit and description in full, and nothing changes until they agree; its address and document are theirs alone. You can never change a credential. get_endpoint says what you may change. In calls of their own, on an endpoint or an MCP server you see: note proposes the owner's note on it, and detach a definition of its own for one that shares its schema with other servers; both ask the owner. A change that asks the owner answers with a link. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       input: z.object({
         endpoint: z
           .string()
@@ -3503,7 +3501,7 @@ export function buildGatewayServer(
             ]
           : []),
         "Another wrapper of one you see: pass its short name in definition and a name, and no tools; it shares that wrapper's programs. note proposes the owner's note on it: one line they read whole.",
-        "Nothing is made yet: the owner is shown every program, schema, call and secret in full on PCP's page and decides. End your reply with the link, and call check_permission once they say they have answered.",
+        `Nothing is made yet: the owner is shown every program, schema, call and secret in full on PCP's page and decides. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       ].join("\n\n"),
       input: z.object({
         name: z
@@ -3620,8 +3618,7 @@ export function buildGatewayServer(
     register({
       name: "update_wrapper",
       title: "Propose a change to a wrapper",
-      description:
-        "Propose a change to a wrapper: its name, its description, tools added or replaced whole (by name), tools removed, where secrets go (the whole list, replacing it), or whose levels its calls follow (call_levels). Read it with get_wrapper first. The owner is shown every new or changed program in full, before and after, and decides on PCP's page; nothing changes until they do, and then only if the wrapper is as it was when they were asked. In calls of their own: note proposes the owner's note on it, and detach a definition of its own for one that shares its programs with other wrappers. End your reply with the link, and call check_permission once they say they have answered.",
+      description: `Propose a change to a wrapper: its name, its description, tools added or replaced whole (by name), tools removed, where secrets go (the whole list, replacing it), or whose levels its calls follow (call_levels). Read it with get_wrapper first. The owner is shown every new or changed program in full, before and after, and decides on PCP's page; nothing changes until they do, and then only if the wrapper is as it was when they were asked. In calls of their own: note proposes the owner's note on it, and detach a definition of its own for one that shares its programs with other wrappers. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       input: z.object({
         wrapper: z
           .string()
@@ -3752,8 +3749,7 @@ export function buildGatewayServer(
     register({
       name: "delete_wrapper",
       title: "Propose deleting a wrapper",
-      description:
-        "Propose deleting a wrapper: its tools stop working for every assistant, and the tools it stood in for come back to search. The owner decides on PCP's page. End your reply with the link, and call check_permission once they say they have answered.",
+      description: `Propose deleting a wrapper: its tools stop working for every assistant, and the tools it stood in for come back to search. The owner decides on PCP's page. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       input: z.object({
         wrapper: z
           .string()

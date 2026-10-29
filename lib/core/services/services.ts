@@ -17,6 +17,7 @@ import { invalid, isPcpError, notFound, PcpError } from "../errors"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
 import { makeRedactor } from "../openapi/redact"
+import { markdownLink } from "../owner-link"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import {
   createServer,
@@ -1177,7 +1178,7 @@ export async function callServiceTool(
     }
 
     return errorToolResult(
-      `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${pageOf(loaded.server.id, publicUrl)}`,
+      `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${markdownLink(`Open ${loaded.server.name}'s page in PCP`, pageOf(loaded.server.id, publicUrl))}`,
       { redact },
     )
   }
@@ -1227,7 +1228,10 @@ export async function stoppedServiceMessage(
   { publicUrl }: { publicUrl: string },
 ): Promise<string | null> {
   const where = loaded.host?.name ?? "its SSH server"
-  const page = pageOf(loaded.server.id, publicUrl)
+  const page = markdownLink(
+    `Open ${loaded.server.name}'s page in PCP`,
+    pageOf(loaded.server.id, publicUrl),
+  )
 
   if (!access) {
     return `${loaded.server.name} runs on ${where}, which PCP cannot reach now. The owner sees it on the service's page:\n${page}`

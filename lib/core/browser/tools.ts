@@ -2,6 +2,7 @@ import { z } from "zod"
 
 import type { CatalogueTool } from "../catalogue"
 import { invalid } from "../errors"
+import { OWNER_LINK_RULE } from "../owner-link"
 import {
   DEFAULT_READ_CHARS,
   MAX_FIND_MATCHES,
@@ -553,8 +554,7 @@ const SPECS: readonly BrowserToolSpec[] = [
   {
     name: "hand_over",
     title: "Hand a tab to the owner",
-    description:
-      'Asks the owner to do something in a tab themselves: sign in, solve a CAPTCHA, approve a payment. message says what, in a sentence or two. Answers "Not done yet" with a link to the tab on PCP\'s page: end your reply with it, on a line of its own. While the owner has the tab, the other tools refuse it; once they say they are done, call check_permission with the id it gave, then take a snapshot.',
+    description: `Asks the owner to do something in a tab themselves: sign in, solve a CAPTCHA, approve a payment. message says what, in a sentence or two. Answers "Not done yet" with a link to the tab on PCP's page. ${OWNER_LINK_RULE} While the owner has the tab, the other tools refuse it; once they say they are done, call check_permission with the id it gave, then take a snapshot.`,
     args: z.strictObject({
       tab,
       message: z
@@ -571,8 +571,7 @@ const SPECS: readonly BrowserToolSpec[] = [
   {
     name: "request_secret",
     title: "Ask the owner for a secret",
-    description:
-      'Asks the owner to store a secret for the browser to type into pages at the sites you name (a password, or the seed of a sign-in\'s one-time codes), so it never passes through you or the conversation. Answers "Not done yet" with a link: end your reply with it, on a line of its own. The owner types the value on PCP\'s page, checks the sites, and chooses whether this token may use it once, for an hour, or always without asking. Never ask them for the value in the conversation. Once they say they have answered, call check_permission with the id it gave; then type it with type\'s text {"$secret": "<name>"}. A name PCP already holds is refused: type that one instead.',
+    description: `Asks the owner to store a secret for the browser to type into pages at the sites you name (a password, or the seed of a sign-in's one-time codes), so it never passes through you or the conversation. Answers "Not done yet" with a link. ${OWNER_LINK_RULE} The owner types the value on PCP's page, checks the sites, and chooses whether this token may use it once, for an hour, or always without asking. Never ask them for the value in the conversation. Once they say they have answered, call check_permission with the id it gave; then type it with type's text {"$secret": "<name>"}. A name PCP already holds is refused: type that one instead.`,
     args: z.strictObject({
       name: z
         .string()
