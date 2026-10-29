@@ -206,7 +206,12 @@ export function catalogueTools(definition: WrapperDefinition): CatalogueTool[] {
       replaces: tool.replaces,
       ...(definition.callLevels ? { callLevels: definition.callLevels } : {}),
     }),
-    ...(tool.outputSchema ? { output: outlineSchema(tool.outputSchema) } : {}),
+    ...(tool.outputSchema
+      ? {
+          output: outlineSchema(tool.outputSchema),
+          outputSchema: tool.outputSchema,
+        }
+      : {}),
   }))
 }
 

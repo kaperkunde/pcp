@@ -16,7 +16,11 @@ import {
   type GatewayScope,
 } from "../gateway"
 import { json, startTestApi, type TestApi } from "../openapi/test-api"
-import { decidePermission, getPermissionView } from "../permissions"
+import {
+  decidePermission,
+  defaultExecutor,
+  getPermissionView,
+} from "../permissions"
 import { readServerNote, setPersonalNote } from "../personal-notes"
 import { serializeItem } from "../repos/documents"
 import { localItem } from "../repos/local"
@@ -41,7 +45,7 @@ import {
 } from "./definition"
 import { flowSites } from "./flow-sites"
 import { FLOW_RUN_TIMEOUT_MS, WRAPPER_RUN_TIMEOUT_MS } from "./limits"
-import { wrapperRunTimeout } from "./run"
+import { withWrappers, wrapperRunTimeout } from "./run"
 
 /** The run limits as tests set them; the real ones unless a test says. */
 const timeouts = vi.hoisted(() => ({
@@ -1094,7 +1098,9 @@ describe("a tool's output schema", () => {
       server: "lookup",
       tool: "lookup",
     })
-    expect(described.text).toContain('"returns": "{got: string}"')
+    expect(described.text).toContain('"outputSchema": {')
+    expect(described.text).toContain('"additionalProperties": false')
+    expect(described.text).not.toContain('"returns"')
 
     const read = await call("get_wrapper", { wrapper: "lookup" })
     expect(read.text).toContain('"output_schema"')
@@ -1106,6 +1112,36 @@ describe("a tool's output schema", () => {
     })
     expect(result.isError).toBe(false)
     expect(result.text).toContain("q=hello")
+  })
+
+  it("answers a value that fits as structuredContent, with its JSON as the text", async () => {
+    const wrapper = await approvedWrapper({
+      ...ECHO_TOOL,
+      output_schema: SHAPE,
+    })
+    const executor = withWrappers(defaultExecutor, {
+      ctx,
+      tokenId: scope.tokenId,
+      publicUrl: PUBLIC_URL,
+      serverIds: null,
+      approved: false,
+    })
+
+    const result = await executor.callTool(
+      ctx,
+      wrapper,
+      "lookup",
+      { word: "hello" },
+      { publicUrl: PUBLIC_URL, tokenId: scope.tokenId },
+    )
+
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({
+      got: expect.stringContaining("q=hello"),
+    })
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual(
+      result.structuredContent,
+    )
   })
 
   it("makes an answer that does not fit an error, naming where", async () => {

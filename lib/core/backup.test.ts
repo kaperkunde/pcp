@@ -593,6 +593,55 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect((await db().permissionRequest.findFirst())?.targetKey).toBeNull()
   })
 
+  it("carries what a tool declares it answers and its icons, and restores a file from before them as none", async () => {
+    const { ctx, serverId } = await populate()
+    const outputSchema = {
+      type: "object",
+      properties: { total: { type: "integer" } },
+    }
+    const icons = [{ src: "https://upstream.example/alpha.png" }]
+    await storeTools(serverId, [
+      {
+        name: "alpha",
+        description: "First",
+        inputSchema: { type: "object" },
+        outputSchema,
+        icons,
+      },
+    ])
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    const tool = await db().mcpTool.findFirstOrThrow({
+      where: { name: "alpha" },
+    })
+    expect(JSON.parse(tool.outputSchema!)).toEqual(outputSchema)
+    expect(JSON.parse(tool.icons!)).toEqual(icons)
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    for (const row of older.tables.tools as Record<string, unknown>[]) {
+      delete row.outputSchema
+      delete row.icons
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().mcpTool.findFirstOrThrow({ where: { name: "alpha" } }),
+    ).toMatchObject({ outputSchema: null, icons: null })
+  })
+
   it("carries definitions and the owner's notes, and gives each server of a file from before them a definition of its own", async () => {
     const { ctx, serverId } = await populate()
     const { id: cloneId } = await cloneServer(ctx, serverId, {

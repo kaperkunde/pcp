@@ -366,6 +366,10 @@ const McpToolRow = z.strictObject({
   annotations: str.nullable(),
   operation: str.nullable(),
   output: str.nullable(),
+  // Added after the rest: a tool from an older file declares none until
+  // its server is read again.
+  outputSchema: str.nullable().default(null),
+  icons: str.nullable().default(null),
   createdAt: date,
   updatedAt: date,
 })

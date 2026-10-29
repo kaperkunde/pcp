@@ -317,6 +317,8 @@ const TOOL_ROW = {
   inputSchema: true,
   annotations: true,
   output: true,
+  outputSchema: true,
+  icons: true,
   operation: true,
 } as const
 
@@ -326,6 +328,8 @@ type ToolRow = {
   inputSchema: string
   annotations: string | null
   output: string | null
+  outputSchema: string | null
+  icons: string | null
   operation: string | null
 }
 
@@ -1461,6 +1465,19 @@ export function buildGatewayServer(
     })
   }
 
+  /** A stored JSON column, parsed; undefined when empty or unreadable. */
+  function parsedOrNothing(json: string | null): unknown {
+    if (!json) {
+      return undefined
+    }
+
+    try {
+      return JSON.parse(json)
+    } catch {
+      return undefined
+    }
+  }
+
   /**
    * describe's answer for a tool, call_handle first so a long schema cut short
    * still carries it. The recovery answers of call_tool give the same.
@@ -1479,6 +1496,9 @@ export function buildGatewayServer(
       inputSchema = row.inputSchema
     }
 
+    const outputSchema = parsedOrNothing(row.outputSchema)
+    const icons = parsedOrNothing(row.icons)
+
     const json = JSON.stringify(
       {
         call_handle: handleFor(entry, row),
@@ -1494,8 +1514,15 @@ export function buildGatewayServer(
         description: tool.descriptionOverride ?? tool.description,
         access: tool.access,
         inputSchema,
-        // What a successful call answers, when the API's schema says.
-        ...(row.output ? { returns: row.output } : {}),
+        // What a successful call answers: the JSON Schema of its
+        // structuredContent when the tool declares one, else the outline
+        // an API's schema gives.
+        ...(outputSchema !== undefined
+          ? { outputSchema }
+          : row.output
+            ? { returns: row.output }
+            : {}),
+        ...(icons !== undefined ? { icons } : {}),
         // A wrapper's tool: the tools its program calls.
         ...(entry.kind === "wrapper"
           ? {

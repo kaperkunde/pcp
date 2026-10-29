@@ -467,3 +467,144 @@ describe("an MCP server limited to public addresses", () => {
     expect(mcp.requests.some((request) => request.url === "/mcp")).toBe(true)
   })
 })
+
+describe("an MCP server as it describes and answers its tools", () => {
+  let mcp: TestApi
+
+  beforeEach(async () => {
+    mcp = await startTestApi((request, res) => {
+      if (request.method !== "POST") {
+        res.statusCode = 405
+        return res.end()
+      }
+
+      const { id, method, params } = JSON.parse(request.body) as {
+        id?: number
+        method: string
+        params?: { name?: string }
+      }
+      const answer = (result: unknown) =>
+        json(res, 200, { jsonrpc: "2.0", id, result })
+
+      if (id === undefined) {
+        res.statusCode = 202
+        return res.end()
+      }
+
+      if (method === "initialize") {
+        return answer({
+          protocolVersion: "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "shaped", version: "1" },
+        })
+      }
+
+      if (method === "tools/list") {
+        return answer({
+          tools: [
+            {
+              name: "count",
+              title: "Count things",
+              description: "Counts things.",
+              inputSchema: { type: "object" },
+              outputSchema: {
+                type: "object",
+                properties: { total: { type: "integer" } },
+                required: ["total"],
+              },
+              icons: [
+                { src: "https://shaped.example/count.png", sizes: ["48x48"] },
+                { src: "javascript:alert(1)" },
+              ],
+            },
+            {
+              name: "has space",
+              description: "A name MCP does not allow.",
+              inputSchema: { type: "object" },
+            },
+          ],
+        })
+      }
+
+      if (params?.name === "picky") {
+        return json(res, 200, {
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32602, message: "count must be a number" },
+        })
+      }
+
+      if (params?.name === "broken") {
+        res.statusCode = 502
+        return res.end("Bad gateway")
+      }
+
+      return answer({
+        content: [{ type: "text", text: '{"total":3}' }],
+        structuredContent: { total: 3 },
+      })
+    })
+  })
+
+  afterEach(async () => {
+    await mcp.close()
+  })
+
+  it("keeps each tool's outputSchema, title and icons, and says which names MCP does not allow", async () => {
+    const { id } = await createServer(ctx, {
+      name: "Shaped",
+      url: `${mcp.origin}/mcp`,
+      authType: "none",
+    })
+    const server = await getServer(ctx, id)
+
+    const sync = await syncServerTools(ctx, server, PUBLIC)
+
+    expect(sync.status).toBe("ok")
+    expect(sync.toolCount).toBe(2)
+    expect(sync.message).toContain('"has space"')
+    const count = await db().mcpTool.findFirstOrThrow({
+      where: { serverId: id, name: "count" },
+    })
+    expect(count.title).toBe("Count things")
+    expect(JSON.parse(count.outputSchema!)).toEqual({
+      type: "object",
+      properties: { total: { type: "integer" } },
+      required: ["total"],
+    })
+    expect(JSON.parse(count.icons!)).toEqual([
+      { src: "https://shaped.example/count.png", sizes: ["48x48"] },
+    ])
+
+    const result = await callServerTool(ctx, server, "count", {}, PUBLIC)
+    expect(result.structuredContent).toEqual({ total: 3 })
+  })
+
+  it("tells a server that answered with an error from one it could not reach", async () => {
+    const { id } = await createServer(ctx, {
+      name: "Shaped",
+      url: `${mcp.origin}/mcp`,
+      authType: "none",
+    })
+    const server = await getServer(ctx, id)
+    await syncServerTools(ctx, server, PUBLIC)
+
+    // It answered: a tool error in its words, and it is not marked down.
+    const picky = await callServerTool(ctx, server, "picky", {}, PUBLIC)
+    expect(picky.isError).toBe(true)
+    expect(picky._meta).toEqual({
+      "gg.pcp/error": { code: "invalid_arguments" },
+    })
+    expect(JSON.stringify(picky.content)).toContain(
+      "Shaped answered picky with an error (JSON-RPC -32602): count must be a number",
+    )
+    expect(JSON.stringify(picky.content)).not.toContain("could not be reached")
+    expect((await getServer(ctx, id)).status).toBe("ok")
+
+    // It did not: thrown as a failure on the way, and marked.
+    await expect(
+      callServerTool(ctx, server, "broken", {}, PUBLIC),
+    ).rejects.toMatchObject({ code: "upstream" })
+    expect((await getServer(ctx, id)).status).toBe("error")
+  })
+})
