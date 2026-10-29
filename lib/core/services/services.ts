@@ -231,18 +231,9 @@ export async function prepareLaunch(
   let definition: ServiceDefinition
 
   if (input.definitionId) {
-    const shared = await definitionForNew(ctx, input.definitionId, "service")
-    const source = await db().serviceSpec.findFirst({
-      where: { server: { definitionId: shared.id } },
-      orderBy: { createdAt: "asc" },
-    })
-
-    if (!source) {
-      throw notFound("That service definition")
-    }
-
+    const shared = await serviceOfDefinition(ctx, input.definitionId)
     definitionId = shared.id
-    definition = readServiceDefinition(source.definition)
+    definition = shared.definition
   } else {
     let value = input.definition
 
@@ -298,6 +289,38 @@ export async function prepareLaunch(
     publish,
     env,
     containerName: await containerNameFor(ctx, host.id, name),
+  }
+}
+
+/**
+ * A service definition of the vault, as another instance of it is launched:
+ * its name, description and definition (its oldest instance's, which every
+ * instance shares).
+ */
+export async function serviceOfDefinition(
+  ctx: VaultContext,
+  definitionId: string,
+): Promise<{
+  id: string
+  name: string
+  description: string
+  definition: ServiceDefinition
+}> {
+  const shared = await definitionForNew(ctx, definitionId, "service")
+  const source = await db().serviceSpec.findFirst({
+    where: { server: { definitionId: shared.id, vaultId: ctx.vaultId } },
+    orderBy: { createdAt: "asc" },
+  })
+
+  if (!source) {
+    throw notFound("That service definition")
+  }
+
+  return {
+    id: shared.id,
+    name: shared.name,
+    description: shared.description,
+    definition: readServiceDefinition(source.definition),
   }
 }
 
@@ -1280,6 +1303,8 @@ export async function servicesOnHost(
 /** What the service's page shows of it that is not live: nothing secret. */
 export type ServiceView = {
   id: string
+  /** The definition its instances share: another is launched on it. */
+  definitionId: string | null
   name: string
   containerName: string
   engine: ServiceEngine
@@ -1312,6 +1337,7 @@ export async function serviceView(
 
   return {
     id,
+    definitionId: loaded.server.definitionId,
     name: loaded.server.name,
     containerName: loaded.spec.containerName,
     engine: loaded.engine,

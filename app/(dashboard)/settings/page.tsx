@@ -143,7 +143,7 @@ export default async function SettingsPage({
             href="/settings/repositories"
             icon={<IconTile icon={FolderGit2} size="sm" />}
             title="Repositories"
-            description="Share skills, wrappers, flows, endpoints and servers through GitHub"
+            description="Share skills, wrappers, flows, endpoints, servers and services through GitHub, and add PCP's common items"
           />
         </List>
       </ListSection>

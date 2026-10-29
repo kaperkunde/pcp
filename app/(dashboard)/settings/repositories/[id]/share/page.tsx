@@ -36,6 +36,7 @@ const KIND: Record<ItemKind, string> = {
   flow: "browser flow",
   endpoint: "API endpoint",
   server: "MCP server",
+  service: "service",
 }
 
 const CHANGE_LABEL = {

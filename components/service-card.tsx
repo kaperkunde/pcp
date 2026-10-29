@@ -192,6 +192,13 @@ export function ServiceCard({ view }: { view: ServiceView }) {
             </Button>
           }
         />
+        {view.definitionId ? (
+          <ListRow
+            href={`/servers/services/new?definition=${encodeURIComponent(view.definitionId)}`}
+            title="Launch another"
+            description="Another container of this definition, on an SSH server, address and secrets of its own. A change to the definition is every one's."
+          />
+        ) : null}
         {view.registered ? (
           <ListRow
             href={`/servers/${view.registered.id}`}

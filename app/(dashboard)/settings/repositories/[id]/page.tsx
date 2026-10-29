@@ -48,10 +48,12 @@ const KIND: Record<string, string> = {
   flow: "Browser flow",
   endpoint: "API endpoint",
   server: "MCP server",
+  service: "Service",
 }
 
 const GROUP: Record<ItemGroup, string> = {
   servers: "Servers and APIs",
+  services: "Services",
   wrappers: "Wrappers",
   skills: "Skills",
   flows: "Browser flows",

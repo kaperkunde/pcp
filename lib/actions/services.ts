@@ -16,13 +16,9 @@ import {
   runServiceAction,
   updateService,
 } from "@/lib/core/upstream"
-import {
-  type ActionState,
-  field,
-  fields,
-  guarded,
-} from "@/lib/server/action-state"
+import { type ActionState, field, guarded } from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
+import { envFrom, serviceInputFrom } from "@/lib/server/service-input"
 import { requireContext } from "@/lib/server/session"
 
 import type { ServerActionResult } from "./servers"
@@ -45,35 +41,6 @@ function revalidate(id: string) {
   revalidatePath("/tokens/[id]", "page")
 }
 
-/** The variables' secrets, as env.<NAME> fields: the empty ones left out. */
-function envFrom(formData: FormData): Record<string, string> {
-  const env: Record<string, string> = {}
-
-  for (const [key, value] of formData.entries()) {
-    if (key.startsWith("env.") && typeof value === "string" && value) {
-      env[key.slice(4)] = value
-    }
-  }
-
-  return env
-}
-
-function publishFrom(formData: FormData) {
-  const containers = fields(formData, "port.container")
-  const hosts = fields(formData, "port.host")
-
-  return {
-    address: field(formData, "address"),
-    ports: containers.map((container, at) => {
-      const host = Number(hosts[at])
-      if (!Number.isInteger(host)) {
-        throw invalid(`Choose the SSH server's port for port ${container}.`)
-      }
-      return { container: Number(container), host }
-    }),
-  }
-}
-
 export async function launchServiceAction(
   _previous: ServerActionResult,
   formData: FormData,
@@ -84,13 +51,12 @@ export async function launchServiceAction(
     const launched = await launchService(
       ctx,
       {
-        name: field(formData, "name"),
+        ...serviceInputFrom(formData),
         description: field(formData, "description"),
-        hostId: field(formData, "hostId"),
-        definition: field(formData, "definition"),
-        publish: publishFrom(formData),
-        env: envFrom(formData),
-        note: field(formData, "note") || null,
+        // Another instance of a service takes its definition from there.
+        ...(field(formData, "definitionId")
+          ? { definitionId: field(formData, "definitionId") }
+          : { definition: field(formData, "definition") }),
       },
       { publicUrl },
     )

@@ -387,6 +387,101 @@ describe("another server of a definition (definition)", () => {
         username: "ada",
         secret: "x",
       }),
-    ).toMatch(/definition is for an MCP server or an API/)
+    ).toMatch(/definition is for an MCP server, an API or a service/)
+  })
+})
+
+describe("a service (kind service)", () => {
+  const service = { service: { image: "x" }, ssh_server: "build-box" }
+
+  it("is the kind named, or the one a definition in service makes", () => {
+    expect(resolveKind({ service: {} })).toBe("service")
+    expect(resolveKind({ kind: "service" })).toBe("service")
+    expect(resolveKind({}, "service")).toBe("service")
+    expect(resolveKind({ openapi_schema: "{}", service: {} })).toBe("service")
+  })
+
+  it("takes its definition, the SSH server, where it is published and its secrets", () => {
+    expect(checkRegisterShape("service", service)).toBeNull()
+    expect(
+      checkRegisterShape("service", {
+        ...service,
+        description: "Documents to Markdown.",
+        publish_address: "10.0.0.5",
+        publish_ports: [{ container: 5001, host: 8001 }],
+        env_secrets: [{ name: "API_KEY", secret: "Docling key" }],
+      }),
+    ).toBeNull()
+  })
+
+  it("needs a definition and an SSH server", () => {
+    expect(checkRegisterShape("service", { ssh_server: "build-box" })).toMatch(
+      /from its definition in service/,
+    )
+    expect(checkRegisterShape("service", { service: {} })).toMatch(
+      /pass its short name in ssh_server/,
+    )
+  })
+
+  it("takes none of the other kinds' arguments, and signs in to nothing", () => {
+    expect(
+      checkRegisterShape("service", { ...service, url: "https://x" }),
+    ).toMatch(/takes none of url/)
+    expect(
+      checkRegisterShape("service", { ...service, secret: "Docling key" }),
+    ).toMatch(/takes none of secret/)
+    expect(
+      checkRegisterShape("service", { ...service, read_only: true }),
+    ).toMatch(/takes none of read_only/)
+    expect(
+      checkRegisterShape("service", { ...service, auth_type: "header" }),
+    ).toMatch(/signs in to nothing/)
+  })
+
+  it("keeps its own arguments out of every other kind", () => {
+    expect(
+      checkRegisterShape("mcp", {
+        url: "https://mcp.example.com/mcp",
+        ssh_server: "build-box",
+      }),
+    ).toMatch(/ssh_server is for kind service/)
+    expect(
+      checkRegisterShape("api", {
+        openapi_schema: "{}",
+        env_secrets: [],
+        publish_ports: [],
+      }),
+    ).toMatch(/publish_ports, env_secrets are for kind service/)
+    expect(
+      checkRegisterShape("caldav", {
+        url: "caldav.icloud.com",
+        auth_type: "oauth",
+        service: {},
+        publish_address: "0.0.0.0",
+      }),
+    ).toMatch(/service, publish_address are for kind service/)
+  })
+
+  it("as another of a definition, brings only its own part", () => {
+    expect(
+      checkRegisterShape("service", {
+        definition: "docling-service",
+        ssh_server: "build-box",
+        env_secrets: [{ name: "API_KEY", secret: "Docling key" }],
+      }),
+    ).toBeNull()
+    expect(
+      checkRegisterShape("service", {
+        definition: "docling-service",
+        ...service,
+      }),
+    ).toMatch(/leave service out/)
+    expect(
+      checkRegisterShape("service", {
+        definition: "docling-service",
+        ssh_server: "build-box",
+        description: "Mine.",
+      }),
+    ).toMatch(/leave description out/)
   })
 })

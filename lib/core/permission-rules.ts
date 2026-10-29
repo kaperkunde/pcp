@@ -312,6 +312,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
   repo_share: {
     decline: "Not now",
   },
+  // A service an assistant proposed, launched as the owner saw it whole.
+  service_change: {
+    allow_once: "Launch it",
+    decline: "Not now",
+  },
   // The owner's note on a server or a skill, as an assistant proposed it.
   note_change: {
     allow_once: "Save the note",

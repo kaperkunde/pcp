@@ -70,6 +70,7 @@ const NOUN: Record<ItemKind, string> = {
   flow: "browser flow",
   endpoint: "API endpoint",
   server: "MCP server",
+  service: "service",
 }
 
 const STATUS: Record<ItemStatus, string> = {
