@@ -1,7 +1,17 @@
 import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { createRequire } from "node:module"
 import net from "node:net"
+import os from "node:os"
+import path from "node:path"
 
 import {
   afterAll,
@@ -19,19 +29,27 @@ import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import {
   acquireDisplay,
+  displayRenderer,
   displaySwitches,
+  hasRenderNode,
   PLAYWRIGHT_DISABLED_FEATURES,
+  playwrightEnabledFeatures,
+  rendererFor,
   runningDisplay,
   setXvfbCommand,
   wantsVirtualDisplay,
 } from "./display"
 import { chromiumExecutable } from "./executable"
+import { OFF_SCREEN_WINDOW, SHOWN_WINDOW_POSITION } from "./limits"
 import {
   browserStatus,
   closeAllBrowsers,
+  closeSolvePage,
   ensureBrowser,
+  openSolvePage,
   openTab,
 } from "./runtime"
+import { subscribeScreencast } from "./screencast"
 
 // The virtual display a server's browser runs on, against the machine's own
 // Xvfb. Skipped where there is none (`apt install xvfb`).
@@ -102,6 +120,139 @@ describe("Chromium's switches on the virtual display", () => {
       ...playwrights,
       "RenderDocument",
     ])
+  })
+
+  it("draw in software without a GPU: SwiftShader, as before", () => {
+    expect(rendererFor(false)).toBe("software")
+    expect(displaySwitches("software")).toEqual(displaySwitches())
+
+    const switches = displaySwitches("software")
+    expect(switches[0]).toBe("--enable-unsafe-swiftshader")
+    expect(switches).toHaveLength(2)
+    expect(switches.join(" ")).not.toMatch(/vulkan|--enable-features/i)
+  })
+
+  it("draw with the GPU when there is one: ANGLE on Vulkan, SwiftShader only as the fallback", () => {
+    expect(rendererFor(true)).toBe("gpu")
+
+    const switches = displaySwitches("gpu", {})
+    expect(switches).toEqual(
+      expect.arrayContaining([
+        "--use-angle=vulkan",
+        "--disable-vulkan-surface",
+        // Not a switch to software: WebGL falls back to it only when the
+        // GPU does not start, and without it would be gone.
+        "--enable-unsafe-swiftshader",
+      ]),
+    )
+    // Nothing that makes Chromium draw in software, and no override of the
+    // blocklist.
+    for (const forced of [
+      "--use-angle=swiftshader",
+      "--use-gl=swiftshader",
+      "--disable-gpu",
+      "--ignore-gpu-blocklist",
+    ]) {
+      expect(switches).not.toContain(forced)
+    }
+    // The virtual display's other switches stay.
+    expect(switches).toContain(displaySwitches("software")[1])
+  })
+
+  it("carry the features Playwright turns on with the GPU's, since Chromium keeps only the last list", () => {
+    const bundle = readFileSync(
+      createRequire(import.meta.url).resolve("patchright-core/lib/coreBundle"),
+      "utf8",
+    )
+    const switches = bundle.match(
+      /chromiumSwitches = \(options\) => \[([\s\S]*?)\]\.filter/,
+    )?.[1]
+    expect(switches).toBeDefined()
+    const playwrights = [
+      ...switches!.matchAll(/"--enable-features=([^"]+)"/g),
+    ].flatMap((m) => m[1]!.split(","))
+    expect(playwrights.length).toBeGreaterThan(0)
+    expect(switches).toContain(
+      'process.env.PLAYWRIGHT_LEGACY_SCREENSHOT ? "" : "--enable-features=',
+    )
+    expect(playwrightEnabledFeatures({})).toEqual(playwrights)
+
+    const enable = (env: Record<string, string>) => {
+      const lists = displaySwitches("gpu", env).filter((s) =>
+        s.startsWith("--enable-features="),
+      )
+      expect(lists).toHaveLength(1)
+      return lists[0]!.slice("--enable-features=".length).split(",")
+    }
+    expect(enable({})).toEqual([...playwrights, "Vulkan"])
+    // Playwright leaves its own out with this set, and so does PCP.
+    expect(enable({ PLAYWRIGHT_LEGACY_SCREENSHOT: "1" })).toEqual(["Vulkan"])
+    expect(
+      displaySwitches("gpu", {}).filter((s) =>
+        s.startsWith("--disable-features="),
+      ),
+    ).toHaveLength(1)
+  })
+})
+
+describe("the GPU's render node", () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(os.tmpdir(), "pcp-dri-"))
+  })
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it("is there when the container has one PCP may open", async () => {
+    writeFileSync(path.join(dir, "card0"), "")
+    expect(await hasRenderNode(dir)).toBe(false)
+
+    writeFileSync(path.join(dir, "renderD128"), "")
+    expect(await hasRenderNode(dir)).toBe(true)
+  })
+
+  it("is not without /dev/dri, or with only a node that is not there", async () => {
+    expect(await hasRenderNode(path.join(dir, "missing"))).toBe(false)
+
+    symlinkSync(path.join(dir, "gone"), path.join(dir, "renderD128"))
+    expect(await hasRenderNode(dir)).toBe(false)
+  })
+
+  it.skipIf(process.getuid?.() === 0)(
+    "is not when PCP's user may not read and write it",
+    async () => {
+      writeFileSync(path.join(dir, "renderD128"), "", { mode: 0o600 })
+      chmodSync(path.join(dir, "renderD128"), 0o400)
+      expect(await hasRenderNode(dir)).toBe(false)
+    },
+  )
+
+  it("is said in the log once, as GPU or software, and again only when that changes", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {})
+    try {
+      writeFileSync(path.join(dir, "renderD128"), "")
+      const missing = path.join(dir, "missing")
+
+      expect(await displayRenderer(dir)).toBe("gpu")
+      expect(await displayRenderer(dir)).toBe("gpu")
+      expect(await displayRenderer(missing)).toBe("software")
+      expect(await displayRenderer(missing)).toBe("software")
+
+      const lines = log.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes("virtual display draws"))
+      expect(lines).toEqual([
+        "[browser] Chromium on the virtual display draws with the GPU",
+        "[browser] Chromium on the virtual display draws in software (no GPU render node it may use)",
+      ])
+      // Nothing of the device.
+      expect(lines.join("\n")).not.toContain("renderD")
+    } finally {
+      log.mockRestore()
+    }
   })
 })
 
@@ -232,12 +383,33 @@ navigator.userAgentData
 </script>`)
         }
 
+        if (request.url?.startsWith("/place")) {
+          // A new window has no outer size for its first moments (more of
+          // them on a busy machine): the page waits for one to report.
+          return res.end(`<!doctype html><title>?</title><script>
+let tries = 0
+function report() {
+  if (outerWidth === 0 && tries++ < 200) return setTimeout(report, 25)
+  document.title = JSON.stringify({
+    place: [screenX, screenY],
+    window: [outerWidth, outerHeight, innerWidth, innerHeight],
+    screen: [screen.width, screen.height],
+    visible: document.visibilityState,
+    userAgent: navigator.userAgent,
+  })
+}
+report()
+</script>`)
+        }
+
         res.end(`<!doctype html><title>?</title><script>
 const gl = document.createElement("canvas").getContext("webgl")
+const info = gl && gl.getExtension("WEBGL_debug_renderer_info")
 document.title = JSON.stringify({
   window: [outerWidth, outerHeight, innerWidth, innerHeight],
   screen: [screen.width, screen.height],
   webgl: gl ? gl.getParameter(gl.RENDERER) : null,
+  renderer: info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : null,
 })
 </script>`)
       })
@@ -268,6 +440,7 @@ document.title = JSON.stringify({
         window: number[]
         screen: number[]
         webgl: string | null
+        renderer: string | null
       }
 
       expect(seen.window[2]).toBe(1280)
@@ -275,6 +448,10 @@ document.title = JSON.stringify({
       expect(seen.window[1]).toBeGreaterThan(seen.window[3]!)
       expect(seen.screen).toEqual([1920, 1080])
       expect(seen.webgl).toBeTruthy()
+      // Without a GPU render node, WebGL is SwiftShader's, as before.
+      if (!(await hasRenderNode())) {
+        expect(seen.renderer).toContain("SwiftShader")
+      }
 
       // Every document sees the window as its script runs, not only the
       // first: a new document once read 0 by 0 until the window reached it.
@@ -331,6 +508,193 @@ document.title = JSON.stringify({
       expect(seen).toEqual(own)
       expect(seen.architecture).not.toBe("")
     })
+
+    it("in the desktop app, has a window of its own off the screen, which still paints for the live view", async () => {
+      // The machine's own screen, as the desktop app has one: here a display
+      // of PCP's, handed to Chromium as a desktop session's would be.
+      const screen = await acquireDisplay()
+      vi.stubEnv("DISPLAY", screen!.display.display)
+      vi.stubEnv("XAUTHORITY", screen!.display.authFile)
+      vi.stubEnv("PCP_DESKTOP", "1")
+      vi.stubEnv("PCP_BROWSER_DISPLAY", "")
+
+      try {
+        const vault = await ensureBrowser(ctx)
+        expect(vault.mode).toBe("window")
+        expect(vault.display).toBeNull()
+        expect(browserStatus(ctx.vaultId).display).toBe("window")
+
+        const tab = await openTab(vault, {
+          openedBy: "owner",
+          tokenId: null,
+          rules: null,
+          privateAllowed: true,
+        })
+        const where = async (cdp: typeof tab.cdp) => {
+          const { bounds } = await cdp.send("Browser.getWindowForTarget")
+          return [bounds.left, bounds.top]
+        }
+        expect(await where(tab.cdp)).toEqual([
+          OFF_SCREEN_WINDOW.x,
+          OFF_SCREEN_WINDOW.y,
+        ])
+
+        await tab.page.goto(`${api.origin}/place`)
+        await tab.page.waitForFunction(() => document.title !== "?")
+        const seen = JSON.parse(await tab.page.title()) as {
+          place: number[]
+          window: number[]
+          screen: number[]
+          visible: string
+          userAgent: string
+        }
+        // The page is told a place on the screen it is told of, not the
+        // window's own, and still counts as seen.
+        expect(seen.place).toEqual([
+          SHOWN_WINDOW_POSITION.x,
+          SHOWN_WINDOW_POSITION.y,
+        ])
+        expect(seen.window[0]).toBeGreaterThan(seen.window[2]!)
+        expect(seen.window[1]).toBeGreaterThan(seen.window[3]!)
+        expect(seen.screen).toEqual([1920, 1080])
+        expect(seen.visible).toBe("visible")
+        expect(seen.userAgent).not.toContain("Headless")
+
+        // The live view's frames keep coming from a window no one sees.
+        const frames: unknown[] = []
+        const viewer = await subscribeScreencast(tab, (frame) => {
+          frames.push(frame)
+          viewer?.took()
+        })
+        await tab.page.evaluate(() => {
+          document.body.style.background = "rgb(1, 2, 3)"
+        })
+        await vi.waitFor(() => expect(frames.length).toBeGreaterThan(0), {
+          timeout: 10_000,
+        })
+        viewer?.stop()
+
+        // A popup opens where its page asks, on the screen, and moves off
+        // it as it becomes a tab.
+        await tab.page.evaluate(() => {
+          window.open("about:blank", "", "popup,left=100,top=100")
+        })
+        await vi.waitFor(() => expect(vault.tabs.size).toBe(2), {
+          timeout: 10_000,
+        })
+        const popup = [...vault.tabs.values()].find((other) => other !== tab)!
+        expect(await where(popup.cdp)).toEqual([
+          OFF_SCREEN_WINDOW.x,
+          OFF_SCREEN_WINDOW.y,
+        ])
+      } finally {
+        await closeAllBrowsers()
+        screen?.release()
+      }
+    })
+
+    it("in the desktop app, opens its own tabs and web_fetch's pages in windows of their own, in the background", async () => {
+      const screen = await acquireDisplay()
+      vi.stubEnv("DISPLAY", screen!.display.display)
+      vi.stubEnv("XAUTHORITY", screen!.display.authFile)
+      vi.stubEnv("PCP_DESKTOP", "1")
+      vi.stubEnv("PCP_BROWSER_DISPLAY", "")
+      const log = vi.spyOn(console, "error")
+
+      try {
+        const vault = await ensureBrowser(ctx)
+        expect(vault.mode).toBe("window")
+        const meta = {
+          openedBy: "owner" as const,
+          tokenId: null,
+          rules: null,
+          privateAllowed: true,
+        }
+        const first = await openTab(vault, meta)
+        const second = await openTab(vault, meta)
+        const solve = await openSolvePage(vault, {
+          url: new URL(api.origin),
+          privateAllowed: true,
+        })
+        const solveCdp = await solve.page.context().newCDPSession(solve.page)
+
+        // Each opened through Target.createTarget in the background, not
+        // Playwright's newPage: nothing fell back to it.
+        expect(
+          log.mock.calls.some((call) => String(call[0]).includes("in front")),
+        ).toBe(false)
+
+        const windows = new Set<number>()
+        for (const cdp of [first.cdp, second.cdp, solveCdp]) {
+          const { targetInfo } = await cdp.send("Target.getTargetInfo")
+          expect(targetInfo.type).toBe("page")
+          expect(targetInfo.url).toBe("about:blank")
+
+          // A window of its own, off the screen.
+          const { windowId, bounds } = await cdp.send(
+            "Browser.getWindowForTarget",
+          )
+          windows.add(windowId)
+          expect([bounds.left, bounds.top]).toEqual([
+            OFF_SCREEN_WINDOW.x,
+            OFF_SCREEN_WINDOW.y,
+          ])
+        }
+        expect(windows.size).toBe(3)
+        await solveCdp.detach()
+        await closeSolvePage(vault, solve)
+
+        // Neither tab is a hidden one of a shared window: both still draw.
+        for (const tab of [first, second]) {
+          await tab.page.goto(`${api.origin}/place`)
+          await tab.page.waitForFunction(() => document.title !== "?")
+          const seen = JSON.parse(await tab.page.title()) as {
+            visible: string
+          }
+          expect(seen.visible).toBe("visible")
+
+          const frames: unknown[] = []
+          const viewer = await subscribeScreencast(tab, (frame) => {
+            frames.push(frame)
+            viewer?.took()
+          })
+          await tab.page.evaluate(() => {
+            document.body.style.background = "rgb(4, 5, 6)"
+          })
+          await vi.waitFor(() => expect(frames.length).toBeGreaterThan(0), {
+            timeout: 10_000,
+          })
+          viewer?.stop()
+        }
+      } finally {
+        log.mockRestore()
+        await closeAllBrowsers()
+        screen?.release()
+      }
+    })
+
+    it.skipIf(process.platform !== "linux")(
+      "runs headless when its own window does not open",
+      async () => {
+        // Linux with no screen at all: a windowed Chromium stops as it starts.
+        vi.stubEnv("DISPLAY", "")
+        vi.stubEnv("WAYLAND_DISPLAY", "")
+        vi.stubEnv("PCP_DESKTOP", "1")
+        vi.stubEnv("PCP_BROWSER_DISPLAY", "")
+        const log = vi.spyOn(console, "error").mockImplementation(() => {})
+
+        try {
+          const vault = await ensureBrowser(ctx)
+          expect(vault.mode).toBe("headless")
+          expect(browserStatus(ctx.vaultId).display).toBe("headless")
+          expect(String(log.mock.calls[0]?.[0])).toContain(
+            "did not start in its window mode",
+          )
+        } finally {
+          log.mockRestore()
+        }
+      },
+    )
 
     it("is headless where no display is wanted", async () => {
       vi.stubEnv("PCP_BROWSER_DISPLAY", "headless")

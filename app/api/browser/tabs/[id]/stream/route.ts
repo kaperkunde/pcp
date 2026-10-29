@@ -102,7 +102,7 @@ export async function GET(
 
   const stream = new ReadableStream<Uint8Array>({
     async start() {
-      tabState = await tabView(tab)
+      tabState = await tabView(tab, { favicon: false })
       subscription = await subscribeScreencast(tab, (next) => {
         touch(ctx.vaultId)
         frame = next
@@ -128,6 +128,8 @@ export async function GET(
           end("closed", {})
           return
         }
+        // Someone is watching, even a page that paints nothing new.
+        touch(ctx.vaultId)
         ticks += 1
         if (ticks % SESSION_EVERY_TICKS === 0 && !checking) {
           checking = true
@@ -143,7 +145,7 @@ export async function GET(
               checking = false
             })
         }
-        void tabView(tab).then((view) => {
+        void tabView(tab, { favicon: false }).then((view) => {
           tabState = view
           notify()
         })

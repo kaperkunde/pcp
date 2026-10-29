@@ -12,10 +12,15 @@ import {
 
 import { CopyableValue } from "@/components/copyable-value"
 import { FormError, FormNote } from "@/components/form-status"
+import { ItemAboutRows } from "@/components/item-about"
 import { LocalDate, RelativeDate } from "@/components/local-date"
 import { PageHeader } from "@/components/page-header"
 import { ServerStatusBadge } from "@/components/server-status-badge"
 import { ServerTools, type ServerTool } from "@/components/server-tools"
+import {
+  SharedDefinitionNote,
+  SharedInstancesProvider,
+} from "@/components/shared-definition"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
@@ -34,6 +39,7 @@ import {
   setSignInParamsAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
+import type { ItemAbout } from "@/lib/core/item-about"
 import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
 import type { OAuthConnection } from "@/lib/core/upstream"
 import { cn } from "@/lib/utils"
@@ -62,6 +68,8 @@ export type ServerDetailProps = {
     oauthConnection: OAuthConnection | null
     /** OAuth: what the sign-in adds to its address, as the owner set it. */
     oauthAuthorizeParams: string
+    /** A wrapper whose tools drive the browser (a browser flow). */
+    flow?: boolean
   }
   tools: ServerTool[]
   notice: { kind: "ok" | "error"; message: string } | null
@@ -69,8 +77,15 @@ export type ServerDetailProps = {
   redirectUrl: string
   /** The kind's settings form, folded under Advanced. */
   settings: ReactNode
+  /** Its pace (components/server-pacing-form.tsx), under Advanced too. */
+  pacing?: ReactNode
   /** What the kind needs from you, shown after About (SSH's keys). */
   children?: ReactNode
+  /**
+   * The About card's rows every item has (lib/core/item-about.ts): type and
+   * definition, source, sync, sharing, instances, and your note.
+   */
+  about?: ItemAbout
 }
 
 /**
@@ -85,7 +100,9 @@ export function ServerDetail({
   notice,
   redirectUrl,
   settings,
+  pacing,
   children,
+  about,
 }: ServerDetailProps) {
   const endpoint = server.kind === "openapi"
   const mail = server.kind === "jmap" || server.kind === "imap"
@@ -136,9 +153,10 @@ export function ServerDetail({
           ? "Check browser"
           : "Refresh tools"
   const statusTrouble = server.statusMessage && server.status !== "ok"
+  const instances = (about?.instances ?? []).map((instance) => instance.slug)
 
   return (
-    <>
+    <SharedInstancesProvider instances={instances}>
       <PageHeader
         back={{ href: "/servers", label: "Servers" }}
         icon={<IconTile kind={server.kind} size="lg" />}
@@ -161,6 +179,9 @@ export function ServerDetail({
             </span>
             {(endpoint || mail || calendar) && server.readOnly ? (
               <Badge variant="secondary">Read-only</Badge>
+            ) : null}
+            {wrapper && server.flow ? (
+              <Badge variant="secondary">Browser flow</Badge>
             ) : null}
             {/* An endpoint says so under Advanced, with its other facts. */}
             {server.kind === "mcp" && server.publicOnly ? (
@@ -267,6 +288,7 @@ export function ServerDetail({
               Edit
             </Button>
           </div>
+          {about ? <ItemAboutRows about={about} /> : null}
           <SignInRow
             server={server}
             pending={pending}
@@ -332,33 +354,39 @@ export function ServerDetail({
         title="Advanced"
         description={advancedSummary(server.kind)}
       >
+        <SharedDefinitionNote instances={instances} kind={server.kind} />
         {endpoint ? <EndpointFacts server={server} /> : null}
         {/* Its own box: made on the server page, it is no list item. */}
         <div className="flex flex-col gap-4">{settings}</div>
+        {pacing ? (
+          <div className="flex flex-col gap-4 border-t border-separator pt-4">
+            {pacing}
+          </div>
+        ) : null}
       </Disclosure>
 
       <RemoveServer server={server} />
-    </>
+    </SharedInstancesProvider>
   )
 }
 
 function advancedSummary(kind: ServerKind): string {
   switch (kind) {
     case "openapi":
-      return "Schema, base URL, sign-in, edits to the schema, public addresses, name"
+      return "Schema, base URL, sign-in, edits to the schema, public addresses, name, pacing"
     case "jmap":
     case "imap":
-      return "Addresses, sign-in, sender, read-only, name"
+      return "Addresses, sign-in, sender, read-only, name, pacing"
     case "caldav":
-      return "Address, sign-in, read-only, name"
+      return "Address, sign-in, read-only, name, pacing"
     case "ssh":
-      return "Host, port, login, name"
+      return "Host, port, login, name, pacing"
     case "wrapper":
       return "The whole definition as JSON, short name, name"
     case "browser":
-      return "Name and description"
+      return "Name and description, pacing"
     default:
-      return "Address, public addresses, sign-in, headers, sign-in app, short name"
+      return "Address, public addresses, sign-in, headers, sign-in app, short name, pacing"
   }
 }
 

@@ -1,7 +1,8 @@
 "use client"
 
-import { useMemo, useState, useTransition } from "react"
+import { useMemo, useState } from "react"
 
+import { useAnswer } from "@/components/answer-queue"
 import { FormError } from "@/components/form-status"
 import {
   DECISION_BUTTON,
@@ -68,12 +69,9 @@ export function AccessReview({
   )
   const [chosen, setChosen] = useState<Record<string, ToolAccess>>(initial)
   const [onlyChanges, setOnlyChanges] = useState(true)
-  const [pending, startTransition] = useTransition()
-  const [error, setError] = useState<string | null>(null)
-  const [done, setDone] = useState<{
-    message: string
-    isError: boolean
-  } | null>(null)
+  // The same way through as every other answer: the count drops at once,
+  // then the owner is taken on to the next request.
+  const { submit, pending, error, done } = useAnswer({ request: id })
 
   const changes = servers.flatMap((server) =>
     server.tools.flatMap((tool) => {
@@ -95,38 +93,34 @@ export function AccessReview({
   }
 
   function save() {
-    setError(null)
-    startTransition(async () => {
+    submit(async () => {
       const result = await saveAccessRequestAction(id, changes)
 
-      if (result.status === "error") {
-        setError(result.error)
-      } else if (result.status === "ok") {
-        // The outcome's text is written for the assistant. The page re-renders
-        // as answered and says the same.
-        setDone({
-          message: result.isError ? result.message : "You saved these levels.",
-          isError: result.isError,
-        })
-      }
+      return result.status === "ok"
+        ? {
+            ...result,
+            // The outcome's text is written for the assistant. The page
+            // re-renders as answered and says the same.
+            message: result.isError
+              ? result.message
+              : "You saved these levels.",
+          }
+        : { error: result.status === "error" ? result.error : "Not sent." }
     })
   }
 
   function decline() {
-    setError(null)
-    startTransition(async () => {
+    submit(async () => {
       const result = await decidePermissionAction(id, "decline")
 
-      if (result.status === "error") {
-        setError(result.error)
-      } else if (result.status === "ok") {
-        setDone({
-          message: result.isError
-            ? result.message
-            : "You said no, so no tool's level changed.",
-          isError: result.isError,
-        })
-      }
+      return result.status === "ok"
+        ? {
+            ...result,
+            message: result.isError
+              ? result.message
+              : "You said no, so no tool's level changed.",
+          }
+        : { error: result.status === "error" ? result.error : "Not sent." }
     })
   }
 

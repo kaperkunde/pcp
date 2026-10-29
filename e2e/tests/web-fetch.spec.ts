@@ -5,7 +5,6 @@ import { callTool, initialize, toolText } from "../lib/mcp"
 import {
   chooseLevel,
   createFetchingToken,
-  createToken,
   expectLevel,
   openTokenAdvanced,
   setPrivateAddresses,
@@ -37,7 +36,7 @@ test.afterAll(async () => {
   await upstream?.close()
 })
 
-test("a token made to fetch gets the tool and is told how; others get neither", async ({
+test("a token made to fetch gets the tool and is told how", async ({
   page,
   baseURL,
 }) => {
@@ -50,14 +49,7 @@ test("a token made to fetch gets the tool and is told how; others get neither", 
   expect(tools).toContain("web_fetch")
   expect(instructions).toContain("web_fetch")
   expect(instructions).toContain("public addresses only")
-
-  const plain = await createToken(page, `No web ${RUN}`)
-  await expect(
-    page.getByRole("switch", { name: /^Read web pages/ }),
-  ).not.toBeChecked()
-  const without = await initialize(baseURL!, plain)
-  expect(without.tools).not.toContain("web_fetch")
-  expect(without.instructions).not.toContain("web_fetch")
+  // A token without the switch gets neither: lib/core/web-fetch.test.ts.
 })
 
 test("the first request to a site asks the owner and lists the site", async ({

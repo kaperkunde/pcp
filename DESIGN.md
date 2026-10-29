@@ -28,8 +28,8 @@ Copy (the words) follows CLAUDE.md › Copy.
 
 The sidebar (`components/app-sidebar.tsx`) has two groups:
 
-- **Every day:** Home, Servers, Assistants, Memories, and Browser below
-  Memories while the browser is added and enabled.
+- **Every day:** Home, Servers, Assistants, Memories, Skills, and Browser
+  below Skills while the browser is added and enabled.
 - **Now and then:** Secrets, Log, Settings.
 
 At the bottom: the update notice, the owner's name and **Lock**. The bell
@@ -40,8 +40,8 @@ the items in one scrolling row.
 A page under another (a server's page under Servers) has a back link above
 its title, not an entry in the sidebar. The browser is the exception once
 it is added and enabled: its tabs (who opened them, who has them) are worth
-one click, so it has an item of its own and its page and its tabs' pages
-highlight Browser. Before that it is only a kind of server: the page where
+one click, so it has an item of its own and its page (the tabs view, with
+the tab chosen there live) highlights Browser. Before that it is only a kind of server: the page where
 it is added highlights Servers and links back to them.
 
 "Assistants" is the menu's name for API tokens: each assistant connects
@@ -111,19 +111,20 @@ Use a `Card` for what is not rows: a form, a block of text, a code sample.
 
 ## What goes where
 
-| Shown on the page                               | Folded (Disclosure) or one page down                                   |
-| ----------------------------------------------- | ---------------------------------------------------------------------- |
-| A server's description, sign-in state, on/off   | Its address, headers, sign-in app (OAuth client), private addresses    |
-| Its tools                                       | Each tool's description in the owner's words                           |
-| An endpoint's read-only switch                  | Schema source, base URL, sign-in kind, JSON Patch edits, public-only   |
-| What an assistant reaches; memories, web, code  | Expiry, every tool's level, web methods and sites, what it may propose |
-| Connecting an assistant: which app, name, reach | More options: expiry, memories, web, code, endpoints, wrappers         |
-| Settings: address, updates, sign-in, backup     | Network (public address, outside access, pcp.gg, DNS, HTTPS), upkeep   |
-| A request: what will happen, in plain words     | "Show exactly what will be sent": the raw arguments                    |
+| Shown on the page                                           | Folded (Disclosure) or one page down                                                     |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| A server's description, sign-in state, on/off               | Its address, headers, sign-in app (OAuth client), private addresses                      |
+| Its tools                                                   | Each tool's description in the owner's words                                             |
+| An endpoint's read-only switch                              | Schema source, base URL, sign-in kind, JSON Patch edits, public-only                     |
+| What it reaches and the skills it sees; memories, web, code | Expiry, its instructions, every tool's level, web methods and sites, what it may propose |
+| Connecting an assistant: which app, name, reach             | More options: expiry, memories, web, code, endpoints, wrappers                           |
+| Settings: address, updates, sign-in, backup                 | Network (public address, outside access, pcp.gg, DNS, HTTPS), upkeep                     |
+| A request: what will happen, in plain words                 | "Show exactly what will be sent": the raw arguments                                      |
 
 Anything an assistant proposes (a server, an endpoint change, a wrapper, a
-shared memory) is never folded on the page that asks the owner: they read
-it whole before they agree.
+shared memory, a skill) is never folded on the page that asks the owner:
+they read it whole before they agree. A skill's request shows what changes
+line by line, then the whole skill and every file.
 
 ## Patterns built on these
 
@@ -136,6 +137,24 @@ Reuse these before writing a new one; each settles a question once.
   text at the right; then "Nothing runs until you answer". What the
   request carries is `PermissionLines`, and `ShownInFull` when the lines
   cut it short. The token page's waiting requests use the same pieces.
+- **Answering in turn** (`components/answer-queue.tsx`): every answer
+  (a request's decision, saved levels, a repository's change) goes through
+  `useAnswer`. The count in the bell and on Home drops as it is sent and
+  comes back, with the error, if it fails. Once it is in, the owner is
+  taken to the oldest thing still waiting, with what came of their answer
+  above it (`AnsweredBefore`), or told on the page they answered that
+  nothing else is waiting (`AllClearAfter`). A page that lists its own
+  requests (a token's) keeps the owner there; a request whose page still
+  needs them (a server to connect) stays put. It only opens the next page:
+  nothing is answered for the owner.
+- **Answering where the thing is** (`components/browser-tabs.tsx`): a
+  request about something with a page of its own (a hand-over, about a
+  browser tab) is answered there, with the request's words and decision
+  buttons on the item itself, amber, and the item first in its list. The
+  queue (`queueHref`) leads to it, the request's own page sends you on to
+  it while it waits, and `AnsweredBefore alone` at the top of the page says
+  what came of the answer. Once answered, the request's page shows the
+  outcome as for any request.
 - **A server's form** (`components/server-form-parts.tsx`): the frame,
   sections, name and short name, a choice field (segmented or select),
   switch groups, More options and the footer, shared by the MCP server,

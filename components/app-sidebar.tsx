@@ -5,6 +5,7 @@ import {
   Globe,
   House,
   KeyRound,
+  ListChecks,
   Lock,
   ScrollText,
   Server,
@@ -15,15 +16,12 @@ import {
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 
+import { usePendingRequests } from "@/components/answer-queue"
 import { PcpMark } from "@/components/pcp-mark"
-import {
-  PendingRequests,
-  usePendingRequests,
-} from "@/components/pending-requests"
+import { PendingRequests } from "@/components/pending-requests"
 import { CountBadge } from "@/components/ui/badge"
 import { UpdateNotice } from "@/components/update-notice"
 import { logoutAction } from "@/lib/actions/auth"
-import type { PendingRequestsState } from "@/lib/actions/permissions"
 import { cn } from "@/lib/utils"
 
 type NavItem = {
@@ -36,7 +34,7 @@ type NavItem = {
 
 /**
  * Where the owner goes every day. DESIGN.md › Navigation. The browser has
- * an item of its own, below Memories, while it is added and enabled, so its
+ * an item of its own, below Skills, while it is added and enabled, so its
  * tabs are one click away; before that its page (where it is added) belongs
  * to Servers.
  */
@@ -51,6 +49,7 @@ function primaryItems(browser: boolean): NavItem[] {
     },
     { href: "/tokens", label: "Assistants", icon: UserRound },
     { href: "/memories", label: "Memories", icon: BookOpen },
+    { href: "/skills", label: "Skills", icon: ListChecks },
     ...(browser ? [{ href: "/browser", label: "Browser", icon: Globe }] : []),
   ]
 }
@@ -101,24 +100,23 @@ function NavLink({
 /**
  * The dashboard's navigation: a sidebar on a wide window, a bar across the
  * top on a narrow one. The bell and Home's count share one live copy of
- * what is waiting for the owner.
+ * what is waiting for the owner (components/answer-queue.tsx), which drops
+ * the moment the owner answers.
  */
 export function AppSidebar({
   vaultName,
   version,
-  pending,
   update,
   browser,
 }: {
   vaultName: string
   version: string
-  pending: PendingRequestsState
   update: { version: string } | null
   /** The browser is added and enabled: it gets an item of its own. */
   browser: boolean
 }) {
   const pathname = usePathname()
-  const { state, refresh } = usePendingRequests(pending)
+  const { state, refresh } = usePendingRequests()
   const waiting = state.total
 
   return (

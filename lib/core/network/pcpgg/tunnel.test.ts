@@ -283,6 +283,9 @@ describe("relay and connector", () => {
     directory.revoked.add("dev_alice")
     await waitFor(() => status.state === "unauthorized")
     expect(status.lastError).toMatch(/replaced or removed/)
+    // The relay lets the name go once it has seen the socket close, which
+    // can come a moment after the connector heard why.
+    await waitFor(() => relay.hostnames().length === 0)
     expect(relay.hostnames()).toEqual([])
   })
 })

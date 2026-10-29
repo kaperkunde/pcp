@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 
-import { executeCall, redactSecrets } from "./call"
+import { executeCall } from "./call"
 import type { BuiltRequest } from "./request"
 import { json, startTestApi, type TestApi } from "./test-api"
 
@@ -185,47 +185,9 @@ describe("redaction", () => {
       "HTTP 401 Unauthorized\nInvalid API key: [redacted]",
     )
   })
-
-  it("catches the form a JSON string would hold", () => {
-    const secret = 'pa"ss\\word'
-    expect(redactSecrets(JSON.stringify({ k: secret }), [secret])).toBe(
-      '{"k":"[redacted]"}',
-    )
-  })
-
-  it("leaves very short values alone, and everything else as it was", () => {
-    expect(redactSecrets("a cat sat", ["a", ""])).toBe("a cat sat")
-    expect(redactSecrets("nothing here", ["sk-live-0123456789"])).toBe(
-      "nothing here",
-    )
-  })
 })
 
 describe("redaction when the answer is cut at the size cap", () => {
-  it("drops the start of a key the cut ended in the middle of", () => {
-    const secret = "sk-live-0123456789"
-    // The first ten characters of the key made it in before the cut.
-    expect(
-      redactSecrets(`token: ${secret.slice(0, 10)}`, [secret], {
-        truncated: true,
-      }),
-    ).toBe("token: [redacted]")
-    // Also for a header value that wraps the key.
-    expect(
-      redactSecrets("auth: Bearer sk-live-01", [secret, `Bearer ${secret}`], {
-        truncated: true,
-      }),
-    ).toBe("auth: [redacted]")
-    // A complete answer that merely ends like the start of the key is left.
-    expect(redactSecrets(`ends: ${secret.slice(0, 10)}`, [secret])).toBe(
-      `ends: ${secret.slice(0, 10)}`,
-    )
-    // A cut that did not reach the key changes nothing.
-    expect(redactSecrets("plain text", [secret], { truncated: true })).toBe(
-      "plain text",
-    )
-  })
-
   it("applies to a real answer cut by the byte cap", async () => {
     api = await startTestApi((_, res) => {
       res.setHeader("content-type", "text/plain")

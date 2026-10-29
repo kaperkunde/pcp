@@ -10,8 +10,14 @@
 // earlier than the one it leads to. It is written into the build's checkout
 // only and tagged `vX.Y.Z-dev.N`; develop's package.json keeps the release.
 //
+// The image's `develop` tag is what the develop channel installs, so it is
+// the latest version among the releases and develop's builds, as PCP's update
+// check reckons it: a release that is later than every build moves it too.
+//
 //   node scripts/version.mjs next               print the next release
 //   node scripts/version.mjs dev <n>            print develop's build <n>
+//   node scripts/version.mjs leads <version>    print whether the release is
+//                                               later than every build
 //   node scripts/version.mjs set <version>      write it into package.json
 //   node scripts/version.mjs bump major|minor   raise one and write it
 
@@ -72,6 +78,22 @@ export function devBuild(packageVersion, tags, run) {
 }
 
 /**
+ * Whether release `version` is later than every build of develop among
+ * `tags`, so that the develop channel's latest is the release: a build
+ * `X.Y.Z-dev.N` comes before release X.Y.Z (lib/core/updates/semver.ts).
+ *
+ * @param {string} version
+ * @param {string[]} tags
+ */
+export function leadsDevelop(version, tags) {
+  parse(version)
+  return tags.every((tag) => {
+    const build = tag.startsWith("v") ? DEV_BUILD.exec(tag.slice(1)) : null
+    return !build || compare(version, build.slice(1, 4).join(".")) >= 0
+  })
+}
+
+/**
  * @param {string} version
  * @param {string} part
  */
@@ -113,6 +135,9 @@ function main([command, arg]) {
   if (command === "dev") {
     return devBuild(current, releaseTags(), arg)
   }
+  if (command === "leads") {
+    return String(leadsDevelop(arg, releaseTags()))
+  }
   if (command === "set") {
     writeVersion(arg)
     return arg
@@ -123,7 +148,7 @@ function main([command, arg]) {
     return version
   }
   throw new Error(
-    "Usage: node scripts/version.mjs next | dev <n> | set <version> | bump <major|minor>",
+    "Usage: node scripts/version.mjs next | dev <n> | leads <version> | set <version> | bump <major|minor>",
   )
 }
 

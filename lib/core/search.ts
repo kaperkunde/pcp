@@ -1,7 +1,9 @@
 /**
- * Ranking tools for search_tools. Pure: takes the catalogue rows, returns
- * the best matches. A vault has tens to a few hundred tools, so scoring
- * every row per query is cheaper than keeping an index in step.
+ * Ranking for the gateway's search: tools (search_tools ranks those alone),
+ * and beside them the skills and memories a token reads. Pure: takes the
+ * rows, returns the best matches. A vault has tens to a few hundred tools
+ * and skills, so scoring every row per query is cheaper than keeping an
+ * index in step.
  */
 
 export type ToolCandidate = {
@@ -143,6 +145,159 @@ export function searchTools(
     .slice(0, limit)
 }
 
+/** A skill as search sees it: its name and description. */
+export type SkillCandidate = { name: string; description: string }
+
+/** A memory as search sees it: its full path and its text. */
+export type MemoryCandidate = { path: string; text: string }
+
+export type SearchKind = "tool" | "skill" | "memory"
+
+/** One result of search: what it is, how describe names it, one line on it. */
+export type SearchResult = {
+  kind: SearchKind
+  /** tool: server/tool; skill: skill:<name>; memory: its path. */
+  ref: string
+  /** A tool's title, when it has one. */
+  title: string | null
+  description: string
+  score: number
+}
+
+/** Where kinds that score the same come in a list. */
+const KIND_ORDER: Record<SearchKind, number> = { skill: 0, tool: 1, memory: 2 }
+
+/**
+ * A memory's line in a search: the line that mentions most words of the
+ * query, or else its first line that says something.
+ */
+function memoryLine(text: string, words: string[]): string {
+  const lines = text
+    .split("\n")
+    .map((line) => line.replace(/^\s*(#+|[-*>])\s*/, "").trim())
+    .filter(Boolean)
+  let best = lines[0] ?? ""
+  let most = 0
+
+  for (const line of lines) {
+    const lower = line.toLowerCase()
+    const hits = words.filter((word) => lower.includes(word)).length
+
+    if (hits > most) {
+      best = line
+      most = hits
+    }
+  }
+
+  return summarize(best, 160)
+}
+
+/**
+ * Tools, skills and memories ranked together for one query, scored the
+ * same way: a skill as a tool whose name is its name, a memory as one whose
+ * name is its path and whose description is its text. `server` keeps to
+ * that server's tools; `kind` to one kind.
+ */
+export function searchEverything(
+  {
+    tools,
+    skills = [],
+    memories = [],
+  }: {
+    tools: ToolCandidate[]
+    skills?: SkillCandidate[]
+    memories?: MemoryCandidate[]
+  },
+  query: string,
+  {
+    limit = 10,
+    server,
+    kind,
+  }: { limit?: number; server?: string | null; kind?: SearchKind | null } = {},
+): SearchResult[] {
+  const cleaned = query.trim().toLowerCase()
+  const words = tokenize(cleaned).filter((word) => !STOP_WORDS.has(word))
+  const wants = (wanted: SearchKind) =>
+    (!kind || kind === wanted) && (!server || wanted === "tool")
+
+  const toolResults = wants("tool")
+    ? (server ? tools.filter((tool) => tool.server === server) : tools).map(
+        (tool): SearchResult => ({
+          kind: "tool",
+          ref: `${tool.server}/${tool.name}`,
+          title: tool.title,
+          description: summarize(tool.description) || "no description",
+          score: words.length ? scoreOne(tool, words, cleaned) : 0,
+        }),
+      )
+    : []
+  const skillResults = wants("skill")
+    ? skills.map((skill): SearchResult => {
+        const ref = `skill:${skill.name}`
+        const score = words.length
+          ? scoreOne(
+              {
+                server: "skill",
+                serverName: "skills",
+                serverDescription: "procedure how to",
+                name: skill.name,
+                title: null,
+                description: skill.description,
+              },
+              words,
+              cleaned,
+            ) + (cleaned === ref ? 40 : 0)
+          : 0
+
+        return {
+          kind: "skill",
+          ref,
+          title: null,
+          description: summarize(skill.description, 200),
+          score,
+        }
+      })
+    : []
+  const memoryResults = wants("memory")
+    ? memories.map((memory): SearchResult => ({
+        kind: "memory",
+        ref: memory.path,
+        title: null,
+        description: memoryLine(memory.text, words) || "(empty)",
+        score: words.length
+          ? scoreOne(
+              {
+                server: "memory",
+                serverName: "memories",
+                serverDescription: "note",
+                name: memory.path,
+                title: null,
+                description: memory.text,
+              },
+              words,
+              cleaned,
+            ) + (cleaned === memory.path.toLowerCase() ? 40 : 0)
+          : 0,
+      }))
+    : []
+
+  const order = (a: SearchResult, b: SearchResult) =>
+    b.score - a.score ||
+    KIND_ORDER[a.kind] - KIND_ORDER[b.kind] ||
+    a.ref.localeCompare(b.ref)
+
+  // Nothing to rank by: the skills, then the tools, in name order. A memory
+  // is found by what it says, or listed by read_memory.
+  if (!cleaned || words.length === 0) {
+    return [...skillResults, ...toolResults].sort(order).slice(0, limit)
+  }
+
+  return [...toolResults, ...skillResults, ...memoryResults]
+    .filter((result) => result.score > 0)
+    .sort(order)
+    .slice(0, limit)
+}
+
 /** The first sentence, cut to fit one line of a search result. */
 export function summarize(description: string, max = 140): string {
   const firstLine = description.trim().split(/\r?\n/)[0] ?? ""
@@ -153,6 +308,31 @@ export function summarize(description: string, max = 140): string {
   }
 
   return `${sentence.slice(0, max - 1).trimEnd()}…`
+}
+
+/**
+ * The owner's notes on the servers and skills among a search's results, one
+ * line each, in the order they first come up: what the owner said about
+ * this one (which host, what it is for). `notes` is by server slug, and by
+ * skill ref (skill:<name>).
+ */
+export function ownerNotesFor(
+  refs: string[],
+  notes: ReadonlyMap<string, string>,
+): string[] {
+  const lines: string[] = []
+  const seen = new Set<string>()
+
+  for (const ref of refs) {
+    const key = ref.split("/")[0]!
+
+    if (key && !seen.has(key) && notes.has(key)) {
+      seen.add(key)
+      lines.push(`Owner's note on ${key}: ${notes.get(key)}`)
+    }
+  }
+
+  return lines
 }
 
 /** How many tools one list_tools answer names. */
@@ -176,10 +356,23 @@ export function listTools(
   {
     offset = 0,
     size = LIST_PAGE_SIZE,
-  }: { offset?: number; size?: number } = {},
+    about,
+  }: {
+    offset?: number
+    size?: number
+    /** The server's name, description and the owner's note, said first. */
+    about?: { name: string; description: string; note?: string | null }
+  } = {},
 ): string {
+  const lead = about
+    ? [
+        `${server} (${about.name})${about.description ? `: ${summarize(about.description, 300)}` : ""}`,
+        ...(about.note ? [`Owner's note: ${about.note}`] : []),
+      ]
+    : []
+
   if (tools.length === 0) {
-    return `${server} has no tools you can see.`
+    return [...lead, `${server} has no tools you can see.`].join("\n")
   }
 
   const sorted = tools.slice().sort((a, b) => a.name.localeCompare(b.name))
@@ -193,6 +386,7 @@ export function listTools(
   const end = offset + page.length
 
   return [
+    ...lead,
     `${server}: ${sorted.length} tool${sorted.length === 1 ? "" : "s"}, ${allowed} allowed and ${sorted.length - allowed} ask the owner first.${
       offset > 0 || end < sorted.length
         ? ` These are ${offset + 1}–${end}.`

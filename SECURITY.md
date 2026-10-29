@@ -23,7 +23,8 @@ ciphertext and SHA-256 hashes. The vault's data key is stored only wrapped
 under keys derived from your password (scrypt, 64 MiB), the recovery key, a
 session cookie, an API token or what an app that signed in holds (its access
 and refresh tokens) — none of which are on the disk. The browser's
-sign-ins and kept results are in the vault too, encrypted the same way. See
+sign-ins, kept results and your notes on servers and skills are in the vault
+too, encrypted the same way. See
 [ARCHITECTURE.md](ARCHITECTURE.md#encryption). In the Mac app, the window's
 session cookie and the Touch ID key do sit in the app's folder, but encrypted
 under a key in your login keychain, which a copy of the disk does not open.
@@ -31,13 +32,16 @@ under a key in your login keychain, which a copy of the disk does not open.
 **Someone with a running server but no credential** cannot read the vault
 either: the key exists in memory only for the duration of a request that
 presented one. The one thing kept decrypted longer is the browser's: while
-it runs (until fifteen idle minutes have passed), Chromium holds its
-sign-ins in memory.
+it runs (until it has been idle for the minutes set on Settings → Resources,
+an hour unless you change it; a hand-over waiting for you keeps it open),
+Chromium holds its sign-ins in memory.
 
 **An assistant with an API token** can call the tools of the servers that
 token reaches, as far as you allowed them: tools ask you first until you
 decide, and blocked tools are refused. It cannot answer a permission request
-for you: you answer on PCP's own page, signed in. It can only propose a new
+for you: you answer on PCP's own page, signed in. It can withdraw a request
+of its own while it still waits for you, which runs and writes nothing, and
+no other token's. It can only propose a new
 server, API (as OpenAPI text or a schema URL) or mail account, naming a secret
 rather than seeing it; nothing is added until you agree, you are shown the
 address, the tools and the secret first, and a secret PCP does not hold yet is
@@ -112,6 +116,9 @@ would read (a shared memory, or one read in every conversation) is yours to
 agree to: you are shown the whole text, nothing is written before you answer,
 and text with characters that do not show on screen is refused, so what you
 read is all there is. The right to keep memories is off unless you tick it.
+Its memory migration (moving what its app keeps about you into PCP) asks you
+before it moves anything and again before it deletes the originals; the
+assistant can only turn it off, and only you turn it on.
 
 **An assistant with a token that may fetch web pages** can have PCP request
 public addresses, as far as the token's method and site levels allow: a site
@@ -140,9 +147,23 @@ over goes only to a token you pick that is live and reaches the browser,
 and the site it is at counts as allowed for that tab. Every connection goes
 through PCP's proxy, which checks the address it dials, so a page, a
 redirect or a script on it cannot reach your network either. No tool runs a
-script, reads cookies or storage, or downloads a file. The sign-ins are kept
+script, reads cookies or storage, or downloads a file. The Browser page shows
+a tab's icon from the picture Chromium loaded for the page itself, as a data:
+address: PCP fetches nothing for it, and opening the page makes your own
+browser ask no site for anything. The sign-ins are kept
 in your vault, encrypted, and shared by every token that reaches the
-browser; **Forget all sites** signs it out of everything.
+browser; **Forget all sites** signs it out of everything. It never sees your
+secrets, but it can have PCP type one into a page (`type` with
+`{"$secret": name}`): only at a site you allowed for that secret and that
+token (the first use at a site asks you, with the secret's name, the site and
+the tab; you allow it once, for an hour or always), only into a field of the
+page's own site and not a frame from another, typed by PCP at that moment.
+The value is in no answer, error or log line: the field reads as
+`[secret: name]`, every password field's value is hidden, and screenshots of
+the tab are refused while a field holds it. That an API endpoint sends a
+secret does not let the browser type it. A one-time codes (TOTP) secret types
+the code of the moment; its seed never leaves PCP. A secret it asks you for
+(`request_secret`) you type on PCP's page, and it is told only the name.
 
 **Someone with your session cookie but not your password** can use PCP as you
 while the session lasts (30 days from sign-in). They cannot make an API token
@@ -251,6 +272,11 @@ Not defended against:
   request. PCP's own address is the one the site sees, so a site that trusts
   PCP's network more than the assistant's trusts this too, and where you
   allowed private addresses, the devices on your network are in reach.
+- **A secret typed into a page.** PCP types it only where you allowed it,
+  but the page has it then: the site, or a script on it, can send it
+  anywhere, and a page that shows it back in a way PCP does not look for (in
+  an image, or changed) can show it to the assistant. Allow a secret only at
+  the site it belongs to, and check the site on the request.
 - **Pages the browser opens.** A page is someone else's text, and an
   assistant reading it can be steered by it, while it acts as you where the
   browser is signed in. Keep its tools at Ask you first where a click could
@@ -281,11 +307,16 @@ Not defended against:
   PCP's own user in PCP's container, with the data directory (the vault's
   ciphertext, the request log, host settings, TLS keys) and the container's
   network, loopback and PCP's own port included, in reach. PCP's proxy and
-  address checks do not hold against code running in the renderer. What
+  address checks do not hold against code running in the renderer. Where the
+  installer gave the container the graphics card's render node (`/dev/dri`,
+  so pages are drawn with the card), the card's kernel driver is in reach of
+  such code too; `PCP_GPU=0` for the installer, or no `devices:` with
+  Compose, keeps it out. What
   limits it: the browser is off until you add it on the Browser page, and
   Chromium starts only when a page is opened (by an assistant you let use
   its tools, by you, or by web fetch reading past a Cloudflare check when the
-  browser is added), and stops after fifteen minutes idle. Keep the image
+  browser is added), and stops once idle for the minutes set on Settings →
+  Resources (an hour unless you change it). Keep the image
   current (its Chromium is the version its Playwright pins, so it moves with
   the image), do not add the browser if you do not use it, and keep its
   tools at Ask you first, with sites you do not know blocked or asked

@@ -9,6 +9,7 @@ import {
   type SecretOption,
 } from "@/components/header-auth-fields"
 import { OAuthClientFields } from "@/components/oauth-client-fields"
+import { useSharedChangeGuard } from "@/components/shared-definition"
 import { SubmitButton } from "@/components/submit-button"
 import { Card } from "@/components/ui/card"
 import { Disclosure } from "@/components/ui/disclosure"
@@ -86,6 +87,8 @@ export function ServerForm({
   )
   const [authType, setAuthType] = useState<AuthType>(initial.authType)
   const prefix = editing ? `server-${initial.id}` : "server-new"
+  // Its description is shared with the other servers of its definition.
+  const guard = useSharedChangeGuard(editing)
 
   const oauthFields =
     authType === "oauth" ? (
@@ -116,7 +119,12 @@ export function ServerForm({
     ) : null
 
   const form = (
-    <form action={action} className="flex flex-col gap-5">
+    <form
+      ref={guard.ref}
+      action={action}
+      onSubmit={guard.onSubmit}
+      className="flex flex-col gap-5"
+    >
       {editing ? <input type="hidden" name="id" value={initial.id} /> : null}
 
       <Field label="Name" htmlFor={`${prefix}-name`}>

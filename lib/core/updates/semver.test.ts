@@ -62,6 +62,15 @@ describe("versions", () => {
     expect(isNewer("0.5.0-dev.1", "0.4.3-dev.80")).toBe(true)
   })
 
+  it("puts every build of a release before the next one, and a MINOR bump's after both", () => {
+    expect(isNewer("0.4.4", "0.4.3-dev.999")).toBe(true)
+    expect(isNewer("0.4.3-dev.999", "0.4.4")).toBe(false)
+    // develop raised MINOR to 0.5.0 while main released 0.4.4.
+    expect(isNewer("0.5.0-dev.13", "0.4.4")).toBe(true)
+    expect(isNewer("0.5.0-dev.13", "0.5.0-dev.12")).toBe(true)
+    expect(isNewer("0.5.0", "0.5.0-dev.13")).toBe(true)
+  })
+
   it("never counts garbage as newer", () => {
     expect(isNewer("latest", "0.1.3")).toBe(false)
     expect(isNewer("9.9.9", "dev")).toBe(false)

@@ -5,6 +5,7 @@ import { defineConfig, devices } from "@playwright/test"
 import {
   E2E_EDGE_HTTP_PORT,
   E2E_EDGE_HTTPS_PORT,
+  E2E_GITHUB_URL,
   E2E_PCPGG_RELAY_URL,
   E2E_RELEASES_URL,
 } from "./e2e/lib/network"
@@ -61,8 +62,15 @@ export default defineConfig({
         }
       : {}),
   },
+  // The production build, served as the image serves it
+  // (e2e/scripts/serve.mjs): `pnpm test:e2e` builds it first. Pages come
+  // hydrated and compiled, so nothing waits on the dev server's first
+  // compile. PCP_E2E_DEV=1 runs `pnpm dev` instead, for iterating on a spec
+  // with the app's code changing under it.
   webServer: {
-    command: "pnpm dev",
+    command: process.env.PCP_E2E_DEV
+      ? "pnpm dev"
+      : "node e2e/scripts/serve.mjs",
     url: `${baseURL}/api/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
@@ -79,6 +87,16 @@ export default defineConfig({
       // The update check asks a port nothing answers on, never GitHub.
       PCP_RELEASES_URL: E2E_RELEASES_URL,
       PCP_PCPGG_RELAY_URL: E2E_PCPGG_RELAY_URL,
+      // Linked repositories talk to the fake GitHub (e2e/fixtures/github.ts)
+      // on a fixed port, never to GitHub. A production build reads these
+      // only when it was built with PCP_TEST_BUILD=1, as `pnpm test:e2e`
+      // builds it.
+      PCP_GITHUB_API_URL: E2E_GITHUB_URL,
+      PCP_GITHUB_URL: E2E_GITHUB_URL,
+      // The suite acts far faster than a person: pacing (lib/core/pacing/)
+      // would make every browser and web fetch step wait. Unit tests cover
+      // it; its settings are still shown and saved.
+      PCP_PACING: "off",
     },
   },
   projects: [
@@ -192,6 +210,31 @@ export default defineConfig({
       testMatch: /memories\.spec\.ts/,
       dependencies: ["setup"],
       use: signedIn("memories"),
+    },
+    {
+      // Skills: written on the Skills page, found with search and read with
+      // describe, and an assistant's change waiting for the owner.
+      name: "skills",
+      testMatch: /skills\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("skills"),
+    },
+    {
+      // Definitions and instances: an endpoint's About card, the owner's
+      // private note, cloning it with an address of its own, and Detach.
+      name: "definitions",
+      testMatch: /definitions\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("definitions"),
+    },
+    {
+      // Linked repositories against a fake GitHub: linking one, adding a
+      // skill from it after reading it whole, an update available that waits
+      // for the owner, and pushing one of theirs after its review.
+      name: "repositories",
+      testMatch: /repositories\.spec\.ts/,
+      dependencies: ["setup"],
+      use: signedIn("repositories"),
     },
     {
       // APIs an assistant proposes with more than a bearer token: HTTP Basic

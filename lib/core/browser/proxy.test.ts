@@ -136,6 +136,30 @@ describe("the browser's proxy", () => {
     )
   })
 
+  it("closes a tunnel to an allowed address that does not answer", async () => {
+    // A port that was just let go: nothing listens there.
+    const closed = await new Promise<number>((resolve) => {
+      const probe = net.createServer().listen(0, "127.0.0.1", () => {
+        const { port } = probe.address() as net.AddressInfo
+        probe.close(() => resolve(port))
+      })
+    })
+    proxy = await startBrowserProxy({ check: () => "ok" })
+
+    const answer = await new Promise<string>((resolve, reject) => {
+      const socket = net.connect(proxy!.port, "127.0.0.1", () => {
+        socket.write(`CONNECT 127.0.0.1:${closed} HTTP/1.1\r\n\r\n`)
+      })
+      let text = ""
+      socket.on("data", (chunk) => (text += chunk.toString()))
+      socket.on("close", () => resolve(text))
+      socket.on("error", reject)
+    })
+
+    expect(answer).not.toContain("200 Connection Established")
+    expect(proxy.refusal("127.0.0.1")).toBeNull()
+  })
+
   it("refuses a tunnel to something that is not host:port", async () => {
     proxy = await startBrowserProxy({ check: () => "ok" })
     expect(await tunnel("user:pass@example.com:443")).toMatch(/^HTTP\/1\.1 400/)

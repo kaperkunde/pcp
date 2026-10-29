@@ -3,11 +3,21 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
 import type { VaultContext } from "./context"
+import { decryptString } from "./crypto"
 import { db } from "./db"
+import { createEndpoint, storedSpec } from "./endpoints"
 import { invalid } from "./errors"
-import { buildGatewayServer, buildInstructions } from "./gateway"
+import {
+  buildGatewayServer,
+  buildInstructions,
+  loadGatewayServers,
+} from "./gateway"
 import type { JmapProbe } from "./mail/probe"
-import { getPermissionView } from "./permissions"
+import { decidePermission, getPermissionView } from "./permissions"
+import { readServerNote } from "./personal-notes"
+import { createSecret, writeManagedSecret } from "./secrets"
+import { createServer, getServer, setToolDescription } from "./servers"
+import { writeToolAccess } from "./tool-access"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 
@@ -647,5 +657,472 @@ describe("what register_server has always taken", () => {
         /MCP server sends a secret in a header or signs in with OAuth/,
       ),
     })
+  })
+})
+
+describe("a secret the owner already has", () => {
+  /** The gateway again, for a token that may or may not manage endpoints. */
+  async function connectAs(manageEndpoints: boolean) {
+    await client.close()
+    const { token } = await createApiToken(ctx, {
+      name: manageEndpoints ? "Manager" : "Helper",
+      allowAllServers: true,
+      serverIds: [],
+      manageEndpoints,
+    })
+    const scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(scope, [], {
+      lookupHost: async () => ["203.0.114.7"],
+    }).connect(serverSide)
+    client = new Client({ name: "test", version: "1.0.0" })
+    await client.connect(clientSide)
+  }
+
+  async function linearKey() {
+    const key = await createSecret(ctx, {
+      name: "Linear API key",
+      value: "lin_live_0123456789",
+    })
+    for (const [name, url] of [
+      ["Linear", "https://mcp.linear.example/mcp"],
+      ["Linear staging", "https://staging.linear.example/mcp"],
+    ]) {
+      await createServer(ctx, {
+        name: name!,
+        url: url!,
+        authType: "header",
+        authSecretId: key.id,
+      })
+    }
+  }
+
+  const proposal = {
+    name: "Linear issues",
+    openapi_schema: PETS,
+    url: "https://api.example.com/v1",
+    auth_type: "header",
+    header_name: "X-API-Key",
+    value_template: "{{secret}}",
+    secret: "Linear API key",
+  }
+  const REUSED =
+    'Reuses your secret "Linear API key", already used by Linear and Linear staging: you do not enter it again'
+
+  it("tells the owner and a token that manages endpoints what already uses it", async () => {
+    await linearKey()
+    await connectAs(true)
+
+    const asked = await register(proposal)
+
+    expect(asked.isError).toBe(false)
+    expect(asked.text).toContain(REUSED)
+    expect(asked.text).not.toContain("They type")
+    expect(asked.text).not.toContain("lin_live_0123456789")
+    const view = await shown()
+    expect(view.secretToEnter).toBeNull()
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        'Authentication: sends your secret "Linear API key" in the X-API-Key header',
+        REUSED,
+      ]),
+    )
+  })
+
+  it("says so when nothing uses it yet", async () => {
+    await createSecret(ctx, { name: "Linear API key", value: "lin_live_0" })
+    await connectAs(true)
+
+    expect((await register(proposal)).text).toContain(
+      'Reuses your secret "Linear API key", not used by anything yet: you do not enter it again',
+    )
+  })
+
+  it("shows what uses it to the owner alone when the token does not manage endpoints", async () => {
+    await linearKey()
+    await connectAs(false)
+
+    const asked = await register(proposal)
+
+    expect(asked.isError).toBe(false)
+    expect(asked.text).not.toContain("Linear staging")
+    expect((await shown()).lines).toContain(REUSED)
+  })
+
+  it("treats the name of a secret PCP manages as a new secret", async () => {
+    await writeManagedSecret(ctx, {
+      name: "Build box SSH key",
+      description: "PCP's SSH key for Build box.",
+      value: "-----BEGIN OPENSSH PRIVATE KEY-----",
+      kind: "ssh_key",
+    })
+    await writeManagedSecret(ctx, {
+      name: "Calendar sign-in",
+      description: "OAuth tokens",
+      value: "{}",
+      kind: "oauth",
+    })
+    await connectAs(true)
+
+    for (const name of ["Build box SSH key", "Calendar sign-in"]) {
+      const asked = await register({ ...proposal, secret: name })
+
+      expect(asked.isError).toBe(false)
+      expect(asked.text).toContain(
+        `They type the value of the secret "${name}" in there`,
+      )
+      expect(asked.text).not.toContain("Reuses your secret")
+      const view = await shown()
+      expect(view.secretToEnter?.name).toBe(name)
+      expect(view.lines).toContain(
+        `Authentication: sends a new secret, saved as "${name}", in the X-API-Key header; you enter its value here when you agree`,
+      )
+    }
+  })
+})
+
+describe("another server of a definition", () => {
+  const NO_SYNC = {
+    callTool: async () => {
+      throw new Error("no call runs here")
+    },
+    syncTools: async () => ({
+      status: "ok" as const,
+      message: "",
+      toolCount: 0,
+    }),
+  }
+
+  /** The owner's endpoint, with a secret, an edit and a tool's description. */
+  async function ownerEndpoint() {
+    const key = await createSecret(ctx, { name: "Gaaf key", value: "k-1" })
+    const { id } = await createEndpoint(ctx, {
+      name: "Coolify gaaf",
+      description: "Coolify's API.",
+      baseUrl: "https://gaaf.example.net/v1",
+      specSource: "upload",
+      specText: PETS,
+      patches: [
+        {
+          op: "add",
+          path: "/paths/~1pets/get/summary",
+          value: "List the pets",
+        },
+      ],
+      readOnly: false,
+      authType: "header",
+      authHeaderName: "Authorization",
+      authValueTemplate: "Bearer {{secret}}",
+      authSecretId: key.id,
+    })
+    await setToolDescription(ctx, id, "listPets", "Every pet, by name.")
+    return getServer(ctx, id)
+  }
+
+  /** The gateway for a token that sees the servers made so far. */
+  async function connectSeeing(serverIds?: string[], manageEndpoints = false) {
+    await client.close()
+    const { token } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: serverIds === undefined,
+      serverIds: serverIds ?? [],
+      manageEndpoints,
+    })
+    const scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(scope, await loadGatewayServers(scope), {
+      lookupHost: async () => ["203.0.114.7"],
+    }).connect(serverSide)
+    client = new Client({ name: "test", version: "1.0.0" })
+    await client.connect(clientSide)
+  }
+
+  async function approve() {
+    const row = await db().permissionRequest.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    })
+
+    return decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      NO_SYNC,
+    )
+  }
+
+  it("asks for an endpoint of the same definition at its own address, with the definition's schema, and makes nothing yet", async () => {
+    const source = await ownerEndpoint()
+    await connectSeeing()
+
+    const asked = await register({
+      name: "Coolify plek",
+      definition: source.slug,
+      url: "https://plek.example.net/v1",
+      read_only: true,
+      note: "The plek.je production host.",
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.title).toBe("Add the API endpoint Coolify plek?")
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "Address: https://plek.example.net/v1",
+        `Another server of Coolify gaaf, beside ${source.slug}: it shares their description, schema, edits and tool descriptions, so a change to those changes every one of them`,
+        "Its tools ask you first, for every token, as a new server's do",
+        "Schema: the one they share",
+        "Edits: 1 change to the schema, applied before the tools are made",
+        "Read-only: only GET operations become tools",
+        "Description: Coolify's API.",
+        "Your note on it, which every assistant that sees it reads as yours:\nThe plek.je production host.",
+      ]),
+    )
+    // Nothing exists yet, and no copy of the schema waits on the request.
+    expect(await db().mcpServer.count({ where: { kind: "openapi" } })).toBe(1)
+    const row = await db().permissionRequest.findFirstOrThrow()
+    const args = JSON.parse(
+      decryptString(
+        ctx.dek,
+        Buffer.from(row.argsCiphertext),
+        `permission_request:${row.id}`,
+      ),
+    ) as { endpoint: { spec: string } }
+    expect(args.endpoint.spec).toBe("")
+  })
+
+  it("makes it on approval from the definition's schema, edits and descriptions, public-only, with the note and no levels", async () => {
+    const source = await ownerEndpoint()
+    await writeToolAccess(
+      (await createApiToken(ctx, { name: "Other", allowAllServers: true })).id,
+      source.id,
+      "listPets",
+      "allowed",
+    )
+    await connectSeeing()
+    await register({
+      name: "Coolify plek",
+      definition: source.slug,
+      url: "https://plek.example.net/v1",
+      note: "The plek.je production host.",
+    })
+
+    const done = await approve()
+
+    expect(done.isError).not.toBe(true)
+    const made = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Coolify plek" },
+      include: { tools: true },
+    })
+    expect(made).toMatchObject({
+      definitionId: source.definitionId,
+      description: "Coolify's API.",
+      url: "https://plek.example.net/v1",
+      publicOnly: true,
+      authType: "none",
+      authSecretId: null,
+    })
+    const [mine, theirs] = await Promise.all([
+      storedSpec(made.id),
+      storedSpec(source.id),
+    ])
+    expect(mine!.hash).toBe(theirs!.hash)
+    expect(mine!.patches).toEqual(theirs!.patches)
+    expect(
+      made.tools.find((tool) => tool.name === "listPets")?.descriptionOverride,
+    ).toBe("Every pet, by name.")
+    expect(readServerNote(ctx, made)).toBe("The plek.je production host.")
+    // The source's levels stay the source's.
+    expect(
+      await db().apiTokenToolAccess.count({ where: { serverId: made.id } }),
+    ).toBe(0)
+  })
+
+  it("makes nothing when the definition changed after the owner was asked", async () => {
+    const source = await ownerEndpoint()
+    await connectSeeing()
+    await register({
+      name: "Coolify plek",
+      definition: source.slug,
+      url: "https://plek.example.net/v1",
+    })
+    await setToolDescription(ctx, source.id, "listPets", "Something else.")
+
+    const done = await approve()
+
+    expect(JSON.stringify(done)).toMatch(/has changed since this was asked/)
+    expect(await db().mcpServer.count({ where: { kind: "openapi" } })).toBe(1)
+  })
+
+  it("asks for an MCP server of the same definition, and makes it on approval", async () => {
+    const { id } = await createServer(ctx, {
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      description: "Issues and projects.",
+      authType: "none",
+    })
+    const source = await getServer(ctx, id)
+    await connectSeeing()
+
+    const asked = await register({
+      name: "Linear staging",
+      definition: "linear",
+      url: "https://staging.linear.example/mcp",
+    })
+
+    expect(asked.isError).toBe(false)
+    expect((await shown()).lines).toEqual(
+      expect.arrayContaining([
+        "Another server of Linear, beside linear: it shares their description and tool descriptions, so a change to those changes every one of them",
+        "Description: Issues and projects.",
+      ]),
+    )
+    await approve()
+    const made = await db().mcpServer.findFirstOrThrow({
+      where: { name: "Linear staging" },
+    })
+    expect(made).toMatchObject({
+      definitionId: source.definitionId,
+      description: "Issues and projects.",
+      publicOnly: true,
+    })
+  })
+
+  it("is refused for a definition the token does not see, a kind that is not its, or a note that does not fit", async () => {
+    const source = await ownerEndpoint()
+    const { id: other } = await createServer(ctx, {
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      authType: "none",
+    })
+    await connectSeeing([other])
+
+    const hidden = await register({
+      name: "Coolify plek",
+      definition: source.slug,
+      url: "https://plek.example.net/v1",
+    })
+    expect(hidden).toMatchObject({
+      isError: true,
+      text: expect.stringMatching(
+        /No MCP server or API endpoint called coolify-gaaf that this token sees, .*Those it sees: linear\./,
+      ),
+    })
+
+    await connectSeeing()
+    expect(
+      await register({
+        name: "Coolify plek",
+        kind: "mcp",
+        definition: source.slug,
+        url: "https://plek.example.net/v1",
+      }),
+    ).toMatchObject({
+      isError: true,
+      text: expect.stringMatching(/is an API endpoint: its kind is api/),
+    })
+    expect(
+      await register({
+        name: "Coolify plek",
+        definition: source.slug,
+        url: "https://plek.example.net/v1",
+        openapi_schema: PETS,
+      }),
+    ).toMatchObject({
+      isError: true,
+      text: expect.stringMatching(
+        /the schema and its edits are the definition's/,
+      ),
+    })
+
+    for (const note of ["Two\nlines", "x".repeat(301), "Hidden​thing"]) {
+      expect(
+        (
+          await register({
+            name: "Coolify plek",
+            definition: source.slug,
+            url: "https://plek.example.net/v1",
+            note,
+          })
+        ).isError,
+      ).toBe(true)
+    }
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("lets update_endpoint propose the note and detach, each in a call of its own", async () => {
+    const source = await ownerEndpoint()
+    await createEndpoint(ctx, {
+      name: "Coolify plek",
+      baseUrl: "https://plek.example.net/v1",
+      specSource: "upload",
+      specText: PETS,
+      readOnly: false,
+      authType: "none",
+      definitionId: source.definitionId,
+    })
+    await connectSeeing(undefined, true)
+    const update = async (args: Record<string, unknown>) => {
+      const result = await client.callTool({
+        name: "update_endpoint",
+        arguments: args,
+      })
+      return {
+        isError: result.isError === true,
+        text: (result.content as Array<{ text?: string }>)
+          .map((part) => part.text ?? "")
+          .join(""),
+      }
+    }
+
+    expect(
+      await update({ endpoint: source.slug, note: "Gaaf.", detach: true }),
+    ).toMatchObject({
+      isError: true,
+      text: expect.stringContaining(
+        "note and detach each go in a call of their own",
+      ),
+    })
+    expect(
+      await update({ endpoint: source.slug, note: "Gaaf.", name: "Other" }),
+    ).toMatchObject({
+      isError: true,
+      text: expect.stringContaining("note goes in a call of its own"),
+    })
+    expect(await db().permissionRequest.count()).toBe(0)
+
+    expect(
+      (await update({ endpoint: source.slug, note: "The gaaf host." })).text,
+    ).toContain("Not done yet")
+    expect((await shown()).title).toBe(
+      "Save this as your note on Coolify gaaf?",
+    )
+
+    expect(
+      (await update({ endpoint: source.slug, detach: true })).text,
+    ).toContain("Not done yet")
+    const detach = await shown()
+    expect(detach.kind).toBe("endpoint_change")
+    expect(detach.title).toBe("Detach Coolify gaaf?")
+    expect(detach.lines).toContain(
+      "Shares its description, schema, edits and tool descriptions with: coolify-plek",
+    )
+    // Nothing was written by asking.
+    expect(readServerNote(ctx, await getServer(ctx, source.id))).toBeNull()
+    expect((await getServer(ctx, source.id)).definitionId).toBe(
+      source.definitionId,
+    )
+  })
+
+  it("puts a note on any new server, for the owner to read whole", async () => {
+    await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      note: "The team's tracker.",
+    })
+
+    expect((await shown()).lines).toContain(
+      "Your note on it, which every assistant that sees it reads as yours:\nThe team's tracker.",
+    )
   })
 })

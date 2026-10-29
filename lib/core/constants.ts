@@ -88,6 +88,12 @@ export type AllowForMinutes = (typeof ALLOW_FOR_MINUTES)[number]
 /** What the owner's page offers first. */
 export const DEFAULT_ALLOW_FOR_MINUTES: AllowForMinutes = 60
 
+/**
+ * How long "Allow for" lets the browser type a secret at a site
+ * (lib/core/browser-secrets.ts): an hour, not a choice.
+ */
+export const SECRET_ALLOW_MINUTES = 60
+
 export function allowForLabel(minutes: number): string {
   return minutes < 60
     ? `${minutes} minutes`
@@ -106,7 +112,13 @@ export type PermissionKind =
   | "fetch"
   | "browse"
   | "browser_handover"
+  | "secret_use"
+  | "secret_request"
   | "wrapper_change"
+  | "skill_change"
+  | "repo_change"
+  | "repo_share"
+  | "note_change"
 
 /**
  * The HTTP methods web_fetch has a level for. Each is the default for a
@@ -175,8 +187,38 @@ export const MAX_MEMORY_CHARS = 10_000
  */
 export const MAX_SHARED_MEMORY_CHARS = 2_000
 
+/**
+ * The longest instructions the owner gives one assistant
+ * (lib/core/instructions.ts): short enough to sit at the start of every
+ * conversation.
+ */
+export const MAX_INSTRUCTIONS_CHARS = 4_000
+
 /** The longest memory path, without the leading /memories/. */
 export const MAX_MEMORY_PATH = 200
+
+/**
+ * Skills (lib/core/skills.ts): procedures the owner approved. The longest
+ * name (a slug, as an Agent Skill's), description and body, how many
+ * reference files one carries and how long each is, how many tools it
+ * names, and how many skills a vault keeps. Short enough that the owner
+ * reads a whole skill before agreeing to an assistant's change.
+ */
+export const MAX_SKILL_NAME = 64
+export const MAX_SKILL_DESCRIPTION = 300
+export const MAX_SKILL_BODY = 20_000
+export const MAX_SKILL_FILES = 10
+export const MAX_SKILL_FILE_CHARS = 20_000
+export const MAX_SKILL_FILE_PATH = 100
+export const MAX_SKILL_TOOLS = 30
+export const MAX_SKILLS = 200
+
+/**
+ * The owner's own note on a server or skill (lib/core/definitions.ts): one
+ * line, short enough that it sits beside the description in what an
+ * assistant reads.
+ */
+export const MAX_PERSONAL_NOTE = 300
 
 /**
  * Dynamic DNS services PCP can keep pointed at this machine

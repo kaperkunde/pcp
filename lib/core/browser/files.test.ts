@@ -27,6 +27,7 @@ import {
   saveResourceConfig,
 } from "../resources/state"
 import { scratchDatabase } from "../test-db"
+import { describedHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
 import {
   keepBytes,
@@ -48,11 +49,12 @@ import { browserTools } from "./tools"
 // gone from the machine), one a page offers on its own refused and said,
 // and kept results put into a page's file field. Skipped where no Chromium
 // is installed, as call.test.ts is. A click that starts nothing is given a
-// second and a half rather than ten.
+// second and a half rather than ten, and an action three seconds.
 
 vi.mock("./limits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./limits")>()),
   DOWNLOAD_START_MS: 1_500,
+  ACTION_TIMEOUT_MS: 3_000,
 }))
 
 const executable = await chromiumExecutable()
@@ -182,6 +184,18 @@ function refOf(result: CallToolResult, pattern: RegExp): string {
   return ref
 }
 
+/** The tab an answer is about ("Tab abc: title"). */
+function tabOf(result: CallToolResult | string): string {
+  const text = typeof result === "string" ? result : textOf(result)
+  const id = text.match(/^Tab (\S+):/m)?.[1]
+
+  if (!id) {
+    throw new Error(`no tab in:\n${text}`)
+  }
+
+  return id
+}
+
 type Downloaded = {
   tab: string
   file: { $result: string; type: string; size: number; name: string }
@@ -205,10 +219,14 @@ describe.skipIf(!executable)(
   { timeout: 90_000 },
   () => {
     it("keeps a download as the token's result and leaves nothing on disk", async () => {
-      const page = await call("navigate", { url: `${api.origin}/files` })
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
 
       const byLink = downloaded(
-        await call("download", { ref: refOf(page, /link "Invoice"/) }),
+        await call("download", { tab, ref: refOf(page, /link "Invoice"/) }),
       )
       expect(byLink.file).toMatchObject({
         type: "application/pdf",
@@ -222,7 +240,7 @@ describe.skipIf(!executable)(
 
       // A file the page makes itself (a blob), kept as the text it is.
       const blob = downloaded(
-        await call("download", { ref: refOf(page, /link "Export"/) }),
+        await call("download", { tab, ref: refOf(page, /link "Export"/) }),
       )
       expect(blob.file).toMatchObject({
         type: "text/csv; charset=utf-8",
@@ -234,10 +252,10 @@ describe.skipIf(!executable)(
 
       // By its address, at a site the tab may open; the tab stays put.
       const byUrl = downloaded(
-        await call("download", { url: `${api.origin}/invoice?again` }),
+        await call("download", { tab, url: `${api.origin}/invoice?again` }),
       )
       expect(byUrl.file.name).toBe("invoice-42.pdf")
-      expect(textOf(await call("snapshot"))).toContain(
+      expect(textOf(await call("snapshot", { tab }))).toContain(
         `Address: ${api.origin}/files`,
       )
 
@@ -255,53 +273,83 @@ describe.skipIf(!executable)(
     })
 
     it("refuses a download nobody asked for, and says the page offered one", async () => {
-      const page = await call("navigate", { url: `${api.origin}/files` })
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
       const clicked = await call("click", {
+        tab,
         ref: refOf(page, /link "Invoice"/),
       })
       // In this answer or the next: Chromium says so once the site answers.
-      const waited = await call("wait_for", { ms: 1_000 })
+      const waited = await call("wait_for", { tab, ms: 1_000 })
 
       expect(`${textOf(clicked)}\n${textOf(waited)}`).toContain(
         "The page offered a file to download (invoice-42.pdf)",
       )
-      expect(await leftOnDisk()).toEqual([])
+      // Chromium removes the part of a download it cancelled itself, a
+      // moment after it says so: on a busy machine, after the answer.
+      await expect.poll(leftOnDisk).toEqual([])
       expect(await db().toolResult.count()).toBe(0)
       // Said once.
-      expect(textOf(await call("snapshot"))).not.toContain("offered a file")
+      expect(textOf(await call("snapshot", { tab }))).not.toContain(
+        "offered a file",
+      )
 
-      const opened = await call("navigate", { url: `${api.origin}/invoice` })
+      const opened = await call("navigate", {
+        tab,
+        url: `${api.origin}/invoice`,
+      })
       expect(opened.isError).toBe(true)
       expect(textOf(opened)).toContain("Call download with that address")
     })
 
     it("downloads nothing from a site the tab may not open, nothing too large, and says when nothing started", async () => {
-      const page = await call("navigate", { url: `${api.origin}/files` })
+      const page = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/files`,
+      })
+      const tab = tabOf(page)
 
-      const refused = await call("download", { url: `${elsewhere.origin}/x` })
+      const refused = await call("download", {
+        tab,
+        url: `${elsewhere.origin}/x`,
+      })
       expect(refused.isError).toBe(true)
       expect(textOf(refused)).toContain("Call navigate with the address")
       expect(elsewhere.requests).toHaveLength(0)
 
-      const pcp = await call("download", { url: `${PUBLIC_URL}/api/export` })
+      const pcp = await call("download", {
+        tab,
+        url: `${PUBLIC_URL}/api/export`,
+      })
       expect(pcp.isError).toBe(true)
       expect(textOf(pcp)).toContain("PCP's own address")
 
       const nothing = await call("download", {
+        tab,
         ref: refOf(page, /button "Nothing"/),
       })
       expect(nothing.isError).toBe(true)
       expect(textOf(nothing)).toContain("Nothing started a download")
 
       await saveResourceConfig({ ...EMPTY_CONFIG, fileMb: 1 })
-      const big = await call("download", { ref: refOf(page, /link "Big"/) })
+      const big = await call("download", {
+        tab,
+        ref: refOf(page, /link "Big"/),
+      })
       expect(big.isError).toBe(true)
       expect(textOf(big)).toContain("big.bin is larger than PCP keeps")
-      expect(await leftOnDisk()).toEqual([])
+      // Cancelled past the largest file: Chromium removes its part.
+      await expect.poll(leftOnDisk).toEqual([])
       expect(await db().toolResult.count()).toBe(0)
 
-      const page2 = await call("navigate", { url: `${api.origin}/page` })
-      const opened = await call("download", { url: `${api.origin}/page` })
+      const page2 = await call("navigate", { tab, url: `${api.origin}/page` })
+      const opened = await call("download", {
+        tab,
+        url: `${api.origin}/page`,
+      })
       expect(opened.isError).toBe(true)
       expect(textOf(opened)).toContain("opened a page, not a file")
       expect(page2.isError).toBeUndefined()
@@ -334,15 +382,21 @@ describe.skipIf(!executable)(
           open: resultOpener(ctx, tokenId),
         })
 
-      const form = await viaGateway("navigate", { url: `${api.origin}/form` })
+      const form = await viaGateway("tabs", {
+        action: "open",
+        url: `${api.origin}/form`,
+      })
+      const tab = tabOf(form)
 
       const unknown = viaGateway("upload_file", {
+        tab,
         ref: refOf(form, /button "Statement"/),
         files: [{ $result: "nope" }],
       })
       await expect(unknown).rejects.toThrow(/not there for this token/)
 
       const intoField = await viaGateway("upload_file", {
+        tab,
         ref: refOf(form, /button "Statement"/),
         files: [{ $result: pdf.id }],
       })
@@ -350,6 +404,7 @@ describe.skipIf(!executable)(
       expect(textOf(intoField)).toContain("Chose statement.pdf in")
 
       const throughPicker = await viaGateway("upload_file", {
+        tab,
         ref: refOf(intoField, /button "Attach"/),
         files: [
           { $result: note.id, name: "note.txt" },
@@ -359,6 +414,7 @@ describe.skipIf(!executable)(
       expect(throughPicker.isError, textOf(throughPicker)).toBeUndefined()
 
       const notAField = await viaGateway("upload_file", {
+        tab,
         ref: refOf(throughPicker, /heading "Upload"/),
         files: [{ $result: pdf.id }],
       })
@@ -370,6 +426,7 @@ describe.skipIf(!executable)(
         false,
       )
       const sent = await viaGateway("click", {
+        tab,
         ref: refOf(throughPicker, /button "Send"/),
       })
       expect(textOf(sent)).toContain("Thank you")
@@ -420,12 +477,11 @@ describe.skipIf(!executable)(
           name: "run_code",
           arguments: {
             code: `
-const got = await pcp.call("browser", "download", { url: "${api.origin}/invoice" })
-const form = await pcp.call("browser", "navigate", { url: "${api.origin}/form" })
-const ref = (name) =>
-  form.split("\\n").find((line) => line.includes('"' + name + '"')).match(/ref=(e[0-9]+)/)[1]
-await pcp.call("browser", "upload_file", { ref: ref("Statement"), files: [got.file] })
-const sent = await pcp.call("browser", "click", { ref: ref("Send") })
+const form = await pcp.call("browser", "tabs", { action: "open", url: "${api.origin}/form" })
+const tab = form.match(/^Tab (\\S+):/m)[1]
+const got = await pcp.call("browser", "download", { tab, url: "${api.origin}/invoice" })
+await pcp.call("browser", "upload_file", { tab, target: { role: "button", name: "Statement" }, files: [got.file] })
+const sent = await pcp.call("browser", "click", { tab, target: { role: "button", name: "Send" } })
 return { file: got.file, sent: sent.includes("Thank you") }
 `,
           },
@@ -487,10 +543,13 @@ return { file: got.file, sent: sent.includes("Thank you") }
         const parts = (result as { content: Array<{ text?: string }> }).content
         return parts.map((part) => part.text ?? "").join("\n")
       }
-      const browser = (tool: string, args: Record<string, unknown>) =>
+      const browser = async (tool: string, args: Record<string, unknown>) =>
         client.callTool({
           name: "call_tool",
-          arguments: { server: "browser", tool, arguments: args },
+          arguments: {
+            call_handle: await describedHandle(client, "browser", tool),
+            arguments: args,
+          },
         })
       /** The secret at the end of a link, as the route takes it. */
       const secretOf = (url: string) => url.split("/").pop()!
@@ -515,19 +574,21 @@ return { file: got.file, sent: sent.includes("Thank you") }
         expect(sentByCurl).toMatchObject({ ok: true, size: PDF.length })
 
         const form = answer(
-          await browser("navigate", { url: `${api.origin}/form` }),
+          await browser("tabs", { action: "open", url: `${api.origin}/form` }),
         )
+        const tab = tabOf(form)
         const ref = (name: string) =>
           form
             .split("\n")
             .find((line) => line.includes(`"${name}"`))!
             .match(/ref=(e\d+)/)![1]!
         const chose = await browser("upload_file", {
+          tab,
           ref: ref("Statement"),
           files: [receive.result],
         })
         expect(chose.isError, answer(chose)).toBeFalsy()
-        await browser("click", { ref: ref("Send") })
+        await browser("click", { tab, ref: ref("Send") })
         const post = api.requests.find((request) => request.method === "POST")!
         expect(post.body).toContain(
           'name="statement"; filename="scan.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4',
@@ -535,7 +596,9 @@ return { file: got.file, sent: sent.includes("Thank you") }
 
         // Out: a file the browser downloaded, onto the assistant's computer.
         const got = JSON.parse(
-          answer(await browser("download", { url: `${api.origin}/invoice` })),
+          answer(
+            await browser("download", { tab, url: `${api.origin}/invoice` }),
+          ),
         ) as { file: { $result: string }; note: string }
         expect(got.note).toContain("share_result")
         const shared = JSON.parse(

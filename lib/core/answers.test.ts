@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest"
 import {
   answerValue,
   decodeBase64Text,
+  MAX_ANSWER_CHARS,
+  MAX_ANSWER_IMAGE_CHARS,
   MAX_AUTO_TEXT_HANDLES,
   MAX_HANDLES_PER_ANSWER,
   pickFields,
@@ -513,8 +515,29 @@ describe("an answer still too long", () => {
 })
 
 describe("files in other blocks", () => {
+  it("passes an image on up to its own budget, not the text's: a screenshot larger than MAX_ANSWER_CHARS still shows", async () => {
+    const screenshot = Buffer.concat([PNG, Buffer.alloc(48_000, 1)])
+    expect(screenshot.toString("base64").length).toBeGreaterThan(
+      MAX_ANSWER_CHARS,
+    )
+    const { shown } = await keeping({
+      content: [
+        {
+          type: "image",
+          data: screenshot.toString("base64"),
+          mimeType: "image/jpeg",
+        },
+      ],
+    })
+
+    expect(shown.content.map((block) => block.type)).toEqual(["image", "text"])
+  })
+
   it("replaces an image too large to pass on with its handle, and keeps a small one beside a note", async () => {
-    const big = Buffer.concat([PNG, Buffer.alloc(60_000, 1)])
+    const big = Buffer.concat([
+      PNG,
+      Buffer.alloc((MAX_ANSWER_IMAGE_CHARS / 4) * 3, 1),
+    ])
     const { kept, shown } = await keeping({
       content: [
         { type: "image", data: big.toString("base64"), mimeType: "image/png" },

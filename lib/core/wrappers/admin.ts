@@ -7,11 +7,33 @@ import type { GatewayServer } from "../gateway-servers"
 import { newId } from "../ids"
 import { canonicalJson } from "../permission-rules"
 import { createSecretNamedAfter, findTextSecretByName } from "../secrets"
-import { deleteServer, slugify, uniqueSlug, WRAPPER_URL } from "../servers"
+import {
+  contentInstance,
+  definitionForNew,
+  ensureDefinition,
+  shareDescription,
+  siblingInstances,
+} from "../definition-rows"
+import {
+  definitionBasis,
+  detachServer,
+  type BindableDefinition,
+} from "../definitions"
+import { checkPersonalNote, setPersonalNote } from "../personal-notes"
+import {
+  deleteServer,
+  normalizeNameAndDescription,
+  slugify,
+  uniqueSlug,
+  WRAPPER_URL,
+} from "../servers"
 
 import { syncWrapperTools } from "./catalogue"
 import {
+  browserServerIds,
   definitionHash,
+  isFlow,
+  isFlowTool,
   readDefinition,
   resolveDefinition,
   type CallLevels,
@@ -21,6 +43,7 @@ import {
   type WrapperToolInput,
   type SecretBindingInput,
 } from "./definition"
+import { flowSites, type FlowSites } from "./flow-sites"
 import { MAX_WRAPPERS } from "./limits"
 
 /**
@@ -48,6 +71,13 @@ export type WrapperShownTool = {
   previousProgram: string | null
   calls: string[]
   replaces: string[]
+  /**
+   * It drives the browser (definition.ts isFlowTool). Left out of a request
+   * made before flows were told apart.
+   */
+  flow?: boolean
+  /** A flow's sites, as far as its program's text says (flow-sites.ts). */
+  sites?: FlowSites
 }
 
 export type WrapperShownSecret = {
@@ -68,12 +98,15 @@ export type WrapperShown = {
   warning: string | null
   /** Whose levels the calls inside its tools follow, once this is made. */
   callLevels: CallLevels
+  /** Any of its tools, once this is made, drives the browser. */
+  flow?: boolean
   tools: WrapperShownTool[]
   secrets: WrapperShownSecret[]
 }
 
 export type WrapperChangeAsk = {
-  action: "create" | "update" | "delete"
+  /** detach: the wrapper gets a definition of its own, and nothing else. */
+  action: "create" | "update" | "delete" | "detach"
   /** The wrapper changed or deleted; null for a new one. */
   serverId: string | null
   /** The wrapper as it was when the owner was asked; null for a new one. */
@@ -84,6 +117,16 @@ export type WrapperChangeAsk = {
   /** A secret PCP does not hold yet, which the owner types in. */
   newSecret: string | null
   shown: WrapperShown
+  /**
+   * create: another wrapper of this definition, made only while the
+   * definition is as the owner was shown it (definitions.ts
+   * definitionBasis).
+   */
+  instanceOf?: { definitionId: string; basis: string }
+  /** detach: the definition it shares now; a change since refuses. */
+  detachFrom?: { definitionId: string }
+  /** create: the owner's note it gets, which they read whole. */
+  note?: string | null
 }
 
 /** What get_wrapper and the owner's form read: other tools by short name. */
@@ -94,6 +137,8 @@ export type WrapperView = {
   description: string
   enabled: boolean
   callLevels: CallLevels
+  /** A browser flow: one of its tools calls the browser. */
+  flow: boolean
   tools: Array<
     Omit<WrapperToolInput, "calls" | "replaces"> & {
       calls: string[]
@@ -195,6 +240,7 @@ export async function getWrapper(
     description: server.description,
     enabled: server.enabled,
     callLevels: definition.callLevels ?? "token",
+    flow: isFlow(definition, await browserServerIds(ctx)),
     ...(await toInput(ctx, definition)),
   }
 }
@@ -240,11 +286,16 @@ async function describe(
     ctx,
     (after?.secrets ?? []).map((binding) => binding.serverId),
   )
+  const browserIds = await browserServerIds(ctx)
+  const browsers = [...(await slugsById(ctx, [...browserIds])).values()].map(
+    (server) => server.slug,
+  )
   const tools: WrapperShownTool[] = []
 
-  for (const tool of shownAfter?.tools ?? []) {
+  for (const [index, tool] of (shownAfter?.tools ?? []).entries()) {
     const old = shownBefore?.tools.find((entry) => entry.name === tool.name)
     const same = old !== undefined && canonicalJson(old) === canonicalJson(tool)
+    const flow = isFlowTool(after!.tools[index]!, browserIds)
 
     tools.push({
       name: tool.name,
@@ -258,6 +309,8 @@ async function describe(
       previousProgram: old && old.program !== tool.program ? old.program : null,
       calls: tool.calls,
       replaces: tool.replaces,
+      flow,
+      ...(flow ? { sites: flowSites(tool.program, browsers) } : {}),
     })
   }
 
@@ -275,6 +328,12 @@ async function describe(
         previousProgram: null,
         calls: old.calls,
         replaces: old.replaces,
+        flow: before
+          ? isFlowTool(
+              before.tools.find((entry) => entry.name === old.name)!,
+              browserIds,
+            )
+          : false,
       })
     }
   }
@@ -296,6 +355,9 @@ async function describe(
     ),
   ]
   const changed = tools.filter((tool) => tool.status !== "same")
+  const flow =
+    action !== "delete" &&
+    tools.some((tool) => tool.status !== "removed" && tool.flow === true)
 
   const title =
     action === "create"
@@ -334,6 +396,11 @@ async function describe(
           (before?.callLevels ?? "token") !== (after?.callLevels ?? "token")
             ? [
                 `The calls inside its tools now follow ${after?.callLevels === "approved" ? "your approval of the wrapper (they were at each token's own levels)" : "each token's own levels (they followed your approval of the wrapper)"}.`,
+              ]
+            : []),
+          ...(flow
+            ? [
+                `A browser flow: its tools drive PCP's browser as the token that calls them, on the sites that token may open.${action === "create" ? " Like every new tool, each asks you first for every token until you allow it." : ""}`,
               ]
             : []),
           after?.callLevels === "approved"
@@ -378,6 +445,7 @@ async function describe(
     lines,
     warning,
     callLevels: after?.callLevels ?? "token",
+    flow,
     tools,
     secrets,
   }
@@ -414,6 +482,126 @@ export async function proposeWrapper(
       after: resolved.definition,
       previousName: null,
     }),
+  }
+}
+
+/** A new wrapper's note, for the owner to read whole with the rest. */
+export function withWrapperNote(
+  ask: WrapperChangeAsk,
+  input: string | undefined,
+): WrapperChangeAsk {
+  const note = checkPersonalNote(input)
+
+  if (!note) {
+    return ask
+  }
+
+  return {
+    ...ask,
+    note,
+    shown: {
+      ...ask.shown,
+      lines: [
+        ...ask.shown.lines,
+        `Your note on it, which every assistant that sees it reads as yours:\n${note}`,
+      ],
+    },
+  }
+}
+
+/**
+ * The request for another wrapper of a definition the token sees: the
+ * definition's programs, calls, secret places and descriptions, shown in
+ * full as a new wrapper's are, under a name of its own. Nothing of it comes
+ * from the assistant but the name (and a note, withWrapperNote).
+ */
+export async function proposeWrapperInstance(
+  ctx: VaultContext,
+  bound: Pick<BindableDefinition, "id" | "name" | "basis" | "instances">,
+  input: { name: string },
+): Promise<WrapperChangeAsk> {
+  await assertRoomForWrapper(ctx)
+  const source = await contentInstance(bound.id)
+
+  if (!source || source.kind !== "wrapper") {
+    throw invalid("That wrapper has no program to make another of.")
+  }
+
+  const { server, definition } = await loadWrapper(ctx, { id: source.id })
+  const name = normalizeNameAndDescription({
+    name: input.name,
+    description: "",
+  }).name
+  const shown = await describe(ctx, {
+    action: "create",
+    name,
+    description: server.description,
+    before: null,
+    after: definition,
+    previousName: null,
+  })
+
+  return {
+    action: "create",
+    serverId: null,
+    basis: null,
+    name,
+    description: server.description,
+    definition,
+    newSecret: null,
+    instanceOf: { definitionId: bound.id, basis: bound.basis },
+    shown: {
+      ...shown,
+      title: `Add the wrapper ${name}, another of ${bound.name}?`,
+      lines: [
+        `Another wrapper of ${bound.name}, beside ${bound.instances.map((each) => each.slug).join(", ")}: it shares their programs, calls, secret places and tool descriptions, so a change to those changes every one of them`,
+        "Its tools ask you first, for every token, as a new server's do",
+        ...shown.lines,
+      ],
+    },
+  }
+}
+
+/**
+ * The request to give a wrapper a definition of its own: a copy of what it
+ * shares now, so that a change to it no longer reaches the others, or
+ * theirs it. Nothing else of it changes.
+ */
+export async function proposeWrapperDetach(
+  ctx: VaultContext,
+  slug: string,
+): Promise<WrapperChangeAsk> {
+  const { server, spec, definition } = await loadWrapper(ctx, { slug })
+  const others = await siblingInstances(server.id)
+
+  if (!server.definitionId || others.length === 0) {
+    throw invalid(
+      `${slug} is the only wrapper of its definition: there is nothing to detach it from.`,
+    )
+  }
+
+  return {
+    action: "detach",
+    serverId: server.id,
+    basis: basisOf(server, spec.hash),
+    name: server.name,
+    description: server.description,
+    definition: null,
+    newSecret: null,
+    detachFrom: { definitionId: server.definitionId },
+    shown: {
+      title: `Detach the wrapper ${server.name}?`,
+      lines: [
+        `Wrapper: ${server.name} (${server.slug})`,
+        `Shares its definition with: ${others.map((other) => other.slug).join(", ")}`,
+        `It gets a definition of its own, a copy of the programs, calls, secret places and descriptions it has now. From then on a change to it does not reach ${others.length === 1 ? "the other" : "the others"}, and theirs does not reach it`,
+        "Nothing else changes: its tools, levels and note stay as they are",
+      ],
+      warning: null,
+      callLevels: definition.callLevels ?? "token",
+      tools: [],
+      secrets: [],
+    },
   }
 }
 
@@ -635,6 +823,19 @@ export async function applyWrapperChange(
 ): Promise<string> {
   if (ask.action === "create") {
     await assertRoomForWrapper(ctx)
+
+    // Another wrapper of a definition: as the owner was shown it, or not.
+    if (
+      ask.instanceOf &&
+      (await definitionBasis(ask.instanceOf.definitionId)) !==
+        ask.instanceOf.basis
+    ) {
+      throw new PcpError(
+        "state",
+        "The wrapper this would be another of has changed since this was asked (or is gone), so nothing was added. Ask again.",
+      )
+    }
+
     const definition = await withSecretIds(ctx, ask.definition!, {
       newSecret: ask.newSecret,
       secretValue,
@@ -646,7 +847,13 @@ export async function applyWrapperChange(
       ask.name,
       ask.description,
       definition,
+      ask.instanceOf?.definitionId ?? null,
     )
+
+    if (ask.note) {
+      await setPersonalNote(ctx, "server", id, ask.note)
+    }
+
     const token = await db().apiToken.findUnique({
       where: { id: tokenId },
       select: { allowAllServers: true },
@@ -679,6 +886,18 @@ export async function applyWrapperChange(
     return `The wrapper ${server.name} was deleted.`
   }
 
+  if (ask.action === "detach") {
+    if (server.definitionId !== ask.detachFrom?.definitionId) {
+      throw new PcpError(
+        "state",
+        `${server.name} has changed since this was asked, so nothing changed. Ask again.`,
+      )
+    }
+
+    await detachServer(ctx, server.id)
+    return `The wrapper ${server.name} (${server.slug}) has a definition of its own now: a change to it reaches no other wrapper.`
+  }
+
   const definition = await withSecretIds(ctx, ask.definition!, {
     newSecret: ask.newSecret,
     secretValue,
@@ -695,8 +914,13 @@ async function createWrapperRow(
   name: string,
   description: string,
   definition: WrapperDefinition,
+  /** Another wrapper of this definition, whose description it takes. */
+  definitionId: string | null = null,
 ): Promise<string> {
   const id = newId()
+  const shared = definitionId
+    ? await definitionForNew(ctx, definitionId, "wrapper")
+    : null
 
   await db().$transaction([
     db().mcpServer.create({
@@ -706,9 +930,10 @@ async function createWrapperRow(
         kind: "wrapper",
         name,
         slug: await uniqueSlug(ctx.vaultId, slugify(name)),
-        description,
+        description: shared?.description ?? description,
         url: WRAPPER_URL,
         authType: "none",
+        definitionId: shared?.id ?? null,
       },
     }),
     db().wrapperSpec.create({
@@ -720,6 +945,7 @@ async function createWrapperRow(
     }),
   ])
   await syncWrapperTools({ id })
+  await ensureDefinition(id)
 
   return id
 }
@@ -742,6 +968,39 @@ async function writeWrapper(
     }),
   ])
   await syncWrapperTools({ id })
+  await shareWrapper(id)
+}
+
+/**
+ * Gives every other instance of a wrapper's definition its program and
+ * description, and rebuilds their tools: what a wrapper is, is the
+ * definition's.
+ */
+async function shareWrapper(id: string): Promise<void> {
+  await shareDescription(id)
+
+  const siblings = (await siblingInstances(id)).filter(
+    (sibling) => sibling.kind === "wrapper",
+  )
+
+  if (siblings.length === 0) {
+    return
+  }
+
+  const spec = await db().wrapperSpec.findUniqueOrThrow({
+    where: { serverId: id },
+  })
+
+  for (const sibling of siblings) {
+    const { count } = await db().wrapperSpec.updateMany({
+      where: { serverId: sibling.id, hash: { not: spec.hash } },
+      data: { definition: spec.definition, hash: spec.hash },
+    })
+
+    if (count > 0) {
+      await syncWrapperTools({ id: sibling.id })
+    }
+  }
 }
 
 /**

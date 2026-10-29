@@ -10,7 +10,7 @@ import { resolvePointer } from "./refs"
  * What a successful call answers, as a short outline an assistant can read
  * before it calls: `{data: [{id: string, amount: number, …}], meta: {…}}`.
  * Text the API sends base64-encoded is `string (base64)`.
- * describe_tool shows it, so the assistant knows the field names to look
+ * describe shows it, so the assistant knows the field names to look
  * for, and to pick with call_tool's fields, without a first call to find out.
  *
  * Read from the schema's own description of the answer, which is untrusted

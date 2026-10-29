@@ -14,7 +14,9 @@ import {
   type ImapClientLike,
   type ImapConfig,
   type ImapDeps,
+  type ImapSendHooks,
   type OutgoingMail,
+  sentCopyIds,
 } from "./imap"
 import { MailAuthError, MailRequestError, MailTransportError } from "./types"
 
@@ -180,7 +182,13 @@ function fakeImap(
     secureConnection: secure,
     capabilities: new Map(capabilities.map((name) => [name, true])),
     get mailbox() {
-      return open ? { path: open, uidValidity: current().uidValidity } : false
+      return open
+        ? {
+            path: open,
+            uidValidity: current().uidValidity,
+            exists: current().messages.length,
+          }
+        : false
     },
     async logout() {
       calls.push("logout")
@@ -188,6 +196,7 @@ function fakeImap(
     close() {
       calls.push("close")
     },
+    async noop() {},
     async list() {
       return [...boxes.entries()].map(([path, box]) => ({
         path,
@@ -214,26 +223,45 @@ function fakeImap(
     },
     async search(criteria) {
       calls.push(`search ${JSON.stringify(criteria)}`)
-      return current()
-        .messages.filter((m) =>
-          criteria.seen === undefined
-            ? true
-            : m.flags.has("\\Seen") === criteria.seen,
-        )
-        .filter((m) =>
-          criteria.text
-            ? (m.envelope?.subject ?? "").includes(criteria.text)
-            : true,
-        )
-        .filter((m) =>
-          criteria.keyword ? m.flags.has(criteria.keyword) : true,
-        )
-        .filter((m) =>
-          criteria.unKeyword ? !m.flags.has(criteria.unKeyword) : true,
-        )
-        .map((m) => m.uid)
+      return (
+        current()
+          .messages.filter((m) =>
+            criteria.seen === undefined
+              ? true
+              : m.flags.has("\\Seen") === criteria.seen,
+          )
+          .filter((m) =>
+            criteria.text
+              ? (m.envelope?.subject ?? "").includes(criteria.text)
+              : true,
+          )
+          .filter((m) =>
+            criteria.keyword ? m.flags.has(criteria.keyword) : true,
+          )
+          .filter((m) =>
+            criteria.unKeyword ? !m.flags.has(criteria.unKeyword) : true,
+          )
+          // HEADER is a case-insensitive substring match (RFC 3501 6.4.4).
+          .filter((m) => {
+            const wanted = criteria.header?.["message-id"]
+            return typeof wanted === "string"
+              ? (m.envelope?.messageId ?? "")
+                  .toLowerCase()
+                  .includes(wanted.toLowerCase())
+              : true
+          })
+          .map((m) => m.uid)
+      )
     },
-    async fetchAll(range) {
+    async fetchAll(range, _query, { uid }) {
+      if (!uid) {
+        // Sequence numbers, "from:*": the newest from that one on.
+        calls.push(`fetch ${String(range)}`)
+        const from = Number(String(range).split(":")[0])
+        return current()
+          .messages.slice(from - 1)
+          .map(view)
+      }
       const uids = new Set((range as number[]).map(Number))
       return current()
         .messages.filter((m) => uids.has(m.uid))
@@ -313,6 +341,26 @@ const CONFIG: ImapConfig = {
   from: null,
 }
 
+/**
+ * The copy of a sent email an SMTP server files in Sent itself, as Gmail's
+ * does: under the header that names it, once PCP has waited `atLook` times.
+ */
+function serverCopy(
+  box: Box,
+  mail: OutgoingMail,
+  header = "Message-ID",
+): StoredMessage {
+  return {
+    uid: box.uidNext++,
+    flags: new Set(["\\Seen"]),
+    internalDate: new Date("2026-10-22T09:00:00Z"),
+    envelope: { subject: mail.subject, messageId: mail.messageId },
+    bodyStructure: { type: "text/plain", size: 20 },
+    parts: { "1": mail.text },
+    headers: `${header}:\r\n ${mail.messageId}\r\n\r\n`,
+  }
+}
+
 function setup(
   options: {
     boxes?: Map<string, Box>
@@ -322,6 +370,13 @@ function setup(
     connect?: ImapDeps["connect"]
     rejected?: string[]
     verify?: () => Promise<unknown>
+    /**
+     * The SMTP server files its own copy in Sent, there by the look this
+     * counts (1 is the first), under this header.
+     */
+    files?: { atLook: number; header?: string }
+    /** Looks for the copy in Sent wait for the answer (after-answer.ts). */
+    defer?: boolean
   } = {},
 ) {
   const boxes = options.boxes ?? world()
@@ -330,11 +385,45 @@ function setup(
     capabilities: options.capabilities,
   })
   const mailed: OutgoingMail[] = []
+  /** The waits before each look for the copy in Sent. */
+  const slept: number[] = []
+  const filing: OutgoingMail[] = []
+  const fileCopies = () => {
+    while (
+      options.files &&
+      filing.length &&
+      slept.length >= options.files.atLook
+    ) {
+      const box = boxes.get("Sent")!
+      box.messages.push(serverCopy(box, filing.shift()!, options.files.header))
+    }
+  }
+  const tasks: Array<() => Promise<void>> = []
+  const learned: boolean[] = []
+  const hooks: ImapSendHooks = {
+    learned: async (value) => {
+      learned.push(value)
+    },
+    ...(options.defer
+      ? {
+          defer: (task) => {
+            tasks.push(task)
+            return true
+          },
+        }
+      : {}),
+  }
   const deps: ImapDeps = {
     connect: options.connect ?? (async () => imap),
+    sleep: async (ms) => {
+      slept.push(ms)
+      fileCopies()
+    },
     smtp: async () => ({
       async sendMail(mail) {
         mailed.push(mail)
+        filing.push(mail)
+        fileCopies()
         return {
           messageId: mail.messageId,
           accepted: mail.to.map((t) => t.address),
@@ -355,7 +444,16 @@ function setup(
     mailed,
     deps,
     config,
-    mail: openImapBackend(config, LOGIN, deps),
+    slept,
+    tasks,
+    learned,
+    /** Runs what the send handed on, as the request does once it answered. */
+    afterAnswer: async () => {
+      for (const task of tasks.splice(0)) {
+        await task()
+      }
+    },
+    mail: openImapBackend(config, LOGIN, deps, hooks),
   }
 }
 
@@ -899,6 +997,105 @@ describe("sending", () => {
     expect(original.flags.has("\\Answered")).toBe(true)
   })
 
+  it.each(["<engine-1@example.com>", "engine-1@example.com"])(
+    "replies to an email found by its Message-ID (%s), and marks that one answered",
+    async (messageId) => {
+      const { mail, mailed, imap, boxes } = setup()
+
+      const sent = await mail.sendEmail!({
+        to: [{ name: null, email: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "Re: The engine",
+        text: "Thursday suits me.",
+        inReplyTo: messageId,
+      })
+
+      expect(mailed[0]).toMatchObject({
+        inReplyTo: "<engine-1@example.com>",
+        references: ["<older@example.com>", "<engine-1@example.com>"],
+      })
+      expect(sent).toMatchObject({ answered: true })
+      // Searched with its brackets, so a longer Message-ID does not match.
+      expect(imap.calls.filter((call) => call.startsWith("search"))).toEqual([
+        `search ${JSON.stringify({ header: { "message-id": "<engine-1@example.com>" } })}`,
+      ])
+      const original = boxes
+        .get("INBOX")!
+        .messages.find((message) => message.uid === 1)!
+      expect(original.flags.has("\\Answered")).toBe(true)
+    },
+  )
+
+  it("looks for a Message-ID past the inbox, in the special mailboxes", async () => {
+    const boxes = world()
+    const inbox = boxes.get("INBOX")!.messages[0]!
+    boxes.get("Sent")!.messages.push({
+      ...inbox,
+      uid: 5,
+      flags: new Set(["\\Seen"]),
+      envelope: { ...inbox.envelope, messageId: "<mine-5@example.com>" },
+    })
+    const { mail, mailed, imap } = setup({ boxes })
+
+    const sent = await mail.sendEmail!({
+      to: [{ name: null, email: "charles@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "And another thing.",
+      inReplyTo: "mine-5@example.com",
+    })
+
+    expect(mailed[0]).toMatchObject({ inReplyTo: "<mine-5@example.com>" })
+    expect(sent).toMatchObject({ answered: true })
+    expect(imap.calls).toContain("add 5 \\Answered")
+    expect(
+      boxes.get("Sent")!.messages.find((message) => message.uid === 5)!.flags,
+    ).toContain("\\Answered")
+    expect(boxes.get("INBOX")!.messages[0]!.flags.has("\\Answered")).toBe(false)
+  })
+
+  it("refuses a Message-ID no email has, in a bounded few mailboxes, and sends nothing", async () => {
+    const boxes = world()
+    for (const [path, specialUse] of [
+      ["Archive", "\\Archive"],
+      ["All Mail", "\\All"],
+      ["Spam", "\\Junk"],
+      ["Drafts", "\\Drafts"],
+      ["Starred", "\\Flagged"],
+      ["Important", "\\Important"],
+    ] as const) {
+      boxes.set(path, {
+        uidValidity: 30n,
+        uidNext: 1,
+        specialUse,
+        messages: [],
+      })
+    }
+    const { mail, mailed, imap } = setup({ boxes })
+
+    await expect(
+      mail.sendEmail!({
+        to: [{ name: null, email: "charles@example.com" }],
+        cc: [],
+        bcc: [],
+        subject: "Re: nothing",
+        text: "t",
+        inReplyTo: "<nobody-9@example.com>",
+      }),
+    ).rejects.toThrow("No email with that Message-ID in this account.")
+    expect(mailed).toEqual([])
+    expect(imap.calls.filter((call) => call.startsWith("lock"))).toEqual([
+      "lock INBOX read-only",
+      "lock Sent read-only",
+      "lock Archive read-only",
+      "lock All Mail read-only",
+      "lock Spam read-only",
+      "lock Trash read-only",
+    ])
+  })
+
   it("says so when the email it answers cannot be marked, and the email still goes", async () => {
     const { mail, mailed, imap } = setup()
     imap.messageFlagsAdd = async () => false
@@ -1017,6 +1214,255 @@ describe("sending", () => {
   })
 })
 
+describe("the copy in Sent", () => {
+  const EMAIL = {
+    to: [{ name: null, email: "charles@example.com" }],
+    cc: [],
+    bcc: [],
+    subject: "Thursday",
+    text: "Thursday suits me.",
+  }
+  /** The waits before each look, while PCP knows nothing of the server. */
+  const LOOKS = [0, 1_000, 1_000, 1_000, 2_000, 2_500, 2_500]
+  const sentIds = (boxes: Map<string, Box>) =>
+    boxes.get("Sent")!.messages.map((message) => message.envelope?.messageId)
+
+  it("answers at once, then finds the copy the server filed itself and files none", async () => {
+    const { mail, imap, boxes, mailed, tasks, afterAnswer, learned, slept } =
+      setup({ defer: true, files: { atLook: 2 } })
+
+    const sent = await mail.sendEmail!(EMAIL)
+
+    // Nothing was looked for before the answer.
+    expect(sent).toMatchObject({ savedTo: "pending", id: null })
+    expect(tasks).toHaveLength(1)
+    expect(slept).toEqual([])
+    await mail.close()
+
+    await afterAnswer()
+    expect(imap.appended).toEqual([])
+    expect(sentIds(boxes)).toEqual([mailed[0]!.messageId])
+    expect(slept).toEqual([0, 1_000])
+    expect(learned).toEqual([true])
+    // On a connection of its own, which it closes.
+    expect(imap.calls.at(-1)).toBe("logout")
+    expect(imap.calls).toContain("lock Sent read-only")
+  })
+
+  it("files exactly one copy when the server did not, after the whole look", async () => {
+    const { mail, imap, tasks, afterAnswer, learned, slept } = setup({
+      defer: true,
+    })
+
+    await mail.sendEmail!(EMAIL)
+    await mail.close()
+    expect(imap.appended).toEqual([])
+    expect(tasks).toHaveLength(1)
+
+    await afterAnswer()
+    expect(slept).toEqual(LOOKS)
+    expect(imap.appended).toEqual([
+      {
+        path: "Sent",
+        raw: "Subject: Thursday\r\n\r\nThursday suits me.",
+        flags: ["\\Seen"],
+      },
+    ])
+    expect(learned).toEqual([false])
+  })
+
+  it("names the server's copy when it looks in the call", async () => {
+    const { mail, imap, tasks, learned } = setup({ files: { atLook: 3 } })
+
+    const sent = await mail.sendEmail!(EMAIL)
+
+    expect(tasks).toEqual([])
+    expect(imap.appended).toEqual([])
+    expect(sent).toMatchObject({
+      savedTo: "Sent",
+      id: encodeImapId(1, 8n, "Sent"),
+    })
+    expect(learned).toEqual([true])
+  })
+
+  it("finds Outlook's copy by the Message-ID it kept", async () => {
+    const { mail, imap, afterAnswer } = setup({
+      defer: true,
+      files: { atLook: 1, header: "X-Microsoft-Original-Message-ID" },
+    })
+
+    await mail.sendEmail!(EMAIL)
+    await afterAnswer()
+
+    expect(imap.appended).toEqual([])
+  })
+
+  it("reads only the newest emails in Sent", async () => {
+    const boxes = world()
+    const sentBox = boxes.get("Sent")!
+    for (let n = 0; n < 20; n++) {
+      sentBox.messages.push(
+        serverCopy(sentBox, {
+          to: [],
+          cc: [],
+          bcc: [],
+          subject: "Older",
+          text: "t",
+          messageId: `<older-${n}@example.com>`,
+        }),
+      )
+    }
+    const { mail, imap, afterAnswer } = setup({
+      boxes,
+      defer: true,
+      files: { atLook: 1 },
+    })
+
+    await mail.sendEmail!(EMAIL)
+    await afterAnswer()
+
+    expect(imap.calls.filter((call) => call.startsWith("fetch"))).toEqual([
+      "fetch 7:*",
+    ])
+    expect(imap.appended).toEqual([])
+  })
+
+  it("never files a copy, nor looks, when the account says never", async () => {
+    const { mail, imap, tasks, slept, learned } = setup({
+      defer: true,
+      files: { atLook: 1 },
+      config: { saveSent: "never" },
+    })
+
+    const sent = await mail.sendEmail!(EMAIL)
+
+    expect(sent).toMatchObject({ savedTo: null, id: null })
+    expect(tasks).toEqual([])
+    expect(slept).toEqual([])
+    expect(imap.appended).toEqual([])
+    expect(imap.calls.some((call) => call.includes("Sent"))).toBe(false)
+    expect(learned).toEqual([])
+  })
+
+  it("files a copy at once, without looking, when the account says always", async () => {
+    const { mail, imap, tasks, slept } = setup({
+      defer: true,
+      config: { saveSent: "always" },
+    })
+
+    const sent = await mail.sendEmail!(EMAIL)
+
+    expect(sent).toMatchObject({
+      savedTo: "Sent",
+      id: encodeImapId(1, 8n, "Sent"),
+    })
+    expect(tasks).toEqual([])
+    expect(slept).toEqual([])
+    expect(imap.calls.some((call) => call.startsWith("fetch"))).toBe(false)
+    expect(imap.appended).toHaveLength(1)
+  })
+
+  it("waits longer for a server that files its own copy, and learns when it stops", async () => {
+    const files = setup({
+      defer: true,
+      files: { atLook: 8 },
+      config: { serverFilesSent: true },
+    })
+    await files.mail.sendEmail!(EMAIL)
+    await files.afterAnswer()
+
+    expect(files.slept).toEqual([...LOOKS, 5_000])
+    expect(files.imap.appended).toEqual([])
+    expect(files.learned).toEqual([])
+
+    const stopped = setup({ defer: true, config: { serverFilesSent: true } })
+    await stopped.mail.sendEmail!(EMAIL)
+    await stopped.afterAnswer()
+
+    expect(stopped.imap.appended).toHaveLength(1)
+    expect(stopped.learned).toEqual([false])
+  })
+
+  it("looks briefly for a server that does not file one, and learns when it starts", async () => {
+    const doesNot = setup({ defer: true, config: { serverFilesSent: false } })
+    await doesNot.mail.sendEmail!(EMAIL)
+    await doesNot.afterAnswer()
+
+    expect(doesNot.slept).toEqual([0, 1_000, 2_000])
+    expect(doesNot.imap.appended).toHaveLength(1)
+    expect(doesNot.learned).toEqual([])
+
+    const started = setup({
+      defer: true,
+      files: { atLook: 2 },
+      config: { serverFilesSent: false },
+    })
+    await started.mail.sendEmail!(EMAIL)
+    await started.afterAnswer()
+
+    expect(started.imap.appended).toEqual([])
+    expect(started.learned).toEqual([true])
+  })
+
+  it("looks for ten seconds at most in the call, and learns nothing from a cut look", async () => {
+    const { mail, imap, slept, learned } = setup({
+      config: { serverFilesSent: true },
+    })
+
+    const sent = await mail.sendEmail!(EMAIL)
+
+    expect(slept).toEqual(LOOKS)
+    expect(sent).toMatchObject({ savedTo: "Sent" })
+    expect(imap.appended).toHaveLength(1)
+    expect(learned).toEqual([])
+  })
+
+  it("files its copy when it cannot look, and learns nothing", async () => {
+    const { mail, imap, afterAnswer, learned } = setup({ defer: true })
+    imap.noop = async () => {
+      throw Object.assign(new Error("no"), { responseStatus: "BAD" })
+    }
+
+    await mail.sendEmail!(EMAIL)
+    await afterAnswer()
+
+    expect(imap.appended).toHaveLength(1)
+    expect(learned).toEqual([])
+  })
+
+  it("leaves two copies when the server files one after PCP stopped looking, and deletes neither", async () => {
+    const { mail, imap, boxes, mailed, afterAnswer } = setup({
+      defer: true,
+      files: { atLook: 99 },
+    })
+
+    await mail.sendEmail!(EMAIL)
+    await afterAnswer()
+    const sentBox = boxes.get("Sent")!
+    sentBox.messages.push(serverCopy(sentBox, mailed[0]!))
+
+    // PCP's copy, and the server's.
+    expect(imap.appended).toHaveLength(1)
+    expect(sentBox.messages).toHaveLength(1)
+    expect(
+      imap.calls.some(
+        (call) => call.startsWith("delete") || call.includes("\\Deleted"),
+      ),
+    ).toBe(false)
+  })
+
+  it("reads the Message-IDs in the headers that name a copy, folded or not", () => {
+    expect(
+      sentCopyIds(
+        Buffer.from(
+          "Message-ID:\r\n <AbC@example.com>\r\nX-Microsoft-Original-Message-ID: <orig@pcp.example>\r\nReferences: <other@example.com>\r\n\r\n",
+        ),
+      ),
+    ).toEqual(["abc@example.com", "orig@pcp.example"])
+    expect(sentCopyIds(undefined)).toEqual([])
+  })
+})
+
 describe("drafting", () => {
   function withDrafts(specialUse: string | undefined = "\\Drafts") {
     const boxes = world()
@@ -1085,6 +1531,41 @@ describe("drafting", () => {
       .get("INBOX")!
       .messages.find((message) => message.uid === 1)!
     expect(original.flags.has("\\Answered")).toBe(false)
+  })
+
+  it("drafts a reply to an email named by its Message-ID", async () => {
+    const { mail, deps, boxes } = setup({ boxes: withDrafts() })
+    const composed: OutgoingMail[] = []
+    const compose = deps.compose
+    deps.compose = async (mail) => {
+      composed.push(mail)
+      return compose(mail)
+    }
+
+    await mail.createDraft({
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: "Re: The engine",
+      text: "Thursday suits me.",
+      inReplyTo: "<engine-1@example.com>",
+    })
+
+    expect(composed[0]).toMatchObject({
+      inReplyTo: "<engine-1@example.com>",
+      references: ["<older@example.com>", "<engine-1@example.com>"],
+    })
+    expect(boxes.get("INBOX")!.messages[0]!.flags.has("\\Answered")).toBe(false)
+    await expect(
+      mail.createDraft({
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: "s",
+        text: "t",
+        inReplyTo: "nobody@example.com",
+      }),
+    ).rejects.toThrow("No email with that Message-ID in this account.")
   })
 
   it("finds Drafts by name, and needs neither SMTP, a From address nor UIDPLUS", async () => {

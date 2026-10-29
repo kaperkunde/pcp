@@ -1,4 +1,4 @@
-import { Link2 } from "lucide-react"
+import { FolderGit2, Link2 } from "lucide-react"
 import type { Metadata } from "next"
 
 import { ExportCard, RestoreCard } from "@/components/backup-cards"
@@ -7,6 +7,7 @@ import { CopyableValue } from "@/components/copyable-value"
 import { DeleteVaultCard } from "@/components/delete-vault-card"
 import { FormNote } from "@/components/form-status"
 import { PageColumn } from "@/components/page-column"
+import { PacingCard } from "@/components/pacing-card"
 import { PageHeader } from "@/components/page-header"
 import { ResourcesCard } from "@/components/resources-card"
 import {
@@ -23,6 +24,7 @@ import { cleanupOverview } from "@/lib/core/cleanup/runtime"
 import { deviceKeyInfo } from "@/lib/core/device-keys"
 import { isLocalAddress } from "@/lib/core/local-address"
 import { networkNotices, networkOverview } from "@/lib/core/network/runtime"
+import { pacingOverview } from "@/lib/core/pacing/config"
 import { resourcesOverview } from "@/lib/core/resources/state"
 import { getSetting, SETTING_PUBLIC_URL } from "@/lib/core/settings"
 import { updatesOverview } from "@/lib/core/updates/state"
@@ -58,6 +60,7 @@ export default async function SettingsPage({
     touchId,
     cleanup,
     resources,
+    pacing,
   ] = await Promise.all([
     getSetting(ctx, SETTING_PUBLIC_URL),
     requestOrigin(),
@@ -69,6 +72,7 @@ export default async function SettingsPage({
     deviceKeyInfo(ctx.vaultId),
     cleanupOverview(),
     resourcesOverview(),
+    pacingOverview(ctx),
   ])
 
   return (
@@ -89,7 +93,7 @@ export default async function SettingsPage({
               />
             }
             title="Connection address"
-            description="Add this as a remote MCP server in your assistant, with an API token as the bearer token. It offers three tools — search_tools, describe_tool and call_tool — that reach every server you connected."
+            description="Add this as a remote MCP server in your assistant, with an API token as the bearer token. It offers three tools — search, describe and call_tool — that reach every server you connected, and your skills."
           >
             <div className="basis-full">
               <CopyableValue value={`${publicUrl}/mcp`} />
@@ -133,10 +137,22 @@ export default async function SettingsPage({
         username={vault.name}
       />
 
+      <ListSection title="Sharing">
+        <List>
+          <ListRow
+            href="/settings/repositories"
+            icon={<IconTile icon={FolderGit2} size="sm" />}
+            title="Repositories"
+            description="Share skills, wrappers, flows, endpoints and servers through GitHub"
+          />
+        </List>
+      </ListSection>
+
       <ListSection title="Upkeep">
         <List>
           <CleanupCard overview={cleanup} />
           <ResourcesCard overview={resources} />
+          <PacingCard overview={pacing} />
         </List>
       </ListSection>
 

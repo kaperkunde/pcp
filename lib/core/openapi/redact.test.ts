@@ -52,8 +52,19 @@ describe("redactSecrets", () => {
         truncated: true,
       }),
     ).toBe("token: [redacted]")
+    // Also for a header value that wraps the key.
+    expect(
+      redactSecrets("auth: Bearer sk-live-01", [SECRET, `Bearer ${SECRET}`], {
+        truncated: true,
+      }),
+    ).toBe("auth: [redacted]")
+    // A complete answer that merely ends like the start of the key is left.
     expect(redactSecrets(`ends: ${SECRET.slice(0, 10)}`, [SECRET])).toBe(
       `ends: ${SECRET.slice(0, 10)}`,
+    )
+    // A cut that did not reach the key changes nothing.
+    expect(redactSecrets("plain text", [SECRET], { truncated: true })).toBe(
+      "plain text",
     )
   })
 })

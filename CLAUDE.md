@@ -50,9 +50,11 @@ so in the summary; the bump itself waits for the request.
   `lib/core/constants.ts` and `import type`. Anything else drags Prisma into
   the browser bundle and the build fails in webpack, not in the dev server.
 - Secrets are decrypted in `lib/core/secrets.ts` and used in
-  `lib/core/upstream.ts` (headers, and a wrapper's bound placeholders).
-  Nothing returns a secret value to an assistant;
-  `revealSecret` is for the owner's own screen. An API endpoint's calls
+  `lib/core/upstream.ts` (headers, a wrapper's bound placeholders, and a
+  secret the browser types). Nothing returns a secret value to an assistant;
+  `revealSecret` and `revealTotpCode` are for the owner's own screen. A
+  `totp` secret's seed never leaves `secrets.ts`: only the code of the
+  moment is typed, and only by the browser. An API endpoint's calls
   (`lib/core/endpoints.ts`, `lib/core/openapi/`) are handed their finished
   header by `upstream.ts` and never read a secret; `openapi/call.ts` scrubs
   the secret from what the API answers.
@@ -82,6 +84,24 @@ so in the summary; the bump itself waits for the request.
   which writes only the columns it is given and never the credential. Keep
   all of that when adding to it, and add a test for each new field an
   assistant can set.
+- Definitions (`lib/core/definitions.ts`, `definition-rows.ts`): an MCP
+  server, endpoint or wrapper is an instance of a `server_definition`, and
+  what instances share (description, schema and edits, wrapper program, tool
+  descriptions) is copied on each of them. Anything that writes shared
+  content goes through `endpoints.ts applySpec`, `shareDescription`,
+  `setToolDescription` or `writeWrapper`, so every instance gets it and
+  rebuilds its tools; a server made on a definition takes its content, never
+  its own. An endpoint shares the owner's rules with its siblings: it is the
+  assistant's only while every instance is. Merge is the owner's alone. An
+  assistant only proposes the rest, each a permission request that writes
+  nothing until the owner agrees: another server of a definition it sees
+  (`definition` on `register_server` and `create_wrapper`: the instance's
+  own part only, made on the definition while `definitionBasis` holds, no
+  levels copied), detach (`detach` on `update_endpoint`/`update_wrapper`)
+  and the owner's note (`personal-notes.ts`: one line, at most 300
+  characters, encrypted, never in a repository document; `note` there, or
+  `/skills/<name>/.note`, a `note_change` the owner reads whole, written
+  only over the note they had when asked).
 - Memories (`lib/core/memories.ts`): an assistant writes its own
   (`/memories/…`) without asking, but anything other assistants would read
   (`/memories/shared/…`: creating, sharing, changing, renaming, deleting) is a
@@ -96,6 +116,58 @@ so in the summary; the bump itself waits for the request.
   only the owner sets that mark, and an assistant's change to an always
   memory it keeps clears it, so every text in the instructions is one the
   owner read. Never a token's own memory the owner did not mark.
+- Skills (`lib/core/skills.ts`) are procedures the owner approved, kept as
+  SKILL.md (frontmatter with a `version`, other tools' keys kept as they
+  are), encrypted under `skill:<id>`. An assistant reads the ones its token
+  sees through `search` and `describe`, and proposes a change only through
+  the `memory` tool's `/skills/…` paths: a `skill_change` request that shows
+  the whole skill and its diff and writes only that, while the skill is
+  still at the version the owner was shown. A change to the SKILL.md shape
+  stays backward compatible.
+- `call_tool` and `call_read_only_tool` take only a `call_handle` from
+  `describe` (`lib/core/call-handles.ts`: an HMAC under the vault key over
+  the token, the tool and its schema's hash), and check the arguments against
+  the schema before anything runs or asks the owner. run_code's `pcp.call`
+  keeps names.
+- Pacing (`lib/core/pacing/`) applies only in `upstream.ts callServerTool`
+  (the browser by the tab's site, in `browser/call.ts`) and web fetch's
+  request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
+  is paced: call_tool, run_code, wrappers and flows, owner-approved calls.
+  New defaults and bounds go in `pacing/limits.ts`, by class of action;
+  nothing names a site or vendor. The owner's overrides are the vault's
+  `pacing` setting, never a host setting.
+- Linked repositories (`lib/core/repos/`) share items, never secrets, and
+  are never a backup. Their documents carry `pcp_format` and change only
+  backward compatibly (add fields with defaults, never repurpose one).
+  `github.ts` is the only client: GitHub's REST API, and github.com for the
+  device flow only; no redirect, public addresses only, every answer bounded
+  (`repos/limits.ts`) and read against a schema, every file checked against
+  its git id. It never reads a secret: `upstream.ts githubCredential` hands
+  it the header, from a text secret or PCP's own sign-in (`oauth/github`).
+  A server's document is its definition only (`PCP_FORMAT` 2): sync never
+  writes an instance's own fields (name and short name, address,
+  credential and secrets, read-only, public-only, enabled, pace, levels,
+  note), and what a format-1 document says of its server only fills in a
+  first instance. A push is one commit per item, fast-forward only, and
+  only through the push's review (`repos/share-review.ts`): every file in
+  full, what stays private, and the personal-data check
+  (`repos/personal-data.ts`, pure), which a public repository waits on
+  until each hit is fixed or ticked; Confirm pushes exactly what was shown
+  (its `basis`) or opens the review again. Never a push of several items
+  at once. From a trusted read-and-write repository only a `textOnly`
+  change applies by itself; an item imported from a read-only repository
+  is pinned, and everything else waits on the item (`pending`, named by
+  its git id) and applies only as the owner was shown it, while its
+  `basis` holds. Nothing syncs without a
+  request's key: `runDueSyncs` runs only through `after()` from `/mcp` and
+  the owner's pages; never a timer, a webhook or a stored key. An assistant
+  (manage-endpoints only) helps through `search`, `describe` and
+  `/repos/<id>/` in the memory tool, as one `repo_change` request, and
+  proposes one item it sees for a push through `/repos/share/…`
+  (`repos/assist-share.ts`): a `repo_share` request whose only yes is
+  Confirm on the push's review (`confirmProposedShare`, which is
+  `confirmShare` unchanged). A new way in gets a test against
+  `fake-github.ts`.
 - Tool levels an assistant proposes for its token (`propose_tool_access`,
   `lib/core/access-requests.ts`) are written only by the owner's save on the
   request's page (`applyAccessRequest`), with what they chose there. No
@@ -171,8 +243,9 @@ so in the summary; the bump itself waits for the request.
   upload, its token live, every use in the request log, never exported, and
   pruned by the cleanup. Nothing else serves a kept result over HTTP.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:
-  tool, server, upstream tool, time, outcome, and the permission request an
-  ask made. Never arguments, results, sites or a secret; the Log page
+  tool, server, upstream tool, time, outcome, the permission request an
+  ask made, and for a secret the browser typed, its name and the origin.
+  Never arguments, results, other sites or a secret's value; the Log page
   (`lib/core/activity.ts`) reads only the vault's own lines. A new way a call
   can ask the owner calls `noteOwnerAsked`. The cleanup
   (`lib/core/cleanup/`) deletes rows and log days by their dates, needs no
@@ -241,7 +314,9 @@ so in the summary; the bump itself waits for the request.
   secret goes in only as `{"$secret": name}` where a binding the owner
   approved names that tool (by server id), argument and address: matched
   and written in `upstream.ts`, scrubbed from the answer, errors and status
-  there, refused in an assistant's own call and never put into the browser.
+  there, and refused in an assistant's own call. Into the browser it goes
+  only as `type`'s text (in a wrapper, a binding for `browser/type` at
+  `/text`, no template), through the browser's own gate below.
   An assistant's create, change and delete are a permission request
   (`wrapper_change`) that shows every program, schema, call, replaced tool
   and secret place in full and writes only that, to the wrapper as it was
@@ -268,7 +343,10 @@ so in the summary; the bump itself waits for the request.
   protocol with each event's own time (`input.ts`), never as page script.
   In the container image Chromium runs with windows on a virtual display PCP
   starts itself (`display.ts`: Xvfb, its own cookie, stopped with the last
-  browser); never in the desktop app, which starts no child process. A
+  browser), with the host's GPU when it has a render node PCP may use and
+  in software otherwise; never in the desktop app, which starts no child
+  process: there Chromium has a window of its own kept off the screen,
+  its pages opened in the background (`launch.ts`). A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
   a permission request (`browse`, `browser_handover`); a site is asked
   about only for the address in the call's arguments, so a call the owner
@@ -280,6 +358,25 @@ so in the summary; the bump itself waits for the request.
   only by the owner's click (`browser/install.ts`), only from the addresses
   Playwright pins for that version, in PCP's process: never with a child
   process, which the desktop app's fuses forbid.
+- A secret goes into a page (`lib/core/browser-secrets.ts`) only as the
+  browser's `type` text `{"$secret": name}` (from an assistant's call,
+  run_code or a wrapper's binding), never in another tool or argument, and
+  only through `upstream.ts callBrowser`, which hands the browser a typer,
+  never a value. The browser asks for it only at the moment of typing, for
+  an input or textarea whose frame is the page's own origin; the typer lets
+  it through only where the token has an allowance for that secret at that
+  origin (once, an hour, or always while the origin is the secret's
+  `SecretBrowserOrigin`), or else asks the owner (`secret_use`, with
+  `noteOwnerAsked`), whose answer never changes a tool's level; an API
+  endpoint's use of the secret never counts. It is typed with CDP
+  `Input.insertText` once the field has the focus. While a field holds it
+  (`browser/held.ts`, a keyed hash, never the value), every answer shows it
+  as `[secret: name]` and `screenshot` is refused; a password field's value
+  never shows. The value is scrubbed from answers and errors, and the
+  request log has the secret's name and origin, never the value.
+  `request_secret` asks the owner to type a new one on PCP's page and never
+  writes over a name PCP holds. Allowances are not exported; origins are.
+  Add a test for each new way in.
 - PCP's own authorization server (`lib/core/oauth-server/`), for apps that
   sign in to `/mcp` with a URL alone (claude.ai's connectors, ChatGPT), is
   PCP's and never a relay's: whoever issues the tokens could mint one for
@@ -441,7 +538,10 @@ CalDAV are a "calendar account" ("Calendar accounts" in the UI); a server
 whose tools are programs over the
 others is a "wrapper" ("Wrappers" in the UI); a note an
 assistant keeps between conversations is a "memory", "shared" when every
-assistant reads it; what web_fetch reaches is a "site" (a host), and a level
+assistant reads it; a procedure the owner approved for assistants to follow
+is a "skill" ("Skills" in the UI); a wrapper whose tools drive the browser
+is a "browser flow"; a GitHub repository PCP shares items with is a "linked
+repository"; what web_fetch reaches is a "site" (a host), and a level
 every token follows is "for all tokens" ("All tokens" in the UI); unlocking
 or confirming with a fingerprint in the Mac app is "Touch ID". No operator
 vocabulary in the UI: no "DEK", "grant", "KEK" outside code comments and

@@ -36,11 +36,14 @@ import { isOwnerNeeded, type OwnerNeeded } from "./types"
 // this machine. Skipped where no Chromium is installed (`pnpm exec
 // playwright install chromium`, or PCP_BROWSER_EXECUTABLE). A site's check
 // is given a few seconds rather than twenty: the fake one passes in a third
-// of a second, or never.
+// of a second, or never. An action on an element that never becomes
+// actionable is given three seconds rather than ten: the pages here answer
+// at once.
 
 vi.mock("./limits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./limits")>()),
   CHALLENGE_WAIT_MS: 3_000,
+  ACTION_TIMEOUT_MS: 3_000,
 }))
 
 const executable = await chromiumExecutable()
@@ -94,17 +97,53 @@ Promise.all([
 })
 </script>`
 
-/** What a page's own script can tell of the browser that shows it. */
+/**
+ * What a page's own script can tell of the browser that shows it, after a
+ * word: read_page leaves out a code block that is only JSON.
+ */
 const FINGERPRINT = `<!doctype html><title>Fingerprint</title>
 <pre><code id="seen"></code></pre>
 <script>
-document.getElementById("seen").textContent = JSON.stringify({
+document.getElementById("seen").textContent = "seen " + JSON.stringify({
   webdriver: navigator.webdriver,
   userAgent: navigator.userAgent,
   brands: JSON.stringify(navigator.userAgentData?.brands),
   screenWidth: screen.width,
 })
 </script>`
+
+/** The state a site's app carries in its page, which it does not show. */
+const STATE = JSON.stringify({
+  messages: Array.from({ length: 30 }, (_, i) => ({ id: i, text: "hidden" })),
+})
+
+/**
+ * A messaging page: the same words in the sidebar and the thread, an
+ * element covered by another, a button that opens an alert, and what it
+ * does not show (a hidden draft, its state as JSON).
+ */
+const INBOX = `<!doctype html><title>Inbox</title>
+<nav aria-label="Conversations"><ul>
+<li><a href="#ada">Ada: see you at noon</a></li>
+<li><a href="#bob">Bob: see you at noon</a></li>
+</ul></nav>
+<main>
+<h1>Ada</h1>
+<section aria-label="Thread">
+<p>Ada: see you at noon</p>
+<button>Reply</button> <button>Reply all</button>
+<label>Message <input></label>
+</section>
+<button onclick="alert('Saved!')">Save</button>
+<div style="position: relative; width: 200px">
+<button onclick="document.title = 'clicked'">Covered</button>
+<div role="dialog" aria-label="Cookie consent" style="position: absolute; inset: 0; background: #0003"></div>
+</div>
+<p hidden>Secret draft</p>
+<code style="display: none">${STATE}</code>
+<pre><code>${STATE}</code></pre>
+</main>
+<footer>Footer words</footer>`
 
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
@@ -193,6 +232,10 @@ setTimeout(() => window.open("/page"), 300)
       return res.end(DOORS)
     }
 
+    if (request.url.startsWith("/inbox")) {
+      return res.end(INBOX)
+    }
+
     res.end("<title>Page</title><h1>A page</h1>")
   })
 })
@@ -239,6 +282,17 @@ function textOf(result: CallToolResult): string {
     .join("\n")
 }
 
+/** The tab an answer is about ("Tab abc: title"). */
+function tabOf(result: CallToolResult): string {
+  const id = textOf(result).match(/^Tab (\S+):/m)?.[1]
+
+  if (!id) {
+    throw new Error(`no tab in:\n${textOf(result)}`)
+  }
+
+  return id
+}
+
 function refOf(result: CallToolResult, pattern: RegExp): string {
   const line = textOf(result)
     .split("\n")
@@ -266,10 +320,12 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
   it("asks about a new site, refuses a private address until allowed, then opens and acts on the page", async () => {
     const host = new URL(api.origin).host
 
-    const asked = await owner(call("navigate", { url: `${api.origin}/form` }))
+    const asked = await owner(
+      call("tabs", { action: "open", url: `${api.origin}/form` }),
+    )
     expect(asked.ask).toMatchObject({
       kind: "browse",
-      input: { serverId: server.id, tabId: null, toolName: "navigate" },
+      input: { serverId: server.id, tabId: null, toolName: "tabs" },
     })
     // The site is on the token's page as one it tried, as web_fetch does.
     expect(
@@ -278,47 +334,63 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     expect(runningBrowser(ctx.vaultId)).toBeNull()
 
     await setFetchSite(ctx, tokenId, host, "allowed")
-    const refused = await call("navigate", { url: `${api.origin}/form` })
+    const refused = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/form`,
+    })
     expect(refused.isError).toBe(true)
     expect(textOf(refused)).toContain("private or local address")
     expect(api.requests).toHaveLength(0)
+    // The tab opened all the same, and its id comes first.
+    const tab = tabOf(refused)
+    expect(textOf(refused).split("\n")[0]).toBe(
+      `Opened a new tab: ${tab}. Name ${tab} as tab in the calls that follow.`,
+    )
 
     await setFetchPrivate(ctx, tokenId, "allowed")
-    const opened = await call("navigate", { url: `${api.origin}/form` })
+    const opened = await call("navigate", { tab, url: `${api.origin}/form` })
     const text = textOf(opened)
     expect(opened.isError, text).toBeUndefined()
     expect(text).toContain(`Address: ${api.origin}/form`)
     expect(text).toMatch(
-      /The owner can watch it or take over at http:\/\/pcp\.test\/browser\/tabs\/\S+/,
+      /The owner can watch it or take over at http:\/\/pcp\.test\/browser\?tab=\S+/,
     )
     expect(text).toContain('textbox "Name"')
     expect(api.requests[0]!.headers["user-agent"]).not.toContain("Headless")
 
     const typed = await call("type", {
+      tab,
       ref: refOf(opened, /textbox "Name"/),
       text: "Ada",
     })
     const clicked = await call("click", {
+      tab,
       ref: refOf(typed, /button "Say hello"/),
     })
     expect(textOf(clicked)).toContain("Hello, Ada")
 
     const chosen = await call("select_option", {
+      tab,
       ref: refOf(clicked, /combobox "Pet"/),
       values: ["cat"],
     })
     expect(textOf(chosen)).toMatch(/option "Cat" \[selected\]/)
 
-    const found = await call("find", { text: "hello" })
-    expect(textOf(found)).toMatch(/heading "Hello, Ada"/)
+    const found = JSON.parse(
+      textOf(await call("find", { tab, text: "hello" })),
+    ) as { tab: string; matches: Array<{ role: string; name?: string }> }
+    expect(found.tab).toBe(tab)
+    expect(found.matches).toContainEqual(
+      expect.objectContaining({ role: "heading", name: "Hello, Ada" }),
+    )
 
-    const read = await call("read_page", {})
+    const read = await call("read_page", { tab })
     expect(textOf(read)).toContain("# Hello, Ada")
 
-    const picture = await call("screenshot", {})
+    const picture = await call("screenshot", { tab })
     expect(picture.content.some((part) => part.type === "image")).toBe(true)
 
-    const stale = await call("click", { ref: "e999" })
+    const stale = await call("click", { tab, ref: "e999" })
     expect(stale.isError).toBe(true)
     expect(textOf(stale)).toContain("Take a new snapshot")
   })
@@ -328,8 +400,12 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     await setFetchSite(ctx, tokenId, host, "allowed")
     await setFetchPrivate(ctx, tokenId, "allowed")
 
-    const opened = await call("navigate", { url: `${api.origin}/form` })
+    const opened = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/form`,
+    })
     const followed = await call("click", {
+      tab: tabOf(opened),
       ref: refOf(opened, /link "Elsewhere"/),
     })
     const other = `localhost:${new URL(api.origin).port}`
@@ -349,17 +425,22 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     await setFetchSite(ctx, tokenId, host, "allowed")
     await setFetchPrivate(ctx, tokenId, "allowed")
 
-    const opened = await call("navigate", { url: `${api.origin}/popups` })
-    const parentId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+    const opened = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/popups`,
+    })
+    const parentId = tabOf(opened)
     const vault = runningBrowser(ctx.vaultId)!
 
     // The popup on the token's own site becomes a tab of the token's.
+    let popupId = ""
     await vi.waitFor(
       () => {
         const popup = [...vault.tabs.values()].find(
           (tab) => tab.page.url() === `${api.origin}/page`,
         )
         expect(popup?.openedBy).toBe("Claude")
+        popupId = popup!.id
       },
       { timeout: 10_000, interval: 50 },
     )
@@ -379,6 +460,11 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
       `The page tried to open ${other}`,
     )
+    // The popup is named as a new tab; it is not the one the answer is about.
+    expect(`${textOf(opened)}\n${textOf(snapshot)}`).toContain(
+      `The page opened a new tab, ${popupId} (${api.origin}/page).`,
+    )
+    expect(tabOf(snapshot)).toBe(parentId)
     expect(
       (await listFetchRules(ctx, tokenId)).sites.map((site) => site.host),
     ).toContain(other)
@@ -389,26 +475,41 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     await setFetchSite(ctx, tokenId, host, "allowed")
     await setFetchPrivate(ctx, tokenId, "allowed")
 
-    const opened = await call("navigate", { url: `${api.origin}/form` })
-    await call("click", { ref: refOf(opened, /button "Say hello"/) })
+    const opened = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/form`,
+    })
+    await call("click", {
+      tab: tabOf(opened),
+      ref: refOf(opened, /button "Say hello"/),
+    })
     await closeBrowser(ctx.vaultId, { ctx })
     expect(runningBrowser(ctx.vaultId)).toBeNull()
     expect(
       (await loadProfile(ctx))?.cookies.map((cookie) => cookie.name),
     ).toEqual(["seen"])
 
-    const again = await call("navigate", { url: `${api.origin}/cookie` })
+    // The tab went with the browser: naming it opens a new one.
+    const again = await call("navigate", {
+      tab: tabOf(opened),
+      url: `${api.origin}/cookie`,
+    })
     expect(textOf(again)).toContain("cookie: seen=1")
+    expect(textOf(again).split("\n")[0]).toContain(
+      `There is no tab ${tabOf(opened)}`,
+    )
   })
 
   it("hands a tab to the owner and refuses it until they are done", async () => {
     const host = new URL(api.origin).host
     await setFetchSite(ctx, tokenId, host, "allowed")
     await setFetchPrivate(ctx, tokenId, "allowed")
-    await call("navigate", { url: `${api.origin}/form` })
+    const tab = tabOf(
+      await call("tabs", { action: "open", url: `${api.origin}/form` }),
+    )
 
     const handed = await owner(
-      call("hand_over", { message: "Please sign in." }),
+      call("hand_over", { tab, message: "Please sign in." }),
     )
     expect(handed.ask).toMatchObject({
       kind: "browser_handover",
@@ -420,12 +521,13 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     })
     const tabId = (handed.ask.input as { tabId: string }).tabId
 
-    const refused = await call("snapshot", {})
+    expect(tabId).toBe(tab)
+    const refused = await call("snapshot", { tab })
     expect(refused.isError).toBe(true)
     expect(textOf(refused)).toContain("check_permission")
 
     expect(await finishHandover(ctx, tabId)).toBe(true)
-    expect(textOf(await call("snapshot", {}))).toContain(`Tab ${tabId}`)
+    expect(textOf(await call("snapshot", { tab }))).toContain(`Tab ${tabId}`)
   })
 
   it("opens a site the owner allowed once, for that tab while it is open", async () => {
@@ -440,7 +542,10 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     expect(textOf(opened)).toContain('textbox "Name"')
 
     // Another page of the same site in that tab needs no asking.
-    const next = await call("navigate", { url: `${api.origin}/page` })
+    const next = await call("navigate", {
+      tab: tabOf(opened),
+      url: `${api.origin}/page`,
+    })
     expect(textOf(next)).toContain("A page")
 
     // A new tab does.
@@ -451,8 +556,11 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     const host = new URL(api.origin).host
     await setFetchSite(ctx, tokenId, host, "allowed")
     await setFetchPrivate(ctx, tokenId, "allowed")
-    const opened = await call("navigate", { url: `${api.origin}/form` })
-    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+    const opened = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/form`,
+    })
+    const tabId = tabOf(opened)
     const other = await otherToken()
 
     // The other token sees no tab, and A's tab answers as one that does
@@ -476,7 +584,7 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
       ["wait_for", { ms: 1 }],
       ["handle_dialog", { action: "accept" }],
       ["hand_over", { message: "Mine now." }],
-      ["tabs", { action: "select" }],
+      ["tabs", { action: "reset" }],
       ["tabs", { action: "close" }],
     ] as const) {
       const result = await other.call(name, { ...args, tab: tabId })
@@ -484,12 +592,14 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
       expect(textOf(result), name).toBe(unknown.replace("nosuchtab", tabId))
       expect(textOf(result), name).not.toContain(api.origin)
 
-      // Nor does a call without a tab fall onto it (tabs needs one).
-      if (name !== "tabs") {
-        const current = await other.call(name, args)
-        expect(current.isError, name).toBe(true)
-        expect(textOf(current), name).toContain("This token has no tab open")
-      }
+      // Nor does a call without a tab fall onto it: it names none.
+      const current = await other.call(name, args)
+      expect(current.isError, name).toBe(true)
+      expect(textOf(current), name).toContain(
+        "needs the tab to act on (tab), and the browser never picks one",
+      )
+      expect(textOf(current), name).toContain("This token has no tab open")
+      expect(textOf(current), name).not.toContain(tabId)
     }
 
     // A navigate in A's tab opens a tab of the other token's own instead.
@@ -506,12 +616,12 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     )
 
     // A's tab is as A left it, and A's alone.
-    const mine = textOf(await call("snapshot", {}))
+    const mine = textOf(await call("snapshot", { tab: tabId }))
     expect(mine).toContain(`Tab ${tabId}:`)
     expect(mine).toContain(`Address: ${api.origin}/form`)
     expect(mine).toContain("Who are you?")
     expect(textOf(await call("tabs", { action: "list" }))).toMatch(
-      new RegExp(`^\\* ${tabId}: Form`, "m"),
+      new RegExp(`^- ${tabId}: Form · ${api.origin}/form`, "m"),
     )
   })
 
@@ -523,7 +633,7 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
       { tabId: null, url: `${api.origin}/form` },
       { allowedByOwner: true },
     )
-    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+    const tabId = tabOf(opened)
     const other = await otherToken()
     await setFetchPrivate(ctx, other.tokenId, "allowed")
 
@@ -544,7 +654,7 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     )
     expect(textOf(allowed)).toContain("A page")
     expect(textOf(allowed)).not.toContain(`Tab ${tabId}:`)
-    expect(textOf(await call("snapshot", {}))).toContain(
+    expect(textOf(await call("snapshot", { tab: tabId }))).toContain(
       `Address: ${api.origin}/form`,
     )
   })
@@ -553,12 +663,15 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     const host = new URL(api.origin).host
     await setFetchSite(ctx, tokenId, host, "allowed")
     await setFetchPrivate(ctx, tokenId, "allowed")
-    const opened = await call("navigate", { url: `${api.origin}/form` })
-    const tabId = textOf(opened).match(/^Tab (\S+):/m)![1]!
+    const opened = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/form`,
+    })
+    const tabId = tabOf(opened)
 
     await setFetchSite(ctx, tokenId, host, "blocked")
     for (const name of ["snapshot", "read_page", "screenshot"]) {
-      const refused = await call(name, {})
+      const refused = await call(name, { tab: tabId })
       expect(refused.isError, name).toBe(true)
       expect(textOf(refused), name).toContain(
         `${host}, which this token may not open now`,
@@ -573,7 +686,10 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
   })
 
   it("never opens PCP's own address", async () => {
-    const own = await call("navigate", { url: `${PUBLIC_URL}/settings` })
+    const own = await call("tabs", {
+      action: "open",
+      url: `${PUBLIC_URL}/settings`,
+    })
     expect(own.isError).toBe(true)
     expect(textOf(own)).toContain("PCP's own address")
     expect((await listFetchRules(ctx, tokenId)).sites).toEqual([])
@@ -582,7 +698,10 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
   it("waits for a site's check that passes on its own, and keeps its clearance with the sign-ins", async () => {
     await allowApi()
 
-    const opened = await call("navigate", { url: `${api.origin}/walled` })
+    const opened = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/walled`,
+    })
     const text = textOf(opened)
     expect(opened.isError, text).toBeUndefined()
     expect(text).toContain("Behind the wall")
@@ -597,15 +716,18 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     await allowApi()
 
     const started = Date.now()
-    const stuck = await call("navigate", {
+    const stuck = await call("tabs", {
+      action: "open",
       url: `${api.origin}/walled-forever`,
     })
     const text = textOf(stuck)
+    const tab = tabOf(stuck)
     expect(Date.now() - started).toBeGreaterThanOrEqual(CHALLENGE_WAIT_MS)
     // Not an error, and nobody asked: the call answered rather than
     // throwing for the owner.
     expect(stuck.isError, text).toBeUndefined()
-    expect(text.split("\n")[0]).toBe(
+    // After the new tab's id, which comes first.
+    expect(text.split("\n")[1]).toBe(
       `${CHALLENGE_LINE} It did not pass on its own in this tab: call hand_over so the owner can pass it themselves, then take a snapshot.`,
     )
     expect(text).toContain(`Address: ${api.origin}/walled-forever`)
@@ -616,7 +738,7 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
       ["wait_for", { ms: 1 }],
       ["read_page", {}],
     ] as const) {
-      const again = await call(name, args)
+      const again = await call(name, { ...args, tab })
       expect(again.isError, name).toBeUndefined()
       expect(textOf(again).split("\n")[0], name).toContain(CHALLENGE_LINE)
       expect(textOf(again), name).toContain("hand_over")
@@ -624,7 +746,7 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
 
     // The owner passes it in the hand-over the assistant chose to make.
     const handed = await owner(
-      call("hand_over", { message: "Please pass the check." }),
+      call("hand_over", { tab, message: "Please pass the check." }),
     )
     expect(handed.ask.kind).toBe("browser_handover")
   })
@@ -634,21 +756,29 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
 
     // The fake's clearance opens both of its pages, so the one that stays
     // comes first.
-    const doors = await call("navigate", { url: `${api.origin}/doors` })
-    const stayed = await call("click", { ref: refOf(doors, /link "Stays"/) })
+    const doors = await call("tabs", {
+      action: "open",
+      url: `${api.origin}/doors`,
+    })
+    const tab = tabOf(doors)
+    const stayed = await call("click", {
+      tab,
+      ref: refOf(doors, /link "Stays"/),
+    })
     expect(stayed.isError).toBeUndefined()
     expect(textOf(stayed).split("\n")[0]).toContain(CHALLENGE_LINE)
     expect(textOf(stayed)).toContain(`Address: ${api.origin}/walled-forever`)
 
-    await call("navigate", { url: `${api.origin}/page` })
-    const back = await call("back", {})
+    await call("navigate", { tab, url: `${api.origin}/page` })
+    const back = await call("back", { tab })
     expect(back.isError).toBeUndefined()
     expect(textOf(back).split("\n")[0]).toContain(CHALLENGE_LINE)
     expect(textOf(back)).toContain(`Address: ${api.origin}/walled-forever`)
 
-    const returned = await call("back", {})
+    const returned = await call("back", { tab })
     expect(textOf(returned)).not.toContain(CHALLENGE_LINE)
     const passed = await call("click", {
+      tab,
       ref: refOf(returned, /link "Passes"/),
     })
     expect(textOf(passed)).toContain("Behind the wall")
@@ -658,9 +788,11 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
   it("shows sites a browser that says neither that it is headless nor that it is driven", async () => {
     await allowApi()
 
-    await call("navigate", { url: `${api.origin}/fingerprint` })
-    const read = textOf(await call("read_page", {}))
-    const seen = JSON.parse(read.match(/```\w*\n([\s\S]*?)\n```/)![1]!) as {
+    const tab = tabOf(
+      await call("tabs", { action: "open", url: `${api.origin}/fingerprint` }),
+    )
+    const read = textOf(await call("read_page", { tab }))
+    const seen = JSON.parse(read.match(/```\w*\nseen (.*?)\n```/)![1]!) as {
       webdriver: boolean
       userAgent: string
       brands: string
@@ -682,12 +814,14 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
   it("refuses a service worker at the gate and leaves the page's own functions alone", async () => {
     await allowApi()
 
-    await call("navigate", { url: `${api.origin}/workers` })
+    const tab = tabOf(
+      await call("tabs", { action: "open", url: `${api.origin}/workers` }),
+    )
 
     let seen: Record<string, unknown> = {}
     await vi.waitFor(
       async () => {
-        const read = textOf(await call("read_page", {}))
+        const read = textOf(await call("read_page", { tab }))
         expect(read).not.toContain("pending")
         seen = JSON.parse(read.match(/```\w*\n([\s\S]*?)\n```/)![1]!)
       },
@@ -708,6 +842,275 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
     ).toBe(false)
   })
 })
+
+describe.skipIf(!executable)(
+  "reading and acting on a page",
+  { timeout: 90_000 },
+  () => {
+    async function inbox(): Promise<{ tab: string; opened: CallToolResult }> {
+      await allowApi()
+      const opened = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/inbox`,
+      })
+      return { tab: tabOf(opened), opened }
+    }
+
+    it("refuses a call that names no tab, as a tool error listing the token's tabs", async () => {
+      const { tab } = await inbox()
+
+      for (const [name, args] of [
+        ["snapshot", {}],
+        ["navigate", { url: `${api.origin}/page` }],
+        ["tabs", { action: "close" }],
+        ["hand_over", { message: "Please." }],
+      ] as const) {
+        const refused = await call(name, args)
+        expect(refused.isError, name).toBe(true)
+        expect(textOf(refused), name).toContain(
+          `${name} needs the tab to act on (tab)`,
+        )
+        expect(textOf(refused), name).toMatch(
+          new RegExp(`^- ${tab}: Inbox · ${api.origin}/inbox · `, "m"),
+        )
+      }
+
+      // Nothing was opened in the meantime.
+      expect(runningBrowser(ctx.vaultId)!.tabs.size).toBe(1)
+    })
+
+    it("finds elements as JSON, with the part of the page that tells the same words apart, and within one part", async () => {
+      const { tab, opened } = await inbox()
+      const found = JSON.parse(
+        textOf(await call("find", { tab, text: "see you at noon" })),
+      ) as {
+        total: number
+        matches: Array<{
+          role: string
+          name?: string
+          ref?: string
+          landmark?: { role: string; name?: string; ref?: string }
+        }>
+      }
+
+      expect(found.total).toBe(3)
+      expect(
+        found.matches.map((match) => [match.role, match.landmark]),
+      ).toEqual([
+        [
+          "link",
+          expect.objectContaining({
+            role: "navigation",
+            name: "Conversations",
+          }),
+        ],
+        [
+          "link",
+          expect.objectContaining({
+            role: "navigation",
+            name: "Conversations",
+          }),
+        ],
+        [
+          "paragraph",
+          expect.objectContaining({ role: "region", name: "Thread" }),
+        ],
+      ])
+
+      const thread = refOf(opened, /region "Thread"/)
+      const within = JSON.parse(
+        textOf(
+          await call("find", { tab, text: "see you at noon", within: thread }),
+        ),
+      ) as { total: number; matches: Array<{ role: string }> }
+      expect(within.total).toBe(1)
+      expect(within.matches[0]!.role).toBe("paragraph")
+
+      const stale = await call("find", { tab, text: "x", within: "e999" })
+      expect(stale.isError).toBe(true)
+      expect(textOf(stale)).toContain("Take a new snapshot")
+    })
+
+    it("acts on an element by its role and name, and refuses a target that is none or several", async () => {
+      const { tab, opened } = await inbox()
+
+      const typed = await call("type", {
+        tab,
+        target: { role: "textbox", name: "Message" },
+        text: "On my way",
+      })
+      expect(typed.isError, textOf(typed)).toBeUndefined()
+      expect(textOf(typed)).toMatch(/textbox "Message"[^\n]*: On my way/)
+
+      // The second of two links that read alike.
+      const bob = await call("click", {
+        tab,
+        target: { role: "link", name: "see you at noon", nth: 1 },
+      })
+      expect(textOf(bob)).toContain(`Address: ${api.origin}/inbox#bob`)
+
+      const several = await call("click", {
+        tab,
+        target: { role: "button", name: "Reply" },
+      })
+      expect(several.isError).toBe(true)
+      expect(textOf(several)).toContain(
+        '2 elements match button named "Reply". Say which: nth',
+      )
+      expect(textOf(several)).toContain('"name":"Reply all"')
+      expect(textOf(several)).toMatch(/"ref":"e\d+"/)
+
+      const exact = await call("click", {
+        tab,
+        target: { role: "button", name: "Reply", exact: true },
+      })
+      expect(exact.isError, textOf(exact)).toBeUndefined()
+
+      const none = await call("click", {
+        tab,
+        target: { role: "button", name: "Delete everything" },
+      })
+      expect(none.isError).toBe(true)
+      expect(textOf(none)).toContain(
+        'There is no button named "Delete everything" on the page. The button elements it has',
+      )
+      expect(textOf(none)).toContain('"name":"Save"')
+
+      const tooFar = await call("click", {
+        tab,
+        target: { role: "button", name: "Reply", nth: 5 },
+      })
+      expect(textOf(tooFar)).toContain("Only 2 elements match")
+
+      // Inside one part of the page only.
+      const thread = refOf(opened, /region "Thread"/)
+      const outside = await call("click", {
+        tab,
+        target: { role: "link", name: "see you at noon", within: thread },
+      })
+      expect(outside.isError).toBe(true)
+      expect(textOf(outside)).toContain(
+        `There is no link named "see you at noon" inside ${thread}`,
+      )
+    })
+
+    it("says why a click did not happen: what covers the element, with a short snapshot", async () => {
+      const { tab, opened } = await inbox()
+      const started = Date.now()
+      const covered = await call("click", {
+        tab,
+        ref: refOf(opened, /button "Covered"/),
+      })
+      const text = textOf(covered)
+
+      expect(covered.isError).toBe(true)
+      expect(text).toContain("The click on e")
+      expect(text).toContain(
+        'did not happen: Another element covers it and would get the click: a dialog (<div>) "Cookie consent".',
+      )
+      expect(text).toContain("force: true")
+      expect(text).toContain("Snapshot:")
+      expect(text.length).toBeLessThan(6_000)
+      // Within the action's own time, not the tab's deadline.
+      expect(Date.now() - started).toBeLessThan(20_000)
+      expect(
+        await runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page.title(),
+      ).toBe("Inbox")
+    })
+
+    it("answers at once while the page shows an alert, and says how to answer it", async () => {
+      const { tab, opened } = await inbox()
+      const saved = await call("click", {
+        tab,
+        ref: refOf(opened, /button "Save"/),
+      })
+      expect(textOf(saved)).toContain(
+        `Tab ${tab} shows an alert: "Saved!". Nothing else on the page responds until it is answered: call handle_dialog`,
+      )
+
+      const started = Date.now()
+      for (const [name, args] of [
+        ["find", { text: "Ada" }],
+        ["read_page", {}],
+        ["click", { ref: refOf(opened, /button "Reply all"/) }],
+        ["type", { target: { role: "textbox", name: "Message" }, text: "x" }],
+        ["press_key", { key: "Enter" }],
+        ["scroll", { direction: "down" }],
+        ["wait_for", { text: "Never there" }],
+        ["select_option", { ref: "e1", values: ["x"] }],
+        ["download", { ref: "e1" }],
+        ["back", {}],
+        ["navigate", { url: `${api.origin}/page` }],
+      ] as const) {
+        const refused = await call(name, { ...args, tab })
+        expect(refused.isError, name).toBe(true)
+        expect(textOf(refused), name).toContain(`Tab ${tab} shows an alert`)
+        expect(textOf(refused), name).toContain(`${name} was not done.`)
+      }
+      expect(Date.now() - started).toBeLessThan(10_000)
+
+      // A snapshot and a screenshot say so too, without a picture.
+      expect(textOf(await call("snapshot", { tab }))).toContain(
+        "shows an alert",
+      )
+      const picture = await call("screenshot", { tab })
+      expect(picture.content.map((part) => part.type)).toEqual(["text"])
+
+      const answered = await call("handle_dialog", { tab, action: "accept" })
+      expect(textOf(answered)).not.toContain("shows an alert")
+      expect(textOf(answered)).toContain("Snapshot:")
+    })
+
+    it("reads the page without what it does not show, the main part alone, or one element", async () => {
+      const { tab, opened } = await inbox()
+
+      const read = textOf(await call("read_page", { tab }))
+      expect(read).toContain("# Ada")
+      expect(read).toContain("Footer words")
+      expect(read).not.toContain("Secret draft")
+      expect(read).not.toContain('"hidden"')
+      expect(read).toContain("Left out: 1 block of JSON data the page carries")
+
+      const main = textOf(await call("read_page", { tab, main_only: true }))
+      expect(main).toContain("Only the page's main part, as asked.")
+      expect(main).toContain("# Ada")
+      expect(main).not.toContain("Footer words")
+
+      const thread = textOf(
+        await call("read_page", { tab, ref: refOf(opened, /region "Thread"/) }),
+      )
+      expect(thread).toContain("Ada: see you at noon")
+      expect(thread).not.toContain("# Ada")
+      expect(thread).not.toContain("Bob")
+
+      const byTarget = textOf(
+        await call("read_page", {
+          tab,
+          target: { role: "navigation", name: "Conversations" },
+        }),
+      )
+      expect(byTarget).toContain("Bob: see you at noon")
+    })
+
+    it("hands a screenshot back no wider than asked, and of one element", async () => {
+      const { tab } = await inbox()
+
+      const small = await call("screenshot", { tab, max_width: 400 })
+      expect(textOf(small)).toContain("400 by 250, made smaller to pass on")
+      const image = small.content.find((part) => part.type === "image")
+      expect(image).toBeTruthy()
+
+      const thread = await call("screenshot", {
+        tab,
+        target: { role: "region", name: "Thread" },
+      })
+      const size = textOf(thread).match(/(\d+) by (\d+)/)!
+      expect(Number(size[1])).toBeLessThan(1280)
+      expect(Number(size[2])).toBeLessThan(800)
+      expect(textOf(thread)).toContain('the region "Thread"')
+    })
+  },
+)
 
 /** The test API's site, and private addresses, for the token. */
 async function allowApi(): Promise<void> {

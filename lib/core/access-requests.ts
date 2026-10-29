@@ -158,7 +158,7 @@ export function resolveAccessChanges(
             .map(({ pattern }) => `"${pattern}"`)
             .join(
               ", ",
-            )}${unmatched.length > 5 ? ` and ${unmatched.length - 5} more` : ""}. Use search_tools to find the right names.`,
+            )}${unmatched.length > 5 ? ` and ${unmatched.length - 5} more` : ""}. Use search to find the right names.`,
         )
       }
 

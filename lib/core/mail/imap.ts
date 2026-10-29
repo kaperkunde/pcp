@@ -11,15 +11,21 @@ import type {
 
 import { describeFetchError } from "../openapi/http"
 import { PCP_VERSION } from "../version"
-import type { MailServerAddress } from "./addresses"
+import { replyTarget, type MailServerAddress } from "./addresses"
 import { htmlToText } from "./html"
 import {
   MAIL_CALL_TIMEOUT_MS,
   MAIL_CONNECT_TIMEOUT_MS,
   MAX_ATTACHMENTS_LISTED,
   MAX_MAILBOXES,
+  MAX_REPLY_LOOKUP_MAILBOXES,
   MAX_SEARCH_ALL_WINDOW,
   MAX_SEARCH_MAILBOXES,
+  SENT_COPY_IN_CALL_MS,
+  SENT_COPY_LOOKS_DOES_NOT_MS,
+  SENT_COPY_LOOKS_FILES_MS,
+  SENT_COPY_LOOKS_MS,
+  SENT_COPY_RECENT,
 } from "./limits"
 import {
   checkDeletable,
@@ -42,6 +48,7 @@ import {
   type MailboxRole,
   type MailboxSummary,
   type MailMessageDetail,
+  type MailSaveSent,
   type MailMessageSummary,
   type MarkChange,
   type MoveResult,
@@ -49,6 +56,7 @@ import {
   type SearchResult,
   type SendInput,
   type SendResult,
+  SENT_COPY_PENDING,
 } from "./types"
 
 /**
@@ -70,13 +78,22 @@ export type Login = { username: string; password: string }
 /** The part of an imapflow client PCP uses. */
 export interface ImapClientLike {
   readonly secureConnection: boolean
-  readonly mailbox: { path: string; uidValidity: bigint } | false
+  readonly mailbox:
+    | {
+        path: string
+        uidValidity: bigint
+        /** How many emails it holds, as the server last said. */
+        exists?: number
+      }
+    | false
   /** What the server offers (CAPABILITY), by name. */
   readonly capabilities: ReadonlyMap<string, unknown>
   /** Extensions turned on for the session: IMAP4rev2 is one. */
   readonly enabled?: ReadonlySet<string>
   logout(): Promise<void>
   close(): void
+  /** NOOP: the server says what changed in the open mailbox meanwhile. */
+  noop(): Promise<void>
   list(options?: {
     statusQuery?: { messages?: boolean; unseen?: boolean }
   }): Promise<
@@ -102,7 +119,8 @@ export interface ImapClientLike {
   fetchAll(
     range: number[] | string,
     query: FetchQueryObject,
-    options: { uid: true },
+    /** false: the range is of sequence numbers ("10:*"), not UIDs. */
+    options: { uid: boolean },
   ): Promise<FetchMessageObject[]>
   fetchOne(
     uid: string,
@@ -194,6 +212,8 @@ export type ImapDeps = {
   smtp(address: MailServerAddress, login: Login): Promise<SmtpTransportLike>
   /** The message as it goes into the Sent mailbox, Bcc kept. */
   compose(mail: OutgoingMail): Promise<Buffer>
+  /** Waits between looks for the copy in Sent; the tests' is instant. */
+  sleep?(ms: number): Promise<void>
 }
 
 export const defaultImapDeps: ImapDeps = {
@@ -246,7 +266,26 @@ export const defaultImapDeps: ImapDeps = {
 
     return node.build()
   },
+
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }
+
+/**
+ * Where a reply looks for the email its Message-ID names, in this order:
+ * the mailboxes an email answered is most often in first, the ones that
+ * only show others' emails (Flagged, Important) last.
+ */
+const REPLY_LOOKUP_ROLES: readonly MailboxRole[] = [
+  "inbox",
+  "sent",
+  "archive",
+  "all",
+  "junk",
+  "trash",
+  "drafts",
+  "flagged",
+  "important",
+]
 
 const ROLES: Record<string, MailboxRole> = {
   "\\inbox": "inbox",
@@ -422,6 +461,27 @@ function messageIds(header: string): string[] {
   return [...header.matchAll(/<([^<>\s]+)>/g)].map((match) => match[1]!)
 }
 
+/**
+ * The headers that name an email in Sent: its Message-ID, and the one
+ * Outlook keeps when its SMTP server gives the email a Message-ID of its
+ * own.
+ */
+const SENT_ID_HEADERS = ["message-id", "x-microsoft-original-message-id"]
+
+/** The Message-IDs those headers carry, bare and lowercased. */
+export function sentCopyIds(raw: Buffer | undefined): string[] {
+  const unfolded = (raw?.toString("utf8") ?? "").replace(/\r?\n[ \t]+/g, " ")
+
+  return unfolded.split(/\r?\n/).flatMap((line) => {
+    const colon = line.indexOf(":")
+
+    return colon > 0 &&
+      SENT_ID_HEADERS.includes(line.slice(0, colon).trim().toLowerCase())
+      ? messageIds(line.slice(colon + 1)).map((id) => id.toLowerCase())
+      : []
+  })
+}
+
 function isoDate(value: Date | string | undefined): string | null {
   if (!value) {
     return null
@@ -535,6 +595,25 @@ export type ImapConfig = {
   smtp: MailServerAddress | null
   /** The From address; the user name when it is one. */
   from: string | null
+  /** Whether PCP files a copy of what it sends in Sent; "auto" when left out. */
+  saveSent?: MailSaveSent
+  /**
+   * What PCP learned of the server: it files its own copy of what it sends
+   * (true), it does not (false), or not known (null, or left out).
+   */
+  serverFilesSent?: boolean | null
+}
+
+/** What sending needs from the request it runs in, and where it reports. */
+export type ImapSendHooks = {
+  /**
+   * Hands on work to run once the call has answered and returned
+   * (lib/core/after-answer.ts); false when nothing will run it, and the
+   * look for the copy in Sent is made in the call instead, for a while.
+   */
+  defer?: (task: () => Promise<void>) => boolean
+  /** Told what a look for the copy in Sent found out about the server. */
+  learned?: (serverFilesSent: boolean) => Promise<void>
 }
 
 /** Signs in to the IMAP server, and the SMTP one when there is one. */
@@ -568,6 +647,7 @@ export function openImapBackend(
   config: ImapConfig,
   login: Login,
   deps: ImapDeps = defaultImapDeps,
+  hooks: ImapSendHooks = {},
 ): MailBackend {
   let connection: Promise<ImapClientLike> | null = null
 
@@ -968,6 +1048,60 @@ export function openImapBackend(
     }
   }
 
+  /**
+   * The id of the email a reply answers: inReplyTo itself when it is an id,
+   * or else the email its Message-ID names, looked for in the inbox and
+   * then the special mailboxes (a bounded few, one at a time), the first
+   * match winning.
+   */
+  async function replyId(inReplyTo: string): Promise<string> {
+    const target = replyTarget(inReplyTo)
+
+    if (!target) {
+      throw new MailRequestError(
+        "inReplyTo is neither an email id nor a Message-ID.",
+      )
+    }
+
+    if ("id" in target) {
+      return target.id
+    }
+
+    const boxes = await mailboxes()
+    const order: MailboxSummary[] = []
+
+    for (const role of REPLY_LOOKUP_ROLES) {
+      const box = mailboxByRole(boxes, role)
+
+      if (
+        box &&
+        !listing.unselectable.has(box.id) &&
+        !order.some((other) => other.id === box.id)
+      ) {
+        order.push(box)
+      }
+    }
+
+    // A HEADER search matches a part of the header: with its brackets, the
+    // whole Message-ID.
+    const criteria: SearchObject = {
+      header: { "message-id": `<${target.messageId}>` },
+    }
+
+    for (const box of order.slice(0, MAX_REPLY_LOOKUP_MAILBOXES)) {
+      const found = await inMailbox(box.id, true, async (imap, uidValidity) => {
+        const [uid] = (await imap.search(criteria, { uid: true })) || []
+        return uid === undefined ? null : encodeImapId(uid, uidValidity, box.id)
+      })
+
+      if (found) {
+        return found
+      }
+    }
+
+    throw new MailRequestError("No email with that Message-ID in this account.")
+  }
+
   /** The From address: the one the owner set, or the user name. */
   const fromAddress =
     config.from ?? (login.username.includes("@") ? login.username : null)
@@ -977,18 +1111,21 @@ export function openImapBackend(
    * when it answers one. From is left out only when there is no address,
    * which only a draft allows.
    */
-  async function outgoing(input: SendInput): Promise<OutgoingMail> {
+  async function outgoing(
+    input: SendInput,
+  ): Promise<{ mail: OutgoingMail; original: string | null }> {
     let inReplyTo: string | undefined
     let references: string[] | undefined
+    const original = input.inReplyTo ? await replyId(input.inReplyTo) : null
 
-    if (input.inReplyTo) {
-      const original = await withEmail(input.inReplyTo, true, (imap, uid) =>
+    if (original) {
+      const answered = await withEmail(original, true, (imap, uid) =>
         headers(imap, uid),
       )
 
-      if (original.messageId) {
-        inReplyTo = `<${original.messageId}>`
-        references = [...original.references, original.messageId]
+      if (answered.messageId) {
+        inReplyTo = `<${answered.messageId}>`
+        references = [...answered.references, answered.messageId]
           .slice(-20)
           .map((value) => `<${value}>`)
       }
@@ -999,23 +1136,26 @@ export function openImapBackend(
       list.map((entry) => ({ name: entry.name ?? "", address: entry.email }))
 
     return {
-      ...(fromAddress ? { from: { name: "", address: fromAddress } } : {}),
-      to: named(input.to),
-      cc: named(input.cc),
-      bcc: named(input.bcc),
-      subject: input.subject,
-      text: input.text,
-      messageId: `<${randomUUID()}@${domain}>`,
-      ...(inReplyTo ? { inReplyTo, references } : {}),
-      ...(input.attachments?.length
-        ? {
-            attachments: input.attachments.map((attachment) => ({
-              filename: attachment.name,
-              contentType: attachment.type,
-              content: attachment.bytes,
-            })),
-          }
-        : {}),
+      mail: {
+        ...(fromAddress ? { from: { name: "", address: fromAddress } } : {}),
+        to: named(input.to),
+        cc: named(input.cc),
+        bcc: named(input.bcc),
+        subject: input.subject,
+        text: input.text,
+        messageId: `<${randomUUID()}@${domain}>`,
+        ...(inReplyTo ? { inReplyTo, references } : {}),
+        ...(input.attachments?.length
+          ? {
+              attachments: input.attachments.map((attachment) => ({
+                filename: attachment.name,
+                contentType: attachment.type,
+                content: attachment.bytes,
+              })),
+            }
+          : {}),
+      },
+      original,
     }
   }
 
@@ -1030,7 +1170,7 @@ export function openImapBackend(
       )
     }
 
-    const mail = await outgoing(input)
+    const { mail } = await outgoing(input)
     const raw = await deps.compose(mail)
     let appended: Awaited<ReturnType<ImapClientLike["append"]>>
 
@@ -1387,6 +1527,147 @@ export function openImapBackend(
     },
   }
 
+  type SentCopy = { savedTo: string | null; id: string | null }
+
+  /**
+   * Whether Sent holds the email with this Message-ID among its newest,
+   * by the headers that name it: the copy's id when it does. Read rather
+   * than searched for, since a server's search (Gmail's) can lag behind
+   * what the mailbox holds.
+   */
+  async function findInSent(path: string, wanted: string) {
+    return inMailbox(path, true, async (imap, uidValidity) => {
+      // The mailbox may have been open a while: the count is brought up
+      // to date first.
+      await imap.noop()
+      const opened = imap.mailbox
+      const count = opened ? (opened.exists ?? 0) : 0
+
+      if (count === 0) {
+        return null
+      }
+
+      const newest = await imap.fetchAll(
+        `${Math.max(1, count - SENT_COPY_RECENT + 1)}:*`,
+        { uid: true, headers: SENT_ID_HEADERS },
+        { uid: false },
+      )
+      const found = newest.find((message) =>
+        sentCopyIds(message.headers).includes(wanted),
+      )
+
+      return found ? encodeImapId(found.uid, uidValidity, path) : null
+    })
+  }
+
+  /**
+   * Files the copy of an email the SMTP server took in Sent, as the
+   * account is set: never; always; or (auto) only when the server did not
+   * file one itself, which PCP looks for first, for as long as what it
+   * learned of the server says, at most `within` milliseconds. A copy the
+   * server files after PCP stopped looking makes two; nothing deletes one.
+   */
+  async function fileSentCopy(
+    mail: OutgoingMail,
+    { look, within = Infinity }: { look: boolean; within?: number },
+  ): Promise<SentCopy> {
+    const sentBox = mailboxByRole(await mailboxes(), "sent")
+
+    if (!sentBox) {
+      return { savedTo: null, id: null }
+    }
+
+    if (look) {
+      const known = config.serverFilesSent ?? null
+      const looks =
+        known === null
+          ? SENT_COPY_LOOKS_MS
+          : known
+            ? SENT_COPY_LOOKS_FILES_MS
+            : SENT_COPY_LOOKS_DOES_NOT_MS
+      const wanted = bare(mail.messageId)!.toLowerCase()
+      const sleep = deps.sleep ?? defaultImapDeps.sleep!
+      let waited = 0
+      let failed = false
+
+      for (const at of looks.filter((ms) => ms <= within)) {
+        await sleep(at - waited)
+        waited = at
+        let found: string | null
+
+        try {
+          found = await findInSent(sentBox.id, wanted)
+        } catch {
+          // Not knowing is not finding: PCP files its own copy, and learns
+          // nothing from this send.
+          failed = true
+          break
+        }
+
+        if (found) {
+          if (known !== true) {
+            await hooks.learned?.(true).catch(() => {})
+          }
+
+          return { savedTo: sentBox.id, id: found }
+        }
+      }
+
+      if (!failed && waited === looks.at(-1) && known !== false) {
+        await hooks.learned?.(false).catch(() => {})
+      }
+    }
+
+    const raw = await deps.compose(mail)
+    const imap = await client()
+    const appended = await imap.append(sentBox.id, raw, ["\\Seen"])
+
+    return {
+      savedTo: sentBox.id,
+      // Without UIDPLUS the server does not say where it put it.
+      id:
+        appended &&
+        appended.uid !== undefined &&
+        appended.uidValidity !== undefined
+          ? encodeImapId(appended.uid, appended.uidValidity, sentBox.id)
+          : null,
+    }
+  }
+
+  /**
+   * The sent copy, as the account is set. A look for the server's own
+   * copy waits seconds, so it runs once the call has answered when the
+   * request can run it then, on a connection of its own that it closes;
+   * otherwise in the call, for a while.
+   */
+  async function sentCopy(mail: OutgoingMail): Promise<SentCopy> {
+    const mode = config.saveSent ?? "auto"
+    const bestEffort = (run: () => Promise<SentCopy>) =>
+      run().catch((): SentCopy => ({ savedTo: null, id: null }))
+
+    if (mode === "never") {
+      return { savedTo: null, id: null }
+    }
+
+    if (mode === "always") {
+      return bestEffort(() => fileSentCopy(mail, { look: false }))
+    }
+
+    const deferred = hooks.defer?.(async () => {
+      try {
+        await bestEffort(() => fileSentCopy(mail, { look: true }))
+      } finally {
+        await backend.close()
+      }
+    })
+
+    return deferred
+      ? { savedTo: SENT_COPY_PENDING, id: null }
+      : bestEffort(() =>
+          fileSentCopy(mail, { look: true, within: SENT_COPY_IN_CALL_MS }),
+        )
+  }
+
   if (config.smtp) {
     const smtp = config.smtp
 
@@ -1397,7 +1678,7 @@ export function openImapBackend(
         )
       }
 
-      const mail = await outgoing(input)
+      const { mail, original } = await outgoing(input)
       const transport = await deps.smtp(smtp, login)
       let sent: Awaited<ReturnType<SmtpTransportLike["sendMail"]>>
 
@@ -1419,10 +1700,10 @@ export function openImapBackend(
       // gone whatever happens here, so a refusal is reported, not thrown.
       let answered: boolean | undefined
 
-      if (input.inReplyTo) {
+      if (original) {
         try {
           answered =
-            (await withEmail(input.inReplyTo, false, (imap, uid) =>
+            (await withEmail(original, false, (imap, uid) =>
               imap.messageFlagsAdd(uid, ["\\Answered"], { uid: true }),
             )) !== false
         } catch {
@@ -1432,39 +1713,17 @@ export function openImapBackend(
 
       // The sent copy: best effort, since the email has gone whatever
       // happens here.
-      let savedTo: string | null = null
-      let id: string | null = null
-
-      try {
-        const sentBox = mailboxByRole(await mailboxes(), "sent")
-
-        if (sentBox) {
-          const raw = await deps.compose(mail)
-          const imap = await client()
-          const appended = await imap.append(sentBox.id, raw, ["\\Seen"])
-          savedTo = sentBox.id
-
-          if (
-            appended &&
-            appended.uid !== undefined &&
-            appended.uidValidity !== undefined
-          ) {
-            id = encodeImapId(appended.uid, appended.uidValidity, sentBox.id)
-          }
-        }
-      } catch {
-        savedTo = null
-      }
+      const copy = await sentCopy(mail)
 
       return {
-        id,
+        id: copy.id,
         messageId: bare(sent.messageId ?? mail.messageId),
         from: { name: null, email: fromAddress },
         to: input.to,
         cc: input.cc,
         bcc: input.bcc,
         subject: input.subject,
-        savedTo,
+        savedTo: copy.savedTo,
         ...(answered !== undefined ? { answered } : {}),
       }
     }

@@ -27,6 +27,7 @@ describe("the browser's tools", () => {
       "download",
       "handle_dialog",
       "hand_over",
+      "request_secret",
     ])
 
     for (const tool of tools) {
@@ -74,12 +75,76 @@ describe("the browser's tools", () => {
     expect(names).not.toMatch(/evaluate|script|cookie|storage/)
   })
 
+  it("take a secret only as type's text, by its name", () => {
+    const parse = (name: string, args: unknown) =>
+      parseBrowserArgs(browserToolSpec(name)!, args)
+
+    expect(
+      parse("type", { tab: "t1", ref: "e3", text: { $secret: "Shop" } }),
+    ).toEqual({ tab: "t1", ref: "e3", text: { $secret: "Shop" } })
+    expect(() =>
+      parse("type", {
+        tab: "t1",
+        ref: "e3",
+        text: { $secret: "Shop", template: "x {{secret}}" },
+      }),
+    ).toThrow()
+    expect(() =>
+      parse("type", { tab: "t1", ref: "e3", text: { $secret: "" } }),
+    ).toThrow()
+    expect(() =>
+      parse("press_key", { tab: "t1", key: { $secret: "Shop" } }),
+    ).toThrow()
+    expect(() =>
+      parse("select_option", {
+        tab: "t1",
+        ref: "e3",
+        values: [{ $secret: "Shop" }],
+      }),
+    ).toThrow()
+    expect(() =>
+      parse("handle_dialog", {
+        tab: "t1",
+        action: "accept",
+        text: { $secret: "Shop" },
+      }),
+    ).toThrow()
+  })
+
+  it("ask for a secret by its name, purpose, sites and kind", () => {
+    const parse = (args: unknown) =>
+      parseBrowserArgs(browserToolSpec("request_secret")!, args)
+    const ask = {
+      name: "Shop password",
+      purpose: "To sign in to the shop.",
+      origins: ["https://shop.example"],
+    }
+
+    expect(parse(ask)).toEqual(ask)
+    expect(parse({ ...ask, kind: "totp" })).toEqual({ ...ask, kind: "totp" })
+    expect(() => parse({ ...ask, kind: "hotp" })).toThrow()
+    expect(() => parse({ ...ask, name: "" })).toThrow()
+    expect(() => parse({ ...ask, name: "x".repeat(101) })).toThrow()
+    expect(() => parse({ ...ask, purpose: "" })).toThrow()
+    expect(() => parse({ ...ask, purpose: "x".repeat(501) })).toThrow()
+    expect(() => parse({ ...ask, origins: [] })).toThrow()
+    expect(() =>
+      parse({
+        ...ask,
+        origins: Array.from({ length: 11 }, (_, i) => `https://s${i}.example`),
+      }),
+    ).toThrow()
+    // No value: the owner types it in on PCP's page.
+    expect(() => parse({ ...ask, value: "hunter2" })).toThrow()
+  })
+
   it("move files only as kept results, never by a path", () => {
     const parse = (name: string, args: unknown) =>
       parseBrowserArgs(browserToolSpec(name)!, args)
 
     expect(
       parse("upload_file", {
+        tab: "t1",
         ref: "e3",
         files: [
           { $result: "r1" },
@@ -87,63 +152,188 @@ describe("the browser's tools", () => {
         ],
       }),
     ).toEqual({
+      tab: "t1",
       ref: "e3",
       files: [
         { $result: "r1" },
         { $result: "r2", name: "a.pdf", type: "application/pdf" },
       ],
     })
-    expect(() => parse("upload_file", { ref: "e3", files: [] })).toThrow()
     expect(() =>
-      parse("upload_file", { ref: "e3", files: ["/etc/passwd"] }),
+      parse("upload_file", { tab: "t1", ref: "e3", files: [] }),
     ).toThrow()
     expect(() =>
-      parse("upload_file", { ref: "e3", files: [{ path: "/etc/passwd" }] }),
+      parse("upload_file", { tab: "t1", ref: "e3", files: ["/etc/passwd"] }),
     ).toThrow()
     expect(() =>
       parse("upload_file", {
+        tab: "t1",
+        ref: "e3",
+        files: [{ path: "/etc/passwd" }],
+      }),
+    ).toThrow()
+    expect(() =>
+      parse("upload_file", {
+        tab: "t1",
         ref: "e3",
         files: [{ $result: "r1", name: "../../etc/passwd" }],
       }),
     ).toThrow(/without a path/)
     expect(() =>
       parse("upload_file", {
+        tab: "t1",
         ref: "e3",
         files: Array.from({ length: 21 }, () => ({ $result: "r1" })),
       }),
     ).toThrow()
 
-    expect(parse("download", { ref: "e4" })).toEqual({ ref: "e4" })
-    expect(parse("download", { url: "https://example.com/a.pdf" })).toEqual({
-      url: "https://example.com/a.pdf",
+    expect(parse("download", { tab: "t1", ref: "e4" })).toEqual({
+      tab: "t1",
+      ref: "e4",
     })
-    expect(() => parse("download", {})).toThrow(/one of them/)
+    expect(
+      parse("download", { tab: "t1", url: "https://example.com/a.pdf" }),
+    ).toEqual({ tab: "t1", url: "https://example.com/a.pdf" })
+    expect(() => parse("download", { tab: "t1" })).toThrow(/one of them/)
     expect(() =>
-      parse("download", { ref: "e4", url: "https://example.com/a.pdf" }),
+      parse("download", {
+        tab: "t1",
+        ref: "e4",
+        url: "https://example.com/a.pdf",
+      }),
     ).toThrow(/one of them/)
-    expect(() => parse("download", { ref: "e4", path: "/tmp/x" })).toThrow()
+    expect(() =>
+      parse("download", { tab: "t1", ref: "e4", path: "/tmp/x" }),
+    ).toThrow()
   })
 
   it("check their arguments", () => {
     const parse = (name: string, args: unknown) =>
       parseBrowserArgs(browserToolSpec(name)!, args)
 
-    expect(parse("navigate", { url: "https://example.com" })).toEqual({
-      url: "https://example.com",
-    })
-    expect(() => parse("navigate", {})).toThrow(/navigate:/)
-    expect(() => parse("click", { ref: "button" })).toThrow(
+    expect(
+      parse("navigate", { tab: "t1", url: "https://example.com" }),
+    ).toEqual({ tab: "t1", url: "https://example.com" })
+    expect(() => parse("navigate", { tab: "t1" })).toThrow(/navigate:/)
+    expect(() => parse("click", { tab: "t1", ref: "button" })).toThrow(
       /ref looks like e12/,
     )
     expect(() => parse("tabs", { action: "open" })).toThrow(/open needs a url/)
     expect(() => parse("tabs", { action: "close" })).toThrow(
       /need the tab's id/,
     )
-    expect(() => parse("scroll", { direction: "down", ref: "e1" })).toThrow(
-      /one of them/,
+    expect(() => parse("tabs", { action: "reset" })).toThrow(
+      /need the tab's id/,
     )
-    expect(() => parse("wait_for", {})).toThrow(/one of them/)
+    expect(() => parse("tabs", { action: "select", tab: "t1" })).toThrow()
+    expect(() =>
+      parse("scroll", { tab: "t1", direction: "down", ref: "e1" }),
+    ).toThrow(/one of them/)
+    expect(() => parse("wait_for", { tab: "t1" })).toThrow(/one of them/)
     expect(() => parse("snapshot", { tab: "x", extra: 1 })).toThrow()
-    expect(() => parse("hand_over", { message: "x".repeat(1001) })).toThrow()
+    expect(() =>
+      parse("hand_over", { tab: "t1", message: "x".repeat(1001) }),
+    ).toThrow()
+    expect(
+      parse("screenshot", { tab: "t1", max_width: 640, quality: 50 }),
+    ).toEqual({ tab: "t1", max_width: 640, quality: 50 })
+    expect(() => parse("screenshot", { tab: "t1", max_width: 5000 })).toThrow()
+    expect(() => parse("screenshot", { tab: "t1", quality: 100 })).toThrow()
+    expect(parse("find", { tab: "t1", text: "Reply", within: "e12" })).toEqual({
+      tab: "t1",
+      text: "Reply",
+      within: "e12",
+    })
+    expect(() =>
+      parse("read_page", { tab: "t1", ref: "e2", main_only: true }),
+    ).toThrow(/at most one/)
+  })
+
+  it("name the tab in every tool but tabs' open and list, and request_secret", () => {
+    for (const tool of browserTools()) {
+      const schema = tool.inputSchema as { required?: string[] }
+      expect(schema.required?.includes("tab") ?? false, tool.name).toBe(
+        tool.name !== "tabs" && tool.name !== "request_secret",
+      )
+    }
+    expect(
+      parseBrowserArgs(browserToolSpec("tabs")!, {
+        action: "open",
+        url: "https://example.com",
+      }),
+    ).toEqual({ action: "open", url: "https://example.com" })
+  })
+
+  it("take a target, by role and name, in place of a ref", () => {
+    const parse = (name: string, args: unknown) =>
+      parseBrowserArgs(browserToolSpec(name)!, args)
+    const target = {
+      role: "button",
+      name: "Send",
+      exact: true,
+      nth: 1,
+      within: "e4",
+    }
+
+    for (const name of [
+      "click",
+      "type",
+      "select_option",
+      "upload_file",
+      "scroll",
+      "screenshot",
+      "read_page",
+    ]) {
+      const extra =
+        name === "type"
+          ? { text: "x" }
+          : name === "select_option"
+            ? { values: ["a"] }
+            : name === "upload_file"
+              ? { files: [{ $result: "r1" }] }
+              : {}
+      expect(parse(name, { tab: "t1", target, ...extra }), name).toMatchObject({
+        target,
+      })
+      expect(
+        () => parse(name, { tab: "t1", ref: "e1", target, ...extra }),
+        name,
+      ).toThrow()
+    }
+
+    expect(() => parse("click", { tab: "t1" })).toThrow(/one of them/)
+    // Bounded, and a role is a word.
+    expect(() =>
+      parse("click", { tab: "t1", target: { role: "button", name: "" } }),
+    ).toThrow()
+    expect(() =>
+      parse("click", {
+        tab: "t1",
+        target: { role: "button", name: "x".repeat(301) },
+      }),
+    ).toThrow()
+    expect(() =>
+      parse("click", {
+        tab: "t1",
+        target: { role: "button[name=x]", name: "x" },
+      }),
+    ).toThrow(/ARIA role/)
+    expect(() =>
+      parse("click", {
+        tab: "t1",
+        target: { role: "button", name: "x", nth: -1 },
+      }),
+    ).toThrow()
+    expect(() =>
+      parse("click", {
+        tab: "t1",
+        target: { role: "button", name: "x", within: "main" },
+      }),
+    ).toThrow(/ref looks like/)
+    expect(parse("click", { tab: "t1", ref: "e2", force: true })).toEqual({
+      tab: "t1",
+      ref: "e2",
+      force: true,
+    })
   })
 })

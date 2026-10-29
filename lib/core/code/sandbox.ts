@@ -98,6 +98,15 @@ export function sandboxLanguages(): SandboxLanguage[] {
   return runner ? [...runner.languages] : []
 }
 
+/**
+ * Whether the program the runner runs now is the one with this bridge. Such
+ * a program cannot have the runner take another job for it (pcp.video.frames
+ * from the bridge, run.ts): that job would wait for it to end.
+ */
+export function sandboxRuns(bridge: Bridge): boolean {
+  return state().job?.bridge === bridge
+}
+
 function send(target: Runner | null, message: Record<string, unknown>) {
   if (target && !target.socket.destroyed) {
     target.socket.write(`${JSON.stringify(message)}\n`)
@@ -164,6 +173,7 @@ function resultOf(message: Record<string, unknown>, current: Job): RunResult {
     return {
       kind: "error",
       message: `The run took longer than ${Math.round(RUN_TIMEOUT_MS / 1000)} seconds and was stopped.`,
+      reason: "time",
       ...shown,
     }
   }

@@ -6,7 +6,6 @@ import path from "node:path"
 import type {
   Browser,
   BrowserContext,
-  BrowserContextOptions,
   CDPSession,
   Dialog,
   Page,
@@ -14,26 +13,41 @@ import type {
 
 import type { VaultContext } from "../context"
 import { PcpError } from "../errors"
+import { closePendingRequests } from "../permission-close"
 import { isPcpSite } from "../fetch/fetch"
 import { resolveFetchAccess, siteKey, type FetchRuleSet } from "../fetch/rules"
 import { isOwnAddress, isPublicAddress } from "../openapi/address"
+import { loadResourceLimits, resourceLimits } from "../resources/state"
 import { watchDocuments, type DocumentWatch } from "./challenge"
 import {
   acquireDisplay,
-  displaySwitches,
-  wantsVirtualDisplay,
+  displayRenderer,
+  type Renderer,
   type VirtualDisplay,
 } from "./display"
 import { openDownloads, watchDownloads, type Downloads } from "./downloads"
 import { chromiumExecutable } from "./executable"
+import { watchFavicon } from "./favicon"
+import { handoverWaiting, waitIdle } from "./idle"
 import {
+  contextOptions,
+  keepOffScreen,
+  launchOptions,
+  modesToTry,
+  newBrowserContext,
+  openPage,
+  wantedMode,
+  type BrowserMode,
+} from "./launch"
+import {
+  ACTION_TIMEOUT_MS,
+  BROWSER_LOCK_DEADLINE_MS,
   DIALOG_DISMISS_MS,
-  IDLE_CLOSE_MS,
   MAX_SOLVES,
   MAX_TABS,
+  NAVIGATION_TIMEOUT_MS,
   PROFILE_SAVE_INTERVAL_MS,
-  SCREEN,
-  VIEWPORT,
+  TITLE_TIMEOUT_MS,
 } from "./limits"
 import { loadProfile, saveProfile } from "./profile"
 import {
@@ -41,15 +55,19 @@ import {
   type AddressVerdict,
   type BrowserProxy,
 } from "./proxy"
+import { bounded, inLane, newLane, type Lane } from "./queue"
 import type { TabControl, TabView } from "./types"
 
 /**
  * The browser's running side: one Chromium per vault, started on first use
- * and closed after IDLE_CLOSE_MS with nothing happening, its tabs, and who
- * drives each. It runs headless, or with windows on PCP's virtual display
- * where there is one (display.ts: the container image). One per process, kept on globalThis because
- * the gateway, the Server Actions and the route handlers are bundled apart
- * and would otherwise each have their own copy of this module.
+ * and closed after the owner's idle minutes (Settings → Resources) with
+ * nothing happening and no hand-over waiting (idle.ts), its tabs, and who
+ * drives each. It runs with windows on PCP's virtual display where there is
+ * one (display.ts: the container image), with a window of its own kept off
+ * the screen in the desktop app, or headless (launch.ts). One per process,
+ * kept on globalThis because the gateway, the Server Actions and the route
+ * handlers are bundled apart and would otherwise each have their own copy of
+ * this module.
  *
  * The browser keeps nothing on disk: its context is in memory, started
  * from the vault's saved profile (profile.ts) and saved back while a
@@ -64,6 +82,12 @@ import type { TabControl, TabView } from "./types"
  * that drives the tab may reach (its web fetch lines), the sites the owner
  * allowed for this tab, or anything while the owner drives it. PCP's own
  * site never.
+ *
+ * Work waits its turn per tab (queue.ts): the calls on one tab run one at
+ * a time, each for at most its deadline, and a tab whose call passes it
+ * is reopened at its address (reopenTab). Only what changes the set of
+ * tabs (opening and closing one, taking a popup in, closing the browser)
+ * holds the whole browser, briefly (withVault).
  *
  * Besides its tabs, the browser reads pages for web_fetch when a site
  * checks its visitors first (solve.ts): each in a page of a second context
@@ -96,8 +120,18 @@ export type Tab = {
   control: TabControl
   /** The owner holds the tab for an assistant's hand-over, since then. */
   handoverSince: number | null
+  /**
+   * The hand-over requests asked about this tab (noteHandoverRequest):
+   * closed when the tab closes, so none waits for a tab that is gone.
+   */
+  handoverRequests: Set<string>
   /** The last site the gate kept the main frame from opening. */
   lastBlocked: string | null
+  /**
+   * Its page's icon as a data: address, as Chromium loaded it for the page
+   * (favicon.ts); null until then, and for a page without one.
+   */
+  favicon: string | null
   dialog: Dialog | null
   /**
    * A file the page offered while no download call waited (refused), by
@@ -106,6 +140,22 @@ export type Tab = {
   offeredFile: string | null
   /** What its main frame shows, and whether that is a site's check. */
   documents: DocumentWatch
+  /** The calls on this tab, one at a time. */
+  lane: Lane
+  /**
+   * The call whose turn on the lane it is now, and the run_code or wrapper
+   * run it is made for (null for none); null between calls.
+   */
+  running: { runId: string | null } | null
+  /**
+   * Its page stopped responding (a call passed its deadline) or crashed:
+   * it is reopened at its address, at once or on the next call.
+   */
+  unresponsive: boolean
+  /** The page being reopened (reopenTab), which calls wait for. */
+  reopening: Promise<Reopened> | null
+  /** Tabs its page opened (popups), said in its next answer. */
+  popups: string[]
   createdAt: number
   lastUsedAt: number
   /** The live view's state (screencast.ts) and the owner's input (input.ts). */
@@ -137,14 +187,15 @@ export type VaultBrowser = {
   proxy: BrowserProxy
   /** Chromium's own sandbox: off when the machine cannot give it one. */
   sandbox: boolean
-  /** The virtual display its windows are on (display.ts), or headless. */
+  /** How it runs (launch.ts): what started, not what was wanted. */
+  mode: BrowserMode
+  /** The virtual display its windows are on (display.ts), in "virtual". */
   display: string | null
   /** Chromium's folder for what it keeps outside the profile (launch). */
   scratchDir: string
   /** Downloads, refused but while a download call waits (downloads.ts). */
   downloads: Downloads
   tabs: Map<string, Tab>
-  lastTabByToken: Map<string, string>
   /**
    * The context web_fetch's pages open in: made on the first, from none of
    * the vault's sign-ins, never saved, gone with the browser.
@@ -163,7 +214,10 @@ export type VaultBrowser = {
   publicUrl: string | null
   privateAllowed: boolean
   idleTimer: NodeJS.Timeout | null
-  chain: Promise<unknown>
+  /** What holds the whole browser: the set of tabs changing. */
+  lock: Lane
+  /** Profile saves, one at a time (calls on two tabs may save at once). */
+  saving: Promise<unknown>
   lastSavedAt: number
   lastSavedHash: string | null
   startedAt: number
@@ -204,17 +258,37 @@ export function runningBrowser(vaultId: string): VaultBrowser | null {
   return runtime().vaults.get(vaultId) ?? null
 }
 
-/** Runs browser work for a vault one at a time. */
+/** Whether a restore is writing the vault, and its browser may not run. */
+export function browserHeld(vaultId: string): boolean {
+  return runtime().held.has(vaultId)
+}
+
+/**
+ * Runs what changes the set of tabs (opening or closing one, taking a
+ * popup in, closing the browser) one at a time for the vault, for at most
+ * BROWSER_LOCK_DEADLINE_MS. The calls on a tab wait in its own lane, not
+ * here.
+ */
 export function withVault<T>(
   vault: VaultBrowser,
   run: () => Promise<T>,
 ): Promise<T> {
-  const result = vault.chain.then(run, run)
-  vault.chain = result.catch(() => {})
-  return result
+  return inLane(vault.lock, run, {
+    deadlineMs: BROWSER_LOCK_DEADLINE_MS,
+    onDeadline: async () => {
+      throw new PcpError(
+        "state",
+        "The browser did not answer in time. Try again in a moment.",
+      )
+    },
+  })
 }
 
-/** Something happened: the idle close waits again. */
+/**
+ * Something happened: the idle close waits again, for as long as the
+ * owner's setting says. When the wait is over, a tab held for a hand-over
+ * the owner has not answered keeps the browser open (idle.ts).
+ */
 export function touch(vaultId: string): void {
   const vault = runningBrowser(vaultId)
 
@@ -222,15 +296,16 @@ export function touch(vaultId: string): void {
     return
   }
 
-  if (vault.idleTimer) {
-    clearTimeout(vault.idleTimer)
-  }
-
-  vault.idleTimer = setTimeout(() => {
-    void closeBrowser(vaultId).catch((error) =>
-      console.error("[browser] closing after idle failed", error),
-    )
-  }, IDLE_CLOSE_MS).unref()
+  waitIdle(vault, {
+    delayMs: () => resourceLimits().browserIdleMs,
+    holdsOpen: () => handoverWaiting(vault.tabs.values()),
+    close: () => {
+      if (runningBrowser(vaultId) !== vault) return
+      void closeBrowser(vaultId).catch((error) =>
+        console.error("[browser] closing after idle failed", error),
+      )
+    },
+  })
 }
 
 function bareName(hostname: string): string {
@@ -271,17 +346,6 @@ function verdict(
   return vault.privateAllowed ? "ok" : "private"
 }
 
-function platformToken(): string {
-  switch (process.platform) {
-    case "darwin":
-      return "Macintosh; Intel Mac OS X 10_15_7"
-    case "win32":
-      return "Windows NT 10.0; Win64; x64"
-    default:
-      return "X11; Linux x86_64"
-  }
-}
-
 /**
  * Chromium keeps its crash reporter's database in the user's config folder
  * (~/.config), and when it cannot make one there it can abort as it starts:
@@ -299,88 +363,78 @@ function removeScratchDir(dir: string): void {
 }
 
 async function launch(
+  mode: BrowserMode,
   executablePath: string,
   proxyPort: number,
   sandbox: boolean,
   scratchDir: string,
   display: VirtualDisplay | null,
+  renderer: Renderer,
 ): Promise<Browser> {
   const { chromium } = await import("patchright-core")
 
   return chromium.launch({
-    executablePath,
-    // With windows on the virtual display where there is one, as a
-    // desktop's Chrome runs; headless otherwise.
-    headless: display === null,
-    chromiumSandbox: sandbox,
-    env: {
-      ...process.env,
-      XDG_CONFIG_HOME: path.join(scratchDir, "config"),
-      XDG_CACHE_HOME: path.join(scratchDir, "cache"),
-      ...(display
-        ? { DISPLAY: display.display, XAUTHORITY: display.authFile }
-        : {}),
-    },
-    // What tells a page it is being driven: the automation switch and the
-    // webdriver flag. The rest of Chromium is as it is.
-    ignoreDefaultArgs: ["--enable-automation"],
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      ...(display ? displaySwitches() : []),
-      // Two of Playwright's own switches that patchright-core leaves out and
-      // PCP relies on: a page's script may open a window without a click
-      // (the gate decides what loads in it), and a step back loads a
-      // document again (the gate and the check watch see it), rather than
-      // coming from the back-forward cache.
-      "--disable-popup-blocking",
-      "--disable-back-forward-cache",
-      "--disable-dev-shm-usage",
-      // UDP would go around the proxy: no QUIC, and WebRTC only through it.
-      "--disable-quic",
-      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-      "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-    ],
+    ...launchOptions({
+      mode,
+      executablePath,
+      sandbox,
+      scratchDir,
+      display,
+      renderer,
+    }),
     proxy: { server: `http://127.0.0.1:${proxyPort}`, bypass: "<-loopback>" },
     timeout: 30_000,
   })
 }
 
 /**
- * What every context starts with, the vault's and web_fetch's alike: a
- * desktop Chrome's user agent without "Headless", a screen larger than the
- * viewport as a desktop's is, the host's locale and time zone.
- *
- * With a window (headless is false) the browser keeps its own user agent:
- * overriding it makes Playwright send client hints built from the string,
- * with an empty platform version, which Chromium's own never has. Headless
- * the user agent says "HeadlessChrome" and has to be replaced.
- *
- * Service workers are not an option here: a service worker can answer a
- * navigation without the network, around the gate, and the gate refuses
- * their scripts itself (isServiceWorkerScript). Playwright's own "block"
- * overwrote navigator.serviceWorker.register in every frame, which a page
- * can tell from the real one and go around through the prototype.
+ * Chromium started in the first of `modes` that starts, with its own
+ * sandbox where the machine gives one.
  */
-function contextOptions(
-  browser: Browser,
-  { headless }: { headless: boolean },
-): BrowserContextOptions {
-  const major = browser.version().split(".")[0] ?? "141"
-  const { locale, timeZone } = Intl.DateTimeFormat().resolvedOptions()
+async function launchFirst(
+  modes: BrowserMode[],
+  executable: string,
+  proxyPort: number,
+  scratchDir: string,
+  display: VirtualDisplay | null,
+  renderer: Renderer,
+): Promise<{ browser: Browser; mode: BrowserMode; sandbox: boolean }> {
+  let failure: unknown = new Error("No mode to start Chromium in.")
 
-  return {
-    viewport: { ...VIEWPORT },
-    screen: { ...SCREEN },
-    deviceScaleFactor: 1,
-    ...(headless
-      ? {
-          userAgent: `Mozilla/5.0 (${platformToken()}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
-        }
-      : {}),
-    locale,
-    timezoneId: timeZone,
-    acceptDownloads: false,
+  for (const [index, mode] of modes.entries()) {
+    const attempt = (sandbox: boolean) =>
+      launch(
+        mode,
+        executable,
+        proxyPort,
+        sandbox,
+        scratchDir,
+        display,
+        renderer,
+      )
+    const sandbox = sandboxSetting() !== "off"
+
+    try {
+      try {
+        return { browser: await attempt(sandbox), mode, sandbox }
+      } catch (error) {
+        // An unprivileged container, or root, has no sandbox to give.
+        if (!sandbox || sandboxSetting() === "on") throw error
+        return { browser: await attempt(false), mode, sandbox: false }
+      }
+    } catch (error) {
+      failure = error
+
+      if (index < modes.length - 1) {
+        console.error(
+          `[browser] Chromium did not start in its ${mode} mode; it starts ${modes[index + 1]} instead`,
+          error,
+        )
+      }
+    }
   }
+
+  throw failure
 }
 
 function sandboxSetting(): "on" | "off" | "auto" {
@@ -396,6 +450,8 @@ export async function ensureBrowser(
   ctx: VaultContext,
   { publicUrl }: { publicUrl?: string } = {},
 ): Promise<VaultBrowser> {
+  // The idle close follows the owner's setting as last saved.
+  await loadResourceLimits()
   const state = runtime()
 
   if (state.held.has(ctx.vaultId)) {
@@ -448,27 +504,26 @@ async function start(
       vault ? verdict(vault, address, port, host) : "private",
   })
 
-  let browser: Browser
-  let sandbox = sandboxSetting() !== "off"
   const scratchDir = await makeScratchDir()
-  const screen = wantsVirtualDisplay() ? await acquireDisplay() : null
+  const wanted = wantedMode()
+  const screen = wanted === "virtual" ? await acquireDisplay() : null
   const display = screen?.display ?? null
+  // The machine's GPU on the virtual display, when the container has one.
+  const renderer: Renderer = display ? await displayRenderer() : "software"
+  let browser: Browser
+  let mode: BrowserMode
+  let sandbox: boolean
 
   try {
-    try {
-      browser = await launch(
-        executable,
-        proxy.port,
-        sandbox,
-        scratchDir,
-        display,
-      )
-    } catch (error) {
-      // An unprivileged container, or root, has no sandbox to give.
-      if (!sandbox || sandboxSetting() === "on") throw error
-      sandbox = false
-      browser = await launch(executable, proxy.port, false, scratchDir, display)
-    }
+    ;({ browser, mode, sandbox } = await launchFirst(
+      // A virtual display that did not start leaves the browser headless.
+      modesToTry(wanted === "virtual" && !display ? "headless" : wanted),
+      executable,
+      proxy.port,
+      scratchDir,
+      display,
+      renderer,
+    ))
   } catch (error) {
     screen?.release()
     await proxy.close()
@@ -502,8 +557,8 @@ async function start(
     throw error
   }
 
-  const context = await browser.newContext({
-    ...contextOptions(browser, { headless: display === null }),
+  const context = await newBrowserContext(browser, mode, {
+    ...contextOptions(browser.version(), mode),
     storageState: (await loadProfile(ctx)) ?? undefined,
   })
 
@@ -513,11 +568,11 @@ async function start(
     context,
     proxy,
     sandbox,
+    mode,
     display: display?.display ?? null,
     scratchDir,
     downloads,
     tabs: new Map(),
-    lastTabByToken: new Map(),
     fetchContext: null,
     solves: new Map(),
     solving: 0,
@@ -525,7 +580,8 @@ async function start(
     publicUrl,
     privateAllowed: false,
     idleTimer: null,
-    chain: Promise.resolve(),
+    lock: newLane(),
+    saving: Promise.resolve(),
     lastSavedAt: Date.now(),
     lastSavedHash: null,
     startedAt: Date.now(),
@@ -537,11 +593,13 @@ async function start(
     // the one that opened it, if there is room. Until then the gate decides
     // its pages by that tab (judge), so it has loaded nothing else.
     if ([...self.tabs.values()].some((tab) => tab.page === page)) return
-    void adoptPopup(self, page).catch(() => page.close().catch(() => {}))
+    void withVault(self, () => adoptPopup(self, page)).catch(() =>
+      page.close().catch(() => {}),
+    )
   })
   browser.on("disconnected", () => {
     if (runtime().vaults.get(self.vaultId) === self) {
-      forget(self)
+      void forget(self)
     }
     removeScratchDir(self.scratchDir)
   })
@@ -550,12 +608,16 @@ async function start(
   return vault
 }
 
-function forget(vault: VaultBrowser): void {
+/** The browser is gone, and its tabs with it: their hand-overs close. */
+function forget(vault: VaultBrowser): Promise<void> {
+  const tabs = [...vault.tabs.values()]
+
   if (vault.idleTimer) clearTimeout(vault.idleTimer)
   runtime().vaults.delete(vault.vaultId)
   vault.tabs.clear()
   vault.solves.clear()
   void vault.proxy.close()
+  return closeHandovers(vault.vaultId, tabs)
 }
 
 /**
@@ -572,14 +634,22 @@ export async function closeBrowser(
     return
   }
 
-  if (ctx) {
-    await saveVaultProfile(ctx, vault, { force: true }).catch((error) =>
-      console.error("[browser] saving the profile failed", error),
-    )
+  const close = async () => {
+    if (runningBrowser(vaultId) !== vault) return
+
+    if (ctx) {
+      await saveVaultProfile(ctx, vault, { force: true }).catch((error) =>
+        console.error("[browser] saving the profile failed", error),
+      )
+    }
+
+    const closed = forget(vault)
+    await vault.browser.close().catch(() => {})
+    await closed
   }
 
-  forget(vault)
-  await vault.browser.close().catch(() => {})
+  // A lock that does not come in time still closes the browser.
+  await withVault(vault, close).catch(close)
 }
 
 /**
@@ -606,7 +676,10 @@ export async function withBrowserClosed<T>(
     const vault = runningBrowser(ctx.vaultId)
 
     if (vault) {
-      await withVault(vault, () => closeBrowser(ctx.vaultId, { ctx }))
+      // The calls in flight on each tab finish (or pass their deadline);
+      // any later one is refused while the vault is held.
+      await Promise.all([...vault.tabs.values()].map((tab) => tab.lane.tail))
+      await closeBrowser(ctx.vaultId, { ctx })
     }
 
     return await write()
@@ -622,20 +695,34 @@ export async function closeAllBrowsers(): Promise<void> {
   }
 }
 
-/** Saves the profile, at most every PROFILE_SAVE_INTERVAL_MS unless forced. */
-export async function saveVaultProfile(
+/**
+ * Saves the profile, at most every PROFILE_SAVE_INTERVAL_MS unless forced,
+ * one save at a time. A browser that has closed saves nothing: a call that
+ * finished after it (one past its deadline) cannot write over what a
+ * restore wrote since.
+ */
+export function saveVaultProfile(
   ctx: VaultContext,
   vault: VaultBrowser,
   { force = false }: { force?: boolean } = {},
 ): Promise<void> {
-  if (!force && Date.now() - vault.lastSavedAt < PROFILE_SAVE_INTERVAL_MS) {
-    return
-  }
+  const save = async () => {
+    if (runningBrowser(vault.vaultId) !== vault) {
+      return
+    }
 
-  vault.lastSavedAt = Date.now()
-  vault.lastSavedHash = await saveProfile(ctx, vault.context, {
-    unless: vault.lastSavedHash,
-  })
+    if (!force && Date.now() - vault.lastSavedAt < PROFILE_SAVE_INTERVAL_MS) {
+      return
+    }
+
+    vault.lastSavedAt = Date.now()
+    vault.lastSavedHash = await saveProfile(ctx, vault.context, {
+      unless: vault.lastSavedHash,
+    })
+  }
+  const saved = vault.saving.then(save, save)
+  vault.saving = saved.catch(() => {})
+  return saved
 }
 
 function newTabId(): string {
@@ -845,43 +932,51 @@ async function startGate(
   })
 }
 
-async function attach(
+/** What PCP holds of a page: its DevTools session and main frame. */
+async function pageParts(
   vault: VaultBrowser,
   page: Page,
-  meta: Pick<Tab, "openedBy" | "tokenId" | "rules" | "privateAllowed"> & {
-    allowedHosts?: Iterable<string>
-  },
-): Promise<Tab> {
+): Promise<Pick<Tab, "page" | "cdp" | "mainFrameId" | "documents">> {
+  // Every wait on the page ends: none of Playwright's has no timeout.
+  page.setDefaultTimeout(ACTION_TIMEOUT_MS)
+  page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+  const documents = watchDocuments(page)
   const cdp = await vault.context.newCDPSession(page)
   const { frameTree } = await cdp.send("Page.getFrameTree")
-  const now = Date.now()
-  const tab: Tab = {
-    id: newTabId(),
-    page,
-    cdp,
-    mainFrameId: frameTree.frame.id,
-    openedBy: meta.openedBy,
-    tokenId: meta.tokenId,
-    rules: meta.rules,
-    privateAllowed: meta.privateAllowed,
-    allowedHosts: new Set(meta.allowedHosts ?? []),
-    control: "assistant",
-    handoverSince: null,
-    lastBlocked: null,
-    dialog: null,
-    offeredFile: null,
-    documents: watchDocuments(page),
-    createdAt: now,
-    lastUsedAt: now,
-    extra: new Map(),
-  }
+
+  // Every tab and popup, before PCP lets it load anything.
+  if (vault.mode === "window") await keepOffScreen(cdp)
+
+  return { page, cdp, mainFrameId: frameTree.frame.id, documents }
+}
+
+/** What a tab listens for on its page, for as long as it is the tab's. */
+async function listen(
+  vault: VaultBrowser,
+  tab: Tab,
+  page: Page,
+): Promise<void> {
+  const mine = () => tab.page === page
 
   // A page's file chooser never opens a window on the machine: a file
   // reaches a page only through upload_file.
   page.on("filechooser", () => {})
-  await watchDownloads(vault.downloads, cdp).catch(() => {})
+  await watchDownloads(vault.downloads, tab.cdp).catch(() => {})
+  tab.favicon = null
+  await watchFavicon(tab.cdp, {
+    mainFrame: () => tab.mainFrameId,
+    mine,
+    set: (favicon) => {
+      tab.favicon = favicon
+    },
+  }).catch(() => {})
 
   page.on("dialog", (dialog) => {
+    if (!mine()) {
+      dialog.dismiss().catch(() => {})
+      return
+    }
+
     tab.dialog = dialog
     setTimeout(() => {
       if (tab.dialog === dialog) {
@@ -890,23 +985,71 @@ async function attach(
       }
     }, DIALOG_DISMISS_MS).unref()
   })
-  page.on("close", () => {
-    vault.tabs.delete(tab.id)
-    for (const [token, id] of vault.lastTabByToken) {
-      if (id === tab.id) vault.lastTabByToken.delete(token)
-    }
-    recomputePrivate(vault)
+  // Reopened on the next call (reopenTab).
+  page.on("crash", () => {
+    if (mine()) tab.unresponsive = true
   })
+  page.on("close", () => {
+    // A page closed as its tab is reopened is no longer the tab's.
+    if (!mine()) return
+    // Closed by the page itself (closeTab and the browser's close take the
+    // tab out first, and close its hand-overs themselves).
+    const listed = vault.tabs.get(tab.id) === tab
+    vault.tabs.delete(tab.id)
+    recomputePrivate(vault)
+    if (listed) void closeHandovers(vault.vaultId, [tab])
+  })
+}
 
+async function attach(
+  vault: VaultBrowser,
+  page: Page,
+  meta: Pick<Tab, "openedBy" | "tokenId" | "rules" | "privateAllowed"> & {
+    allowedHosts?: Iterable<string>
+  },
+): Promise<Tab> {
+  const now = Date.now()
+  const tab: Tab = {
+    id: newTabId(),
+    ...(await pageParts(vault, page)),
+    openedBy: meta.openedBy,
+    tokenId: meta.tokenId,
+    rules: meta.rules,
+    privateAllowed: meta.privateAllowed,
+    allowedHosts: new Set(meta.allowedHosts ?? []),
+    control: "assistant",
+    handoverSince: null,
+    handoverRequests: new Set(),
+    lastBlocked: null,
+    favicon: null,
+    dialog: null,
+    offeredFile: null,
+    lane: newLane(),
+    running: null,
+    unresponsive: false,
+    reopening: null,
+    popups: [],
+    createdAt: now,
+    lastUsedAt: now,
+    extra: new Map(),
+  }
+
+  await listen(vault, tab, page)
   vault.tabs.set(tab.id, tab)
   recomputePrivate(vault)
   return tab
 }
 
+/**
+ * A page the browser opened itself (a popup, target=_blank) becomes a tab of
+ * the one that opened it, its token's, and that tab's next answer names it.
+ * Runs under withVault, so the room for it is counted with every other tab.
+ */
 async function adoptPopup(vault: VaultBrowser, page: Page): Promise<void> {
   const opener = await page.opener()
 
-  // A page PCP opened itself (openTab) has no opener, and is attached there.
+  // A page PCP opened itself (openTab, reopenTab) has no opener, and is
+  // attached there.
   if (!opener) {
     return
   }
@@ -926,13 +1069,10 @@ async function adoptPopup(vault: VaultBrowser, page: Page): Promise<void> {
     allowedHosts: parent.allowedHosts,
   })
   tab.control = parent.control
-
-  if (parent.tokenId) {
-    vault.lastTabByToken.set(parent.tokenId, tab.id)
-  }
+  parent.popups.push(tab.id)
 }
 
-/** A new, empty tab. */
+/** A new, empty tab. Call it under withVault. */
 export async function openTab(
   vault: VaultBrowser,
   meta: Pick<Tab, "openedBy" | "tokenId" | "rules" | "privateAllowed">,
@@ -944,14 +1084,66 @@ export async function openTab(
     )
   }
 
-  const page = await vault.context.newPage()
-  const tab = await attach(vault, page, meta)
+  const page = await openPage(vault.context, vault.mode)
+  return attach(vault, page, meta)
+}
 
-  if (meta.tokenId) {
-    vault.lastTabByToken.set(meta.tokenId, tab.id)
-  }
+/** Where a reopened tab is now. */
+export type Reopened = { address: string; loaded: boolean }
 
-  return tab
+/**
+ * Closes a tab's page and opens a new one in its place, at the address it
+ * was at, through the gate as any page is: for a tab whose call passed its
+ * deadline, whose page crashed, or that its assistant asked to reset. The
+ * tab keeps its id, its token and the sites allowed for it; what the page
+ * held (a form half filled, its history) is gone. Calls on the tab wait
+ * for it; a second reset while one runs is the same one.
+ */
+export function reopenTab(vault: VaultBrowser, tab: Tab): Promise<Reopened> {
+  tab.reopening ??= (async () => {
+    tab.unresponsive = true
+    const old = tab.page
+    const address = old.url()
+    const page = await openPage(vault.context, vault.mode)
+
+    try {
+      Object.assign(tab, await pageParts(vault, page), { dialog: null })
+      await listen(vault, tab, page)
+    } catch (error) {
+      await page.close().catch(() => {})
+      throw error
+    }
+
+    await bounded(old.close(), ACTION_TIMEOUT_MS, "page.close").catch(() => {})
+
+    // Closed meanwhile: the new page goes too.
+    if (vault.tabs.get(tab.id) !== tab) {
+      await page.close().catch(() => {})
+      return { address, loaded: false }
+    }
+
+    let loaded = false
+
+    if (/^https?:/i.test(address) && mayOpen(vault, tab, address)) {
+      loaded = await page
+        .goto(address, {
+          waitUntil: "domcontentloaded",
+          timeout: NAVIGATION_TIMEOUT_MS,
+        })
+        .then(
+          () => true,
+          () => false,
+        )
+    }
+
+    tab.unresponsive = false
+    tab.lastUsedAt = Date.now()
+    return { address, loaded }
+  })().finally(() => {
+    tab.reopening = null
+  })
+
+  return tab.reopening
 }
 
 /** Whether the gate lets a page read for web_fetch open an address. */
@@ -978,21 +1170,21 @@ export function solveMayOpen(
 }
 
 function fetchContext(vault: VaultBrowser): Promise<BrowserContext> {
-  vault.fetchContext ??= vault.browser
-    .newContext(
-      contextOptions(vault.browser, { headless: vault.display === null }),
-    )
-    .then((context) => {
-      // A page read for web_fetch opens no windows: the gate refuses what a
-      // popup would load, and the window is closed.
-      context.on("page", (page) => {
-        void page
-          .opener()
-          .then((opener) => (opener ? page.close() : undefined))
-          .catch(() => {})
-      })
-      return context
+  vault.fetchContext ??= newBrowserContext(
+    vault.browser,
+    vault.mode,
+    contextOptions(vault.browser.version(), vault.mode),
+  ).then((context) => {
+    // A page read for web_fetch opens no windows: the gate refuses what a
+    // popup would load, and the window is closed.
+    context.on("page", (page) => {
+      void page
+        .opener()
+        .then((opener) => (opener ? page.close() : undefined))
+        .catch(() => {})
     })
+    return context
+  })
   vault.fetchContext.catch(() => {
     vault.fetchContext = null
   })
@@ -1019,11 +1211,15 @@ export async function openSolvePage(
   let page: Page | null = null
 
   try {
-    page = await (await fetchContext(vault)).newPage()
+    page = await openPage(await fetchContext(vault), vault.mode)
     const documents = watchDocuments(page)
     const cdp = await page.context().newCDPSession(page)
     const { frameTree } = await cdp.send("Page.getFrameTree")
-    await cdp.detach().catch(() => {})
+
+    // The window's place is told to the page through this session, which
+    // then lasts as long as the page; otherwise it is not needed.
+    if (vault.mode === "window") await keepOffScreen(cdp)
+    else await cdp.detach().catch(() => {})
     const solve: Solve = {
       page,
       mainFrameId: frameTree.frame.id,
@@ -1059,10 +1255,63 @@ export function getTab(vaultId: string, id: string): Tab | null {
   return runningBrowser(vaultId)?.tabs.get(id) ?? null
 }
 
+/**
+ * Closes a tab, even one whose call hangs: its page closes under it, and
+ * the calls queued on it are answered as for a tab that is gone. Call it
+ * under withVault.
+ */
 export async function closeTab(vault: VaultBrowser, tab: Tab): Promise<void> {
-  await tab.page.close().catch(() => {})
   vault.tabs.delete(tab.id)
   recomputePrivate(vault)
+  await closeHandovers(vault.vaultId, [tab])
+  await bounded(tab.page.close(), ACTION_TIMEOUT_MS, "page.close").catch(
+    () => {},
+  )
+}
+
+/**
+ * A hand-over request an assistant made about a tab: closed with the tab
+ * (or the browser), as one nobody can answer any more.
+ */
+export function noteHandoverRequest(
+  vaultId: string,
+  tabId: string,
+  requestId: string,
+): void {
+  getTab(vaultId, tabId)?.handoverRequests.add(requestId)
+}
+
+/**
+ * The open tab a hand-over request is about, or null once that tab is gone
+ * (or the browser closed): where the owner answers it (owner-queue.ts).
+ */
+export function handoverTabOf(
+  vaultId: string,
+  requestId: string,
+): string | null {
+  for (const tab of runningBrowser(vaultId)?.tabs.values() ?? []) {
+    if (tab.handoverRequests.has(requestId)) {
+      return tab.id
+    }
+  }
+
+  return null
+}
+
+/** Tabs that are gone: the hand-overs still waiting about them close. */
+async function closeHandovers(vaultId: string, tabs: Tab[]): Promise<void> {
+  const ids = tabs.flatMap((tab) => [...tab.handoverRequests])
+
+  if (ids.length === 0) {
+    return
+  }
+
+  await closePendingRequests(
+    { vaultId, kind: "browser_handover", id: { in: ids } },
+    "closed",
+  ).catch((error) =>
+    console.error("[browser] closing a tab's hand-over failed", error),
+  )
 }
 
 /** Who drives a tab. A hand-over keeps it the owner's until they answer. */
@@ -1084,19 +1333,33 @@ export function setControl(
   tab.handoverSince = control === "owner" && handover ? Date.now() : null
 }
 
+/** The page's title, or none when the page does not say in time. */
 export async function tabTitle(tab: Tab): Promise<string> {
-  return (await tab.page.title().catch(() => "")).slice(0, 300)
+  return (
+    await bounded(tab.page.title(), TITLE_TIMEOUT_MS, "page.title").catch(
+      () => "",
+    )
+  ).slice(0, 300)
 }
 
-export async function tabView(tab: Tab): Promise<TabView> {
+/**
+ * A tab as PCP's pages show it. `favicon: false` leaves the icon out (the
+ * live view, which sends this again every moment and shows no icon).
+ */
+export async function tabView(
+  tab: Tab,
+  { favicon = true }: { favicon?: boolean } = {},
+): Promise<TabView> {
   return {
     id: tab.id,
     url: tab.page.url(),
     title: await tabTitle(tab),
+    favicon: favicon ? tab.favicon : null,
     openedBy: tab.openedBy,
     tokenId: tab.tokenId,
     control: tab.control,
     handover: tab.handoverSince !== null,
+    busy: tab.running !== null,
     lastUsedAt: new Date(tab.lastUsedAt).toISOString(),
   }
 }
@@ -1111,7 +1374,7 @@ export async function listTabs(vaultId: string): Promise<TabView[]> {
   return Promise.all(
     [...vault.tabs.values()]
       .sort((a, b) => a.createdAt - b.createdAt)
-      .map(tabView),
+      .map((tab) => tabView(tab)),
   )
 }
 
@@ -1121,11 +1384,12 @@ export type BrowserStatus = {
   tabs: number
   startedAt: string | null
   /**
-   * How it runs: with windows on the virtual display, or headless (also
-   * where the display was wanted and did not start). Null when it is not
+   * How it runs (launch.ts): with windows on the virtual display, with a
+   * window of its own kept off the screen, or headless (also where a
+   * display or a window was wanted and did not start). Null when it is not
    * running.
    */
-  display: "virtual" | "headless" | null
+  display: BrowserMode | null
 }
 
 export function browserStatus(vaultId: string): BrowserStatus {
@@ -1136,6 +1400,6 @@ export function browserStatus(vaultId: string): BrowserStatus {
     sandbox: vault?.sandbox ?? null,
     tabs: vault?.tabs.size ?? 0,
     startedAt: vault ? new Date(vault.startedAt).toISOString() : null,
-    display: vault ? (vault.display === null ? "headless" : "virtual") : null,
+    display: vault?.mode ?? null,
   }
 }

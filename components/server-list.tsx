@@ -22,7 +22,10 @@ export type ServerListItem = Pick<
   | "status"
   | "connected"
   | "toolCount"
->
+> & {
+  /** A wrapper whose tools drive the browser (a browser flow). */
+  flow?: boolean
+}
 
 type Filter =
   "all" | "mcp" | "api" | "mail" | "calendar" | "ssh" | "wrapper" | "browser"
@@ -115,6 +118,7 @@ function ServerRow({ server }: { server: ServerListItem }) {
         <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
           <span className="font-semibold">{server.name}</span>
           {readOnly ? <Badge variant="secondary">Read-only</Badge> : null}
+          {server.flow ? <Badge variant="secondary">Browser flow</Badge> : null}
           <code className="text-xs font-normal text-muted-foreground">
             {server.slug}
           </code>

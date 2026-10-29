@@ -22,8 +22,18 @@ export const PERMISSION_TTL_MS = 24 * 60 * 60_000
 /** Rows this long past their expiry are deleted at boot. */
 export const PERMISSION_KEEP_MS = 7 * 24 * 60 * 60_000
 
+/**
+ * `withdrawn`: the assistant that asked took it back (withdraw_request).
+ * `closed`: what it was about went away first (a hand-over's tab).
+ */
 export type PermissionStatus =
-  "pending" | "running" | "executed" | "failed" | "declined"
+  | "pending"
+  | "running"
+  | "executed"
+  | "failed"
+  | "declined"
+  | "withdrawn"
+  | "closed"
 
 /** JSON with sorted keys and no undefined values, so equal args hash equal. */
 export function canonicalJson(value: unknown): string {
@@ -247,6 +257,11 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     allow_once: "Allow the change",
     decline: "Not now",
   },
+  // A skill added, changed, renamed or deleted, as the owner saw it whole.
+  skill_change: {
+    allow_once: "Allow the change",
+    decline: "Not now",
+  },
   // Saved with the levels the owner chose on the page (applyAccessRequest),
   // never by a decision: the only one is no.
   access: {
@@ -259,6 +274,21 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
   // A wrapper made, changed or deleted, as the owner saw it on the page.
   wrapper_change: {
     allow_once: "Make the change",
+    decline: "Not now",
+  },
+  // A linked repository's change, as an assistant merged or reviewed it.
+  repo_change: {
+    allow_once: "Apply the change",
+    decline: "Not now",
+  },
+  // An item of the vault an assistant proposed to push: confirmed on the
+  // push's review (confirmProposedShare), never by a decision here.
+  repo_share: {
+    decline: "Not now",
+  },
+  // The owner's note on a server or a skill, as an assistant proposed it.
+  note_change: {
+    allow_once: "Save the note",
     decline: "Not now",
   },
   // A site's answer, not the method's: the owner decides where it goes.
@@ -282,6 +312,22 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
   // A tab the assistant handed over: the owner says when they are done.
   browser_handover: {
     allow_once: "Done",
+    decline: "Not now",
+  },
+  // A stored secret typed into a page, per secret, site and token. Always
+  // allow also adds the site to the secret's; nothing here lifts a block.
+  secret_use: {
+    allow_once: "Allow once",
+    allow_for: "Allow for 1 hour",
+    always: "Always allow",
+    decline: "Not now",
+  },
+  // A secret the owner types in for the browser, and how its uses go: the
+  // next one only, every one for an hour, or every one.
+  secret_request: {
+    allow_once: "Save, allow one use",
+    allow_for: "Save, allow for 1 hour",
+    always: "Save, always allow",
     decline: "Not now",
   },
 }

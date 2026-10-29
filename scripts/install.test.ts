@@ -85,6 +85,22 @@ type Host = {
   signal?: string
   /** What `timedatectl show -p Timezone --value` answers; no such program when absent. */
   timedatectl?: string
+  /** Accounts in /etc/passwd; `pcp` puts this installer's Quadlet unit in the home. */
+  users?: { name: string; uid: number; pcp?: boolean }[]
+  /** Whether root reaches those users' systemd managers (lingering or logged in). */
+  userSession?: boolean
+  /**
+   * The host's /dev/dri: a render node with what `ls -l` says of it
+   * (mode, group id and name), or a card with no render node. Absent when
+   * there is none.
+   */
+  dri?: { mode: string; gid: number; group: string } | "card only"
+  /** What `id -G` answers. */
+  groups?: number[]
+  /** Podman's OCI runtime, as `podman info` names it. */
+  ociRuntime?: string
+  /** Whether the Docker daemon runs without root. */
+  dockerRootless?: boolean
 }
 
 const roots: string[] = []
@@ -119,6 +135,12 @@ function host({
   image,
   signal,
   timedatectl,
+  users = [],
+  userSession = true,
+  dri,
+  groups = [1000],
+  ociRuntime = "crun",
+  dockerRootless = false,
 }: Host = {}) {
   const root = mkdtempSync(join(tmpdir(), "pcp-install-"))
   roots.push(root)
@@ -171,7 +193,7 @@ function host({
       "docker",
       `case "$1" in
   --version) echo "${version}" ;;
-  info) ${info} ;;
+  info) ${dockerRootless ? 'echo "[name=seccomp,profile=builtin name=rootless name=cgroupns]"; ' : ""}${info} ;;
   inspect) echo "${state}" ;;
   image) ${imageId} ;;
   exec) ${request} ;;
@@ -184,6 +206,7 @@ esac`,
       "podman",
       `case "$1" in
   --version) echo "podman version ${podman}" ;;
+  info) echo "${ociRuntime}" ;;
   inspect) echo "${state}" ;;
   image) ${imageId} ;;
   exec) ${request} ;;
@@ -200,12 +223,50 @@ esac`,
   shim("loginctl", "")
   shim("curl", `exit ${healthy ? 0 : 22}`)
   answer("uname", `echo "${system}"`)
-  answer("id", `case "$1" in -u) echo ${uid} ;; -un) echo pat ;; esac`)
+  answer(
+    "id",
+    `case "$1" in -u) echo ${uid} ;; -un) echo pat ;; -G) echo "${groups.join(" ")}" ;; esac`,
+  )
   answer("hostname", 'echo "192.168.1.20 10.0.0.5"')
   answer("sysctl", `echo ${portStart}`)
   if (timedatectl !== undefined) {
     answer("timedatectl", `echo "${timedatectl}"`)
   }
+  shim(
+    "runuser",
+    `case "$*" in
+  *show-environment*) exit ${userSession ? 0 : 1} ;;
+esac`,
+  )
+  answer("systemd-run", "")
+  const homes = join(root, "homes")
+  const passwd = ["root:x:0:0:root:/root:/bin/sh"]
+  for (const { name, uid, pcp } of users) {
+    const userHome = join(homes, name)
+    const units = join(userHome, ".config", "containers", "systemd")
+    mkdirSync(units, { recursive: true })
+    if (pcp) {
+      writeFileSync(join(units, "pcp.container"), UNIT)
+    }
+    passwd.push(`${name}:x:${uid}:${uid}::${userHome}:/bin/sh`)
+  }
+  if (dri) {
+    const devices = join(sys, "dev", "dri")
+    mkdirSync(devices, { recursive: true })
+    writeFileSync(join(devices, "card0"), "")
+    if (dri !== "card only") {
+      writeFileSync(join(devices, "renderD128"), "")
+      answer(
+        "ls",
+        `case "$1" in
+  -ln) echo "${dri.mode} 1 0 ${dri.gid} 226, 128 Oct 23 02:00 $2" ;;
+  -l) echo "${dri.mode} 1 root ${dri.group} 226, 128 Oct 23 02:00 $2" ;;
+esac`,
+      )
+    }
+  }
+  mkdirSync(join(sys, "etc"), { recursive: true })
+  writeFileSync(join(sys, "etc", "passwd"), passwd.join("\n") + "\n")
 
   return {
     unit: join(home, ".config", "containers", "systemd", "pcp.container"),
@@ -391,7 +452,7 @@ describe("install.sh with Docker", () => {
     const machine = host({ docker: "works" })
     expect(machine.run([], { PCP_PORT: "8080", PCP_HTTPS: "1" }).status).toBe(0)
     expect(readFileSync(machine.conf, "utf8")).toBe(
-      "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_RUNTIME=docker\nPCP_DATA_VOLUME=pcp-data\nPCP_AUTO_UPDATE=0\nPCP_UPDATE_BUTTON=1\nPCP_CHANNEL=stable\n",
+      "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_RUNTIME=docker\nPCP_DATA_VOLUME=pcp-data\nPCP_AUTO_UPDATE=0\nPCP_UPDATE_BUTTON=1\nPCP_CHANNEL=stable\nPCP_GPU=1\n",
     )
 
     const again = machine.run()
@@ -739,7 +800,7 @@ describe("install.sh as root", () => {
     expect(first.stderr).toContain(machine.conf)
     expect(first.stderr).toContain(machine.sys.conf)
     expect(readFileSync(machine.sys.conf, "utf8")).toBe(
-      "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_RUNTIME=docker\nPCP_DATA_VOLUME=pcp-data\nPCP_AUTO_UPDATE=0\nPCP_UPDATE_BUTTON=1\nPCP_CHANNEL=stable\n",
+      "PCP_PORT=8080\nPCP_HTTPS=1\nPCP_RUNTIME=docker\nPCP_DATA_VOLUME=pcp-data\nPCP_AUTO_UPDATE=0\nPCP_UPDATE_BUTTON=1\nPCP_CHANNEL=stable\nPCP_GPU=1\n",
     )
 
     // The file in HOME is not read again, whatever it says now.
@@ -855,6 +916,119 @@ describe("install.sh as root", () => {
     ).toBe(0)
     expect(existsSync(machine.sys.updater)).toBe(false)
     expect(existsSync(machine.sys.timer)).toBe(false)
+  })
+})
+
+describe("install.sh next to another install", () => {
+  const badpirate = { name: "badpirate", uid: 1000, pcp: true }
+  const handOver = (calls: string[]) =>
+    calls.find((call) => call.includes("systemd-run"))
+
+  it("updates a user's rootless PCP as that user when root runs it", () => {
+    const machine = host({ podman: "5.8.4", uid: 0, users: [badpirate] })
+    const result = machine.run([], { PCP_CHANNEL: "develop" })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("PCP is installed for the user badpirate")
+    expect(handOver(result.calls)).toMatch(
+      new RegExp(
+        "^runuser -u badpirate -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus " +
+          "systemd-run --user --quiet --collect --wait --unit=pcp-install-\\d+ --setenv=PCP_CHANNEL=develop " +
+          "sh -c curl -fsSL 'https://raw\\.githubusercontent\\.com/kaperkunde/pcp/main/install\\.sh' \\| sh$",
+      ),
+    )
+    // Its output goes to the journal, never through this session, which
+    // may end with the PCP being replaced.
+    expect(handOver(result.calls)).not.toContain("--pipe")
+    expect(result.stdout).toMatch(
+      /journalctl _SYSTEMD_USER_UNIT=pcp-install-\d+\.service -f/,
+    )
+    // Root starts nothing of its own and writes nothing of its own.
+    expect(started(result.calls)).toBe(false)
+    expect(existsSync(machine.sys.unit)).toBe(false)
+    expect(existsSync(machine.sys.conf)).toBe(false)
+  })
+
+  it("passes on only the settings given, so the user's own stay", () => {
+    const machine = host({ podman: "5.8.4", uid: 0, users: [badpirate] })
+    const result = machine.run([])
+    expect(result.status).toBe(0)
+    expect(handOver(result.calls)).not.toContain("--setenv")
+  })
+
+  it("leaves users without PCP, and system accounts, alone", () => {
+    const machine = host({
+      podman: "5.8.4",
+      uid: 0,
+      users: [
+        { name: "pat", uid: 1001 },
+        { name: "daemon", uid: 2, pcp: true },
+      ],
+    })
+    const result = machine.run([])
+    expect(result.status).toBe(0)
+    expect(handOver(result.calls)).toBeUndefined()
+    expect(existsSync(machine.sys.unit)).toBe(true)
+  })
+
+  it("says to run it as the user when root cannot reach their systemd", () => {
+    const machine = host({
+      podman: "5.8.4",
+      uid: 0,
+      users: [badpirate],
+      userSession: false,
+    })
+    const result = machine.run([])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("Update it as badpirate")
+    expect(result.stderr).toContain("an empty vault")
+    expect(handOver(result.calls)).toBeUndefined()
+    expect(started(result.calls)).toBe(false)
+  })
+
+  it("names the users when more than one has PCP", () => {
+    const machine = host({
+      podman: "5.8.4",
+      uid: 0,
+      users: [badpirate, { name: "pat", uid: 1001, pcp: true }],
+    })
+    const result = machine.run([])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("more than one user here: badpirate pat.")
+    expect(started(result.calls)).toBe(false)
+  })
+
+  it("says which to remove when root and a user both have PCP", () => {
+    const machine = host({ podman: "5.8.4", uid: 0, users: [badpirate] })
+    mkdirSync(dirname(machine.sys.unit), { recursive: true })
+    writeFileSync(machine.sys.unit, UNIT)
+    const result = machine.run([])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("PCP is installed twice here")
+    expect(result.stderr).toContain("sh -s -- uninstall")
+    expect(handOver(result.calls)).toBeUndefined()
+    expect(started(result.calls)).toBe(false)
+  })
+
+  it("refuses a user's install next to root's", () => {
+    const machine = host({ podman: "5.8.4" })
+    mkdirSync(dirname(machine.sys.unit), { recursive: true })
+    writeFileSync(machine.sys.unit, UNIT)
+    const result = machine.run([])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("Update it as root")
+    expect(started(result.calls)).toBe(false)
+    expect(existsSync(machine.unit)).toBe(false)
+  })
+
+  it("still lets root update and remove its own install", () => {
+    const machine = host({ podman: "5.8.4", uid: 0 })
+    expect(machine.run([]).status).toBe(0)
+    const again = machine.run([])
+    expect(again.status).toBe(0)
+    expect(again.stdout).toContain("PCP is updated and running")
+    expect(again.stdout).not.toContain("Open it now")
+    expect(machine.run(["uninstall"]).status).toBe(0)
+    expect(existsSync(machine.sys.unit)).toBe(false)
   })
 })
 
@@ -1263,5 +1437,190 @@ describe("install.sh passing on the host's time zone and language", () => {
       })
       expect(result.calls).toContain(runLine("LANG=de_DE@euro"))
     })
+  })
+})
+
+// PCP's browser draws with the graphics card when the container has its
+// render node (kaperkunde/pcp#38), so the installer passes /dev/dri in where
+// the host has one, with the node's group where PCP's user needs it.
+describe("install.sh passing on the host's graphics card", () => {
+  const OPEN = { mode: "crw-rw-rw-", gid: 105, group: "render" }
+  const GROUP_ONLY = { mode: "crw-rw----+", gid: 105, group: "render" }
+  const runLine = (...gpu: string[]) =>
+    `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2${gpu
+      .map((entry) => ` ${entry}`)
+      .join("")} -v pcp-data:/data ${IMAGE}`
+  const note = (stderr: string) =>
+    stderr.includes("draws in software rather than with this computer's")
+
+  it("passes nothing when the host has no /dev/dri, as before", () => {
+    const docker = host({ docker: "works" }).run()
+    expect(docker.calls).toContain(`docker ${RUN}`)
+    expect(docker.calls.join("\n")).not.toContain("/dev/dri")
+    expect(note(docker.stderr)).toBe(false)
+
+    const machine = host({ podman: "5.2.2" })
+    expect(machine.run().status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toBe(UNIT)
+  })
+
+  it("passes nothing for a card without a render node", () => {
+    const docker = host({ docker: "works", dri: "card only" }).run()
+    expect(docker.calls).toContain(`docker ${RUN}`)
+  })
+
+  it("passes /dev/dri alone when everyone may open the render node (Fedora, Bazzite)", () => {
+    const docker = host({ docker: "works", dri: OPEN }).run()
+    expect(docker.status).toBe(0)
+    expect(docker.calls).toContain(runLine("--device /dev/dri"))
+    expect(note(docker.stderr)).toBe(false)
+
+    const machine = host({ podman: "5.2.2", dri: OPEN })
+    expect(machine.run().status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toBe(
+      UNIT.replace(
+        "Environment=PCP_HOST_UPDATER=2\n",
+        "Environment=PCP_HOST_UPDATER=2\nAddDevice=/dev/dri\n",
+      ),
+    )
+  })
+
+  it("puts it after the time zone and language, before the volume", () => {
+    const result = host({ docker: "works", dri: OPEN }).run([], {
+      TZ: "Europe/Berlin",
+    })
+    expect(result.calls).toContain(
+      runLine("-e TZ=Europe/Berlin", "--device /dev/dri"),
+    )
+  })
+
+  it("adds the render node's group by number under Docker", () => {
+    const result = host({ docker: "works", dri: GROUP_ONLY }).run()
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      runLine("--device /dev/dri", "--group-add 105"),
+    )
+    expect(note(result.stderr)).toBe(false)
+  })
+
+  it("adds it by number for root's Podman, in the unit too", () => {
+    const machine = host({ podman: "5.2.2", uid: 0, dri: GROUP_ONLY })
+    expect(machine.run().status).toBe(0)
+    expect(readFileSync(machine.sys.unit, "utf8")).toContain(
+      "AddDevice=/dev/dri\nGroupAdd=105\n",
+    )
+  })
+
+  it("hands a Podman without root your groups, when you are in the node's", () => {
+    const machine = host({
+      podman: "5.2.2",
+      dri: GROUP_ONLY,
+      groups: [1000, 105],
+    })
+    const result = machine.run()
+    expect(result.status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toContain(
+      "AddDevice=/dev/dri\nGroupAdd=keep-groups\n",
+    )
+    expect(note(result.stderr)).toBe(false)
+
+    const plain = host({
+      podman: "4.3.1",
+      dri: GROUP_ONLY,
+      groups: [1000, 105],
+    })
+    expect(plain.run().calls).toContain(
+      `podman ${runLine("--device /dev/dri", "--group-add keep-groups").slice("docker ".length)}`,
+    )
+  })
+
+  it("says how to join the group when you are not in it, and still passes the device", () => {
+    const machine = host({ podman: "5.2.2", dri: GROUP_ONLY, groups: [1000] })
+    const result = machine.run()
+    expect(result.status).toBe(0)
+    const unit = readFileSync(machine.unit, "utf8")
+    expect(unit).toContain("AddDevice=/dev/dri\n")
+    expect(unit).not.toContain("GroupAdd")
+    expect(note(result.stderr)).toBe(true)
+    expect(result.stderr).toContain("sudo usermod -aG render pat")
+    // It never runs sudo itself.
+    expect(result.calls.some((call) => call.startsWith("sudo"))).toBe(false)
+  })
+
+  it("adds no keep-groups without crun, which alone knows it", () => {
+    const machine = host({
+      podman: "5.2.2",
+      dri: GROUP_ONLY,
+      groups: [1000, 105],
+      ociRuntime: "runc",
+    })
+    const result = machine.run()
+    expect(result.status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).not.toContain("GroupAdd")
+    expect(result.stderr).toContain("crun runtime, not runc")
+  })
+
+  it("leaves GroupAdd out of the unit of a Podman older than 5.1, which would refuse it", () => {
+    const machine = host({
+      podman: "5.0.3",
+      dri: GROUP_ONLY,
+      groups: [1000, 105],
+    })
+    const result = machine.run()
+    expect(result.status).toBe(0)
+    const unit = readFileSync(machine.unit, "utf8")
+    expect(unit).toContain("AddDevice=/dev/dri\n")
+    expect(unit).not.toContain("GroupAdd")
+    expect(result.stderr).toContain("Podman 5.0.3 cannot add")
+  })
+
+  it("adds no group a rootless Docker cannot map, and says so", () => {
+    const result = host({
+      docker: "works",
+      dri: GROUP_ONLY,
+      dockerRootless: true,
+    }).run()
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(runLine("--device /dev/dri"))
+    expect(result.stderr).toContain("Docker without root")
+  })
+
+  it("never adds root's group", () => {
+    const result = host({
+      docker: "works",
+      dri: { mode: "crw-rw----", gid: 0, group: "root" },
+    }).run()
+    expect(result.calls).toContain(runLine("--device /dev/dri"))
+  })
+
+  it("leaves the card out with PCP_GPU=0, and remembers it", () => {
+    const machine = host({ docker: "works", dri: GROUP_ONLY })
+    const first = machine.run([], { PCP_GPU: "0" })
+    expect(first.status).toBe(0)
+    expect(first.calls).toContain(`docker ${RUN}`)
+    expect(readFileSync(machine.conf, "utf8")).toContain("PCP_GPU=0\n")
+
+    // The daily update has no PCP_GPU of its own: the remembered one holds.
+    expect(machine.run(["update"]).calls).toContain(`docker ${RUN}`)
+    // Until it is turned back on.
+    expect(machine.run([], { PCP_GPU: "1" }).calls).toContain(
+      runLine("--device /dev/dri", "--group-add 105"),
+    )
+  })
+
+  it("refuses a PCP_GPU it does not understand", () => {
+    const result = host({ docker: "works" }).run([], { PCP_GPU: "yes" })
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain("PCP_GPU must be 0 or 1")
+  })
+
+  it("passes it again when an update starts PCP from a new image", () => {
+    const machine = host({ docker: "works", dri: GROUP_ONLY })
+    expect(machine.run().status).toBe(0)
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(
+      runLine("--device /dev/dri", "--group-add 105"),
+    )
   })
 })

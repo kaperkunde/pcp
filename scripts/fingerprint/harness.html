@@ -1,0 +1,1408 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fingerprint harness</title>
+    <!--
+      PCP's fingerprint harness (kaperkunde/pcp#38): what a page can read about
+      the browser it runs in, as one JSON object, to compare PCP's browser with
+      a person's (scripts/fingerprint/diff.mjs). Self-contained: it loads
+      nothing and sends nothing; the JSON leaves only when you copy it.
+      It holds no addresses (WebRTC candidates are counted by kind) and no
+      device labels; it does hold the time zone, the locale, the GPU's name
+      and the fonts found. See README.md beside it.
+    -->
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fbfbfa;
+        --fg: #1d1d1b;
+        --muted: #6b6b66;
+        --line: #e2e1dc;
+        --card: #ffffff;
+        --flag: #b42318;
+        --flag-bg: #fdecea;
+        --ok: #1a7f37;
+        --accent: #2457c5;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #161615;
+          --fg: #ecebe6;
+          --muted: #a09f98;
+          --line: #33332f;
+          --card: #1e1e1c;
+          --flag: #ff8a80;
+          --flag-bg: #3a1d1b;
+          --ok: #6fdc8c;
+          --accent: #8ab4ff;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          15px/1.5 system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+      }
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 24px 16px 64px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0 0 4px;
+      }
+      h2 {
+        font-size: 16px;
+        margin: 28px 0 8px;
+      }
+      p {
+        margin: 4px 0;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin: 16px 0;
+      }
+      button,
+      input {
+        font: inherit;
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: var(--card);
+        color: var(--fg);
+      }
+      button {
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 6px 10px;
+        border-top: 1px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+      th {
+        width: 34%;
+        font-weight: 500;
+      }
+      tr.flag td,
+      tr.flag th {
+        background: var(--flag-bg);
+      }
+      .why {
+        color: var(--flag);
+        font-size: 13px;
+      }
+      pre {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        overflow: auto;
+        max-height: 480px;
+        font-size: 12px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      #status.done {
+        color: var(--ok);
+      }
+      #pad {
+        padding: 16px;
+        border: 1px dashed var(--line);
+        border-radius: 8px;
+        background: var(--card);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Fingerprint harness</h1>
+      <p class="muted">
+        What a page can read about this browser, for kaperkunde/pcp#38. Nothing
+        is sent anywhere.
+      </p>
+      <p id="status" role="status">Measuring…</p>
+
+      <div class="bar">
+        <label for="label">Which browser</label>
+        <input id="label" placeholder="pcp, claude-app, chrome…" size="22" />
+        <button id="copy" class="primary" type="button">Copy JSON</button>
+        <button id="again" type="button">Measure again</button>
+        <span id="copied" class="muted" role="status"></span>
+      </div>
+
+      <h2>Input</h2>
+      <div id="pad">
+        <p>
+          Move the pointer here, click the button and type a few words: the
+          JSON's <code>behaviour</code> records how the input looked (counts and
+          timings only, never what was typed).
+        </p>
+        <div class="bar">
+          <button id="target" type="button">Click me</button>
+          <input id="typing" placeholder="Type here" autocomplete="off" />
+        </div>
+      </div>
+
+      <h2>Summary</h2>
+      <p class="muted">
+        Rows marked in red look unlike a person's Chrome on its own. The diff
+        script ranks what differs between two browsers.
+      </p>
+      <table>
+        <tbody id="summary"></tbody>
+      </table>
+
+      <h2>JSON</h2>
+      <pre id="json">…</pre>
+    </main>
+
+    <script>
+      "use strict"
+
+      const HARNESS_VERSION = 1
+
+      /** The last measurement, shown and copied. */
+      let result = null
+
+      /** A short, stable hash of a string (cyrb53), as hex. */
+      function hash(text) {
+        let h1 = 0xdeadbeef
+        let h2 = 0x41c6ce57
+        for (let i = 0; i < text.length; i++) {
+          const ch = text.charCodeAt(i)
+          h1 = Math.imul(h1 ^ ch, 2654435761)
+          h2 = Math.imul(h2 ^ ch, 1597334677)
+        }
+        h1 =
+          Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^
+          Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+        h2 =
+          Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^
+          Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+        return (4294967296 * (2097151 & h2) + (h1 >>> 0))
+          .toString(16)
+          .padStart(14, "0")
+      }
+
+      /** Runs a probe; a probe that throws or hangs records why. */
+      async function probe(fn, ms = 3000) {
+        let timer
+        try {
+          return await Promise.race([
+            Promise.resolve().then(fn),
+            new Promise((resolve) => {
+              timer = setTimeout(() => resolve({ error: "timed out" }), ms)
+            }),
+          ])
+        } catch (error) {
+          return { error: String((error && error.message) || error) }
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+      // Started at once, before anything else runs: these watch the page's
+      // whole life.
+
+      /**
+       * A DevTools client with the Runtime domain on serializes what the page
+       * logs, reading an error's stack as it does: the getter fires. No page
+       * script reads it, so it fires only for a client (or open DevTools).
+       */
+      const runtimeEnable = { detected: false, checks: 0 }
+      function checkRuntimeEnable() {
+        const error = new Error("")
+        Object.defineProperty(error, "stack", {
+          configurable: false,
+          enumerable: false,
+          get() {
+            runtimeEnable.detected = true
+            return ""
+          },
+        })
+        runtimeEnable.checks++
+        console.debug(error)
+      }
+
+      /**
+       * Calls into the page's own functions from automation code carry its
+       * marks in their stack (Playwright's and Puppeteer's evaluation
+       * scripts). Patchright evaluates in a world of its own, which these
+       * wrappers do not see; a stock Playwright would show here.
+       */
+      const MARKS =
+        /playwright|puppeteer|pptr|__selenium|webdriver|UtilityScript|evaluation_script|injectedScript/i
+      const stackTraps = []
+      function trap(object, name, label) {
+        const original = object[name]
+        if (typeof original !== "function") return
+        object[name] = function (...args) {
+          const stack = new Error().stack || ""
+          if (MARKS.test(stack) && stackTraps.length < 10) {
+            stackTraps.push({
+              call: label,
+              mark: (stack.match(MARKS) || [""])[0],
+            })
+          }
+          return original.apply(this, args)
+        }
+      }
+      trap(Document.prototype, "querySelector", "document.querySelector")
+      trap(Document.prototype, "querySelectorAll", "document.querySelectorAll")
+      trap(Element.prototype, "getBoundingClientRect", "getBoundingClientRect")
+      trap(Element.prototype, "scrollIntoView", "scrollIntoView")
+
+      /** How input arrives: counts and timings, never the keys. */
+      const behaviour = {
+        pointerMoves: 0,
+        mouseMoves: 0,
+        untrustedEvents: 0,
+        movesWithMovement: 0,
+        pointerTypes: [],
+        keyDowns: 0,
+        keyIntervalsMs: [],
+        wheel: 0,
+        touches: 0,
+        clicks: [],
+        firstInputMs: null,
+      }
+      let lastKeyAt = null
+      let lastMoveAt = null
+      const startedAt = performance.now()
+      let refreshTimer = null
+      function noteInput(event) {
+        if (behaviour.firstInputMs === null) {
+          behaviour.firstInputMs = Math.round(performance.now() - startedAt)
+        }
+        if (!event.isTrusted) behaviour.untrustedEvents++
+        // The JSON on the page follows the input, for an assistant that
+        // reads it rather than copying it.
+        if (result && !refreshTimer) {
+          refreshTimer = setTimeout(() => {
+            refreshTimer = null
+            renderJson()
+          }, 250)
+        }
+      }
+      addEventListener(
+        "pointermove",
+        (event) => {
+          noteInput(event)
+          behaviour.pointerMoves++
+          if (!behaviour.pointerTypes.includes(event.pointerType)) {
+            behaviour.pointerTypes.push(event.pointerType)
+          }
+        },
+        { capture: true, passive: true },
+      )
+      addEventListener(
+        "mousemove",
+        (event) => {
+          noteInput(event)
+          behaviour.mouseMoves++
+          if (event.movementX || event.movementY) behaviour.movesWithMovement++
+          lastMoveAt = performance.now()
+        },
+        { capture: true, passive: true },
+      )
+      addEventListener(
+        "keydown",
+        (event) => {
+          noteInput(event)
+          behaviour.keyDowns++
+          const now = performance.now()
+          if (lastKeyAt !== null && behaviour.keyIntervalsMs.length < 50) {
+            behaviour.keyIntervalsMs.push(Math.round(now - lastKeyAt))
+          }
+          lastKeyAt = now
+        },
+        { capture: true, passive: true },
+      )
+      addEventListener(
+        "wheel",
+        (event) => {
+          noteInput(event)
+          behaviour.wheel++
+        },
+        { capture: true, passive: true },
+      )
+      addEventListener(
+        "touchstart",
+        (event) => {
+          noteInput(event)
+          behaviour.touches++
+        },
+        { capture: true, passive: true },
+      )
+      addEventListener(
+        "click",
+        (event) => {
+          noteInput(event)
+          if (behaviour.clicks.length >= 10) return
+          behaviour.clicks.push({
+            trusted: event.isTrusted,
+            pointerType: event.pointerType || null,
+            client: [event.clientX, event.clientY],
+            screen: [event.screenX, event.screenY],
+            // A mouse's screen position is the page's plus the window's
+            // place and its frame; equal to the page's, it came from no
+            // mouse.
+            screenMinusClient: [
+              event.screenX - event.clientX,
+              event.screenY - event.clientY,
+            ],
+            window: [screenX, screenY],
+            detail: event.detail,
+            moveBeforeMs:
+              lastMoveAt === null
+                ? null
+                : Math.round(performance.now() - lastMoveAt),
+          })
+        },
+        { capture: true, passive: true },
+      )
+
+      // The probes.
+
+      async function navigatorProbe() {
+        const n = navigator
+        const descriptor = Object.getOwnPropertyDescriptor(
+          Navigator.prototype,
+          "webdriver",
+        )
+        return {
+          userAgent: n.userAgent,
+          appVersion: n.appVersion,
+          platform: n.platform,
+          vendor: n.vendor,
+          productSub: n.productSub,
+          language: n.language,
+          languages: [...(n.languages || [])],
+          hardwareConcurrency: n.hardwareConcurrency,
+          deviceMemory: n.deviceMemory ?? null,
+          maxTouchPoints: n.maxTouchPoints,
+          cookieEnabled: n.cookieEnabled,
+          doNotTrack: n.doNotTrack,
+          pdfViewerEnabled: n.pdfViewerEnabled ?? null,
+          webdriver: n.webdriver,
+          webdriverGetterNative: descriptor
+            ? /\[native code\]/.test(
+                Function.prototype.toString.call(descriptor.get),
+              )
+            : null,
+          webdriverOwnProperty: Object.prototype.hasOwnProperty.call(
+            n,
+            "webdriver",
+          ),
+          plugins: [...(n.plugins || [])].map((plugin) => plugin.name),
+          mimeTypes: [...(n.mimeTypes || [])].map((mime) => mime.type),
+          connection: n.connection
+            ? {
+                effectiveType: n.connection.effectiveType,
+                rtt: n.connection.rtt,
+                downlink: n.connection.downlink,
+                saveData: n.connection.saveData,
+              }
+            : null,
+          globalPrivacyControl: n.globalPrivacyControl ?? null,
+        }
+      }
+
+      async function userAgentDataProbe() {
+        const data = navigator.userAgentData
+        if (!data) return null
+        const high = await data.getHighEntropyValues([
+          "architecture",
+          "bitness",
+          "brands",
+          "formFactors",
+          "fullVersionList",
+          "model",
+          "platformVersion",
+          "uaFullVersion",
+          "wow64",
+        ])
+        return {
+          brands: data.brands.map((b) => `${b.brand} ${b.version}`),
+          mobile: data.mobile,
+          platform: data.platform,
+          architecture: high.architecture,
+          bitness: high.bitness,
+          formFactors: high.formFactors ?? null,
+          fullVersionList: (high.fullVersionList || []).map(
+            (b) => `${b.brand} ${b.version}`,
+          ),
+          model: high.model,
+          platformVersion: high.platformVersion,
+          uaFullVersion: high.uaFullVersion,
+          wow64: high.wow64,
+        }
+      }
+
+      function screenProbe() {
+        const s = screen
+        return {
+          width: s.width,
+          height: s.height,
+          availWidth: s.availWidth,
+          availHeight: s.availHeight,
+          availLeft: s.availLeft ?? null,
+          availTop: s.availTop ?? null,
+          colorDepth: s.colorDepth,
+          pixelDepth: s.pixelDepth,
+          isExtended: s.isExtended ?? null,
+          orientation: s.orientation ? s.orientation.type : null,
+        }
+      }
+
+      function windowProbe() {
+        return {
+          outerWidth,
+          outerHeight,
+          innerWidth,
+          innerHeight,
+          // What the window's frame takes: 0 by 0 is a window that is
+          // exactly the page, which only a headless browser has.
+          frame: [outerWidth - innerWidth, outerHeight - innerHeight],
+          screenX,
+          screenY,
+          devicePixelRatio,
+          visibility: document.visibilityState,
+          hasFocus: document.hasFocus(),
+          historyLength: history.length,
+          isSecureContext,
+          crossOriginIsolated: self.crossOriginIsolated ?? null,
+          inIframe: window.top !== window,
+        }
+      }
+
+      function mediaQueryProbe() {
+        const queries = {
+          pointerFine: "(pointer: fine)",
+          pointerCoarse: "(pointer: coarse)",
+          anyPointerFine: "(any-pointer: fine)",
+          hover: "(hover: hover)",
+          anyHover: "(any-hover: hover)",
+          dark: "(prefers-color-scheme: dark)",
+          reducedMotion: "(prefers-reduced-motion: reduce)",
+          reducedTransparency: "(prefers-reduced-transparency: reduce)",
+          contrastMore: "(prefers-contrast: more)",
+          forcedColors: "(forced-colors: active)",
+          gamutP3: "(color-gamut: p3)",
+          dynamicRangeHigh: "(dynamic-range: high)",
+          monochrome: "(monochrome)",
+        }
+        const out = {}
+        for (const [name, query] of Object.entries(queries)) {
+          out[name] = matchMedia(query).matches
+        }
+        return out
+      }
+
+      function webglProbe() {
+        const canvas = document.createElement("canvas")
+        const gl =
+          canvas.getContext("webgl") || canvas.getContext("experimental-webgl")
+        if (!gl) return { supported: false }
+        const debug = gl.getExtension("WEBGL_debug_renderer_info")
+        const extensions = gl.getSupportedExtensions() || []
+        const params = [
+          "MAX_TEXTURE_SIZE",
+          "MAX_RENDERBUFFER_SIZE",
+          "MAX_VIEWPORT_DIMS",
+          "MAX_VERTEX_ATTRIBS",
+          "MAX_VERTEX_UNIFORM_VECTORS",
+          "MAX_FRAGMENT_UNIFORM_VECTORS",
+          "MAX_VARYING_VECTORS",
+          "ALIASED_LINE_WIDTH_RANGE",
+          "ALIASED_POINT_SIZE_RANGE",
+        ]
+        const values = {}
+        for (const name of params) {
+          const value = gl.getParameter(gl[name])
+          values[name] = value && typeof value === "object" ? [...value] : value
+        }
+        return {
+          supported: true,
+          vendor: gl.getParameter(gl.VENDOR),
+          renderer: gl.getParameter(gl.RENDERER),
+          unmaskedVendor: debug
+            ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL)
+            : null,
+          unmaskedRenderer: debug
+            ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL)
+            : null,
+          version: gl.getParameter(gl.VERSION),
+          shadingLanguage: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+          extensionCount: extensions.length,
+          extensionsHash: hash(extensions.join(",")),
+          parametersHash: hash(JSON.stringify(values)),
+          parameters: values,
+          webgl2: !!document.createElement("canvas").getContext("webgl2"),
+        }
+      }
+
+      async function webgpuProbe() {
+        if (!navigator.gpu) return { supported: false }
+        const adapter = await navigator.gpu.requestAdapter()
+        if (!adapter) return { supported: true, adapter: null }
+        const info = adapter.info || {}
+        return {
+          supported: true,
+          adapter: {
+            vendor: info.vendor ?? null,
+            architecture: info.architecture ?? null,
+            description: info.description ?? null,
+            isFallbackAdapter: adapter.isFallbackAdapter ?? null,
+          },
+        }
+      }
+
+      function canvasProbe() {
+        const draw = () => {
+          const canvas = document.createElement("canvas")
+          canvas.width = 280
+          canvas.height = 60
+          const ctx = canvas.getContext("2d")
+          ctx.textBaseline = "top"
+          ctx.font = "16px 'Arial'"
+          ctx.fillStyle = "#f60"
+          ctx.fillRect(100, 1, 62, 20)
+          ctx.fillStyle = "#069"
+          ctx.fillText("Cwm fjordbank glyphs vext quiz, \u{1F603}", 2, 15)
+          ctx.fillStyle = "rgba(102, 204, 0, 0.7)"
+          ctx.font = "18px 'Times New Roman'"
+          ctx.fillText("Cwm fjordbank glyphs vext quiz, \u{1F603}", 4, 35)
+          ctx.globalCompositeOperation = "multiply"
+          const gradient = ctx.createLinearGradient(0, 0, 280, 0)
+          gradient.addColorStop(0, "#f0f")
+          gradient.addColorStop(1, "#0ff")
+          ctx.fillStyle = gradient
+          ctx.beginPath()
+          ctx.arc(240, 30, 22, 0, Math.PI * 2)
+          ctx.fill()
+          return canvas.toDataURL()
+        }
+        const first = draw()
+        const second = draw()
+        const metrics = document
+          .createElement("canvas")
+          .getContext("2d")
+          .measureText("Cwm fjordbank glyphs vext quiz")
+        return {
+          hash: hash(first),
+          // A canvas that comes out different each time is noise added to
+          // hide it, itself a mark.
+          stable: first === second,
+          textWidth: metrics.width,
+        }
+      }
+
+      async function audioProbe() {
+        const Offline =
+          window.OfflineAudioContext || window.webkitOfflineAudioContext
+        if (!Offline) return { supported: false }
+        const context = new Offline(1, 5000, 44100)
+        const oscillator = context.createOscillator()
+        oscillator.type = "triangle"
+        oscillator.frequency.value = 10000
+        const compressor = context.createDynamicsCompressor()
+        compressor.threshold.value = -50
+        compressor.knee.value = 40
+        compressor.ratio.value = 12
+        compressor.attack.value = 0
+        compressor.release.value = 0.25
+        oscillator.connect(compressor)
+        compressor.connect(context.destination)
+        oscillator.start(0)
+        const buffer = await context.startRendering()
+        const samples = buffer.getChannelData(0)
+        let sum = 0
+        for (let i = 4500; i < 5000; i++) sum += Math.abs(samples[i])
+        let live = null
+        try {
+          const Live = window.AudioContext || window.webkitAudioContext
+          const ctx = new Live()
+          live = {
+            sampleRate: ctx.sampleRate,
+            baseLatency: ctx.baseLatency ?? null,
+            outputLatency: ctx.outputLatency ?? null,
+            maxChannelCount: ctx.destination.maxChannelCount,
+            state: ctx.state,
+          }
+          ctx.close()
+        } catch (error) {
+          live = { error: String(error) }
+        }
+        return {
+          supported: true,
+          sum: sum.toFixed(9),
+          hash: hash(sum.toString()),
+          live,
+        }
+      }
+
+      const FONTS = [
+        "Arial",
+        "Arial Black",
+        "Arial Narrow",
+        "Calibri",
+        "Cambria",
+        "Candara",
+        "Comic Sans MS",
+        "Consolas",
+        "Constantia",
+        "Corbel",
+        "Courier New",
+        "Franklin Gothic Medium",
+        "Georgia",
+        "Impact",
+        "Lucida Console",
+        "Lucida Sans Unicode",
+        "Palatino Linotype",
+        "Segoe UI",
+        "Segoe UI Emoji",
+        "Tahoma",
+        "Times New Roman",
+        "Trebuchet MS",
+        "Verdana",
+        "Helvetica",
+        "Helvetica Neue",
+        "Menlo",
+        "Monaco",
+        "Geneva",
+        "Avenir",
+        "Avenir Next",
+        "Futura",
+        "Gill Sans",
+        "Optima",
+        "Apple Color Emoji",
+        "PingFang SC",
+        "Noto Color Emoji",
+        "Noto Sans",
+        "DejaVu Sans",
+        "DejaVu Serif",
+        "DejaVu Sans Mono",
+        "Liberation Sans",
+        "Liberation Serif",
+        "Ubuntu",
+        "Cantarell",
+        "Roboto",
+        "Droid Sans",
+      ]
+
+      /** A font is there when text in it measures unlike every fallback. */
+      function fontsProbe() {
+        const ctx = document.createElement("canvas").getContext("2d")
+        const sample = "mmmmmmmmmmlliWW@#&%0123456789"
+        const bases = ["monospace", "sans-serif", "serif"]
+        const measure = (family) => {
+          ctx.font = `72px ${family}`
+          const m = ctx.measureText(sample)
+          return `${m.width}/${m.actualBoundingBoxAscent}/${m.actualBoundingBoxDescent}`
+        }
+        const base = Object.fromEntries(bases.map((b) => [b, measure(b)]))
+        const present = FONTS.filter((font) =>
+          bases.some((b) => measure(`"${font}", ${b}`) !== base[b]),
+        )
+        return {
+          checked: FONTS.length,
+          found: present.length,
+          present,
+        }
+      }
+
+      function codecsProbe() {
+        const types = {
+          h264: 'video/mp4; codecs="avc1.42E01E"',
+          h265: 'video/mp4; codecs="hvc1.1.6.L93.B0"',
+          vp8: 'video/webm; codecs="vp8"',
+          vp9: 'video/webm; codecs="vp09.00.10.08"',
+          av1: 'video/mp4; codecs="av01.0.05M.08"',
+          theora: 'video/ogg; codecs="theora"',
+          aac: 'audio/mp4; codecs="mp4a.40.2"',
+          mp3: "audio/mpeg",
+          opus: 'audio/webm; codecs="opus"',
+          vorbis: 'audio/ogg; codecs="vorbis"',
+          flac: "audio/flac",
+          wav: 'audio/wav; codecs="1"',
+        }
+        const video = document.createElement("video")
+        const canPlay = {}
+        const mediaSource = {}
+        for (const [name, type] of Object.entries(types)) {
+          canPlay[name] = video.canPlayType(type) || "no"
+          mediaSource[name] = window.MediaSource
+            ? MediaSource.isTypeSupported(type)
+            : null
+        }
+        return {
+          canPlay,
+          mediaSource,
+          encryptedMedia: typeof navigator.requestMediaKeySystemAccess,
+        }
+      }
+
+      function intlProbe() {
+        const resolved = Intl.DateTimeFormat().resolvedOptions()
+        const date = new Date(2024, 0, 15, 12, 0, 0)
+        return {
+          timeZone: resolved.timeZone,
+          locale: resolved.locale,
+          calendar: resolved.calendar,
+          numberingSystem: resolved.numberingSystem,
+          offsetMinutesJanuary: date.getTimezoneOffset(),
+          offsetMinutesJuly: new Date(2024, 6, 15).getTimezoneOffset(),
+          dateString: date.toString().replace(/^.*?GMT/, "GMT"),
+          numberFormat: new Intl.NumberFormat().format(1234567.891),
+          collatorLocale: new Intl.Collator().resolvedOptions().locale,
+        }
+      }
+
+      async function permissionsProbe() {
+        const names = [
+          "notifications",
+          "geolocation",
+          "camera",
+          "microphone",
+          "midi",
+          "clipboard-read",
+          "clipboard-write",
+          "persistent-storage",
+          "background-sync",
+          "accelerometer",
+          "local-fonts",
+          "window-management",
+        ]
+        const states = {}
+        for (const name of names) {
+          try {
+            states[name] = (await navigator.permissions.query({ name })).state
+          } catch {
+            states[name] = "unsupported"
+          }
+        }
+        const notification =
+          typeof Notification === "undefined" ? null : Notification.permission
+        return {
+          notificationPermission: notification,
+          query: states,
+          // Headless Chrome answered "denied" for one and "prompt" for the
+          // other; a person's Chrome answers "default" with "prompt".
+          notificationsConsistent:
+            notification === null ||
+            (notification === "default" && states.notifications === "prompt") ||
+            notification === states.notifications,
+        }
+      }
+
+      async function mediaDevicesProbe() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices)
+          return { supported: false }
+        const devices = await navigator.mediaDevices.enumerateDevices()
+        const counts = { audioinput: 0, audiooutput: 0, videoinput: 0 }
+        for (const device of devices) {
+          counts[device.kind] = (counts[device.kind] || 0) + 1
+        }
+        return { supported: true, ...counts, total: devices.length }
+      }
+
+      async function speechProbe() {
+        if (!window.speechSynthesis) return { supported: false }
+        let voices = speechSynthesis.getVoices()
+        if (voices.length === 0) {
+          await new Promise((resolve) => {
+            speechSynthesis.addEventListener("voiceschanged", resolve, {
+              once: true,
+            })
+            setTimeout(resolve, 1500)
+          })
+          voices = speechSynthesis.getVoices()
+        }
+        const names = voices.map((voice) => `${voice.name} (${voice.lang})`)
+        return {
+          supported: true,
+          count: voices.length,
+          local: voices.filter((voice) => voice.localService).length,
+          default: (voices.find((voice) => voice.default) || {}).name || null,
+          firstNames: names.slice(0, 8),
+          namesHash: hash(names.join("|")),
+        }
+      }
+
+      function chromeProbe() {
+        const chrome = window.chrome
+        if (!chrome) return { present: false }
+        return {
+          present: true,
+          keys: Object.keys(chrome).sort(),
+          runtime: typeof chrome.runtime,
+          app: typeof chrome.app,
+          csi: typeof chrome.csi,
+          loadTimes: typeof chrome.loadTimes,
+        }
+      }
+
+      function automationProbe() {
+        const suspicious =
+          /^(__playwright|__pw|_pw|cdc_|\$cdc_|\$wdc_|__webdriver|__selenium|__driver|__fxdriver|_selenium|_Selenium|callPhantom|_phantom|__nightmare|domAutomation|__puppeteer|__lastWatirAlert|__stagehand|__browserbase)/
+        const globals = Object.getOwnPropertyNames(window).filter((name) =>
+          suspicious.test(name),
+        )
+        const documentKeys = Object.getOwnPropertyNames(document).filter(
+          (name) => suspicious.test(name),
+        )
+        const html = document.documentElement
+        const attributes = ["webdriver", "selenium", "driver"].filter((name) =>
+          html.hasAttribute(name),
+        )
+        // A function a stealth script replaced no longer prints as native.
+        const natives = {
+          "permissions.query": navigator.permissions?.query,
+          "Function.prototype.toString": Function.prototype.toString,
+          "HTMLCanvasElement.toDataURL": HTMLCanvasElement.prototype.toDataURL,
+          "WebGLRenderingContext.getParameter":
+            WebGLRenderingContext.prototype.getParameter,
+          "Navigator.languages getter": Object.getOwnPropertyDescriptor(
+            Navigator.prototype,
+            "languages",
+          )?.get,
+          "Navigator.plugins getter": Object.getOwnPropertyDescriptor(
+            Navigator.prototype,
+            "plugins",
+          )?.get,
+          "Date.prototype.getTimezoneOffset": Date.prototype.getTimezoneOffset,
+        }
+        const notNative = Object.entries(natives)
+          .filter(
+            ([, fn]) =>
+              typeof fn === "function" &&
+              !/\{\s*\[native code\]\s*\}\s*$/.test(
+                Function.prototype.toString.call(fn),
+              ),
+          )
+          .map(([name]) => name)
+        return {
+          globals,
+          documentKeys,
+          htmlAttributes: attributes,
+          notNative,
+          runtimeEnableDetected: runtimeEnable.detected,
+          runtimeEnableChecks: runtimeEnable.checks,
+          stackTraps,
+          errorStackStyle: (() => {
+            const stack = new Error("x").stack || ""
+            return stack.split("\n")[1]?.trim().slice(0, 3) || null
+          })(),
+        }
+      }
+
+      async function apisProbe() {
+        let battery = null
+        if (navigator.getBattery) {
+          try {
+            const b = await navigator.getBattery()
+            battery = {
+              charging: b.charging,
+              level: b.level,
+              chargingTime: b.chargingTime,
+              dischargingTime: b.dischargingTime,
+            }
+          } catch (error) {
+            battery = { error: String(error) }
+          }
+        }
+        const has = (name, where = window) => name in where
+        return {
+          Notification: typeof Notification !== "undefined",
+          battery,
+          getBattery: has("getBattery", navigator),
+          bluetooth: has("bluetooth", navigator),
+          usb: has("usb", navigator),
+          serial: has("serial", navigator),
+          hid: has("hid", navigator),
+          share: has("share", navigator),
+          contacts: has("contacts", navigator),
+          keyboard: has("keyboard", navigator),
+          wakeLock: has("wakeLock", navigator),
+          xr: has("xr", navigator),
+          presentation: has("presentation", navigator),
+          credentials: has("credentials", navigator),
+          serviceWorker: has("serviceWorker", navigator),
+          sharedStorage: has("sharedStorage"),
+          documentPictureInPicture: has("documentPictureInPicture"),
+          showOpenFilePicker: has("showOpenFilePicker"),
+          eyeDropper: has("EyeDropper"),
+          paymentRequest: has("PaymentRequest"),
+          speechRecognition: has("webkitSpeechRecognition"),
+        }
+      }
+
+      async function storageProbe() {
+        const estimate = navigator.storage?.estimate
+          ? await navigator.storage.estimate()
+          : null
+        let localStorageWorks = false
+        try {
+          localStorage.setItem("fp", "1")
+          localStorage.removeItem("fp")
+          localStorageWorks = true
+        } catch {}
+        return {
+          // An in-memory profile (incognito, or a browser that keeps none)
+          // is offered far less than a disk's share.
+          quotaMB: estimate ? Math.round(estimate.quota / 1048576) : null,
+          persisted: navigator.storage?.persisted
+            ? await navigator.storage.persisted()
+            : null,
+          localStorage: localStorageWorks,
+          indexedDB: typeof indexedDB !== "undefined",
+        }
+      }
+
+      /** WebRTC's own candidates, by kind only: no address leaves the page. */
+      async function webrtcProbe() {
+        if (typeof RTCPeerConnection === "undefined")
+          return { supported: false }
+        const connection = new RTCPeerConnection({ iceServers: [] })
+        const kinds = { host: 0, srflx: 0, relay: 0, prflx: 0 }
+        const addresses = { mdns: 0, ipv4: 0, ipv6: 0 }
+        connection.createDataChannel("fp")
+        const done = new Promise((resolve) => {
+          connection.onicecandidate = (event) => {
+            if (!event.candidate) return resolve()
+            const parts = event.candidate.candidate.split(" ")
+            const address = parts[4] || ""
+            const type = parts[7] || "?"
+            kinds[type] = (kinds[type] || 0) + 1
+            if (address.endsWith(".local")) addresses.mdns++
+            else if (address.includes(":")) addresses.ipv6++
+            else if (address) addresses.ipv4++
+          }
+          setTimeout(resolve, 2000)
+        })
+        await connection.setLocalDescription(await connection.createOffer())
+        await done
+        connection.close()
+        return { supported: true, candidates: kinds, addresses }
+      }
+
+      /** Rows a person's Chrome would not show, with why. */
+      function flagsOf(r) {
+        const flags = []
+        const flag = (path, why) => flags.push({ path, why })
+        const nav = r.navigator || {}
+        const win = r.window || {}
+        const scr = r.screen || {}
+        if (nav.webdriver) flag("navigator.webdriver", "webdriver is true")
+        if (/Headless/i.test(nav.userAgent || ""))
+          flag("navigator.userAgent", "says Headless")
+        if (nav.plugins && nav.plugins.length === 0)
+          flag("navigator.plugins", "no plugins (Chrome lists 5 PDF viewers)")
+        if (nav.languages && nav.languages.length === 0)
+          flag("navigator.languages", "no languages")
+        const ua = r.userAgentData
+        if (ua && !ua.error) {
+          if (ua.brands.some((b) => /Headless/i.test(b)))
+            flag("userAgentData.brands", "a Headless brand")
+          if (
+            !ua.brands.some((b) =>
+              /Google Chrome|Microsoft Edge|Brave|Opera/.test(b),
+            )
+          )
+            flag("userAgentData.brands", "Chromium alone, no browser brand")
+          if (ua.platformVersion === "")
+            flag(
+              "userAgentData.platformVersion",
+              "blank (a replaced user agent's client hints)",
+            )
+          const major = (nav.userAgent || "").match(/Chrome\/(\d+)/)?.[1]
+          if (major && !ua.brands.some((b) => b.endsWith(` ${major}`)))
+            flag("userAgentData.brands", "brands disagree with the user agent")
+        }
+        if (win.frame && win.frame[0] === 0 && win.frame[1] === 0)
+          flag("window.frame", "the window is exactly the page")
+        if (
+          typeof win.screenX === "number" &&
+          (win.screenX < -50 ||
+            win.screenX > scr.width ||
+            win.screenY < -50 ||
+            win.screenY > scr.height)
+        )
+          flag("window.screenX", "the window is off the screen it reports")
+        if (scr.availHeight === scr.height && scr.availWidth === scr.width)
+          flag("screen.availHeight", "no taskbar or menu bar")
+        if (win.visibility !== "visible")
+          flag("window.visibility", `the page is ${win.visibility}`)
+        const gl = r.webgl || {}
+        if (
+          /SwiftShader|llvmpipe|Software/i.test(
+            gl.unmaskedRenderer || gl.renderer || "",
+          )
+        )
+          flag("webgl.unmaskedRenderer", "software rendering")
+        if (gl.supported === false) flag("webgl.supported", "no WebGL")
+        if (r.canvas && r.canvas.stable === false)
+          flag("canvas.stable", "noise added to the canvas")
+        const perms = r.permissions || {}
+        if (perms.notificationsConsistent === false)
+          flag(
+            "permissions.notificationsConsistent",
+            "Notification.permission disagrees with permissions.query",
+          )
+        const codecs = r.codecs || {}
+        if (codecs.canPlay && codecs.canPlay.h264 === "no")
+          flag("codecs.canPlay.h264", "no H.264 (a Chromium build, not Chrome)")
+        if (codecs.canPlay && codecs.canPlay.aac === "no")
+          flag("codecs.canPlay.aac", "no AAC (a Chromium build, not Chrome)")
+        const media = r.mediaDevices || {}
+        if (media.supported && media.total === 0)
+          flag("mediaDevices.total", "no media devices at all")
+        const speech = r.speech || {}
+        if (speech.supported && speech.count === 0)
+          flag("speech.count", "no speech voices")
+        const chrome = r.chrome || {}
+        if (chrome.present === false) flag("chrome.present", "no window.chrome")
+        else if (chrome.app === "undefined")
+          flag("chrome.app", "window.chrome has no app")
+        const auto = r.automation || {}
+        if (auto.globals && auto.globals.length)
+          flag(
+            "automation.globals",
+            `automation globals: ${auto.globals.join(", ")}`,
+          )
+        if (auto.runtimeEnableDetected)
+          flag(
+            "automation.runtimeEnableDetected",
+            "a DevTools client reads what the page logs (Runtime.enable)",
+          )
+        if (auto.stackTraps && auto.stackTraps.length)
+          flag(
+            "automation.stackTraps",
+            "automation code called the page's functions",
+          )
+        if (auto.notNative && auto.notNative.length)
+          flag("automation.notNative", `patched: ${auto.notNative.join(", ")}`)
+        const storage = r.storage || {}
+        if (storage.quotaMB !== null && storage.quotaMB < 1024)
+          flag("storage.quotaMB", "a small quota (a profile kept in memory)")
+        const media2 = r.media || {}
+        if (media2.hover === false && media2.pointerFine === false)
+          flag("media.hover", "no mouse (headless reports a touch screen)")
+        const intl = r.intl || {}
+        if (intl.timeZone === "UTC" || intl.timeZone === "Etc/UTC")
+          flag("intl.timeZone", "UTC, as a server is")
+        const input = r.behaviour || { clicks: [] }
+        const frame = (r.window && r.window.frame) || [0, 0]
+        if (
+          input.clicks.some(
+            (click) =>
+              click.screenMinusClient[0] === 0 &&
+              click.screenMinusClient[1] === 0 &&
+              (frame[1] > 0 || click.window[0] !== 0 || click.window[1] !== 0),
+          )
+        )
+          flag(
+            "behaviour.clicks",
+            "a click whose screen position is the page's: no window frame or place in it",
+          )
+        if (input.clicks.length > 0 && input.mouseMoves <= input.clicks.length)
+          flag(
+            "behaviour.mouseMoves",
+            "the pointer jumped to each click without moving there",
+          )
+        if (input.untrustedEvents > 0)
+          flag("behaviour.untrustedEvents", "input made by a script")
+        return flags
+      }
+
+      // Running, showing and copying.
+
+      async function measure() {
+        const status = document.getElementById("status")
+        status.textContent = "Measuring…"
+        status.className = ""
+        document.title = "Fingerprint: measuring"
+        const begin = performance.now()
+
+        for (let i = 0; i < 3; i++) {
+          checkRuntimeEnable()
+          await sleep(50)
+        }
+
+        const r = {
+          meta: {
+            harness: HARNESS_VERSION,
+            label: document.getElementById("label").value.trim() || null,
+            page: location.origin + location.pathname,
+            takenAt: new Date().toISOString(),
+          },
+        }
+        r.navigator = await probe(navigatorProbe)
+        r.userAgentData = await probe(userAgentDataProbe)
+        r.screen = await probe(screenProbe)
+        r.window = await probe(windowProbe)
+        r.media = await probe(mediaQueryProbe)
+        r.webgl = await probe(webglProbe)
+        r.webgpu = await probe(webgpuProbe)
+        r.canvas = await probe(canvasProbe)
+        r.audio = await probe(audioProbe)
+        r.fonts = await probe(fontsProbe)
+        r.codecs = await probe(codecsProbe)
+        r.intl = await probe(intlProbe)
+        r.permissions = await probe(permissionsProbe)
+        r.mediaDevices = await probe(mediaDevicesProbe)
+        r.speech = await probe(speechProbe)
+        r.chrome = await probe(chromeProbe)
+        r.apis = await probe(apisProbe)
+        r.storage = await probe(storageProbe)
+        r.webrtc = await probe(webrtcProbe)
+        checkRuntimeEnable()
+        await sleep(50)
+        r.automation = await probe(automationProbe)
+        r.behaviour = behaviour
+        r.flags = flagsOf(r)
+        r.meta.tookMs = Math.round(performance.now() - begin)
+
+        result = r
+        show(r)
+        status.textContent = `Done: ${r.flags.length} ${r.flags.length === 1 ? "row" : "rows"} marked. Copy the JSON below.`
+        status.className = "done"
+        document.title = "Fingerprint: done"
+      }
+
+      function text(value) {
+        if (value === null || value === undefined) return "—"
+        if (Array.isArray(value))
+          return value.length ? value.join(", ") : "none"
+        if (typeof value === "object") return JSON.stringify(value)
+        return String(value)
+      }
+
+      function show(r) {
+        const rows = [
+          ["User agent", "navigator.userAgent", r.navigator.userAgent],
+          ["Brands", "userAgentData.brands", r.userAgentData?.brands],
+          [
+            "Full versions",
+            "userAgentData.fullVersionList",
+            r.userAgentData?.fullVersionList,
+          ],
+          [
+            "Platform",
+            "userAgentData.platform",
+            `${r.userAgentData?.platform} ${r.userAgentData?.platformVersion}`,
+          ],
+          ["webdriver", "navigator.webdriver", r.navigator.webdriver],
+          ["Languages", "navigator.languages", r.navigator.languages],
+          [
+            "Cores, memory",
+            "navigator.hardwareConcurrency",
+            `${r.navigator.hardwareConcurrency} cores, ${r.navigator.deviceMemory} GB`,
+          ],
+          ["Plugins", "navigator.plugins", r.navigator.plugins?.length],
+          [
+            "Screen",
+            "screen.availHeight",
+            `${r.screen.width}×${r.screen.height}, available ${r.screen.availWidth}×${r.screen.availHeight}, depth ${r.screen.colorDepth}`,
+          ],
+          [
+            "Window",
+            "window.frame",
+            `outer ${r.window.outerWidth}×${r.window.outerHeight}, inner ${r.window.innerWidth}×${r.window.innerHeight}, at ${r.window.screenX},${r.window.screenY}, ratio ${r.window.devicePixelRatio}`,
+          ],
+          [
+            "Window place",
+            "window.screenX",
+            `${r.window.screenX},${r.window.screenY}`,
+          ],
+          [
+            "Visibility",
+            "window.visibility",
+            `${r.window.visibility}, focus ${r.window.hasFocus}`,
+          ],
+          [
+            "Pointer",
+            "media.hover",
+            `fine ${r.media.pointerFine}, hover ${r.media.hover}`,
+          ],
+          [
+            "WebGL",
+            "webgl.unmaskedRenderer",
+            `${r.webgl.unmaskedVendor} / ${r.webgl.unmaskedRenderer}`,
+          ],
+          ["WebGL works", "webgl.supported", r.webgl.supported],
+          [
+            "WebGPU",
+            "webgpu",
+            r.webgpu.adapter
+              ? `${r.webgpu.adapter.vendor} ${r.webgpu.adapter.architecture}`
+              : r.webgpu.supported,
+          ],
+          [
+            "Canvas",
+            "canvas.stable",
+            `${r.canvas.hash}${r.canvas.stable === false ? " (changes each time)" : ""}`,
+          ],
+          ["Audio", "audio", r.audio.sum],
+          [
+            "Fonts",
+            "fonts",
+            `${r.fonts.found} of ${r.fonts.checked}: ${text(r.fonts.present)}`,
+          ],
+          ["H.264", "codecs.canPlay.h264", r.codecs.canPlay?.h264],
+          ["AAC", "codecs.canPlay.aac", r.codecs.canPlay?.aac],
+          [
+            "Time zone, locale",
+            "intl.timeZone",
+            `${r.intl.timeZone}, ${r.intl.locale}`,
+          ],
+          [
+            "Notifications",
+            "permissions.notificationsConsistent",
+            `${r.permissions.notificationPermission} / ${r.permissions.query?.notifications}`,
+          ],
+          [
+            "Media devices",
+            "mediaDevices.total",
+            r.mediaDevices.supported
+              ? `${r.mediaDevices.audioinput} in, ${r.mediaDevices.audiooutput} out, ${r.mediaDevices.videoinput} cameras`
+              : "none",
+          ],
+          ["Speech voices", "speech.count", r.speech.count],
+          [
+            "window.chrome",
+            "chrome.present",
+            r.chrome.present ? text(r.chrome.keys) : "missing",
+          ],
+          ["window.chrome.app", "chrome.app", r.chrome.app],
+          ["Automation globals", "automation.globals", r.automation.globals],
+          [
+            "Runtime.enable seen",
+            "automation.runtimeEnableDetected",
+            r.automation.runtimeEnableDetected,
+          ],
+          [
+            "Automation in stacks",
+            "automation.stackTraps",
+            r.automation.stackTraps?.length,
+          ],
+          ["Patched functions", "automation.notNative", r.automation.notNative],
+          ["Storage quota", "storage.quotaMB", `${r.storage.quotaMB} MB`],
+          [
+            "WebRTC",
+            "webrtc",
+            r.webrtc.supported ? text(r.webrtc.candidates) : "none",
+          ],
+          ["Battery", "apis.battery", r.apis.battery],
+          [
+            "Input",
+            "behaviour.clicks",
+            `${r.behaviour.mouseMoves} moves, ${r.behaviour.clicks.length} clicks, ${r.behaviour.keyDowns} keys`,
+          ],
+          ["Pointer path", "behaviour.mouseMoves", r.behaviour.mouseMoves],
+        ]
+        const flagged = new Map()
+        for (const f of r.flags) {
+          flagged.set(f.path, [...(flagged.get(f.path) || []), f.why])
+        }
+        const body = document.getElementById("summary")
+        body.replaceChildren()
+        for (const [name, path, value] of rows) {
+          const tr = document.createElement("tr")
+          const th = document.createElement("th")
+          th.textContent = name
+          const td = document.createElement("td")
+          td.textContent = text(value)
+          const whys = flagged.get(path)
+          if (whys) {
+            tr.className = "flag"
+            for (const why of whys) {
+              const note = document.createElement("div")
+              note.className = "why"
+              note.textContent = why
+              td.append(note)
+            }
+          }
+          tr.append(th, td)
+          body.append(tr)
+        }
+        document.getElementById("json").textContent = JSON.stringify(r, null, 2)
+      }
+
+      /** The JSON as it stands: the label and the input so far. */
+      function renderJson() {
+        if (!result) return ""
+        result.behaviour = behaviour
+        result.meta.label =
+          document.getElementById("label").value.trim() || null
+        result.flags = flagsOf(result)
+        show(result)
+        return JSON.stringify(result, null, 2)
+      }
+
+      async function copy() {
+        if (!result) return
+        const json = renderJson()
+        const said = document.getElementById("copied")
+        try {
+          await navigator.clipboard.writeText(json)
+          said.textContent = "Copied."
+        } catch {
+          const area = document.createElement("textarea")
+          area.value = json
+          document.body.append(area)
+          area.select()
+          const ok = document.execCommand("copy")
+          area.remove()
+          said.textContent = ok
+            ? "Copied."
+            : "Could not copy: select the JSON below and copy it."
+        }
+      }
+
+      const params = new URLSearchParams(location.search)
+      if (params.get("label")) {
+        document.getElementById("label").value = params.get("label")
+      }
+      document.getElementById("copy").addEventListener("click", copy)
+      document.getElementById("again").addEventListener("click", measure)
+      document.getElementById("label").addEventListener("change", renderJson)
+      measure()
+    </script>
+  </body>
+</html>

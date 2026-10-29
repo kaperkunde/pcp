@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
+import { afterAnswerScope } from "../after-answer"
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
@@ -21,8 +22,9 @@ import {
 } from "../tool-results"
 import { callServerTool, syncServerTools } from "../upstream"
 import { setupVault } from "../vault"
-import { createMailAccount, updateMailAccount } from "./accounts"
+import { callMailTool, createMailAccount, updateMailAccount } from "./accounts"
 import { createFakeJmap, type FakeJmap } from "./fake-jmap"
+import type { ImapClientLike, ImapDeps } from "./imap"
 
 // Mail accounts end to end in the core: created by the owner, read and
 // called through upstream.ts like any server, against an in-memory JMAP
@@ -264,6 +266,156 @@ describe("adding an account", () => {
     expect(
       await db().secret.findUnique({ where: { id: "managed" } }),
     ).toBeNull()
+  })
+})
+
+describe("an IMAP account's copy in Sent", () => {
+  async function imapAccount(
+    overrides: Partial<Parameters<typeof createMailAccount>[1]> = {},
+  ) {
+    return account({
+      protocol: "imap",
+      url: "imaps://mail.example.com",
+      smtpUrl: "smtps://mail.example.com",
+      ...overrides,
+    })
+  }
+
+  const IMAP_INPUT = {
+    name: "Mail",
+    url: "imaps://mail.example.com",
+    smtpUrl: "smtps://mail.example.com",
+    readOnly: false,
+    authType: "basic" as const,
+    authUsername: "ada@example.com",
+  }
+
+  it("is the owner's choice, automatic unless they say otherwise", async () => {
+    const plain = await imapAccount()
+    expect(await getServer(ctx, plain)).toMatchObject({
+      mailSaveSent: "auto",
+      mailServerFilesSent: null,
+    })
+
+    const never = await imapAccount({ mailSaveSent: "never" })
+    expect((await getServer(ctx, never)).mailSaveSent).toBe("never")
+
+    await expect(imapAccount({ mailSaveSent: "sometimes" })).rejects.toThrow(
+      /copy in Sent/,
+    )
+
+    // A JMAP server files its own: nothing is kept for one.
+    const jmap = await account({ mailSaveSent: "never" })
+    expect((await getServer(ctx, jmap)).mailSaveSent).toBe("auto")
+  })
+
+  it("keeps what PCP learned until the server or login changes", async () => {
+    const id = await imapAccount({ mailSaveSent: "always" })
+    await db().mcpServer.update({
+      where: { id },
+      data: { mailServerFilesSent: true },
+    })
+
+    // Left out of a change, the choice stays; a new name forgets nothing.
+    expect(
+      await updateMailAccount(ctx, id, {
+        ...IMAP_INPUT,
+        name: "Gmail",
+        authSecretId: secretId,
+      }),
+    ).toEqual({ reconnect: false })
+    expect(await getServer(ctx, id)).toMatchObject({
+      name: "Gmail",
+      mailSaveSent: "always",
+      mailServerFilesSent: true,
+    })
+
+    await updateMailAccount(ctx, id, {
+      ...IMAP_INPUT,
+      smtpUrl: "smtps://smtp.example.com",
+      authSecretId: secretId,
+      mailSaveSent: "auto",
+    })
+    expect(await getServer(ctx, id)).toMatchObject({
+      mailSaveSent: "auto",
+      mailServerFilesSent: null,
+    })
+  })
+
+  it("looks once the call has answered, and keeps what it found out", async () => {
+    const id = await imapAccount()
+    const appended: string[] = []
+    const client = {
+      secureConnection: true,
+      capabilities: new Map([["IMAP4rev1", true]]),
+      mailbox: { path: "Sent", uidValidity: 8n, exists: 0 },
+      async logout() {},
+      close() {},
+      async noop() {},
+      async list() {
+        return [
+          {
+            path: "Sent",
+            name: "Sent",
+            delimiter: "/",
+            parentPath: "",
+            flags: new Set<string>(),
+            specialUse: "\\Sent",
+          },
+        ]
+      },
+      async getMailboxLock(path: string) {
+        return { path, release() {} }
+      },
+      async fetchAll() {
+        return []
+      },
+      async append(path: string) {
+        appended.push(path)
+        return { uid: 1, uidValidity: 8n }
+      },
+    }
+    const imap: ImapDeps = {
+      connect: async () => client as unknown as ImapClientLike,
+      smtp: async () => ({
+        sendMail: async (mail) => ({
+          messageId: mail.messageId,
+          accepted: ["charles@example.com"],
+          rejected: [],
+        }),
+        verify: async () => true,
+        close() {},
+      }),
+      compose: async () => Buffer.from("Subject: Hello\r\n\r\nThursday?"),
+      sleep: async () => {},
+    }
+    const row = await getServer(ctx, id)
+    const later = afterAnswerScope()
+
+    const result = await later.run(() =>
+      callMailTool(
+        row,
+        "send_email",
+        { to: ["charles@example.com"], subject: "Hello", text: "Thursday?" },
+        {
+          credential: {
+            headers: {},
+            login: { username: "ada@example.com", password: PASSWORD },
+            redact: [PASSWORD],
+          },
+          imap,
+        },
+      ),
+    )
+
+    expect(result.structuredContent).toMatchObject({
+      sent: { savedTo: "pending" },
+    })
+    expect(appended).toEqual([])
+
+    await later.drain()
+    expect(appended).toEqual(["Sent"])
+    expect((await getServer(ctx, id)).mailServerFilesSent).toBe(false)
   })
 })
 
@@ -683,7 +835,71 @@ describe("calling its tools", () => {
         PUBLIC,
       ),
     ).rejects.toMatchObject({ code: "validation" })
+
+    for (const args of [
+      { to: [{ name: "Eve", email: "not an address" }] },
+      { to: [{ name: "Eve\r\nBcc: x@y.z", email: "e@example.com" }] },
+      { to: [{ email: "e@example.com", address: "x" }] },
+      { to: ["a@example.com"], inReplyTo: "<e1>" },
+      { to: ["a@example.com"], inReplyTo: "a b@example.com" },
+    ]) {
+      await expect(
+        callServerTool(
+          ctx,
+          server,
+          "send_email",
+          { ...args, subject: "s", text: "t" },
+          PUBLIC,
+        ),
+      ).rejects.toMatchObject({ code: "validation" })
+    }
+
     expect(fake.requests.length).toBe(before)
+  })
+
+  it("sends to addresses as get_email gives them, in reply to a Message-ID", async () => {
+    const server = await ready()
+    const read = await callServerTool(
+      ctx,
+      server,
+      "get_email",
+      { id: "e1" },
+      PUBLIC,
+    )
+    const email = read.structuredContent as {
+      messageId: string
+      from: Array<{ name: string | null; email: string }>
+    }
+    expect(email.messageId).toBe("engine-1@example.com")
+
+    const result = await callServerTool(
+      ctx,
+      server,
+      "send_email",
+      {
+        to: email.from,
+        cc: ["Ada <ada@example.com>"],
+        subject: "Re: The engine",
+        text: "Thursday suits me.",
+        inReplyTo: email.messageId,
+      },
+      PUBLIC,
+    )
+
+    expect(result.isError).toBeUndefined()
+    expect(result.structuredContent).toMatchObject({
+      sent: {
+        to: [{ name: "Charles Babbage", email: "charles@example.com" }],
+        cc: [{ name: "Ada", email: "ada@example.com" }],
+        answered: true,
+      },
+    })
+    expect(fake.emails.at(-1)).toMatchObject({
+      inReplyTo: ["engine-1@example.com"],
+    })
+    expect(fake.emails.find((e) => e.id === "e1")!.keywords).toMatchObject({
+      $answered: true,
+    })
   })
 
   it("refuses writing tools on a read-only account, whatever the catalogue says", async () => {

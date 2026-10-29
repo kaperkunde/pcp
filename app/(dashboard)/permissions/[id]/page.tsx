@@ -1,16 +1,21 @@
 import {
   BookOpen,
   ChevronLeft,
+  FolderGit2,
   Globe,
+  KeyRound,
+  ListChecks,
   Server,
   SlidersHorizontal,
+  StickyNote,
   TriangleAlert,
 } from "lucide-react"
 import type { Metadata } from "next"
 import Link from "next/link"
+import { redirect } from "next/navigation"
 
 import { AccessReview } from "@/components/access-review"
-import { BrowserTabView } from "@/components/browser-tab-view"
+import { AllClearAfter, AnsweredBefore } from "@/components/answer-queue"
 import { RelativeDate } from "@/components/local-date"
 import { MemoryReview } from "@/components/memory-review"
 import { PageHeader } from "@/components/page-header"
@@ -18,10 +23,12 @@ import { PageColumn } from "@/components/page-column"
 import { PermissionDecision } from "@/components/permission-decision"
 import { PermissionLines } from "@/components/permission-lines"
 import { PermissionOutcome } from "@/components/permission-outcome"
-import { buttonVariants } from "@/components/ui/button"
+import { RepoReview } from "@/components/repo-review"
+import { ButtonLink, buttonVariants } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { IconTile } from "@/components/ui/icon-tile"
 import { ShownInFull } from "@/components/shown-in-full"
+import { SkillReview } from "@/components/skill-review"
 import { WrapperReview } from "@/components/wrapper-review"
 import { tabFor } from "@/lib/core/browser/owner"
 import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
@@ -43,6 +50,8 @@ const STATUS: Record<string, string> = {
   running: "You allowed this; it is running now.",
   failed: "You allowed this, but it did not go through.",
   declined: "You said no, so nothing ran.",
+  withdrawn: "Withdrawn by the assistant, so nothing ran.",
+  closed: "The tab was closed before you were done, so nothing more happens.",
   expired: "This expired without an answer, so nothing ran.",
 }
 
@@ -52,6 +61,7 @@ const ACCESS_STATUS: Record<string, string> = {
   running: "Saving now.",
   failed: "You saved, but the levels were not written.",
   declined: "You said no, so no tool's level changed.",
+  withdrawn: "Withdrawn by the assistant, so no tool's level changed.",
   expired: "This expired without an answer, so no tool's level changed.",
 }
 
@@ -60,13 +70,20 @@ const STATUS_TONE: Record<string, "ok" | "warning" | "error" | "off"> = {
   running: "warning",
   failed: "error",
   declined: "off",
+  withdrawn: "off",
+  closed: "off",
   expired: "off",
 }
+
+/** Nothing for the assistant to hear: it ended without your answer. */
+const UNANSWERED = new Set(["expired", "withdrawn", "closed"])
 
 /**
  * Where an assistant sends you to answer something it asked PCP for
  * (lib/core/permissions.ts): when its app cannot show the question itself,
- * or you would rather decide here.
+ * or you would rather decide here. A hand-over whose tab is open is
+ * answered on the tab, in the Browser page's tabs view, which this sends
+ * you on to; once answered, or with its tab gone, it is shown here.
  */
 export default async function PermissionPage({
   params,
@@ -101,15 +118,24 @@ export default async function PermissionPage({
       view.status === "failed" ||
       (memory && view.status === "declined")) &&
     view.outcome
+
+  // A hand-over is answered on its tab while the tab is open.
+  if (
+    view.kind === "browser_handover" &&
+    pending &&
+    view.browserTabId &&
+    (await tabFor(ctx, view.browserTabId))
+  ) {
+    redirect(`/browser?tab=${encodeURIComponent(view.browserTabId)}`)
+  }
+
   const proposal = access && pending ? await getAccessProposal(ctx, id) : null
-  // A tab handed to the owner is shown here, live, to do what was asked.
-  const handedTab =
-    view.kind === "browser_handover" && pending && view.browserTabId
-      ? await tabFor(ctx, view.browserTabId)
-      : null
-  // A live tab, a long list of levels or a wrapper's programs want room.
+  // A long list of levels, a wrapper's programs or a skill want room.
   const roomy = Boolean(
-    handedTab || (access && pending) || view.wrapper !== null,
+    (access && pending) ||
+    view.wrapper !== null ||
+    view.skill !== null ||
+    view.repo !== null,
   )
 
   return (
@@ -121,6 +147,9 @@ export default async function PermissionPage({
         <ChevronLeft aria-hidden className="size-4" />
         Home
       </Link>
+      <AnsweredBefore
+        className={cn("mx-auto w-full", !roomy && "max-w-[720px]")}
+      />
       <Card
         className={cn(
           "mx-auto w-full gap-6 rounded-[18px] p-5 sm:p-8",
@@ -159,6 +188,7 @@ export default async function PermissionPage({
         ) : (
           <PermissionLines lines={view.lines} />
         )}
+        {view.skill ? <SkillReview skill={view.skill} /> : null}
         {view.full ? <ShownInFull parts={view.full} /> : null}
         {view.warning && view.memory ? (
           // The text is what to check; the warning says what to look for,
@@ -182,6 +212,7 @@ export default async function PermissionPage({
           </p>
         ) : null}
         {view.wrapper ? <WrapperReview shown={view.wrapper} /> : null}
+        {view.repo ? <RepoReview shown={view.repo} /> : null}
         {pending && proposal ? (
           <>
             <p className="text-muted-foreground">
@@ -200,18 +231,22 @@ export default async function PermissionPage({
           </>
         ) : pending ? (
           <>
-            <PendingNote view={view} handedTab={handedTab !== null} />
-            {handedTab ? (
-              <BrowserTabView
-                tabId={handedTab.id}
-                initial={handedTab}
-                mode="handover"
-              />
+            <PendingNote view={view} />
+            {view.shareHref ? (
+              // A push is agreed to on its review, after every file.
+              <div>
+                <ButtonLink href={view.shareHref} size="lg">
+                  Open the push&apos;s review
+                </ButtonLink>
+              </div>
             ) : null}
             <PermissionDecision
               id={view.id}
               decisions={view.decisions}
               secret={view.secretToEnter}
+              allowForFixed={
+                view.kind === "secret_use" || view.kind === "secret_request"
+              }
               every={
                 view.kind === "memory_share" && view.memory
                   ? { asked: view.memory.always }
@@ -230,7 +265,7 @@ export default async function PermissionPage({
             tone={STATUS_TONE[view.status] ?? "off"}
             outcome={showOutcome ? view.outcome : null}
             outcomeIsError={view.outcomeIsError}
-            tell={view.status !== "expired"}
+            tell={!UNANSWERED.has(view.status)}
           />
         )}
         {view.connect ? (
@@ -249,6 +284,9 @@ export default async function PermissionPage({
           </div>
         ) : null}
       </Card>
+      <AllClearAfter
+        className={cn("mx-auto w-full", !roomy && "max-w-[720px]")}
+      />
     </PageColumn>
   )
 }
@@ -271,25 +309,29 @@ function RequestTile({ view }: { view: PermissionView }) {
     case "memory_share":
     case "memory_change":
       return <IconTile size="lg" icon={BookOpen} className={tile} />
+    case "skill_change":
+      return <IconTile size="lg" icon={ListChecks} className={tile} />
+    case "repo_change":
+    case "repo_share":
+      return <IconTile size="lg" icon={FolderGit2} className={tile} />
+    case "note_change":
+      return <IconTile size="lg" icon={StickyNote} className={tile} />
     case "access":
       return <IconTile size="lg" icon={SlidersHorizontal} className={tile} />
     case "fetch":
     case "browse":
     case "browser_handover":
       return <IconTile size="lg" icon={Globe} className={tile} />
+    case "secret_use":
+    case "secret_request":
+      return <IconTile size="lg" icon={KeyRound} className={tile} />
     default:
       return <IconTile size="lg" icon={Server} className={tile} />
   }
 }
 
 /** What the answers do, in the owner's words, before the buttons. */
-function PendingNote({
-  view,
-  handedTab,
-}: {
-  view: PermissionView
-  handedTab: boolean
-}) {
+function PendingNote({ view }: { view: PermissionView }) {
   const note = "text-[13px] leading-relaxed text-muted-foreground"
 
   switch (view.kind) {
@@ -330,27 +372,87 @@ function PendingNote({
         </p>
       )
     case "browser_handover":
-      return handedTab ? (
+      // Its tab is open no longer: an open one is answered on the tab.
+      return (
         <p className={note}>
-          Do what the assistant asks in the tab below, then say Done. It is
-          yours until you answer.
+          The tab this is about is closed, or the browser has closed since, so
+          there is nothing left to do in it: say Not now. The{" "}
+          <Link href="/browser" className="underline">
+            Browser
+          </Link>{" "}
+          page lists the tabs that are open.
         </p>
-      ) : (
+      )
+    case "secret_use":
+      return (
         <p className={note}>
-          {view.browserTabId ? (
-            <>
-              <Link
-                href={`/browser/tabs/${view.browserTabId}`}
-                className="underline"
-              >
-                Open the tab
-              </Link>
-              , do what the assistant asks there, then come back and say Done.
-            </>
-          ) : (
-            "Do what the assistant asks in the tab, then say Done."
-          )}{" "}
-          The tab is yours until you answer.
+          Allow once types it this time. Allow for 1 hour and Always allow let
+          this token have it typed at this site without asking you, for an hour
+          or until you end it; Always allow also adds the site to the
+          secret&apos;s. You can end either on the token&apos;s page or under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>
+          . While a field holds it, the assistant reads the field as [secret:{" "}
+          name] and gets no screenshots of the tab.
+        </p>
+      )
+    case "secret_request":
+      return (
+        <p className={note}>
+          Saving stores the secret under{" "}
+          <Link href="/secrets" className="underline">
+            Secrets
+          </Link>{" "}
+          with these sites. Allow one use lets this token have it typed once;
+          the others let it, at these sites, for an hour or until you end it.
+          Any other use asks you first.
+        </p>
+      )
+    case "skill_change":
+      return (
+        <p className={note}>
+          Allowing it writes the skill exactly as shown above, and only if
+          nobody changed it since the assistant asked. Every assistant that sees
+          it follows it from then on. You can read, edit and delete every skill
+          under{" "}
+          <Link href="/skills" className="underline">
+            Skills
+          </Link>
+          .
+        </p>
+      )
+    case "repo_change":
+      return (
+        <p className={note}>
+          Applying it writes the item exactly as shown above, and only if
+          neither your vault&apos;s item nor the repository&apos;s change moved
+          since the assistant asked. Linked repositories are under{" "}
+          <Link href="/settings/repositories" className="underline">
+            Settings › Repositories
+          </Link>
+          .
+        </p>
+      )
+    case "repo_share":
+      return (
+        <p className={note}>
+          Nothing is pushed from here. The push&apos;s review shows every file
+          in full, what stays private and what looks personal; Confirm there
+          pushes exactly what it shows, as one commit that names the assistant.
+          Linked repositories are under{" "}
+          <Link href="/settings/repositories" className="underline">
+            Settings › Repositories
+          </Link>
+          .
+        </p>
+      )
+    case "note_change":
+      return (
+        <p className={note}>
+          Saving it writes the note exactly as shown above, and only if your
+          note did not change since the assistant asked. It is yours from then
+          on: you can change it on the item&apos;s page.
         </p>
       )
     case "memory_share":

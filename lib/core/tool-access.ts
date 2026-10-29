@@ -243,9 +243,10 @@ export async function setToolAccessShared(
 }
 
 /**
- * Makes one token reach the same servers, with the same tool levels and web
- * fetch levels of its own, as another. What the target had before is
- * replaced, not merged; levels for all tokens apply to both already.
+ * Makes one token reach the same servers, see the same skills, and have the
+ * same tool levels and web fetch levels of its own, as another. What the
+ * target had before is replaced, not merged; levels for all tokens apply to
+ * both already.
  */
 export async function copyTokenAccess(
   ctx: VaultContext,
@@ -259,7 +260,7 @@ export async function copyTokenAccess(
   await requireLiveToken(ctx, targetId)
   const source = await db().apiToken.findFirst({
     where: { id: sourceId, vaultId: ctx.vaultId },
-    include: { servers: true, toolAccess: true },
+    include: { servers: true, skills: true, toolAccess: true },
   })
 
   if (!source) {
@@ -273,8 +274,22 @@ export async function copyTokenAccess(
   await db().$transaction([
     db().apiToken.update({
       where: { id: targetId },
-      data: { allowAllServers: source.allowAllServers },
+      data: {
+        allowAllServers: source.allowAllServers,
+        allSkills: source.allSkills,
+      },
     }),
+    db().apiTokenSkill.deleteMany({ where: { tokenId: targetId } }),
+    ...(source.skills.length > 0
+      ? [
+          db().apiTokenSkill.createMany({
+            data: source.skills.map((link) => ({
+              tokenId: targetId,
+              skillId: link.skillId,
+            })),
+          }),
+        ]
+      : []),
     db().apiTokenServer.deleteMany({ where: { tokenId: targetId } }),
     ...(source.servers.length > 0
       ? [

@@ -1,5 +1,7 @@
 import { createMcpHandler } from "@modelcontextprotocol/server"
+import { after } from "next/server"
 
+import { afterAnswerScope } from "@/lib/core/after-answer"
 import { resolveApiToken } from "@/lib/core/api-tokens"
 import { clientHello, clientSeen } from "@/lib/core/client-hello"
 import {
@@ -9,6 +11,7 @@ import {
   type GatewayScope,
 } from "@/lib/core/gateway"
 import { instructionMemories } from "@/lib/core/memories"
+import { instructionSkills } from "@/lib/core/skills"
 import { bearerChallenge } from "@/lib/core/oauth-server/metadata"
 import {
   ACCESS_TOKEN_PREFIX,
@@ -17,6 +20,7 @@ import {
 import { checkRateLimit } from "@/lib/core/rate-limit"
 import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
 import { loadResourceLimits } from "@/lib/core/resources/state"
+import { runDueSyncs } from "@/lib/core/repos/sync"
 
 /**
  * The gateway endpoint: https://<pcp>/mcp
@@ -54,6 +58,7 @@ const mcpHandler = createMcpHandler(
       memories: scope.keepMemories
         ? await instructionMemories(scope.ctx, scope.tokenId)
         : null,
+      skills: await instructionSkills(scope.ctx, scope.skillIds),
     })
   },
   {
@@ -180,14 +185,25 @@ async function handle(request: Request): Promise<Response> {
     publicUrl: await publicUrlFor(resolved.ctx, request),
   }
 
-  const response = await mcpHandler.fetch(request, {
-    authInfo: {
-      token: "",
-      clientId: resolved.tokenId,
-      scopes: [],
-      extra: { scope },
-    },
-  })
+  // What a call hands on to do once it has answered (an IMAP send's look
+  // for its copy in Sent) runs once this answer is sent, inside this
+  // request, with what the request brought.
+  const later = afterAnswerScope()
+  const response = await later.run(() =>
+    mcpHandler.fetch(request, {
+      authInfo: {
+        token: "",
+        clientId: resolved.tokenId,
+        scopes: [],
+        extra: { scope },
+      },
+    }),
+  )
+  after(() => later.drain())
+
+  // Linked repositories due a sync are synced once this answer is sent,
+  // with the key this request brought: nothing holds one in between.
+  after(() => runDueSyncs(resolved.ctx))
 
   return withCors(response)
 }

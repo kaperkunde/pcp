@@ -19,7 +19,7 @@ import { resolvePointer } from "./refs"
  *   allows any: if it only takes that value, PCP can send it itself. Not
  *   for a header that carries a credential, whose example is a placeholder
  *   for something only the owner has.
- * - Operations that do not describe their answer, so describe_tool cannot
+ * - Operations that do not describe their answer, so describe cannot
  *   say what they return.
  */
 
@@ -250,7 +250,7 @@ export function lintDocument(
 
   if (undescribed > 0) {
     problems.push({
-      problem: `${undescribed} GET operation${undescribed === 1 ? " does" : "s do"} not describe ${undescribed === 1 ? "its" : "their"} answer as JSON, so describe_tool cannot say what ${undescribed === 1 ? "it returns" : "they return"}.`,
+      problem: `${undescribed} GET operation${undescribed === 1 ? " does" : "s do"} not describe ${undescribed === 1 ? "its" : "their"} answer as JSON, so describe cannot say what ${undescribed === 1 ? "it returns" : "they return"}.`,
       at: "/paths",
     })
   }

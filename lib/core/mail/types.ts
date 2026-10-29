@@ -194,6 +194,22 @@ export type SendInput = {
   attachments?: Array<{ name: string; type: string; bytes: Buffer }>
 }
 
+/**
+ * Whether PCP files a copy of what an IMAP account sends in Sent: "auto"
+ * only when the mail server did not file one itself (Gmail's and Outlook's
+ * SMTP do), "always", or "never". The owner's choice, on the account.
+ */
+export type MailSaveSent = "auto" | "always" | "never"
+
+export const MAIL_SAVE_SENT: readonly MailSaveSent[] = [
+  "auto",
+  "always",
+  "never",
+]
+
+/** savedTo while PCP is still finding out where the sent copy is. */
+export const SENT_COPY_PENDING = "pending"
+
 export type SendResult = {
   /** The sent email's id, where the server keeps a copy PCP can name. */
   id: string | null
@@ -203,7 +219,13 @@ export type SendResult = {
   cc: MailAddress[]
   bcc: MailAddress[]
   subject: string
-  /** The mailbox the sent copy is in, when there is one. */
+  /**
+   * The mailbox the sent copy is in, when there is one. IMAP: "pending"
+   * while PCP looks, once it has answered, for the copy the mail server
+   * files itself, and files one when the server did not; null when no copy
+   * is kept (the account is set to Never, it has no Sent mailbox, or
+   * filing the copy failed).
+   */
   savedTo: string | null
   /**
    * With inReplyTo: whether the email it answers is now marked as answered.

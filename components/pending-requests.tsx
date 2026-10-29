@@ -1,8 +1,6 @@
 "use client"
 
 import { Bell } from "lucide-react"
-import { usePathname } from "next/navigation"
-import { useCallback, useEffect, useState } from "react"
 
 import {
   Menu,
@@ -11,61 +9,16 @@ import {
   MenuNote,
   MenuTrigger,
 } from "@/components/ui/menu"
-import {
-  pendingRequestsAction,
-  type PendingRequestsState,
-} from "@/lib/actions/permissions"
+import type { PendingRequestsState } from "@/lib/actions/permissions"
 import { cn, timeAgo } from "@/lib/utils"
-
-/** How often the count is read again while the page is in view. */
-const REFRESH_MS = 15_000
-
-/**
- * What is waiting for the owner, kept fresh: the layout gives the first
- * count; it is read again on every navigation, when the bell opens, when
- * the tab comes back into view, and every little while. The sidebar shares
- * one copy between the bell and Home's count.
- */
-export function usePendingRequests(initial: PendingRequestsState) {
-  const [state, setState] = useState(initial)
-  const pathname = usePathname()
-
-  const refresh = useCallback(async () => {
-    try {
-      setState(await pendingRequestsAction())
-    } catch {
-      // Keep what is shown; the next read tries again.
-    }
-  }, [])
-
-  useEffect(() => {
-    void refresh()
-  }, [pathname, refresh])
-
-  useEffect(() => {
-    const visible = () => document.visibilityState === "visible"
-    const timer = setInterval(() => {
-      if (visible()) void refresh()
-    }, REFRESH_MS)
-    const onVisible = () => {
-      if (visible()) void refresh()
-    }
-
-    document.addEventListener("visibilitychange", onVisible)
-
-    return () => {
-      clearInterval(timer)
-      document.removeEventListener("visibilitychange", onVisible)
-    }
-  }, [refresh])
-
-  return { state, refresh }
-}
 
 /**
  * The bell: how many requests from assistants are waiting for the owner,
- * and a list of them that leads to each one's page. Above them, what PCP
- * itself needs looked at (HTTPS that stopped renewing).
+ * and a list of them, oldest first, that leads to each one's page. Above
+ * them, what PCP itself needs looked at (lib/core/owner-notices.ts: HTTPS
+ * that stopped renewing, suggested instructions that changed, a linked
+ * repository's change). What it shows is kept fresh by the queue
+ * (components/answer-queue.tsx), shared with Home's count.
  */
 export function PendingRequests({
   state,
@@ -114,10 +67,19 @@ export function PendingRequests({
             href={notice.href}
             className="flex-col items-start gap-0.5"
           >
-            <span className="font-medium text-destructive">{notice.title}</span>
-            <span className="text-xs text-muted-foreground">
-              Open Settings to see why
+            <span
+              className={cn(
+                "font-medium",
+                notice.kind === "network" ? "text-destructive" : "text-warning",
+              )}
+            >
+              {notice.title}
             </span>
+            {notice.detail ? (
+              <span className="text-xs text-muted-foreground">
+                {notice.detail}
+              </span>
+            ) : null}
           </MenuLinkItem>
         ))}
         <MenuNote className="pb-1 font-semibold">
@@ -137,7 +99,7 @@ export function PendingRequests({
         {requests.map((request) => (
           <MenuLinkItem
             key={request.id}
-            href={`/permissions/${request.id}`}
+            href={request.href}
             className="flex-col items-start gap-0.5"
           >
             <span className="font-medium">{request.title}</span>
@@ -148,7 +110,7 @@ export function PendingRequests({
         ))}
         {total > requests.length ? (
           <MenuNote>
-            {total - requests.length} more, older. Answer these first, or find
+            {total - requests.length} more, newer. Answer these first, or find
             them on each token&apos;s page.
           </MenuNote>
         ) : null}

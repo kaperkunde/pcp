@@ -231,6 +231,24 @@ function matches(email: FakeEmail, filter: Json | undefined): boolean {
     Date.parse(email.receivedAt) < Date.parse(String(filter.after))
   )
     return false
+  // RFC 8621 4.4.1: [name] for a header that is there, [name, text] for
+  // one whose value holds the text. The id headers, as the email has them.
+  if (Array.isArray(filter.header)) {
+    const [name, text] = filter.header as string[]
+    const ids = (list?: string[] | null) =>
+      list?.length ? list.map((value) => `<${value}>`).join(" ") : null
+    const value = (
+      {
+        "message-id": ids(email.messageId),
+        "in-reply-to": ids(email.inReplyTo),
+        references: ids(email.references),
+        subject: email.subject,
+      } as Record<string, string | null>
+    )[String(name).toLowerCase()]
+
+    if (value == null || (text !== undefined && !value.includes(text)))
+      return false
+  }
   if (
     filter.before &&
     Date.parse(email.receivedAt) >= Date.parse(String(filter.before))

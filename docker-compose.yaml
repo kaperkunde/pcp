@@ -39,6 +39,16 @@ services:
     # environment:
     #   TZ: Europe/Berlin
     #   LANG: de_DE.UTF-8
+    # Optional. PCP's browser draws with this computer's graphics card (AMD
+    # or Intel) when the container has its render node, and in software
+    # otherwise, which sites' bot checks notice. Where `ls -l /dev/dri` shows
+    # a renderD128, pass it in; when that node is not open to everyone
+    # (crw-rw-rw-), add its group by number (`stat -c %g /dev/dri/renderD128`).
+    # install.sh does this by itself. NVIDIA cards are not supported yet.
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "105"
 
 volumes:
   pcp-data:

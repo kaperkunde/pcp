@@ -39,6 +39,11 @@ export const MAX_SEARCH_MAILBOXES = 50
  * each mailbox hands over that many of its newest to be merged.
  */
 export const MAX_SEARCH_ALL_WINDOW = 500
+/**
+ * IMAP: mailboxes a reply looks in for the email its Message-ID names, one
+ * at a time: the inbox, then the special ones (Sent, Archive, All…).
+ */
+export const MAX_REPLY_LOOKUP_MAILBOXES = 6
 export const MAX_VACATION_SUBJECT_CHARS = 500
 
 /*
@@ -51,3 +56,29 @@ export const MAX_ATTACHMENT_TEXT_CHARS = 20_000
 
 /** Renew an OAuth token this long before it runs out. */
 export const OAUTH_REFRESH_MARGIN_MS = 60_000
+
+/*
+ * IMAP: the copy in Sent of an email the SMTP server took. Many servers
+ * (Gmail's, Outlook's) file one themselves a moment after they take it, so
+ * PCP looks for it among the newest emails in Sent, by Message-ID, at these
+ * times after the send, and files its own only when it is not there. How
+ * long it looks depends on what it learned of the server: longer when it
+ * files its own copies, a short look when it does not.
+ */
+/** The newest emails in Sent whose headers one look reads. */
+export const SENT_COPY_RECENT = 15
+/** When PCP looks, in milliseconds after the send, while it knows nothing. */
+export const SENT_COPY_LOOKS_MS: readonly number[] = [
+  0, 1_000, 2_000, 3_000, 5_000, 7_500, 10_000,
+]
+/** When it looks for a server that has filed its own copy before. */
+export const SENT_COPY_LOOKS_FILES_MS: readonly number[] = [
+  0, 1_000, 2_000, 3_000, 5_000, 7_500, 10_000, 15_000,
+]
+/** When it looks for a server that did not file one before. */
+export const SENT_COPY_LOOKS_DOES_NOT_MS: readonly number[] = [0, 1_000, 3_000]
+/**
+ * The longest a look may hold up the answer, when nothing can run it once
+ * the answer has gone.
+ */
+export const SENT_COPY_IN_CALL_MS = 10_000

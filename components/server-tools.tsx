@@ -5,6 +5,10 @@ import Link from "next/link"
 import { useActionState, useId, useState } from "react"
 
 import { FormError, FormNote } from "@/components/form-status"
+import {
+  changesServers,
+  useSharedInstances,
+} from "@/components/shared-definition"
 import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -35,20 +39,20 @@ const PREVIEW = 5
 function about(kind: ServerKind): string {
   switch (kind) {
     case "openapi":
-      return "What an assistant can find with search_tools. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
+      return "What an assistant can find with search. Each one is an operation from the schema; rewrite a description when the schema's wording would not help it choose."
     case "jmap":
     case "imap":
-      return "What an assistant can find with search_tools: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
+      return "What an assistant can find with search: the same mail tools for every account, less those a read-only account or one that cannot send leaves out."
     case "caldav":
-      return "What an assistant can find with search_tools: the same calendar and reminder tools for every account, less the ones that change things on a read-only account."
+      return "What an assistant can find with search: the same calendar and reminder tools for every account, less the ones that change things on a read-only account."
     case "ssh":
-      return "What an assistant can find with search_tools: run_command, one command per call. Leave it at ask, and you see each command before it runs."
+      return "What an assistant can find with search: run_command, one command per call. Leave it at ask, and you see each command before it runs."
     case "browser":
-      return "What an assistant can find with search_tools: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
+      return "What an assistant can find with search: the browser's own tools. Allow the ones that only read a page, and keep the ones that act on it at ask until you trust the assistant there."
     case "wrapper":
-      return "What an assistant can find with search_tools: each one runs its program. For a token, a tool here is blocked wherever a tool it calls is, and asks you wherever one of them asks."
+      return "What an assistant can find with search: each one runs its program. For a token, a tool here is blocked wherever a tool it calls is, and asks you wherever one of them asks."
     default:
-      return "What an assistant can find with search_tools. Rewrite a description when the server's own wording would not help it choose."
+      return "What an assistant can find with search. Rewrite a description when the server's own wording would not help it choose."
   }
 }
 
@@ -152,6 +156,9 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
     { status: "idle" },
   )
   const replaced = tool.replacedBy && tool.replacedBy.length > 0
+  // A tool's description is its definition's, on every server of it.
+  const instances = useSharedInstances()
+  const shared = instances.length > 1
 
   return (
     <li className="flex flex-col gap-1.5 px-4 py-3 text-sm">
@@ -189,7 +196,20 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
         </Button>
       </div>
       {editing ? (
-        <form action={action} className="flex flex-col gap-2">
+        <form
+          action={action}
+          onSubmit={(event) => {
+            if (
+              shared &&
+              !window.confirm(
+                `${changesServers(instances)}. Save this description for all of them?`,
+              )
+            ) {
+              event.preventDefault()
+            }
+          }}
+          className="flex flex-col gap-2"
+        >
           <input type="hidden" name="serverId" value={serverId} />
           <input type="hidden" name="tool" value={tool.name} />
           <Textarea
@@ -201,6 +221,7 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
           <p className="text-xs text-muted-foreground">
             What assistants read about it. Leave it empty to go back to the
             original description.
+            {shared ? ` ${changesServers(instances)}.` : null}
           </p>
           <FormError error={state.status === "error" ? state.error : null} />
           <div>
@@ -252,7 +273,7 @@ function ReplacedNote({
       <input type="hidden" name="serverId" value={serverId} />
       <input type="hidden" name="tool" value={tool} />
       <p className="text-xs leading-relaxed text-muted-foreground">
-        Left out of search_tools and list_tools: assistants find{" "}
+        Left out of search and list_tools: assistants find{" "}
         {by.map((entry, index) => (
           <span key={`${entry.id}/${entry.tool}`}>
             {index > 0 ? ", " : null}

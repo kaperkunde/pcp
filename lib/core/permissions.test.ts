@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 
 import type { CallToolResult } from "@modelcontextprotocol/server"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { listTokenAllowances } from "./allowances"
 import { createApiToken, resolveApiToken, revokeApiToken } from "./api-tokens"
@@ -19,13 +19,17 @@ import {
   checkPermission,
   decidePermission,
   getPermissionView,
+  listOwnOpenRequests,
   listPendingRequests,
   prunePermissionRequests,
   runCall,
+  withdrawPermission,
   withPermission,
   type PermissionExecutor,
   type RegisterArgs,
 } from "./permissions"
+import { closePendingRequests } from "./permission-close"
+import { finishHandover } from "./browser/call"
 import { createFakeCalDav } from "./caldav/fake-caldav"
 import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
 import { startTestApi, type TestApi } from "./openapi/test-api"
@@ -41,6 +45,12 @@ import { createSshServer } from "./ssh/hosts"
 
 // The owner's permission against a scratch database, with the upstream
 // replaced by a stub that counts what actually ran.
+
+// No browser runs here: giving a tab back is only counted.
+vi.mock("./browser/call", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./browser/call")>()),
+  finishHandover: vi.fn(async () => true),
+}))
 
 let cleanup: () => Promise<void>
 
@@ -626,7 +636,7 @@ describe("check_permission", () => {
 })
 
 describe("what is waiting for the owner", () => {
-  it("counts open requests, newest first, and leaves out answered ones and dead tokens", async () => {
+  it("counts open requests, oldest first, and leaves out answered ones and dead tokens", async () => {
     const { ctx, scope, server } = await setup()
     const { executor } = stub()
 
@@ -642,10 +652,11 @@ describe("what is waiting for the owner", () => {
     const both = await listPendingRequests(ctx, PUBLIC_URL)
     expect(both.total).toBe(2)
     expect(both.requests.map((request) => request.title)).toEqual([
-      "Allow postcards/send_postcard?",
       "Allow postcards/add_numbers?",
+      "Allow postcards/send_postcard?",
     ])
     expect(both.requests[0]!.tokenName).toBe("Claude")
+    expect(both.requests[0]!.href).toBe(`/permissions/${both.requests[0]!.id}`)
     // The arguments stay on the request's own page.
     expect(JSON.stringify(both)).not.toContain("Ada")
 
@@ -735,7 +746,9 @@ describe("the owner's answer", () => {
       serverName: "Postcards",
       toolName: "add_numbers",
     })
-    expect(allowance!.until.getTime() - Date.now()).toBeGreaterThan(59 * 60_000)
+    expect(allowance!.until!.getTime() - Date.now()).toBeGreaterThan(
+      59 * 60_000,
+    )
 
     expect(await levelOf(new Date())).toBe("allowed")
     // Only that tool.
@@ -1934,6 +1947,263 @@ describe("a memory an assistant wants to share", () => {
     )
     expect(refused.isError).toBe(true)
     expect(calls).toHaveLength(0)
+  })
+})
+
+describe("an assistant withdrawing its own request", () => {
+  async function otherScope(ctx: VaultContext) {
+    const { token } = await createApiToken(ctx, {
+      name: "Other",
+      allowAllServers: true,
+    })
+
+    return { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+  }
+
+  async function statusOf(id: string) {
+    return (await db().permissionRequest.findUniqueOrThrow({ where: { id } }))
+      .status
+  }
+
+  it("takes back a pending request: the owner no longer sees it, and nothing runs", async () => {
+    const { ctx, scope, server } = await setup()
+    const { calls, executor } = stub()
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+    const id = await onlyRequestId()
+
+    const withdrawn = await withdrawPermission(scope, id)
+    expect(withdrawn.isError).toBeUndefined()
+    expect(textOf(withdrawn)).toBe(
+      `Withdrawn: the owner no longer sees request ${id} (Allow postcards/send_postcard?), and nothing ran for it.`,
+    )
+    expect(await statusOf(id)).toBe("withdrawn")
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).total).toBe(0)
+    expect(
+      (await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL }))?.status,
+    ).toBe("withdrawn")
+    expect(textOf(await checkPermission(scope, id))).toContain(
+      "You withdrew this request",
+    )
+
+    // The owner's answer comes too late: nothing runs.
+    await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    expect(calls).toHaveLength(0)
+    expect(await statusOf(id)).toBe("withdrawn")
+
+    // The same call asked again is a new request.
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+    expect(await db().permissionRequest.count()).toBe(2)
+
+    const again = await withdrawPermission(scope, id)
+    expect(again.isError).toBe(true)
+    expect(textOf(again)).toBe("You already withdrew this request.")
+  })
+
+  it("refuses another token's request as if there were none, and leaves it", async () => {
+    const { ctx, scope, server } = await setup()
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+    const id = await onlyRequestId()
+    const other = await otherScope(ctx)
+
+    const refused = await withdrawPermission(other, id)
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toBe(
+      textOf(await withdrawPermission(other, "no-such-request")),
+    )
+    expect(await statusOf(id)).toBe("pending")
+  })
+
+  it("says why, and changes nothing, once the request is answered, running or expired", async () => {
+    const { ctx, scope, server } = await setup()
+    const { executor } = stub()
+    const ask = async (a: number) => {
+      await withPermission(scope, call(server, "add_numbers", { a }))
+      return (
+        await db().permissionRequest.findFirstOrThrow({
+          orderBy: { createdAt: "desc" },
+        })
+      ).id
+    }
+
+    const allowed = await ask(1)
+    await decidePermission(
+      ctx,
+      allowed,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    const declined = await ask(2)
+    await decidePermission(
+      ctx,
+      declined,
+      "decline",
+      { publicUrl: PUBLIC_URL },
+      executor,
+    )
+    const failed = await ask(3)
+    await db().permissionRequest.update({
+      where: { id: failed },
+      data: { status: "failed" },
+    })
+    const running = await ask(4)
+    await db().permissionRequest.update({
+      where: { id: running },
+      data: { status: "running" },
+    })
+    const expired = await ask(5)
+    await db().permissionRequest.update({
+      where: { id: expired },
+      data: { expiresAt: new Date(Date.now() - 1_000) },
+    })
+
+    for (const [id, status, said] of [
+      [allowed, "executed", "already answered"],
+      [declined, "declined", "already answered"],
+      [failed, "failed", "already answered"],
+      [running, "running", "running now"],
+      [expired, "pending", "expired without an answer"],
+    ] as const) {
+      const refused = await withdrawPermission(scope, id)
+      expect(refused.isError).toBe(true)
+      expect(textOf(refused)).toContain(said)
+      expect(await statusOf(id)).toBe(status)
+    }
+  })
+
+  it("gives a handed-over tab back to the browser tools", async () => {
+    const { ctx, scope, server } = await setup()
+    await withPermission(scope, {
+      kind: "browser_handover",
+      input: {
+        serverId: server.id,
+        tabId: "tab1",
+        message: "Please sign in.",
+        url: "https://shop.example/login",
+        title: "Sign in",
+      },
+    })
+    const id = await onlyRequestId()
+    vi.mocked(finishHandover).mockClear()
+
+    expect(textOf(await withdrawPermission(scope, id))).toContain("Withdrawn")
+    expect(vi.mocked(finishHandover)).toHaveBeenCalledTimes(1)
+    const [given, tabId] = vi.mocked(finishHandover).mock.calls[0]!
+    expect(given.vaultId).toBe(ctx.vaultId)
+    expect(tabId).toBe("tab1")
+  })
+
+  it("writes no memory for a memory it wanted to share", async () => {
+    const { ctx, scope } = await setup()
+    await withPermission(scope, {
+      kind: "memory_share",
+      input: { path: "preferences.md", text: "Metric units." },
+    })
+    const id = await onlyRequestId()
+
+    expect(textOf(await withdrawPermission(scope, id))).toContain("Withdrawn")
+    // Not kept for the assistant either, as the owner's Not now would.
+    expect(await listMemories(ctx)).toEqual([])
+    expect(await statusOf(id)).toBe("withdrawn")
+  })
+
+  it("lists only the token's own open requests when check_permission has no id", async () => {
+    const { ctx, scope, server } = await setup()
+    const other = await otherScope(ctx)
+
+    expect(textOf(await listOwnOpenRequests(scope))).toBe(
+      "You have no requests waiting for the owner.",
+    )
+
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+    await withPermission(other, call(server, "add_numbers", { a: 9 }))
+    const [first, second] = await db().permissionRequest.findMany({
+      where: { tokenId: scope.tokenId },
+      orderBy: { createdAt: "asc" },
+    })
+    await withdrawPermission(scope, second!.id)
+    await db().permissionRequest.update({
+      where: { id: first!.id },
+      data: { createdAt: new Date(Date.now() - 3 * 60 * 60_000) },
+    })
+    await withPermission(scope, call(server, "add_numbers", { a: 2 }))
+    const third = await db().permissionRequest.findFirstOrThrow({
+      where: {
+        tokenId: scope.tokenId,
+        status: "pending",
+        NOT: { id: first!.id },
+      },
+    })
+
+    const listed = textOf(await listOwnOpenRequests(scope))
+    expect(listed.split("\n")).toEqual([
+      "2 requests of yours are waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need.",
+      "",
+      `- ${first!.id} (call, asked 3 hours ago): Allow postcards/add_numbers?`,
+      `  ${PUBLIC_URL}/permissions/${first!.id}`,
+      `- ${third.id} (call, asked just now): Allow postcards/add_numbers?`,
+      `  ${PUBLIC_URL}/permissions/${third.id}`,
+    ])
+    // Nothing of the arguments, and nothing of the other token's.
+    expect(listed).not.toContain("Ada")
+    expect(listed).not.toContain(": 9")
+    expect(
+      await db().permissionRequest.count({ where: { status: "pending" } }),
+    ).toBe(3)
+  })
+})
+
+describe("a request closed because what it was about went away", () => {
+  it("closes only the pending, unexpired rows it names, and says so", async () => {
+    const { ctx, scope, server } = await setup()
+    const handover = (tabId: string) => ({
+      kind: "browser_handover" as const,
+      input: {
+        serverId: server.id,
+        tabId,
+        message: `Please sign in to ${tabId}.`,
+        url: "https://shop.example/login",
+        title: "Sign in",
+      },
+    })
+    await withPermission(scope, handover("tab1"))
+    await withPermission(scope, handover("tab2"))
+    const [one, two] = await db().permissionRequest.findMany({
+      orderBy: { createdAt: "asc" },
+    })
+
+    expect(
+      await closePendingRequests(
+        { vaultId: ctx.vaultId, kind: "browser_handover", id: one!.id },
+        "closed",
+      ),
+    ).toBe(1)
+    // A second close finds nothing open.
+    expect(
+      await closePendingRequests(
+        { vaultId: ctx.vaultId, id: one!.id },
+        "closed",
+      ),
+    ).toBe(0)
+
+    const closed = await checkPermission(scope, one!.id)
+    expect(closed.isError).toBe(true)
+    expect(textOf(closed)).toContain("was closed")
+    expect(
+      (await getPermissionView(ctx, two!.id, { publicUrl: PUBLIC_URL }))
+        ?.status,
+    ).toBe("pending")
+    expect((await listPendingRequests(ctx, PUBLIC_URL)).total).toBe(1)
+    expect(textOf(await withdrawPermission(scope, one!.id))).toContain(
+      "closed already",
+    )
   })
 })
 

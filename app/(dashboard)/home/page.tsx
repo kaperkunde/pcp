@@ -68,6 +68,7 @@ export default async function HomePage() {
               <CountBadge count={pending.total} />
             </span>
           }
+          description="Oldest first. Answer one and PCP takes you to the next."
         >
           <List as="ul" className="ring-1 ring-warning/25">
             {pending.requests.map((request) => (
@@ -82,17 +83,13 @@ export default async function HomePage() {
                     <RelativeDate value={request.createdAt} />
                   </>
                 }
-                trailing={
-                  <ButtonLink href={`/permissions/${request.id}`}>
-                    Review
-                  </ButtonLink>
-                }
+                trailing={<ButtonLink href={request.href}>Review</ButtonLink>}
               />
             ))}
           </List>
           {pending.total > pending.requests.length ? (
             <p className="px-1 text-xs text-muted-foreground">
-              {pending.total - pending.requests.length} more, older: each
+              {pending.total - pending.requests.length} more, newer: each
               assistant&apos;s page lists its own.
             </p>
           ) : null}

@@ -80,11 +80,32 @@ RUN groupadd --system --gid 1001 nodejs \
 # a virtual display PCP starts itself (Xvfb, lib/core/browser/display.ts),
 # as a desktop's Chrome does; Playwright's dependencies bring Xvfb, and it
 # is named here so they cannot drop it unnoticed.
+#
+# What a site's check reads of the machine (kaperkunde/pcp#38):
+# - Fonts. Playwright's dependencies bring only the fonts its tests need,
+#   a set no person's computer has; DejaVu, Noto Sans and Serif and
+#   Cantarell are what Linux desktops have besides (about 45 MB). fc-cache
+#   indexes them once here, so Chromium does not on every start.
+# - The GPU. Mesa's Vulkan drivers (radv for AMD, anv for Intel) let
+#   Chromium draw with the machine's graphics card when the container is
+#   given its render node (/dev/dri, which install.sh passes in where the
+#   host has one; display.ts then switches ANGLE to Vulkan). Without one
+#   it draws in software (SwiftShader), as before. Mesa's own software
+#   driver (lavapipe) is taken out of the loader's list: on a card Mesa
+#   has no driver for (NVIDIA's), Chromium would pick it, block it as
+#   software and leave pages no WebGL at all, rather than SwiftShader's.
+#   About 50 MB; Mesa's LLVM is already there for Xvfb. Mesa wants a
+#   python3 for a script PCP never runs: naming python3-minimal settles
+#   that with it, not the whole of Python (20 MB less).
 ARG PLAYWRIGHT_VERSION=1.63.0
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PCP_BROWSER_SANDBOX=off
 RUN npx -y --no-update-notifier patchright-core@${PLAYWRIGHT_VERSION} install --with-deps --no-shell chromium \
   && apt-get install -y --no-install-recommends xvfb \
+    fontconfig fonts-dejavu-core fonts-noto-core fonts-cantarell \
+    python3-minimal mesa-vulkan-drivers libvulkan1 \
+  && rm -f /usr/share/vulkan/icd.d/lvp_icd.*.json \
+  && fc-cache -f \
   && chmod -R a+rX /ms-playwright \
   && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache
 

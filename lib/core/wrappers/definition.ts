@@ -11,7 +11,11 @@ import { hiddenCharacter, withoutPresentation } from "../memories"
 import { outlineSchema } from "../openapi/outline"
 import { parsePointer } from "../openapi/patch"
 import { canonicalJson } from "../permission-rules"
-import { findTextSecretByName, validateSecretName } from "../secrets"
+import {
+  findOwnerSecretByName,
+  findTextSecretByName,
+  validateSecretName,
+} from "../secrets"
 import { normalizeNameAndDescription } from "../servers"
 import type { CatalogueTool } from "../catalogue"
 
@@ -63,7 +67,7 @@ export type WrapperTool = {
   program: string
   /** Every tool the program may call. */
   calls: ToolRef[]
-  /** Tools it stands in for: they drop out of search_tools and list_tools. */
+  /** Tools it stands in for: they drop out of search and list_tools. */
   replaces: ToolRef[]
 }
 
@@ -232,6 +236,67 @@ export function readWrapperOperation(json: string | null): {
       callLevels: "token",
     }
   }
+}
+
+/**
+ * A browser flow: a wrapper tool whose program drives the vault's browser,
+ * which an assistant writes after doing a site task step by step, so the
+ * task becomes one call. A tool is one when its `calls` name any tool of a
+ * browser server, and a wrapper is one when any of its tools is. Derived,
+ * never stored: the definition (and its hash) stays as it is.
+ */
+export function isFlowTool(
+  tool: Pick<WrapperTool, "calls">,
+  browserIds: ReadonlySet<string>,
+): boolean {
+  return tool.calls.some((call) => browserIds.has(call.serverId))
+}
+
+export function isFlow(
+  definition: Pick<WrapperDefinition, "tools">,
+  browserIds: ReadonlySet<string>,
+): boolean {
+  return definition.tools.some((tool) => isFlowTool(tool, browserIds))
+}
+
+/** The vault's browser servers, by id, for isFlow and isFlowTool. */
+export async function browserServerIds(
+  ctx: Pick<VaultContext, "vaultId">,
+): Promise<Set<string>> {
+  const rows = await db().mcpServer.findMany({
+    where: { vaultId: ctx.vaultId, kind: "browser" },
+    select: { id: true },
+  })
+
+  return new Set(rows.map((row) => row.id))
+}
+
+/** The vault's wrappers that are browser flows, by id. */
+export async function flowWrapperIds(
+  ctx: Pick<VaultContext, "vaultId">,
+): Promise<Set<string>> {
+  const browserIds = await browserServerIds(ctx)
+
+  if (browserIds.size === 0) {
+    return new Set()
+  }
+
+  const specs = await db().wrapperSpec.findMany({
+    where: { server: { vaultId: ctx.vaultId } },
+    select: { serverId: true, definition: true },
+  })
+
+  return new Set(
+    specs.flatMap((spec) => {
+      try {
+        return isFlow(readDefinition(spec.definition), browserIds)
+          ? [spec.serverId]
+          : []
+      } catch {
+        return []
+      }
+    }),
+  )
 }
 
 /** "server/tool", split at its first slash. */
@@ -610,9 +675,19 @@ export async function resolveDefinition(
       `The secret "${secretName}"`,
     )
 
-    if (server.kind === "browser") {
+    // The browser takes a secret only as type's text, typed as it is, and
+    // only where the owner allows it at the moment of typing
+    // (lib/core/browser-secrets.ts): the binding says the wrapper may.
+    if (
+      server.kind === "browser" &&
+      (tool !== "type" ||
+        String(binding.argument ?? "") !== "/text" ||
+        (binding.template !== undefined &&
+          binding.template !== null &&
+          String(binding.template) !== SECRET_PLACEHOLDER))
+    ) {
       throw invalid(
-        `A secret cannot go to the browser: what is typed stays on the page.`,
+        `A secret goes to the browser only as type's text, as it is: browser/type, argument "/text", and no template. PCP types it where the owner allows it.`,
       )
     }
 
@@ -671,7 +746,24 @@ export async function resolveDefinition(
 
     visible(template, `How the secret "${secretName}" is written`)
 
-    const existing = await findTextSecretByName(ctx, secretName)
+    const existing =
+      server.kind === "browser"
+        ? await findOwnerSecretByName(ctx, secretName)
+        : await findTextSecretByName(ctx, secretName)
+
+    // A name taken by a secret that goes nowhere but the browser (one-time
+    // codes) or PCP's own: never sent, and never typed in anew over it.
+    if (
+      !existing &&
+      (await db().secret.findUnique({
+        where: { vaultId_name: { vaultId: ctx.vaultId, name: secretName } },
+        select: { id: true },
+      }))
+    ) {
+      throw invalid(
+        `The secret "${secretName}" is not one PCP sends to ${binding.tool}: it is one-time codes, which only the browser types, or one PCP keeps for a server.`,
+      )
+    }
 
     if (!existing) {
       if (!allowNewSecret) {

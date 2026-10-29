@@ -12,8 +12,10 @@ import {
   MAX_CALLS_PER_RUN,
   MAX_ERROR_CHARS,
   MAX_KEEPS_PER_RUN,
+  MAX_MEDIA_PER_RUN,
   MAX_RANDOM_BYTES,
   MAX_READS_PER_RUN,
+  MAX_STEP_NAME_CHARS,
   RUN_CPU_MS,
   RUN_STACK_BYTES,
 } from "./limits"
@@ -33,6 +35,10 @@ import type { BridgeReply, Executor, RunEnd, RunResult } from "./types"
  *   returns a promise of its JSON reply;
  * - `__pcp_print(text)` adds a line to the output;
  * - `__pcp_random(count)` returns that many random bytes, as hex.
+ *
+ * `pcp.step(name, fn)` is the prelude's alone: it runs fn, sends the step's
+ * name along with each call made in it, and rethrows an error from it with
+ * the step named, so no operation of the bridge's is added for it.
  *
  * The prelude also gives the program what the language lacks and the web
  * has (atob, btoa, TextEncoder, TextDecoder), written in JavaScript inside
@@ -303,6 +309,42 @@ const PRELUDE = `(() => {
   const idOf = (handle) =>
     typeof handle === "string" ? handle : handle !== null && typeof handle === "object" ? handle.$result : undefined
 
+  // pcp.step: the step under way, which each call carries into the run's
+  // trace, and a mark on an error a step already named, so an outer step
+  // passes it on as it is. Steps are meant one after another: run side by
+  // side, a call carries whichever began last.
+  let currentStep = null
+  const STEPPED = Symbol("pcp.step")
+  const STEP_USAGE = 'pcp.step takes a name and a function: await pcp.step("open compose", async () => { … }).'
+  const stepName = (name) => {
+    if (typeof name !== "string") throw new TypeError(STEP_USAGE)
+    const flat = name.replace(/[\\u0000-\\u001f\\u007f]+/g, " ").trim()
+    if (flat === "") throw new TypeError(STEP_USAGE)
+    return flat.length > ${MAX_STEP_NAME_CHARS} ? flat.slice(0, ${MAX_STEP_NAME_CHARS - 1}) + "…" : flat
+  }
+  const step = async (name, fn) => {
+    const label = stepName(name)
+    if (typeof fn !== "function") throw new TypeError(STEP_USAGE)
+    const outer = currentStep
+    currentStep = label
+    try {
+      return await fn()
+    } catch (error) {
+      if (error !== null && typeof error === "object" && error[STEPPED] === true) throw error
+      const isError = error instanceof Error
+      const named = new Error("failed at step '" + label + "': " + (isError ? error.message : show(error)))
+      if (isError) {
+        named.name = error.name
+        if (typeof error.stack === "string") named.stack = error.stack
+      }
+      named.step = label
+      Object.defineProperty(named, STEPPED, { value: true })
+      throw named
+    } finally {
+      currentStep = outer
+    }
+  }
+
   const pcp = Object.freeze({
     call: (server, tool, args, options) =>
       ask("call", {
@@ -312,7 +354,9 @@ const PRELUDE = `(() => {
         fields: options?.fields,
         decode: options?.decode,
         keep: options?.keep,
+        step: currentStep ?? undefined,
       }),
+    step,
     read: async (handle, options) => {
       const as = options?.as ?? "text"
       if (as === "bytes") return decode64(await ask("read", { id: idOf(handle), as: "base64" }))
@@ -337,6 +381,13 @@ const PRELUDE = `(() => {
       })
     },
     tools: (server) => ask("tools", { server: server ?? null }),
+    // Decoded by PCP, not here: the handle and the options go, a handle comes back.
+    image: Object.freeze({
+      compress: (handle, options) => ask("media", { kind: "image", id: idOf(handle), options: options ?? {} }),
+    }),
+    video: Object.freeze({
+      frames: (handle, options) => ask("media", { kind: "frames", id: idOf(handle), options: options ?? {} }),
+    }),
   })
   const log = (...values) => print(values.map(show).join(" "))
 
@@ -407,7 +458,8 @@ export async function checkSyntax(code: string): Promise<string | null> {
 }
 
 /** Requests one run may send, of every kind together. */
-const MAX_REQUESTS = MAX_CALLS_PER_RUN + MAX_KEEPS_PER_RUN + MAX_READS_PER_RUN
+const MAX_REQUESTS =
+  MAX_CALLS_PER_RUN + MAX_KEEPS_PER_RUN + MAX_READS_PER_RUN + MAX_MEDIA_PER_RUN
 
 function clip(text: string): string {
   return text.length > MAX_ERROR_CHARS
@@ -463,10 +515,10 @@ export function javaScriptExecutor({
 export const runJavaScript: Executor = javaScriptExecutor()
 
 async function runInQuickJs(
-  { code, input, bridge, signal }: Parameters<Executor>[0],
+  { code, input, bridge, signal, output: sink }: Parameters<Executor>[0],
   { cpuMs, memoryBytes }: { cpuMs: number; memoryBytes: number },
 ): Promise<RunResult> {
-  const output = new Output()
+  const output = sink ?? new Output()
   const memory = new WebAssembly.Memory({
     initial: INITIAL_PAGES,
     maximum: Math.max(INITIAL_PAGES, Math.floor(memoryBytes / PAGE_BYTES)),
@@ -485,6 +537,8 @@ async function runInQuickJs(
   let broken: string | null = null
   let finished = false
   let requests = 0
+  /** Set once the program asked for more than a run may. */
+  let overRequests = false
   const waiting = new Set<Promise<void>>()
   const deferreds = new Set<QuickJSDeferredPromise>()
 
@@ -542,17 +596,30 @@ async function runInQuickJs(
     }
 
     if (broken) {
-      return ended({ kind: "error", message: broken })
+      return ended({ kind: "error", message: broken, reason: "memory" })
     }
 
     if (overCpu) {
       return ended({
         kind: "error",
         message: `The program computed for more than ${cpuMs / 1000} seconds and was stopped.`,
+        reason: "cpu",
       })
     }
 
-    return ended({ kind: "error", message: describeThrown(value) })
+    const message = describeThrown(value)
+
+    // QuickJS throws an InternalError when its allocator is refused; a
+    // program that made more requests than a run may throws on the last.
+    return ended({
+      kind: "error",
+      message,
+      ...(/^InternalError: out of memory/.test(message)
+        ? { reason: "memory" as const }
+        : overRequests
+          ? { reason: "calls" as const }
+          : {}),
+    })
   }
 
   const print = vm.newFunction("__pcp_print", (text) => {
@@ -570,8 +637,9 @@ async function runInQuickJs(
     }
 
     if (++requests > MAX_REQUESTS) {
+      overRequests = true
       throw new Error(
-        `A run may ask PCP for at most ${MAX_REQUESTS} things (calls, reads and keeps together).`,
+        `A run may ask PCP for at most ${MAX_REQUESTS} things (calls, reads, keeps, images and videos together).`,
       )
     }
 
@@ -701,7 +769,7 @@ async function runInQuickJs(
       }
 
       if (broken) {
-        return ended({ kind: "error", message: broken })
+        return ended({ kind: "error", message: broken, reason: "memory" })
       }
 
       const state = vm.getPromiseState(promise)
@@ -736,7 +804,7 @@ async function runInQuickJs(
       await Promise.race([...waiting, aborted])
 
       if (broken) {
-        return ended({ kind: "error", message: broken })
+        return ended({ kind: "error", message: broken, reason: "memory" })
       }
     }
   } finally {

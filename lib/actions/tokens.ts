@@ -12,6 +12,11 @@ import {
   updateApiToken,
 } from "@/lib/core/api-tokens"
 import {
+  keepOwnInstructions,
+  saveTokenInstructions,
+  takeSuggestedInstructions,
+} from "@/lib/core/instructions"
+import {
   copyTokenAccess,
   parseToolAccess,
   setServerToolAccess,
@@ -36,6 +41,24 @@ const DAY_MS = 24 * 60 * 60 * 1000
 function revalidateToken(id: string) {
   revalidatePath("/tokens")
   revalidatePath(`/tokens/${id}`)
+}
+
+/**
+ * A switch drawn with what it was when the page was (a hidden
+ * `<name>Was`, "on" or "off"): its new value when the owner flipped it,
+ * otherwise undefined, so a page drawn before an assistant changed it does
+ * not change it back. Undefined too where the form does not show it.
+ */
+function flipped(formData: FormData, name: string): boolean | undefined {
+  const was = field(formData, `${name}Was`)
+
+  if (was !== "on" && was !== "off") {
+    return undefined
+  }
+
+  const now = field(formData, name) === "on"
+
+  return now === (was === "on") ? undefined : now
 }
 
 /** A level for all tokens shows on every token's page. */
@@ -139,6 +162,9 @@ export async function updateTokenAction(
       serverIds: fields(formData, "serverIds"),
       manageEndpoints: field(formData, "manageEndpoints") === "on",
       keepMemories: field(formData, "keepMemories") === "on",
+      // The assistant turns it off (memory migration_done); only the
+      // owner's switch on the token's page turns it on.
+      memoryMigration: flipped(formData, "memoryMigration"),
       webFetch: field(formData, "webFetch") === "on",
       runCode: field(formData, "runCode") === "on",
       manageWrappers: field(formData, "manageWrappers") === "on",
@@ -151,6 +177,67 @@ export async function updateTokenAction(
   })
 
   revalidateToken(id)
+
+  return result
+}
+
+/** Where a token's instructions show: its Advanced page and the notice's. */
+function revalidateInstructions(id: string) {
+  revalidatePath(`/tokens/${id}/advanced`)
+  revalidatePath("/tokens/instructions")
+}
+
+/**
+ * The owner's instructions for an assistant, from the editor on its
+ * Advanced page, or (`merged`) the merge with PCP's newer suggestion.
+ */
+export async function saveInstructionsAction(
+  _previous: UpdateTokenResult,
+  formData: FormData,
+): Promise<UpdateTokenResult> {
+  const ctx = await requireContext()
+  const id = field(formData, "id")
+
+  const result = await guarded(async () => {
+    await saveTokenInstructions(ctx, id, field(formData, "instructions"), {
+      merged: field(formData, "merged") === "on",
+    })
+    return { message: "Saved." }
+  })
+
+  revalidateInstructions(id)
+
+  return result
+}
+
+/** "Keep mine" on PCP's newer suggested instructions. */
+export async function keepInstructionsAction(
+  tokenId: string,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await keepOwnInstructions(ctx, tokenId)
+    return {}
+  })
+
+  revalidateInstructions(tokenId)
+
+  return result
+}
+
+/** "Take PCP's": the newer suggested instructions in place of the token's. */
+export async function takeInstructionsAction(
+  tokenId: string,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await takeSuggestedInstructions(ctx, tokenId)
+    return {}
+  })
+
+  revalidateInstructions(tokenId)
 
   return result
 }
@@ -184,7 +271,8 @@ export async function endAllowanceAction(
   tokenId: string,
   target:
     | { kind: "tool"; serverId: string; toolName: string }
-    | { kind: "site"; host: string },
+    | { kind: "site"; host: string }
+    | { kind: "secret"; secretId: string; origin: string },
 ): Promise<ActionState> {
   const ctx = await requireContext()
 
@@ -194,16 +282,23 @@ export async function endAllowanceAction(
       tokenId,
       target?.kind === "site"
         ? { kind: "site", host: String(target.host) }
-        : {
-            kind: "tool",
-            serverId: String(target?.serverId),
-            toolName: String(target?.toolName),
-          },
+        : target?.kind === "secret"
+          ? {
+              kind: "secret",
+              secretId: String(target.secretId),
+              origin: String(target.origin),
+            }
+          : {
+              kind: "tool",
+              serverId: String(target?.serverId),
+              toolName: String(target?.toolName),
+            },
     )
     return {}
   })
 
   revalidatePath(`/tokens/${tokenId}`)
+  revalidatePath("/secrets")
 
   return result
 }

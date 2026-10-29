@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto"
 
 import { db } from "./db"
+import { inheritedToolDescriptions } from "./definition-rows"
 
 /**
  * Writing a server's tool list into the catalogue (mcp_tool), whichever way
  * it was read: an MCP server's tools/list or the operations of an OpenAPI
  * schema. Tools that disappeared are removed; the owner's description
- * overrides are never touched, so they survive a refresh.
+ * overrides are never touched, so they survive a refresh. A tool new to a
+ * server that shares its definition with others starts with the
+ * description in the owner's words that they have for it.
  */
 
 export type SyncResult = {
@@ -52,6 +55,7 @@ export async function storeTools(
   tools: CatalogueTool[],
 ): Promise<number> {
   const names = new Set<string>()
+  const inherited = await inheritedToolDescriptions(serverId)
 
   // One transaction: a schema with hundreds of operations is one write,
   // not hundreds, and a failure leaves the previous list in place.
@@ -72,7 +76,13 @@ export async function storeTools(
 
         await tx.mcpTool.upsert({
           where: { serverId_name: { serverId, name: tool.name } },
-          create: { id: randomUUID(), serverId, name: tool.name, ...fields },
+          create: {
+            id: randomUUID(),
+            serverId,
+            name: tool.name,
+            descriptionOverride: inherited.get(tool.name) ?? null,
+            ...fields,
+          },
           update: fields,
         })
       }

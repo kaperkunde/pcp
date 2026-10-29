@@ -38,6 +38,7 @@ function inputFrom(formData: FormData): MailAccountInput {
     authUsername: field(formData, "authUsername") || null,
     authSecretId: field(formData, "authSecretId") || null,
     mailFrom: field(formData, "mailFrom") || null,
+    mailSaveSent: field(formData, "mailSaveSent") || null,
     oauthClientId: field(formData, "oauthClientId") || null,
     oauthClientSecretId: field(formData, "oauthClientSecretId") || null,
     oauthClientSecretValue: field(formData, "oauthClientSecretValue") || null,
