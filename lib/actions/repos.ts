@@ -37,7 +37,7 @@ import {
   type AddChoice,
 } from "@/lib/core/repos/sync"
 import { getServer } from "@/lib/core/servers"
-import { syncServerTools } from "@/lib/core/upstream"
+import { launchService, syncServerTools } from "@/lib/core/upstream"
 import {
   type ActionState,
   field,
@@ -46,6 +46,7 @@ import {
 } from "@/lib/server/action-state"
 import { instanceInputFrom } from "@/lib/server/instance-input"
 import { publicUrlFor } from "@/lib/server/public-url"
+import { serviceInputFrom } from "@/lib/server/service-input"
 import { requireContext } from "@/lib/server/session"
 
 const ITEM_KINDS = Object.keys(ITEM_DIRS)
@@ -468,6 +469,51 @@ export async function importItemAction(
 
     if (server.kind === "mcp") {
       await syncServerTools(ctx, server, { publicUrl: await publicUrlFor(ctx) })
+    }
+
+    return { id: added.id }
+  })
+
+  if (result.status !== "ok") {
+    return result
+  }
+
+  revalidate()
+  revalidatePath("/servers", "layout")
+  redirect(`/servers/${encodeURIComponent(result.id!)}`)
+}
+
+/**
+ * A new service from a repository, launched with the owner's own part:
+ * the item read again at the commit shown, and launched only when it hashes
+ * as it did; then linked to the repository.
+ */
+export async function importServiceAction(
+  repoId: string,
+  choice: { commit: string; root: string; hash: string },
+  _previous: RepoActionResult,
+  formData: FormData,
+): Promise<RepoActionResult> {
+  const ctx = await requireContext()
+  const publicUrl = await publicUrlFor(ctx)
+  const result = await guarded(async () => {
+    const [added] = await addFromRepo(ctx, repoId, {
+      commit: String(choice.commit),
+      items: [
+        {
+          root: String(choice.root),
+          hash: String(choice.hash),
+          service: {
+            input: serviceInputFrom(formData),
+            launch: (launchCtx, input) =>
+              launchService(launchCtx, input, { publicUrl }),
+          },
+        },
+      ],
+    })
+
+    if (!added?.ok || !added.id) {
+      throw invalid(added?.message ?? "Nothing was launched.")
     }
 
     return { id: added.id }

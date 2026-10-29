@@ -131,20 +131,43 @@ function SecretSelect({
 export function ServiceLaunchForm({
   hosts,
   secrets,
+  fixed,
+  action: given,
+  submitLabel = "Launch",
 }: {
   /** The SSH servers whose host key PCP has pinned. */
   hosts: Array<Option & { address: string }>
   secrets: Option[]
+  /**
+   * A definition the owner does not type: another instance of a service
+   * (`definitionId`), or an item from a linked repository (the action reads
+   * it again there). Shown whole, and not edited here.
+   */
+  fixed?: {
+    /** The definition as JSON text, for the owner to read. */
+    definition: string
+    definitionId?: string
+    name: string
+    description: string
+  }
+  /** Another action than launching from a typed definition. */
+  action?: (
+    state: ServerActionResult,
+    formData: FormData,
+  ) => Promise<ServerActionResult>
+  submitLabel?: string
 }) {
   const [state, action] = useActionState<ServerActionResult, FormData>(
-    launchServiceAction,
+    given ?? launchServiceAction,
     { status: "idle" },
   )
-  const [name, setName] = useState("")
+  const [name, setName] = useState(fixed?.name ?? "")
   const [slug, setSlug] = useState("")
-  const [description, setDescription] = useState("")
+  const [description, setDescription] = useState(fixed?.description ?? "")
   const [hostId, setHostId] = useState(hosts[0]?.id ?? "")
-  const [definition, setDefinition] = useState(EXAMPLE_DEFINITION)
+  const [definition, setDefinition] = useState(
+    fixed?.definition ?? EXAMPLE_DEFINITION,
+  )
   const [address, setAddress] = useState("0.0.0.0")
   const [hostPorts, setHostPorts] = useState<Record<number, string>>({})
   const [env, setEnv] = useState<Record<string, string>>({})
@@ -190,21 +213,41 @@ export function ServiceLaunchForm({
         </Field>
       </FormSection>
       <FormSection title="What it is">
-        <Field
-          label="Definition"
-          htmlFor="service-definition"
-          hint="JSON: the image pinned by digest (repository@sha256:…), its ports, the names of its variables, named volumes (never a folder of the server), a health check, and what PCP adds for it: an API endpoint from its schema (openapi), an MCP server (mcp), or nothing (none)."
-        >
-          <Textarea
-            id="service-definition"
-            name="definition"
-            value={definition}
-            onChange={(event) => setDefinition(event.target.value)}
-            spellCheck={false}
-            className="min-h-72 font-mono text-xs"
-            required
-          />
-        </Field>
+        {fixed ? (
+          <>
+            {fixed.definitionId ? (
+              <input
+                type="hidden"
+                name="definitionId"
+                value={fixed.definitionId}
+              />
+            ) : null}
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Its definition, as it runs: the image pinned by digest, its ports,
+              the names of its variables, its volumes, health check and what PCP
+              adds for it.
+            </p>
+            <pre className="max-h-96 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
+              {fixed.definition}
+            </pre>
+          </>
+        ) : (
+          <Field
+            label="Definition"
+            htmlFor="service-definition"
+            hint="JSON: the image pinned by digest (repository@sha256:…), its ports, the names of its variables, named volumes (never a folder of the server), a health check, and what PCP adds for it: an API endpoint from its schema (openapi), an MCP server (mcp), or nothing (none)."
+          >
+            <Textarea
+              id="service-definition"
+              name="definition"
+              value={definition}
+              onChange={(event) => setDefinition(event.target.value)}
+              spellCheck={false}
+              className="min-h-72 font-mono text-xs"
+              required
+            />
+          </Field>
+        )}
         {shape.problem ? (
           <p className="text-xs text-muted-foreground">{shape.problem}</p>
         ) : null}
@@ -274,7 +317,7 @@ export function ServiceLaunchForm({
       <FormFooter
         editing={false}
         state={state}
-        submitLabel="Launch"
+        submitLabel={submitLabel}
         pendingText="Launching…"
       />
     </ServerFormFrame>
