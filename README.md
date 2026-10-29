@@ -709,7 +709,8 @@ has to build something from them (a MIME message with an attachment). With
 `keep`, a value one tool makes, such as a password a server generates, goes
 into another tool's arguments as a handle, never read by the program or the
 assistant. `pcp.tools()` lists the token's servers and tools, as `list_tools`
-does. The program also has `atob`, `btoa`, `TextEncoder`, `TextDecoder` and
+does, and `pcp.describe(server, tool)` gives one tool's arguments and what
+it returns, as `describe` does. The program also has `atob`, `btoa`, `TextEncoder`, `TextDecoder` and
 `crypto.getRandomValues`, so it can make a strong secret itself.
 
 A large picture costs an assistant far more to look at than a small one, so

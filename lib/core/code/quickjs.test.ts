@@ -28,7 +28,16 @@ describe("what a program can reach", () => {
     expect(result.kind).toBe("done")
     expect(JSON.parse((result as { returned: string }).returned)).toEqual({
       node: Array(8).fill("undefined"),
-      pcp: ["call", "image", "keep", "read", "step", "tools", "video"],
+      pcp: [
+        "call",
+        "describe",
+        "image",
+        "keep",
+        "read",
+        "step",
+        "tools",
+        "video",
+      ],
       frozen: true,
     })
   })

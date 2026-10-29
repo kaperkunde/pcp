@@ -1653,7 +1653,12 @@ three parts:
   server, a tool, its arguments, and call_tool's `fields`, `decode` and
   `keep`), `read` (one of the token's own kept results, as text), `keep`
   (a text kept as a result of the token's, returning its handle), `tools`
-  and `media` (below). A handle
+  (the token's servers, or one's tools, as `list_tools` gives them),
+  `describe` (one of those tools as `describe` gives it, from the catalogue
+  and without a call_handle, since `call` takes names; a blocked or unknown
+  tool is refused as a call to it would be, and no server is read) and
+  `media` (below). `tools` and `describe` are run_code's only: a wrapper's
+  program is refused both. A handle
   PCP wrote into an answer is made bare (`{"$result"}`) before a call, so a
   program passes on what it was handed as it is. Limits are in
   `code/limits.ts`: 3 minutes in all, 100 calls with 5 under way at once,
@@ -1882,7 +1887,8 @@ checkSyntax`), nothing has a character that does not show on screen
   tool's `calls`) is left out of `search`, `list_tools`, `pcp.tools`
   and the instructions' counts (`listedTools`) for a token while the
   wrapper's tool is not blocked for it; it can still be called and
-  described by name, and `describe` says what replaced it. The owner
+  described by name (`pcp.describe` too), and `describe` says what
+  replaced it. The owner
   shows it again from the server's page (`showReplacedTool`, which takes it
   out of every wrapper's lists).
 - **Changes** (`admin.ts`). A token made with "propose wrappers"

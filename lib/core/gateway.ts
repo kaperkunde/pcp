@@ -95,6 +95,7 @@ import {
 import {
   checkRun,
   runCode,
+  type CodeDescriber,
   type CodeLister,
   type RunProgress,
 } from "./code/run"
@@ -1465,9 +1466,30 @@ export function buildGatewayServer(
    * still carries it. The recovery answers of call_tool give the same.
    */
   function described(
-    { server: entry, tool }: { server: GatewayServer; tool: GatewayTool },
+    found: { server: GatewayServer; tool: GatewayTool },
     row: ToolRow,
   ): string {
+    const json = JSON.stringify(
+      describedTool(found, row, { handle: true }),
+      null,
+      1,
+    )
+
+    return json.length > MAX_DESCRIBED_CHARS
+      ? `${json.slice(0, MAX_DESCRIBED_CHARS)}\n… (truncated by PCP)`
+      : json
+  }
+
+  /**
+   * A tool as describe gives it, as a value: with its call_handle for
+   * describe itself, without one for run_code's pcp.describe, whose
+   * pcp.call takes names.
+   */
+  function describedTool(
+    { server: entry, tool }: { server: GatewayServer; tool: GatewayTool },
+    row: ToolRow,
+    { handle }: { handle: boolean },
+  ): Record<string, unknown> {
     let inputSchema: unknown
     let annotations: unknown
 
@@ -1478,42 +1500,34 @@ export function buildGatewayServer(
       inputSchema = row.inputSchema
     }
 
-    const json = JSON.stringify(
-      {
-        call_handle: handleFor(entry, row),
-        server: entry.slug,
-        serverName: entry.name,
-        ...(entry.description
-          ? { serverDescription: summarize(entry.description, 300) }
-          : {}),
-        // The owner's own words about this server: which host, what for.
-        ...(entry.note ? { ownerNote: entry.note } : {}),
-        tool: tool.name,
-        title: tool.title ?? undefined,
-        description: tool.descriptionOverride ?? tool.description,
-        access: tool.access,
-        inputSchema,
-        // What a successful call answers, when the API's schema says.
-        ...(row.output ? { returns: row.output } : {}),
-        // A wrapper's tool: the tools its program calls.
-        ...(entry.kind === "wrapper"
-          ? {
-              calls: readWrapperOperation(row.operation).calls.map(
-                (call) =>
-                  `${servers.find((other) => other.id === call.serverId)?.slug ?? "(another server)"}/${call.tool}`,
-              ),
-            }
-          : {}),
-        ...(tool.hiddenBy ? { replacedBy: tool.hiddenBy } : {}),
-        annotations,
-      },
-      null,
-      1,
-    )
-
-    return json.length > MAX_DESCRIBED_CHARS
-      ? `${json.slice(0, MAX_DESCRIBED_CHARS)}\n… (truncated by PCP)`
-      : json
+    return {
+      ...(handle ? { call_handle: handleFor(entry, row) } : {}),
+      server: entry.slug,
+      serverName: entry.name,
+      ...(entry.description
+        ? { serverDescription: summarize(entry.description, 300) }
+        : {}),
+      // The owner's own words about this server: which host, what for.
+      ...(entry.note ? { ownerNote: entry.note } : {}),
+      tool: tool.name,
+      title: tool.title ?? undefined,
+      description: tool.descriptionOverride ?? tool.description,
+      access: tool.access,
+      inputSchema,
+      // What a successful call answers, when the API's schema says.
+      ...(row.output ? { returns: row.output } : {}),
+      // A wrapper's tool: the tools its program calls.
+      ...(entry.kind === "wrapper"
+        ? {
+            calls: readWrapperOperation(row.operation).calls.map(
+              (call) =>
+                `${servers.find((other) => other.id === call.serverId)?.slug ?? "(another server)"}/${call.tool}`,
+            ),
+          }
+        : {}),
+      ...(tool.hiddenBy ? { replacedBy: tool.hiddenBy } : {}),
+      annotations,
+    }
   }
 
   /**
@@ -4012,7 +4026,7 @@ export function buildGatewayServer(
       .enum(["javascript", ...shells] as [string, ...string[]])
       .optional()
       .describe(
-        `javascript (the default), or ${shells.join(" or ")} in PCP's sandbox: a container with no network, where bash has jq, the usual command-line tools and Python 3 with its standard library, and nothing is kept between runs. The pcp command calls tools: pcp call SERVER TOOL '{"arg": 1}' [--fields a,b] [--decode a] [--keep a] prints the answer as JSON (- reads the arguments from stdin); pcp read [--base64 | --bytes] HANDLE prints a kept text, or a file's bytes as base64 or as they are; pcp keep [--name NAME] [--type TYPE] [--bytes] [FILE] keeps a text, or with --bytes a file, and prints its handle; pcp tools [SERVER] lists the servers, or a server's tools; pcp image [--max-width N] [--max-height N] [--crop X,Y,W,H] [--grayscale] [--format F] [--quality Q] HANDLE and pcp frames [--at T,T | --every S | --count N] [--max-width N] HANDLE work as pcp.image.compress and pcp.video.frames do (ffmpeg is there too). A refusal or a tool's error goes to stderr with status 1. In Python, import pcp, then pcp.call(server, tool, args, fields=…, keep=…), pcp.read(handle) (as_="base64" for a file, as_="bytes" for bytes), pcp.keep(text or bytes, name=…, type=…), pcp.tools(server=None), pcp.image(handle, max_width=…, crop=(x, y, w, h), grayscale=…, format=…, quality=…) and pcp.frames(handle, at=… | every=… | count=…, max_width=…), which raise pcp.PcpError (a paced call's has .code "paced" and .retry_after_ms). What it prints, stdout and stderr together, comes back with how it exited; one program runs at a time.`,
+        `javascript (the default), or ${shells.join(" or ")} in PCP's sandbox: a container with no network, where bash has jq, the usual command-line tools and Python 3 with its standard library, and nothing is kept between runs. The pcp command calls tools: pcp call SERVER TOOL '{"arg": 1}' [--fields a,b] [--decode a] [--keep a] prints the answer as JSON (- reads the arguments from stdin); pcp read [--base64 | --bytes] HANDLE prints a kept text, or a file's bytes as base64 or as they are; pcp keep [--name NAME] [--type TYPE] [--bytes] [FILE] keeps a text, or with --bytes a file, and prints its handle; pcp tools [SERVER] lists the servers, or a server's tools; pcp describe SERVER TOOL prints one tool's inputSchema, what it returns and its access, as describe does; pcp image [--max-width N] [--max-height N] [--crop X,Y,W,H] [--grayscale] [--format F] [--quality Q] HANDLE and pcp frames [--at T,T | --every S | --count N] [--max-width N] HANDLE work as pcp.image.compress and pcp.video.frames do (ffmpeg is there too). A refusal or a tool's error goes to stderr with status 1. In Python, import pcp, then pcp.call(server, tool, args, fields=…, keep=…), pcp.read(handle) (as_="base64" for a file, as_="bytes" for bytes), pcp.keep(text or bytes, name=…, type=…), pcp.tools(server=None), pcp.describe(server, tool), pcp.image(handle, max_width=…, crop=(x, y, w, h), grayscale=…, format=…, quality=…) and pcp.frames(handle, at=… | every=… | count=…, max_width=…), which raise pcp.PcpError (a paced call's has .code "paced" and .retry_after_ms). What it prints, stdout and stderr together, comes back with how it exited; one program runs at a time.`,
       )
     const limits = resourceLimits()
     /** The token's servers, or one's tools, as list_tools gives them. */
@@ -4050,15 +4064,38 @@ export function buildGatewayServer(
           .sort((a, b) => a.name.localeCompare(b.name)),
       }
     }
+    /**
+     * One tool the token can see, as describe gives it, with no call_handle:
+     * a tool it cannot see (blocked, or not there) is refused as findTool
+     * refuses it, and no server is read for it.
+     */
+    const describeForCode: CodeDescriber = async (slug, name) => {
+      const found = findTool(bySlug, slug, name)
+
+      if ("error" in found) {
+        return { ok: false, error: found.error }
+      }
+
+      const row = await toolRow(found.server.id, found.tool.name)
+
+      if (!row) {
+        return {
+          ok: false,
+          error: `${slug} has no tool called ${name}. pcp.tools("${slug}") lists its tools.`,
+        }
+      }
+
+      return { ok: true, value: describedTool(found, row, { handle: false }) }
+    }
 
     // What a program has, in the code argument's description: the tool's
     // own says what it is for and the rules around a run.
     const programDescription = [
       'The program: the body of an async function. await works at the top, return hands back a value (as JSON), console.log(...) prints. For example: const issues = await pcp.call("github", "list_issues", { repo: "pcp" }); return issues.filter((issue) => issue.labels.length === 0).map((issue) => issue.number)',
       "It has the JavaScript language, with atob, btoa, TextEncoder, TextDecoder (UTF-8), crypto.getRandomValues and crypto.randomUUID, and nothing else: no network, no files, no timers, no require or import.",
-      `await pcp.call(server, tool, args, { fields, decode, keep }) calls a tool as call_tool does, but by its server and name as search gives them (no call_handle), with the arguments describe's inputSchema asks for, and returns its answer as a value: the parsed JSON, or the text. The options are call_tool's, and nothing is cut to a preview: the program gets the whole answer, up to ${limits.answerChars.toLocaleString("en")} characters of JSON. A tool's error, a refusal, arguments that do not fit its inputSchema and a blocked tool throw an Error the program may catch. A call that PCP's pacing holds waits, within the run; past the run's end, pcp.call throws an Error with code "paced" and retryAfterMs.`,
+      `await pcp.call(server, tool, args, { fields, decode, keep }) calls a tool as call_tool does, but by its server and name as search gives them (no call_handle), with the arguments its inputSchema asks for (pcp.describe gives it), and returns its answer as a value: the parsed JSON, or the text. The options are call_tool's, and nothing is cut to a preview: the program gets the whole answer, up to ${limits.answerChars.toLocaleString("en")} characters of JSON. A tool's error, a refusal, arguments that do not fit its inputSchema and a blocked tool throw an Error the program may catch. A call that PCP's pacing holds waits, within the run; past the run's end, pcp.call throws an Error with code "paced" and retryAfterMs.`,
       'Files in an answer (attachments, images) come back as handles, {"$result": id, "type", "size", …}: pass a handle as it is where a tool wants the file, and PCP puts the file there (as base64 where the tool wants a string). keep works as in call_tool: pcp.call(…, { keep: ["password"] }) hands the program a handle in place of that value, so a secret one tool makes goes into another tool\'s arguments without the program or you ever reading it. A handle stands for a whole string; to put a file inside a text you build (a MIME message), read its bytes.',
-      'await pcp.read(handle) reads a kept text, and pcp.read(handle, { as: "base64" }) a file\'s bytes as base64 ({ as: "bytes" } as a Uint8Array). await pcp.keep(text, { name, type }) keeps a text and returns its handle; pcp.keep(base64, { encoding: "base64", name, type }), or a Uint8Array, keeps a file. await pcp.tools() lists the servers, and pcp.tools(server) every tool on one, as list_tools does. await pcp.step("name", async () => { … }) runs a part under a name: its calls are listed under it, and an error from it reads "failed at step \'name\'" (error.step names it).',
+      'await pcp.read(handle) reads a kept text, and pcp.read(handle, { as: "base64" }) a file\'s bytes as base64 ({ as: "bytes" } as a Uint8Array). await pcp.keep(text, { name, type }) keeps a text and returns its handle; pcp.keep(base64, { encoding: "base64", name, type }), or a Uint8Array, keeps a file. await pcp.tools() lists the servers, and pcp.tools(server) every tool on one, as list_tools does. await pcp.describe(server, tool) gives one tool as describe does, without a call_handle: its inputSchema (the arguments pcp.call takes), what it returns, its access and annotations; read it before calling a tool whose arguments you have not seen. await pcp.step("name", async () => { … }) runs a part under a name: its calls are listed under it, and an error from it reads "failed at step \'name\'" (error.step names it).',
       `Images and videos: await pcp.image.compress(handle, { maxWidth, maxHeight, crop: { x, y, width, height }, grayscale, format: "jpeg" | "webp" | "png", quality }) makes a smaller copy of a kept PNG, JPEG, WebP or GIF and returns { handle, width, height, bytes, type }; await pcp.video.frames(handle, { at: [seconds] | every: seconds | count, maxWidth }) returns { duration, width, height, frames: [{ t, handle }] }${shells.length > 0 ? "." : ", and needs PCP's sandbox, which is not running."} Compress an image before you read it or return it: to read text or a screen, crop to the part you need, grayscale, about 1200 pixels wide; to judge a layout or a design, keep the colour at a lower quality; to pass an image to another tool (OCR, an upload), send the original handle. From a video, take a few frames and compress those.`,
     ].join("\n\n")
 
@@ -4133,6 +4170,7 @@ export function buildGatewayServer(
               ...(progress ? { progress } : {}),
               ...(runner ? { executor: runner } : {}),
               list,
+              describe: describeForCode,
               call: async ({
                 server: slug,
                 tool: name,
@@ -4156,7 +4194,7 @@ export function buildGatewayServer(
                 const unfit =
                   row &&
                   argumentsUnfit(found.server, found.tool.name, row, callArgs, {
-                    fix: `Fix them; describe ${found.server.slug}/${found.tool.name} gives its inputSchema.`,
+                    fix: `Fix them; pcp.describe("${found.server.slug}", "${found.tool.name}") gives its inputSchema.`,
                     showSchema: false,
                   })
 

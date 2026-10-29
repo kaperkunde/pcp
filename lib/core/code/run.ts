@@ -84,6 +84,9 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
  *   program's or the assistant's) can name in place of the value.
  * - `tools` lists what the gateway's list_tools would: the token's servers,
  *   or one server's tools it can see, at its levels. It reaches no server.
+ * - `describe` gives what the gateway's describe would for one of those
+ *   tools (its inputSchema, what it returns, its access), without the
+ *   call_handle, since `call` takes names. It reaches no server either.
  * - `media` makes a smaller copy of one of the token's kept images
  *   (pcp.image.compress: crop, fit, grey, re-encode), decoded here in PCP's
  *   process (media.ts) and never in the program's engine, or takes frames
@@ -154,6 +157,16 @@ export type CodeCaller = (
 export type CodeLister = (
   server: string | null,
 ) => { ok: true; value: unknown } | { ok: false; error: string }
+
+/**
+ * How the gateway describes one tool for a program: describe's answer for
+ * a tool the token can see, as a value, with no call_handle. A tool it
+ * cannot see is refused as a call to it would be. Nothing is fetched.
+ */
+export type CodeDescriber = (
+  server: string,
+  tool: string,
+) => Promise<{ ok: true; value: unknown } | { ok: false; error: string }>
 
 /** What run_code shows of each part before keeping the rest. */
 const SHOWN_OUTPUT_CHARS = 20_000
@@ -638,6 +651,8 @@ export async function checkRun(
 export type RunOptions = {
   call: CodeCaller
   list?: CodeLister
+  /** pcp.describe; absent where pcp.tools is (a wrapper's program). */
+  describe?: CodeDescriber
   /** The request's own: the run stops when it goes away (a wrapper's). */
   signal?: AbortSignal
   executor?: Executor
@@ -692,6 +707,7 @@ export async function runProgram(
   {
     call,
     list,
+    describe,
     signal,
     executor = runJavaScript,
     timeoutMs = RUN_TIMEOUT_MS,
@@ -1292,6 +1308,23 @@ export async function runProgram(
     return list(server)
   }
 
+  async function describeTool(payload: unknown): Promise<BridgeReply> {
+    const name = (value: unknown) =>
+      typeof value === "string" && value !== "" && value.length <= 200
+
+    if (!isRecord(payload) || !name(payload.server) || !name(payload.tool)) {
+      return refuse(
+        'pcp.describe takes a server\'s name and a tool\'s, as pcp.tools gives them: pcp.describe("github", "list_issues").',
+      )
+    }
+
+    if (!describe) {
+      return refuse("PCP cannot describe tools here.")
+    }
+
+    return describe(payload.server as string, payload.tool as string)
+  }
+
   const bridge: Bridge = async (op, payload) => {
     switch (op) {
       case "call":
@@ -1302,6 +1335,8 @@ export async function runProgram(
         return keep(payload)
       case "tools":
         return tools(payload)
+      case "describe":
+        return describeTool(payload)
       case "media":
         return mediaOp(payload)
       default:
