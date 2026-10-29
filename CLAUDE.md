@@ -125,11 +125,29 @@ so in the summary; the bump itself waits for the request.
   the whole skill and its diff and writes only that, while the skill is
   still at the version the owner was shown. A change to the SKILL.md shape
   stays backward compatible.
+- Every tool PCP exposes is defined through `lib/core/tools/`: PCP's own
+  at `/mcp` with `defineTool`, the families behind call_tool (browser, mail,
+  calendar, SSH, services) with `defineInnerTool` (`tools/family.ts`); a
+  strict zod input published as JSON Schema 2020-12 (objects closed, every
+  property described), rules across arguments as JSON Schema under
+  `allOf`, all four annotations, an `output` when every answer is one
+  shape. One validator (`tools/validate.ts`) checks every call's
+  arguments before anything runs, connects or asks the owner, on every
+  path (`lib/core/call-arguments.ts`: call_tool, run_code's `pcp.call`, a
+  wrapper's or flow's calls; the family again before it runs); zod adds
+  only what JSON Schema cannot say. An answer is one of the outcome kinds
+  (`tools/outcome.ts`: `ok`, `toolError` with its code in
+  `_meta["gg.pcp/error"]`, `needsOwner`, passed on): a family throws only
+  for a failure on the way (`upstream`) or a sign-in (`unauthorized`), never
+  for arguments, an unknown tool or read-only. Arguments are snake_case; a
+  renamed one is an alias for one release with a note (and a wrapper's
+  answer says how to change its program), then `retired`, refused with the
+  name to use. Each rename goes in `docs/breaking-changes.md`.
 - `call_tool` and `call_read_only_tool` take only a `call_handle` from
   `describe` (`lib/core/call-handles.ts`: an HMAC under the vault key over
-  the token, the tool and its schema's hash), and check the arguments against
-  the schema before anything runs or asks the owner. run_code's `pcp.call`
-  keeps names.
+  the token, the tool and its schema's hash), and check the arguments with
+  that validator before anything runs or asks the owner. run_code's
+  `pcp.call` keeps names.
 - Pacing (`lib/core/pacing/`) applies only in `upstream.ts callServerTool`
   (the browser by the tab's site, in `browser/call.ts`) and web fetch's
   request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
@@ -330,8 +348,9 @@ so in the summary; the bump itself waits for the request.
   wrapper, the owner's approval of the wrapper is the level for the calls it
   lists (a tool has its own level only, `innerCall` takes the target from
   the vault), and every request says which calls any token can make through
-  it. A tool's `outputSchema` is checked on every return
-  (`wrappers/schema-check.ts`, no compiled schemas, no `$ref`). A
+  it. A tool's `outputSchema` is checked on every return by the one
+  validator (no `$ref`, `wrappers/schema-check.ts` refuses one when it is
+  saved) and the value answered as `structuredContent`. A
   secret goes in only as `{"$secret": name}` where a binding the owner
   approved names that tool (by server id), argument and address: matched
   and written in `upstream.ts`, scrubbed from the answer, errors and status
