@@ -164,6 +164,9 @@ import {
   readServerNote,
 } from "./personal-notes"
 import {
+  clientPrefixed,
+  clientPrefixNote,
+  describeOwnTool,
   LIST_PAGE_SIZE,
   listTools,
   ownerNotesFor,
@@ -228,7 +231,7 @@ import {
 } from "./wrappers/limits"
 import { findPlaceholders } from "./wrappers/placeholders"
 import { withWrappers } from "./wrappers/run"
-import { defineTool, type ToolSpec } from "./tools/define"
+import { defineTool, type Tool, type ToolSpec } from "./tools/define"
 import {
   NEEDS_OWNER,
   SERVER_STATE,
@@ -957,10 +960,58 @@ export function buildGatewayServer(
       }),
   }
 
+  /**
+   * PCP's own tools this token has, as registered: search finds them (kind
+   * pcp) and describe reads them, by their bare names.
+   */
+  const ownTools: Tool[] = []
+
   /** One of PCP's own tools, on the common interface (lib/core/tools/). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const register = <I extends z.ZodObject<any>>(spec: ToolSpec<I>) =>
-    registerTool(server, defineTool(spec), hooks)
+  const register = <I extends z.ZodObject<any>>(spec: ToolSpec<I>) => {
+    const tool = defineTool(spec)
+    ownTools.push(tool)
+    registerTool(server, tool, hooks)
+  }
+
+  /**
+   * One of PCP's own tools by the name an assistant gave: as it is, or with
+   * its app's prefix (mcp__<server>__run_code), which the note explains.
+   */
+  const ownTool = (
+    given: string,
+  ): { tool: Tool; note: string | null } | null => {
+    const exact = ownTools.find((tool) => tool.name === given.trim())
+
+    if (exact) {
+      return { tool: exact, note: null }
+    }
+
+    const prefixed = clientPrefixed(
+      given,
+      ownTools.map((tool) => tool.name),
+    )
+    const tool =
+      prefixed && ownTools.find((entry) => entry.name === prefixed.name)
+
+    return tool ? { tool, note: clientPrefixNote(prefixed) } : null
+  }
+
+  /** describe's answer for one of PCP's own tools. */
+  const describeOwn = ({ tool, note }: { tool: Tool; note: string | null }) =>
+    text(
+      describeOwnTool(
+        {
+          name: tool.name,
+          title: tool.title,
+          description: tool.description,
+          inputSchema: tool.inputSchema(),
+          outputSchema: tool.outputSchema(),
+          annotations: tool.annotations,
+        },
+        note,
+      ),
+    )
 
   /** The owner is asked; the answer is the request's, passed on. */
   const asked = async (ask: Parameters<typeof withPermission>[1]) =>
@@ -1042,7 +1093,7 @@ export function buildGatewayServer(
   register({
     name: "search",
     title: "Search",
-    description: `Find what helps with a task by describing it in a few words (e.g. "create a github issue", "send email", "write release notes"): ${finds}. Discovery only. Each result is its kind (tool, skill or memory), its ref and one line about it; describe takes the ref: for a tool it gives the call_handle, which call_tool takes, for a skill or a memory its text. To see every tool on a server, use list_tools. ${CORE_RULE}`,
+    description: `Find what helps with a task by describing it in a few words (e.g. "create a github issue", "send email", "write release notes"), or by a tool's name: ${finds}, and PCP's own tools. Discovery only. Each result is its kind (tool, pcp, skill or memory), its ref and one line about it; describe takes the ref: for a tool it gives the call_handle, which call_tool takes, for one of PCP's own tools (kind pcp) its schema, and you call it directly, for a skill or a memory its text. To see every tool on a server, use list_tools. ${CORE_RULE}`,
     input: z.object({
       query: z
         .string()
@@ -1058,14 +1109,16 @@ export function buildGatewayServer(
       kind: z
         .enum(
           scope.manageEndpoints
-            ? ["tool", "skill", "memory", "repo"]
-            : ["tool", "skill", "memory"],
+            ? ["tool", "pcp", "skill", "memory", "repo"]
+            : ["tool", "pcp", "skill", "memory"],
         )
         .optional()
         .describe(
-          scope.manageEndpoints
-            ? "Only one kind of result. repo: changes from linked repositories waiting for the owner (a conflict, or a change to review), which you can help with."
-            : "Only one kind of result.",
+          `Only one kind of result. pcp: PCP's own tools, which you call directly.${
+            scope.manageEndpoints
+              ? " repo: changes from linked repositories waiting for the owner (a conflict, or a change to review), which you can help with."
+              : ""
+          }`,
         ),
       limit: searchLimit,
     }),
@@ -1115,7 +1168,7 @@ export function buildGatewayServer(
           : Promise.resolve([]),
       ])
       const results = searchEverything(
-        { tools: candidates(servers), skills, memories },
+        { tools: candidates(servers), pcp: ownTools, skills, memories },
         args.query,
         { limit: args.limit ?? 10, server: args.server, kind: args.kind },
       )
@@ -1127,12 +1180,26 @@ export function buildGatewayServer(
       }
 
       const notes = ownerNotesFor(
-        results.map((result) => result.ref),
+        results
+          .filter((result) => result.kind !== "pcp")
+          .map((result) => result.ref),
         ownerNotes(servers, skills),
       )
+      // A name with an app's prefix: say what the name is.
+      const prefixed = args.query
+        .trim()
+        .split(/\s+/)
+        .map((term) =>
+          clientPrefixed(
+            term,
+            ownTools.map((tool) => tool.name),
+          ),
+        )
+        .find((found) => found !== null)
 
       return text(
         [
+          ...(prefixed ? [clientPrefixNote(prefixed), ""] : []),
           ...results.map(
             (result) =>
               `${result.kind} ${result.ref}${result.title ? ` (${result.title})` : ""} — ${result.description}`,
@@ -1319,6 +1386,13 @@ export function buildGatewayServer(
   /** describe: a tool, a skill or a memory, by the ref search gave. */
   async function describeRef(args: DescribeArgs): Promise<Outcome> {
     const tool = namedTool(args)
+    // pcp/<name>, when no server is called pcp: one of PCP's own tools.
+    const own =
+      tool?.server === "pcp" && !bySlug.has("pcp") ? ownTool(tool.tool) : null
+
+    if (own) {
+      return describeOwn(own)
+    }
 
     if (tool) {
       return describeTool(tool.server, tool.tool)
@@ -1387,7 +1461,14 @@ export function buildGatewayServer(
         : failure("describe only reads.")
     }
 
-    // A bare name: a skill by it, or the one tool by it.
+    // A bare name: one of PCP's own tools (search's ref for one), a skill
+    // by it, or the one tool by it.
+    const ownNamed = ownTool(ref)
+
+    if (ownNamed) {
+      return describeOwn(ownNamed)
+    }
+
     if (
       (await skillsFor(scope.ctx, scope.skillIds)).some((s) => s.name === ref)
     ) {
@@ -1414,14 +1495,14 @@ export function buildGatewayServer(
   register({
     name: "describe",
     title: "Describe",
-    description: `What search found, in full, by its ref. A tool (ref server/tool, or server and tool): its full description and the JSON Schema of its arguments, whether it runs at once ("allowed") or asks the owner first ("ask"), for an API the shape of what it answers ("returns"), and the call_handle that call_tool takes to run it; call this before call_tool, and again when its call_handle stops working. A skill (ref ${SKILL_REF}<name>): its ${SKILL_FILE}, a procedure the owner approved, to follow when the task matches, with its files (${SKILL_REF}<name>/<file>) and the call_handle of each tool it uses.${scope.keepMemories ? ` A memory (its path, ${MEMORY_ROOT}/…): its text.` : ""}`,
+    description: `What search found, in full, by its ref. A tool (ref server/tool, or server and tool): its full description and the JSON Schema of its arguments, whether it runs at once ("allowed") or asks the owner first ("ask"), for an API the shape of what it answers ("returns"), and the call_handle that call_tool takes to run it; call this before call_tool, and again when its call_handle stops working. One of PCP's own tools (kind pcp, ref its name): its description and schemas; you call it directly, not through call_tool. A skill (ref ${SKILL_REF}<name>): its ${SKILL_FILE}, a procedure the owner approved, to follow when the task matches, with its files (${SKILL_REF}<name>/<file>) and the call_handle of each tool it uses.${scope.keepMemories ? ` A memory (its path, ${MEMORY_ROOT}/…): its text.` : ""}`,
     input: z.object({
       ref: z
         .string()
         .max(500)
         .optional()
         .describe(
-          `As search gives it: server/tool, ${SKILL_REF}<name> (or ${SKILL_REF}<name>/<file>)${scope.keepMemories ? ", or a memory's path" : ""}.`,
+          `As search gives it: server/tool, the name of one of PCP's own tools, ${SKILL_REF}<name> (or ${SKILL_REF}<name>/<file>)${scope.keepMemories ? ", or a memory's path" : ""}.`,
         ),
       server: z
         .string()
@@ -1633,7 +1714,14 @@ export function buildGatewayServer(
       )
     }
 
-    return failure(NOT_A_HANDLE, "invalid_arguments")
+    const own = ownTool(value)
+
+    return failure(
+      own
+        ? `${own.tool.name} is PCP's own tool: call it directly, not through call_tool, so nothing was run or asked.${own.note ? ` ${own.note}` : ""}`
+        : NOT_A_HANDLE,
+      "invalid_arguments",
+    )
   }
 
   const callInput = z.object({
