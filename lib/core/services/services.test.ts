@@ -442,9 +442,13 @@ describe("a running service", { timeout: 30_000 }, () => {
   ])("refuses %s with %j before anything connects", async (tool, args) => {
     const { service } = await launched()
     const before = docker.commands.length
-    await expect(
-      callServerTool(ctx, service, tool, args, PUBLIC),
-    ).rejects.toThrow()
+    const refused = await callServerTool(ctx, service, tool, args, PUBLIC)
+    expect(refused.isError).toBe(true)
+    expect(refused._meta).toEqual({
+      "gg.pcp/error": {
+        code: tool === "exec" ? "not_found" : "invalid_arguments",
+      },
+    })
     expect(docker.commands.length).toBe(before)
   })
 

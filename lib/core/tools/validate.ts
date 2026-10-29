@@ -696,7 +696,17 @@ function check(
     }
 
     if (typeof schema.pattern === "string" && !matches(schema.pattern, value)) {
-      add(`${label} does not match the ${named}'s pattern ${schema.pattern}.`)
+      // What the value is meant to be, in the schema's own words, says
+      // more than a pattern does.
+      const meant =
+        typeof schema.description === "string" &&
+        schema.description.length <= 200
+          ? ` (${schema.description.trim().replace(/\.$/, "")})`
+          : ""
+
+      add(
+        `${label} does not match the ${named}'s pattern ${schema.pattern}${meant}.`,
+      )
     }
 
     const format =
@@ -1147,4 +1157,18 @@ export function argumentsRefusal(
     ...problems.map((problem) => `- ${problem}`),
     ...(hint ? ["", hint] : []),
   ].join("\n")
+}
+
+/**
+ * What a zod check found wrong, in the words validate uses: for the rules
+ * JSON Schema cannot say (a refinement), checked after the schema.
+ */
+export function zodProblems(
+  issues: ReadonlyArray<{ path: PropertyKey[]; message: string }>,
+): string[] {
+  return issues.map((issue) =>
+    issue.path.length > 0
+      ? `"${issue.path.map(String).join("/")}": ${issue.message}`
+      : issue.message,
+  )
 }

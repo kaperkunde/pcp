@@ -4,6 +4,7 @@ import {
   auth,
   Client,
   discoverAuthorizationServerMetadata,
+  ProtocolError,
   SdkHttpError,
   StreamableHTTPClientTransport,
   UnauthorizedError,
@@ -109,6 +110,13 @@ import {
 import { noteExitUsed, noteSecretTyped } from "./request-log"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
+import { isToolName } from "./tools/define"
+import { familyError } from "./tools/family"
+import {
+  MAX_ICON_SRC_CHARS,
+  MAX_OUTPUT_SCHEMA_CHARS,
+  MAX_TOOL_ICONS,
+} from "./tools/limits"
 import { PCP_VERSION } from "./version"
 import { syncWrapperTools } from "./wrappers/catalogue"
 import {
@@ -1221,6 +1229,54 @@ async function sshIdentity(
 }
 
 /**
+ * An upstream tool's outputSchema as the catalogue keeps it: an object
+ * schema of a bounded size, else nothing (describe then shows none).
+ */
+function keptOutputSchema(schema: unknown): unknown {
+  return schema !== null &&
+    typeof schema === "object" &&
+    !Array.isArray(schema) &&
+    JSON.stringify(schema).length <= MAX_OUTPUT_SCHEMA_CHARS
+    ? schema
+    : undefined
+}
+
+/**
+ * The icons an upstream gave a tool, as the catalogue keeps them: an https
+ * address or an image as a data: URI, of a bounded length, with its type,
+ * sizes and theme, and nothing else.
+ */
+function keptIcons(icons: unknown): unknown {
+  if (!Array.isArray(icons)) {
+    return undefined
+  }
+
+  const kept = icons
+    .filter(
+      (icon): icon is Record<string, unknown> =>
+        icon !== null &&
+        typeof icon === "object" &&
+        typeof icon.src === "string" &&
+        icon.src.length <= MAX_ICON_SRC_CHARS &&
+        /^(https:|data:image\/)/i.test(icon.src),
+    )
+    .slice(0, MAX_TOOL_ICONS)
+    .map((icon) => ({
+      src: icon.src,
+      ...(typeof icon.mimeType === "string" ? { mimeType: icon.mimeType } : {}),
+      ...(Array.isArray(icon.sizes) &&
+      icon.sizes.every((size) => typeof size === "string")
+        ? { sizes: icon.sizes.slice(0, 8) }
+        : {}),
+      ...(icon.theme === "light" || icon.theme === "dark"
+        ? { theme: icon.theme }
+        : {}),
+    }))
+
+  return kept.length > 0 ? kept : undefined
+}
+
+/**
  * An exit, ready for one request: the SSH connection it leaves through
  * opened (or found open) with PCP's key, decrypted here and handed to the
  * ssh module, never further.
@@ -1429,8 +1485,15 @@ export async function syncServerTools(
             : scrub.text(tool.description),
         inputSchema: scrub.value(tool.inputSchema) as typeof tool.inputSchema,
         annotations: tool.annotations,
+        outputSchema: keptOutputSchema(scrub.value(tool.outputSchema)),
+        icons: keptIcons(tool.icons),
       })),
     )
+    // A name MCP does not allow is kept (the server answers to it), and
+    // said in the server's status, for the owner to take up with its makers.
+    const misnamed = tools
+      .map((tool) => tool.name)
+      .filter((name) => !isToolName(name))
 
     // The upstream's own description is a fallback for a server the owner
     // has not described yet.
@@ -1443,9 +1506,21 @@ export async function syncServerTools(
       })
     }
 
-    await setServerStatus(server.id, "ok", "", { lastSyncedAt: new Date() })
+    const message =
+      misnamed.length > 0
+        ? `Some of its tools have names MCP does not allow (1 to 128 letters, digits, "_", "." or "-"), which some apps refuse: ${misnamed
+            .slice(0, 5)
+            .map((name) => JSON.stringify(name.slice(0, 80)))
+            .join(
+              ", ",
+            )}${misnamed.length > 5 ? ` and ${misnamed.length - 5} more` : ""}.`
+        : ""
 
-    return { status: "ok", message: "", toolCount }
+    await setServerStatus(server.id, "ok", message, {
+      lastSyncedAt: new Date(),
+    })
+
+    return { status: "ok", message, toolCount }
   } catch (error) {
     const result = describeFailure(server, error, connection)
     result.message = makeRedactor(await failureSecrets(error, connection)).text(
@@ -1944,6 +2019,28 @@ async function dispatchKind(
     // quoting the request) must not hand its credential to the assistant.
     return scrubResult(result, await connection.secrets())
   } catch (error) {
+    // The server answered, with a JSON-RPC error: it is up, and the call
+    // got there and was turned down. A tool error in its words, never "could
+    // not be reached", and nothing about the server's state changes.
+    if (ProtocolError.isInstance(error)) {
+      return familyError(
+        makeRedactor([
+          ...placed,
+          ...(await failureSecrets(error, connection)),
+        ]).text(
+          `${server.name} answered ${toolName} with an error (JSON-RPC ${error.code}): ${error.message}`.slice(
+            0,
+            1000,
+          ),
+        ),
+        error.code === -32602
+          ? "invalid_arguments"
+          : error.code === -32601
+            ? "not_found"
+            : "upstream",
+      )
+    }
+
     const failure = describeFailure(server, error, connection)
     failure.message = makeRedactor([
       ...placed,
@@ -2016,6 +2113,18 @@ function describeFailure(
   }
 
   const message = error instanceof Error ? error.message : String(error)
+
+  // It was reached, and answered with a JSON-RPC error.
+  if (ProtocolError.isInstance(error)) {
+    return {
+      status: "error",
+      message:
+        `${server.name} answered with an error (JSON-RPC ${error.code}): ${message}`.slice(
+          0,
+          500,
+        ),
+    }
+  }
 
   return {
     status: "error",

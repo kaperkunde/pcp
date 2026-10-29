@@ -18,3 +18,9 @@ export const MAX_PATTERN_CHARS = 500
 export const MAX_PATTERN_SUBJECT_CHARS = 100_000
 /** The keys listed when a key is not one an object takes. */
 export const MAX_LISTED_KEYS = 30
+/** Icons kept of the ones an MCP server gives a tool. */
+export const MAX_TOOL_ICONS = 4
+/** An icon's address (often a data: URI), in characters, still kept. */
+export const MAX_ICON_SRC_CHARS = 16_000
+/** An upstream tool's outputSchema, as JSON, still kept for describe. */
+export const MAX_OUTPUT_SCHEMA_CHARS = 200_000

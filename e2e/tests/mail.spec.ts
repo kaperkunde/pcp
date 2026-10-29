@@ -119,7 +119,7 @@ test("an assistant reads, files and sends mail through the gateway", async ({
         to: ["Charles Babbage <charles@example.com>"],
         subject: "Re: The engine",
         text: "Thursday suits me.",
-        inReplyTo: "e1",
+        in_reply_to: "e1",
       },
     }),
   )

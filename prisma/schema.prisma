@@ -796,6 +796,13 @@ model McpTool {
   /// openapi: an outline of what a successful call answers, from the
   /// schema; describe_tool shows it. Null when the schema does not say.
   output      String?
+  /// JSON Schema, as JSON text, of what a successful call answers as
+  /// structuredContent, when the tool declares it: an MCP server's
+  /// outputSchema, a family tool's (lib/core/tools/family.ts) or a wrapper
+  /// tool's. describe shows it as outputSchema.
+  outputSchema String? @map("output_schema")
+  /// JSON: the icons an MCP server gave the tool (MCP's Icon objects).
+  icons       String?
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 

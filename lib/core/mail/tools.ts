@@ -1,8 +1,15 @@
 import { z } from "zod"
 
 import type { CatalogueTool } from "../catalogue"
-import { invalid } from "../errors"
 import type { MailKind } from "../servers"
+import type { ToolAnnotations } from "../tools/define"
+import {
+  atLeastOne,
+  defineInnerTool,
+  exactlyOne,
+  type ArgumentRule,
+  type InnerTool,
+} from "../tools/family"
 import { parseRecipient, replyTarget, type RecipientObject } from "./addresses"
 import {
   DEFAULT_SEARCH_LIMIT,
@@ -24,8 +31,9 @@ import {
  * The tools a mail account offers, the same for JMAP and IMAP where the
  * protocols allow, so an assistant learns one set. Which ones an account
  * has depends on its kind, on read-only, on whether it can send, and (JMAP)
- * on whether the server offers an automatic reply. Arguments are checked
- * here, before any connection is opened.
+ * on whether the server offers an automatic reply. Each is defined on PCP's
+ * one tool interface (lib/core/tools/family.ts), its arguments checked by
+ * the one validator before any connection is opened.
  *
  * It is a fixed set on purpose, not the protocol passed through: each tool
  * is one the rules can hold to (read-only, nothing deleted for good, files
@@ -51,18 +59,17 @@ export type MailToolName =
   | "get_vacation_response"
   | "set_vacation_response"
 
-type Annotations = {
-  readOnlyHint: boolean
-  destructiveHint?: boolean
-  idempotentHint?: boolean
-  openWorldHint: boolean
-}
+type Annotations = ToolAnnotations
 
-type MailToolSpec = {
+type MailToolInput = {
   name: MailToolName
   title: string
   description: string
-  args: (kind: MailKind) => z.ZodType
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  args: (kind: MailKind) => z.ZodObject<any>
+  rules?: ArgumentRule[]
+  /** Old argument names, accepted for a release with a note. */
+  aliases?: Record<string, string>
   annotations: Annotations
   kinds: readonly MailKind[]
   /** Changes mail: absent on a read-only account, and refused there. */
@@ -124,11 +131,10 @@ const keyword = z
   )
 const keywords = z.array(keyword).min(1).max(MAX_KEYWORDS)
 /** One email or several: id or ids, never both. */
-const oneOrMany = (value: { id?: unknown; ids?: unknown }) =>
-  (value.id === undefined) !== (value.ids === undefined)
-const ONE_OR_MANY = {
-  message: "Give id for one email, or ids for several.",
-}
+const ONE_OR_MANY = exactlyOne(
+  ["id", "ids"],
+  "Give id for one email, or ids for several.",
+)
 const date = z
   .string()
   .max(40)
@@ -142,16 +148,18 @@ const date = z
 const recipient = z.union([
   z.string().min(3).max(400),
   z.strictObject({
-    name: z.string().max(200).nullable().optional(),
-    email: z.string().min(3).max(320),
+    name: z
+      .string()
+      .max(200)
+      .nullable()
+      .optional()
+      .describe("The name shown with the address; null or left out for none."),
+    email: z.string().min(3).max(320).describe("The address."),
   }),
 ])
-const recipients = z
-  .array(recipient)
-  .max(MAX_RECIPIENTS)
-  .describe(
-    'Addresses, each as "ada@example.com", "Ada Lovelace <ada@example.com>", or {"name": "Ada Lovelace", "email": "ada@example.com"} as get_email gives them.',
-  )
+const RECIPIENTS =
+  'Addresses, each as "ada@example.com", "Ada Lovelace <ada@example.com>", or {"name": "Ada Lovelace", "email": "ada@example.com"} as get_email gives them.'
+const recipients = z.array(recipient).max(MAX_RECIPIENTS).describe(RECIPIENTS)
 /** The email a reply answers: PCP's id for it, or its Message-ID. */
 const replyTo = z
   .string()
@@ -172,12 +180,18 @@ const noArgs = () => z.strictObject({})
  */
 function composition(kind: MailKind, { draft }: { draft: boolean }) {
   return z.strictObject({
-    to: draft ? recipients.optional() : recipients.min(1),
-    cc: recipients.optional(),
-    bcc: recipients.optional(),
-    subject: z.string().max(MAX_SUBJECT_CHARS),
+    to: (draft ? recipients.optional() : recipients.min(1)).describe(
+      draft
+        ? `Who it goes to, when it is sent. ${RECIPIENTS}`
+        : `Who it goes to. ${RECIPIENTS}`,
+    ),
+    cc: recipients.optional().describe("Who gets a copy, as to takes them."),
+    bcc: recipients
+      .optional()
+      .describe("Who gets a copy no other recipient sees, as to takes them."),
+    subject: z.string().max(MAX_SUBJECT_CHARS).describe("The subject line."),
     text: z.string().max(MAX_SEND_TEXT_CHARS).describe("The body, plain text."),
-    inReplyTo: replyTo.optional(),
+    in_reply_to: replyTo.optional(),
     attachments: z
       .array(
         z.strictObject({
@@ -229,11 +243,15 @@ function composition(kind: MailKind, { draft }: { draft: boolean }) {
 
 const READS: Annotations = {
   readOnlyHint: true,
+  destructiveHint: false,
   idempotentHint: true,
   openWorldHint: true,
 }
 
-const SPECS: readonly MailToolSpec[] = [
+/** What send_email and create_draft took in camelCase until this release. */
+const COMPOSE_ALIASES = { inReplyTo: "in_reply_to" }
+
+const INPUTS: readonly MailToolInput[] = [
   {
     name: "list_mailboxes",
     title: "List mailboxes",
@@ -247,56 +265,95 @@ const SPECS: readonly MailToolSpec[] = [
   {
     name: "search_emails",
     title: "Search emails",
-    description: `Finds emails in one mailbox (the inbox unless you name another), or with allMailboxes in every mailbox but Trash and Junk, newest first. Every filter is optional; with none, it lists the latest emails. Answers with each email's id, date, sender, recipients, subject, flags, keywords and whether it has attachments; get_email reads one. Up to ${MAX_SEARCH_LIMIT} at a time; offset pages further.`,
+    description: `Finds emails in one mailbox (the inbox unless you name another), or with all_mailboxes in every mailbox but Trash and Junk, newest first. Every filter is optional; with none, it lists the latest emails. Answers with each email's id, date, sender, recipients, subject, flags, keywords and whether it has attachments; get_email reads one. Up to ${MAX_SEARCH_LIMIT} at a time; offset pages further.`,
     args: () =>
-      z
-        .strictObject({
-          mailbox: mailbox.optional(),
-          allMailboxes: z
-            .boolean()
-            .optional()
-            .describe(
-              "true: search every mailbox but Trash and Junk instead of one (name Trash or Junk as mailbox to search those).",
-            ),
-          text: z
-            .string()
-            .min(1)
-            .max(MAX_SEARCH_TEXT_CHARS)
-            .optional()
-            .describe("Words anywhere in the email: headers or body."),
-          from: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
-          to: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
-          subject: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
-          after: date
-            .optional()
-            .describe("Only emails received on or after this date (ISO 8601)."),
-          before: date
-            .optional()
-            .describe("Only emails received before this date (ISO 8601)."),
-          unread: z
-            .boolean()
-            .optional()
-            .describe("true: only unread; false: only read."),
-          flagged: z.boolean().optional(),
-          hasAttachment: z.boolean().optional(),
-          keyword: keyword
-            .optional()
-            .describe("Only emails with this keyword (label)."),
-          notKeyword: keyword
-            .optional()
-            .describe("Only emails without this keyword (label)."),
-          offset: z.number().int().min(0).max(MAX_SEARCH_OFFSET).optional(),
-          limit: z
-            .number()
-            .int()
-            .min(1)
-            .max(MAX_SEARCH_LIMIT)
-            .optional()
-            .describe(`How many (default ${DEFAULT_SEARCH_LIMIT}).`),
-        })
-        .refine((value) => !(value.allMailboxes === true && value.mailbox), {
-          message: "Name a mailbox, or say allMailboxes, not both.",
-        }),
+      z.strictObject({
+        mailbox: mailbox.optional(),
+        all_mailboxes: z
+          .boolean()
+          .optional()
+          .describe(
+            "true: search every mailbox but Trash and Junk instead of one (name Trash or Junk as mailbox to search those).",
+          ),
+        text: z
+          .string()
+          .min(1)
+          .max(MAX_SEARCH_TEXT_CHARS)
+          .optional()
+          .describe("Words anywhere in the email: headers or body."),
+        from: z
+          .string()
+          .min(1)
+          .max(MAX_SEARCH_TEXT_CHARS)
+          .optional()
+          .describe("Words in the sender's name or address."),
+        to: z
+          .string()
+          .min(1)
+          .max(MAX_SEARCH_TEXT_CHARS)
+          .optional()
+          .describe("Words in a recipient's name or address."),
+        subject: z
+          .string()
+          .min(1)
+          .max(MAX_SEARCH_TEXT_CHARS)
+          .optional()
+          .describe("Words in the subject."),
+        after: date
+          .optional()
+          .describe("Only emails received on or after this date (ISO 8601)."),
+        before: date
+          .optional()
+          .describe("Only emails received before this date (ISO 8601)."),
+        unread: z
+          .boolean()
+          .optional()
+          .describe("true: only unread; false: only read."),
+        flagged: z
+          .boolean()
+          .optional()
+          .describe("true: only flagged; false: only not flagged."),
+        has_attachment: z
+          .boolean()
+          .optional()
+          .describe("true: only emails with attachments; false: only without."),
+        keyword: keyword
+          .optional()
+          .describe("Only emails with this keyword (label)."),
+        not_keyword: keyword
+          .optional()
+          .describe("Only emails without this keyword (label)."),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_SEARCH_OFFSET)
+          .optional()
+          .describe("How many to skip, for the next page (0 by default)."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_SEARCH_LIMIT)
+          .optional()
+          .describe(`How many (default ${DEFAULT_SEARCH_LIMIT}).`),
+      }),
+    rules: [
+      {
+        says: "Name a mailbox, or say all_mailboxes, not both.",
+        schema: {
+          not: {
+            required: ["all_mailboxes", "mailbox"],
+            properties: { all_mailboxes: { const: true } },
+          },
+        },
+      },
+    ],
+    aliases: {
+      allMailboxes: "all_mailboxes",
+      hasAttachment: "has_attachment",
+      notKeyword: "not_keyword",
+    },
     annotations: READS,
     kinds: ["jmap", "imap"],
     writes: false,
@@ -336,8 +393,15 @@ const SPECS: readonly MailToolSpec[] = [
       "Lists the emails in one conversation, oldest first, from the threadId search_emails or get_email gives.",
     args: () =>
       z.strictObject({
-        threadId: z.string().min(1).max(500).describe("The email's threadId."),
+        thread_id: z
+          .string()
+          .min(1)
+          .max(500)
+          .describe(
+            "The email's threadId, as search_emails or get_email gives it.",
+          ),
       }),
+    aliases: { threadId: "thread_id" },
     annotations: READS,
     kinds: ["jmap"],
     writes: false,
@@ -357,8 +421,9 @@ const SPECS: readonly MailToolSpec[] = [
     name: "send_email",
     title: "Send an email",
     description:
-      'Sends a plain-text email from this account. A copy goes into Sent, as the account is set: savedTo names the mailbox, is "pending" while PCP checks, once it has answered, whether the mail server filed a copy itself (it files one only when not), or is null when no copy is kept. To reply, pass the email you answer as inReplyTo, by its id or its Message-ID: the reply then joins its conversation, and that email is marked answered (answered in the result says whether it could be). To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]: an attachment get_attachment read (from this account or another), or any file a tool answered with. Sending cannot be undone.',
+      'Sends a plain-text email from this account. A copy goes into Sent, as the account is set: savedTo names the mailbox, is "pending" while PCP checks, once it has answered, whether the mail server filed a copy itself (it files one only when not), or is null when no copy is kept. To reply, pass the email you answer as in_reply_to, by its id or its Message-ID: the reply then joins its conversation, and that email is marked answered (answered in the result says whether it could be). To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]: an attachment get_attachment read (from this account or another), or any file a tool answered with. Sending cannot be undone.',
     args: (kind) => composition(kind, { draft: false }),
+    aliases: COMPOSE_ALIASES,
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
@@ -373,8 +438,9 @@ const SPECS: readonly MailToolSpec[] = [
     name: "create_draft",
     title: "Write a draft",
     description:
-      'Writes a plain-text email into this account\'s Drafts mailbox, marked as a draft, and sends nothing: the owner can read it, change it and send it from their mail app. It takes what send_email takes, with recipients optional. To draft a reply, pass the email it answers as inReplyTo, by its id or its Message-ID: the draft then joins its conversation. To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]. Answers with the draft\'s id, which get_email reads, and the mailbox it is in.',
+      'Writes a plain-text email into this account\'s Drafts mailbox, marked as a draft, and sends nothing: the owner can read it, change it and send it from their mail app. It takes what send_email takes, with recipients optional. To draft a reply, pass the email it answers as in_reply_to, by its id or its Message-ID: the draft then joins its conversation. To attach files, pass results PCP kept for you as attachments, [{"$result": "<id>"}]. Answers with the draft\'s id, which get_email reads, and the mailbox it is in.',
     args: (kind) => composition(kind, { draft: true }),
+    aliases: COMPOSE_ALIASES,
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
@@ -389,9 +455,14 @@ const SPECS: readonly MailToolSpec[] = [
     title: "Move emails",
     description: `Moves an email, or up to ${MAX_BULK_EMAILS} with ids, to another mailbox. An IMAP email gets a new id when it moves: the answer gives it. With ids, the answer lists the emails moved (done) and the ones that could not be, with why (failed).`,
     args: () =>
-      z
-        .strictObject({ id: id.optional(), ids: ids.optional(), mailbox })
-        .refine(oneOrMany, ONE_OR_MANY),
+      z.strictObject({
+        id: id.optional(),
+        ids: ids.optional(),
+        mailbox: mailbox.describe(
+          "Where to move it: an id from list_mailboxes, a role (inbox, archive, trash…), or a name or path.",
+        ),
+      }),
+    rules: [ONE_OR_MANY],
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
@@ -406,31 +477,34 @@ const SPECS: readonly MailToolSpec[] = [
     title: "Mark emails",
     description: `Marks an email, or up to ${MAX_BULK_EMAILS} with ids: read or unread, flagged or not, answered or not, and adds or removes keywords (labels, as other mail apps show them). What you leave out stays as it is. With ids, the answer lists the emails changed (done) and the ones that could not be, with why (failed).`,
     args: () =>
-      z
-        .strictObject({
-          id: id.optional(),
-          ids: ids.optional(),
-          read: z.boolean().optional(),
-          flagged: z.boolean().optional(),
-          answered: z.boolean().optional(),
-          addKeywords: keywords
-            .optional()
-            .describe('Keywords to add, like ["invoices"].'),
-          removeKeywords: keywords.optional().describe("Keywords to remove."),
-        })
-        .refine(oneOrMany, ONE_OR_MANY)
-        .refine(
-          (value) =>
-            value.read !== undefined ||
-            value.flagged !== undefined ||
-            value.answered !== undefined ||
-            value.addKeywords !== undefined ||
-            value.removeKeywords !== undefined,
-          {
-            message:
-              "Say what to change: read, flagged, answered, addKeywords or removeKeywords.",
-          },
-        ),
+      z.strictObject({
+        id: id.optional(),
+        ids: ids.optional(),
+        read: z.boolean().optional().describe("true: read; false: unread."),
+        flagged: z
+          .boolean()
+          .optional()
+          .describe("true: flagged; false: not flagged."),
+        answered: z
+          .boolean()
+          .optional()
+          .describe("true: answered; false: not answered."),
+        add_keywords: keywords
+          .optional()
+          .describe('Keywords to add, like ["invoices"].'),
+        remove_keywords: keywords.optional().describe("Keywords to remove."),
+      }),
+    rules: [
+      ONE_OR_MANY,
+      atLeastOne(
+        ["read", "flagged", "answered", "add_keywords", "remove_keywords"],
+        "Say what to change: read, flagged, answered, add_keywords or remove_keywords.",
+      ),
+    ],
+    aliases: {
+      addKeywords: "add_keywords",
+      removeKeywords: "remove_keywords",
+    },
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
@@ -444,10 +518,8 @@ const SPECS: readonly MailToolSpec[] = [
     name: "delete_email",
     title: "Delete emails",
     description: `Moves an email, or up to ${MAX_BULK_EMAILS} with ids, to the Trash. Nothing is deleted for good; the owner can take them back from there. With ids, the answer lists the emails moved (done) and the ones that could not be, with why (failed).`,
-    args: () =>
-      z
-        .strictObject({ id: id.optional(), ids: ids.optional() })
-        .refine(oneOrMany, ONE_OR_MANY),
+    args: () => z.strictObject({ id: id.optional(), ids: ids.optional() }),
+    rules: [ONE_OR_MANY],
     annotations: {
       readOnlyHint: false,
       destructiveHint: true,
@@ -486,21 +558,19 @@ const SPECS: readonly MailToolSpec[] = [
     description:
       "Gives a mailbox a new name, or moves it inside another one (parent; null for the top level), or both. The inbox stays where it is. On IMAP the emails inside get new ids, since an IMAP email's id says which mailbox it is in: search again for them.",
     args: () =>
-      z
-        .strictObject({
-          mailbox,
-          name: mailboxName.optional().describe("Its new name."),
-          parent: mailbox
-            .nullable()
-            .optional()
-            .describe(
-              "The mailbox to move it inside (id, name or path), or null for the top level.",
-            ),
-        })
-        .refine(
-          (value) => value.name !== undefined || value.parent !== undefined,
-          { message: "Say a new name, a new parent, or both." },
-        ),
+      z.strictObject({
+        mailbox,
+        name: mailboxName.optional().describe("Its new name."),
+        parent: mailbox
+          .nullable()
+          .optional()
+          .describe(
+            "The mailbox to move it inside (id, name or path), or null for the top level.",
+          ),
+      }),
+    rules: [
+      atLeastOne(["name", "parent"], "Say a new name, a new parent, or both."),
+    ],
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
@@ -580,16 +650,40 @@ const SPECS: readonly MailToolSpec[] = [
   },
 ]
 
+type MailToolSpec = Omit<MailToolInput, "args" | "rules" | "aliases"> & {
+  /** The tool as an account of each kind it is offered on takes it. */
+  tool: Partial<Record<MailKind, InnerTool>>
+}
+
+const SPECS: readonly MailToolSpec[] = INPUTS.map(
+  ({ args, rules, aliases, ...spec }) => ({
+    ...spec,
+    tool: Object.fromEntries(
+      spec.kinds.map((kind) => [
+        kind,
+        defineInnerTool({
+          name: spec.name,
+          title: spec.title,
+          description: spec.description,
+          input: args(kind),
+          annotations: spec.annotations,
+          ...(rules ? { rules } : {}),
+          ...(aliases ? { aliases } : {}),
+        }),
+      ]),
+    ),
+  }),
+)
+
 const BY_NAME = new Map(SPECS.map((spec) => [spec.name, spec]))
 
 export function mailToolSpec(name: string): MailToolSpec | undefined {
   return BY_NAME.get(name as MailToolName)
 }
 
-function jsonSchema(schema: z.ZodType): unknown {
-  const generated = z.toJSONSchema(schema) as Record<string, unknown>
-  delete generated.$schema
-  return generated
+/** The tool an account of this kind offers by that name, if any. */
+export function mailTool(kind: MailKind, name: string): InnerTool | undefined {
+  return mailToolSpec(name)?.tool[kind]
 }
 
 /** The tools an account has, for the catalogue. */
@@ -611,33 +705,7 @@ export function mailTools({
       !(readOnly && spec.writes) &&
       !(spec.sends && !canSend) &&
       !(spec.vacation && !canVacation),
-  ).map((spec) => ({
-    name: spec.name,
-    title: spec.title,
-    description: spec.description,
-    inputSchema: jsonSchema(spec.args(kind)),
-    annotations: spec.annotations,
-  }))
-}
-
-/** A tool's arguments, checked; a readable refusal otherwise. */
-export function parseMailArgs(
-  spec: MailToolSpec,
-  kind: MailKind,
-  args: unknown,
-): Record<string, unknown> {
-  const parsed = spec.args(kind).safeParse(args ?? {})
-
-  if (!parsed.success) {
-    throw invalid(
-      `${spec.name}: ${z
-        .prettifyError(parsed.error)
-        .replace(/\s*\n\s*/g, " ")
-        .slice(0, 500)}`,
-    )
-  }
-
-  return parsed.data as Record<string, unknown>
+  ).map((spec) => spec.tool[kind]!.listed())
 }
 
 /** Recipients as parsed addresses; `field` (to, cc, bcc) names them in a refusal. */

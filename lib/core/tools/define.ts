@@ -243,31 +243,46 @@ export function publishedSchema(
   }
 }
 
-export function defineTool<I extends AnyObject>(spec: ToolSpec<I>): Tool {
-  if (!TOOL_NAME.test(spec.name)) {
+/** The name MCP allows a tool, or why not. */
+export function checkToolName(name: string): void {
+  if (!TOOL_NAME.test(name)) {
     throw new Error(
-      `A tool's name is 1 to 128 letters, digits, "_", "." or "-": ${JSON.stringify(spec.name)} is not.`,
+      `A tool's name is 1 to 128 letters, digits, "_", "." or "-": ${JSON.stringify(name)} is not.`,
     )
   }
+}
 
+/** Whether a name is one MCP allows a tool (1 to 128 of A-Z a-z 0-9 _ . -). */
+export function isToolName(name: string): boolean {
+  return TOOL_NAME.test(name)
+}
+
+/**
+ * A tool's input and output schemas as published, made and checked on
+ * first use: every property described, the input an object.
+ */
+export function toolSchemas(
+  name: string,
+  inputType: AnyObject,
+  outputType: z.ZodType | undefined,
+): { inputSchema(): Json; outputSchema(): Json | undefined } {
   let input: Json | undefined
   let output: Json | undefined
 
   return {
-    ...(spec as unknown as ToolSpec),
     inputSchema() {
       if (!input) {
-        const json = toolJsonSchema(spec.input, "input")
+        const json = toolJsonSchema(inputType, "input")
         const missing = undescribedProperties(json)
 
         if (missing.length > 0) {
           throw new Error(
-            `${spec.name}'s input schema has properties without a description: ${missing.join(", ")}.`,
+            `${name}'s input schema has properties without a description: ${missing.join(", ")}.`,
           )
         }
 
         if (json.type !== "object") {
-          throw new Error(`${spec.name}'s input schema is not an object.`)
+          throw new Error(`${name}'s input schema is not an object.`)
         }
 
         input = json
@@ -276,12 +291,21 @@ export function defineTool<I extends AnyObject>(spec: ToolSpec<I>): Tool {
       return input
     },
     outputSchema() {
-      if (spec.output && !output) {
-        output = toolJsonSchema(spec.output, "output")
+      if (outputType && !output) {
+        output = toolJsonSchema(outputType, "output")
       }
 
       return output
     },
+  }
+}
+
+export function defineTool<I extends AnyObject>(spec: ToolSpec<I>): Tool {
+  checkToolName(spec.name)
+
+  return {
+    ...(spec as unknown as ToolSpec),
+    ...toolSchemas(spec.name, spec.input, spec.output),
   }
 }
 

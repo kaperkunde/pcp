@@ -547,10 +547,11 @@ function prepareAnswer(
     }
 
     sawJson = true
-    // An API's answer that is not an object is passed as { value } there.
+    // An older client's SDK wraps a value that is not an object as
+    // { result }; either way it is the same answer.
     repeatsStructured ||=
       structured !== undefined &&
-      [parsed.value, { value: parsed.value }].some(
+      [parsed.value, { result: parsed.value }].some(
         (candidate) => canonicalJson(candidate) === canonicalJson(structured),
       )
     parts.push({

@@ -8,7 +8,8 @@ describe("jsonToolResult", () => {
       content: [{ type: "text", text: '{\n  "ok": true\n}' }],
       structuredContent: { ok: true },
     })
-    expect(jsonToolResult([1, 2]).structuredContent).toEqual({ value: [1, 2] })
+    // Any JSON value, not wrapped: MCP 2026-07-28 takes it as it is.
+    expect(jsonToolResult([1, 2]).structuredContent).toEqual([1, 2])
   })
 
   it("keeps a credential out of both", () => {

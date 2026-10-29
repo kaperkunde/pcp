@@ -3,6 +3,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
+import { createBrowserServer } from "./browser/server"
 import {
   base32,
   checkCallHandle,
@@ -24,7 +25,6 @@ import { scratchDatabase } from "./test-db"
 import { describedHandle } from "./test-handles"
 import { writeToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
-import { checkArguments } from "./wrappers/schema-check"
 
 // call_tool takes the call_handle describe gives, never a server and a
 // tool name: a tool is described before it is called, a handle goes stale
@@ -483,6 +483,47 @@ describe("call_tool with a call handle", () => {
     expect(await db().permissionRequest.count()).toBe(1)
   })
 
+  it("checks a family's tool by its own definition: its rules, the tabs it lists, and old names renamed", async () => {
+    await createBrowserServer(ctx)
+    const browser = await db().mcpServer.findFirstOrThrow({
+      where: { kind: "browser" },
+    })
+    await writeToolAccess(scope.tokenId, browser.id, "snapshot", "ask")
+    await writeToolAccess(scope.tokenId, browser.id, "click", "ask")
+    const client = await connect()
+    const snapshot = await describedHandle(client, "browser", "snapshot")
+    const click = await describedHandle(client, "browser", "click")
+
+    // No tab: refused before anything is asked, with the token's tabs.
+    const tabless = await call(client, "call_tool", {
+      call_handle: snapshot,
+      arguments: {},
+    })
+    expect(tabless.isError).toBe(true)
+    expect(tabless.text).toContain('"tab" is missing')
+    expect(tabless.text).toContain("This token has no tab open.")
+
+    // A rule across arguments, in its own words.
+    const both = await call(client, "call_tool", {
+      call_handle: click,
+      arguments: {
+        tab: "t1",
+        ref: "e1",
+        target: { role: "button", name: "Send" },
+      },
+    })
+    expect(both.isError).toBe(true)
+    expect(both.text).toContain("Give a ref or a target, one of them.")
+    expect(await db().permissionRequest.count()).toBe(0)
+
+    const asked = await call(client, "call_tool", {
+      call_handle: click,
+      arguments: { tab: "t1", ref: "e1" },
+    })
+    expect(asked.text).toContain("Not done yet")
+    expect(await db().permissionRequest.count()).toBe(1)
+  })
+
   it("runs a read-only tool through call_read_only_tool, and nothing else", async () => {
     const client = await connect()
     const list = await describedHandle(client, "postcards", "list_cards")
@@ -499,44 +540,5 @@ describe("call_tool with a call handle", () => {
     expect(refused.isError).toBe(true)
     expect(refused.text).toContain("not marked read-only")
     expect(ran).toEqual([{ tool: "list_cards", args: {} }])
-  })
-})
-
-describe("checkArguments", () => {
-  it("passes what it cannot evaluate rather than refusing", () => {
-    expect(
-      checkArguments(
-        {
-          type: "object",
-          properties: {
-            pet: { $ref: "#/$defs/pet" },
-            note: { type: "string", nullable: true },
-            either: {
-              oneOf: [
-                { type: "string", pattern: "^a" },
-                { type: "string", pattern: "^b" },
-              ],
-            },
-          },
-          patternProperties: { "^x-": { type: "string" } },
-          additionalProperties: false,
-        },
-        { pet: 3, note: null, either: "a1", "x-extra": "y" },
-      ),
-    ).toEqual([])
-    expect(checkArguments({ $ref: "#/x" }, { anything: 1 })).toEqual([])
-  })
-
-  it("lets a kept result's handle stand for a string or a file", () => {
-    expect(
-      checkArguments(
-        {
-          type: "object",
-          properties: { body: { type: "string" } },
-          required: ["body"],
-        },
-        { body: { $result: "abc" } },
-      ),
-    ).toEqual([])
   })
 })

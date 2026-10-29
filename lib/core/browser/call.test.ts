@@ -1220,9 +1220,11 @@ describe.skipIf(!executable)(
         textOf(await call("find", { tab, query: "Reply" })),
       ) as { total: number }
       expect(found.total).toBe(2)
-      await expect(
-        call("find", { tab, query: "Reply", text: "Save" }),
-      ).rejects.toThrow("query is another name for text; give one of them.")
+      const both = await call("find", { tab, query: "Reply", text: "Save" })
+      expect(both.isError).toBe(true)
+      expect(textOf(both)).toContain(
+        "query is another name for text; give one of them.",
+      )
     })
 
     it("reads a page its script draws from its snapshot, and says when a page has no text", async () => {
