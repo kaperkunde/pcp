@@ -43,6 +43,7 @@ import {
   resolveHandles,
 } from "./result-handles"
 import type { ResultOpener } from "./tool-results"
+import { lintDocument } from "./openapi/lint"
 import { validateBaseUrl, validateSpecUrl } from "./openapi/urls"
 import { deleteManagedSecret } from "./secrets"
 import {
@@ -627,6 +628,91 @@ export async function rebuildOutdatedEndpoints(): Promise<{
   }
 
   return { rebuilt, failed }
+}
+
+/**
+ * What failed when this PCP last tried to build an endpoint's tools from
+ * the schema it holds, by server, with the schema it tried: so a schema
+ * that does not build is not built again on every describe and call.
+ */
+const unbuilt = new Map<string, { basis: string; message: string }>()
+
+/**
+ * Whether an endpoint's tools are today's generator's. Tools another PCP
+ * version built are built again here from the copy and edits PCP keeps,
+ * as rebuildOutdatedEndpoints does at boot; null when they are current or
+ * now are. When the schema no longer builds (a stricter rule, a limit), the
+ * tools stay as they were and this says what is wrong and how an assistant
+ * fixes it: with update_endpoint's edits, the fixes get_endpoint's
+ * include_problems proposes when there are any.
+ */
+export async function endpointMigration(
+  server: Pick<McpServer, "id" | "kind" | "readOnly" | "authType"> &
+    Partial<McpServer>,
+): Promise<string | null> {
+  if (server.kind !== "openapi") {
+    return null
+  }
+
+  const stored = await db().openApiSpec.findUnique({
+    where: { serverId: server.id },
+    select: { builtWith: true, hash: true, patches: true },
+  })
+
+  if (!stored || stored.builtWith === PCP_VERSION) {
+    return null
+  }
+
+  const basis = `${stored.hash}\n${stored.patches}\n${server.readOnly}`
+  const known = unbuilt.get(server.id)
+  let message = known?.basis === basis ? known.message : null
+
+  if (message === null) {
+    const spec = await storedSpec(server.id)
+
+    if (!spec) {
+      return null
+    }
+
+    const headers = await authHeaderNames(server as McpServer)
+
+    try {
+      const generated = generateEndpointTools(spec.text, {
+        readOnly: server.readOnly,
+        authHeaderNames: headers,
+        patches: spec.patches,
+      })
+
+      await storeGenerated(server.id, generated)
+      await db().openApiSpec.update({
+        where: { serverId: server.id },
+        data: { builtWith: PCP_VERSION },
+      })
+      unbuilt.delete(server.id)
+      return null
+    } catch (error) {
+      const said = (
+        error instanceof Error ? error.message : String(error)
+      ).replace(/\.$/, "")
+      let fixes: PatchOperation[] = []
+
+      try {
+        fixes = lintDocument(readDocument(spec.text, spec.patches), {
+          blockedHeaders: headers,
+        }).problems.flatMap((problem) => problem.fix ?? [])
+      } catch {
+        // A schema that does not read has nothing to propose.
+      }
+
+      message =
+        fixes.length > 0
+          ? `This endpoint needs migrating: ${said}. Fix it with update_endpoint's add_patches: ${JSON.stringify(fixes).slice(0, 4_000)} (get_endpoint with include_problems explains each).`
+          : `This endpoint needs migrating: ${said}. Fix it with update_endpoint's add_patches, edits to the schema (get_endpoint with include_problems, and spec_pointer to read the part concerned, shows what to change).`
+      unbuilt.set(server.id, { basis, message })
+    }
+  }
+
+  return message
 }
 
 /** The fingerprint kept with a schema's text, to tell a changed one. */

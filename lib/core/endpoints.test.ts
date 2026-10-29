@@ -4,6 +4,7 @@ import { createApiToken, resolveApiToken } from "./api-tokens"
 import { db } from "./db"
 import {
   createEndpoint,
+  endpointMigration,
   rebuildOutdatedEndpoints,
   syncEndpointTools,
   updateEndpoint,
@@ -720,6 +721,44 @@ describe("tools an earlier PCP built", () => {
       (await db().openApiSpec.findUniqueOrThrow({ where: { serverId: id } }))
         .builtWith,
     ).toBe("0.0.1")
+  })
+
+  it("are built again when a call or describe meets them, or say how to fix a schema that no longer builds", async () => {
+    const builds = await builtByEarlierPcp()
+    expect(
+      await endpointMigration(
+        await db().mcpServer.findUniqueOrThrow({ where: { id: builds } }),
+      ),
+    ).toBeNull()
+    expect(
+      (
+        await db().openApiSpec.findUniqueOrThrow({
+          where: { serverId: builds },
+        })
+      ).builtWith,
+    ).toBe(PCP_VERSION)
+
+    const broken = await builtByEarlierPcp()
+    await db().openApiSpec.update({
+      where: { serverId: broken },
+      data: {
+        patches: JSON.stringify([{ op: "remove", path: "/paths/~1gone" }]),
+      },
+    })
+    const server = await db().mcpServer.findUniqueOrThrow({
+      where: { id: broken },
+    })
+
+    const message = await endpointMigration(server)
+    expect(message).toMatch(/^This endpoint needs migrating: /)
+    expect(message).toContain("update_endpoint's add_patches")
+    // Its tools stay as they were, and it is not built again for nothing.
+    expect(
+      (await getServer(ctx, broken)).tools.every(
+        (tool) => tool.description === "stale",
+      ),
+    ).toBe(true)
+    expect(await endpointMigration(server)).toBe(message)
   })
 
   it("are marked with the version that built them", async () => {

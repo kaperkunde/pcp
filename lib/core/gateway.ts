@@ -246,6 +246,7 @@ import {
 } from "./tools/serve"
 import { argumentsRefusal } from "./tools/validate"
 import { checkCallArguments, familyTool } from "./call-arguments"
+import { endpointMigration } from "./endpoints"
 
 /**
  * The MCP server PCP exposes at /mcp: one per request, built for the token
@@ -1216,6 +1217,9 @@ export function buildGatewayServer(
       return failure(found.error, "not_found")
     }
 
+    // An endpoint another PCP version built is built again first, or says
+    // how to fix the schema that no longer builds.
+    const migration = await endpointMigration(found.server)
     const row = await toolRow(found.server.id, found.tool.name)
 
     if (!row) {
@@ -1225,7 +1229,11 @@ export function buildGatewayServer(
       )
     }
 
-    return text(described(found, row))
+    return text(
+      migration
+        ? `${migration}\n\n${described(found, row)}`
+        : described(found, row),
+    )
   }
 
   /**
@@ -1846,18 +1854,21 @@ export function buildGatewayServer(
       { fix: "Fix them and call again with the same call_handle." },
     )
 
+    // An endpoint whose schema no longer builds says how to fix it, with
+    // whatever its call comes to.
+    const migration = await endpointMigration(target)
+
     if ("refusal" in unfit) {
-      return toolError(unfit.refusal, {
-        code: "invalid_arguments",
-        logAs: ARGUMENTS_DID_NOT_FIT,
-      })
+      return toolError(
+        migration ? `${unfit.refusal}\n\n${migration}` : unfit.refusal,
+        { code: "invalid_arguments", logAs: ARGUMENTS_DID_NOT_FIT },
+      )
     }
 
     // An old argument name, renamed: the call runs, and its answer says so.
+    const leads = [...unfit.notes, ...(migration ? [migration] : [])]
     const lead = (outcome: Outcome) =>
-      unfit.notes.length > 0
-        ? withLead(unfit.notes.join("\n"), outcome)
-        : outcome
+      leads.length > 0 ? withLead(leads.join("\n"), outcome) : outcome
 
     if (tool.access === "ask") {
       return lead(
