@@ -154,6 +154,8 @@ const INBOX = `<!doctype html><title>Inbox</title>
 /**
  * A page its script draws, in shadow DOM (which the page's HTML does not
  * carry), anew on every click: each element a new one where the old was.
+ * It draws within the click itself, so the answer's snapshot has the new
+ * page: one drawn a moment later would race the snapshot.
  */
 const DRAWN = `<!doctype html><title>Drawn</title>
 <div id="app"></div>
@@ -174,7 +176,7 @@ function draw() {
       clicks += 1
       if (button.id === "drop") fruit = fruit.filter((name) => name !== "pear")
       if (button.dataset.fruit) document.title = "Added " + button.dataset.fruit
-      setTimeout(draw, 0)
+      draw()
     })
   }
 }
@@ -1182,15 +1184,16 @@ describe.skipIf(!executable)(
       // Playwright's own ref for it is a new one.
       expect(playwrights()).not.toBe(drawnFirst)
 
-      // Redrawn again without a snapshot in between: the old ref still
-      // reaches the element where it is now.
-      await call("click", { tab, target: { role: "button", name: "Redraw" } })
+      // Redrawn again without a snapshot in between (a click on the page
+      // itself, not through a tool, which would answer with one): the old
+      // ref still reaches the element where it is now.
+      const page = runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page
+      await page.locator("#redraw").click()
+      await page.getByText("Clicked 2 times").waitFor()
       const added = await call("click", { tab, ref: pear })
       expect(added.isError, textOf(added)).toBeUndefined()
       expect(textOf(added)).toContain("Tab ")
-      expect(
-        await runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page.title(),
-      ).toBe("Added pear")
+      expect(await page.title()).toBe("Added pear")
 
       // An element that has gone says so; one the tab never gave too.
       const dropped = await call("click", {
