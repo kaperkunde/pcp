@@ -8,6 +8,12 @@ import { db } from "../db"
 import { invalid, isPcpError, PcpError } from "../errors"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
+import {
+  argumentsResult,
+  familyError,
+  refusalOf,
+  withNotes,
+} from "../tools/family"
 import { makeRedactor } from "../openapi/redact"
 import {
   getServer,
@@ -68,7 +74,7 @@ import {
   MAX_LISTED_NOTES_CHARS,
   MAX_RANGE_DAYS,
 } from "./limits"
-import { calendarToolSpec, calendarTools, parseCalendarArgs } from "./tools"
+import { calendarToolSpec, calendarTools } from "./tools"
 import {
   DavAuthError,
   DavRequestError,
@@ -790,7 +796,16 @@ function intlZoneName(name: string): string | null {
 }
 
 function recurrenceArg(value: unknown): RecurrenceInput | null | undefined {
-  return value === undefined ? undefined : (value as RecurrenceInput | null)
+  if (value === undefined || value === null) {
+    return value
+  }
+
+  const { month_days: monthDays, ...rest } = value as Record<string, unknown>
+
+  return {
+    ...(rest as RecurrenceInput),
+    ...(monthDays !== undefined ? { monthDays: monthDays as number[] } : {}),
+  }
 }
 
 async function runTool(
@@ -1535,6 +1550,55 @@ function reminderFields(
   }
 }
 
+/**
+ * What the schema cannot check of a calendar call's arguments: a zone PCP
+ * knows, times it can read, an occurrence as list_events gives it.
+ */
+function calendarArgumentProblems(args: Record<string, unknown>): string[] {
+  const problems: string[] = []
+  const check = (run: () => unknown) => {
+    try {
+      run()
+    } catch (error) {
+      if (!isPcpError(error) || error.code !== "validation") {
+        throw error
+      }
+
+      problems.push(error.message)
+    }
+  }
+
+  if (typeof args.timezone === "string") {
+    const zone = args.timezone
+    check(() => checkZone(zone))
+  }
+
+  // Times are read in their zone later; their form is checked now.
+  for (const key of ["from", "to", "start", "end", "due", "due_before"]) {
+    const value = args[key]
+
+    if (typeof value === "string") {
+      check(() => parseTimeInput(value, "UTC", key))
+    }
+  }
+
+  const until = (args.recurrence as { until?: unknown } | null | undefined)
+    ?.until
+
+  if (typeof until === "string") {
+    check(() => parseTimeInput(until, "UTC", "recurrence.until"))
+  }
+
+  if (
+    typeof args.occurrence === "string" &&
+    parseOccurrenceKey(args.occurrence) === null
+  ) {
+    problems.push("occurrence: give it as list_events does.")
+  }
+
+  return problems
+}
+
 /** Runs one calendar tool for an assistant. */
 export async function callCalendarTool(
   server: McpServer,
@@ -1545,46 +1609,33 @@ export async function callCalendarTool(
   const spec = calendarToolSpec(toolName)
 
   if (!spec) {
-    throw new PcpError(
-      "state",
+    return familyError(
       `${server.name} has no tool called ${toolName}.`,
+      "not_found",
     )
   }
 
   if (server.readOnly && spec.writes) {
-    throw new PcpError(
-      "forbidden",
+    return familyError(
       `${server.name} is read-only in PCP; ${toolName} would change a calendar.`,
+      "forbidden",
     )
   }
 
   // Checked before anything connects: a bad argument never reaches the
   // server.
-  const args = parseCalendarArgs(spec, rawArgs)
+  const checked = spec.check(rawArgs)
+  const label = `${server.slug}/${toolName}`
 
-  if (typeof args.timezone === "string") {
-    checkZone(args.timezone)
+  if (!checked.fits) {
+    return argumentsResult(label, checked.problems, { notes: checked.notes })
   }
 
-  // Times are read in their zone later; their form is checked now.
-  for (const key of ["from", "to", "start", "end", "due", "due_before"]) {
-    if (typeof args[key] === "string") {
-      parseTimeInput(args[key], "UTC", key)
-    }
-  }
+  const args = checked.args
+  const problems = calendarArgumentProblems(args)
 
-  const until = (args.recurrence as { until?: unknown } | null | undefined)
-    ?.until
-
-  if (typeof until === "string") {
-    parseTimeInput(until, "UTC", "recurrence.until")
-  }
-
-  if (
-    typeof args.occurrence === "string" &&
-    parseOccurrenceKey(args.occurrence) === null
-  ) {
-    throw invalid("occurrence: give it as list_events does.")
+  if (problems.length > 0) {
+    return argumentsResult(label, problems, { notes: checked.notes })
   }
 
   try {
@@ -1592,10 +1643,19 @@ export async function callCalendarTool(
     const calendars = await calendarsOf(server, client)
     const value = await runTool({ server, client, calendars }, toolName, args)
 
-    return jsonToolResult(value, { redact: credential.redact })
+    return withNotes(
+      jsonToolResult(value, { redact: credential.redact }),
+      checked.notes,
+    )
   } catch (error) {
     if (error instanceof DavRequestError) {
       return errorToolResult(error.message, { redact: credential.redact })
+    }
+
+    const refused = refusalOf(error, label, checked.notes)
+
+    if (refused) {
+      return refused
     }
 
     if (isPcpError(error)) {

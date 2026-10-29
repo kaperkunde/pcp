@@ -638,7 +638,7 @@ session offers `vacationresponse`.
 answered and adds or removes keywords, which every summary lists and
 `search_emails` filters on; the keywords the flags carry (`$seen`,
 `$flagged`, `$answered`, `$draft`) are left to the flags. `search_emails` with
-`allMailboxes` looks in every mailbox but Trash and Junk (JMAP:
+`all_mailboxes` looks in every mailbox but Trash and Junk (JMAP:
 `inMailboxOtherThan`; IMAP: All Mail alone where the server has one, else
 each selectable mailbox but the Flagged and Important views in turn, at most
 `MAX_SEARCH_MAILBOXES`, merged by date and paged only to

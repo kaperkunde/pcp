@@ -1,3 +1,4 @@
+import type { CallToolResult } from "@modelcontextprotocol/server"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import type { VaultContext } from "../context"
@@ -10,6 +11,15 @@ import { setupVault } from "../vault"
 import { createCalendarAccount, updateCalendarAccount } from "./accounts"
 import { acceptedAddress, validateCalDavUrl } from "./addresses"
 import { createFakeCalDav, type FakeCalDav } from "./fake-caldav"
+
+/** The words of a refusal PCP wrote (isError): nothing was done. */
+async function refusal(answer: Promise<CallToolResult>): Promise<string> {
+  const result = await answer
+  expect(result.isError).toBe(true)
+  return result.content
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("\n")
+}
 
 // Calendar accounts end to end in the core: created by the owner, read and
 // called through upstream.ts like any server, against an in-memory CalDAV
@@ -168,15 +178,17 @@ describe("adding an account", () => {
       "list_events",
       "list_reminders",
     ])
-    await expect(
-      callServerTool(
-        ctx,
-        await getServer(ctx, id),
-        "create_event",
-        { title: "x", start: "2026-10-12" },
-        PUBLIC,
+    expect(
+      await refusal(
+        callServerTool(
+          ctx,
+          await getServer(ctx, id),
+          "create_event",
+          { title: "x", start: "2026-10-12" },
+          PUBLIC,
+        ),
       ),
-    ).rejects.toThrow(/read-only/)
+    ).toMatch(/read-only/)
   })
 
   it("marks refused credentials, with iCloud's hint, and keeps the password out of it", async () => {
@@ -477,42 +489,50 @@ describe("calendars and events", () => {
     const id = await account()
     const sent = fake.requests.length
 
-    await expect(
-      callServerTool(
-        ctx,
-        await getServer(ctx, id),
-        "list_events",
-        { timezone: "Mars/Olympus" },
-        PUBLIC,
+    expect(
+      await refusal(
+        callServerTool(
+          ctx,
+          await getServer(ctx, id),
+          "list_events",
+          { timezone: "Mars/Olympus" },
+          PUBLIC,
+        ),
       ),
-    ).rejects.toThrow(/time zone/)
-    await expect(
-      callServerTool(
-        ctx,
-        await getServer(ctx, id),
-        "get_event",
-        { id: "../../etc" },
-        PUBLIC,
+    ).toMatch(/time zone/)
+    expect(
+      await refusal(
+        callServerTool(
+          ctx,
+          await getServer(ctx, id),
+          "get_event",
+          { id: "../../etc" },
+          PUBLIC,
+        ),
       ),
-    ).rejects.toThrow(/id/)
-    await expect(
-      callServerTool(
-        ctx,
-        await getServer(ctx, id),
-        "create_event",
-        { title: "x", start: "2026-02-30" },
-        PUBLIC,
+    ).toMatch(/id/)
+    expect(
+      await refusal(
+        callServerTool(
+          ctx,
+          await getServer(ctx, id),
+          "create_event",
+          { title: "x", start: "2026-02-30" },
+          PUBLIC,
+        ),
       ),
-    ).rejects.toThrow(/not a date that exists/)
-    await expect(
-      callServerTool(
-        ctx,
-        await getServer(ctx, id),
-        "update_event",
-        { id: "home/x.ics", occurrence: "sometime soon", title: "y" },
-        PUBLIC,
+    ).toMatch(/not a date that exists/)
+    expect(
+      await refusal(
+        callServerTool(
+          ctx,
+          await getServer(ctx, id),
+          "update_event",
+          { id: "home/x.ics", occurrence: "sometime soon", title: "y" },
+          PUBLIC,
+        ),
       ),
-    ).rejects.toThrow(/occurrence/)
+    ).toMatch(/occurrence/)
     expect(fake.requests.length).toBe(sent)
   })
 

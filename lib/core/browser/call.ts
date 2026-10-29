@@ -19,6 +19,12 @@ import { checkRateLimit } from "../rate-limit"
 import { loadResourceLimits } from "../resources/state"
 import { missingResultMessage, resolveHandles } from "../result-handles"
 import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
+import {
+  argumentsResult,
+  familyError,
+  textAnswer,
+  withNotes,
+} from "../tools/family"
 import { decideSite, loadFetchRules } from "../web-fetch"
 import { parseSecretPlaceholder, scrubResult } from "../wrappers/placeholders"
 import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
@@ -76,7 +82,6 @@ import {
 import { nameMatches, resolveTarget, type Target } from "./target"
 import {
   browserToolSpec,
-  parseBrowserArgs,
   type BrowserToolName,
   type BrowserToolSpec,
 } from "./tools"
@@ -146,11 +151,12 @@ export type BrowserScope = {
   runId?: string
 }
 
+/**
+ * An answer in words, or a refusal: what the tab or the page is in the way
+ * of ("state"), as the one mapping writes it (lib/core/tools/outcome.ts).
+ */
 function text(value: string, isError = false): CallToolResult {
-  return {
-    content: [{ type: "text", text: value }],
-    ...(isError ? { isError: true } : {}),
-  }
+  return isError ? familyError(value, "state") : textAnswer(value)
 }
 
 function failed(result: CallToolResult): CallToolResult {
@@ -1771,7 +1777,7 @@ type BrowserCallOptions = Parameters<typeof runBrowserTool>[4]
  */
 export async function callBrowserTool(
   ctx: VaultContext,
-  server: Pick<McpServer, "id" | "name">,
+  server: Pick<McpServer, "id" | "name"> & { slug?: string },
   toolName: string,
   rawArgs: Record<string, unknown>,
   options: BrowserCallOptions,
@@ -1784,7 +1790,7 @@ export async function callBrowserTool(
 
 async function runBrowserTool(
   ctx: VaultContext,
-  server: Pick<McpServer, "id" | "name">,
+  server: Pick<McpServer, "id" | "name"> & { slug?: string },
   toolName: string,
   rawArgs: Record<string, unknown>,
   {
@@ -1831,9 +1837,9 @@ async function runBrowserTool(
   const spec = browserToolSpec(toolName)
 
   if (!spec) {
-    throw new PcpError(
-      "state",
+    return familyError(
       `${server.name} has no tool called ${toolName}.`,
+      "not_found",
     )
   }
 
@@ -1857,10 +1863,55 @@ async function runBrowserTool(
   }
 
   // Before the browser is touched: an unknown id never reaches a page.
-  const args = parseBrowserArgs(
-    spec,
+  const checked = spec.check(
     open ? await resolveHandles(rawArgs, open, { skip: ["files"] }) : rawArgs,
   )
+
+  if (!checked.fits) {
+    return argumentsResult(
+      `${server.slug ?? "browser"}/${spec.name}`,
+      checked.problems,
+      {
+        notes: checked.notes,
+        hint: tabProblem(checked.problems)
+          ? await tabHint(ctx, tokenId, publicUrl)
+          : undefined,
+      },
+    )
+  }
+
+  return withNotes(
+    await runCheckedTool(scope, server, spec, checked.args, {
+      open,
+      keepBytes,
+      secret,
+    }),
+    checked.notes,
+  )
+}
+
+/** Whether a refusal of arguments is about the tab, so it lists the tabs. */
+export function tabProblem(problems: string[]): boolean {
+  return problems.some((problem) => /\btab\b/.test(problem))
+}
+
+/** A browser tool on arguments checked against its schema. */
+async function runCheckedTool(
+  scope: BrowserScope,
+  server: Pick<McpServer, "id" | "name">,
+  spec: BrowserToolSpec,
+  args: Record<string, unknown>,
+  {
+    open,
+    keepBytes,
+    secret,
+  }: {
+    open: ResultOpener | undefined
+    keepBytes: BytesKeeper | undefined
+    secret: SecretTyper | undefined
+  },
+): Promise<CallToolResult> {
+  const { ctx, tokenId, publicUrl, signal } = scope
 
   if (!checkRateLimit(`browser:${tokenId}`, BROWSER_ACTIONS)) {
     return text(

@@ -20,7 +20,7 @@ import {
   type NeedsOwner,
   type Outcome,
 } from "./outcome"
-import { argumentsRefusal, validate } from "./validate"
+import { argumentsRefusal, validate, zodProblems } from "./validate"
 
 /**
  * How a call of a tool defined with defineTool runs, from the arguments as
@@ -112,17 +112,6 @@ function markOwner(outcome: Outcome, publicUrl: string): Outcome {
   return owner
     ? passOn({ ...outcome.result, structuredContent: owner })
     : outcome
-}
-
-/** The words a zod refinement found wrong, for one that JSON Schema lacks. */
-function zodProblems(
-  issues: ReadonlyArray<{ path: PropertyKey[]; message: string }>,
-): string[] {
-  return issues.map((issue) =>
-    issue.path.length > 0
-      ? `"${issue.path.map(String).join("/")}": ${issue.message}`
-      : issue.message,
-  )
 }
 
 /** What a tool names for its log line, from arguments not yet checked. */

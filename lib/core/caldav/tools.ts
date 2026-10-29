@@ -1,7 +1,14 @@
 import { z } from "zod"
 
 import type { CatalogueTool } from "../catalogue"
-import { invalid } from "../errors"
+import type { ToolAnnotations } from "../tools/define"
+import {
+  atLeastOne,
+  defineInnerTool,
+  exactlyOne,
+  type ArgumentRule,
+  type InnerTool,
+} from "../tools/family"
 import {
   DEFAULT_EVENT_LIMIT,
   DEFAULT_RANGE_DAYS,
@@ -27,8 +34,9 @@ import {
  * to do ("what is on Tuesday", "find an hour with nobody booked", "move the
  * dentist to Friday", "remind me to call Ada") rather than around WebDAV.
  * Times go in and come out as ISO 8601 with their offset; recurring events
- * come out one occurrence at a time. Arguments are checked here, before
- * anything connects.
+ * come out one occurrence at a time. Each is defined on PCP's one tool
+ * interface (lib/core/tools/family.ts), its arguments checked by the one
+ * validator before anything connects.
  *
  * A fixed set on purpose, not the protocol passed through: no tool takes a
  * WebDAV method or raw iCalendar, and none invites people (adding attendees
@@ -50,20 +58,23 @@ export type CalendarToolName =
   | "delete_reminder"
   | "create_calendar"
 
-type Annotations = {
-  readOnlyHint: boolean
-  destructiveHint?: boolean
-  idempotentHint?: boolean
-  openWorldHint: boolean
+type Annotations = ToolAnnotations
+
+export type CalendarToolSpec = InnerTool & {
+  name: CalendarToolName
+  /** Changes a calendar: absent on a read-only account, and refused there. */
+  writes: boolean
 }
 
-export type CalendarToolSpec = {
+type CalendarToolInput = {
   name: CalendarToolName
   title: string
   description: string
-  args: z.ZodType
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  args: z.ZodObject<any>
+  rules?: ArgumentRule[]
+  aliases?: Record<string, string>
   annotations: Annotations
-  /** Changes a calendar: absent on a read-only account, and refused there. */
   writes: boolean
 }
 
@@ -101,7 +112,11 @@ const reminderList = z
   .min(1)
   .max(500)
   .describe("A reminder list: its id or its name, from list_calendars.")
-const timeText = z.string().min(10).max(40)
+const timeText = z
+  .string()
+  .min(10)
+  .max(40)
+  .describe("A date (2026-10-12) or a time (2026-10-12T09:00).")
 const timezone = z
   .string()
   .min(1)
@@ -114,13 +129,15 @@ const title = z
   .min(1)
   .max(MAX_TITLE_CHARS)
   .regex(/^[^\u0000-\u001f\u007f]+$/, { message: "A title on one line." })
-const notes = z.string().max(MAX_NOTES_CHARS)
+  .describe("Its title, on one line.")
+const notes = z.string().max(MAX_NOTES_CHARS).describe("Its notes, as text.")
 const url = z
   .string()
   .max(MAX_URL_CHARS)
   .regex(/^(https?|mailto|tel):[^\s]*$/i, {
     message: "An http(s), mailto or tel address.",
   })
+  .describe("A link: an http(s), mailto or tel address.")
 const alerts = z
   .array(z.number().int().min(0).max(MAX_ALERT_MINUTES))
   .max(MAX_ALERTS)
@@ -130,7 +147,9 @@ const alerts = z
 const WEEKDAY = /^([+-]?[1-5])?(MO|TU|WE|TH|FR|SA|SU)$/i
 const recurrence = z
   .strictObject({
-    frequency: z.enum(["daily", "weekly", "monthly", "yearly"]),
+    frequency: z
+      .enum(["daily", "weekly", "monthly", "yearly"])
+      .describe("How often: daily, weekly, monthly or yearly."),
     interval: z
       .number()
       .int()
@@ -163,7 +182,7 @@ const recurrence = z
       .describe(
         'Weekly: the days, ["MO","WE"]. Monthly or yearly: a day by position, ["1MO"] (first Monday) or ["-1FR"] (last Friday).',
       ),
-    monthDays: z
+    month_days: z
       .array(
         z
           .number()
@@ -188,9 +207,13 @@ const noArgs = () => z.strictObject({})
 
 const READS: Annotations = {
   readOnlyHint: true,
+  destructiveHint: false,
   idempotentHint: true,
   openWorldHint: true,
 }
+
+/** recurrence's monthDays, camelCase until this release. */
+const RECURRENCE_ALIASES = { "recurrence.monthDays": "month_days" }
 
 const WRITES: Annotations = {
   readOnlyHint: false,
@@ -199,7 +222,7 @@ const WRITES: Annotations = {
   openWorldHint: true,
 }
 
-const SPECS: readonly CalendarToolSpec[] = [
+const INPUTS: readonly CalendarToolInput[] = [
   {
     name: "list_calendars",
     title: "List calendars and reminder lists",
@@ -337,7 +360,11 @@ const SPECS: readonly CalendarToolSpec[] = [
         .optional()
         .describe("For a timed event without end: how long (default 60)."),
       timezone: timezone.optional(),
-      location: z.string().max(MAX_LOCATION_CHARS).optional(),
+      location: z
+        .string()
+        .max(MAX_LOCATION_CHARS)
+        .optional()
+        .describe("Where it is."),
       notes: notes.optional(),
       url: url.optional(),
       alerts: alerts.optional(),
@@ -347,6 +374,7 @@ const SPECS: readonly CalendarToolSpec[] = [
         .describe("Whether it counts as busy (default) or free in free time."),
       recurrence: recurrence.optional(),
     }),
+    aliases: RECURRENCE_ALIASES,
     annotations: WRITES,
     writes: true,
   },
@@ -355,56 +383,75 @@ const SPECS: readonly CalendarToolSpec[] = [
     title: "Change or move an event",
     description:
       'Changes an event: what you pass changes, what you leave out stays, and null clears location, notes or url. A new start alone keeps its length. For a repeating event, pass occurrence to change just that one (scope "this", the default with occurrence), or scope "all" to change the whole series: a new start for one occurrence with scope "all" moves every occurrence by as much. recurrence null makes it stop repeating. calendar moves the whole event to another calendar. Answers with the event as it is now.',
-    args: z
-      .strictObject({
-        id: eventId,
-        occurrence: occurrence.optional(),
-        scope: z
-          .enum(["this", "all"])
-          .optional()
-          .describe(
-            'With occurrence: "this" (default) changes that occurrence, "all" the whole series.',
-          ),
-        calendar: calendar
-          .optional()
-          .describe("Move the event to this calendar."),
-        title: title.optional(),
-        start: timeText.optional(),
-        end: timeText.optional(),
-        timezone: timezone.optional(),
-        location: z.string().max(MAX_LOCATION_CHARS).nullable().optional(),
-        notes: notes.nullable().optional(),
-        url: url.nullable().optional(),
-        alerts: alerts.optional(),
-        availability: z.enum(["busy", "free"]).optional(),
-        recurrence: recurrence.nullable().optional(),
-      })
-      .refine(
-        (value) =>
-          [
-            "calendar",
-            "title",
-            "start",
-            "end",
-            "location",
-            "notes",
-            "url",
-            "alerts",
-            "availability",
-            "recurrence",
-          ].some(
-            (key) => (value as Record<string, unknown>)[key] !== undefined,
-          ),
-        { message: "Say what to change." },
-      )
-      .refine(
-        (value) =>
-          !(value.calendar && value.occurrence && value.scope !== "all"),
-        {
-          message:
-            "A whole event moves to another calendar: leave occurrence out.",
-        },
+    args: z.strictObject({
+      id: eventId,
+      occurrence: occurrence.optional(),
+      scope: z
+        .enum(["this", "all"])
+        .optional()
+        .describe(
+          'With occurrence: "this" (default) changes that occurrence, "all" the whole series.',
+        ),
+      calendar: calendar
+        .optional()
+        .describe("Move the event to this calendar."),
+      title: title.optional().describe("Its new title."),
+      start: timeText
+        .optional()
+        .describe("Its new start: a date (all-day) or a time."),
+      end: timeText
+        .optional()
+        .describe("Its new end: a date (all-day) or a time."),
+      timezone: timezone.optional(),
+      location: z
+        .string()
+        .max(MAX_LOCATION_CHARS)
+        .nullable()
+        .optional()
+        .describe("Where it is; null clears it."),
+      notes: notes
+        .nullable()
+        .optional()
+        .describe("Its notes; null clears them."),
+      url: url.nullable().optional().describe("Its link; null clears it."),
+      alerts: alerts.optional(),
+      availability: z
+        .enum(["busy", "free"])
+        .optional()
+        .describe("Whether it counts as busy or free in free time."),
+      recurrence: recurrence
+        .nullable()
+        .optional()
+        .describe("How it repeats; null makes it stop repeating."),
+    }),
+    rules: [
+      atLeastOne(
+        [
+          "calendar",
+          "title",
+          "start",
+          "end",
+          "location",
+          "notes",
+          "url",
+          "alerts",
+          "availability",
+          "recurrence",
+        ],
+        "Say what to change.",
       ),
+      {
+        says: "A whole event moves to another calendar: leave occurrence out.",
+        schema: {
+          if: { required: ["calendar", "occurrence"] },
+          then: {
+            required: ["scope"],
+            properties: { scope: { const: "all" } },
+          },
+        },
+      },
+    ],
+    aliases: RECURRENCE_ALIASES,
     annotations: { ...WRITES, idempotentHint: true },
     writes: true,
   },
@@ -434,7 +481,14 @@ const SPECS: readonly CalendarToolSpec[] = [
         .describe(
           "Only reminders due by then: a date (up to and including that day) or a time.",
         ),
-      text: z.string().min(1).max(MAX_SEARCH_TEXT_CHARS).optional(),
+      text: z
+        .string()
+        .min(1)
+        .max(MAX_SEARCH_TEXT_CHARS)
+        .optional()
+        .describe(
+          "Only reminders whose title or notes contain this (any case).",
+        ),
       timezone: timezone.optional(),
       limit: z
         .number()
@@ -458,7 +512,10 @@ const SPECS: readonly CalendarToolSpec[] = [
       notes: notes.optional(),
       due: timeText.optional().describe("When it is due: a date or a time."),
       timezone: timezone.optional(),
-      priority: z.enum(["high", "medium", "low", "none"]).optional(),
+      priority: z
+        .enum(["high", "medium", "low", "none"])
+        .optional()
+        .describe("high, medium, low or none (the default)."),
       alert: z
         .boolean()
         .optional()
@@ -466,6 +523,7 @@ const SPECS: readonly CalendarToolSpec[] = [
       url: url.optional(),
       recurrence: recurrence.optional(),
     }),
+    aliases: RECURRENCE_ALIASES,
     annotations: WRITES,
     writes: true,
   },
@@ -474,37 +532,54 @@ const SPECS: readonly CalendarToolSpec[] = [
     title: "Change a reminder",
     description:
       "Changes a reminder: what you pass changes, what you leave out stays; null clears notes, url, due or recurrence. completed marks it done or open again (complete_reminder does the same for several). list moves it to another list. Answers with the reminder as it is now.",
-    args: z
-      .strictObject({
-        id: reminderId,
-        list: reminderList.optional().describe("Move it to this list."),
-        title: title.optional(),
-        notes: notes.nullable().optional(),
-        due: timeText.nullable().optional(),
-        timezone: timezone.optional(),
-        priority: z.enum(["high", "medium", "low", "none"]).optional(),
-        alert: z.boolean().optional(),
-        url: url.nullable().optional(),
-        recurrence: recurrence.nullable().optional(),
-        completed: z.boolean().optional(),
-      })
-      .refine(
-        (value) =>
-          [
-            "list",
-            "title",
-            "notes",
-            "due",
-            "priority",
-            "alert",
-            "url",
-            "recurrence",
-            "completed",
-          ].some(
-            (key) => (value as Record<string, unknown>)[key] !== undefined,
-          ),
-        { message: "Say what to change." },
+    args: z.strictObject({
+      id: reminderId,
+      list: reminderList.optional().describe("Move it to this list."),
+      title: title.optional().describe("Its new title."),
+      notes: notes
+        .nullable()
+        .optional()
+        .describe("Its notes; null clears them."),
+      due: timeText
+        .nullable()
+        .optional()
+        .describe("When it is due: a date or a time; null clears it."),
+      timezone: timezone.optional(),
+      priority: z
+        .enum(["high", "medium", "low", "none"])
+        .optional()
+        .describe("high, medium, low or none."),
+      alert: z
+        .boolean()
+        .optional()
+        .describe("Alert at the due time (needs a due time)."),
+      url: url.nullable().optional().describe("Its link; null clears it."),
+      recurrence: recurrence
+        .nullable()
+        .optional()
+        .describe("How it repeats; null makes it stop repeating."),
+      completed: z
+        .boolean()
+        .optional()
+        .describe("true marks it done; false opens it again."),
+    }),
+    rules: [
+      atLeastOne(
+        [
+          "list",
+          "title",
+          "notes",
+          "due",
+          "priority",
+          "alert",
+          "url",
+          "recurrence",
+          "completed",
+        ],
+        "Say what to change.",
       ),
+    ],
+    aliases: RECURRENCE_ALIASES,
     annotations: { ...WRITES, idempotentHint: true },
     writes: true,
   },
@@ -512,21 +587,27 @@ const SPECS: readonly CalendarToolSpec[] = [
     name: "complete_reminder",
     title: "Complete reminders",
     description: `Marks a reminder done, or up to ${MAX_BULK_REMINDERS} with ids (completed false opens them again). A repeating reminder moves on to its next due date and stays open, as in Reminders. With ids, the answer lists the ones changed (done) and the ones that could not be, with why (failed).`,
-    args: z
-      .strictObject({
-        id: reminderId.optional(),
-        ids: z.array(reminderId).min(1).max(MAX_BULK_REMINDERS).optional(),
-        completed: z
-          .boolean()
-          .optional()
-          .describe("true (default) marks done; false opens again."),
-      })
-      .refine(
-        (value) => (value.id === undefined) !== (value.ids === undefined),
-        {
-          message: "Give id for one reminder, or ids for several.",
-        },
+    args: z.strictObject({
+      id: reminderId.optional(),
+      ids: z
+        .array(reminderId)
+        .min(1)
+        .max(MAX_BULK_REMINDERS)
+        .optional()
+        .describe(
+          `Several reminder ids, up to ${MAX_BULK_REMINDERS}, in place of id.`,
+        ),
+      completed: z
+        .boolean()
+        .optional()
+        .describe("true (default) marks done; false opens again."),
+    }),
+    rules: [
+      exactlyOne(
+        ["id", "ids"],
+        "Give id for one reminder, or ids for several.",
       ),
+    ],
     annotations: { ...WRITES, idempotentHint: true },
     writes: true,
   },
@@ -549,30 +630,34 @@ const SPECS: readonly CalendarToolSpec[] = [
         .string()
         .min(1)
         .max(MAX_CALENDAR_NAME_CHARS)
-        .regex(/^[^\u0000-\u001f\u007f]+$/, { message: "A name on one line." }),
+        .regex(/^[^\u0000-\u001f\u007f]+$/, { message: "A name on one line." })
+        .describe("Its name, on one line."),
       holds: z
         .enum(["events", "reminders"])
         .describe("events for a calendar, reminders for a reminder list."),
       color: z
         .string()
         .regex(/^#[0-9A-Fa-f]{6}$/, { message: "A color like #FF9500." })
-        .optional(),
+        .optional()
+        .describe("Its color, like #FF9500."),
     }),
     annotations: WRITES,
     writes: true,
   },
 ]
 
+const SPECS: readonly CalendarToolSpec[] = INPUTS.map(
+  ({ args, writes, ...spec }) => ({
+    ...defineInnerTool({ ...spec, input: args }),
+    name: spec.name,
+    writes,
+  }),
+)
+
 const BY_NAME = new Map(SPECS.map((spec) => [spec.name, spec]))
 
 export function calendarToolSpec(name: string): CalendarToolSpec | undefined {
   return BY_NAME.get(name as CalendarToolName)
-}
-
-function jsonSchema(schema: z.ZodType): unknown {
-  const generated = z.toJSONSchema(schema) as Record<string, unknown>
-  delete generated.$schema
-  return generated
 }
 
 /** The tools an account has, for the catalogue. */
@@ -581,30 +666,7 @@ export function calendarTools({
 }: {
   readOnly: boolean
 }): CatalogueTool[] {
-  return SPECS.filter((spec) => !(readOnly && spec.writes)).map((spec) => ({
-    name: spec.name,
-    title: spec.title,
-    description: spec.description,
-    inputSchema: jsonSchema(spec.args),
-    annotations: spec.annotations,
-  }))
-}
-
-/** A tool's arguments, checked; a readable refusal otherwise. */
-export function parseCalendarArgs(
-  spec: CalendarToolSpec,
-  args: unknown,
-): Record<string, unknown> {
-  const parsed = spec.args.safeParse(args ?? {})
-
-  if (!parsed.success) {
-    throw invalid(
-      `${spec.name}: ${z
-        .prettifyError(parsed.error)
-        .replace(/\s*\n\s*/g, " ")
-        .slice(0, 500)}`,
-    )
-  }
-
-  return parsed.data as Record<string, unknown>
+  return SPECS.filter((spec) => !(readOnly && spec.writes)).map((spec) =>
+    spec.listed(),
+  )
 }
