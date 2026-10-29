@@ -85,11 +85,12 @@ so in the summary; the bump itself waits for the request.
   all of that when adding to it, and add a test for each new field an
   assistant can set.
 - Definitions (`lib/core/definitions.ts`, `definition-rows.ts`): an MCP
-  server, endpoint or wrapper is an instance of a `server_definition`, and
-  what instances share (description, schema and edits, wrapper program, tool
-  descriptions) is copied on each of them. Anything that writes shared
-  content goes through `endpoints.ts applySpec`, `shareDescription`,
-  `setToolDescription` or `writeWrapper`, so every instance gets it and
+  server, endpoint, wrapper or service is an instance of a
+  `server_definition`, and what instances share (description, schema and
+  edits, wrapper program, a service's definition, tool descriptions) is
+  copied on each of them. Anything that writes shared content goes through
+  `endpoints.ts applySpec`, `shareDescription`, `setToolDescription`,
+  `writeWrapper` or `services.ts writeServiceDefinition`, so every instance gets it and
   rebuilds its tools; a server made on a definition takes its content, never
   its own. An endpoint shares the owner's rules with its siblings: it is the
   assistant's only while every instance is. Merge is the owner's alone. An
@@ -227,6 +228,26 @@ so in the summary; the bump itself waits for the request.
   for it. Its limits go in `ssh/limits.ts`, and a change to how a host is
   trusted or PCP signs in gets a test against the test server
   (`ssh/client.test.ts`).
+- Services (`lib/core/services/`) run with the Docker or Podman the owner
+  already has on an SSH server PCP holds, through the engine's command line
+  over SSH `exec` only: PCP installs no engine, never touches a socket and
+  starts no child process. Every command is built from checked fields (the
+  patterns in `services/definition.ts`) and quoted by `services/shell.ts`,
+  the one quoting helper, then run as `sh -c '<script>'`; never a shell
+  string from anyone. Variable values come from the vault, decrypted only in
+  `upstream.ts` (a `ServiceEnv`, beside the `ServiceHost` that runs commands
+  with PCP's key, only on a pinned host), and reach the engine over standard
+  input as an env file the same command deletes, never on a command line;
+  they are scrubbed from logs and errors, and `inspect` reads only state,
+  image and labels. Images are pinned by digest; volumes are named volumes,
+  never a host path. Only the owner launches, changes, updates or removes
+  one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
+  owner's levels (and will propose one as a permission request). Status is
+  read only inside a request (page, `check_server`, a failing call), never
+  polled; a saved secret remakes the services that take it through
+  `after()`. A launch that fails takes back everything it did. Limits go in
+  `services/limits.ts`; a new command, tool or argument gets a test against
+  the fake engine (`services/fake-docker.ts`, `services.test.ts`).
 - Long tool answers and files are kept only through
   `lib/core/tool-results.ts`: text or bytes, encrypted with
   `tool_result:<id>`, readable by the token whose call produced them, gone
@@ -533,7 +554,8 @@ The owner is "you"; the assistant is "an assistant"; the thing PCP holds is
 a "secret", the server it talks to is a "server", and an API added from an
 OpenAPI schema is an "endpoint" ("API endpoints" in the UI); a mailbox PCP
 signs in to is a "mail account"; a machine PCP runs commands on is an "SSH
-server" ("SSH servers" in the UI); calendars and reminders PCP reaches over
+server" ("SSH servers" in the UI); a container PCP runs on one is a
+"service" ("Services" in the UI); calendars and reminders PCP reaches over
 CalDAV are a "calendar account" ("Calendar accounts" in the UI); a server
 whose tools are programs over the
 others is a "wrapper" ("Wrappers" in the UI); a note an
