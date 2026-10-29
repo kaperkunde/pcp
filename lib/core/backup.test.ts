@@ -36,7 +36,9 @@ import { getHostJson, setHostJson } from "./host-settings"
 import { getTokenInstructions, saveTokenInstructions } from "./instructions"
 import { currentTemplate } from "./instructions-defaults"
 import { createMailAccount } from "./mail/accounts"
-import { createMemory, listMemories } from "./memories"
+import { createMemory, listMemories, runMemoryCommand } from "./memories"
+import { openRequestFor } from "./permission-fold"
+import { withPermission } from "./permissions"
 import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
 import { UPDATE_CONFIG_KEY, UPDATE_STATUS_KEY } from "./updates/state"
 import { createSecret, deleteSecret, revealSecret } from "./secrets"
@@ -531,6 +533,64 @@ describe("restoring", { timeout: 60_000 }, () => {
     )
     // As for the tokens of a vault that updated: the offer is made once.
     expect((await resolveApiToken(token))!.memoryMigration).toBe(true)
+  })
+
+  it("carries what a waiting request is about, and restores a file from before it as nothing", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    const scope = { ctx, tokenId }
+    const outcome = await runMemoryCommand(scope, {
+      command: "str_replace",
+      path: "/memories/shared/notes.md",
+      old_str: "this",
+      new_str: "that",
+    })
+    if (!("ask" in outcome)) {
+      throw new Error("expected a request")
+    }
+    await withPermission(
+      { ...scope, publicUrl: "https://pcp.example" },
+      outcome.ask,
+    )
+    const [row] = await db().permissionRequest.findMany()
+    expect(row?.targetKey).toMatch(/^[0-9a-f]{64}$/)
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    const [memory] = await listMemories(ctx)
+    expect(
+      (
+        await openRequestFor(
+          ctx,
+          tokenId,
+          "memory_change",
+          `memory:${memory!.id}`,
+        )
+      )?.id,
+    ).toBe(row!.id)
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    for (const request of older.tables.permissionRequests as Record<
+      string,
+      unknown
+    >[]) {
+      delete request.targetKey
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect((await db().permissionRequest.findFirst())?.targetKey).toBeNull()
   })
 
   it("carries definitions and the owner's notes, and gives each server of a file from before them a definition of its own", async () => {

@@ -1084,6 +1084,19 @@ the owner's or one they read:
   `basis` ("the skill changed since the owner was asked"); a new skill only
   while its name is free. The owner edits, imports (a pasted SKILL.md) and
   deletes skills freely on the Skills page.
+- **One request per item and token.** A `permission_request` keeps what it
+  is about as `target_key`, an HMAC of the target (`skill:<id>`,
+  `memory:<id or path>`, `note:<kind>:<id>`) under a key derived from the
+  vault's data key (`lib/core/permission-fold.ts`). A second change from
+  the same token to a skill or shared memory whose request still waits is
+  made on top of that request's `after` and replaces its arguments, keeping
+  its `before` and `basis` (`fold`), so the owner reads one diff against
+  what they have and approves every change at once; a note proposed again
+  replaces the waiting one. A page the owner had open answers only the
+  version they read (`revision`, the row's `args_hash`). Another token's
+  waiting request for the same item is shown on both pages as a conflict:
+  approving one makes the other stale, and check_permission then says why
+  and, for a skill, the version it is at now.
 - **Exported** as rows (`skill`, `api_token_skill`, `all_skills`); an older
   file restores with none, every token seeing every skill. Deleting the
   vault wipes them.

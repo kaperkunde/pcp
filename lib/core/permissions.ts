@@ -74,6 +74,7 @@ import {
   waitingRequestsWhere,
 } from "./owner-queue"
 import { waitForOwner } from "./owner-wait"
+import { foldedText, isFoldingKind, targetKey } from "./permission-fold"
 import {
   argsInFull,
   canonicalJson,
@@ -336,6 +337,18 @@ export type PermissionView = {
    */
   shareHref: string | null
   url: string
+  /**
+   * The version of the request the owner reads: it changes when an
+   * assistant folds another change into it, and an answer given on the
+   * version before is refused (decidePermission's `revision`).
+   */
+  revision: string
+  /**
+   * Other requests still waiting on the same skill, shared memory or note
+   * (another token's, or one that could not fold): approving one makes the
+   * others fail, since each is made on the item as it is now.
+   */
+  conflicts: Array<{ id: string; tokenName: string; url: string }>
   createdAt: Date
   expiresAt: Date
   outcome: string | null
@@ -1395,6 +1408,9 @@ async function toView(
         ? shareReviewHref(readArgs(ctx, row) as RepoShareAsk, row.id)
         : null,
     url: permissionUrl(publicUrl, row.id),
+    revision: row.argsHash,
+    conflicts:
+      status === "pending" ? await conflictsOf(ctx, row, publicUrl) : [],
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
     outcome: readResult(ctx, row),
@@ -1406,6 +1422,33 @@ async function toView(
         : null,
     secretToEnter: await secretToEnter(ctx, row),
   }
+}
+
+/** The other requests waiting on what this one changes (`conflicts`). */
+async function conflictsOf(
+  ctx: VaultContext,
+  row: Row,
+  publicUrl: string,
+): Promise<PermissionView["conflicts"]> {
+  if (!isFoldingKind(row.kind) || !row.targetKey) {
+    return []
+  }
+
+  const others = await db().permissionRequest.findMany({
+    where: {
+      ...waitingRequestsWhere(ctx),
+      targetKey: row.targetKey,
+      id: { not: row.id },
+    },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, token: { select: { name: true } } },
+  })
+
+  return others.map((other) => ({
+    id: other.id,
+    tokenName: other.token.name,
+    url: permissionUrl(publicUrl, other.id),
+  }))
 }
 
 /** The tab a browser request is about, if it names one. */
@@ -1579,6 +1622,7 @@ export async function withPermission(
 ): Promise<CallToolResult> {
   const { target, args } = describeAsk(ask)
   const argsHash = requestHash(ask.kind, target, args)
+  const key = targetKey(scope.ctx.dek, target)
   const now = new Date()
 
   // The same request asked again finds the row it already has, so the owner
@@ -1595,6 +1639,44 @@ export async function withPermission(
   })
 
   let id = existing?.id
+  let folded = false
+
+  // A change made on top of the token's own waiting request (skills.ts,
+  // memories.ts: `fold`), or a note proposed again, replaces that request:
+  // the owner is asked once, about everything together, and a page they
+  // had open answers only after they read it again (`revision`).
+  const foldInto = id ? undefined : await foldTarget(scope, ask, key, now)
+
+  if (foldInto) {
+    const { count } = await db().permissionRequest.updateMany({
+      where: {
+        id: foldInto,
+        vaultId: scope.ctx.vaultId,
+        tokenId: scope.tokenId,
+        kind: ask.kind,
+        status: "pending",
+        expiresAt: { gt: now },
+      },
+      data: {
+        argsCiphertext: asBytes(
+          encryptString(scope.ctx.dek, JSON.stringify(args), aad(foldInto)),
+        ),
+        argsHash,
+        targetKey: key,
+        expiresAt: new Date(now.getTime() + PERMISSION_TTL_MS),
+      },
+    })
+
+    if (count !== 1) {
+      return text(
+        `Your open request ${foldInto}, which this change was made on top of, was answered or ended in the meantime, so this change was not added to it and the owner was not asked. Call check_permission with id "${foldInto}" to see how it went, then read the item again and propose the change anew.`,
+        true,
+      )
+    }
+
+    id = foldInto
+    folded = true
+  }
 
   if (!id) {
     id = newId()
@@ -1626,6 +1708,7 @@ export async function withPermission(
           encryptString(scope.ctx.dek, JSON.stringify(args), aad(id)),
         ),
         argsHash,
+        targetKey: key,
         expiresAt: new Date(now.getTime() + PERMISSION_TTL_MS),
       },
     })
@@ -1659,9 +1742,48 @@ export async function withPermission(
         )
       : undefined
 
-  return text(
-    pendingText(await toView(scope.ctx, row!, scope.publicUrl), detail),
+  const pending = pendingText(
+    await toView(scope.ctx, row!, scope.publicUrl),
+    detail,
   )
+
+  return text(folded ? `${foldedText(id, ask.kind)}\n\n${pending}` : pending)
+}
+
+/**
+ * The waiting request an ask replaces, if it replaces one: the one a skill
+ * or memory change was made on top of, or the token's note proposal still
+ * waiting for the same item (a note is proposed whole, so the newer one is
+ * what the assistant wants).
+ */
+async function foldTarget(
+  scope: PermissionScope,
+  ask: PermissionAsk,
+  key: string,
+  now: Date,
+): Promise<string | undefined> {
+  if ("fold" in ask && ask.fold) {
+    return ask.fold
+  }
+
+  if (ask.kind !== "note_change") {
+    return undefined
+  }
+
+  const open = await db().permissionRequest.findFirst({
+    where: {
+      vaultId: scope.ctx.vaultId,
+      tokenId: scope.tokenId,
+      kind: "note_change",
+      targetKey: key,
+      status: "pending",
+      expiresAt: { gt: now },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  })
+
+  return open?.id
 }
 
 /**
@@ -1681,9 +1803,15 @@ export async function decidePermission(
     always,
     minutes,
     origins,
+    revision,
   }: {
     publicUrl: string
     tokenId?: string
+    /**
+     * The view's `revision` the owner answered: a request an assistant
+     * changed since (a change folded in) is not answered on what they read.
+     */
+    revision?: string
     /** The value of a new server's secret, typed in on PCP's page. */
     secretValue?: string
     /** request_secret: the sites the owner left in, on PCP's page. */
@@ -1707,6 +1835,13 @@ export async function decidePermission(
 
   if (!isOpen(row)) {
     return outcomeOf(await toView(ctx, row, publicUrl))
+  }
+
+  if (revision !== undefined && revision !== row.argsHash) {
+    return text(
+      "The assistant added to this request while you had it open, so nothing was done. Read it again, then answer.",
+      true,
+    )
   }
 
   const kind = row.kind as PermissionKind

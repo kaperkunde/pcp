@@ -20,6 +20,7 @@ import { RelativeDate } from "@/components/local-date"
 import { MemoryReview } from "@/components/memory-review"
 import { PageHeader } from "@/components/page-header"
 import { PageColumn } from "@/components/page-column"
+import { PermissionConflicts } from "@/components/permission-conflicts"
 import { PermissionDecision } from "@/components/permission-decision"
 import { PermissionLines } from "@/components/permission-lines"
 import { PermissionOutcome } from "@/components/permission-outcome"
@@ -231,6 +232,7 @@ export default async function PermissionPage({
           </>
         ) : pending ? (
           <>
+            <PermissionConflicts conflicts={view.conflicts} />
             <PendingNote view={view} />
             {view.shareHref ? (
               // A push is agreed to on its review, after every file.
@@ -242,6 +244,7 @@ export default async function PermissionPage({
             ) : null}
             <PermissionDecision
               id={view.id}
+              revision={view.revision}
               decisions={view.decisions}
               secret={view.secretToEnter}
               allowForFixed={

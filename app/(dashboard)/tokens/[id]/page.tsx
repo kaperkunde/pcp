@@ -121,6 +121,11 @@ export default async function TokenPage({
                     : request.kind === "repo_share"
                       ? "Review the push"
                       : null,
+            revision: request.revision,
+            conflicts: request.conflicts.map(({ id, tokenName }) => ({
+              id,
+              tokenName,
+            })),
             title: request.title,
             lines: request.lines,
             full: request.full,

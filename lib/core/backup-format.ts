@@ -209,6 +209,9 @@ const PermissionRequestRow = z.strictObject({
   toolName: str,
   argsCiphertext: bytes,
   argsHash: str,
+  // Added with folding changes to one skill or memory: absent from older
+  // files, whose requests then fold into nothing and conflict with nothing.
+  targetKey: str.nullable().default(null),
   fields: str.nullable(),
   decode: str.nullable(),
   // Added in 0.2: absent from older files.

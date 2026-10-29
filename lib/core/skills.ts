@@ -16,7 +16,7 @@ import {
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
-import { invalid, notFound, PcpError } from "./errors"
+import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
 import { diffLines, type DiffLine } from "./line-merge"
 import { hiddenCharacter, withoutPresentation } from "./memories"
@@ -25,6 +25,7 @@ import {
   readSkillNote,
   type NoteChangeAsk,
 } from "./personal-notes"
+import { openRequestFor, type OpenRequest } from "./permission-fold"
 import { canonicalJson } from "./permission-rules"
 import { readStrictYaml } from "./strict-yaml"
 
@@ -1014,7 +1015,16 @@ export type SkillChangeAsk = {
   after: SkillBody | null
 }
 
-export type SkillAsk = { kind: "skill_change"; input: SkillChangeAsk }
+/**
+ * `fold`: the token's own request still waiting on this skill, which the
+ * change was made on top of and replaces (permissions.ts withPermission):
+ * the owner is asked once, about every change together.
+ */
+export type SkillAsk = {
+  kind: "skill_change"
+  input: SkillChangeAsk
+  fold?: string
+}
 
 export type SkillOutcome =
   | { text: string }
@@ -1303,10 +1313,17 @@ export function viewSkill(
   return `${skillPath(entry.name, file)}: a file of the skill ${entry.name} (version ${entry.version}).\n${numbered(found.text, range)}`
 }
 
+/**
+ * The ask for a skill as `next` would make it. `entry` is what the change
+ * was made on: the stored skill, or with `fold` the skill as the token's
+ * waiting request would make it, whose `before` and `basis` the ask keeps,
+ * so the owner sees every change together against the skill they have.
+ */
 function change(
   entry: SkillEntry | null,
   next: Omit<SkillBody, "version">,
   verb: string,
+  fold: OpenRequest<SkillChangeAsk> | null = null,
 ): SkillOutcome {
   const skill = checkSkill(arrived(next))
 
@@ -1315,39 +1332,51 @@ function change(
     skillText({ ...skill, version: entry.version }) === skillText(entry) &&
     JSON.stringify(skill.files) === JSON.stringify(entry.files)
   ) {
-    return { text: "Nothing changed: the skill is the same." }
+    return {
+      text: fold
+        ? `Nothing changed: your open request ${fold.id} already makes the skill that.`
+        : "Nothing changed: the skill is the same.",
+    }
   }
 
-  const before: SkillBody | null = entry
-    ? {
-        name: entry.name,
-        description: entry.description,
-        version: entry.version,
-        body: entry.body,
-        tools: entry.tools,
-        files: entry.files,
-        extra: entry.extra ?? {},
-      }
-    : null
+  const before: SkillBody | null = fold
+    ? fold.args.before
+    : entry
+      ? {
+          name: entry.name,
+          description: entry.description,
+          version: entry.version,
+          body: entry.body,
+          tools: entry.tools,
+          files: entry.files,
+          extra: entry.extra ?? {},
+        }
+      : null
+  const basis = fold ? fold.args.basis : (entry?.version ?? null)
 
   return {
     ask: {
       kind: "skill_change",
       input: {
-        skillId: entry?.id ?? null,
-        basis: entry?.version ?? null,
+        skillId: fold ? fold.args.skillId : (entry?.id ?? null),
+        basis,
         before,
-        after: { ...skill, version: (entry?.version ?? 0) + 1 },
+        after: { ...skill, version: (basis ?? 0) + 1 },
       },
+      ...(fold ? { fold: fold.id } : {}),
     },
-    lead: `${verb} a skill asks the owner. ${ASKS_FIRST}`,
+    lead: `${fold && !before ? "Adding" : verb} a skill asks the owner. ${ASKS_FIRST}`,
   }
 }
 
-function deleteAsk(entry: SkillEntry): SkillOutcome {
+function deleteAsk(
+  entry: SkillEntry,
+  fold: OpenRequest<SkillChangeAsk> | null = null,
+): SkillOutcome {
   return {
     ask: {
       kind: "skill_change",
+      ...(fold ? { fold: fold.id } : {}),
       input: {
         skillId: entry.id,
         basis: entry.version,
@@ -1566,6 +1595,151 @@ export async function runSkillCommand(
       }
     }
 
+    case "create":
+    case "str_replace":
+    case "insert":
+    case "delete":
+    case "rename":
+      return writeCommand(scope, all, target, entry, args)
+
+    default:
+      throw invalid(
+        `${args.command} does not go with a skill: view, create, str_replace, insert, delete, rename and search do.`,
+      )
+  }
+}
+
+/** The memory tool's commands that change a skill. */
+type WriteCommand = "create" | "str_replace" | "insert" | "delete" | "rename"
+
+/**
+ * The token's own request still waiting on a skill, for a new change to
+ * fold into: for a stored skill, only while it is still at the version that
+ * request was made on and the request keeps it (a deletion folds nothing
+ * in); for a skill not added yet, the request that adds it by that name.
+ */
+async function openChange(
+  scope: SkillScope,
+  entry: SkillEntry | null,
+  name: string | null,
+): Promise<OpenRequest<SkillChangeAsk> | null> {
+  if (entry) {
+    const open = await openRequestFor<SkillChangeAsk>(
+      scope.ctx,
+      scope.tokenId,
+      "skill_change",
+      `skill:${entry.id}`,
+    )
+
+    return open &&
+      open.args.skillId === entry.id &&
+      open.args.basis === entry.version &&
+      open.args.after
+      ? open
+      : null
+  }
+
+  if (name === null) {
+    return null
+  }
+
+  const open = await openRequestFor<SkillChangeAsk>(
+    scope.ctx,
+    scope.tokenId,
+    "skill_change",
+    `skill:${name}`,
+  )
+
+  return open && open.args.skillId === null && open.args.after ? open : null
+}
+
+/** The skill as a waiting request would make it, to change further. */
+function asEntry(stored: SkillEntry | null, after: SkillBody): SkillEntry {
+  return {
+    id: stored?.id ?? "",
+    author: stored?.author ?? "assistant",
+    note: stored?.note ?? null,
+    createdAt: stored?.createdAt ?? new Date(0),
+    updatedAt: stored?.updatedAt ?? new Date(0),
+    name: after.name,
+    description: after.description,
+    version: stored?.version ?? 0,
+    body: after.body,
+    tools: after.tools,
+    files: after.files,
+    extra: after.extra ?? {},
+  }
+}
+
+/**
+ * A write on a skill path. While the token has a request waiting on the
+ * skill, the change is made on top of what that request would make and
+ * folds into it (one request, one diff against the skill as it is), so two
+ * edits in one turn are not two requests at one version of which the
+ * second would fail. The same change asked again is the request it made.
+ */
+async function writeCommand(
+  scope: SkillScope,
+  all: SkillEntry[],
+  target: SkillPath,
+  stored: SkillEntry | null,
+  args: SkillCommand,
+): Promise<SkillOutcome> {
+  const open = await openChange(scope, stored, target.name)
+
+  if (!open) {
+    return writeSkill(scope, all, target, stored, args, null)
+  }
+
+  const again = await writeSkill(scope, all, target, stored, args, null).catch(
+    () => null,
+  )
+
+  if (
+    again &&
+    "ask" in again &&
+    again.ask.kind === "skill_change" &&
+    canonicalJson(again.ask.input) === canonicalJson(open.args)
+  ) {
+    return again
+  }
+
+  try {
+    return await writeSkill(scope, all, target, stored, args, open)
+  } catch (error) {
+    if (isPcpError(error) && error.code === "validation") {
+      throw invalid(
+        `${error.message} Your open request ${open.id} holds your earlier changes to this skill, and this one applies on top of them.`,
+      )
+    }
+
+    throw error
+  }
+}
+
+async function writeSkill(
+  scope: SkillScope,
+  all: SkillEntry[],
+  target: SkillPath,
+  stored: SkillEntry | null,
+  args: SkillCommand,
+  fold: OpenRequest<SkillChangeAsk> | null,
+): Promise<SkillOutcome> {
+  const entry = fold ? asEntry(stored, fold.args.after!) : stored
+  const needEntry = (): SkillEntry => {
+    if (!entry) {
+      throw missing(args.path!)
+    }
+
+    return entry
+  }
+  const changed = (
+    base: SkillEntry | null,
+    next: Omit<SkillBody, "version">,
+    verb: string,
+  ) => change(base, next, verb, fold)
+
+  switch (args.command as WriteCommand) {
     case "create": {
       if (target.name === null || target.file === null) {
         throw invalid(
@@ -1595,12 +1769,12 @@ export async function runSkillCommand(
           await roomForOneMore(scope.ctx)
         }
 
-        return change(entry, next, entry ? "Changing" : "Adding")
+        return changed(entry, next, entry ? "Changing" : "Adding")
       }
 
       const found = needEntry()
 
-      return change(
+      return changed(
         found,
         {
           ...found,
@@ -1639,7 +1813,7 @@ export async function runSkillCommand(
           )
         }
 
-        return change(found, next, "Changing")
+        return changed(found, next, "Changing")
       }
 
       const file = found.files.find((item) => item.path === target.file)
@@ -1648,7 +1822,7 @@ export async function runSkillCommand(
         throw missing(args.path!)
       }
 
-      return change(
+      return changed(
         found,
         {
           ...found,
@@ -1670,6 +1844,17 @@ export async function runSkillCommand(
       const found = needEntry()
 
       if (target.file === null || target.file === SKILL_FILE) {
+        if (fold) {
+          if (fold.args.skillId === null) {
+            throw new PcpError(
+              "conflict",
+              `The skill ${found.name} is not added yet: your open request ${fold.id} proposes it. Take that back with withdraw_request instead.`,
+            )
+          }
+
+          return deleteAsk(stored!, fold)
+        }
+
         return deleteAsk(found)
       }
 
@@ -1677,7 +1862,7 @@ export async function runSkillCommand(
         throw missing(args.path!)
       }
 
-      return change(
+      return changed(
         found,
         {
           ...found,
@@ -1715,7 +1900,7 @@ export async function runSkillCommand(
           )
         }
 
-        return change(found, { ...found, name: to.name }, "Renaming")
+        return changed(found, { ...found, name: to.name }, "Renaming")
       }
 
       if (
@@ -1741,7 +1926,7 @@ export async function runSkillCommand(
         )
       }
 
-      return change(
+      return changed(
         found,
         {
           ...found,
@@ -1756,9 +1941,7 @@ export async function runSkillCommand(
     }
 
     default:
-      throw invalid(
-        `${args.command} does not go with a skill: view, create, str_replace, insert, delete, rename and search do.`,
-      )
+      throw invalid(`${args.command} does not change a skill.`)
   }
 }
 
@@ -1786,6 +1969,19 @@ function asShown(after: SkillBody): Omit<SkillBody, "version"> {
 }
 
 /**
+ * A change the owner agreed to onto a version the skill has left behind
+ * (another change was saved first: another request, or the owner's own
+ * edit): what check_permission tells the assistant, with the version the
+ * skill is at now, to propose the change anew on.
+ */
+function stale(entry: SkillEntry, basis: number | null): PcpError {
+  return new PcpError(
+    "conflict",
+    `The skill ${entry.name} changed since the owner was asked (they were shown a change to version ${basis ?? 0}; it is at version ${entry.version} now), so nothing was written. Describe it again (ref "${SKILL_REF}${entry.name}") and propose your change anew on top of version ${entry.version}.`,
+  )
+}
+
+/**
  * The owner agreed to a skill request (permissions.ts, once the row is
  * claimed). Writes exactly the skill they were shown, onto the version they
  * were shown it against; anything else is refused and nothing is written.
@@ -1796,10 +1992,6 @@ export async function applySkillChange(
   ask: SkillChangeAsk,
 ): Promise<string> {
   const entries = await load(ctx)
-  const stale = new PcpError(
-    "conflict",
-    "The skill changed since the owner was asked, so nothing was written. Describe it again and ask anew.",
-  )
 
   if (ask.skillId === null) {
     if (!ask.after) {
@@ -1807,7 +1999,10 @@ export async function applySkillChange(
     }
 
     if (taken(entries, ask.after.name)) {
-      throw stale
+      throw new PcpError(
+        "conflict",
+        `A skill called ${ask.after.name} was added since the owner was asked, so nothing was written. Describe it (ref "${SKILL_REF}${ask.after.name}") and propose your change on top of it, or pick another name.`,
+      )
     }
 
     const skill = asShown(ask.after)
@@ -1837,9 +2032,17 @@ export async function applySkillChange(
   }
 
   const entry = entries.find((item) => item.id === ask.skillId)
+  const name = ask.before?.name ?? ask.after?.name ?? "it"
 
-  if (!entry || entry.version !== ask.basis) {
-    throw stale
+  if (!entry) {
+    throw new PcpError(
+      "conflict",
+      `The skill ${name} was deleted since the owner was asked, so nothing was written.`,
+    )
+  }
+
+  if (entry.version !== ask.basis) {
+    throw stale(entry, ask.basis)
   }
 
   if (!ask.after) {
@@ -1848,7 +2051,10 @@ export async function applySkillChange(
   }
 
   if (taken(entries, ask.after.name, entry.id)) {
-    throw stale
+    throw new PcpError(
+      "conflict",
+      `A skill called ${ask.after.name} was added since the owner was asked, so nothing was written. Pick another name and propose it anew.`,
+    )
   }
 
   const skill = asShown(ask.after)

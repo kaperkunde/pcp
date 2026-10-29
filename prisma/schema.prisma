@@ -353,6 +353,12 @@ model PermissionRequest {
   /// sha256 of the kind, the target and the canonical arguments, so the same
   /// request asked twice finds the row it already has.
   argsHash         String     @map("args_hash")
+  /// What the request is about (a skill, a shared memory, a note's item),
+  /// as an HMAC under a key derived from the vault's data key, so the target
+  /// is never stored in the clear: a second change from the same token to
+  /// the same thing folds into the request still waiting, and another
+  /// token's is shown as a conflict. Null on rows from before it existed.
+  targetKey        String?    @map("target_key")
   /// call: the parts of the answer the assistant asked for (call_tool's
   /// fields), as a JSON list of paths. Names, never values.
   fields           String?
@@ -375,6 +381,7 @@ model PermissionRequest {
   decidedAt        DateTime?  @map("decided_at")
 
   @@index([tokenId, argsHash])
+  @@index([vaultId, targetKey])
   @@index([vaultId, status])
   @@index([expiresAt])
   @@map("permission_request")
