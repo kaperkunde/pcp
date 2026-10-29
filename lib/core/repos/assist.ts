@@ -5,7 +5,7 @@ import { tokenize } from "../search"
 
 import { readRepo, refOf, serializeItem, type ItemDocument } from "./documents"
 import { localHash } from "./hash"
-import { itemRoot, type ItemRef, type RepoFiles } from "./layout"
+import { isOneFileKind, itemRoot, type ItemRef, type RepoFiles } from "./layout"
 import { MAX_REVIEW_CHARS } from "./limits"
 import { reviewItem, type FileChange, type ReviewFlag } from "./review"
 import {
@@ -65,6 +65,7 @@ function itemLabel(ref: ItemRef): string {
     flow: "browser flow",
     endpoint: "API endpoint",
     server: "MCP server",
+    service: "service",
   }[ref.kind]
 
   return `the ${noun} ${ref.name}`
@@ -76,7 +77,7 @@ function insideItem(ref: ItemRef, files: RepoFiles): Record<string, string> {
 
   return Object.fromEntries(
     Object.entries(files).map(([path, text]) => [
-      ref.kind === "server"
+      isOneFileKind(ref.kind)
         ? path.slice(path.lastIndexOf("/") + 1)
         : path.slice(root.length + 1),
       text,
@@ -89,7 +90,7 @@ function outsideItem(ref: ItemRef, files: Record<string, string>): RepoFiles {
 
   return Object.fromEntries(
     Object.entries(files).map(([name, text]) => [
-      ref.kind === "server" ? root : `${root}/${name}`,
+      isOneFileKind(ref.kind) ? root : `${root}/${name}`,
       text,
     ]),
   )

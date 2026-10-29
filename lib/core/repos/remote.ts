@@ -16,6 +16,7 @@ import {
   checkItemSize,
   checkRepoPath,
   ITEM_DIRS,
+  isOneFileKind,
   itemKey,
   itemOfPath,
   itemPath,
@@ -341,7 +342,7 @@ export async function fetchItem(
 ): Promise<FetchedItem> {
   const files = await readItemFiles(gh, coords, item)
   const name = (path: string) =>
-    item.ref.kind === "server"
+    isOneFileKind(item.ref.kind)
       ? basename(path)
       : path.slice(itemRoot(item.ref).length + 1)
   const document = await parseItem({
@@ -374,7 +375,7 @@ export async function fetchItemAt(
     files: {},
   }
 
-  if (ref.kind === "server") {
+  if (isOneFileKind(ref.kind)) {
     item.files[basename(root)] = { path: root, sha, size: null }
   } else {
     for (const entry of await readTree(gh, coords, sha)) {
@@ -478,7 +479,7 @@ export function placeFiles(
     return files
   }
 
-  if (ref.kind === "server") {
+  if (isOneFileKind(ref.kind)) {
     throw new PcpError("state", `${root} is not where a server's file goes.`)
   }
 

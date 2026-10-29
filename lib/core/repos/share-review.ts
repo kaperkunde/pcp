@@ -1,3 +1,5 @@
+import { isIP } from "node:net"
+
 import YAML from "yaml"
 
 import type { VaultContext } from "../context"
@@ -14,6 +16,7 @@ import { invalid, PcpError } from "../errors"
 import type { DiffLine } from "../line-merge"
 import { canonicalJson } from "../permission-rules"
 import { getServer, normalizeNameAndDescription } from "../servers"
+import { isLoopback, readPublish } from "../services/definition"
 import { getSkill, updateSkill } from "../skills"
 import { sha256Hex } from "../crypto"
 
@@ -25,7 +28,7 @@ import {
   type ItemKind,
   type RepoFiles,
 } from "./layout"
-import { instanceSignIn, localItem } from "./local"
+import { instanceSignIn, localItem, serviceOwnLines } from "./local"
 import {
   findPersonalData,
   ownerFactsFrom,
@@ -132,14 +135,15 @@ export type ShareReview = {
 /**
  * What the vault knows of its owner, for the personal-data check: PCP's
  * public address, every server's and account's address, the email
- * addresses they sign in or send with, their SSH servers, and their name.
- * Read with no secret: these are plain columns.
+ * addresses they sign in or send with, their SSH servers (the machines
+ * services run on among them) and the addresses services are published on,
+ * and their name. Read with no secret: these are plain columns.
  */
 export async function vaultOwnerFacts(
   ctx: VaultContext,
   { publicUrl }: { publicUrl?: string | null } = {},
 ): Promise<OwnerFacts> {
-  const [servers, vault] = await Promise.all([
+  const [servers, vault, services] = await Promise.all([
     db().mcpServer.findMany({
       where: { vaultId: ctx.vaultId },
       select: {
@@ -154,6 +158,10 @@ export async function vaultOwnerFacts(
       where: { id: ctx.vaultId },
       select: { name: true },
     }),
+    db().serviceSpec.findMany({
+      where: { server: { vaultId: ctx.vaultId } },
+      select: { publish: true, host: { select: { url: true } } },
+    }),
   ])
   const emails = servers.flatMap((server) =>
     [server.authUsername, server.mailFrom].filter(
@@ -166,9 +174,27 @@ export async function vaultOwnerFacts(
     serverAddresses: servers.flatMap((server) =>
       [server.url, server.smtpUrl].filter((value): value is string => !!value),
     ),
-    ownAddresses: servers
-      .filter((server) => server.kind === "ssh")
-      .map((server) => server.url),
+    ownAddresses: [
+      ...servers
+        .filter((server) => server.kind === "ssh")
+        .map((server) => server.url),
+      // A service's SSH server (once deleted, still the owner's machine
+      // until the service goes), and an address of its own it is published
+      // on: never 0.0.0.0 or loopback, which say nothing of the owner.
+      ...services.flatMap((service) => {
+        const published = readPublish(service.publish).address
+
+        return [
+          ...(service.host ? [service.host.url] : []),
+          ...(isIP(published) !== 0 &&
+          published !== "0.0.0.0" &&
+          published !== "::" &&
+          !isLoopback(published)
+            ? [published]
+            : []),
+        ]
+      }),
+    ],
     emails,
     ownerName: vault?.name ?? null,
   })
@@ -313,6 +339,17 @@ async function staysPrivate(
     const note = readServerNote(ctx, instance)
     return note ? [`${instance.slug}: ${note}`] : []
   })
+  const services =
+    row.kind === "service"
+      ? await Promise.all(
+          instances.map(async (instance) => ({
+            slug: instance.slug,
+            ...(await serviceOwnLines(ctx, instance)),
+          })),
+        )
+      : []
+  const each = (lines: string[]) =>
+    lines.length > 0 ? lines.join("; ") : "None"
   const lines = [
     {
       label: "Names here",
@@ -320,20 +357,63 @@ async function staysPrivate(
         .map((instance) => `${instance.name} (${instance.slug})`)
         .join(", "),
     },
-    ...(row.kind === "wrapper"
-      ? []
-      : [
+    ...(row.kind === "service"
+      ? [
           {
-            label: row.kind === "openapi" ? "Base URLs" : "Addresses",
-            value: instances
-              .map((instance) => `${instance.slug}: ${instance.url}`)
-              .join(", "),
+            label: "Runs on",
+            value: each(
+              services.map((service) => `${service.slug}: ${service.runsOn}`),
+            ),
           },
           {
-            label: "Signs in with",
-            value: signIn.length > 0 ? signIn.join("; ") : "No credential",
+            label: "Published on",
+            value: each(
+              services.map(
+                (service) => `${service.slug}: ${service.published}`,
+              ),
+            ),
           },
-        ]),
+          {
+            label: "Containers",
+            value: each(
+              services.map(
+                (service) => `${service.slug}: ${service.container}`,
+              ),
+            ),
+          },
+          {
+            label: "Secrets for its variables",
+            value: each(
+              services.flatMap((service) =>
+                service.secrets.map((line) => `${service.slug}: ${line}`),
+              ),
+            ),
+          },
+          {
+            label: "What it registered",
+            value: each(
+              services.flatMap((service) =>
+                service.registered
+                  ? [`${service.slug}: ${service.registered}`]
+                  : [],
+              ),
+            ),
+          },
+        ]
+      : row.kind === "wrapper"
+        ? []
+        : [
+            {
+              label: row.kind === "openapi" ? "Base URLs" : "Addresses",
+              value: instances
+                .map((instance) => `${instance.slug}: ${instance.url}`)
+                .join(", "),
+            },
+            {
+              label: "Signs in with",
+              value: signIn.length > 0 ? signIn.join("; ") : "No credential",
+            },
+          ]),
     {
       label: "On or off, pace, read-only and private addresses",
       value: "Each server's own",
