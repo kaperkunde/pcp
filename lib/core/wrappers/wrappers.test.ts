@@ -21,6 +21,10 @@ import { readServerNote, setPersonalNote } from "../personal-notes"
 import { serializeItem } from "../repos/documents"
 import { localItem } from "../repos/local"
 import { createSecret } from "../secrets"
+import { createMailAccount } from "../mail/accounts"
+import { getServer } from "../servers"
+import { syncServerTools } from "../upstream"
+import { createFakeJmap } from "../mail/fake-jmap"
 import { scratchDatabase } from "../test-db"
 import { catalogueHandle, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
@@ -180,7 +184,7 @@ async function call(name: string, args: Record<string, unknown>) {
 const ECHO_TOOL = {
   name: "lookup",
   description: "Looks a word up, with the key filled in.",
-  inputSchema: {
+  input_schema: {
     type: "object",
     properties: { word: { type: "string" } },
     required: ["word"],
@@ -201,7 +205,7 @@ async function newestRequest() {
 async function approvedWrapper(
   tool: typeof ECHO_TOOL & {
     annotations?: Record<string, boolean>
-    outputSchema?: Record<string, unknown>
+    output_schema?: Record<string, unknown>
   } = ECHO_TOOL,
   extra: Record<string, unknown> = {},
 ) {
@@ -493,7 +497,7 @@ describe("calling a wrapper's tool", () => {
   })
 
   it("asks while a tool it calls asks, and runs it once the owner allows the call", async () => {
-    const wrapper = await approvedWrapper(ECHO_TOOL, { callLevels: "token" })
+    const wrapper = await approvedWrapper(ECHO_TOOL, { call_levels: "token" })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
     await writeToolAccess(scope.tokenId, endpointId, "echo", "ask")
 
@@ -526,7 +530,7 @@ describe("calling a wrapper's tool", () => {
   })
 
   it("is blocked for a token wherever a tool it calls is", async () => {
-    const wrapper = await approvedWrapper(ECHO_TOOL, { callLevels: "token" })
+    const wrapper = await approvedWrapper(ECHO_TOOL, { call_levels: "token" })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
     await writeToolAccess(scope.tokenId, endpointId, "echo", "blocked")
 
@@ -716,7 +720,7 @@ describe("another wrapper of a definition, a definition of its own, and the owne
     for (const extra of [
       { tools: [ECHO_TOOL] },
       { description: "Mine." },
-      { callLevels: "token" },
+      { call_levels: "token" },
     ]) {
       const refused = await call("create_wrapper", {
         name: "Lookup two",
@@ -900,7 +904,7 @@ describe("what an assistant can set", () => {
     await call("update_wrapper", {
       wrapper: "lookup",
       name: "Counter",
-      removeTools: ["lookup"],
+      remove_tools: ["lookup"],
       secrets: [],
     })
     const row = await newestRequest()
@@ -936,7 +940,7 @@ describe("what an assistant can set", () => {
   it("refuses a schema that is not an object's, and hints it does not know", async () => {
     const schema = await call("create_wrapper", {
       name: "Lookup",
-      tools: [{ ...ECHO_TOOL, inputSchema: { type: "string" } }],
+      tools: [{ ...ECHO_TOOL, input_schema: { type: "string" } }],
     })
     expect(schema.isError).toBe(true)
     expect(schema.text).toContain("JSON Schema for an object")
@@ -1013,7 +1017,7 @@ describe("what an assistant can set", () => {
     await approvedWrapper()
     const missing = await call("update_wrapper", {
       wrapper: "lookup",
-      removeTools: ["nope"],
+      remove_tools: ["nope"],
     })
     expect(missing.isError).toBe(true)
     expect(missing.text).toContain("no tool called nope")
@@ -1066,7 +1070,7 @@ describe("a tool's output schema", () => {
   it("shows the owner the shape, outlines it for assistants and passes an answer that fits", async () => {
     await call("create_wrapper", {
       name: "Lookup",
-      tools: [{ ...ECHO_TOOL, outputSchema: SHAPE }],
+      tools: [{ ...ECHO_TOOL, output_schema: SHAPE }],
       secrets: [
         { secret: "Things key", tool: "things/echo", argument: "/key" },
       ],
@@ -1107,7 +1111,7 @@ describe("a tool's output schema", () => {
   it("makes an answer that does not fit an error, naming where", async () => {
     const wrapper = await approvedWrapper({
       ...ECHO_TOOL,
-      outputSchema: {
+      output_schema: {
         type: "object",
         properties: { got: { type: "number" } },
       },
@@ -1122,7 +1126,9 @@ describe("a tool's output schema", () => {
 
     expect(result.isError).toBe(true)
     expect(result.text).toContain("outputSchema does not allow")
-    expect(result.text).toContain('"/got" is string')
+    expect(result.text).toContain(
+      '"got" is string, but the outputSchema says number.',
+    )
     expect(result.text).not.toContain(KEY)
   })
 
@@ -1130,7 +1136,7 @@ describe("a tool's output schema", () => {
     const wrapper = await approvedWrapper({
       ...ECHO_TOOL,
       program: "await 1",
-      outputSchema: SHAPE,
+      output_schema: SHAPE,
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
@@ -1153,7 +1159,7 @@ describe("a tool's output schema", () => {
     ]) {
       const result = await call("create_wrapper", {
         name: "Lookup",
-        tools: [{ ...ECHO_TOOL, outputSchema }],
+        tools: [{ ...ECHO_TOOL, output_schema: outputSchema }],
       })
 
       expect(result.isError, JSON.stringify(outputSchema)).toBe(true)
@@ -1164,7 +1170,7 @@ describe("a tool's output schema", () => {
       tools: [
         {
           ...ECHO_TOOL,
-          outputSchema: {
+          output_schema: {
             type: "object",
             properties: { a: { $ref: "#/$defs/a" } },
           },
@@ -1176,7 +1182,7 @@ describe("a tool's output schema", () => {
   })
 
   it("is stored only when a tool declares one, so older definitions read as they were", async () => {
-    await approvedWrapper(ECHO_TOOL, { callLevels: "token" })
+    await approvedWrapper(ECHO_TOOL, { call_levels: "token" })
     const spec = await db().wrapperSpec.findFirstOrThrow()
     const stored = JSON.parse(spec.definition) as {
       tools: Array<Record<string, unknown>>
@@ -1274,7 +1280,7 @@ describe("whose levels a wrapper's calls follow", () => {
 
     const token = await call("create_wrapper", {
       name: "Narrow",
-      callLevels: "token",
+      call_levels: "token",
       tools: [ECHO_TOOL],
     })
     expect(token.text).toContain("Not done yet")
@@ -1286,7 +1292,7 @@ describe("whose levels a wrapper's calls follow", () => {
   })
 
   it("keeps the mode on a change, and shows a change of it", async () => {
-    await approvedWrapper(ECHO_TOOL, { callLevels: "token" })
+    await approvedWrapper(ECHO_TOOL, { call_levels: "token" })
 
     await call("update_wrapper", {
       wrapper: "lookup",
@@ -1297,7 +1303,7 @@ describe("whose levels a wrapper's calls follow", () => {
     })
     expect(kept!.wrapper!.callLevels).toBe("token")
 
-    await call("update_wrapper", { wrapper: "lookup", callLevels: "approved" })
+    await call("update_wrapper", { wrapper: "lookup", call_levels: "approved" })
     const changed = await getPermissionView(ctx, (await newestRequest()).id, {
       publicUrl: PUBLIC_URL,
     })
@@ -1314,7 +1320,7 @@ describe("whose levels a wrapper's calls follow", () => {
   it("refuses a mode that is neither", async () => {
     const result = await call("create_wrapper", {
       name: "Lookup",
-      callLevels: "anything",
+      call_levels: "anything",
       tools: [ECHO_TOOL],
     })
 
@@ -1327,7 +1333,7 @@ describe("whose levels a wrapper's calls follow", () => {
 const FLOW_TOOL = {
   name: "post_message",
   description: "Posts a message in a chat thread, unless it is there already.",
-  inputSchema: {
+  input_schema: {
     type: "object",
     properties: {
       thread: { type: "string" },
@@ -1353,7 +1359,7 @@ const FLOW_TOOL = {
 const READ_FLOW_TOOL = {
   name: "read_thread",
   description: "Reads a chat thread.",
-  inputSchema: { type: "object", properties: {} },
+  input_schema: { type: "object", properties: {} },
   annotations: { readOnlyHint: true },
   program:
     'const opened = await pcp.call("browser", "tabs", { action: "open", url: "https://chat.example.com/" }); return opened',
@@ -1363,7 +1369,7 @@ const READ_FLOW_TOOL = {
 const PLAIN_TOOL = {
   name: "lookup",
   description: "Looks a word up.",
-  inputSchema: { type: "object", properties: { word: { type: "string" } } },
+  input_schema: { type: "object", properties: { word: { type: "string" } } },
   program:
     'return await pcp.call("things", "echo", { key: "k", q: args.word })',
   calls: ["things/echo"],
@@ -1789,5 +1795,99 @@ describe("what an assistant is told about flows", () => {
     const { tools } = await listed.listTools()
     const create = tools.find((tool) => tool.name === "create_wrapper")!
     expect(create.description).toContain("browser flow")
+  })
+})
+
+describe("a wrapper whose calls no longer fit", () => {
+  it("still takes a tool's old camelCase names when it is proposed, with a note", async () => {
+    const { input_schema: inputSchema, ...tool } = PLAIN_TOOL
+    const asked = await call("create_wrapper", {
+      name: "Lookup",
+      tools: [{ ...tool, inputSchema }],
+    })
+
+    expect(asked.text).toContain(
+      "tools[].inputSchema was renamed to input_schema; use input_schema.",
+    )
+    expect(asked.text).toContain("Not done yet")
+  })
+
+  it("is refused before anything is sent, with what to change and how", async () => {
+    const { wrapper } = await approved([
+      {
+        ...PLAIN_TOOL,
+        program:
+          'return await pcp.call("things", "echo", { key: "k", query: args.word })',
+      },
+    ])
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
+
+    const result = await call("call_tool", {
+      server: wrapper.slug,
+      tool: "lookup",
+      arguments: { word: "hello" },
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain(
+      '"query" is not an argument of this tool (it takes: key, q).',
+    )
+    expect(result.text).toContain(
+      `The wrapper ${wrapper.slug}'s tool lookup needs migrating: fix it with update_wrapper (edit tool lookup's program so this call fits things/echo's inputSchema, which describe gives).`,
+    )
+    expect(api.requests).toHaveLength(0)
+  })
+
+  it("says in its answer how to change an old argument name of a family's tool", async () => {
+    const fake = createFakeJmap({ authorize: () => true })
+    const jmap = await startTestApi((request, res) => {
+      const answer = fake.handle(request)
+      res.statusCode = answer?.status ?? 404
+      res.setHeader("content-type", answer?.type ?? "text/plain")
+      res.end(answer?.body ?? "")
+    })
+
+    try {
+      const { id: secretId } = await createSecret(ctx, {
+        name: "Mail password",
+        value: "mail-password-1",
+      })
+      const { id: mailId } = await createMailAccount(ctx, {
+        protocol: "jmap",
+        name: "Mail",
+        url: `${jmap.origin}/jmap/session`,
+        readOnly: false,
+        authType: "basic",
+        authUsername: "ada@example.com",
+        authSecretId: secretId,
+      })
+      const mail = await getServer(ctx, mailId)
+      await syncServerTools(ctx, mail, { publicUrl: PUBLIC_URL })
+      await writeToolAccess(scope.tokenId, mailId, "search_emails", "allowed")
+
+      const { wrapper } = await approved([
+        {
+          name: "with_files",
+          description: "Emails with attachments.",
+          input_schema: { type: "object", properties: {} },
+          program: `const found = await pcp.call("${mail.slug}", "search_emails", { hasAttachment: true }); return found.total`,
+          calls: [`${mail.slug}/search_emails`],
+        },
+      ])
+      await writeToolAccess(scope.tokenId, wrapper.id, "with_files", "allowed")
+
+      const result = await call("call_tool", {
+        server: wrapper.slug,
+        tool: "with_files",
+        arguments: {},
+      })
+
+      expect(result.isError).toBe(false)
+      expect(result.text).toContain(
+        `The wrapper ${wrapper.slug}'s tool with_files calls ${mail.slug}/search_emails with hasAttachment, which was renamed to has_attachment (it works until the next release): fix it with update_wrapper (edit tool with_files's program: replace \`hasAttachment\` with \`has_attachment\`).`,
+      )
+    } finally {
+      await jmap.close()
+    }
   })
 })

@@ -11,6 +11,7 @@ import {
 import { ok, toCallToolResult, toolError, type ToolErrorCode } from "./outcome"
 import {
   argumentsRefusal,
+  isResultHandle,
   validate,
   zodProblems,
   type ValidateOptions,
@@ -126,6 +127,30 @@ export type InnerTool<I extends AnyObject = AnyObject> = InnerToolSpec<I> & {
 
 function isRecord(value: unknown): value is Json {
   return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+/** The value at a zod issue's path, or the whole when the path is empty. */
+function valueAt(root: unknown, path: readonly PropertyKey[]): unknown {
+  let node = root
+
+  for (const key of path) {
+    if (node === null || typeof node !== "object") {
+      return undefined
+    }
+
+    node = (node as Record<PropertyKey, unknown>)[key]
+  }
+
+  return node
+}
+
+/** {"$secret": name}: a secret's placeholder. */
+function isSecret(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.$secret === "string" &&
+    Object.keys(value).length === 1
+  )
 }
 
 /** The old names of `map` a call used. */
@@ -245,14 +270,30 @@ export function defineInnerTool<I extends AnyObject>(
 
       const parsed = spec.input.safeParse(renamed.args)
 
-      return parsed.success
-        ? { fits: true, args: parsed.data, notes, renames }
-        : {
-            fits: false,
-            problems: zodProblems(parsed.error.issues),
+      if (parsed.success) {
+        return { fits: true, args: parsed.data, notes, renames }
+      }
+
+      // A kept result's handle, or a secret where the rules let one in,
+      // stands for a string PCP puts there later: what zod would say of the
+      // stand-in is not about the call, and the schema has passed it.
+      const issues = parsed.error.issues.filter((issue) => {
+        const value = valueAt(renamed.args, issue.path)
+
+        return !(
+          ((options.handles ?? true) && isResultHandle(value)) ||
+          (options.secretAt !== undefined && isSecret(value))
+        )
+      })
+
+      return issues.length === 0
+        ? {
+            fits: true,
+            args: renamed.args as z.output<I>,
             notes,
             renames,
           }
+        : { fits: false, problems: zodProblems(issues), notes, renames }
     },
   }
 }

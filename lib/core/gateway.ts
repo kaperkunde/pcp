@@ -244,7 +244,8 @@ import {
   registerTool,
   type ServeHooks,
 } from "./tools/serve"
-import { argumentsRefusal, validate } from "./tools/validate"
+import { argumentsRefusal } from "./tools/validate"
+import { checkCallArguments, familyTool } from "./call-arguments"
 
 /**
  * The MCP server PCP exposes at /mcp: one per request, built for the token
@@ -1677,44 +1678,81 @@ export function buildGatewayServer(
    * anything runs or the owner is asked, so a call that cannot work never
    * becomes a request for them.
    */
-  function argumentsUnfit(
+  async function argumentsUnfit(
     target: GatewayServer,
     name: string,
     row: Pick<ToolRow, "inputSchema">,
     args: Record<string, unknown>,
     { fix, showSchema = true }: { fix: string; showSchema?: boolean },
-  ): string | null {
-    let inputSchema: unknown
+  ): Promise<
+    { refusal: string } | { args: Record<string, unknown>; notes: string[] }
+  > {
+    const checked = await checkCallArguments(
+      target,
+      name,
+      row.inputSchema,
+      args,
+      {
+        // The browser's type takes a secret as its text, which PCP types
+        // (resolveCall refuses one anywhere else).
+        ...(target.kind === "browser" && name === "type"
+          ? { secretAt: (pointer: string) => pointer === "/text" }
+          : {}),
+        tabs: {
+          ctx: scope.ctx,
+          tokenId: scope.tokenId,
+          publicUrl: scope.publicUrl,
+        },
+      },
+    )
+
+    if (checked.fits) {
+      return { args: checked.args, notes: checked.notes }
+    }
+
+    const hint = [
+      ...(checked.hint ? [checked.hint] : []),
+      ...(showSchema
+        ? [
+            `${fix} The inputSchema:`,
+            clipDescribed(
+              JSON.stringify(familySchema(target, name, row), null, 1),
+            ),
+          ]
+        : [fix]),
+    ].join("\n")
+
+    return {
+      refusal: [
+        ...checked.notes,
+        argumentsRefusal(`${target.slug}/${name}`, checked.problems, { hint }),
+      ].join("\n\n"),
+    }
+  }
+
+  /** The inputSchema a refusal shows: the family's own, else the row's. */
+  function familySchema(
+    target: GatewayServer,
+    name: string,
+    row: Pick<ToolRow, "inputSchema">,
+  ): unknown {
+    const tool = familyTool(target, name)
+
+    if (tool) {
+      return tool.inputSchema()
+    }
 
     try {
-      inputSchema = JSON.parse(row.inputSchema)
+      return JSON.parse(row.inputSchema)
     } catch {
-      // A schema PCP cannot read checks nothing; the tool decides.
-      return null
+      return row.inputSchema
     }
+  }
 
-    const problems = validate(inputSchema, args)
-
-    if (problems.length === 0) {
-      return null
-    }
-
-    if (!showSchema) {
-      return argumentsRefusal(`${target.slug}/${name}`, problems, {
-        hint: fix,
-      })
-    }
-
-    const schema = JSON.stringify(inputSchema, null, 1)
-
-    return argumentsRefusal(`${target.slug}/${name}`, problems, {
-      hint: [
-        `${fix} The inputSchema:`,
-        schema.length > MAX_DESCRIBED_CHARS
-          ? `${schema.slice(0, MAX_DESCRIBED_CHARS)}\n… (truncated by PCP)`
-          : schema,
-      ].join("\n"),
-    })
+  function clipDescribed(text: string): string {
+    return text.length > MAX_DESCRIBED_CHARS
+      ? `${text.slice(0, MAX_DESCRIBED_CHARS)}\n… (truncated by PCP)`
+      : text
   }
 
   /**
@@ -1773,39 +1811,53 @@ export function buildGatewayServer(
       )
     }
 
-    const unfit = argumentsUnfit(target, tool.name, handled.row, callArgs, {
-      fix: "Fix them and call again with the same call_handle.",
-    })
+    const unfit = await argumentsUnfit(
+      target,
+      tool.name,
+      handled.row,
+      callArgs,
+      { fix: "Fix them and call again with the same call_handle." },
+    )
 
-    if (unfit) {
-      return toolError(unfit, {
+    if ("refusal" in unfit) {
+      return toolError(unfit.refusal, {
         code: "invalid_arguments",
         logAs: ARGUMENTS_DID_NOT_FIT,
       })
     }
 
-    if (tool.access === "ask") {
-      return asked({
-        kind: "call",
-        server: target,
-        tool,
-        args: args.arguments ?? {},
-        fields,
-        decode,
-        keep,
-      })
-    }
+    // An old argument name, renamed: the call runs, and its answer says so.
+    const lead = (outcome: Outcome) =>
+      unfit.notes.length > 0
+        ? withLead(unfit.notes.join("\n"), outcome)
+        : outcome
 
-    try {
-      return passOn(
-        await runCall(scope.ctx, target, tool.name, args.arguments ?? {}, {
-          publicUrl: scope.publicUrl,
-          tokenId: scope.tokenId,
+    if (tool.access === "ask") {
+      return lead(
+        await asked({
+          kind: "call",
+          server: target,
+          tool,
+          args: unfit.args,
           fields,
           decode,
           keep,
-          executor: callsFor(signal),
         }),
+      )
+    }
+
+    try {
+      return lead(
+        passOn(
+          await runCall(scope.ctx, target, tool.name, unfit.args, {
+            publicUrl: scope.publicUrl,
+            tokenId: scope.tokenId,
+            fields,
+            decode,
+            keep,
+            executor: callsFor(signal),
+          }),
+        ),
       )
     } catch (error) {
       // A call that changes things and failed on its way may have reached
@@ -3244,7 +3296,7 @@ export function buildGatewayServer(
         .record(z.string(), z.unknown())
         .optional()
         .describe(
-          'JSON Schema of what the program returns, e.g. {"type": "object", "properties": {"unread": {"type": "number"}}, "required": ["unread"]}. describe shows it as "returns", and a return that does not fit is an error, so the answer is what you said it would be. Types, required, properties, additionalProperties, items, enum, const, anyOf, oneOf and allOf are checked; $ref is not followed. Leave it out to say nothing.',
+          'JSON Schema of what the program returns, e.g. {"type": "object", "properties": {"unread": {"type": "number"}}, "required": ["unread"]}. describe shows it as "outputSchema", an answer carries the value as structuredContent, and a return that does not fit is an error, so the answer is what you said it would be. It is checked as strictly as arguments are (types, required keys, lengths, patterns, formats, bounds); $ref is refused. Leave it out to say nothing.',
         ),
       annotations: z
         .object({
@@ -4153,16 +4205,24 @@ export function buildGatewayServer(
 
                 // As call_tool's: checked before anything runs or asks.
                 const row = await toolRow(found.server.id, found.tool.name)
-                const unfit =
-                  row &&
-                  argumentsUnfit(found.server, found.tool.name, row, callArgs, {
-                    fix: `Fix them; describe ${found.server.slug}/${found.tool.name} gives its inputSchema.`,
-                    showSchema: false,
-                  })
+                const unfit = row
+                  ? await argumentsUnfit(
+                      found.server,
+                      found.tool.name,
+                      row,
+                      callArgs,
+                      {
+                        fix: `Fix them; describe ${found.server.slug}/${found.tool.name} gives its inputSchema.`,
+                        showSchema: false,
+                      },
+                    )
+                  : { args: callArgs, notes: [] }
 
-                if (unfit) {
-                  return { ok: false, error: unfit, refused: true }
+                if ("refusal" in unfit) {
+                  return { ok: false, error: unfit.refusal, refused: true }
                 }
+
+                const sent = unfit.args
 
                 if (found.tool.access === "ask") {
                   return {
@@ -4170,7 +4230,7 @@ export function buildGatewayServer(
                       kind: "call",
                       server: found.server,
                       tool: found.tool,
-                      args: callArgs,
+                      args: sent,
                       ...shape,
                     }),
                   }
@@ -4182,7 +4242,7 @@ export function buildGatewayServer(
                   scope.ctx,
                   found.server,
                   found.tool.name,
-                  callArgs,
+                  sent,
                   {
                     publicUrl: scope.publicUrl,
                     tokenId: scope.tokenId,
