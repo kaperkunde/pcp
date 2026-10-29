@@ -390,6 +390,7 @@ const PRELUDE = `(() => {
       })
     },
     tools: (server) => ask("tools", { server: server ?? null }),
+    describe: (server, tool) => ask("describe", { server, tool }),
     // Decoded by PCP, not here: the handle and the options go, a handle comes back.
     image: Object.freeze({
       compress: (handle, options) => ask("media", { kind: "image", id: idOf(handle), options: options ?? {} }),

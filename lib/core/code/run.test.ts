@@ -494,6 +494,82 @@ describe("a program's calls", () => {
     expect(ran).toEqual([])
   })
 
+  it("describes a tool it can see as describe does, without a call_handle, and nothing else", async () => {
+    const schema = {
+      type: "object",
+      properties: { to: { type: "string", description: "Who it goes to." } },
+      required: ["to"],
+      additionalProperties: false,
+    }
+    await db().mcpTool.updateMany({
+      where: { name: "send_postcard" },
+      data: {
+        inputSchema: JSON.stringify(schema),
+        output: "{ sent: boolean }",
+      },
+    })
+
+    const { text } = await run(`
+      const tool = await pcp.describe("postcards", "send_postcard")
+      const refused = []
+      for (const [server, name] of [["postcards", "burn_cards"], ["postcards", "nope"], ["nowhere", "list_cards"], ["postcards"]]) {
+        try { await pcp.describe(server, name) } catch (error) { refused.push(error.message) }
+      }
+      return { tool, refused }
+    `)
+    const { tool, refused } = returned(text) as {
+      tool: Record<string, unknown>
+      refused: string[]
+    }
+
+    expect(tool).toMatchObject({
+      server: "postcards",
+      serverName: "Postcards",
+      tool: "send_postcard",
+      description: "send_postcard does one thing.",
+      access: "ask",
+      inputSchema: schema,
+      returns: "{ sent: boolean }",
+    })
+    expect(tool).not.toHaveProperty("call_handle")
+    // A blocked tool is no more there than one that does not exist.
+    expect(refused).toEqual([
+      "postcards has no tool called burn_cards. Use search to find the right name.",
+      "postcards has no tool called nope. Use search to find the right name.",
+      "No server called nowhere. Servers: postcards.",
+      expect.stringContaining(
+        "pcp.describe takes a server's name and a tool's",
+      ),
+    ])
+    expect(ran).toEqual([])
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("refuses pcp.tools and pcp.describe where no lister is given, as in a wrapper's program", async () => {
+    const run = await runProgram(
+      scope,
+      {
+        code: `
+          const said = []
+          for (const ask of [() => pcp.tools(), () => pcp.describe("postcards", "list_cards")]) {
+            try { await ask() } catch (error) { said.push(error.message) }
+          }
+          return said
+        `,
+        label: "wrapper",
+      },
+      { call: async () => ({ ok: true, value: null }) },
+    )
+
+    expect(run).toMatchObject({ state: "finished" })
+    expect(
+      JSON.parse((run as { result: { returned: string } }).result.returned),
+    ).toEqual([
+      "PCP cannot list tools here.",
+      "PCP cannot describe tools here.",
+    ])
+  })
+
   it("checks a call's arguments against its schema before anything runs or the owner is asked", async () => {
     await db().mcpTool.updateMany({
       where: { name: { in: ["send_postcard", "archive"] } },
@@ -529,7 +605,7 @@ describe("a program's calls", () => {
       expect(said).toContain('"all" is not an argument of this tool')
     }
     expect(ask).toContain(
-      "describe postcards/send_postcard gives its inputSchema",
+      'pcp.describe("postcards", "send_postcard") gives its inputSchema',
     )
     expect(await db().permissionRequest.count()).toBe(0)
     expect(ran).toEqual([])
@@ -552,6 +628,7 @@ describe("a program's calls", () => {
       'as: "base64"',
       'encoding: "base64"',
       "pcp.tools()",
+      "pcp.describe(server, tool)",
       'keep: ["password"]',
       "not running on this PCP",
       "pcp.image.compress(handle",
