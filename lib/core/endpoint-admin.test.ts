@@ -491,11 +491,11 @@ describe("getEndpoint", () => {
       belongsTo: "owner",
       authentication: { type: "header", header: "X-API-Key" },
     })
-    expect(changeFor(details, "baseUrl")).toMatch(
+    expect(changeFor(details, "base_url")).toMatch(
       /the owner configured this endpoint/,
     )
     expect(changeFor(details, "authentication")).toMatch(/only the owner/)
-    expect(changeFor(details, "readOnly")).toMatch(/yes, on only/)
+    expect(changeFor(details, "read_only")).toMatch(/yes, on only/)
   })
 
   it("never includes a secret, its name, or its id", async () => {
@@ -840,7 +840,7 @@ describe("an endpoint becomes the owner's when they attach a secret", () => {
         spec: spec(api.origin),
         readOnly: false,
       }),
-    ).rejects.toThrow(/baseUrl, spec, readOnly are theirs to change/)
+    ).rejects.toThrow(/base_url, spec, read_only are theirs to change/)
     expect((await getEndpoint(scope, slug)).readOnly).toBe(true)
 
     // Saying what is already so is not a change.
@@ -901,7 +901,7 @@ describe("an endpoint becomes the owner's when they attach a secret", () => {
 
     await expect(
       updateEndpointDetails(scope, slug, { readOnly: false }),
-    ).rejects.toThrow(/readOnly is theirs to change/)
+    ).rejects.toThrow(/read_only is theirs to change/)
     await expect(
       updateEndpointDetails(scope, slug, {
         baseUrl: "http://169.254.169.254/latest",

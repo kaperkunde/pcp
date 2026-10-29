@@ -361,13 +361,13 @@ owner approved that secret going to the address they were shown.
 **Reading and changing** one afterwards is for a token the owner made with
 "read and change API endpoints" (`api_token.manage_endpoints`, off for every
 other token): two more gateway tools, `update_endpoint(endpoint, …)` and
-`get_endpoint(endpoint, …)`. A schema is changed with edits (`addPatches`
+`get_endpoint(endpoint, …)`. A schema is changed with edits (`add_patches`
 adds to them, `patches` replaces them all) rather than by sending it again,
-and read a part at a time: `get_endpoint`'s `specPointer` returns one value of
+and read a part at a time: `get_endpoint`'s `spec_pointer` returns one value of
 the edited document by JSON Pointer, and a value too long to include comes
 back as its keys, to point further in with, so a schema of any size can be
 read in steps under the answer's length limit (such a read leaves out what
-the first one said). `includeProblems` lists likely mistakes in the schema
+the first one said). `include_problems` lists likely mistakes in the schema
 that confuse assistants, each with the edits that fix it
 (`openapi/lint.ts`); `register_server` names them too. The rules are in
 `lib/core/endpoint-admin.ts`, and they exist because an assistant that can
@@ -436,7 +436,7 @@ change an endpoint decides where PCP sends requests:
   document the owner was shown, not from a second download. Afterwards
   (`mcp_server.spec_url_from_assistant`) a background re-read that finds a
   different document reports it and keeps the approved tools; the owner's
-  "Re-read" takes it, and so does the assistant's `refreshSpec` while the
+  "Re-read" takes it, and so does the assistant's `refresh_spec` while the
   endpoint is its own, which disables it until the owner enables it again.
   Whoever controls that address cannot add operations, or words every
   assistant reads, by changing the file. When a downloaded document does not
@@ -597,7 +597,7 @@ repository document or anything else shared, and not part of a skill's
 SKILL.md. Assistants that see the server or skill read it as the owner's
 note, after the description: the instructions' server and skill lines
 (`… (N tools) Owner's note: …`, cut to 120 characters), a line per server
-or skill under `search` and `search_tools` results (it counts toward
+or skill under `search` results (it counts toward
 finding the server, too), the head of `list_tools`, `describe`
 (`ownerNote`, beside `serverName` and `serverDescription`; a skill's under
 its frame) and `check_server`. The owner wrote it, so it may stand in the
@@ -3210,6 +3210,20 @@ checks the token on every request, so a revoked one stops at once.
 
 ## The gateway's tools
 
+Every one of PCP's own tools is written to one interface
+(`lib/core/tools/`): `defineTool` with a zod input published as JSON
+Schema 2020-12, every object closed (`additionalProperties: false`) and
+every property described (refused otherwise), all four annotations, an
+output schema when every answer is one shape, and old argument names
+accepted for one release with a note (`aliases`). `serve.ts` runs a call:
+it renames, checks the arguments with `validate.ts` in PCP's words (a tool
+error, logged as "did not fit", never quoting them), runs it, and maps its
+outcome (`outcome.ts`): `ok`, `toolError` (isError, the code in
+`_meta["gg.pcp/error"]`), `needsOwner` (a permission request or a server to
+connect, as `structuredContent` `{kind: "needs_owner", …}` with the link
+last in the text), or an answer made elsewhere passed on, in which a
+permission link is recognised and marked the same way.
+
 An MCP client that connects to `/mcp` receives an `instructions` string
 listing the servers its token can reach, each with the owner's one-line
 description and the number of tools it may see, and these tools (two more
@@ -3259,9 +3273,8 @@ skill:<name>` with its description, `memory /memories/…` with the line
   decode and keep paths on the request (`permission_request.fields`,
   `permission_request.decode`, `permission_request.keep`).
   `call_read_only_tool` takes the same handle.
-- `search_tools` and `describe_tool`, the old names, stay registered for
-  one release and answer exactly as before (tools only; server and tool),
-  under one first line naming the new tool.
+- `search_tools` and `describe_tool`, the old names, are gone after their
+  release (docs/breaking-changes.md).
 - `check_permission(id?)`, `withdraw_request(id)`, `check_server(server)`,
   `register_server(...)` and `propose_tool_access(changes)` belong to the
   permission flow below.
@@ -3296,16 +3309,17 @@ and answers, as a tool error and with nothing run or asked:
   says it is blocked.
 
 Then the arguments are checked against the stored inputSchema
-(`checkArguments` in `wrappers/schema-check.ts`: types, required, enum,
-const, properties, additionalProperties, items and the combinators) before
-`withPermission` asks or anything runs: arguments
-that cannot work are answered with every problem and the schema, and leave
-no permission request for the owner. The check is lenient where the schema
-says more than it reads: a `$ref`, `patternProperties` or
-`unevaluatedProperties` passes, OpenAPI's `nullable` is honoured, `oneOf`
-counts as `anyOf`, and a kept result's handle stands for what goes there.
-`run_code`'s `pcp.call` and a wrapper's calls keep naming a server and a
-tool: they are the gateway's own, decided by `resolveCall` as before.
+(`lib/core/tools/validate.ts`, strict: types, required, enum, const,
+properties, additionalProperties, patternProperties, lengths, patterns,
+formats, bounds, items and prefixItems, a true `oneOf`, references inside
+the schema) before `withPermission` asks or anything runs: arguments that
+cannot work are answered with every problem and the schema, and leave no
+permission request for the owner. A reference to another document is
+refused (PCP fetches none), a pattern that could take exponential time is
+left to the tool, OpenAPI's `nullable` is honoured, and a kept result's
+handle stands for a string. `run_code`'s `pcp.call` keeps naming a server
+and a tool, decided by `resolveCall`, and its arguments are checked the
+same way before it runs or asks.
 
 The catalogue (`mcp_tool`) is read from each server when it is added, when
 the owner refreshes it, after an OAuth connection, and lazily when the

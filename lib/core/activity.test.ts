@@ -73,13 +73,13 @@ async function request(id: string, status: string, expiresAt: Date) {
 
 describe("activityLog", () => {
   it("names each token, and says a deleted one is gone", async () => {
-    writeLog([{ tool: "search_tools" }, { tokenId: "gone", tool: "memory" }])
+    writeLog([{ tool: "search" }, { tokenId: "gone", tool: "memory" }])
 
     const { entries, tokens } = await activityLog(ctx, {})
 
     expect(entries.map((entry) => [entry.tool, entry.tokenName])).toEqual([
       ["memory", null],
-      ["search_tools", "Claude"],
+      ["search", "Claude"],
     ])
     expect(tokens).toEqual([{ id: tokenId, name: "Claude", revoked: false }])
   })

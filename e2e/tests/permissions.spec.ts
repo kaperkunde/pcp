@@ -559,7 +559,10 @@ test("an OAuth server an assistant proposes is connected through a link", async 
   // Added, and the assistant is told how to get it connected.
   const added = await agreed
   expect(toolText(added)).toContain("needs connecting")
-  expect(added.body.result?.structuredContent?.kind).toBe("connect")
+  expect(added.body.result?.structuredContent).toMatchObject({
+    kind: "needs_owner",
+    reason: "connect",
+  })
   const connect = added.body.result!.structuredContent!.connect!
   expect(toolText(added)).toContain(`/servers/${connect.serverId}`)
   expect(connect.startUrl).toContain(

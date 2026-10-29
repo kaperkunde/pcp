@@ -142,19 +142,16 @@ describe("the read-only tools", () => {
 
     expect(readOnly("read_memory")).toBe(true)
     expect(readOnly("call_read_only_tool")).toBe(true)
-    // Finding and reading tools, skills and memories, and the old names
-    // kept for one release.
-    for (const name of [
-      "search",
-      "describe",
-      "search_tools",
-      "describe_tool",
-    ]) {
+    // Finding and reading tools, skills and memories.
+    for (const name of ["search", "describe", "list_tools", "read_result"]) {
       expect(readOnly(name), name).toBe(true)
     }
     expect(readOnly("memory")).toBe(false)
     expect(readOnly("call_tool")).not.toBe(true)
     expect(readOnly("list_secrets")).toBeUndefined()
+    // The old names are gone (docs/breaking-changes.md).
+    expect(tools.map((tool) => tool.name)).not.toContain("search_tools")
+    expect(tools.map((tool) => tool.name)).not.toContain("describe_tool")
   })
 
   it("include list_secrets and get_endpoint for a token that manages endpoints", async () => {

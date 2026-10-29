@@ -1,4 +1,4 @@
-import { createMcpHandler } from "@modelcontextprotocol/server"
+import { createMcpHandler, INVALID_REQUEST } from "@modelcontextprotocol/server"
 import { after } from "next/server"
 
 import { afterAnswerScope } from "@/lib/core/after-answer"
@@ -67,12 +67,14 @@ const mcpHandler = createMcpHandler(
   },
 )
 
+// Stateless, in both eras: no session (Mcp-Session-Id) and no stream to
+// resume (Last-Event-ID), so neither header is asked for or shown.
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers":
-    "Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Method, Mcp-Name, Mcp-Session-Id, Last-Event-ID",
-  "Access-Control-Expose-Headers": "WWW-Authenticate, Mcp-Session-Id",
+    "Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Method, Mcp-Name",
+  "Access-Control-Expose-Headers": "WWW-Authenticate",
 }
 
 function withCors(response: Response): Response {
@@ -89,6 +91,11 @@ function withCors(response: Response): Response {
   })
 }
 
+/**
+ * A request refused before it reaches the MCP server: no token, too many,
+ * a batch. JSON-RPC's Invalid Request, never a code in the -32000 to -32019
+ * range MCP has left to older servers.
+ */
 function jsonRpcError(
   status: number,
   message: string,
@@ -97,7 +104,7 @@ function jsonRpcError(
   return new Response(
     JSON.stringify({
       jsonrpc: "2.0",
-      error: { code: -32000, message },
+      error: { code: INVALID_REQUEST, message },
       id: null,
     }),
     {

@@ -25,6 +25,8 @@ export type McpResponse = {
       // What PCP says in fields as well as text (lib/core/connect.ts).
       structuredContent?: {
         kind?: string
+        reason?: string
+        request?: string
         permission?: {
           id: string
           status: string

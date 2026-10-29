@@ -494,10 +494,58 @@ describe("a program's calls", () => {
     expect(ran).toEqual([])
   })
 
+  it("checks a call's arguments against its schema before anything runs or the owner is asked", async () => {
+    await db().mcpTool.updateMany({
+      where: { name: { in: ["send_postcard", "archive"] } },
+      data: {
+        inputSchema: JSON.stringify({
+          type: "object",
+          properties: { to: { type: "string", maxLength: 5 } },
+          required: ["to"],
+          additionalProperties: false,
+        }),
+      },
+    })
+
+    const { text } = await run(`
+      const said = []
+      for (const tool of ["send_postcard", "archive"]) {
+        try {
+          await pcp.call("postcards", tool, { to: "Grace Hopper", all: true })
+        } catch (error) {
+          said.push(error.message)
+        }
+      }
+      return said
+    `)
+    const [ask, allowed] = returned(text) as string[]
+
+    // send_postcard asks the owner and archive runs at once: neither did.
+    for (const said of [ask, allowed]) {
+      expect(said).toContain("do not fit postcards/")
+      expect(said).toContain(
+        '"to" is 12 characters long, but the inputSchema says at most 5.',
+      )
+      expect(said).toContain('"all" is not an argument of this tool')
+    }
+    expect(ask).toContain(
+      "describe postcards/send_postcard gives its inputSchema",
+    )
+    expect(await db().permissionRequest.count()).toBe(0)
+    expect(ran).toEqual([])
+  })
+
   it("says in its description what the program has, and that no sandbox runs", async () => {
     const { tools } = await client.listTools()
-    const description =
-      tools.find((tool) => tool.name === "run_code")?.description ?? ""
+    const tool = tools.find((entry) => entry.name === "run_code")
+    const code = (
+      tool?.inputSchema.properties as Record<string, { description?: string }>
+    ).code
+    // What a program has is in the code argument's description; the tool's
+    // own stays short.
+    const description = `${tool?.description ?? ""}\n${code?.description ?? ""}`
+
+    expect((tool?.description ?? "").length).toBeLessThan(3_000)
 
     for (const part of [
       "crypto.getRandomValues",

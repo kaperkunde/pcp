@@ -999,7 +999,8 @@ describe("adding a server", () => {
     })
 
     expect(added.structuredContent).toMatchObject({
-      kind: "connect",
+      kind: "needs_owner",
+      reason: "connect",
       connect: {
         serverId: linear.id,
         startUrl: `${PUBLIC_URL}/api/servers/${linear.id}/oauth/start`,
@@ -1027,7 +1028,8 @@ describe("adding a server", () => {
     // owner has signed in, then done.
     const waiting = await checkPermission(scope, id)
     expect(waiting.structuredContent).toMatchObject({
-      kind: "connect",
+      kind: "needs_owner",
+      reason: "connect",
       connect: { serverId: linear.id, slug: linear.slug },
     })
     expect(textOf(waiting)).toContain("Linear needs connecting")
@@ -2648,9 +2650,10 @@ describe("a mail account an assistant proposes", () => {
     const added = await decidePermission(ctx, id, "allow_once", web, real)
 
     expect(textOf(added)).toMatch(/Added Mail as "mail"/)
-    expect(
-      (added.structuredContent as { kind?: string } | undefined)?.kind,
-    ).toBe("connect")
+    expect(added.structuredContent).toMatchObject({
+      kind: "needs_owner",
+      reason: "connect",
+    })
     expect(
       await db().mcpServer.findFirstOrThrow({ where: { name: "Mail" } }),
     ).toMatchObject({

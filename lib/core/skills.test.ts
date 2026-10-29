@@ -20,11 +20,9 @@ import { db } from "./db"
 import {
   buildGatewayServer,
   buildInstructions,
-  DESCRIBE_TOOL_RENAMED,
   instructionsPreview,
   loadGatewayServers,
   READ_MEMORY_NOTE,
-  SEARCH_TOOLS_RENAMED,
   skillInstructions,
   type GatewayScope,
 } from "./gateway"
@@ -1155,7 +1153,7 @@ describe("search and describe", () => {
     await client.close()
   })
 
-  it("describes a tool as describe_tool did, by ref or by server and tool, and a memory as view does", async () => {
+  it("describes a tool by ref or by server and tool, and a memory as view does", async () => {
     const client = await connect()
     const byRef = await call(client, "describe", {
       ref: "postcards/send_postcard",
@@ -1187,34 +1185,14 @@ describe("search and describe", () => {
     await client.close()
   })
 
-  it("keeps search_tools and describe_tool working as before, each saying what took its place", async () => {
+  it("no longer has search_tools and describe_tool, whose release has passed", async () => {
     const client = await connect()
-    const search = await call(client, "search_tools", { query: "postcard" })
-    const [lead, blank, ...rest] = search.text.split("\n")
+    const names = (await client.listTools()).tools.map((tool) => tool.name)
 
-    expect(lead).toBe(SEARCH_TOOLS_RENAMED)
-    expect(lead).toBe(
-      "search_tools is now search (tools, skills and memories); use search.",
-    )
-    expect(blank).toBe("")
-    expect(rest[0]).toMatch(/^postcards\/send_postcard — /)
-    expect(search.text).not.toContain("skill:")
-
-    const described = await call(client, "describe_tool", {
-      server: "postcards",
-      tool: "send_postcard",
-    })
-    expect(described.text.startsWith(`${DESCRIBE_TOOL_RENAMED}\n\n`)).toBe(true)
-    expect(
-      JSON.parse(described.text.slice(DESCRIBE_TOOL_RENAMED.length + 2)),
-    ).toMatchObject({ tool: "send_postcard" })
-
-    const missing = await call(client, "describe_tool", {
-      server: "postcards",
-      tool: "nope",
-    })
-    expect(missing.isError).toBe(true)
-    expect(missing.text.startsWith(DESCRIBE_TOOL_RENAMED)).toBe(true)
+    expect(names).toContain("search")
+    expect(names).toContain("describe")
+    expect(names).not.toContain("search_tools")
+    expect(names).not.toContain("describe_tool")
     await client.close()
   })
 

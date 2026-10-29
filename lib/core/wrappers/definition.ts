@@ -377,7 +377,7 @@ export async function resolveDefinition(
 
   if (callLevels !== "approved" && callLevels !== "token") {
     throw invalid(
-      'callLevels is "approved" (the calls its tools list run on your approval of the wrapper) or "token" (at the calling token\'s own levels).',
+      'call_levels is "approved" (the calls its tools list run on your approval of the wrapper) or "token" (at the calling token\'s own levels).',
     )
   }
 
@@ -516,7 +516,7 @@ export async function resolveDefinition(
       (schema as { type?: unknown }).type !== "object"
     ) {
       throw invalid(
-        `${what}'s inputSchema is a JSON Schema for an object: {"type": "object", "properties": {…}}.`,
+        `${what}'s input_schema is a JSON Schema for an object: {"type": "object", "properties": {…}}.`,
       )
     }
 
@@ -524,11 +524,11 @@ export async function resolveDefinition(
 
     if (schemaText.length > MAX_WRAPPER_SCHEMA_CHARS) {
       throw invalid(
-        `${what}'s inputSchema is longer than ${MAX_WRAPPER_SCHEMA_CHARS.toLocaleString("en")} characters of JSON.`,
+        `${what}'s input_schema is longer than ${MAX_WRAPPER_SCHEMA_CHARS.toLocaleString("en")} characters of JSON.`,
       )
     }
 
-    visible(schemaText, `${what}'s inputSchema`)
+    visible(schemaText, `${what}'s input_schema`)
 
     let outputSchema: Record<string, unknown> | undefined
 
@@ -541,7 +541,7 @@ export async function resolveDefinition(
         Object.keys(declared).length === 0
       ) {
         throw invalid(
-          `${what}'s outputSchema is a JSON Schema for what the program returns, like {"type": "object", "properties": {…}}; leave it out to say nothing.`,
+          `${what}'s output_schema is a JSON Schema for what the program returns, like {"type": "object", "properties": {…}}; leave it out to say nothing.`,
         )
       }
 
@@ -549,15 +549,15 @@ export async function resolveDefinition(
 
       if (outputText.length > MAX_WRAPPER_SCHEMA_CHARS) {
         throw invalid(
-          `${what}'s outputSchema is longer than ${MAX_WRAPPER_SCHEMA_CHARS.toLocaleString("en")} characters of JSON.`,
+          `${what}'s output_schema is longer than ${MAX_WRAPPER_SCHEMA_CHARS.toLocaleString("en")} characters of JSON.`,
         )
       }
 
-      visible(outputText, `${what}'s outputSchema`)
+      visible(outputText, `${what}'s output_schema`)
 
       if (hasReference(declared)) {
         throw invalid(
-          `${what}'s outputSchema has a $ref, which is not followed: write the shape out where it is used.`,
+          `${what}'s output_schema has a $ref, which is not followed: write the shape out where it is used.`,
         )
       }
 
