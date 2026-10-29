@@ -2372,12 +2372,31 @@ they send the site nothing. Nothing names a site or a vendor.
 destination (`server:<id>` or `site:<host>`; web fetch and the browser share
 a site's), on `globalThis`. A caller is given its slot the moment it asks,
 in order (the last slot, the pause, and a random extra wait; then the burst
-cap), so two callers never share one, and waits for it. A wait up to 30
-seconds (`PACING_MAX_WAIT_MS`) is served; past it the call is answered at
-once with a tool error ("Paced: <destination> takes its next action in N s;
-try again then.") and takes no slot. A caller whose signal aborts (a
-run_code run that ended) stops waiting and gives its slot back when no
-later caller took one.
+cap), so two callers never share one, and waits for it.
+
+How long a call may wait is its caller's: a `deadline` (epoch milliseconds,
+`CallOptions.deadline` in `upstream.ts`, `BrowserScope.deadline` for the
+browser, `runFetch`'s for web fetch), and the call waits until
+`PACING_DEADLINE_MARGIN_MS` before it, never more than
+`PACING_LONGEST_WAIT_MS` (`pacing/pace.ts waitBudget`). A run_code program's
+calls carry the run's end (`code/run.ts CallRun.deadline`: its start plus
+`RUN_TIMEOUT_MS`), and a wrapper's calls their run's (its own limit, or the
+calling run's end when that comes first), so a program waits for its turn
+instead of failing with work half done. A call straight from an assistant's
+request (call_tool, call_read_only_tool, web_fetch) or from the owner's
+answer to one carries `callDeadline()`: a wait up to
+`PACING_CALL_WAIT_MS`, 45 seconds, the same clock as `RUN_ANSWER_MS`. A
+caller that names none waits `PACING_MAX_WAIT_MS` at most.
+
+Past that the call is answered at once with a tool error that says how long
+the wait is and that nothing was sent ("Paced: <destination> takes its next
+action in N s, longer than this call can wait (M s). …"), with
+`structuredContent` `{code: "paced", retry_after_ms}`, and takes no slot.
+run_code hands the program the same: the error `pcp.call` throws has
+`code` "paced" and `retryAfterMs` (a Python `PcpError`'s `code` and
+`retry_after_ms`), carried as fields of the bridge's reply. A caller whose
+signal aborts (a run_code run that ended) stops waiting and gives its slot
+back when no later caller took one.
 
 **The owner's own pace** (`pacing/config.ts`) is the vault's setting
 `pacing` (the `setting` table), not the machine's: it names the owner's

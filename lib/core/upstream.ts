@@ -39,7 +39,7 @@ import {
   isPublicAddress,
 } from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
-import { paceServerCall } from "./pacing"
+import { paceServerCall, pacedResult } from "./pacing"
 import { checkedFetch } from "./openapi/transport"
 import {
   applyAuthorizeParams,
@@ -1370,6 +1370,13 @@ export type CallOptions = {
    * look at it yet.
    */
   signal?: AbortSignal
+  /**
+   * The latest the call may still go, in epoch milliseconds: how long it
+   * waits for its turn under pacing (lib/core/pacing/), the run's end for
+   * a program's call, pacing's callDeadline() for one straight from a
+   * request. Without it a call waits PACING_MAX_WAIT_MS at most.
+   */
+  deadline?: number
 }
 
 /**
@@ -1390,10 +1397,11 @@ export async function callServerTool(
   if (server.kind !== "browser" && server.kind !== "wrapper") {
     const paced = await paceServerCall(ctx.vaultId, server, toolName, {
       signal: options.signal,
+      deadline: options.deadline,
     })
 
     if (paced) {
-      return { content: [{ type: "text", text: paced }], isError: true }
+      return pacedResult(paced)
     }
   }
 
@@ -1523,6 +1531,7 @@ async function callBrowser(
       open: options.open,
       keepBytes: options.keepBytes,
       signal: options.signal,
+      deadline: options.deadline,
       runId: options.runId,
       secret,
     })
@@ -1595,7 +1604,16 @@ async function dispatchCall(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { publicUrl, tokenId, keep, keepBytes, open, signal, runId }: CallOptions,
+  {
+    publicUrl,
+    tokenId,
+    keep,
+    keepBytes,
+    open,
+    signal,
+    deadline,
+    runId,
+  }: CallOptions,
   placed: string[],
 ): Promise<CallToolResult> {
   if (server.kind === "wrapper") {
@@ -1618,6 +1636,7 @@ async function dispatchCall(
       open,
       keepBytes,
       signal,
+      deadline,
       runId,
     })
   }

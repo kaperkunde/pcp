@@ -118,10 +118,14 @@ import type { Bridge, BridgeReply, Executor, RunResult } from "./types"
 /**
  * The run a program's call is made for. `onRun` is told the id of the run
  * a wrapper's tool starts for it (wrappers/run.ts), for the trace.
+ * `deadline` is when the run's own limit ends it (epoch milliseconds): a
+ * call waits for its turn under pacing until shortly before it
+ * (lib/core/pacing/), rather than be refused with work half done.
  */
 export type CallRun = {
   runId: string
   signal: AbortSignal
+  deadline: number
   onRun?: (runId: string) => void
 }
 
@@ -642,6 +646,12 @@ export type RunOptions = {
   runId?: string
   /** Where the run's calls are traced, for a caller that reads it as it goes. */
   trace?: TraceEntry[]
+  /**
+   * The latest the caller's own run lasts (a run_code program that called
+   * a wrapper's tool): the run's calls wait under pacing until whichever
+   * of it and the run's own limit comes first.
+   */
+  deadline?: number
 }
 
 /** How one program's run went, before it is put into words. */
@@ -687,6 +697,7 @@ export async function runProgram(
     timeoutMs = RUN_TIMEOUT_MS,
     runId = newRunId(),
     trace = [],
+    deadline: outerDeadline,
   }: RunOptions,
 ): Promise<ProgramRun> {
   const limits = await loadResourceLimits()
@@ -702,6 +713,8 @@ export async function runProgram(
   const controller = new AbortController()
   /** What ended the run from outside the program, when something did. */
   let abortedFor: "time" | "gone" | null = null
+  /** When the run's limit ends it, or its caller's run before that. */
+  const deadline = Math.min(Date.now() + timeoutMs, outerDeadline ?? Infinity)
   const timer = setTimeout(() => {
     abortedFor ??= "time"
     controller.abort(
@@ -848,6 +861,7 @@ export async function runProgram(
             run: {
               runId,
               signal: controller.signal,
+              deadline,
               onRun: (inner) => {
                 entry.runId = inner
               },
@@ -902,10 +916,17 @@ export async function runProgram(
         return { stop: true }
       }
 
-      // The program is told the value or the error, nothing else.
+      // The program is told the value or the error, nothing else; a call
+      // pacing refused says so, and when to try again.
       return outcome.ok
         ? { ok: true, value: outcome.value }
-        : { ok: false, error: outcome.error }
+        : {
+            ok: false,
+            error: outcome.error,
+            ...(outcome.code === "paced"
+              ? { code: "paced", retryAfterMs: outcome.retryAfterMs ?? 0 }
+              : {}),
+          }
     })
   }
 

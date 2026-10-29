@@ -49,6 +49,7 @@ import { invalid, isPcpError, notFound, PcpError } from "./errors"
 import { fetchWeb } from "./fetch/fetch"
 import type { FetchArgs } from "./fetch/request"
 import { newId } from "./ids"
+import { callDeadline } from "./pacing"
 import { createCalendarAccount } from "./caldav/accounts"
 import { createMailAccount } from "./mail/accounts"
 import {
@@ -427,6 +428,7 @@ export async function runCall(
     keep,
     ownerAllowed = false,
     executor = defaultExecutor,
+    deadline = callDeadline(),
   }: {
     publicUrl: string
     /** The token the call is made for: the one that may read a kept answer. */
@@ -434,6 +436,11 @@ export async function runCall(
     /** The owner allowed this very call, its arguments shown to them. */
     ownerAllowed?: boolean
     executor?: PermissionExecutor
+    /**
+     * The latest the call may still go, under pacing: by default the budget
+     * of a call straight from a request (call_tool, the owner's answer).
+     */
+    deadline?: number
   } & AnswerShape,
 ): Promise<CallToolResult> {
   if (needsConnecting(server)) {
@@ -449,6 +456,7 @@ export async function runCall(
       keep: keepers.text,
       keepBytes: keepers.bytes,
       open: resultOpener(ctx, tokenId),
+      deadline,
     })
     const { shown, whole } = await shapeAnswerKeeping(
       answer,
@@ -479,7 +487,7 @@ export async function runCall(
       const { tabId, url } = error.ask.input
 
       return (executor.browse ?? performNavigate)(
-        { ctx, tokenId, publicUrl, serverId: server.id },
+        { ctx, tokenId, publicUrl, serverId: server.id, deadline },
         { tabId, url },
         { allowedByOwner: true },
       )
@@ -533,6 +541,10 @@ export type CodeCallOutcome =
        * answer in time), so it may have gone through.
        */
       transit?: boolean
+      /** "paced": its turn under pacing was too far off; nothing was sent. */
+      code?: "paced"
+      /** With "paced": when the destination takes its next action. */
+      retryAfterMs?: number
     }
   /** The owner has to act first: the result with their link. */
   | { owner: CallToolResult }
@@ -595,6 +607,7 @@ export async function runCodeCall(
         ? {
             runId: run.runId,
             signal: run.signal,
+            deadline: run.deadline,
             ...(run.onRun ? { onRun: run.onRun } : {}),
           }
         : {}),

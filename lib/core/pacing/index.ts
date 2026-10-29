@@ -1,7 +1,13 @@
 import { markedReadOnly } from "../read-only"
 import { readPacingConfig, resolvePolicy } from "./config"
-import { pacingOff, UNPACED_BROWSER_TOOLS, type PacingClass } from "./limits"
-import { waitForSlot } from "./pace"
+import {
+  PACING_CALL_WAIT_MS,
+  PACING_DEADLINE_MARGIN_MS,
+  pacingOff,
+  UNPACED_BROWSER_TOOLS,
+  type PacingClass,
+} from "./limits"
+import { pacingNow, waitForSlot, type PacedRefusal } from "./pace"
 
 /**
  * One pacing for everything an assistant does (limits.ts says why), applied
@@ -11,11 +17,36 @@ import { waitForSlot } from "./pace"
  * browser's actions are paced inside browser/call.ts by the tab's site),
  * and web fetch's request path (fetch/fetch.ts each request and redirect,
  * web-fetch.ts the read through the browser). Each answers null when the
- * action may go, after waiting for its turn, or the tool error to answer
- * with when its turn is too far off.
+ * action may go, after waiting for its turn, or a refusal (pacedResult
+ * makes it the tool error) when its turn is further off than the caller
+ * can wait.
+ *
+ * How long that is, is the caller's: a `deadline` on pacing's clock (epoch
+ * milliseconds), the run's end for a run_code program's or a wrapper's
+ * calls (code/run.ts CallRun), callDeadline() for a call straight from an
+ * assistant's request or the owner's answer. A call waits up to the
+ * deadline less PACING_DEADLINE_MARGIN_MS, and never past its signal.
  */
 
 export type { PacingClass } from "./limits"
+export { pacedResult, pacedRetryAfter, type PacedRefusal } from "./pace"
+
+/** The options every pacing call takes. */
+export type PaceOptions = {
+  /** Aborts the wait (the run ended); its slot is given back. */
+  signal?: AbortSignal
+  /** The latest the call may still go, in epoch milliseconds. */
+  deadline?: number
+}
+
+/**
+ * The deadline of a call made straight from an assistant's request (call_tool,
+ * call_read_only_tool, web_fetch) or from the owner's answer to one: its wait
+ * comes to PACING_CALL_WAIT_MS at most.
+ */
+export function callDeadline(): number {
+  return pacingNow() + PACING_CALL_WAIT_MS + PACING_DEADLINE_MARGIN_MS
+}
 
 function serverKey(vaultId: string, serverId: string): string {
   return `${vaultId}\nserver:${serverId}`
@@ -33,8 +64,8 @@ export async function paceServerCall(
   vaultId: string,
   server: { id: string; name: string },
   toolName: string,
-  { signal }: { signal?: AbortSignal } = {},
-): Promise<string | null> {
+  { signal, deadline }: PaceOptions = {},
+): Promise<PacedRefusal | null> {
   if (pacingOff()) {
     return null
   }
@@ -52,6 +83,7 @@ export async function paceServerCall(
 
   return waitForSlot(serverKey(vaultId, server.id), server.name, policy, {
     signal,
+    deadline,
   })
 }
 
@@ -63,8 +95,8 @@ export async function paceSite(
   vaultId: string,
   host: string,
   pacingClass: Extract<PacingClass, "browser_act" | "web_fetch">,
-  { serverId, signal }: { serverId?: string; signal?: AbortSignal } = {},
-): Promise<string | null> {
+  { serverId, signal, deadline }: PaceOptions & { serverId?: string } = {},
+): Promise<PacedRefusal | null> {
   if (pacingOff() || !host) {
     return null
   }
@@ -78,7 +110,10 @@ export async function paceSite(
     return null
   }
 
-  return waitForSlot(siteKey(vaultId, host), host, policy, { signal })
+  return waitForSlot(siteKey(vaultId, host), host, policy, {
+    signal,
+    deadline,
+  })
 }
 
 /** Whether a browser tool is paced: the ones that act on the page. */

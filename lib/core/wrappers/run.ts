@@ -194,7 +194,11 @@ async function callWrapperTool(
   server: McpServer,
   toolName: string,
   args: Record<string, unknown>,
-  { runId: parentRunId, onRun }: Pick<CallOptions, "runId" | "onRun"> = {},
+  {
+    runId: parentRunId,
+    onRun,
+    deadline,
+  }: Pick<CallOptions, "runId" | "onRun" | "deadline"> = {},
 ): Promise<CallToolResult> {
   const spec = await db().wrapperSpec.findUnique({
     where: { serverId: server.id },
@@ -237,6 +241,10 @@ async function callWrapperTool(
       ...(env.codeExecutor ? { executor: env.codeExecutor } : {}),
       timeoutMs: wrapperRunTimeout(flow),
       runId,
+      // Called from a run (run_code's), its calls wait under pacing no
+      // longer than that run lasts. A call straight from a request or the
+      // owner's answer gives the wrapper its own limit.
+      ...(parentRunId && deadline !== undefined ? { deadline } : {}),
     },
   )
 
