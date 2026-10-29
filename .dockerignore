@@ -14,5 +14,4 @@ e2e/.auth
 e2e/.state
 test-results
 playwright-report
-install.sh
 docs
