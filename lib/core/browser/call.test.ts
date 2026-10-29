@@ -24,11 +24,17 @@ import {
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import { listFetchRules, setFetchPrivate, setFetchSite } from "../web-fetch"
-import { callBrowserTool, finishHandover, performNavigate } from "./call"
+import {
+  callBrowserTool,
+  finishHandover,
+  performNavigate,
+  tabHint,
+} from "./call"
 import { chromiumExecutable } from "./executable"
 import { CHALLENGE_WAIT_MS } from "./limits"
 import { loadProfile } from "./profile"
 import { closeAllBrowsers, closeBrowser, runningBrowser } from "./runtime"
+import { refsOf } from "./refs"
 import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type OwnerNeeded } from "./types"
 
@@ -145,6 +151,36 @@ const INBOX = `<!doctype html><title>Inbox</title>
 </main>
 <footer>Footer words</footer>`
 
+/**
+ * A page its script draws, in shadow DOM (which the page's HTML does not
+ * carry), anew on every click: each element a new one where the old was.
+ */
+const DRAWN = `<!doctype html><title>Drawn</title>
+<div id="app"></div>
+<script>
+let fruit = ["apple", "pear"]
+let clicks = 0
+function draw() {
+  const app = document.getElementById("app")
+  app.replaceChildren()
+  const host = document.createElement("div")
+  app.append(host)
+  const root = host.attachShadow({ mode: "open" })
+  root.innerHTML = "<h1>Shop</h1><p>Clicked " + clicks + " times</p><ul>" +
+    fruit.map((name) => "<li><button data-fruit='" + name + "'>Add " + name + "</button></li>").join("") +
+    "</ul><button id='redraw'>Redraw</button><button id='drop'>Drop pear</button>"
+  for (const button of root.querySelectorAll("button")) {
+    button.addEventListener("click", () => {
+      clicks += 1
+      if (button.id === "drop") fruit = fruit.filter((name) => name !== "pear")
+      if (button.dataset.fruit) document.title = "Added " + button.dataset.fruit
+      setTimeout(draw, 0)
+    })
+  }
+}
+draw()
+</script>`
+
 beforeEach(async () => {
   ;({ cleanup } = await scratchDatabase())
   ctx = await setupVault({
@@ -234,6 +270,14 @@ setTimeout(() => window.open("/page"), 300)
 
     if (request.url.startsWith("/inbox")) {
       return res.end(INBOX)
+    }
+
+    if (request.url.startsWith("/drawn")) {
+      return res.end(DRAWN)
+    }
+
+    if (request.url.startsWith("/empty")) {
+      return res.end("<!doctype html><title>Empty</title>")
     }
 
     res.end("<title>Page</title><h1>A page</h1>")
@@ -392,7 +436,9 @@ describe.skipIf(!executable)("the browser's tools", { timeout: 90_000 }, () => {
 
     const stale = await call("click", { tab, ref: "e999" })
     expect(stale.isError).toBe(true)
-    expect(textOf(stale)).toContain("Take a new snapshot")
+    expect(textOf(stale)).toContain(
+      "There is no element e999 on this tab's page: refs come from this tab's snapshots (and find). Take a snapshot",
+    )
   })
 
   it("stops a link to a site the token may not open, and lists the site", async () => {
@@ -928,7 +974,7 @@ describe.skipIf(!executable)(
 
       const stale = await call("find", { tab, text: "x", within: "e999" })
       expect(stale.isError).toBe(true)
-      expect(textOf(stale)).toContain("Take a new snapshot")
+      expect(textOf(stale)).toContain("There is no element e999")
     })
 
     it("acts on an element by its role and name, and refuses a target that is none or several", async () => {
@@ -1009,6 +1055,12 @@ describe.skipIf(!executable)(
         'did not happen: Another element covers it and would get the click: a dialog (<div>) "Cookie consent".',
       )
       expect(text).toContain("force: true")
+      // The covering element's ref, from the snapshot that comes with it.
+      const over = text.match(
+        /What covers it is the dialog "Cookie consent" \(ref (e\d+)\): close or dismiss it first/,
+      )
+      expect(over, text).toBeTruthy()
+      expect(text).toContain(`dialog "Cookie consent" [ref=${over![1]}]`)
       expect(text).toContain("Snapshot:")
       expect(text.length).toBeLessThan(6_000)
       // Within the action's own time, not the tab's deadline.
@@ -1069,7 +1121,9 @@ describe.skipIf(!executable)(
       expect(read).toContain("Footer words")
       expect(read).not.toContain("Secret draft")
       expect(read).not.toContain('"hidden"')
-      expect(read).toContain("Left out: 1 block of JSON data the page carries")
+      expect(read).toContain(
+        "Left out: 2 elements the page's HTML marks hidden, and 1 block of JSON data the page carries",
+      )
 
       const main = textOf(await call("read_page", { tab, main_only: true }))
       expect(main).toContain("Only the page's main part, as asked.")
@@ -1090,6 +1144,150 @@ describe.skipIf(!executable)(
         }),
       )
       expect(byTarget).toContain("Bob: see you at noon")
+    })
+
+    it("keeps a ref while its element is on the page, through find and a page drawn anew, and says when it has gone", async () => {
+      await allowApi()
+      const opened = await call("tabs", {
+        action: "open",
+        url: `${api.origin}/drawn`,
+      })
+      const tab = tabOf(opened)
+      const pear = refOf(opened, /button "Add pear"/)
+      const apple = refOf(opened, /button "Add apple"/)
+      const playwrights = () =>
+        refsOf(runningBrowser(ctx.vaultId)!.tabs.get(tab)!).playwrightRef(pear)
+      const drawnFirst = playwrights()
+
+      // find answers with the page's refs and changes none of them.
+      const found = JSON.parse(
+        textOf(await call("find", { tab, query: "pear" })),
+      ) as { matches: Array<{ name?: string; ref?: string }> }
+      expect(found.matches).toContainEqual(
+        expect.objectContaining({ name: "Add pear", ref: pear }),
+      )
+      expect(refOf(await call("snapshot", { tab }), /button "Add pear"/)).toBe(
+        pear,
+      )
+
+      // A click draws the page anew: every element is a new one, and the
+      // refs are what they were.
+      const redrawn = await call("click", {
+        tab,
+        target: { role: "button", name: "Redraw" },
+      })
+      expect(textOf(redrawn)).toContain("Clicked 1 times")
+      expect(refOf(redrawn, /button "Add pear"/)).toBe(pear)
+      expect(refOf(redrawn, /button "Add apple"/)).toBe(apple)
+      // Playwright's own ref for it is a new one.
+      expect(playwrights()).not.toBe(drawnFirst)
+
+      // Redrawn again without a snapshot in between: the old ref still
+      // reaches the element where it is now.
+      await call("click", { tab, target: { role: "button", name: "Redraw" } })
+      const added = await call("click", { tab, ref: pear })
+      expect(added.isError, textOf(added)).toBeUndefined()
+      expect(textOf(added)).toContain("Tab ")
+      expect(
+        await runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page.title(),
+      ).toBe("Added pear")
+
+      // An element that has gone says so; one the tab never gave too.
+      const dropped = await call("click", {
+        tab,
+        target: { role: "button", name: "Drop pear" },
+      })
+      expect(textOf(dropped)).not.toContain("Add pear")
+      expect(refOf(dropped, /button "Add apple"/)).toBe(apple)
+      const gone = await call("click", { tab, ref: pear })
+      expect(gone.isError).toBe(true)
+      expect(textOf(gone)).toContain(
+        `The element ${pear} is no longer on the page, or no longer where it can be acted on`,
+      )
+      const never = await call("click", { tab, ref: "e99999" })
+      expect(textOf(never)).toContain(
+        "There is no element e99999 on this tab's page",
+      )
+    })
+
+    it("takes query for find's text, and refuses both with different values", async () => {
+      const { tab } = await inbox()
+
+      const found = JSON.parse(
+        textOf(await call("find", { tab, query: "Reply" })),
+      ) as { total: number }
+      expect(found.total).toBe(2)
+      await expect(
+        call("find", { tab, query: "Reply", text: "Save" }),
+      ).rejects.toThrow("query is another name for text; give one of them.")
+    })
+
+    it("reads a page its script draws from its snapshot, and says when a page has no text", async () => {
+      await allowApi()
+      const tab = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/drawn` }),
+      )
+      const before = refOf(await call("snapshot", { tab }), /button "Add pear"/)
+
+      const read = textOf(await call("read_page", { tab }))
+      expect(read).toContain(
+        "The page's HTML holds next to no text (a page its scripts draw, in shadow DOM or in frames), so this is the text of its accessibility snapshot instead",
+      )
+      expect(read).toContain("# Shop")
+      expect(read).toContain("Clicked 0 times")
+      expect(read).toContain("Add pear")
+      expect(read).not.toContain("[ref=")
+      expect(read).not.toContain("Characters 0 to 0 of 0")
+      // Reading took a snapshot, and changed no ref.
+      expect(refOf(await call("snapshot", { tab }), /button "Add pear"/)).toBe(
+        before,
+      )
+
+      await call("navigate", { tab, url: `${api.origin}/empty` })
+      const empty = await call("read_page", { tab })
+      expect(empty.isError).toBeUndefined()
+      expect(textOf(empty)).toContain("\n\n(no text)\n")
+      expect(textOf(empty)).not.toContain("Characters")
+
+      const past = await call("read_page", { tab, start_index: 5 })
+      expect(textOf(past)).toContain("(no text)")
+    })
+
+    it("lists the token's tabs, the one used last first, when a call names none or one it does not have", async () => {
+      const { tab: first } = await inbox()
+      const second = tabOf(
+        await call("tabs", { action: "open", url: `${api.origin}/page` }),
+      )
+      await call("snapshot", { tab: first })
+
+      const order = (text: string) =>
+        [...text.matchAll(/^- (\S+): /gm)].map((match) => match[1])
+
+      const unknown = await call("snapshot", { tab: "nosuchtab" })
+      expect(unknown.isError).toBe(true)
+      expect(textOf(unknown)).toContain("There is no tab nosuchtab")
+      expect(textOf(unknown)).toContain(
+        "This token's open tabs, the one used last first:",
+      )
+      expect(order(textOf(unknown))).toEqual([first, second])
+
+      const missing = await call("click", { ref: "e1" })
+      expect(order(textOf(missing))).toEqual([first, second])
+
+      await call("snapshot", { tab: second })
+      expect(order(await tabHint(ctx, tokenId, PUBLIC_URL))).toEqual([
+        second,
+        first,
+      ])
+      expect(await tabHint(ctx, tokenId, PUBLIC_URL)).toContain(
+        `${PUBLIC_URL}/browser?tab=${second}`,
+      )
+
+      // Another token's tabs are none of this one's.
+      const other = await otherToken()
+      expect(await tabHint(ctx, other.tokenId, PUBLIC_URL)).toContain(
+        "This token has no tab open",
+      )
     })
 
     it("hands a screenshot back no wider than asked, and of one element", async () => {

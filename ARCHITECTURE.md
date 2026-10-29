@@ -2057,14 +2057,19 @@ Hosts are never logged.
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
 `download`, `handle_dialog`, `hand_over` and `request_secret`. Every one but
 `tabs`' open and list and `request_secret` names its tab (below). An assistant reads a snapshot (Playwright's
-accessibility tree with refs), `find`'s elements of it as JSON (role, name,
+accessibility tree, with PCP's refs, below), `find`'s elements of it as JSON (role, name,
 ref, states, and the landmark or region each is in, which tells two lines
-that read the same apart; `within` searches one element), the page as
+that read the same apart; `within` searches one element; `query` is taken
+for its `text`, `BROWSER_ARG_ALIASES` in `tools.ts`), the page as
 Markdown (`read-page.ts`: `htmlToMarkdown` of the live page, or of one
 element or its main part, less what its HTML hides and code blocks of JSON
-data, which a site's app carries hidden; web_fetch's Markdown is
-unchanged), a screenshot of the viewport or of one element, and the tab's
-address, title and the link to it in PCP. It acts by ref, or by a target
+data, which a site's app carries hidden, both counted in the answer;
+web_fetch's Markdown is unchanged. A page whose HTML holds next to no text,
+`MIN_READ_PAGE_TEXT_CHARS`, as one its scripts draw in shadow DOM or frames
+does, is read from the tab's snapshot instead, `snapshotText`, and the answer
+says so; a page with no words at all answers "(no text)"), a screenshot of
+the viewport or of one element, and the tab's address, title and the link
+to it in PCP. It acts by ref, or by a target
 (`target.ts`: a role and a name, as Playwright's `getByRole` finds them,
 optionally `exact`, the `nth` of several, `within` an element), which a
 program can name without a snapshot; a target that is not exactly one
@@ -2072,7 +2077,34 @@ element is refused with the ones it could mean. A click is scrolled into
 view first (`force` skips Playwright's checks), and one that cannot happen
 says why from Playwright's call log (`failures.ts`: what covers the
 element, by its role and label, or that it is hidden, disabled or gone),
-with a short snapshot. A screenshot steps its quality, then its size, down
+with a short snapshot; what covers it is named with its ref from that
+snapshot (`coveringLine`: matched by its role, its tag's own included, and
+label; failing that, the dialogs the page shows).
+
+**Refs** (`refs.ts`). Playwright's refs last only until its next snapshot,
+and a page that draws itself anew (React and the like put a new element
+where the old one was) gets new ones each time, so an assistant's ref from
+one answer was gone by the next. The refs an assistant sees are PCP's: each
+tab keeps a map from them to the element's fingerprint and Playwright's ref
+for it in the latest snapshot, and every snapshot of the tab (an answer's,
+`find`'s, `read_page`'s fallback, a target's refusal) goes through it
+(`tabSnapshot`). A snapshot's elements are matched to the map's by
+Playwright's ref (which it keeps on an element while its role and name
+stay), else by fingerprint (role, name, the roles and names of the elements
+around it, and which of the elements sharing all of that it is, taken only
+while the page has as many of those as before, so a list that lost a line
+gives its redrawn lines new refs rather than a neighbour's), else as new.
+So a ref holds while its element is on the page, and `find` changes none.
+A ref is resolved through Playwright's ref in the latest snapshot, or a new
+snapshot when the page changed since (`resolveTabRef`). Refs are numbered
+per tab and never reused, so an answer tells a ref whose element has gone
+(or is hidden or covered: Playwright gives such an element no ref) from
+one the tab never gave. A new document in the tab (its `performance.timeOrigin`,
+read in PCP's own world) starts the matching afresh; a frame's elements keep
+its mark (`f1e12`). The map holds the latest snapshot's elements
+(`MAX_PAGE_REFS`) and the last `MAX_GONE_REFS` out of it for now, which get
+their refs back when they show again (a dialog over them closed); it goes
+with the tab. A screenshot steps its quality, then its size, down
 until it fits what an answer passes on inline (`MAX_ANSWER_IMAGE_CHARS`,
 an image's own budget, apart from the text's); one that never fits is kept
 and handed back as its handle. While the page shows a dialog (an alert),
@@ -2186,7 +2218,10 @@ a tab that does not exist, in the same words, so its address and title
 never reach it. There is no current tab: every tool but `tabs`' open and
 list names one, and a call that does not is refused (a tool error, with
 the token's tabs by id, title and address), since two conversations on
-one token would otherwise act on each other's tab. `tabs` open answers
+one token would otherwise act on each other's tab. Every refusal about a
+tab (none named, one the token does not have, another token's, in the same
+words) lists the token's own tabs, the one used last first (`tabHint`,
+exported for the gateway's own check of a call's arguments). `tabs` open answers
 with the new tab's id first. `navigate` naming such a tab opens a new
 one of the token's own, and a `browse` request never names another token's
 tab. So a site the owner allowed once stays with the token whose tab it

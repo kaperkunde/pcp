@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { browserTools, browserToolSpec, parseBrowserArgs } from "./tools"
+import {
+  BROWSER_ARG_ALIASES,
+  browserTools,
+  browserToolSpec,
+  parseBrowserArgs,
+} from "./tools"
 
 // The browser's fixed catalogue: what an assistant finds, and arguments
 // refused before the browser is touched.
@@ -335,5 +340,65 @@ describe("the browser's tools", () => {
       ref: "e2",
       force: true,
     })
+  })
+
+  it("describe every argument, the ones inside a target or a file too", () => {
+    const undescribed: string[] = []
+    const visit = (schema: Record<string, unknown>, at: string) => {
+      const properties = (schema.properties ?? {}) as Record<
+        string,
+        Record<string, unknown>
+      >
+
+      for (const [name, property] of Object.entries(properties)) {
+        if (typeof property.description !== "string") {
+          undescribed.push(`${at}.${name}`)
+        }
+
+        visit(property, `${at}.${name}`)
+        if (property.items) {
+          visit(property.items as Record<string, unknown>, `${at}.${name}[]`)
+        }
+      }
+    }
+
+    for (const tool of browserTools()) {
+      visit(tool.inputSchema as Record<string, unknown>, tool.name)
+    }
+
+    expect(undescribed).toEqual([])
+  })
+
+  it("take query for find's text, and only one of the two", () => {
+    const find = browserToolSpec("find")!
+
+    expect(BROWSER_ARG_ALIASES.find).toEqual({ query: "text" })
+    expect(parseBrowserArgs(find, { tab: "t1", query: "Reply" })).toEqual({
+      tab: "t1",
+      text: "Reply",
+    })
+    expect(
+      parseBrowserArgs(find, { tab: "t1", query: "Reply", text: "Reply" }),
+    ).toEqual({ tab: "t1", text: "Reply" })
+    expect(() =>
+      parseBrowserArgs(find, { tab: "t1", query: "Reply", text: "Save" }),
+    ).toThrow("find: query is another name for text; give one of them.")
+    // The schema lists text alone.
+    expect(
+      Object.keys(
+        (
+          browserTools().find((tool) => tool.name === "find")!.inputSchema as {
+            properties: Record<string, unknown>
+          }
+        ).properties,
+      ),
+    ).toEqual(["tab", "text", "within"])
+    // Another tool takes no query.
+    expect(() =>
+      parseBrowserArgs(browserToolSpec("snapshot")!, {
+        tab: "t1",
+        query: "x",
+      }),
+    ).toThrow()
   })
 })

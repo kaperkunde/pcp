@@ -138,6 +138,20 @@ export const MAX_ELEMENT_NAME_CHARS = 200
 /** The snapshot an action that failed answers with. */
 export const MAX_FAILURE_SNAPSHOT_CHARS = 4_000
 /**
+ * A tab's ref map (refs.ts): the elements of its latest snapshot it gives
+ * refs to (one past this is shown without one), and the elements out of
+ * that snapshot for now it remembers, so one that shows again (a dialog
+ * over it closed) gets its ref back.
+ */
+export const MAX_PAGE_REFS = 20_000
+export const MAX_GONE_REFS = 2_000
+/**
+ * read_page's text from the page's HTML shorter than this, in characters
+ * that are not white space, is next to none: read_page gives the text of
+ * the accessibility snapshot instead, when that has more.
+ */
+export const MIN_READ_PAGE_TEXT_CHARS = 40
+/**
  * A site's check of its visitors (Cloudflare's "Just a moment…") that
  * passes on its own does so in a few seconds; past this, a tab or a page
  * read for web_fetch stops waiting and says so.
