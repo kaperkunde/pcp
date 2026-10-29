@@ -491,7 +491,7 @@ test("the owner attaches a secret, typing the address to confirm it; then the en
   const before = upstream.requests.length
 
   for (const changes of [
-    { baseUrl: "https://attacker.example.com/api" },
+    { base_url: "https://attacker.example.com/api" },
     // A new schema could add operations the owner's key then performs.
     { spec: managedSpec("https://attacker.example.com") },
   ]) {
@@ -552,19 +552,21 @@ test("the owner attaches a secret, typing the address to confirm it; then the en
     "Lists every pet in the store.",
   )
 
-  // There is no argument that touches the credential: extra ones are dropped
-  // and there is nothing left to change.
+  // There is no argument that touches the credential: one that is not in
+  // the schema is refused by name, before anything is looked at.
   const sneaky = await callTool(baseURL!, managerToken, "update_endpoint", {
     endpoint: MANAGED_SLUG,
     authSecretId: "anything",
   })
   expect(sneaky.body.result?.isError).toBe(true)
-  expect(toolText(sneaky)).toMatch(/Nothing to change/)
+  expect(toolText(sneaky)).toMatch(
+    /"authSecretId" is not an argument of this tool/,
+  )
 
   // It can narrow the endpoint, and cannot widen it again.
   const narrowed = await callTool(baseURL!, managerToken, "update_endpoint", {
     endpoint: MANAGED_SLUG,
-    readOnly: true,
+    read_only: true,
   })
   expect(narrowed.body.result?.isError ?? false, toolText(narrowed)).toBe(false)
   expect(
@@ -574,10 +576,10 @@ test("the owner attaches a secret, typing the address to confirm it; then the en
   ).toEqual(["getPet", "listPets"])
   const widened = await callTool(baseURL!, managerToken, "update_endpoint", {
     endpoint: MANAGED_SLUG,
-    readOnly: false,
+    read_only: false,
   })
   expect(widened.body.result?.isError).toBe(true)
-  expect(toolText(widened)).toMatch(/readOnly is theirs to change/)
+  expect(toolText(widened)).toMatch(/read_only is theirs to change/)
 
   // Nothing above sent a request anywhere.
   expect(upstream.requests).toHaveLength(before)
