@@ -58,6 +58,9 @@ const QUIET: Decision[] = ["block", "discard"]
  * The answer goes through the owner's queue (components/answer-queue.tsx):
  * the count drops at once, and the owner is taken on to the next request,
  * unless `advance` is off (a token's page, which lists its own).
+ *
+ * `revision` is the request as the page shows it: when an assistant has
+ * added to it since, the answer is refused and the owner reads it again.
  */
 export function PermissionDecision({
   id,
@@ -66,9 +69,11 @@ export function PermissionDecision({
   every,
   advance = true,
   allowForFixed = false,
+  revision,
 }: {
   advance?: boolean
   id: string
+  revision?: string
   decisions: Array<{ value: Decision; label: string }>
   allowForFixed?: boolean
   secret?: {
@@ -130,6 +135,7 @@ export function PermissionDecision({
               .map((line) => line.trim())
               .filter(Boolean)
           : undefined,
+        revision,
       )
 
       return result.status === "ok"
