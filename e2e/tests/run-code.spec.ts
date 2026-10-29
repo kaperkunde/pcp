@@ -153,7 +153,8 @@ test("a tool that asks the owner stops the program until they allow it", async (
   expect(stopped).toContain("Not done yet")
   const path = stopped.match(/\/permissions\/[\w-]+/)?.[0]
   expect(path, stopped).toBeTruthy()
-  expect(stopped.trimEnd().endsWith(path!)).toBe(true)
+  // The link to the owner's page is the last line, as a markdown link.
+  expect(stopped.trimEnd()).toMatch(new RegExp(`\\]\\([^)]*${path!}\\)$`))
   expect(callsOf("add_numbers")).toHaveLength(before + 1)
   expect(callsOf("send_postcard")).toHaveLength(0)
 

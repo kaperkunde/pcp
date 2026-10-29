@@ -94,7 +94,7 @@ test("a service launches on an SSH server and registers its API endpoint", async
   await page.getByLabel("Name", { exact: true }).fill(NAME)
   await page.getByLabel("Description").fill("Turns documents into text.")
   await page
-    .getByLabel("SSH server")
+    .getByLabel("SSH server", { exact: true })
     .selectOption({ label: `${HOST} (127.0.0.1)` })
   await page.getByLabel("Definition").fill(
     JSON.stringify({

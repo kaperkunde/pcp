@@ -481,7 +481,7 @@ test("the owner attaches a secret, typing the address to confirm it; then the en
     headers: ["Authorization"],
   })
   expect(JSON.stringify(details.changes)).toMatch(
-    /baseUrl[^"]*":"no: the owner configured this endpoint/,
+    /base_url[^"]*":"no: the owner configured this endpoint/,
   )
   expect(JSON.parse(details.spec)).toMatchObject({ openapi: "3.0.3" })
   // No secret value, name or id anywhere in what it can read.
