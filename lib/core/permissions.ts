@@ -152,7 +152,17 @@ import {
 } from "./browser-secrets"
 import { resourceLimits } from "./resources/state"
 import { namesInWords, secretUses } from "./secret-uses"
-import { callServerTool, needsConnecting, syncServerTools } from "./upstream"
+import {
+  callServerTool,
+  launchService,
+  needsConnecting,
+  syncServerTools,
+} from "./upstream"
+import {
+  applyServiceChange,
+  describeServiceAsk,
+  type ServiceChangeAsk,
+} from "./services/proposals"
 import {
   applyWrapperChange,
   type WrapperChangeAsk,
@@ -265,6 +275,7 @@ export type PermissionAsk =
   | { kind: "repo_change"; input: RepoChangeAsk }
   | { kind: "repo_share"; input: RepoShareAsk }
   | { kind: "note_change"; input: NoteChangeAsk }
+  | { kind: "service_change"; input: ServiceChangeAsk }
   | MemoryAsk
   | SkillAsk
   | AccessAsk
@@ -289,6 +300,8 @@ export type PermissionExecutor = {
   solveWeb?: typeof fetchThroughBrowser
   /** The browser opening a site the owner allowed; the real one when left out. */
   browse?: typeof performNavigate
+  /** A service the owner agreed to launch; the real one when left out. */
+  launchService?: typeof launchService
 }
 
 export const defaultExecutor: PermissionExecutor = {
@@ -722,6 +735,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `note:${ask.input.target}:${ask.input.id}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "service_change":
+      return {
+        target: `service:${ask.input.host.id}\n${ask.input.name}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "fetch":
       return {
         target: `fetch:${ask.input.method} ${ask.input.url}`,
@@ -759,6 +777,7 @@ function toolNameOf(ask: PermissionAsk): string {
     case "call":
       return ask.tool.name
     case "register":
+    case "service_change":
       return "register_server"
     case "access":
       return "propose_tool_access"
@@ -979,6 +998,12 @@ async function summarizeRow(
     const { shown } = args as NoteChangeAsk
 
     return { ...shown, lines: [...shown.lines, asker] }
+  }
+
+  if (row.kind === "service_change") {
+    const asked = describeServiceAsk(args as ServiceChangeAsk)
+
+    return { ...asked, lines: [...asked.lines, asker] }
   }
 
   if (row.kind === "browse") {
@@ -1504,6 +1529,14 @@ function newSecretOf(
       kind: asked.kind,
       origins: asked.origins,
     }
+  }
+
+  if (row.kind === "service_change") {
+    const { newSecret } = readArgs(ctx, row) as ServiceChangeAsk
+
+    return newSecret
+      ? { name: newSecret, optional: false, clientId: null, login: null }
+      : null
   }
 
   if (row.kind === "wrapper_change") {
@@ -2059,40 +2092,57 @@ export async function decidePermission(
                         readArgs(ctx, row) as NoteChangeAsk,
                       ),
                     )
-                  : kind === "fetch"
-                    ? await executeFetch(ctx, row, publicUrl, executor)
-                    : kind === "browse"
-                      ? await executeBrowse(ctx, row, publicUrl, executor)
-                      : kind === "browser_handover"
-                        ? await executeHandover(ctx, row)
-                        : kind === "secret_use"
-                          ? await executeSecretUse(
-                              ctx,
-                              row,
-                              secretLevel(choice),
-                              publicUrl,
-                              executor,
-                            )
-                          : kind === "secret_request"
-                            ? text(
-                                await applySecretRequest(
-                                  ctx,
-                                  row.tokenId,
-                                  readArgs(ctx, row) as SecretRequestAsk,
-                                  {
-                                    value: secretValue,
-                                    origins,
-                                    level: secretLevel(choice),
-                                  },
-                                ),
-                              )
-                            : await executeRegister(
+                  : kind === "service_change"
+                    ? text(
+                        await applyServiceChange(
+                          ctx,
+                          readArgs(ctx, row) as ServiceChangeAsk,
+                          {
+                            tokenId: row.tokenId,
+                            ...(secretValue ? { secretValue } : {}),
+                            launch: (launchCtx, input) =>
+                              (executor.launchService ?? launchService)(
+                                launchCtx,
+                                input,
+                                { publicUrl },
+                              ),
+                          },
+                        ),
+                      )
+                    : kind === "fetch"
+                      ? await executeFetch(ctx, row, publicUrl, executor)
+                      : kind === "browse"
+                        ? await executeBrowse(ctx, row, publicUrl, executor)
+                        : kind === "browser_handover"
+                          ? await executeHandover(ctx, row)
+                          : kind === "secret_use"
+                            ? await executeSecretUse(
                                 ctx,
                                 row,
+                                secretLevel(choice),
                                 publicUrl,
                                 executor,
-                                secretValue,
                               )
+                            : kind === "secret_request"
+                              ? text(
+                                  await applySecretRequest(
+                                    ctx,
+                                    row.tokenId,
+                                    readArgs(ctx, row) as SecretRequestAsk,
+                                    {
+                                      value: secretValue,
+                                      origins,
+                                      level: secretLevel(choice),
+                                    },
+                                  ),
+                                )
+                              : await executeRegister(
+                                  ctx,
+                                  row,
+                                  publicUrl,
+                                  executor,
+                                  secretValue,
+                                )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {

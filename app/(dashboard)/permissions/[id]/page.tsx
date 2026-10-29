@@ -319,6 +319,8 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={FolderGit2} className={tile} />
     case "note_change":
       return <IconTile size="lg" icon={StickyNote} className={tile} />
+    case "service_change":
+      return <IconTile size="lg" kind="service" className={tile} />
     case "access":
       return <IconTile size="lg" icon={SlidersHorizontal} className={tile} />
     case "fetch":
@@ -456,6 +458,19 @@ function PendingNote({ view }: { view: PermissionView }) {
           Saving it writes the note exactly as shown above, and only if your
           note did not change since the assistant asked. It is yours from then
           on: you can change it on the item&apos;s page.
+        </p>
+      )
+    case "service_change":
+      return (
+        <p className={note}>
+          Launching it pulls the image exactly as shown above, by its digest,
+          and runs it on that SSH server with the secrets named there; nothing
+          runs until you agree. You can stop, update or remove it on its page
+          under{" "}
+          <Link href="/servers" className="underline">
+            Servers
+          </Link>
+          .
         </p>
       )
     case "memory_share":

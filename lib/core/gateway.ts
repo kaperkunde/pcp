@@ -155,6 +155,7 @@ import {
   resolveKind,
   type RegisterKind,
 } from "./register-rules"
+import { prepareServiceProposal } from "./services/proposals"
 import {
   checkPersonalNote,
   clipNote,
@@ -2313,12 +2314,13 @@ export function buildGatewayServer(
 
   register({
     name: "register_server",
-    title: "Add a server, an API, a mail or a calendar account",
+    title: "Add a server, an API, a mail or a calendar account, or a service",
     description: [
-      "Propose something new for PCP to reach; the owner must agree on PCP's page before it is added, and nothing exists until they do. kind says what it is: mcp (an MCP server, by url), api (a REST API, from its OpenAPI 3 document in openapi_schema or openapi_url), jmap or imap (a mail account), caldav (calendars and reminders). An SSH server cannot be proposed: the owner adds one on PCP's Servers page.",
+      "Propose something new for PCP to reach; the owner must agree on PCP's page before it is added, and nothing exists until they do. kind says what it is: mcp (an MCP server, by url), api (a REST API, from its OpenAPI 3 document in openapi_schema or openapi_url), jmap or imap (a mail account), caldav (calendars and reminders), service (a container on the owner's SSH server). An SSH server cannot be proposed: the owner adds one on PCP's Servers page.",
       "A mailbox is always a mail account (jmap or imap), never an API you write around its mail server: PCP signs in to a mail account itself, over an encrypted connection, and gives every account the same tools (list, search, read, move, flag, delete into the Trash, send). Calendars and reminders are always a calendar account (caldav), never an API: PCP finds the calendars itself and gives every account the same tools (events, free time, reminders).",
       `Authentication is auth_type: none, header (a secret in a header), basic (username and a password) or oauth (the owner signs in once they agree; PCP finds out itself whether the provider lets it register, so client_id is only for one that does not). Secrets are named by their NAME in secret (and extra_headers): one the owner stored is reused, a new name is typed in by the owner on PCP's page when they agree. ${scope.manageEndpoints ? "list_secrets gives the names of the secrets the owner stored and what already uses each: name one of its text secrets to reuse it rather than inventing a name. " : "A token that may read and change API endpoints can list the names of the owner's secrets with list_secrets. "}Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.`,
-      "Another server of one you see (the same API or MCP server at another address): pass its short name in definition. note proposes the owner's note on what is new.",
+      "A service is a container on one of the owner's SSH servers (ssh_server): its definition in service, its variables' secrets by NAME in env_secrets. Nothing runs until the owner agrees.",
+      "Another server of one you see (the same API, MCP server or service elsewhere): pass its short name in definition. note proposes the owner's note on what is new.",
     ].join("\n\n"),
     input: z.object({
       name: z
@@ -2329,10 +2331,10 @@ export function buildGatewayServer(
           'What to call it, e.g. "Linear", "Pet store API" or "Personal mail".',
         ),
       kind: z
-        .enum(["mcp", "api", "jmap", "imap", "caldav"])
+        .enum(["mcp", "api", "jmap", "imap", "caldav", "service"])
         .optional()
         .describe(
-          "What it is: mcp (an MCP server), api (a REST API from an OpenAPI document), jmap (a mailbox on a JMAP server: Stalwart, Fastmail, Cyrus), imap (a mailbox over IMAP, with SMTP to send) or caldav (calendars and reminders over CalDAV: iCloud, Fastmail, Nextcloud, Radicale). Left out: api when openapi_schema or openapi_url is passed, mcp otherwise. A mailbox is always jmap or imap, and a calendar caldav, never an api.",
+          "What it is: mcp (an MCP server), api (a REST API from an OpenAPI document), jmap (a mailbox on a JMAP server: Stalwart, Fastmail, Cyrus), imap (a mailbox over IMAP, with SMTP to send), caldav (calendars and reminders over CalDAV: iCloud, Fastmail, Nextcloud, Radicale) or service (a container on one of the owner's SSH servers). Left out: service when service is passed, api when openapi_schema or openapi_url is, mcp otherwise. A mailbox is always jmap or imap, and a calendar caldav, never an api.",
         ),
       url: z
         .string()
@@ -2452,7 +2454,66 @@ export function buildGatewayServer(
         .max(100)
         .optional()
         .describe(
-          "For mcp and api: the short name of a server you see to make another of, at the address in url, with its own sign-in. Its description, schema, edits and tool descriptions come from there: pass only this one's name, url, authentication and read_only, and leave description, openapi_schema, openapi_url and spec_patches out.",
+          "For mcp and api: the short name of a server you see to make another of, at the address in url, with its own sign-in. Its description, schema, edits and tool descriptions come from there: pass only this one's name, url, authentication and read_only, and leave description, openapi_schema, openapi_url and spec_patches out. For service: the short name of a service you see to launch another of; what it runs comes from there: pass only this one's name, ssh_server, publish_address, publish_ports and env_secrets, and leave service and description out.",
+        ),
+      service: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe(
+          'For kind service: its definition, as PCP\'s own launch takes it: {"image": "ghcr.io/org/app@sha256:<64 hex>", "source": "ghcr.io/org/app:latest", "ports": [{"container": 5001}], "env": [{"name": "API_KEY", "required": true, "description": "…"}, {"name": "LOG_LEVEL", "value": "info"}], "volumes": [{"name": "data", "path": "/data"}], "args": [], "health": {"kind": "http", "port": 5001, "path": "/health"}, "registers": {"kind": "openapi", "port": 5001, "specPath": "/openapi.json", "auth": {"env": "API_KEY", "header": "X-Api-Key", "template": "{{secret}}"}}}. registers is {"kind": "mcp", "port", "path"} for an MCP server, or {"kind": "none"}. A fixed value is no secret; a secret goes to a variable through env_secrets.',
+        ),
+      ssh_server: z
+        .string()
+        .max(100)
+        .optional()
+        .describe(
+          "For kind service: the short name of the owner's SSH server it runs on, one this token sees.",
+        ),
+      publish_address: z
+        .string()
+        .max(64)
+        .optional()
+        .describe(
+          "For kind service: the SSH server's IP address its ports listen on (default 0.0.0.0, every address). PCP reaches what it serves there, so not 127.0.0.1 unless PCP runs on that machine.",
+        ),
+      publish_ports: z
+        .array(
+          z.object({
+            container: z
+              .number()
+              .int()
+              .min(1)
+              .max(65535)
+              .describe("The service's port."),
+            host: z
+              .number()
+              .int()
+              .min(1)
+              .max(65535)
+              .describe("The SSH server's port it is published on."),
+          }),
+        )
+        .max(8)
+        .optional()
+        .describe(
+          "For kind service: the SSH server's port for each of the service's; a port left out keeps its own number.",
+        ),
+      env_secrets: z
+        .array(
+          z.object({
+            name: z.string().max(128).describe("The variable's name."),
+            secret: z
+              .string()
+              .max(200)
+              .describe(
+                "The NAME of the secret it takes: one the owner stored, or one new name they type in on PCP's page.",
+              ),
+          }),
+        )
+        .max(64)
+        .optional()
+        .describe(
+          "For kind service: the secret each variable takes, by name, never a value.",
         ),
       note: noteArg,
     }),
@@ -2483,6 +2544,11 @@ export function buildGatewayServer(
       client_id?: string
       definition?: string
       note?: string
+      service?: Record<string, unknown>
+      ssh_server?: string
+      publish_address?: string
+      publish_ports?: Array<{ container: number; host: number }>
+      env_secrets?: Array<{ name: string; secret: string }>
     }) {
       // Another server of a definition the token sees: what it is comes
       // from there, and only what is this server's own comes from here.
@@ -2491,13 +2557,19 @@ export function buildGatewayServer(
           ? await findBindableDefinition(scope.ctx, args.definition, servers, [
               "mcp",
               "openapi",
+              "service",
             ])
           : null
       const kind = resolveKind(args, bound?.kind)
+      const boundKind: Record<string, RegisterKind> = {
+        openapi: "api",
+        mcp: "mcp",
+        service: "service",
+      }
 
-      if (bound && kind !== (bound.kind === "openapi" ? "api" : "mcp")) {
+      if (bound && kind !== boundKind[bound.kind]) {
         return failure(
-          `${args.definition!.trim()} is ${bound.kind === "openapi" ? "an API endpoint: its kind is api" : "an MCP server: its kind is mcp"}; leave kind out.`,
+          `${args.definition!.trim()} is ${bound.kind === "openapi" ? "an API endpoint: its kind is api" : bound.kind === "service" ? "a service: its kind is service" : "an MCP server: its kind is mcp"}; leave kind out.`,
         )
       }
 
@@ -2509,6 +2581,62 @@ export function buildGatewayServer(
 
       // The owner reads it whole; checked before they are asked.
       const note = checkPersonalNote(args.note)
+
+      if (kind === "service") {
+        if (
+          !checkRateLimit(
+            `endpoint-register:${scope.tokenId}`,
+            ENDPOINT_CHANGES,
+          )
+        ) {
+          return tooManyCalls(
+            "That is a lot of registrations in a short time. Wait a few minutes.",
+          )
+        }
+
+        // Only an SSH server this token sees: the owner's other machines
+        // are not its to name.
+        const host = bySlug.get(args.ssh_server!.trim())
+
+        if (!host || host.kind !== "ssh") {
+          return failure(
+            `No SSH server called ${args.ssh_server!.trim()} that this token sees. Those it sees: ${
+              servers
+                .filter((server) => server.kind === "ssh")
+                .map((server) => server.slug)
+                .join(", ") ||
+              "(none): the owner adds one on PCP's Servers page"
+            }.`,
+          )
+        }
+
+        const input = await prepareServiceProposal(scope.ctx, {
+          name: args.name,
+          ...(args.description !== undefined
+            ? { description: args.description }
+            : {}),
+          ...(args.service !== undefined ? { service: args.service } : {}),
+          ...(bound
+            ? {
+                definition: {
+                  id: bound.id,
+                  name: bound.name,
+                  basis: bound.basis,
+                  instances: bound.instances.map((each) => each.slug),
+                },
+              }
+            : {}),
+          sshServerId: host.id,
+          ...(args.publish_address !== undefined
+            ? { publishAddress: args.publish_address }
+            : {}),
+          ...(args.publish_ports ? { publishPorts: args.publish_ports } : {}),
+          ...(args.env_secrets ? { envSecrets: args.env_secrets } : {}),
+          ...(note ? { note } : {}),
+        })
+
+        return asked({ kind: "service_change", input })
+      }
 
       const authType: AuthType = args.auth_type ?? "none"
       const isApi = kind === "api"
