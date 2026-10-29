@@ -31,8 +31,36 @@ import { callMailTool, syncMailTools } from "./mail/accounts"
 import type { MailCredential } from "./mail/types"
 import type { GitHubCredential } from "./repos/github"
 import { GITHUB_SIGNIN_SECRET } from "./repos/limits"
-import type { SshIdentity } from "./ssh/client"
-import { callSshTool, syncSshTools } from "./ssh/hosts"
+import { sshExec, type SshIdentity } from "./ssh/client"
+import { callSshTool, sshTarget, syncSshTools } from "./ssh/hosts"
+import type { ServiceDefinition } from "./services/definition"
+import type {
+  ContainerAction,
+  ServiceEnv,
+  ServiceHost,
+} from "./services/engine"
+import { containerLogs } from "./services/engine"
+import {
+  callServiceTool,
+  launchServiceOn,
+  loadService,
+  prepareLaunch,
+  recreateServiceOn,
+  removeServiceOn,
+  serviceActionOn,
+  serviceBehind,
+  servicesUsingSecret,
+  serviceStatusOn,
+  statusWords,
+  stoppedServiceMessage,
+  syncServiceTools,
+  updateServiceOn,
+  type LaunchResult,
+  type LoadedService,
+  type ServiceAccess,
+  type ServiceLaunchInput,
+  type ServiceStatus,
+} from "./services/services"
 import {
   AddressBlockedError,
   isOwnAddress,
@@ -60,6 +88,7 @@ import {
   extraAuthHeaders,
   isCalendarKind,
   isMailKind,
+  isServiceKind,
   isSshKind,
   kindNoun,
   renderAuthValue,
@@ -87,7 +116,9 @@ import {
  * or login this module builds, or an OAuth token it renews; calendar
  * accounts (kind "caldav") to lib/core/caldav/accounts.ts, the same way;
  * SSH servers (kind "ssh") to lib/core/ssh/hosts.ts, with PCP's key for the
- * server, decrypted here. Linked repositories' GitHub client
+ * server, decrypted here; services (kind "service") to
+ * lib/core/services/, with a way to run commands on their SSH server and
+ * their variables' values (ServiceAccess), built here. Linked repositories' GitHub client
  * (lib/core/repos/github.ts) gets its Authorization header from
  * githubCredential, the same way.
  *
@@ -1215,6 +1246,21 @@ export async function syncServerTools(
     })
   }
 
+  if (isServiceKind(server.kind)) {
+    const loaded = await loadService(ctx, server.id)
+    let access: ServiceAccess | null = null
+
+    try {
+      access = byOwner ? await serviceAccess(ctx, loaded, { publicUrl }) : null
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await setServerStatus(server.id, "error", message)
+      return { status: "error", message, toolCount: 0 }
+    }
+
+    return syncServiceTools(loaded, access, { byOwner })
+  }
+
   if (isMailKind(server.kind) || isCalendarKind(server.kind)) {
     let signIn: MailCredential
 
@@ -1599,7 +1645,32 @@ async function placeSecrets(
   return { args: placeValues(args, values), redact }
 }
 
+/**
+ * A call, and when it fails for a server a service registered, the
+ * service's state in place of a bare "could not be reached": a stopped
+ * service is said to be stopped.
+ */
 async function dispatchCall(
+  ctx: VaultContext,
+  server: McpServer,
+  toolName: string,
+  args: Record<string, unknown>,
+  options: CallOptions,
+  placed: string[],
+): Promise<CallToolResult> {
+  try {
+    return await dispatchKind(ctx, server, toolName, args, options, placed)
+  } catch (error) {
+    if (!isPcpError(error) || error.code !== "upstream") {
+      throw error
+    }
+
+    const said = await serviceFailure(ctx, server, options.publicUrl)
+    throw said ? new PcpError("upstream", said) : error
+  }
+}
+
+async function dispatchKind(
   ctx: VaultContext,
   server: McpServer,
   toolName: string,
@@ -1650,6 +1721,29 @@ async function dispatchCall(
       publicUrl,
       redact: placed,
     })
+  }
+
+  if (isServiceKind(server.kind)) {
+    const loaded = await loadService(ctx, server.id)
+    const access = await serviceAccess(ctx, loaded, { publicUrl })
+
+    if (!access) {
+      throw new PcpError(
+        "state",
+        `${server.name}'s SSH server is no longer in PCP, so PCP cannot reach it.`,
+      )
+    }
+
+    return callServiceTool(
+      loaded,
+      toolName,
+      args,
+      {
+        ...access,
+        env: { ...access.env, redact: [...access.env.redact, ...placed] },
+      },
+      { publicUrl },
+    )
   }
 
   // The endpoint resolves its own handles: an upload's file fields take
@@ -1851,4 +1945,334 @@ function refusedMessage(server: McpServer, said: string): string {
     : ""
 
   return `${server.name} refused PCP's request although PCP is signed in (${said}). The account or OAuth client you signed in with is not allowed to use it yet.${google} Once that is fixed, choose Refresh tools.`
+}
+
+// ---- Services -----------------------------------------------------------------
+
+/** How long a launch or restart waits for health; tests shorten it. */
+export type ServiceOptions = {
+  publicUrl: string
+  timing?: ServiceAccess["timing"]
+}
+
+/**
+ * A way to run commands on an SSH server for a service: PCP's key for it,
+ * decrypted here, and its pinned host key. A server whose host key the
+ * owner has not pinned is not connected to, whoever asks.
+ */
+async function serviceHost(
+  ctx: VaultContext,
+  host: McpServer,
+  { publicUrl }: { publicUrl: string },
+): Promise<ServiceHost> {
+  if (!isSshKind(host.kind)) {
+    throw invalid("A service runs on one of your SSH servers.")
+  }
+
+  const target = sshTarget(host)
+
+  if (!target.hostKey) {
+    throw new PcpError(
+      "state",
+      `PCP has not pinned ${host.name}'s host key yet, so it does not connect: the owner checks the server on its page first.\n${publicUrl.replace(/\/+$/, "")}/servers/${host.id}`,
+    )
+  }
+
+  const identity = await sshIdentity(ctx, host)
+
+  return {
+    name: host.name,
+    address: target.host,
+    exec: (command, { stdin, timeoutMs, maxOutputBytes }) =>
+      // A service's command never pins a host key.
+      sshExec(
+        target,
+        identity,
+        { command, stdin, timeoutMs, maxOutputBytes },
+        async () => {},
+      ),
+  }
+}
+
+/**
+ * The variables' values: the definition's fixed ones, and the bound
+ * secrets', decrypted here for the one command that sends them over
+ * standard input, and scrubbed from whatever the engine answers.
+ */
+async function serviceEnv(
+  ctx: VaultContext,
+  definition: ServiceDefinition,
+  bindings: Record<string, string>,
+): Promise<ServiceEnv> {
+  const values: Record<string, string> = {}
+  const redact: string[] = []
+
+  for (const entry of definition.env) {
+    if (entry.value !== undefined) {
+      values[entry.name] = entry.value
+    }
+  }
+
+  for (const [name, secretId] of Object.entries(bindings)) {
+    const value = await readSecretValue(ctx, secretId)
+    values[name] = value
+    redact.push(value)
+  }
+
+  return { values, redact }
+}
+
+/** What the services module needs for a service; null once its SSH server is gone. */
+async function serviceAccess(
+  ctx: VaultContext,
+  loaded: LoadedService,
+  { publicUrl, timing }: ServiceOptions,
+): Promise<ServiceAccess | null> {
+  if (!loaded.host) {
+    return null
+  }
+
+  return {
+    host: await serviceHost(ctx, loaded.host, { publicUrl }),
+    env: await serviceEnv(ctx, loaded.definition, loaded.env),
+    ...(timing ? { timing } : {}),
+  }
+}
+
+async function requireAccess(
+  ctx: VaultContext,
+  loaded: LoadedService,
+  options: ServiceOptions,
+): Promise<ServiceAccess> {
+  const access = await serviceAccess(ctx, loaded, options)
+
+  if (!access) {
+    throw new PcpError(
+      "state",
+      `${loaded.server.name}'s SSH server is no longer in PCP, so PCP cannot reach its container.`,
+    )
+  }
+
+  return access
+}
+
+/**
+ * The owner's launch (services/services.ts launchServiceOn): checked before
+ * anything connects, then run with the SSH server's key and the variables'
+ * values. An MCP server it registers has its tools read here.
+ */
+export async function launchService(
+  ctx: VaultContext,
+  input: ServiceLaunchInput,
+  options: ServiceOptions,
+): Promise<LaunchResult & { message: string }> {
+  const prepared = await prepareLaunch(ctx, input)
+  const access: ServiceAccess = {
+    host: await serviceHost(ctx, prepared.host, options),
+    env: await serviceEnv(ctx, prepared.definition, prepared.env),
+    ...(options.timing ? { timing: options.timing } : {}),
+  }
+  const result = await launchServiceOn(ctx, prepared, access)
+  let message = `${prepared.name} is running on ${prepared.host.name}.`
+
+  if (result.registeredId && result.registeredKind === "mcp") {
+    const registered = await db().mcpServer.findUniqueOrThrow({
+      where: { id: result.registeredId },
+    })
+    const sync = await syncServerTools(ctx, registered, {
+      publicUrl: options.publicUrl,
+      byOwner: true,
+    })
+
+    if (sync.status !== "ok") {
+      message += ` PCP could not read its tools yet: ${sync.message}`
+    }
+  }
+
+  return { ...result, message }
+}
+
+/** The service's state now, read on its SSH server for the owner's page. */
+export async function readServiceStatus(
+  ctx: VaultContext,
+  id: string,
+  options: ServiceOptions,
+): Promise<ServiceStatus> {
+  const loaded = await loadService(ctx, id)
+  return serviceStatusOn(loaded, await requireAccess(ctx, loaded, options))
+}
+
+/** The service's last lines, with its secrets taken out. */
+export async function readServiceLogs(
+  ctx: VaultContext,
+  id: string,
+  lines: number,
+  options: ServiceOptions,
+): Promise<{ text: string; truncated: boolean }> {
+  const loaded = await loadService(ctx, id)
+  const access = await requireAccess(ctx, loaded, options)
+
+  try {
+    return await containerLogs(
+      access.host,
+      loaded.engine,
+      loaded.spec.containerName,
+      { lines },
+      access.env.redact,
+    )
+  } catch (error) {
+    throw new PcpError(
+      "upstream",
+      makeRedactor(access.env.redact).text(
+        error instanceof Error ? error.message : String(error),
+      ),
+    )
+  }
+}
+
+/** Start, stop or restart, for the owner. */
+export async function runServiceAction(
+  ctx: VaultContext,
+  id: string,
+  action: ContainerAction,
+  options: ServiceOptions,
+): Promise<ServiceStatus> {
+  const loaded = await loadService(ctx, id)
+  return serviceActionOn(
+    loaded,
+    action,
+    await requireAccess(ctx, loaded, options),
+  )
+}
+
+/** Makes the container again with the variables as they are now. */
+export async function recreateService(
+  ctx: VaultContext,
+  id: string,
+  options: ServiceOptions,
+): Promise<ServiceStatus> {
+  const loaded = await loadService(ctx, id)
+  return recreateServiceOn(loaded, await requireAccess(ctx, loaded, options))
+}
+
+/** The newest image of the definition's source, pinned, and the container made again. */
+export async function updateService(
+  ctx: VaultContext,
+  id: string,
+  options: ServiceOptions,
+): Promise<{ status: ServiceStatus; image: string; changed: boolean }> {
+  const loaded = await loadService(ctx, id)
+  return updateServiceOn(loaded, await requireAccess(ctx, loaded, options))
+}
+
+/** Removes the service, its container first (see removeServiceOn). */
+export async function removeService(
+  ctx: VaultContext,
+  id: string,
+  choices: { volumes?: boolean; registered?: boolean },
+  options: ServiceOptions,
+): Promise<string> {
+  const loaded = await loadService(ctx, id)
+  return removeServiceOn(
+    ctx,
+    loaded,
+    await serviceAccess(ctx, loaded, options),
+    choices,
+  )
+}
+
+/**
+ * After a secret's value changed: every service whose variables take it is
+ * made again with the new value (a restart alone would keep the old one).
+ * One that fails says so on its row; the others go on.
+ */
+export async function restartServicesUsingSecret(
+  ctx: VaultContext,
+  secretId: string,
+  options: ServiceOptions,
+): Promise<Array<{ id: string; ok: boolean; message: string }>> {
+  const outcomes: Array<{ id: string; ok: boolean; message: string }> = []
+
+  for (const id of await servicesUsingSecret(ctx, secretId)) {
+    try {
+      const loaded = await loadService(ctx, id)
+      const status = await recreateServiceOn(
+        loaded,
+        await requireAccess(ctx, loaded, options),
+      )
+      outcomes.push({
+        id,
+        ok: true,
+        message: statusWords(loaded.server.name, status),
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await setServerStatus(id, "error", message).catch(() => {})
+      outcomes.push({ id, ok: false, message })
+    }
+  }
+
+  return outcomes
+}
+
+/**
+ * Why a call to a server a service registered failed, when the service is
+ * the reason; null otherwise. Read live, inside the failing call's request.
+ */
+async function serviceFailure(
+  ctx: VaultContext,
+  server: McpServer,
+  publicUrl: string,
+): Promise<string | null> {
+  try {
+    const loaded = await serviceBehind(ctx, server.id)
+
+    if (!loaded) {
+      return null
+    }
+
+    const access = await serviceAccess(ctx, loaded, { publicUrl }).catch(
+      () => null,
+    )
+    const said = await stoppedServiceMessage(loaded, access, { publicUrl })
+    return said ? `${server.name} could not be reached. ${said}` : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * One line for check_server about a service, or a server a service
+ * registered: its state, read now. Null for any other server.
+ */
+export async function serviceStateLine(
+  ctx: VaultContext,
+  server: Pick<McpServer, "id" | "kind" | "name">,
+  publicUrl: string,
+): Promise<string | null> {
+  try {
+    const loaded = isServiceKind(server.kind)
+      ? await loadService(ctx, server.id)
+      : await serviceBehind(ctx, server.id)
+
+    if (!loaded) {
+      return null
+    }
+
+    const access = await serviceAccess(ctx, loaded, { publicUrl })
+
+    if (!access) {
+      return `It runs as the service ${loaded.server.name}, whose SSH server is no longer in PCP.`
+    }
+
+    const words = statusWords(
+      loaded.server.name,
+      await serviceStatusOn(loaded, access),
+    )
+    return isServiceKind(server.kind)
+      ? words
+      : `It runs as the service ${loaded.server.slug}: ${words}`
+  } catch (error) {
+    return `Its service could not be read: ${error instanceof Error ? error.message.slice(0, 300) : String(error)}`
+  }
 }

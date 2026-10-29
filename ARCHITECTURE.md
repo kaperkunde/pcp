@@ -467,7 +467,8 @@ The same server can be in a vault more than once: one Coolify API on two
 hosts, with two keys. What makes it that API is shared; where it is and how
 PCP signs in there is not. So every MCP server, API endpoint and wrapper is
 an **instance** of a **definition** (`server_definition`, `lib/core/
-definitions.ts`), alone at first.
+definitions.ts`), alone at first; so is every service (below, "Services":
+its definition is what runs, its instance where).
 
 - **Definition:** what the server is, as it could be shared, without an
   address, a secret or anything of the owner's: its own slug and name, the
@@ -926,6 +927,117 @@ one is answered with the server's page in PCP, for the owner; a server that
 cannot be reached is an error. Limits are in `ssh/limits.ts`. The test server
 (`ssh/fake-server.ts`) is `ssh2`'s own server. The request log keeps the call
 by name like any other, never the command or its output.
+
+## Services
+
+A service is a container PCP runs with the Docker or Podman engine the owner
+already runs on one of their SSH servers, Coolify-style: by running the
+engine's own command line over SSH `exec` (`lib/core/services/`). PCP never
+installs an engine, never reaches its socket (on the SSH server or its own
+machine), and starts no child process: the commands run on the SSH server,
+through the ssh module's client. Only the owner launches, changes and removes
+one (Servers → Add → Service); an assistant uses its tools at the owner's
+levels.
+
+**Rows.** A service is a server row of kind `service` (`url` the fixed
+`pcp:service`), an instance of a definition of kind `service`, with a
+`service_spec` beside it:
+
+- `definition` (shared, JSON, `services/definition.ts`): the image pinned by
+  digest (`repository@sha256:…`) and optionally the `source` tag an update
+  resolves to a new digest; its container `ports`; its variables (`env`: a
+  name, a description, whether it is required, and optionally a fixed value
+  that is no secret); its `volumes`, named volumes only, made on the host as
+  `<container>-<name>` and mounted at an absolute path (never a path on the
+  host, so a definition reads and writes none of the host's files); `args`
+  after the image; a `health` check (`{kind: "http", port, path}` or
+  `{kind: "none"}`); and what it `registers`: `{kind: "openapi", port,
+specPath, basePath, auth?}` (an API endpoint from the schema it serves,
+  `auth` naming the variable whose secret the endpoint sends in a header),
+  `{kind: "mcp", port, path}` or `{kind: "none"}`. The union stays open for
+  an exit next. `hash` is its canonical JSON's SHA-256, and
+  `definitionBasis` includes it. `writeServiceDefinition` writes it on every
+  instance, as `writeWrapper` does a program.
+- The instance's own part: `host_id` (the SSH server; null once that is
+  deleted, and the container stays there), `engine` and `engine_version`
+  (found at launch), `container_name` (`pcp-<name>`, unique among the
+  vault's services on that host), `publish` (`{address, ports: [{container,
+host}]}`, the host's IP address the ports are bound to), `env` (`{NAME:
+secret id}`, never a value) and `registered_id` (the endpoint or MCP
+  server it registered).
+
+**Commands.** Every command is words built from checked fields (image
+references, ports, names, volume names and paths, arguments, each against a
+strict pattern in `definition.ts`) and quoted by `services/shell.ts`, the
+one quoting helper; the whole script goes to the login shell as `sh -c
+'<script>'`, so the script is sh's whatever the login's shell is. Nothing
+anyone typed is pasted in as shell text. The engine is found with `command
+-v docker`, then `podman` (`detectEngine`), and then only that program name
+starts a command. A container is made with `run --detach --name
+pcp-<name> --label pcp.service=<service id> --restart unless-stopped`, its
+ports, volumes, `--env-file` and the image by digest, the image's arguments
+after it. The variables' values go over standard input: the script sets
+`umask 077`, writes stdin to a `mktemp` file, passes it as `--env-file` and
+deletes it on exit, so a value is never on a command line (where `ps` shows
+it) and a value with a line break is refused (an env file cannot carry
+one). State is read with `inspect --format` naming only the state, the
+image and the labels, never the whole inspect (which holds the
+environment). Logs are `logs --timestamps --tail N [--since]`, bounded
+(`services/limits.ts`), and every secret value is scrubbed from them and
+from every engine error. Start, stop (with a grace time) and restart are the
+engine's own; a container whose `pcp.service` label is not the service's is
+left alone.
+
+**Secrets.** Decrypted only in `upstream.ts`, which builds a `ServiceAccess`
+for the services module: a `ServiceHost` (runs one command on the SSH server
+with PCP's key for it, never pinning a host key, and only on a server whose
+host key the owner pinned) and a `ServiceEnv` (the values by name, and the
+secrets to scrub). The service's variables name secrets by id; only text
+secrets the owner typed qualify. Saving a secret with a new value makes every
+service that takes it again (`restartServicesUsingSecret`, through `after()`
+in that save's request: a restart alone would keep the old value), and a
+secret a service takes cannot be deleted under it.
+
+**Launching** (`upstream.ts launchService`, `services.ts launchServiceOn`):
+everything is checked before anything connects (the SSH server, the
+definition, the publish address and ports, the secrets, and that PCP can
+reach what it registers: a port bound to the SSH server's loopback is
+reachable only when PCP runs on that machine, until it can forward through
+the SSH connection). Then PCP finds the engine, pulls the image, runs the
+container, waits up to 90 seconds for it to be healthy (its HTTP health
+check from PCP when it can reach it, else the image's own check, else
+running is enough; a container that exits fails at once), makes the
+service's own server and its tools, and registers what it serves: an API
+endpoint (`createEndpoint` with the schema at `specPath`, the base URL at
+`basePath`, `publicOnly` off, since it is the owner's own machine, and the
+`auth` variable's secret as its header) or an MCP server (`createServer`,
+its tools read at once). A failure past starting the container removes the
+container and its volumes and whatever was made, and the error says what was
+taken back, with the container's last lines (scrubbed) when it did not
+become healthy.
+
+**Status** is read only inside a request: the service's page when it opens
+(and on Check), `check_server` (for the service and for the server it
+serves), the owner's Check, and a failing call. Nothing polls: there is no
+stored key. A call to the endpoint or MCP server a service registered that
+fails with "could not be reached" reads the service's state (`dispatchCall`
+in `upstream.ts`) and, when it is stopped, gone or unhealthy, says so, with
+the service's `start` tool and its page, instead of a bare failure.
+
+**Tools** (`services/tools.ts`, on the service's own server): `status` and
+`logs` (read-only; `lines` 1 to 500, `since_minutes` up to a week), `start`
+(makes the container again from the definition when it is gone), `stop` and
+`restart`, their arguments checked before anything connects. None takes a
+command, an image or a variable. **Update** (the owner's) resolves the
+definition's `source` to its newest digest, pins it on the definition and
+makes this instance's container again; other instances show that they run an
+older image. **Remove** (the owner's, on the service's page; `deleteServer`
+refuses a service) removes the container first, its volumes and the server
+it serves as chosen.
+
+The test engine (`services/fake-docker.ts`) is a Node program on the PATH of
+a real sh that the test SSH server runs each command in, recording the
+words it got and the env file it read.
 
 ## Memories
 

@@ -47,7 +47,15 @@ export type AuthType = "none" | "header" | "oauth" | "basic"
 export type StoredAuthType = AuthType | "key"
 
 export type ServerKind =
-  "mcp" | "openapi" | "jmap" | "imap" | "caldav" | "ssh" | "browser" | "wrapper"
+  | "mcp"
+  | "openapi"
+  | "jmap"
+  | "imap"
+  | "caldav"
+  | "ssh"
+  | "browser"
+  | "wrapper"
+  | "service"
 
 export type MailKind = Extract<ServerKind, "jmap" | "imap">
 
@@ -60,6 +68,7 @@ const SERVER_KINDS: readonly ServerKind[] = [
   "ssh",
   "browser",
   "wrapper",
+  "service",
 ]
 
 /**
@@ -99,6 +108,11 @@ export function isSshKind(kind: string): kind is "ssh" {
   return kind === "ssh"
 }
 
+/** A container PCP runs on one of the owner's SSH servers (lib/core/services/). */
+export function isServiceKind(kind: string): kind is "service" {
+  return kind === "service"
+}
+
 /** What a kind is called in a sentence: "an API endpoint". */
 export function kindNoun(kind: string): string {
   switch (asServerKind(kind)) {
@@ -115,6 +129,8 @@ export function kindNoun(kind: string): string {
       return "the browser"
     case "wrapper":
       return "a wrapper"
+    case "service":
+      return "a service"
     default:
       return "an MCP server"
   }
@@ -1125,6 +1141,15 @@ export async function setServerEnabled(
 
 export async function deleteServer(ctx: VaultContext, id: string) {
   const existing = await getServer(ctx, id)
+
+  // Its container is on the SSH server: services/services.ts removes it
+  // there first.
+  if (existing.kind === "service") {
+    throw new PcpError(
+      "state",
+      "Remove a service on its own page: PCP removes its container from the SSH server first.",
+    )
+  }
   await db().mcpServer.delete({ where: { id } })
   // The last instance takes its definition with it; others keep it.
   await forgetUnusedDefinition(existing.definitionId)

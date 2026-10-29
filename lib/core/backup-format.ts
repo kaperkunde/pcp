@@ -20,6 +20,7 @@ import type {
   SecretBrowserOrigin,
   ServerAuthHeader,
   ServerDefinition,
+  ServiceSpec,
   Setting,
   Skill,
   Vault,
@@ -386,6 +387,22 @@ const WrapperSpecRow = z.strictObject({
   updatedAt: date,
 })
 
+// Services, added with the service kind: absent from older files.
+const ServiceSpecRow = z.strictObject({
+  serverId: id,
+  definition: str,
+  hash: str,
+  hostId: id.nullable(),
+  engine: str,
+  engineVersion: str.default(""),
+  containerName: str,
+  publish: str.default("{}"),
+  env: str.default("{}"),
+  registeredId: id.nullable(),
+  createdAt: date,
+  updatedAt: date,
+})
+
 // Linked repositories, added in 0.5: absent from older files.
 const RepoRow = z.strictObject({
   id,
@@ -489,6 +506,7 @@ export const PayloadSchema = z.strictObject({
     tools: z.array(McpToolRow),
     openApiSpecs: z.array(OpenApiSpecRow),
     wrapperSpecs: z.array(WrapperSpecRow).default([]),
+    serviceSpecs: z.array(ServiceSpecRow).default([]),
     repos: z.array(RepoRow).default([]),
     repoItems: z.array(RepoItemRow).default([]),
     repoExclusions: z.array(RepoExclusionRow).default([]),
@@ -528,6 +546,7 @@ export type ExportPreview = {
     endpoints: number
     mailAccounts: number
     sshServers: number
+    services: number
     calendarAccounts: number
     wrappers: number
     tools: number
@@ -738,6 +757,12 @@ export function checkReferences(payload: ExportPayload): void {
     pointsAt(spec.serverId, servers, "a server")
   }
 
+  for (const spec of tables.serviceSpecs) {
+    pointsAt(spec.serverId, servers, "a server")
+    pointsAt(spec.hostId, servers, "a service's SSH server")
+    pointsAt(spec.registeredId, servers, "the server a service registered")
+  }
+
   for (const repo of tables.repos) {
     pointsAt(repo.secretId, secrets, "a repository's secret")
   }
@@ -805,6 +830,7 @@ export function previewOf(
         (row) => row.kind === "jmap" || row.kind === "imap",
       ).length,
       sshServers: tables.servers.filter((row) => row.kind === "ssh").length,
+      services: tables.servers.filter((row) => row.kind === "service").length,
       calendarAccounts: tables.servers.filter((row) => row.kind === "caldav")
         .length,
       wrappers: tables.servers.filter((row) => row.kind === "wrapper").length,
@@ -897,6 +923,7 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: Covers<McpTool, z.output<typeof McpToolRow>>
   openApiSpec: Covers<OpenApiSpec, z.output<typeof OpenApiSpecRow>>
   wrapperSpec: Covers<WrapperSpec, z.output<typeof WrapperSpecRow>>
+  serviceSpec: Covers<ServiceSpec, z.output<typeof ServiceSpecRow>>
   repo: Covers<Repo, z.output<typeof RepoRow>>
   repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
   repoExclusion: Covers<RepoExclusion, z.output<typeof RepoExclusionRow>>
@@ -923,6 +950,7 @@ export const FORMAT_COVERS_SCHEMA: {
   tool: true,
   openApiSpec: true,
   wrapperSpec: true,
+  serviceSpec: true,
   repo: true,
   repoItem: true,
   repoExclusion: true,

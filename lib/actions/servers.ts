@@ -188,7 +188,9 @@ export async function refreshToolsAction(
           ? sync.message
           : server.kind === "ssh"
             ? "PCP signed in."
-            : `Found ${toolCount(sync.toolCount)}.`,
+            : server.kind === "service"
+              ? "It is running."
+              : `Found ${toolCount(sync.toolCount)}.`,
     }
   })
 

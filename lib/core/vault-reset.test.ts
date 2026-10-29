@@ -78,6 +78,27 @@ async function populate() {
     authValueTemplate: "Bearer {{secret}}",
     authSecretId: secret.id,
   })
+  // A service on an SSH server: rows only, nothing connects here.
+  await db().mcpServer.create({
+    data: {
+      id: "svc1",
+      vaultId,
+      kind: "service",
+      name: "Docs service",
+      slug: "docs-service",
+      url: "pcp:service",
+      serviceSpec: {
+        create: {
+          definition: "{}",
+          hash: "0",
+          engine: "docker",
+          containerName: "pcp-docs",
+          env: JSON.stringify({ API_KEY: secret.id }),
+          registeredId: server.id,
+        },
+      },
+    },
+  })
   await storeTools(server.id, [
     { name: "alpha", description: "First", inputSchema: { type: "object" } },
   ])
@@ -145,6 +166,7 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.secret_browser_origin).toBe(1)
     expect(before.api_token_secret_allowance).toBe(1)
     expect(before.server_definition).toBe(1)
+    expect(before.service_spec).toBe(1)
 
     await deleteVault(ctx)
 

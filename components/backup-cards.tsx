@@ -423,6 +423,7 @@ function PreviewList({ preview }: { preview: ExportPreview }) {
     plural(counts.endpoints, "API endpoint"),
     plural(counts.mailAccounts, "mail account"),
     ...(counts.sshServers > 0 ? [plural(counts.sshServers, "SSH server")] : []),
+    ...(counts.services > 0 ? [plural(counts.services, "service")] : []),
     ...(counts.calendarAccounts > 0
       ? [plural(counts.calendarAccounts, "calendar account")]
       : []),

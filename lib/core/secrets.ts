@@ -3,6 +3,7 @@ import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
+import { readEnvBindings } from "./services/definition"
 import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
 
 /**
@@ -337,12 +338,20 @@ export async function deleteSecret(ctx: VaultContext, id: string) {
     throw notFound("That secret")
   }
 
+  // A service's variables name secrets in its spec, by id.
+  const services = (
+    await db().serviceSpec.findMany({
+      where: { server: { vaultId: ctx.vaultId }, env: { contains: id } },
+      select: { env: true, server: { select: { name: true } } },
+    })
+  ).filter((spec) => Object.values(readEnvBindings(spec.env)).includes(id))
   const users = [
     ...new Set(
       [
         ...row.authFor,
         ...row.authHeaderFor.map((header) => header.server),
         ...row.oauthClientFor,
+        ...services.map((spec) => spec.server),
       ].map((server) => server.name),
     ),
   ]
