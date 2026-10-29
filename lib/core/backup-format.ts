@@ -221,6 +221,10 @@ const PermissionRequestRow = z.strictObject({
   via: str.nullable(),
   resultCiphertext: bytesOrNull,
   resultIsError: z.boolean(),
+  // Added with answering an identical call from a run allowed once: absent
+  // from older files, whose calls then answer nothing again.
+  resultJsonCiphertext: bytesOrNull.default(null),
+  reuseUntil: dateOrNull.default(null),
   createdAt: date,
   expiresAt: date,
   decidedAt: dateOrNull,

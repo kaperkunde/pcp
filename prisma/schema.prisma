@@ -376,6 +376,15 @@ model PermissionRequest {
   /// The result text, clipped, encrypted with "permission_request:<id>:result".
   resultCiphertext Bytes?     @map("result_ciphertext")
   resultIsError    Boolean    @default(false) @map("result_is_error")
+  /// call: the answer as a run_code program is handed it (answers.ts
+  /// answerValue, files and long texts as handles), as JSON, encrypted with
+  /// "permission_request:<id>:result_json". Kept only for a call the owner
+  /// allowed once, and only when short enough (REUSE_VALUE_MAX_CHARS).
+  resultJsonCiphertext Bytes? @map("result_json_ciphertext")
+  /// call allowed once that ran: until when the same token's identical call
+  /// is answered with this run's answer instead of asking again. Cleared
+  /// when that happens, so it answers one such call.
+  reuseUntil       DateTime?  @map("reuse_until")
   createdAt        DateTime   @default(now()) @map("created_at")
   expiresAt        DateTime   @map("expires_at")
   decidedAt        DateTime?  @map("decided_at")

@@ -5,6 +5,7 @@ import { isConnectResult } from "../connect"
 import { isPcpError } from "../errors"
 import { bareType, isTextType } from "../media-types"
 import type { CodeCallOutcome, PermissionScope } from "../permissions"
+import { REUSE_EXECUTED_MS } from "../permission-rules"
 import {
   appendRequestLog,
   noteOwnerAsked,
@@ -485,7 +486,7 @@ async function answerFor(
         ...effectLines(trace),
         isConnectResult(stop.result)
           ? "Once the owner has connected it (check_server says when), run the program again."
-          : "Once the owner has answered below, run the program again (if they allowed the tool only once, check_permission gives that one call's answer instead; for the program to make it, they choose Always allow, or Allow for while that lasts).",
+          : `If the owner allows it once, that one call runs right then: don't run the program again for it — check_permission gives its answer (an identical call within ${REUSE_EXECUTED_MS / 60_000} minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.`,
       ].join("\n\n"),
       stop.result,
     )
