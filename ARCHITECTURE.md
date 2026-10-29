@@ -3234,22 +3234,36 @@ above). A request without a valid
 token is answered 401, and a token makes at most 240 requests a minute, one
 message each (`app/mcp/route.ts`). The tools:
 
-- `search(query, server?, kind?, limit?)` ranks the catalogue, the skills
+- `search(query, server?, kind?, limit?)` ranks the catalogue, PCP's own
+  tools the token has (as `buildGatewayServer` registered them), the skills
   the token sees and (for a token that keeps memories) the memories it reads
   together (`lib/core/search.ts searchEverything`: name, title, description
   and server words, with light stemming; a skill scores as a tool named
   after it, a memory as one named by its path and described by its text),
-  and returns `kind ref — line` lines: `tool server/tool`, `skill
-skill:<name>` with its description, `memory /memories/…` with the line
-  that says most of the query. `server` keeps to one server's tools, `kind`
-  to one kind.
+  and returns `kind ref — line` lines: `tool server/tool`, `pcp <name>`
+  with its title, first sentence and that it is called directly (not
+  through `call_tool`), `skill skill:<name>` with its description, `memory
+/memories/…` with the line that says most of the query. A name the query
+  gives exactly (the whole query, or a term in it that reads as a name;
+  `server/name` too; case, `-`, `_`, `.` and spaces aside, and without an
+  app's prefix such as `mcp__PCP_Bazzite__`, which the answer then names)
+  ranks first, then a name the query starts. A word counts for a server's
+  description or the owner's note on it only when no candidate has that
+  word in its name, its title or its server's name, so "PCP" does not lift
+  every tool on a server described as hosting PCP. One of PCP's own tools
+  comes up by its name or title only (the app lists them whole already),
+  and with an empty query only for kind `pcp`. `server` keeps to one
+  server's tools, `kind` to one kind (`tool`, `pcp`, `skill`, `memory`).
 - `list_tools(server, offset?)` names every tool the token sees on one
   server, by name, with its level (`allowed` or `ask`) and a summary,
   `LIST_PAGE_SIZE` at a time (`listTools` in `lib/core/search.ts`), so an
   access review does not depend on what a search happens to rank.
 - `describe(ref)` (or `describe(server, tool)`) reads what search
   found: a skill (Skills, above), a memory as `read_memory view` gives it,
-  or a tool. For a tool it returns the description (the owner's
+  one of PCP's own tools (its name, also with an app's prefix or as
+  `pcp/<name>`: its title, description, input and output schema and
+  annotations, with no `call_handle`, since it is called directly), or a
+  tool. For a tool it returns the description (the owner's
   override when there is one), the JSON Schema exactly as the upstream
   published it, whether the tool runs at once or asks first, and for an API
   endpoint's tool, `returns`: an outline of its success answer read from the

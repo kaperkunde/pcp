@@ -38,6 +38,10 @@ const STOP_WORDS = new Set([
   "get",
 ])
 
+/** A name's tier: an exact match ranks above everything, a prefix next. */
+const EXACT = 1000
+const PREFIX = 500
+
 /** Words from a query or a name: lower case, split on case and symbols. */
 export function tokenize(text: string): string[] {
   return text
@@ -57,24 +61,180 @@ function stem(word: string): string {
   return word
 }
 
-function scoreOne(candidate: ToolCandidate, words: string[], query: string) {
+/**
+ * A name as an exact match compares it: lower case, its words (by case or
+ * by any of - _ . and spaces) joined by _, a / kept. "check-permission",
+ * "Check permission" and "checkPermission" are all check_permission.
+ */
+export function normalName(text: string): string {
+  return text
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[^a-z0-9/]+/g, "_")
+    .replace(/_*\/_*/g, "/")
+    .replace(/^_+|_+$/g, "")
+}
+
+/**
+ * What a name may be once an app's prefix for a server's tools is taken
+ * off (mcp__PCP_Bazzite__run_code, as Claude's apps name PCP's tools): the
+ * text itself first, then what follows each __ after mcp__.
+ */
+function withoutClientPrefix(text: string): string[] {
+  const variants = [text]
+
+  if (/^mcp__/i.test(text)) {
+    for (
+      let at = text.indexOf("__", 6);
+      at >= 0;
+      at = text.indexOf("__", at + 1)
+    ) {
+      const rest = text.slice(at + 2)
+
+      if (rest && !rest.startsWith("_")) {
+        variants.push(rest)
+      }
+    }
+  }
+
+  return variants
+}
+
+/**
+ * A name given with an app's prefix (mcp__<server>__<name>) and the one of
+ * `names` it stands for, or null when it has no such prefix or names none.
+ */
+export function clientPrefixed(
+  text: string,
+  names: Iterable<string>,
+): { prefix: string; name: string } | null {
+  const given = text.trim()
+  const known = new Map([...names].map((name) => [normalName(name), name]))
+
+  for (const variant of withoutClientPrefix(given).slice(1)) {
+    const name = known.get(normalName(variant))
+
+    if (name) {
+      return { prefix: given.slice(0, given.length - variant.length), name }
+    }
+  }
+
+  return null
+}
+
+/** What search and describe say when a name came with an app's prefix. */
+export function clientPrefixNote(prefixed: {
+  prefix: string
+  name: string
+}): string {
+  return `"${prefixed.prefix}" is your app's prefix for PCP's tools, not part of the name: the tool is ${prefixed.name}, and you call it directly.`
+}
+
+/** A query, read once for every candidate. */
+type Query = {
+  /** Lower case, trimmed. */
+  cleaned: string
+  /** Its words, stop words left out. */
+  words: string[]
+  /**
+   * What would be a tool's name: the whole query, and each term in it that
+   * reads as a name (it has _ - . / or a capital inside), each also without
+   * an app's prefix, as normalName writes them.
+   */
+  names: string[]
+}
+
+function readQuery(query: string): Query {
+  const raw = query.trim()
+  const cleaned = raw.toLowerCase()
+  const terms = raw
+    .split(/\s+/)
+    .filter((term) => /[_./-]|[a-z][A-Z]/.test(term) && term !== raw)
+
+  return {
+    cleaned,
+    words: tokenize(cleaned).filter((word) => !STOP_WORDS.has(word)),
+    names: [
+      ...new Set(
+        [raw, ...terms]
+          .flatMap(withoutClientPrefix)
+          .map(normalName)
+          .filter(Boolean),
+      ),
+    ],
+  }
+}
+
+/**
+ * The words of a query that some candidate has in its name, its title, or
+ * its server's short name or name: for those, a server's description or
+ * the owner's note on it counts for nothing, so a word ("PCP") that a
+ * server's description happens to use does not lift each of its tools over
+ * the tools named by it.
+ */
+function namedWords(candidates: ToolCandidate[], words: string[]): Set<string> {
+  const named = new Set<string>()
+
+  for (const candidate of candidates) {
+    if (named.size === words.length) break
+
+    const text =
+      `${candidate.name} ${candidate.title ?? ""} ${candidate.server} ${candidate.serverName}`.toLowerCase()
+    const stems = new Set(tokenize(text).map(stem))
+
+    for (const word of words) {
+      if (stems.has(stem(word)) || text.includes(word)) {
+        named.add(word)
+      }
+    }
+  }
+
+  return named
+}
+
+/** Whether a word of the query is in a candidate's name or title. */
+function namesAWord(candidate: ToolCandidate, words: string[]): boolean {
+  const text = `${candidate.name} ${candidate.title ?? ""}`.toLowerCase()
+  const stems = new Set(tokenize(text).map(stem))
+
+  return words.some((word) => stems.has(stem(word)) || text.includes(word))
+}
+
+/** EXACT when the query names the candidate, PREFIX when it starts its name. */
+function nameTier(candidate: ToolCandidate, names: string[]): number {
+  const bare = normalName(candidate.name)
+  const full = normalName(`${candidate.server}/${candidate.name}`)
+
+  if (names.some((name) => name === bare || name === full)) {
+    return EXACT
+  }
+
+  return names.some(
+    (name) =>
+      name.length >= 3 &&
+      (bare.startsWith(name) || (name.includes("/") && full.startsWith(name))),
+  )
+    ? PREFIX
+    : 0
+}
+
+function scoreOne(
+  candidate: ToolCandidate,
+  { words, cleaned: query, names }: Query,
+  named: ReadonlySet<string> | null = null,
+) {
   const name = candidate.name.toLowerCase()
   const nameWords = tokenize(candidate.name).map(stem)
   const title = (candidate.title ?? "").toLowerCase()
   const description = candidate.description.toLowerCase()
   const descriptionWords = new Set(tokenize(candidate.description).map(stem))
   const server = `${candidate.server} ${candidate.serverName}`.toLowerCase()
-  const serverWords = new Set(
-    tokenize(
-      `${candidate.server} ${candidate.serverName} ${candidate.serverDescription}`,
-    ).map(stem),
-  )
+  const serverWords = new Set(tokenize(server).map(stem))
+  const aboutServer = new Set(tokenize(candidate.serverDescription).map(stem))
 
-  let score = 0
+  let score = nameTier(candidate, names)
 
-  if (query && (name === query || `${candidate.server}/${name}` === query)) {
-    score += 40
-  } else if (query && name.includes(query)) {
+  if (!score && query && name.includes(query)) {
     score += 15
   }
 
@@ -99,7 +259,11 @@ function scoreOne(candidate: ToolCandidate, words: string[], query: string) {
       score += 1
     }
 
-    if (serverWords.has(word) || server.includes(raw)) {
+    if (
+      serverWords.has(word) ||
+      server.includes(raw) ||
+      (aboutServer.has(word) && !named?.has(raw))
+    ) {
       score += 3
     }
   }
@@ -116,8 +280,8 @@ export function searchTools(
     ? candidates.filter((candidate) => candidate.server === server)
     : candidates
 
-  const cleaned = query.trim().toLowerCase()
-  const words = tokenize(cleaned).filter((word) => !STOP_WORDS.has(word))
+  const read = readQuery(query)
+  const { cleaned, words } = read
 
   if (!cleaned || words.length === 0) {
     return scoped
@@ -130,10 +294,12 @@ export function searchTools(
       .map((candidate) => ({ ...candidate, score: 0 }))
   }
 
+  const named = namedWords(candidates, words)
+
   return scoped
     .map((candidate) => ({
       ...candidate,
-      score: scoreOne(candidate, words, cleaned),
+      score: scoreOne(candidate, read, named),
     }))
     .filter((match) => match.score > 0)
     .sort(
@@ -151,12 +317,29 @@ export type SkillCandidate = { name: string; description: string }
 /** A memory as search sees it: its full path and its text. */
 export type MemoryCandidate = { path: string; text: string }
 
-export type SearchKind = "tool" | "skill" | "memory"
+/**
+ * One of PCP's own tools the token has (gateway.ts registers them), which
+ * an assistant calls directly, never through call_tool.
+ */
+export type PcpToolCandidate = {
+  name: string
+  title: string
+  description: string
+}
+
+export type SearchKind = "tool" | "pcp" | "skill" | "memory"
+
+/** What a result of kind pcp says after its line. */
+export const PCP_TOOL_NOTE =
+  "PCP's own tool: call it directly (not through call_tool)."
 
 /** One result of search: what it is, how describe names it, one line on it. */
 export type SearchResult = {
   kind: SearchKind
-  /** tool: server/tool; skill: skill:<name>; memory: its path. */
+  /**
+   * tool: server/tool; pcp: the tool's name; skill: skill:<name>; memory:
+   * its path.
+   */
   ref: string
   /** A tool's title, when it has one. */
   title: string | null
@@ -165,7 +348,24 @@ export type SearchResult = {
 }
 
 /** Where kinds that score the same come in a list. */
-const KIND_ORDER: Record<SearchKind, number> = { skill: 0, tool: 1, memory: 2 }
+const KIND_ORDER: Record<SearchKind, number> = {
+  skill: 0,
+  tool: 1,
+  pcp: 2,
+  memory: 3,
+}
+
+/** One of PCP's own tools, scored as a tool on a server called pcp. */
+function pcpCandidate(tool: PcpToolCandidate): ToolCandidate {
+  return {
+    server: "pcp",
+    serverName: "PCP",
+    serverDescription: "",
+    name: tool.name,
+    title: tool.title,
+    description: tool.description,
+  }
+}
 
 /**
  * A memory's line in a search: the line that mentions most words of the
@@ -193,18 +393,22 @@ function memoryLine(text: string, words: string[]): string {
 }
 
 /**
- * Tools, skills and memories ranked together for one query, scored the
- * same way: a skill as a tool whose name is its name, a memory as one whose
- * name is its path and whose description is its text. `server` keeps to
+ * Tools, PCP's own tools, skills and memories ranked together for one
+ * query, scored the same way: one of PCP's tools as a tool on a server
+ * called pcp, a skill as a tool whose name is its name, a memory as one
+ * whose name is its path and whose description is its text. A name the
+ * query gives exactly comes first, then one it starts. `server` keeps to
  * that server's tools; `kind` to one kind.
  */
 export function searchEverything(
   {
     tools,
+    pcp = [],
     skills = [],
     memories = [],
   }: {
     tools: ToolCandidate[]
+    pcp?: PcpToolCandidate[]
     skills?: SkillCandidate[]
     memories?: MemoryCandidate[]
   },
@@ -215,10 +419,12 @@ export function searchEverything(
     kind,
   }: { limit?: number; server?: string | null; kind?: SearchKind | null } = {},
 ): SearchResult[] {
-  const cleaned = query.trim().toLowerCase()
-  const words = tokenize(cleaned).filter((word) => !STOP_WORDS.has(word))
+  const read = readQuery(query)
+  const { cleaned, words } = read
   const wants = (wanted: SearchKind) =>
     (!kind || kind === wanted) && (!server || wanted === "tool")
+  const own = pcp.map(pcpCandidate)
+  const named = words.length ? namedWords([...tools, ...own], words) : null
 
   const toolResults = wants("tool")
     ? (server ? tools.filter((tool) => tool.server === server) : tools).map(
@@ -227,9 +433,26 @@ export function searchEverything(
           ref: `${tool.server}/${tool.name}`,
           title: tool.title,
           description: summarize(tool.description) || "no description",
-          score: words.length ? scoreOne(tool, words, cleaned) : 0,
+          score: words.length ? scoreOne(tool, read, named) : 0,
         }),
       )
+    : []
+  const pcpResults = wants("pcp")
+    ? own.map((tool): SearchResult => ({
+        kind: "pcp",
+        ref: tool.name,
+        title: tool.title,
+        description: `${summarize(tool.description)} ${PCP_TOOL_NOTE}`,
+        // The app lists PCP's tools whole already: one comes up by its
+        // name or title (or for "pcp"), not by a word of its description.
+        score:
+          words.length &&
+          (namesAWord(tool, words) ||
+            nameTier(tool, read.names) > 0 ||
+            words.every((word) => word === "pcp"))
+            ? scoreOne(tool, read, named)
+            : 0,
+      }))
     : []
   const skillResults = wants("skill")
     ? skills.map((skill): SearchResult => {
@@ -244,8 +467,7 @@ export function searchEverything(
                 title: null,
                 description: skill.description,
               },
-              words,
-              cleaned,
+              read,
             ) + (cleaned === ref ? 40 : 0)
           : 0
 
@@ -274,8 +496,7 @@ export function searchEverything(
                 title: null,
                 description: memory.text,
               },
-              words,
-              cleaned,
+              read,
             ) + (cleaned === memory.path.toLowerCase() ? 40 : 0)
           : 0,
       }))
@@ -286,16 +507,56 @@ export function searchEverything(
     KIND_ORDER[a.kind] - KIND_ORDER[b.kind] ||
     a.ref.localeCompare(b.ref)
 
-  // Nothing to rank by: the skills, then the tools, in name order. A memory
-  // is found by what it says, or listed by read_memory.
+  // Nothing to rank by: the skills, then the tools, in name order (PCP's
+  // own only when asked for: the app lists those already). A memory is
+  // found by what it says, or listed by read_memory.
   if (!cleaned || words.length === 0) {
-    return [...skillResults, ...toolResults].sort(order).slice(0, limit)
+    return [
+      ...skillResults,
+      ...toolResults,
+      ...(kind === "pcp" ? pcpResults : []),
+    ]
+      .sort(order)
+      .slice(0, limit)
   }
 
-  return [...toolResults, ...skillResults, ...memoryResults]
+  return [...toolResults, ...pcpResults, ...skillResults, ...memoryResults]
     .filter((result) => result.score > 0)
     .sort(order)
     .slice(0, limit)
+}
+
+/** One of PCP's own tools as describe gives it. */
+export type OwnToolDescription = PcpToolCandidate & {
+  inputSchema: Record<string, unknown>
+  outputSchema?: Record<string, unknown> | undefined
+  annotations: Record<string, boolean>
+}
+
+/**
+ * describe's answer for one of PCP's own tools: what it is and its schemas,
+ * and that it is called directly, so it has no call_handle. `note` says
+ * first what describe made of the name it was given.
+ */
+export function describeOwnTool(
+  tool: OwnToolDescription,
+  note: string | null = null,
+): string {
+  return JSON.stringify(
+    {
+      ...(note ? { note } : {}),
+      tool: tool.name,
+      kind: "pcp",
+      call: `PCP's own tool: call ${tool.name} directly, with arguments that match its inputSchema, not through call_tool. It has no call_handle.`,
+      title: tool.title,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+      annotations: tool.annotations,
+    },
+    null,
+    1,
+  )
 }
 
 /** The first sentence, cut to fit one line of a search result. */

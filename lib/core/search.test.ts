@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  clientPrefixed,
+  describeOwnTool,
   listTools,
+  normalName,
+  PCP_TOOL_NOTE,
   searchEverything,
   searchTools,
   summarize,
   tokenize,
   type ListedTool,
+  type PcpToolCandidate,
   type ToolCandidate,
 } from "./search"
 
@@ -218,5 +223,164 @@ describe("searchEverything", () => {
       "skill:weekly-review",
       "github/create_issue",
     ])
+  })
+})
+
+describe("PCP's own tools in search (#41)", () => {
+  // As the field report had them: a server whose description says it hosts
+  // PCP, tools named like PCP's on other servers, and PCP's own.
+  const upstream: ToolCandidate[] = [
+    {
+      server: "bazzite",
+      serverName: "Bazzite",
+      serverDescription:
+        "My local gaming machine runs my arr stack, as well as hosts this PCP server",
+      name: "run_command",
+      title: "Run a command",
+      description: "Run one command on the machine and answer its output.",
+    },
+    {
+      server: "coolify",
+      serverName: "Coolify",
+      serverDescription: "Deployments.",
+      name: "check-server-registry-login",
+      title: null,
+      description: "Check whether a server is logged in to a registry.",
+    },
+    {
+      server: "porkbun",
+      serverName: "Porkbun",
+      serverDescription: "Domains.",
+      name: "check_domain",
+      title: "Check a domain",
+      description: "Check whether a domain is free, and its price.",
+    },
+  ]
+  const pcp: PcpToolCandidate[] = [
+    {
+      name: "check_permission",
+      title: "Check a permission request",
+      description:
+        "Whether the owner has answered a request, and its answer once they have.",
+    },
+    {
+      name: "withdraw_request",
+      title: "Withdraw a request",
+      description: "Take back a request you no longer need.",
+    },
+    {
+      name: "run_code",
+      title: "Run code",
+      description: "Run a program that calls the owner's tools.",
+    },
+    {
+      name: "delete_wrapper",
+      title: "Delete a wrapper",
+      description:
+        "Propose deleting a wrapper on PCP's page; call check_permission once the owner says they answered.",
+    },
+  ]
+  const refs = (query: string, options = {}) =>
+    searchEverything({ tools: upstream, pcp }, query, options).map(
+      (result) => `${result.kind} ${result.ref}`,
+    )
+
+  it("ranks an exact name first, PCP's own tools included", () => {
+    expect(refs("check_permission PCP")[0]).toBe("pcp check_permission")
+    expect(refs("run_code")[0]).toBe("pcp run_code")
+    expect(refs("withdraw")[0]).toBe("pcp withdraw_request")
+    expect(refs("porkbun/check_domain")[0]).toBe("tool porkbun/check_domain")
+  })
+
+  it("matches a name whatever its case and separators", () => {
+    expect(normalName("Check-Permission")).toBe("check_permission")
+    expect(normalName("checkPermission")).toBe("check_permission")
+    expect(refs("Check permission")[0]).toBe("pcp check_permission")
+    expect(refs("check server registry login")[0]).toBe(
+      "tool coolify/check-server-registry-login",
+    )
+    expect(refs("coolify/check_server_registry_login")[0]).toBe(
+      "tool coolify/check-server-registry-login",
+    )
+  })
+
+  it("takes an app's prefix off a name", () => {
+    expect(refs("mcp__PCP_Bazzite__run_code")[0]).toBe("pcp run_code")
+    expect(refs("mcp__claude_ai_PCP__withdraw_request")[0]).toBe(
+      "pcp withdraw_request",
+    )
+    expect(
+      clientPrefixed("mcp__PCP_Bazzite__run_code", ["run_code", "search"]),
+    ).toEqual({ prefix: "mcp__PCP_Bazzite__", name: "run_code" })
+    expect(clientPrefixed("run_code", ["run_code"])).toBeNull()
+    expect(clientPrefixed("mcp__PCP__nothing", ["run_code"])).toBeNull()
+  })
+
+  it("does not let a server described as PCP outrank the tools a word names", () => {
+    const pcpRun = refs("PCP run")
+    expect(pcpRun[0]).toBe("pcp run_code")
+    expect(pcpRun.indexOf("tool bazzite/run_command")).toBeGreaterThan(0)
+
+    // Words only a server's description has still find its tools.
+    expect(refs("arr stack")).toEqual(["tool bazzite/run_command"])
+    expect(searchTools(upstream, "PCP")[0]?.name).toBe("run_command")
+  })
+
+  it("says how to call one of PCP's own tools, and finds it by name, not its description", () => {
+    const [first] = searchEverything(
+      { tools: upstream, pcp },
+      "check_permission",
+    )
+    expect(first).toMatchObject({
+      kind: "pcp",
+      ref: "check_permission",
+      title: "Check a permission request",
+    })
+    expect(first!.description.endsWith(PCP_TOOL_NOTE)).toBe(true)
+
+    // delete_wrapper's description names check_permission; its name does not.
+    expect(refs("owner answered")).not.toContain("pcp delete_wrapper")
+    expect(refs("check_permission PCP")).not.toContain("pcp delete_wrapper")
+  })
+
+  it("keeps to kind pcp, and leaves PCP's tools out of kind tool and of a server", () => {
+    expect(refs("check", { kind: "pcp" })).toEqual(["pcp check_permission"])
+    expect(
+      refs("check", { kind: "tool" }).every((ref) => ref.startsWith("tool ")),
+    ).toBe(true)
+    expect(refs("run_code", { server: "bazzite" })).toEqual([
+      "tool bazzite/run_command",
+    ])
+    // With nothing to rank by, PCP's tools are listed only when asked for.
+    expect(refs("")).not.toContain("pcp run_code")
+    expect(refs("", { kind: "pcp" })).toHaveLength(4)
+  })
+
+  it("describes one of PCP's tools with its schemas and no call_handle", () => {
+    const said = JSON.parse(
+      describeOwnTool(
+        {
+          ...pcp[0]!,
+          inputSchema: { type: "object", additionalProperties: false },
+          annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+          },
+        },
+        "a note",
+      ),
+    )
+
+    expect(Object.keys(said)[0]).toBe("note")
+    expect(said).toMatchObject({
+      tool: "check_permission",
+      kind: "pcp",
+      inputSchema: { type: "object" },
+    })
+    expect(said.call).toContain("not through call_tool")
+    expect(said.call_handle).toBeUndefined()
+    expect(said.outputSchema).toBeUndefined()
   })
 })
