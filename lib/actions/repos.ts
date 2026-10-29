@@ -6,6 +6,7 @@ import { redirect } from "next/navigation"
 import { invalid } from "@/lib/core/errors"
 import { nextPendingRequest } from "@/lib/core/owner-queue"
 import { confirmProposedShare } from "@/lib/core/permissions"
+import { addCommonRepository } from "@/lib/core/repos/common"
 import { ITEM_DIRS, type ItemKind } from "@/lib/core/repos/layout"
 import {
   confirmShare,
@@ -166,6 +167,23 @@ export async function deleteRepoAction(id: string): Promise<RepoActionResult> {
 
   if (result.status === "ok") {
     redirect(PAGES)
+  }
+
+  return result
+}
+
+/**
+ * PCP's common items (lib/core/repos/common.ts): linked read-only and
+ * untrusted, then the owner browses what it offers.
+ */
+export async function addCommonRepoAction(): Promise<RepoActionResult> {
+  const ctx = await requireContext()
+  const result = await guarded(() => addCommonRepository(ctx))
+
+  revalidate()
+
+  if (result.status === "ok") {
+    redirect(`${PAGES}/${encodeURIComponent(result.id!)}/browse`)
   }
 
   return result
