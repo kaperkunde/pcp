@@ -110,11 +110,25 @@ export function readableMarkdown(
   return { title, markdown, left }
 }
 
-/** What an answer says it left out, or null for nothing worth saying. */
+/**
+ * What an answer says it left out, or null for nothing: elements the HTML
+ * hides, and blocks of JSON data, so an answer with little text says why.
+ */
 export function leftOutNote(left: LeftOut): string | null {
-  if (left.json === 0) {
-    return null
-  }
+  const parts = [
+    ...(left.hidden > 0
+      ? [
+          `${left.hidden.toLocaleString("en")} element${left.hidden === 1 ? "" : "s"} the page's HTML marks hidden`,
+        ]
+      : []),
+    ...(left.json > 0
+      ? [
+          `${left.json} block${left.json === 1 ? "" : "s"} of JSON data the page carries (${left.jsonChars.toLocaleString("en")} characters)`,
+        ]
+      : []),
+  ]
 
-  return `Left out: ${left.json} block${left.json === 1 ? "" : "s"} of JSON data the page carries (${left.jsonChars.toLocaleString("en")} characters), which it does not show.`
+  return parts.length === 0
+    ? null
+    : `Left out: ${parts.join(", and ")}, which it does not show.`
 }

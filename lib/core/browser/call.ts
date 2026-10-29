@@ -22,7 +22,7 @@ import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
 import { decideSite, loadFetchRules } from "../web-fetch"
 import { parseSecretPlaceholder, scrubResult } from "../wrappers/placeholders"
 import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
-import { failureReason } from "./failures"
+import { coveringElement, coveringLine, failureReason } from "./failures"
 import { heldSecret, heldValues, holdSecret } from "./held"
 import {
   ACTION_TIMEOUT_MS,
@@ -37,11 +37,13 @@ import {
   MAX_UPLOAD_BYTES,
   MAX_URL_LENGTH,
   MAX_WAIT_MS,
+  MIN_READ_PAGE_TEXT_CHARS,
   NAVIGATION_TIMEOUT_MS,
   TAB_DEADLINE_MS,
 } from "./limits"
 import { bounded, inLane, pause } from "./queue"
 import { leftOutNote, readableMarkdown } from "./read-page"
+import { missingRefMessage, resolveTabRef, tabSnapshot } from "./refs"
 import {
   browserHeld,
   closeTab,
@@ -63,14 +65,15 @@ import {
 } from "./runtime"
 import { takePicture } from "./screenshot"
 import {
+  allNodes,
   findInSnapshot,
   nodeByRef,
   parseSnapshot,
-  resolveRef,
   secretMask,
-  snapshotTree,
+  snapshotText,
+  type SnapshotNode,
 } from "./snapshot"
-import { resolveTarget, type Target } from "./target"
+import { nameMatches, resolveTarget, type Target } from "./target"
 import {
   browserToolSpec,
   parseBrowserArgs,
@@ -285,31 +288,68 @@ function ownerHolds(tab: Tab): CallToolResult {
   )
 }
 
-function noTab(tabId: string): CallToolResult {
-  return text(
-    `There is no tab ${tabId}: it was closed, or the browser has closed since (it closes after a while with nothing to do). tabs lists this token's open ones.`,
-    true,
-  )
-}
-
 const NO_TABS =
   "This token has no tab open. Open one with tabs (action open, with the url): its answer names the new tab's id, which every other browser tool takes as tab."
 
-/** The token's open tabs, a line each: its id, title and address. */
+/**
+ * The token's open tabs, newest first (the one it used last, then the one
+ * it opened last), a line each: its id, title, address and the link where
+ * the owner can watch it. Never another token's.
+ */
 async function tabLines(
-  scope: BrowserScope,
+  scope: Pick<BrowserScope, "tokenId" | "publicUrl">,
   vault: VaultBrowser | null,
 ): Promise<string[]> {
   const open = await Promise.all(
     [...(vault?.tabs.values() ?? [])]
       .filter((tab) => tab.tokenId === scope.tokenId)
-      .sort((a, b) => a.createdAt - b.createdAt)
+      .sort((a, b) => b.lastUsedAt - a.lastUsedAt || b.createdAt - a.createdAt)
       .map(async (tab) => ({ view: await tabView(tab), tab })),
   )
 
   return open.map(
     ({ view, tab }) =>
       `- ${view.id}: ${view.title || "(no title)"} · ${view.url}${view.control === "owner" ? " · the owner has it" : ""}${tab.unresponsive ? " · not responding" : ""} · ${tabLink(scope.publicUrl, view.id)}`,
+  )
+}
+
+/**
+ * What a refusal about a tab adds: the token's open tabs, newest first, or
+ * how to open one when it has none. Exported for the gateway's own check
+ * of a browser call's arguments, which answers a call without tab before
+ * it reaches the browser.
+ */
+export async function tabHint(
+  ctx: Pick<VaultContext, "vaultId">,
+  tokenId: string,
+  publicUrl: string,
+): Promise<string> {
+  const lines = await tabLines(
+    { tokenId, publicUrl },
+    runningBrowser(ctx.vaultId),
+  )
+
+  return lines.length === 0
+    ? NO_TABS
+    : [
+        "This token's open tabs, the one used last first:",
+        ...lines,
+        "Name the one you opened in this conversation, or open a new one with tabs (action open).",
+      ].join("\n")
+}
+
+/**
+ * A tab id the token has no tab by: closed, the browser closed since, or
+ * another token's (answered in the same words, so nothing of it shows),
+ * with the token's own tabs.
+ */
+async function noTab(
+  scope: BrowserScope,
+  tabId: string,
+): Promise<CallToolResult> {
+  return text(
+    `There is no tab ${tabId}: it was closed, or the browser has closed since (it closes after a while with nothing to do). ${await tabHint(scope.ctx, scope.tokenId, scope.publicUrl)}`,
+    true,
   )
 }
 
@@ -322,27 +362,19 @@ async function missingTab(
   scope: BrowserScope,
   toolName: string,
 ): Promise<CallToolResult> {
-  const lines = await tabLines(scope, runningBrowser(scope.ctx.vaultId))
-
   return text(
-    lines.length === 0
-      ? `${toolName} needs the tab to act on (tab), and the browser never picks one. ${NO_TABS}`
-      : [
-          `${toolName} needs the tab to act on (tab), and the browser never picks one. This token's open tabs:`,
-          ...lines,
-          "Name the one you opened in this conversation, or open a new one with tabs (action open).",
-        ].join("\n"),
+    `${toolName} needs the tab to act on (tab), and the browser never picks one. ${await tabHint(scope.ctx, scope.tokenId, scope.publicUrl)}`,
     true,
   )
 }
 
 /** The token's own tab by the id a call gave, or why there is none. */
-function pickTab(
+async function pickTab(
+  scope: BrowserScope,
   vault: VaultBrowser | null,
-  tokenId: string,
   tabId: string,
-): Tab | CallToolResult {
-  return ownTab(vault, tokenId, tabId) ?? noTab(tabId)
+): Promise<Tab | CallToolResult> {
+  return ownTab(vault, scope.tokenId, tabId) ?? noTab(scope, tabId)
 }
 
 function isTab(value: Tab | CallToolResult): value is Tab {
@@ -487,12 +519,15 @@ async function report(
     lead = [] as string[],
     first = [] as string[],
     maxSnapshot,
+    tree: taken,
   }: {
     snapshot?: boolean
     lead?: string[]
     /** Lines before even the check's: the tab a call opened. */
     first?: string[]
     maxSnapshot?: number
+    /** The tab's snapshot, when the caller has just taken it. */
+    tree?: string
   } = {},
 ): Promise<CallToolResult> {
   const lines = [
@@ -515,7 +550,7 @@ async function report(
 
   if (snapshot) {
     try {
-      const tree = await snapshotTree(tab.page)
+      const tree = taken ?? (await tabSnapshot(tab))
       const shown =
         maxSnapshot && tree.length > maxSnapshot
           ? `${tree.slice(0, maxSnapshot)}\n… (cut short: take a snapshot for all of it)`
@@ -657,7 +692,7 @@ function onLane(
       signal: scope.signal,
       onDeadline: async () => {
         if (gone()) {
-          return noTab(tab.id)
+          return noTab(scope, tab.id)
         }
 
         return reopenedResult(
@@ -680,7 +715,7 @@ function onLane(
     await tab.reopening?.catch(() => {})
 
     if (gone()) {
-      return noTab(tab.id)
+      return noTab(scope, tab.id)
     }
 
     if (tab.unresponsive) {
@@ -946,7 +981,7 @@ async function tabs(
     )
   }
 
-  const picked = pickTab(vault, scope.tokenId, args.tab!)
+  const picked = await pickTab(scope, vault, args.tab!)
 
   if (!isTab(picked)) {
     return picked
@@ -994,7 +1029,7 @@ async function onTab(
   run: (tab: Tab, vault: VaultBrowser) => Promise<CallToolResult>,
 ): Promise<CallToolResult> {
   const vault = runningBrowser(scope.ctx.vaultId)
-  const picked = pickTab(vault, scope.tokenId, tabId)
+  const picked = await pickTab(scope, vault, tabId)
 
   if (!isTab(picked)) {
     return picked
@@ -1240,11 +1275,9 @@ async function typeSecret(
   })
 }
 
-function staleRef(ref: string): CallToolResult {
-  return text(
-    `There is no element ${ref} on the page now: refs hold until the next snapshot. Take a new snapshot and use its refs.`,
-    true,
-  )
+/** A ref that names nothing on the tab's page now: gone, or never the tab's. */
+function staleRef(tab: Tab, ref: string): CallToolResult {
+  return text(missingRefMessage(tab, ref), true)
 }
 
 /** The element a call names, by its ref or its target, or why not. */
@@ -1254,7 +1287,7 @@ async function element(
 ): Promise<{ locator: Locator; label: string } | CallToolResult> {
   if (args.target) {
     const target = args.target as Target
-    const resolved = await resolveTarget(tab.page, target)
+    const resolved = await resolveTarget(tab, target)
 
     return "refusal" in resolved
       ? text(resolved.refusal, true)
@@ -1265,8 +1298,8 @@ async function element(
   }
 
   const ref = args.ref as string
-  const locator = await resolveRef(tab.page, ref)
-  return locator ? { locator, label: ref } : staleRef(ref)
+  const locator = await resolveTabRef(tab, ref)
+  return locator ? { locator, label: ref } : staleRef(tab, ref)
 }
 
 function isElement(
@@ -1431,10 +1464,10 @@ async function downloadFile(
     }
   } else {
     const ref = args.ref!
-    const target = await resolveRef(tab.page, ref)
+    const target = await resolveTabRef(tab, ref)
 
     if (!target) {
-      return staleRef(ref)
+      return staleRef(tab, ref)
     }
 
     start = () => target.click({ timeout: ACTION_TIMEOUT_MS })
@@ -1525,25 +1558,75 @@ async function downloadFile(
   )
 }
 
-/** read_page: the page's text, or one part of it, as Markdown. */
+/** Characters of a text that are not white space. */
+function visibleChars(value: string): number {
+  return value.replace(/\s+/g, "").length
+}
+
+/** The element of a snapshot a target names, as resolveTarget found it. */
+function targetNode(
+  nodes: SnapshotNode[],
+  target: Target,
+): SnapshotNode | null {
+  const scope = target.within ? nodeByRef(nodes, target.within) : null
+
+  if (target.within && !scope) {
+    return null
+  }
+
+  const matching = allNodes(scope ? [scope] : nodes).filter(
+    (node) =>
+      node.role === target.role &&
+      nameMatches(node.name, target.name, target.exact),
+  )
+
+  return target.nth !== undefined
+    ? (matching[target.nth] ?? null)
+    : matching.length === 1
+      ? matching[0]!
+      : null
+}
+
+/** What read_page says when the page's HTML gave its text from the snapshot. */
+const FROM_SNAPSHOT =
+  "The page's HTML holds next to no text (a page its scripts draw, in shadow DOM or in frames), so this is the text of its accessibility snapshot instead: its headings, links and words, without refs (snapshot gives those)."
+
+/**
+ * read_page: the page's text, or one part of it, as Markdown. A page whose
+ * HTML holds next to none (one its scripts draw, in shadow DOM or frames,
+ * which page.content() does not reach) is read from the tab's snapshot
+ * instead (refs.ts, so no ref changes for it), and the answer says so.
+ */
 async function readPage(
   tab: Tab,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> {
   const lead: string[] = []
   let html: string
+  /** The part of the snapshot the same text is in. */
+  let partOf = (nodes: SnapshotNode[]): SnapshotNode[] | null => nodes
 
   if (args.ref || args.target) {
     const found = await element(tab, args)
     if (!isElement(found)) return found
     html = `<body>${await found.locator.innerHTML({ timeout: ACTION_TIMEOUT_MS })}</body>`
     lead.push(`Only ${found.label}, as asked.`)
+    partOf = (nodes) => {
+      const node = args.ref
+        ? nodeByRef(nodes, args.ref as string)
+        : targetNode(nodes, args.target as Target)
+      return node ? [node] : null
+    }
   } else if (args.main_only) {
     const main = tab.page.locator("main, [role=main]").first()
 
     if ((await main.count()) > 0) {
       html = `<body>${await main.innerHTML({ timeout: ACTION_TIMEOUT_MS })}</body>`
       lead.push("Only the page's main part, as asked.")
+      partOf = (nodes) => {
+        const node = allNodes(nodes).find((one) => one.role === "main")
+        return node ? [node] : null
+      }
     } else {
       html = await bounded(
         tab.page.content(),
@@ -1558,9 +1641,51 @@ async function readPage(
 
   const { markdown, left } = readableMarkdown(html, tab.page.url())
   const note = leftOutNote(left)
+  let body = markdown
+
+  if (visibleChars(markdown) < MIN_READ_PAGE_TEXT_CHARS) {
+    const part = partOf(parseSnapshot(await tabSnapshot(tab).catch(() => "")))
+    const words = part ? snapshotText(part) : ""
+
+    if (visibleChars(words) > visibleChars(markdown)) {
+      body = words
+      lead.push(FROM_SNAPSHOT)
+    }
+  }
+
   const start = (args.start_index as number | undefined) ?? 0
   const max = (args.max_length as number | undefined) ?? DEFAULT_READ_CHARS
-  const slice = sliceText(markdown, start, max)
+  const slice = sliceText(body, start, max)
+  const head = [
+    ...checkLead(tab),
+    `Tab ${tab.id}: ${(await tabTitle(tab)) || "(no title)"}`,
+    `Address: ${tab.page.url()}`,
+    ...lead,
+    ...(note ? [note] : []),
+  ]
+
+  if (slice.total === 0) {
+    return text(
+      [
+        ...head,
+        "",
+        "(no text)",
+        "",
+        "Neither its HTML nor its accessibility snapshot has words: take a screenshot to see what it shows.",
+      ].join("\n"),
+    )
+  }
+
+  if (start >= slice.total) {
+    return text(
+      [
+        ...head,
+        `start_index ${start} is past the end: the text has ${slice.total} characters.`,
+      ].join("\n"),
+      true,
+    )
+  }
+
   const more =
     slice.end < slice.total
       ? `; call again with start_index ${slice.end} for the rest`
@@ -1568,11 +1693,7 @@ async function readPage(
 
   return text(
     [
-      ...checkLead(tab),
-      `Tab ${tab.id}: ${(await tabTitle(tab)) || "(no title)"}`,
-      `Address: ${tab.page.url()}`,
-      ...lead,
-      ...(note ? [note] : []),
+      ...head,
       `Characters ${slice.start} to ${slice.end} of ${slice.total}${more}.`,
       "",
       slice.part,
@@ -1585,14 +1706,15 @@ async function findOnPage(
   tab: Tab,
   args: { text: string; within?: string },
 ): Promise<CallToolResult> {
-  const tree = parseSnapshot(await snapshotTree(tab.page))
+  // The tab's snapshot (refs.ts): the page's refs hold through it.
+  const tree = parseSnapshot(await tabSnapshot(tab))
   let nodes = tree
 
   if (args.within) {
     const within = nodeByRef(tree, args.within)
 
     if (!within) {
-      return staleRef(args.within)
+      return staleRef(tab, args.within)
     }
 
     nodes = [within]
@@ -1796,14 +1918,26 @@ async function runBrowserTool(
             force,
           })
         } catch (error) {
-          // Why, in words, and what the tab shows, in short.
+          // Why, in words, and what the tab shows, in short: with the ref
+          // of what covers the element, when the snapshot shows it.
           const dialog = dialogNote(current)
+          const tree = dialog
+            ? undefined
+            : await tabSnapshot(current).catch(() => undefined)
+          const covering = coveringElement(error)
+          const over =
+            covering && tree !== undefined
+              ? coveringLine(parseSnapshot(tree), covering)
+              : null
+
           return failed(
             await report(scope, current, {
               lead: [
                 `The click on ${found.label} did not happen: ${failureReason(error)}`,
+                ...(over ? [over] : []),
               ],
               snapshot: !dialog,
+              tree,
               maxSnapshot: MAX_FAILURE_SNAPSHOT_CHARS,
             }),
           )

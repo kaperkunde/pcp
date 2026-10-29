@@ -10,6 +10,7 @@ import {
   parseSnapshot,
   PASSWORD_MASK,
   secretMask,
+  snapshotText,
 } from "./snapshot"
 
 // Playwright's AI snapshot read into elements: what find answers with, and
@@ -200,5 +201,26 @@ describe("a snapshot's masked fields", () => {
       maskFields(TREE, new Map([["ada@example.com", secretMask("Mail")]])),
     ).toContain('textbox "Email" [ref=e2]: [secret: Mail]')
     expect(maskFields(TREE, new Map())).toBe(TREE)
+  })
+})
+
+describe("a snapshot's words", () => {
+  it("reads as lines: headings, links with their address, items, no refs and no field's value", () => {
+    const text = snapshotText(parseSnapshot(SAMPLE))
+
+    expect(text.split("\n")).toEqual([
+      "[Home](/a)",
+      '# Who "are" you?',
+      "Name",
+      "Menu",
+      "- Hi there: yes",
+      "[Hi there](/x)",
+      "Tab 1",
+      "## Time: now",
+      "Inner",
+      "Hi there",
+      "f",
+    ])
+    expect(text).not.toContain("ref")
   })
 })
