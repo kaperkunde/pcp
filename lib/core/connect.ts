@@ -1,5 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
+import { linkLabel, linkLastText } from "./owner-link"
 import { noteOwnerAsked } from "./request-log"
 import type { ConnectLinks, NeedsOwner, ServerState } from "./tools/outcome"
 import { oauthStartUrl } from "./upstream"
@@ -31,14 +32,8 @@ export function connectLinks(
   }
 }
 
-/**
- * How the assistant hands a link to the owner. Last in its reply, because
- * some apps fold away what an assistant wrote before a tool call, and the
- * owner never sees it.
- */
-export function linkLastText(url: string): string {
-  return `End your reply with this link, on a line of its own, and call no tool after it in this reply: some apps hide the text written before a tool call, and the owner would never see the link.\n${url}`
-}
+/** How the assistant hands a link to the owner (owner-link.ts). */
+export { linkLastText }
 
 /** An OAuth server that needs the owner to sign in before it can be used. */
 export function connectResult(
@@ -47,6 +42,10 @@ export function connectResult(
   { lead = "Not done yet", state }: { lead?: string; state?: ServerState } = {},
 ): CallToolResult {
   const connect = connectLinks(server, publicUrl)
+  const label =
+    server.status === "client_required"
+      ? `Set up ${server.name} in PCP`
+      : `Connect ${server.name} in PCP`
   noteOwnerAsked()
   const wait = `When they say they have, call check_server with server "${server.slug}": it answers once it is connected (and waits a little if they are still signing in). Then try again.`
 
@@ -55,14 +54,14 @@ export function connectResult(
   // Its page says how.
   const said =
     server.status === "client_required"
-      ? `${lead}: ${server.name} needs an OAuth client from the owner before it can be connected, because it does not let PCP register itself. The page at the link below, opened signed in to PCP, says what to create with the provider and where to enter it; then they choose Connect. ${wait}\n\n${linkLastText(connect.pageUrl)}`
-      : `${lead}: ${server.name} needs connecting before its tools can be used. The owner opens the link below signed in to PCP and chooses Connect. ${wait}\n\n${linkLastText(connect.pageUrl)}`
+      ? `${lead}: ${server.name} needs an OAuth client from the owner before it can be connected, because it does not let PCP register itself. The page at the link below, opened signed in to PCP, says what to create with the provider and where to enter it; then they choose Connect. ${wait}\n\n${linkLastText(connect.pageUrl, label)}`
+      : `${lead}: ${server.name} needs connecting before its tools can be used. The owner opens the link below signed in to PCP and chooses Connect. ${wait}\n\n${linkLastText(connect.pageUrl, label)}`
 
   const owner: NeedsOwner = {
     kind: "needs_owner",
     reason: "connect",
     url: connect.pageUrl,
-    label: `Connect ${server.name} in PCP`,
+    label: linkLabel(label),
     connect,
     ...(state ? { server: state } : {}),
   }

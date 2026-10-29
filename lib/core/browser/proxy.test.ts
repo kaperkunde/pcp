@@ -165,3 +165,56 @@ describe("the browser's proxy", () => {
     expect(await tunnel("user:pass@example.com:443")).toMatch(/^HTTP\/1\.1 400/)
   })
 })
+
+describe("an exit's proxy (connect)", () => {
+  it("dials every request through connect, never PCP's own lookup", async () => {
+    api = await startTestApi((_, res) => res.end("from the exit"))
+    const port = Number(new URL(api.origin).port)
+    const dialed: Array<[string, number]> = []
+    proxy = await startBrowserProxy({
+      check: () => "private",
+      connect: async (host, to) => {
+        dialed.push([host, to])
+        const socket = net.connect(port, "127.0.0.1")
+        await new Promise((resolve) => socket.once("connect", resolve))
+        return socket
+      },
+    })
+
+    const answer = await viaProxy("http://site.example/page")
+    expect(answer).toEqual({ status: 200, body: "from the exit" })
+    expect(await tunnel("site.example:443")).toBe(
+      "HTTP/1.1 200 Connection Established",
+    )
+    expect(dialed).toEqual([
+      ["site.example", 80],
+      ["site.example", 443],
+    ])
+  })
+
+  it("answers 403 and remembers a refusal from the exit's side", async () => {
+    const refused = Object.assign(new Error("refused"), { verdict: "own" })
+    proxy = await startBrowserProxy({
+      check: () => "ok",
+      connect: async () => {
+        throw refused
+      },
+    })
+
+    expect(await tunnel("intranet.example:443")).toBe("HTTP/1.1 403 Forbidden")
+    expect((await viaProxy("http://intranet.example/")).status).toBe(403)
+    expect(proxy.refusal("intranet.example")).toBe("own")
+  })
+
+  it("answers 502 when the exit cannot connect", async () => {
+    proxy = await startBrowserProxy({
+      check: () => "ok",
+      connect: async () => {
+        throw new Error("could not connect")
+      },
+    })
+
+    expect(await tunnel("down.example:443")).toBe("HTTP/1.1 502 Bad Gateway")
+    expect(proxy.refusal("down.example")).toBeNull()
+  })
+})

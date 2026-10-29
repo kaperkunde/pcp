@@ -43,6 +43,7 @@ model Vault {
   oauthCredentials   OAuthCredential[]
   repos              Repo[]
   serverDefinitions  ServerDefinition[]
+  exits              Exit[]
 
   @@map("vault")
 }
@@ -295,6 +296,37 @@ model VaultToolAccess {
   @@map("vault_tool_access")
 }
 
+/// A way out to the internet from somewhere else than PCP's machine
+/// (lib/core/exits/): web_fetch and a browser tab can go through one by name.
+/// Kind "ssh" leaves from the SSH server itself (direct-tcpip channels);
+/// kind "service" from a VPN container PCP runs on one. Only the owner adds,
+/// changes or removes one. Its level per token is a web_fetch_rule of kind
+/// "exit" keyed by its id: blocked without one.
+model Exit {
+  id        String     @id
+  vaultId   String     @map("vault_id")
+  vault     Vault      @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// What an assistant calls it, unique in the vault.
+  name      String
+  /// The owner's words for where it comes out ("US — home VPS"); may be "".
+  label     String     @default("")
+  /// ssh | service
+  kind      String
+  /// The SSH server it leaves from, or whose loopback its container is on.
+  serverId  String     @map("server_id")
+  server    McpServer  @relation("ExitHost", fields: [serverId], references: [id], onDelete: Cascade)
+  /// The service (a container PCP runs) for kind "service"; null for "ssh".
+  serviceId String?    @map("service_id")
+  service   McpServer? @relation("ExitService", fields: [serviceId], references: [id], onDelete: Cascade)
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  @@unique([vaultId, name])
+  @@index([serverId])
+  @@index([serviceId])
+  @@map("exit")
+}
+
 /// A level web_fetch follows (lib/core/web-fetch.ts): for one HTTP method
 /// (the default for sites without a level of their own) or for one site,
 /// for one token or for all of them. A token's own rule wins over the one
@@ -376,6 +408,15 @@ model PermissionRequest {
   /// The result text, clipped, encrypted with "permission_request:<id>:result".
   resultCiphertext Bytes?     @map("result_ciphertext")
   resultIsError    Boolean    @default(false) @map("result_is_error")
+  /// call: the answer as a run_code program is handed it (answers.ts
+  /// answerValue, files and long texts as handles), as JSON, encrypted with
+  /// "permission_request:<id>:result_json". Kept only for a call the owner
+  /// allowed once, and only when short enough (REUSE_VALUE_MAX_CHARS).
+  resultJsonCiphertext Bytes? @map("result_json_ciphertext")
+  /// call allowed once that ran: until when the same token's identical call
+  /// is answered with this run's answer instead of asking again. Cleared
+  /// when that happens, so it answers one such call.
+  reuseUntil       DateTime?  @map("reuse_until")
   createdAt        DateTime   @default(now()) @map("created_at")
   expiresAt        DateTime   @map("expires_at")
   decidedAt        DateTime?  @map("decided_at")
@@ -675,6 +716,8 @@ model McpServer {
   authHeaders        ServerAuthHeader[]
   toolResults        ToolResult[]
   repoItems          RepoItem[]
+  exits              Exit[]              @relation("ExitHost")
+  exitServices       Exit[]              @relation("ExitService")
 
   @@unique([vaultId, slug])
   @@index([definitionId])

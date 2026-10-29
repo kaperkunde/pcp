@@ -170,7 +170,10 @@ describe("the host key", () => {
     const sync = await syncServerTools(ctx, await getServer(ctx, id), PUBLIC)
 
     expect(sync).toMatchObject({ status: "error", toolCount: 1 })
-    expect(sync.message).toContain(`/servers/${id}`)
+    // A markdown link, so an app reading it aloud says the label.
+    expect(sync.message.split("\n").at(-1)).toBe(
+      `[Open Build box's page in PCP](http://localhost:3000/servers/${id})`,
+    )
     expect(fake.logins).toEqual([])
     const row = await getServer(ctx, id)
     expect(row.sshHostKey).toBeNull()

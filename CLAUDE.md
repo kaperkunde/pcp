@@ -166,8 +166,15 @@ so in the summary; the bump itself waits for the request.
   A server's document is its definition only (`PCP_FORMAT` 2): sync never
   writes an instance's own fields (name and short name, address,
   credential and secrets, read-only, public-only, enabled, pace, levels,
-  note), and what a format-1 document says of its server only fills in a
-  first instance. A push is one commit per item, fast-forward only, and
+  note; a service's SSH server, publish address, variables' secrets,
+  container, what it registered), and what a format-1 document says of its
+  server only fills in a first instance. Format 3 adds `services/<name>.yaml`
+  (a service's definition); every other kind is still written in the
+  format that first held it (`FORMAT_OF_KIND`), so an older PCP reads them
+  and leaves `services/` alone. PCP's common items,
+  `kaperkunde/pcp-gg-common` (`repos/common.ts`), are offered in one click,
+  linked read-only and untrusted (pinned imports), read without a sign-in.
+  A push is one commit per item, fast-forward only, and
   only through the push's review (`repos/share-review.ts`): every file in
   full, what stays private, and the personal-data check
   (`repos/personal-data.ts`, pure), which a public repository waits on
@@ -241,11 +248,37 @@ so in the summary; the bump itself waits for the request.
   JavaScript (its native parts stay out of `allowBuilds`), narrowed to the
   algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
   `run_command` (`ssh/tools.ts`), its arguments checked before anything
-  connects: `exec` only, never a terminal, forwarding, an agent or a file
-  transfer. Only the owner adds or changes one; `register_server` has no kind
-  for it. Its limits go in `ssh/limits.ts`, and a change to how a host is
-  trusted or PCP signs in gets a test against the test server
-  (`ssh/client.test.ts`).
+  connects: `exec` only, never a terminal, an agent or a file transfer.
+  Forwarding is open for exits only (`openChannel`, below): outbound
+  direct-tcpip, never remote forwarding (`tcpip-forward`), streamlocal,
+  the agent or X11. Only the owner adds or changes one; `register_server` has
+  no kind for it. Its limits go in `ssh/limits.ts`, and a change to how a host
+  is trusted, PCP signs in or a channel opens gets a test against the test
+  server (`ssh/client.test.ts`).
+- Exits (`lib/core/exits/`) let web_fetch (`exit`) and a new browser tab
+  (`tabs` open with `exit`) go out from somewhere else than PCP's machine:
+  an SSH server PCP holds (kind `ssh`), or a VPN container PCP started on one
+  (kind `service`). An assistant names an exit, never a destination: every
+  connection goes through `exits/dial.ts dial`, which looks the name up by
+  DNS-over-HTTPS through the exit (`exits/doh.ts`: resolvers by IP, their
+  certificates checked, answers cached per exit within bounds), checks
+  every address from the exit's side (`exits/check.ts`: never its loopback
+  or its own address; its private, link-local and metadata ranges only with
+  the token's `private` line; never PCP's own) and opens a channel to the
+  address it checked; a container's exit is a channel to the loopback port
+  PCP published for it, then CONNECT or SOCKS5 (`exits/handshake.ts`) to
+  that address. The SSH connection is pooled per server
+  (`ssh/client.ts openChannel`), opened only with the key a request handed
+  in (`upstream.ts openExit`, a pinned host only), idled out, and never
+  reopened in the background: the browser's exit proxy dials keyless. A tab
+  with an exit has its own context through its own proxy (`proxy.ts` with
+  `connect`), signed in to nothing, saved nowhere, no downloads. Exits are
+  vault rows (`exit`), the owner's alone to add, rename or remove (on the SSH
+  server's page); a token's level for one is a `web_fetch_rule` of kind
+  `exit` keyed by its id (own or for all tokens), blocked without one; an
+  ask is an `exit_use` request showing the exit, its label and the request.
+  The request log names the exit, never the site. Limits go in
+  `exits/limits.ts`.
 - Services (`lib/core/services/`) run with the Docker or Podman the owner
   already has on an SSH server PCP holds, through the engine's command line
   over SSH `exec` only: PCP installs no engine, never touches a socket and
@@ -260,8 +293,12 @@ so in the summary; the bump itself waits for the request.
   image and labels. Images are pinned by digest; volumes are named volumes,
   never a host path. Only the owner launches, changes, updates or removes
   one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
-  owner's levels (and will propose one as a permission request). Status is
-  read only inside a request (page, `check_server`, a failing call), never
+  owner's levels, and proposes one only through `register_server` (kind
+  `service`, `services/proposals.ts`): a `service_change` request that shows
+  everything it runs in full (image, ports and address, variables and their
+  secrets by name, volumes, health, what it registers, the SSH server) and
+  launches only that once the owner agrees; a new secret is typed in on
+  PCP's page. Status is read only inside a request (page, `check_server`, a failing call), never
   polled; a saved secret remakes the services that take it through
   `after()`. A launch that fails takes back everything it did. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against
@@ -456,7 +493,10 @@ so in the summary; the bump itself waits for the request.
   session).
 - The owner is asked by link only: a result hands the assistant a link to
   PCP's page, to end its reply with (`linkLastText`: nothing after it, or
-  Claude's apps fold it out of sight), and a check to call once the owner
+  Claude's apps fold it out of sight; a markdown link with a short label
+  naming the action, never the bare address, so voice mode reads the label;
+  `owner-link.ts` holds the label rules and the wording instructions and
+  descriptions use), and a check to call once the owner
   says they answered (`check_permission`, `check_server`,
   `lib/core/owner-wait.ts`). The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
@@ -511,8 +551,9 @@ so in the summary; the bump itself waits for the request.
   restarts itself. Install and restart in the Linux installer's container is
   a file in the data folder (`updates/host-signal.ts`: an id and a time,
   nothing of the vault) that the installer's `watch` reads through `exec` and
-  checks as untrusted input before it runs its own `update`; PCP never
-  addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
+  checks as untrusted input before it runs its own `update`, which runs the
+  installer read out of the image it pulled (`/app/install.sh`), never out
+  of the running container; PCP never addresses the host. A build of develop (`X.Y.Z-dev.N`, a pre-release that
   `.github/workflows/develop.yml` makes on every push to develop) is never
   offered on the stable channel.
 - `desktop/` is a host for the production build, not part of the app. It

@@ -611,7 +611,9 @@ export async function findBindableDefinition(
   )
   const noun = kinds.includes("wrapper")
     ? "wrapper"
-    : "MCP server or API endpoint"
+    : kinds.includes("service")
+      ? "MCP server, API endpoint or service"
+      : "MCP server or API endpoint"
   const byServer = fitting.find((server) => server.slug === name)
   let definitionId = byServer ? await ensureDefinition(byServer.id) : null
 

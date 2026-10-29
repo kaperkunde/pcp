@@ -1,8 +1,9 @@
 import dns from "node:dns"
 import http from "node:http"
 import https from "node:https"
-import { isIP } from "node:net"
-import { Readable } from "node:stream"
+import { isIP, type Socket } from "node:net"
+import { Readable, type Duplex } from "node:stream"
+import tls from "node:tls"
 
 import { AddressBlockedError, bareHostname, isPublicAddress } from "./address"
 
@@ -29,6 +30,14 @@ export type SendOptions = {
    * the socket would connect to and the port.
    */
   addressCheck?: (address: string, port: number) => boolean
+  /**
+   * Connects somewhere else than from PCP's machine: web_fetch through an
+   * exit (lib/core/exits/dial.ts). It resolves the name and checks every
+   * address itself, from the exit's side, and hands back the raw
+   * connection; TLS (with the URL's host as SNI and for the certificate)
+   * is laid over it here. Replaces the lookup and `addressCheck`.
+   */
+  dial?: (host: string, port: number, signal?: AbortSignal) => Promise<Duplex>
 }
 
 export type SendInit = {
@@ -64,18 +73,55 @@ export async function send(
     new URL(rawUrl),
     init,
     options.addressCheck ?? isPublicAddress,
+    options.dial,
   )
+}
+
+/**
+ * The request's socket from a dial (an exit): the raw connection, with
+ * TLS over it for https, the certificate checked against the URL's host.
+ */
+function dialedConnection(
+  url: URL,
+  dial: NonNullable<SendOptions["dial"]>,
+  signal: AbortSignal | undefined,
+): http.RequestOptions["createConnection"] {
+  const host = bareHostname(url)
+  const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80)
+
+  return (_options, callback) => {
+    dial(host, port, signal).then(
+      (raw) => {
+        if (url.protocol !== "https:") {
+          callback(null, raw as Socket)
+          return
+        }
+
+        const secure = tls.connect({
+          socket: raw as Socket,
+          host,
+          // An IP address is no server name: no SNI, but still checked.
+          ...(isIP(host) ? {} : { servername: host }),
+          ALPNProtocols: ["http/1.1"],
+        })
+        callback(null, secure)
+      },
+      (error: Error) => callback(error, undefined as unknown as Socket),
+    )
+    return undefined
+  }
 }
 
 function sendPinned(
   url: URL,
   init: SendInit,
   allowed: (address: string, port: number) => boolean,
+  dial?: SendOptions["dial"],
 ): Promise<Response> {
   const host = bareHostname(url)
   const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80)
 
-  if (isIP(host) && !allowed(host, port)) {
+  if (!dial && isIP(host) && !allowed(host, port)) {
     return Promise.reject(new AddressBlockedError(host, host))
   }
 
@@ -120,9 +166,10 @@ function sendPinned(
       {
         method: init.method ?? "GET",
         headers: { "accept-encoding": "identity", ...init.headers },
-        lookup,
-        agent: false,
         signal: init.signal,
+        ...(dial
+          ? { createConnection: dialedConnection(url, dial, init.signal) }
+          : { lookup, agent: false }),
       },
       (res) => {
         // This runs as an event listener: an exception here would not reach

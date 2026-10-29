@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest"
 import type {
   EndpointDocument,
   ServerDocument,
+  ServiceDocument,
   SkillDocument,
   WrapperDocument,
 } from "./documents"
 import { reviewItem, type FlagKind } from "./review"
+import { parseServiceDefinition } from "../services/definition"
+import { DOCLING } from "./test-vault"
 
 // What the owner is shown before an item from a repository is applied: one
 // case for each thing that would reach further, and the text-only change
@@ -311,5 +314,72 @@ describe("reviewing an item", () => {
     expect(() =>
       reviewItem(WRAPPER, { ...WRAPPER, kind: "flow" }),
     ).not.toThrow()
+  })
+})
+
+describe("reviewing a service", () => {
+  const SERVICE: ServiceDocument = {
+    kind: "service",
+    name: "docling",
+    version: 1,
+    displayName: "Docling",
+    description: "Documents to Markdown.",
+    definition: parseServiceDefinition(DOCLING),
+  }
+
+  it("lists all of a new service: its image, ports, variables, health and what it registers", () => {
+    const review = reviewItem(null, SERVICE)
+    const messages = review.flags.map((flag) => flag.message)
+
+    expect(review.isNew).toBe(true)
+    expect(review.textOnly).toBe(false)
+    expect(review.files.map((file) => file.path)).toEqual([
+      "services/docling.yaml",
+    ])
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        `It runs the image ${DOCLING.image}.`,
+        "An update pulls ghcr.io/docling-project/docling-serve-cpu:latest.",
+        "It listens on port 5001.",
+        "Its variables: DOCLING_SERVE_API_KEY (needed), DOCLING_SERVE_ENABLE_UI=false.",
+        "Its health check is GET /health on port 5001.",
+        "PCP adds an API endpoint from /openapi.json on port 5001, sending DOCLING_SERVE_API_KEY's secret in X-Api-Key.",
+      ]),
+    )
+  })
+
+  it("flags only what changes, and never calls a service's change text", () => {
+    expect(reviewItem(SERVICE, SERVICE)).toMatchObject({
+      same: true,
+      flags: [],
+    })
+
+    const image = `ghcr.io/docling-project/docling-serve-cpu@sha256:${"d".repeat(64)}`
+    const newer = reviewItem(SERVICE, {
+      ...SERVICE,
+      version: 2,
+      definition: { ...SERVICE.definition, image },
+    })
+    expect(kinds(newer.flags)).toEqual(["service_image"])
+    expect(newer.flags[0]!.message).toContain(`(was ${DOCLING.image})`)
+    expect(newer.textOnly).toBe(false)
+
+    const volumes = reviewItem(SERVICE, {
+      ...SERVICE,
+      definition: {
+        ...SERVICE.definition,
+        volumes: [{ name: "cache", path: "/opt/cache" }],
+      },
+    })
+    expect(volumes.flags.map((flag) => flag.message)).toEqual([
+      "It keeps data in named volumes: cache at /opt/cache.",
+    ])
+
+    const described = reviewItem(SERVICE, {
+      ...SERVICE,
+      description: "Other words.",
+    })
+    expect(described.flags).toEqual([])
+    expect(described.textOnly).toBe(false)
   })
 })

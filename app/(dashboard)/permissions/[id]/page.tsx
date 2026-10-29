@@ -319,11 +319,14 @@ function RequestTile({ view }: { view: PermissionView }) {
       return <IconTile size="lg" icon={FolderGit2} className={tile} />
     case "note_change":
       return <IconTile size="lg" icon={StickyNote} className={tile} />
+    case "service_change":
+      return <IconTile size="lg" kind="service" className={tile} />
     case "access":
       return <IconTile size="lg" icon={SlidersHorizontal} className={tile} />
     case "fetch":
     case "browse":
     case "browser_handover":
+    case "exit_use":
       return <IconTile size="lg" icon={Globe} className={tile} />
     case "secret_use":
     case "secret_request":
@@ -368,6 +371,19 @@ function PendingNote({ view }: { view: PermissionView }) {
           Allow once lets this tab open the site&apos;s pages while it is open.
           Allow this site for, Always allow this site and Block this site decide
           for the token, in the browser and in web fetch, as on{" "}
+          <Link href={`/tokens/${view.tokenId}`} className="underline">
+            the token&apos;s page
+          </Link>
+          .
+        </p>
+      )
+    case "exit_use":
+      return (
+        <p className={note}>
+          Allow once sends this one through the exit. Always allow this exit and
+          Block this exit decide for the token&apos;s later requests that name
+          the exit, in web fetch and the browser; sites are still decided on
+          their own, as on{" "}
           <Link href={`/tokens/${view.tokenId}`} className="underline">
             the token&apos;s page
           </Link>
@@ -456,6 +472,19 @@ function PendingNote({ view }: { view: PermissionView }) {
           Saving it writes the note exactly as shown above, and only if your
           note did not change since the assistant asked. It is yours from then
           on: you can change it on the item&apos;s page.
+        </p>
+      )
+    case "service_change":
+      return (
+        <p className={note}>
+          Launching it pulls the image exactly as shown above, by its digest,
+          and runs it on that SSH server with the secrets named there; nothing
+          runs until you agree. You can stop, update or remove it on its page
+          under{" "}
+          <Link href="/servers" className="underline">
+            Servers
+          </Link>
+          .
         </p>
       )
     case "memory_share":

@@ -30,15 +30,19 @@ const TOOLS = [
   "awk",
   "cat",
   "chmod",
+  "cmp",
   "cp",
   "date",
   "dirname",
+  "grep",
+  "head",
   "mkdir",
   "mv",
   "readlink",
   "rm",
   "rmdir",
   "sleep",
+  "wc",
 ]
 
 const UNIT = `# PCP. Written by install.sh; running the installer again rewrites it.
@@ -101,6 +105,11 @@ type Host = {
   ociRuntime?: string
   /** Whether the Docker daemon runs without root. */
   dockerRootless?: boolean
+  /**
+   * What the pulled image holds at /app/install.sh: this installer when
+   * absent, other text, or no such file.
+   */
+  imageInstaller?: string | "missing"
 }
 
 const roots: string[] = []
@@ -141,6 +150,7 @@ function host({
   groups = [1000],
   ociRuntime = "crun",
   dockerRootless = false,
+  imageInstaller,
 }: Host = {}) {
   const root = mkdtempSync(join(tmpdir(), "pcp-install-"))
   roots.push(root)
@@ -176,6 +186,17 @@ function host({
   const ps = compose ? "echo 0123456789ab" : ""
   const imageId = image ? `echo "${image}"` : ":"
   const request = signal === undefined ? "exit 1" : `printf '%s\\n' '${signal}'`
+  // `run --rm … --entrypoint cat <image> /app/install.sh`: the installer the
+  // image carries. Any other run starts PCP and prints nothing.
+  let carried = `cat "${INSTALL_SH}"`
+  if (imageInstaller === "missing") {
+    carried =
+      'echo "cat: /app/install.sh: No such file or directory" >&2; exit 1'
+  } else if (imageInstaller !== undefined) {
+    writeFileSync(join(root, "image-install.sh"), imageInstaller)
+    carried = `cat "${join(root, "image-install.sh")}"`
+  }
+  const run = `run) case "$*" in *--entrypoint*) ${carried} ;; esac ;;`
 
   if (docker !== "absent") {
     const version =
@@ -198,6 +219,7 @@ function host({
   image) ${imageId} ;;
   exec) ${request} ;;
   ps) ${ps} ;;
+  ${run}
 esac`,
     )
   }
@@ -211,6 +233,7 @@ esac`,
   image) ${imageId} ;;
   exec) ${request} ;;
   ps) ${ps} ;;
+  ${run}
 esac`,
     )
   }
@@ -573,6 +596,28 @@ describe("install.sh with Podman", () => {
     expect(result.stderr).toContain("systemd session")
   })
 
+  it("names drop-ins next to the unit, and leaves them", () => {
+    const machine = host({ podman: "5.2.2" })
+    const first = machine.run()
+    expect(first.status).toBe(0)
+    expect(first.stderr).not.toContain("drop-ins")
+
+    const dropins = `${machine.unit}.d`
+    mkdirSync(dropins)
+    writeFileSync(
+      join(dropins, "gpu.conf"),
+      "[Container]\nAddDevice=/dev/dri\n",
+    )
+    const result = machine.run()
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain(
+      `Note: ${dropins} holds drop-ins that change PCP's unit: gpu.conf.`,
+    )
+    expect(readFileSync(join(dropins, "gpu.conf"), "utf8")).toContain(
+      "AddDevice=/dev/dri",
+    )
+  })
+
   it("removes the unit and the container on uninstall", () => {
     const machine = host({ podman: "5.2.2" })
     expect(machine.run().status).toBe(0)
@@ -702,7 +747,7 @@ describe("install.sh update", () => {
     expect(result.status).toBe(0)
     expect(result.calls).toContain(`docker pull -q ${IMAGE}`)
     expect(result.calls).not.toContain("docker rm -f pcp")
-    expect(result.calls.some((call) => call.startsWith("docker run"))).toBe(
+    expect(result.calls.some((call) => call.startsWith("docker run -d"))).toBe(
       false,
     )
     expect(result.stdout).toContain("PCP is up to date")
@@ -720,6 +765,234 @@ describe("install.sh update", () => {
     )
     expect(result.stdout).toContain("PCP is updated")
     expect(result.stdout).not.toContain("Open it now")
+  })
+})
+
+// The image carries the installer (Dockerfile: /app/install.sh), and an
+// update runs the one in the image it pulled rather than the copy saved at
+// install time, which would write the unit as an older installer did
+// (kaperkunde/pcp#38: no /dev/dri after an update).
+describe("install.sh update with the installer in the image", () => {
+  const READ = "run --rm --network none --no-healthcheck --entrypoint cat"
+  const read = (calls: string[]) =>
+    calls.filter((call) => call.includes("--entrypoint cat"))
+  const current = () => readFileSync(INSTALL_SH, "utf8")
+  /** This installer, as a later version of it would differ. */
+  const newer = () =>
+    current().replace(
+      'say "PCP is updated: $IMAGE."',
+      'say "PCP is updated by the installer from the image: $IMAGE."',
+    )
+
+  it("reads it out of the image it pulled, by its id, and keeps the copy when it is the same", () => {
+    const machine = host({ docker: "works", image: "sha256:abc" })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    const pull = result.calls.indexOf(`docker pull -q ${IMAGE}`)
+    const reading = result.calls.indexOf(
+      `docker ${READ} sha256:abc /app/install.sh`,
+    )
+    expect(pull).toBeGreaterThanOrEqual(0)
+    expect(reading).toBeGreaterThan(pull)
+    expect(read(result.calls)).toHaveLength(1)
+    // Never the running PCP's files.
+    expect(result.calls).not.toContain("docker exec pcp cat /app/install.sh")
+    expect(result.stdout).toContain("PCP is up to date")
+    expect(result.stdout).not.toContain("differs from the copy")
+    expect(readFileSync(machine.updater, "utf8")).toBe(current())
+  })
+
+  it("makes a changed one the copy and runs it, which installs even from the same image", () => {
+    const machine = host({
+      docker: "works",
+      image: "sha256:abc",
+      imageInstaller: newer(),
+    })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("differs from the copy")
+    expect(result.stdout).toContain(
+      `PCP is updated by the installer from the image: ${IMAGE}.`,
+    )
+    expect(readFileSync(machine.updater, "utf8")).toBe(newer())
+    expect(result.calls).toContain(`docker ${RUN}`)
+    // The copy it ran pulled again (a no-op for the same image) and did not
+    // read the image's installer a second time.
+    expect(
+      result.calls.filter((call) => call === `docker pull -q ${IMAGE}`),
+    ).toHaveLength(2)
+    expect(read(result.calls)).toHaveLength(1)
+
+    // From then on the copy is the image's, and nothing runs in its place.
+    const again = machine.run(["update"])
+    expect(again.status).toBe(0)
+    expect(again.stdout).not.toContain("differs from the copy")
+    expect(again.stdout).toContain("PCP is up to date")
+    expect(again.calls.some((call) => call.startsWith("docker run -d"))).toBe(
+      false,
+    )
+  })
+
+  it("reads no installer in a copy run in another's place, and installs", () => {
+    const machine = host({
+      docker: "works",
+      image: "sha256:abc",
+      imageInstaller: newer(),
+    })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"], { PCP_UPDATER_REEXEC: "1" })
+    expect(result.status).toBe(0)
+    expect(read(result.calls)).toHaveLength(0)
+    expect(result.calls).toContain(`docker ${RUN}`)
+    expect(readFileSync(machine.updater, "utf8")).toBe(current())
+  })
+
+  it("rewrites the Quadlet unit with the image's installer (Bazzite)", () => {
+    const machine = host({
+      podman: "5.2.2",
+      image: "abc123",
+      imageInstaller: current().replace(
+        "# PCP. Written by install.sh;",
+        "# PCP. Written by the installer from the image;",
+      ),
+    })
+    expect(machine.run([], { PCP_CHANNEL: "develop" }).status).toBe(0)
+    expect(readFileSync(machine.unit, "utf8")).toContain(
+      "# PCP. Written by install.sh;",
+    )
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(`podman ${READ} abc123 /app/install.sh`)
+    expect(readFileSync(machine.unit, "utf8")).toContain(
+      "# PCP. Written by the installer from the image;",
+    )
+    expect(readFileSync(machine.unit, "utf8")).toContain(
+      "Image=ghcr.io/kaperkunde/pcp:develop\n",
+    )
+    expect(result.calls).toContain("systemctl --user restart pcp.service")
+  })
+
+  it("updates with its own copy when the image has no installer, and says so", () => {
+    const machine = host({ docker: "works", imageInstaller: "missing" })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain(
+      `Note: could not read the installer in ${IMAGE}; updating with the copy in ${machine.updater}.`,
+    )
+    expect(result.calls).toContain(`docker ${RUN}`)
+    expect(result.stdout).toContain(`PCP is updated: ${IMAGE}.`)
+    expect(readFileSync(machine.updater, "utf8")).toBe(current())
+    expect(existsSync(`${machine.updater}.image`)).toBe(false)
+  })
+
+  it.each([
+    ["nothing", () => ""],
+    ["no shebang", () => "echo hello\n"],
+    ["another shell", () => current().replace("#!/bin/sh\n", "#!/bin/bash\n")],
+    [
+      "no format line",
+      () => current().replace("\n# pcp-installer-format: 1\n", "\n"),
+    ],
+    [
+      "a format this copy does not know",
+      () =>
+        current().replace(
+          "\n# pcp-installer-format: 1\n",
+          "\n# pcp-installer-format: 2\n",
+        ),
+    ],
+    ["a script sh cannot parse", () => `${current()}\nif then fi (\n`],
+    ["one too large", () => `${current()}\n#${"x".repeat(300_000)}\n`],
+  ])("updates with its own copy when the image's holds %s", (_, text) => {
+    const machine = host({ docker: "works", imageInstaller: text() })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain(
+      `Note: /app/install.sh in ${IMAGE} is not an installer this copy takes`,
+    )
+    expect(result.calls).toContain(`docker ${RUN}`)
+    expect(readFileSync(machine.updater, "utf8")).toBe(current())
+    expect(existsSync(`${machine.updater}.image`)).toBe(false)
+  })
+
+  it("reads it from the pinned image, and the copy it runs stays pinned", () => {
+    const pinned = "ghcr.io/kaperkunde/pcp:1.2.3"
+    const machine = host({ docker: "works", imageInstaller: newer() })
+    expect(
+      machine.run([], { PCP_VERSION: "1.2.3", PCP_AUTO_UPDATE: "1" }).status,
+    ).toBe(0)
+
+    const result = machine.run(["update"], { PCP_VERSION: "1.2.3" })
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(`docker ${READ} ${pinned} /app/install.sh`)
+    expect(result.stdout).toContain(
+      `PCP is updated by the installer from the image: ${pinned}.`,
+    )
+    expect(
+      result.calls.filter((call) => call === `docker pull -q ${pinned}`),
+    ).toHaveLength(2)
+    expect(result.calls.some((call) => call.includes(":latest"))).toBe(false)
+  })
+
+  it("carries a channel the request named into the copy it runs", () => {
+    const develop = "ghcr.io/kaperkunde/pcp:develop"
+    const ID = "0f8a4f6e-3c1b-4d2a-9e5f-7b6c5d4e3f21"
+    const machine = host({
+      docker: "works",
+      signal: `${ID} ${Math.floor(Date.now() / 1000)} develop`,
+      imageInstaller: newer(),
+    })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["watch"])
+    expect(result.status).toBe(0)
+    expect(result.calls).toContain(`docker ${READ} ${develop} /app/install.sh`)
+    expect(result.calls).toContain(
+      `docker run -d --name pcp --restart unless-stopped -p 3000:3000 -e PCP_HOST_UPDATER=2 -v pcp-data:/data ${develop}`,
+    )
+    expect(result.stdout).toContain(
+      `PCP is updated by the installer from the image: ${develop}.`,
+    )
+    expect(readFileSync(machine.conf, "utf8")).toContain(
+      "PCP_CHANNEL=develop\n",
+    )
+    // The copy ran `update`, not `watch`: the request was answered once.
+    expect(
+      result.calls.filter(
+        (call) => call === "docker exec pcp cat /data/install-request",
+      ),
+    ).toHaveLength(1)
+  })
+
+  it("keeps root's copy where only root writes, readable by all", () => {
+    const machine = host({ docker: "works", uid: 0, imageInstaller: newer() })
+    expect(machine.run().status).toBe(0)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(readFileSync(machine.sys.updater, "utf8")).toBe(newer())
+    expect(statSync(machine.sys.updater).mode & 0o777).toBe(0o644)
+    expect(existsSync(machine.updater)).toBe(false)
+  })
+
+  it("reads nothing when there is no copy to keep current", () => {
+    const machine = host({ podman: "5.2.2", imageInstaller: newer() })
+    expect(machine.run([], { PCP_UPDATE_BUTTON: "0" }).status).toBe(0)
+    expect(existsSync(machine.updater)).toBe(false)
+
+    const result = machine.run(["update"])
+    expect(result.status).toBe(0)
+    expect(read(result.calls)).toHaveLength(0)
   })
 })
 

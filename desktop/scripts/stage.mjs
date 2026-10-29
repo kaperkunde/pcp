@@ -5,6 +5,9 @@
 // for the same build. The image's entry point (docker/start.cjs) is not
 // staged: it only picks HOSTNAME, which the wrapper sets itself.
 //
+// Nor is install.sh, which the image carries only for the Linux installer on
+// the host to read when it updates a container: the app has no installer.
+//
 // Chromium, which the Dockerfile installs for the browser, is not staged:
 // the app looks for one on the machine (PCP_BROWSER_EXECUTABLE, or where
 // Playwright installs it), and the Browser page's Install Chromium puts one

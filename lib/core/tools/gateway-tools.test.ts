@@ -280,7 +280,12 @@ describe("PCP's own tools", () => {
       url: expect.stringContaining(`${PUBLIC_URL}/permissions/`),
     })
     const texts = (asked.content as Array<{ text: string }>).map((p) => p.text)
-    expect(texts.at(-1)!.trimEnd().split("\n").at(-1)).toBe(owner.url)
+    expect(texts.at(-1)!.trimEnd().split("\n").at(-1)).toBe(
+      `[Add the server Linear?](${owner.url})`,
+    )
+    expect(asked.structuredContent).toMatchObject({
+      label: "Add the server Linear?",
+    })
 
     const open = await client.callTool({
       name: "check_permission",
@@ -311,5 +316,103 @@ describe("PCP's own tools", () => {
     })
     expect(unknown.isError).toBe(true)
     expect(unknown._meta?.[ERROR_META_KEY]).toEqual({ code: "not_found" })
+  })
+})
+
+describe("PCP's own tools in search and describe (#41)", () => {
+  const said = async (
+    on: Client,
+    name: string,
+    args: Record<string, unknown>,
+  ) => {
+    const result = await on.callTool({ name, arguments: args })
+    return {
+      isError: result.isError === true,
+      text: (result.content as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join("\n"),
+    }
+  }
+
+  it("finds them by name, first, and describes them to be called directly", async () => {
+    const found = await said(client, "search", {
+      query: "check_permission PCP",
+    })
+    expect(found.text.split("\n")[0]).toMatch(
+      /^pcp check_permission \(.+\) — .+ PCP's own tool: call it directly \(not through call_tool\)\.$/,
+    )
+    expect(
+      (await said(client, "search", { query: "withdraw" })).text.split("\n")[0],
+    ).toMatch(/^pcp withdraw_request /)
+
+    const onlyPcp = await said(client, "search", { query: "run", kind: "pcp" })
+    expect(
+      onlyPcp.text
+        .split("\n")
+        .filter((line) => line && !line.startsWith("describe takes"))
+        .every((line) => line.startsWith("pcp ")),
+    ).toBe(true)
+
+    const described = await said(client, "describe", {
+      ref: "check_permission",
+    })
+    expect(described.isError).toBe(false)
+    const tool = JSON.parse(described.text)
+    expect(tool).toMatchObject({
+      tool: "check_permission",
+      kind: "pcp",
+      title: expect.any(String),
+      inputSchema: { type: "object", additionalProperties: false },
+      outputSchema: expect.any(Object),
+    })
+    expect(tool.call_handle).toBeUndefined()
+
+    const handle = await said(client, "call_tool", {
+      call_handle: "check_permission",
+      arguments: {},
+    })
+    expect(handle.isError).toBe(true)
+    expect(handle.text).toContain("check_permission is PCP's own tool")
+  })
+
+  it("reads a name with an app's prefix as the bare name, and says so", async () => {
+    const found = await said(client, "search", {
+      query: "mcp__PCP_Bazzite__run_code",
+    })
+    const lines = found.text.split("\n")
+    expect(lines[0]).toBe(
+      "\"mcp__PCP_Bazzite__\" is your app's prefix for PCP's tools, not part of the name: the tool is run_code, and you call it directly.",
+    )
+    expect(lines[2]).toMatch(/^pcp run_code /)
+
+    const described = JSON.parse(
+      (await said(client, "describe", { ref: "mcp__PCP_Bazzite__run_code" }))
+        .text,
+    )
+    expect(described.tool).toBe("run_code")
+    expect(described.note).toContain('"mcp__PCP_Bazzite__"')
+  })
+
+  it("leaves out the tools a token does not have", async () => {
+    const { token } = await createApiToken(ctx, {
+      name: "Plain",
+      allowAllServers: true,
+    })
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(
+      { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL },
+      [],
+    ).connect(serverSide)
+    const plain = new Client({ name: "test", version: "1.0.0" })
+    await plain.connect(clientSide)
+
+    const found = await said(plain, "search", { query: "run_code" })
+    expect(found.text).not.toContain("pcp run_code")
+    const described = await said(plain, "describe", { ref: "run_code" })
+    expect(described.isError).toBe(true)
+    expect(
+      (await said(plain, "search", { query: "check_permission" })).text,
+    ).toMatch(/^pcp check_permission /)
+    await plain.close()
   })
 })

@@ -18,6 +18,7 @@ import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
 import { argumentsResult, familyError } from "../tools/family"
 import { makeRedactor } from "../openapi/redact"
+import { markdownLink } from "../owner-link"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import {
   createServer,
@@ -231,18 +232,9 @@ export async function prepareLaunch(
   let definition: ServiceDefinition
 
   if (input.definitionId) {
-    const shared = await definitionForNew(ctx, input.definitionId, "service")
-    const source = await db().serviceSpec.findFirst({
-      where: { server: { definitionId: shared.id } },
-      orderBy: { createdAt: "asc" },
-    })
-
-    if (!source) {
-      throw notFound("That service definition")
-    }
-
+    const shared = await serviceOfDefinition(ctx, input.definitionId)
     definitionId = shared.id
-    definition = readServiceDefinition(source.definition)
+    definition = shared.definition
   } else {
     let value = input.definition
 
@@ -298,6 +290,38 @@ export async function prepareLaunch(
     publish,
     env,
     containerName: await containerNameFor(ctx, host.id, name),
+  }
+}
+
+/**
+ * A service definition of the vault, as another instance of it is launched:
+ * its name, description and definition (its oldest instance's, which every
+ * instance shares).
+ */
+export async function serviceOfDefinition(
+  ctx: VaultContext,
+  definitionId: string,
+): Promise<{
+  id: string
+  name: string
+  description: string
+  definition: ServiceDefinition
+}> {
+  const shared = await definitionForNew(ctx, definitionId, "service")
+  const source = await db().serviceSpec.findFirst({
+    where: { server: { definitionId: shared.id, vaultId: ctx.vaultId } },
+    orderBy: { createdAt: "asc" },
+  })
+
+  if (!source) {
+    throw notFound("That service definition")
+  }
+
+  return {
+    id: shared.id,
+    name: shared.name,
+    description: shared.description,
+    definition: readServiceDefinition(source.definition),
   }
 }
 
@@ -1191,7 +1215,7 @@ export async function callServiceTool(
     }
 
     return errorToolResult(
-      `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${pageOf(loaded.server.id, publicUrl)}`,
+      `${error instanceof Error ? error.message : String(error)}\nThe service's page: ${markdownLink(`Open ${loaded.server.name}'s page in PCP`, pageOf(loaded.server.id, publicUrl))}`,
       { redact },
     )
   }
@@ -1241,7 +1265,10 @@ export async function stoppedServiceMessage(
   { publicUrl }: { publicUrl: string },
 ): Promise<string | null> {
   const where = loaded.host?.name ?? "its SSH server"
-  const page = pageOf(loaded.server.id, publicUrl)
+  const page = markdownLink(
+    `Open ${loaded.server.name}'s page in PCP`,
+    pageOf(loaded.server.id, publicUrl),
+  )
 
   if (!access) {
     return `${loaded.server.name} runs on ${where}, which PCP cannot reach now. The owner sees it on the service's page:\n${page}`
@@ -1290,6 +1317,8 @@ export async function servicesOnHost(
 /** What the service's page shows of it that is not live: nothing secret. */
 export type ServiceView = {
   id: string
+  /** The definition its instances share: another is launched on it. */
+  definitionId: string | null
   name: string
   containerName: string
   engine: ServiceEngine
@@ -1322,6 +1351,7 @@ export async function serviceView(
 
   return {
     id,
+    definitionId: loaded.server.definitionId,
     name: loaded.server.name,
     containerName: loaded.spec.containerName,
     engine: loaded.engine,

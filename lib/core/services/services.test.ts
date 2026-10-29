@@ -26,7 +26,7 @@ import {
 import { setupVault } from "../vault"
 import { startFakeDocker, type FakeDocker } from "./fake-docker"
 import type { ServiceDefinitionInput } from "./definition"
-import type { ServiceLaunchInput } from "./services"
+import { serviceOfDefinition, type ServiceLaunchInput } from "./services"
 
 // Services end to end in the core: launched by the owner on an SSH server
 // (the test server on 127.0.0.1) whose login runs commands in a real sh,
@@ -210,6 +210,38 @@ describe("launching a service", { timeout: 30_000 }, () => {
       "--format",
       "{{.Server.Version}}",
     ])
+  })
+
+  it("launches another of a service's definition, which both share", async () => {
+    const hostId = await pinnedHost()
+    const first = await launchService(ctx, await launchInput(hostId), FAST)
+    const definitionId = (await getServer(ctx, first.id)).definitionId!
+    const shared = await serviceOfDefinition(ctx, definitionId)
+
+    expect(shared.definition.image).toBe(`ghcr.io/example/docs@${DIGEST}`)
+
+    const second = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        name: "Docs two",
+        // What another instance brings: its own part only.
+        definition: undefined,
+        definitionId,
+      }),
+      FAST,
+    )
+    const row = await getServer(ctx, second.id)
+
+    expect(row.definitionId).toBe(definitionId)
+    expect(docker.state().containers["pcp-docs-two"]!.image).toBe(
+      `ghcr.io/example/docs@${DIGEST}`,
+    )
+    await expect(
+      serviceOfDefinition(
+        ctx,
+        (await getServer(ctx, first.registeredId!)).definitionId!,
+      ),
+    ).rejects.toThrow(/for an API endpoint/)
   })
 
   it("finds Podman when that is what the login has", async () => {
@@ -444,7 +476,7 @@ describe("a running service", { timeout: 30_000 }, () => {
     expect((failure as Error).message).toMatch(/Docs service is stopped/)
     expect((failure as Error).message).toContain(`${service.slug}/start`)
     expect((failure as Error).message).toContain(
-      `http://localhost:3000/servers/${service.id}`,
+      `page in PCP](http://localhost:3000/servers/${service.id})`,
     )
     expect(await serviceStateLine(ctx, endpoint, PUBLIC.publicUrl)).toMatch(
       /stopped/,

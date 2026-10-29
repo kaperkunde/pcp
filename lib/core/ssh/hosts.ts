@@ -12,6 +12,7 @@ import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
 import { argumentsResult, familyError, withNotes } from "../tools/family"
 import { makeRedactor } from "../openapi/redact"
+import { markdownLink } from "../owner-link"
 import {
   getServer,
   kindNoun,
@@ -22,6 +23,7 @@ import {
 } from "../servers"
 import { deleteManagedSecret, writeManagedSecret } from "../secrets"
 import {
+  closeSshConnections,
   SshAuthError,
   SshHostKeyError,
   sshCheck,
@@ -244,6 +246,8 @@ export async function updateSshServer(
     where: { id },
     data: { ...data, ...(moved ? { sshHostKey: null } : {}) },
   })
+  // An exit's connection is to the server as it was.
+  closeSshConnections(id)
 
   return { reconnect: moved || data.authUsername !== existing.authUsername }
 }
@@ -261,6 +265,7 @@ export async function forgetSshHostKey(
     where: { id },
     data: { sshHostKey: null, status: "unknown", statusMessage: "" },
   })
+  closeSshConnections(id)
 }
 
 /**
@@ -289,6 +294,8 @@ export async function replaceSshKey(
       statusMessage: addKeyNote(existing.authUsername ?? ""),
     },
   })
+  // Signed in with the old key: the next use signs in with the new one.
+  closeSshConnections(id)
 }
 
 /** What the server's page shows: nothing of it is secret. */
@@ -356,9 +363,15 @@ function pinner(server: McpServer) {
   }
 }
 
-/** The server's page in PCP, where its key and host key are. */
+/**
+ * The server's page in PCP, where its key and host key are, as a markdown
+ * link: an app that reads the answer aloud says the label, not the address.
+ */
 function pageOf(server: McpServer, publicUrl: string): string {
-  return `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`
+  return markdownLink(
+    `Open ${server.name}'s page in PCP`,
+    `${publicUrl.replace(/\/+$/, "")}/servers/${server.id}`,
+  )
 }
 
 /** Why PCP does not connect to a server whose host key the owner never pinned. */

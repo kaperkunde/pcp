@@ -277,8 +277,12 @@ describe("permissionLinkIn", () => {
       permissionLinkIn(
         result(`x\n[Allow it?](${PUBLIC_URL}/permissions/a1)`),
         PUBLIC_URL,
-      )?.url,
-    ).toBe(`${PUBLIC_URL}/permissions/a1`)
+      ),
+    ).toMatchObject({
+      url: `${PUBLIC_URL}/permissions/a1`,
+      label: "Allow it?",
+      request: "a1",
+    })
     expect(
       permissionLinkIn(
         result("x\nhttps://evil.example/permissions/a1"),

@@ -242,6 +242,13 @@ describe("the browser's tools", () => {
       /need the tab's id/,
     )
     expect(() => parse("tabs", { action: "select", tab: "t1" })).toThrow()
+    // An exit opens a tab, and a tab keeps it.
+    expect(
+      parse("tabs", { action: "open", url: "https://example.com", exit: "nl" }),
+    ).toEqual({ action: "open", url: "https://example.com", exit: "nl" })
+    expect(() => parse("tabs", { action: "list", exit: "nl" })).toThrow(
+      "exit is only for open: a tab keeps the exit it opened with.",
+    )
     expect(() =>
       parse("scroll", { tab: "t1", direction: "down", ref: "e1" }),
     ).toThrow(/one of them/)

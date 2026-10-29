@@ -138,3 +138,26 @@ describe("the compose files' ports", () => {
     expect(https).not.toMatch(/"3000:3000"/)
   })
 })
+
+// install.sh's update reads the installer out of the image it pulled and runs
+// it in place of the copy it saved at install time, so an existing install
+// gets the unit the new version's installer writes (kaperkunde/pcp#38: the
+// graphics card). install.test.ts covers the reading.
+describe("the Docker image's installer", () => {
+  it("is install.sh, root's and read-only, where install.sh reads it", () => {
+    const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8")
+    const runner = dockerfile.slice(dockerfile.indexOf("FROM base AS runner"))
+    const installer = readFileSync(path.join(root, "install.sh"), "utf8")
+
+    expect(runner).toMatch(/^WORKDIR \/app$/m)
+    expect(runner).toMatch(/^COPY --chmod=0644 install\.sh \.\/install\.sh$/m)
+    expect(installer).toContain('IMAGE_INSTALLER="/app/install.sh"')
+    expect(installer).toMatch(/^# pcp-installer-format: 1$/m)
+  })
+
+  it("is not left out of the build context", () => {
+    const ignored = readFileSync(path.join(root, ".dockerignore"), "utf8")
+
+    expect(ignored.split("\n")).not.toContain("install.sh")
+  })
+})

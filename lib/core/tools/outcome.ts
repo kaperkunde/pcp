@@ -18,7 +18,8 @@ import { isPcpError, type PcpErrorCode } from "../errors"
  *   unknown tool or a malformed request, which the SDK answers.
  * - needsOwner(owner, text): it waits for the owner: a permission request
  *   or a server to connect. The text ends with the link the assistant hands
- *   over (connect.ts linkLastText); structuredContent carries the same as
+ *   over, a markdown link labelled with `label` (owner-link.ts
+ *   linkLastText); structuredContent carries the same as
  *   NEEDS_OWNER, on every tool, declared in the output schema of the tools
  *   that have one.
  * - passOn(result): an answer made elsewhere (an upstream tool's, a

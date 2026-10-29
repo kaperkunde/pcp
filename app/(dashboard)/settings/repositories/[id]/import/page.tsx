@@ -4,11 +4,15 @@ import { CloneForm, type CloneSource } from "@/components/clone-form"
 import { PageColumn } from "@/components/page-column"
 import { PageHeader } from "@/components/page-header"
 import { RepoFilesReview } from "@/components/repo-review"
-import { importItemAction } from "@/lib/actions/repos"
+import { ServiceLaunchForm } from "@/components/service-form"
+import { ButtonLink } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import { importItemAction, importServiceAction } from "@/lib/actions/repos"
 import {
   DEFAULT_HEADER_NAME,
   DEFAULT_VALUE_TEMPLATE,
 } from "@/lib/core/constants"
+import { db } from "@/lib/core/db"
 import { isPcpError } from "@/lib/core/errors"
 import { oauthRedirectUrl } from "@/lib/core/oauth-client"
 import type {
@@ -26,6 +30,7 @@ import { reviewItem } from "@/lib/core/repos/review"
 import { specServerUrls } from "@/lib/core/repos/share-review"
 import { clientFor, getRepo } from "@/lib/core/repos/store"
 import { listSecrets } from "@/lib/core/secrets"
+import { sshServerView } from "@/lib/core/ssh/hosts"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
@@ -76,7 +81,7 @@ function sourceOf(
 }
 
 /**
- * A new MCP server or API endpoint from a linked repository: the item in
+ * A new MCP server, API endpoint or service from a linked repository: the item in
  * full as it would be added, then what is the owner's own, as cloning asks
  * for it (its name, address, sign-in with a secret of theirs, switches and
  * note). The repository holds the definition only; this server is the first
@@ -121,9 +126,11 @@ export default async function ImportPage({
 
       if (
         fetched.document.kind !== "endpoint" &&
-        fetched.document.kind !== "server"
+        fetched.document.kind !== "server" &&
+        fetched.document.kind !== "service"
       ) {
-        failure = "Only an MCP server or API endpoint is added this way."
+        failure =
+          "Only an MCP server, API endpoint or service is added this way."
       } else if (await findLocalItem(ctx, remote.ref)) {
         failure = `Your vault has ${remote.ref.name} already: add it from the list instead, to update it.`
       }
@@ -134,6 +141,71 @@ export default async function ImportPage({
     }
 
     failure = error.message
+  }
+
+  if (fetched && !failure && fetched.document.kind === "service") {
+    const service = fetched.document
+    const review = reviewItem(null, service)
+    const hosts = (
+      await db().mcpServer.findMany({
+        where: { vaultId: ctx.vaultId, kind: "ssh" },
+        orderBy: { name: "asc" },
+      })
+    )
+      // A service's commands go only to a server whose host key is pinned.
+      .filter((server) => server.sshHostKey)
+      .map((server) => ({
+        id: server.id,
+        name: server.name,
+        address: sshServerView(server).host,
+      }))
+    const secrets = (await listSecrets(ctx))
+      .filter((secret) => secret.kind === "text")
+      .map(({ id: secretId, name }) => ({ id: secretId, name }))
+
+    return (
+      <PageColumn width="narrow">
+        <PageHeader
+          back={back}
+          title={`Launch ${service.displayName} from ${label}`}
+          description="The repository has what this service runs: its image, pinned by digest, its ports, variables, volumes, health check and what PCP adds for it. Where it runs, where it is published and the secret each variable takes are yours: give them below. Nothing runs until you launch it."
+        />
+
+        <RepoFilesReview
+          flags={review.flags}
+          files={review.files}
+          whole={Object.entries(fetched.files)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([path, text]) => ({ path, text }))}
+          caption="Its file"
+        />
+
+        {hosts.length > 0 ? (
+          <ServiceLaunchForm
+            hosts={hosts}
+            secrets={secrets}
+            fixed={{
+              definition: JSON.stringify(service.definition, null, 2),
+              name: service.displayName,
+              description: service.description,
+            }}
+            action={importServiceAction.bind(null, id, {
+              commit,
+              root,
+              hash: fetched.hash,
+            })}
+          />
+        ) : (
+          <Card className="items-start gap-3 p-5 text-sm leading-relaxed sm:p-6">
+            <p>
+              A service runs on one of your SSH servers. Add one first, and
+              check its sign-in so PCP pins its host key.
+            </p>
+            <ButtonLink href="/servers/ssh/new">Add an SSH server</ButtonLink>
+          </Card>
+        )}
+      </PageColumn>
+    )
   }
 
   const document =

@@ -9,6 +9,7 @@ import { PageColumn } from "@/components/page-column"
 import { ServerDetail } from "@/components/server-detail"
 import { ServerForm } from "@/components/server-form"
 import { ServerPacingForm } from "@/components/server-pacing-form"
+import { ExitsCard } from "@/components/exits-card"
 import { ServiceCard } from "@/components/service-card"
 import { ServiceSettingsForm } from "@/components/service-form"
 import { SshAccessCard } from "@/components/ssh-access-card"
@@ -29,6 +30,7 @@ import {
   type AuthType,
   type ServerStatus,
 } from "@/lib/core/servers"
+import { listExits } from "@/lib/core/exits/exits"
 import { serviceView } from "@/lib/core/services/services"
 import { sshServerView } from "@/lib/core/ssh/hosts"
 import { describeOAuthConnection } from "@/lib/core/upstream"
@@ -67,6 +69,7 @@ export default async function ServerPage({
   const mail = isMailKind(kind)
   const browser = kind === "browser"
   const ssh = kind === "ssh" ? sshServerView(server) : null
+  const exits = ssh ? await listExits(ctx, { serverId: server.id }) : []
   const wrapper = kind === "wrapper" ? await getWrapper(ctx, { id }) : null
   const service = kind === "service" ? await serviceView(ctx, id) : null
   const replaced = await replacedTools(ctx, server.id)
@@ -326,6 +329,7 @@ export default async function ServerPage({
         about={about}
       >
         {ssh ? <SshAccessCard serverId={server.id} view={ssh} /> : null}
+        {ssh ? <ExitsCard serverId={server.id} exits={exits} /> : null}
         {service ? <ServiceCard view={service} /> : null}
       </ServerDetail>
     </PageColumn>

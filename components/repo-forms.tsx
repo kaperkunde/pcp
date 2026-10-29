@@ -23,6 +23,7 @@ import {
   addItemsAction,
   answerChangeAction,
   createRepoAction,
+  addCommonRepoAction,
   deleteRepoAction,
   pollGitHubSignInAction,
   setExcludedAction,
@@ -487,6 +488,18 @@ function ActionButton({
       </div>
       <ResultLines state={state} />
     </div>
+  )
+}
+
+/** One click for PCP's common items: linked read-only, then browsed. */
+export function AddCommonRepoButton() {
+  return (
+    <ActionButton
+      label="Add PCP's common items"
+      pendingLabel="Adding…"
+      variant="secondary"
+      run={() => addCommonRepoAction()}
+    />
   )
 }
 

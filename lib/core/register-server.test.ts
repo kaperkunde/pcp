@@ -18,6 +18,17 @@ import { readServerNote } from "./personal-notes"
 import { createSecret, writeManagedSecret } from "./secrets"
 import { createServer, getServer, setToolDescription } from "./servers"
 import { writeToolAccess } from "./tool-access"
+import { ensureDefinition } from "./definition-rows"
+import {
+  parseServiceDefinition,
+  serviceDefinitionHash,
+} from "./services/definition"
+import {
+  serviceOfDefinition,
+  writeServiceDefinition,
+  type ServiceLaunchInput,
+} from "./services/services"
+import { createSshServer } from "./ssh/hosts"
 import { scratchDatabase } from "./test-db"
 import { setupVault } from "./vault"
 
@@ -151,7 +162,7 @@ describe("what an assistant is told", () => {
     >
 
     expect(tool.title).toBe(
-      "Add a server, an API, a mail or a calendar account",
+      "Add a server, an API, a mail or a calendar account, or a service",
     )
     expect(tool.description).toContain(
       "A mailbox is always a mail account (jmap or imap), never an API you write around its mail server",
@@ -166,6 +177,7 @@ describe("what an assistant is told", () => {
       "jmap",
       "imap",
       "caldav",
+      "service",
     ])
     expect(properties.auth_type?.enum).toEqual([
       "none",
@@ -1005,7 +1017,7 @@ describe("another server of a definition", () => {
     expect(hidden).toMatchObject({
       isError: true,
       text: expect.stringMatching(
-        /No MCP server or API endpoint called coolify-gaaf that this token sees, .*Those it sees: linear\./,
+        /No MCP server, API endpoint or service called coolify-gaaf that this token sees, .*Those it sees: linear\./,
       ),
     })
 
@@ -1124,5 +1136,369 @@ describe("another server of a definition", () => {
     expect((await shown()).lines).toContain(
       "Your note on it, which every assistant that sees it reads as yours:\nThe team's tracker.",
     )
+  })
+})
+
+describe("proposing a service", () => {
+  const IMAGE = `ghcr.io/docling-project/docling-serve-cpu@sha256:${"c".repeat(64)}`
+  const DEFINITION = {
+    image: IMAGE,
+    source: "ghcr.io/docling-project/docling-serve-cpu:latest",
+    ports: [{ container: 5001 }],
+    env: [
+      { name: "DOCLING_SERVE_API_KEY", required: true },
+      { name: "DOCLING_SERVE_ENABLE_UI", value: "false" },
+    ],
+    volumes: [{ name: "cache", path: "/opt/cache" }],
+    health: { kind: "http", port: 5001, path: "/health" },
+    registers: {
+      kind: "openapi",
+      port: 5001,
+      specPath: "/openapi.json",
+      auth: {
+        env: "DOCLING_SERVE_API_KEY",
+        header: "X-Api-Key",
+        template: "{{secret}}",
+      },
+    },
+  }
+  let launched: ServiceLaunchInput[]
+
+  /** The owner's SSH server, its host key pinned (as rows: nothing connects). */
+  async function sshServer(name = "Build box", pinned = true) {
+    const { id } = await createSshServer(ctx, {
+      name,
+      host: "build.ada-home.net",
+      port: 22,
+      username: "deploy",
+    })
+
+    if (pinned) {
+      await db().mcpServer.update({
+        where: { id },
+        data: { sshHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake" },
+      })
+    }
+
+    return getServer(ctx, id)
+  }
+
+  async function connectSeeing(serverIds?: string[]) {
+    await client.close()
+    const { token } = await createApiToken(ctx, {
+      name: "Claude",
+      allowAllServers: serverIds === undefined,
+      serverIds: serverIds ?? [],
+    })
+    const scope = { ...(await resolveApiToken(token))!, publicUrl: PUBLIC_URL }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(scope, await loadGatewayServers(scope), {
+      lookupHost: async () => ["203.0.114.7"],
+    }).connect(serverSide)
+    client = new Client({ name: "test", version: "1.0.0" })
+    await client.connect(clientSide)
+  }
+
+  /** What launchService makes, as rows: the service, on its definition. */
+  const executor = {
+    callTool: async () => {
+      throw new Error("no call runs here")
+    },
+    syncTools: async () => ({
+      status: "ok" as const,
+      message: "",
+      toolCount: 0,
+    }),
+    launchService: async (
+      launchCtx: VaultContext,
+      input: ServiceLaunchInput,
+    ) => {
+      launched.push(input)
+      const id = `svc-${launched.length}`
+      const definition = input.definitionId
+        ? (await serviceOfDefinition(launchCtx, input.definitionId)).definition
+        : parseServiceDefinition(input.definition)
+
+      await db().mcpServer.create({
+        data: {
+          id,
+          vaultId: launchCtx.vaultId,
+          kind: "service",
+          name: `${input.name} service`,
+          slug: `${input.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-service`,
+          description: input.description ?? "",
+          url: "pcp:service",
+          definitionId: input.definitionId ?? null,
+          serviceSpec: {
+            create: {
+              definition: JSON.stringify(definition),
+              hash: serviceDefinitionHash(definition),
+              hostId: input.hostId,
+              engine: "docker",
+              containerName: `pcp-${id}`,
+              env: JSON.stringify(input.env),
+            },
+          },
+        },
+      })
+      await ensureDefinition(id)
+
+      return {
+        id,
+        registeredId: null,
+        registeredKind: null,
+        message: `${input.name} is running.`,
+      }
+    },
+  }
+
+  async function approve(secretValue?: string) {
+    const row = await db().permissionRequest.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    })
+
+    return decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, ...(secretValue ? { secretValue } : {}) },
+      executor,
+    )
+  }
+
+  beforeEach(() => {
+    launched = []
+  })
+
+  it("asks to launch one, showing everything it runs, and launches nothing yet", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    const asked = await register({
+      name: "Docling",
+      kind: "service",
+      description: "Documents to Markdown.",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      publish_ports: [{ container: 5001, host: 8001 }],
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+      note: "On the build box.",
+    })
+
+    expect(asked.isError).toBe(false)
+    expect(asked.text).toContain('the value of the secret "Docling key"')
+    const view = await shown()
+    expect(view.kind).toBe("service_change")
+    expect(view.title).toBe("Launch the service Docling on Build box?")
+    expect(view.lines).toEqual(
+      expect.arrayContaining([
+        "Runs on your SSH server Build box (build.ada-home.net), with the Docker or Podman there",
+        `Image: ${IMAGE}`,
+        "Updates from: ghcr.io/docling-project/docling-serve-cpu:latest, when you update it on its page",
+        "Published on 0.0.0.0: 8001 → 5001 (every address of the SSH server)",
+        'Variable DOCLING_SERVE_API_KEY: a new secret, saved as "Docling key", which you enter here when you agree',
+        "Variable DOCLING_SERVE_ENABLE_UI: its fixed value, false",
+        "Named volumes (never a folder of the server): cache at /opt/cache",
+        "Health check: GET /health on port 5001",
+        "PCP adds an API endpoint from /openapi.json on port 5001, sending DOCLING_SERVE_API_KEY's secret in X-Api-Key",
+        "Your note on it, which every assistant that sees it reads as yours:\nOn the build box.",
+      ]),
+    )
+    expect(view.warning).toMatch(/Only agree if you trust the image/)
+    expect(view.full?.[0]?.text).toContain(IMAGE)
+    expect(view.secretToEnter).toMatchObject({
+      name: "Docling key",
+      exists: false,
+    })
+    expect(view.decisions.map((decision) => decision.label)).toEqual([
+      "Launch it",
+      "Not now",
+    ])
+    expect(await db().mcpServer.count({ where: { kind: "service" } })).toBe(0)
+  })
+
+  it("launches exactly what was shown on approval, with the secret the owner typed", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+    await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+
+    const done = await approve("dk-typed-by-the-owner")
+
+    expect(done.isError).not.toBe(true)
+    const secret = await db().secret.findFirstOrThrow({
+      where: { name: "Docling key" },
+    })
+    expect(launched).toEqual([
+      expect.objectContaining({
+        name: "Docling",
+        hostId: host.id,
+        publish: {
+          address: "0.0.0.0",
+          ports: [{ container: 5001, host: 5001 }],
+        },
+        env: { DOCLING_SERVE_API_KEY: secret.id },
+        definition: expect.objectContaining({ image: IMAGE }),
+      }),
+    ])
+    expect(JSON.stringify(done)).toContain(
+      'The service is \\"docling-service\\"',
+    )
+    expect(JSON.stringify(done)).not.toContain("dk-typed-by-the-owner")
+  })
+
+  it("reuses a secret the owner stored, by its name", async () => {
+    const host = await sshServer()
+    const key = await createSecret(ctx, { name: "Docling key", value: "k" })
+    await connectSeeing()
+    await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+
+    expect((await shown()).lines).toContain(
+      'Variable DOCLING_SERVE_API_KEY: your secret "Docling key"',
+    )
+    await approve()
+    expect(launched[0]!.env).toEqual({ DOCLING_SERVE_API_KEY: key.id })
+  })
+
+  it("is refused before the owner is asked when it cannot run as proposed", async () => {
+    const host = await sshServer()
+    const unpinned = await sshServer("Spare box", false)
+    await connectSeeing()
+    const propose = (change: Record<string, unknown>) =>
+      register({
+        name: "Docling",
+        service: DEFINITION,
+        ssh_server: host.slug,
+        env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+        ...change,
+      })
+
+    expect(
+      (await propose({ service: { ...DEFINITION, image: "docling:latest" } }))
+        .text,
+    ).toMatch(/pinned by digest/)
+    expect((await propose({ ssh_server: "nowhere" })).text).toMatch(
+      /No SSH server called nowhere that this token sees/,
+    )
+    expect((await propose({ ssh_server: unpinned.slug })).text).toMatch(
+      /has not pinned Spare box's host key/,
+    )
+    expect((await propose({ publish_address: "127.0.0.1" })).text).toMatch(
+      /own loopback/,
+    )
+    expect((await propose({ env_secrets: [] })).text).toMatch(
+      /needs DOCLING_SERVE_API_KEY/,
+    )
+    expect(
+      (
+        await propose({
+          env_secrets: [
+            { name: "DOCLING_SERVE_API_KEY", secret: "Docling key" },
+            { name: "DOCLING_SERVE_ENABLE_UI", secret: "Another new one" },
+          ],
+        })
+      ).text,
+    ).toMatch(/Only one new secret/)
+    expect(
+      (await propose({ env_secrets: [{ name: "NOPE", secret: "x" }] })).text,
+    ).toMatch(/no variable called NOPE/)
+    expect(
+      (await propose({ publish_ports: [{ container: 9, host: 9 }] })).text,
+    ).toMatch(/does not publish/)
+    expect((await propose({ url: "https://x.example" })).text).toMatch(
+      /takes none of url/,
+    )
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("does not reach an SSH server the token does not see", async () => {
+    const host = await sshServer()
+    const other = await createServer(ctx, {
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      authType: "none",
+    })
+    await connectSeeing([other.id])
+
+    const asked = await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+
+    expect(asked.isError).toBe(true)
+    expect(asked.text).toMatch(/that this token sees/)
+  })
+
+  it("launches another of a service definition it sees, only while that is as shown", async () => {
+    const host = await sshServer()
+    await createSecret(ctx, { name: "Docling key", value: "k" })
+    await connectSeeing()
+    await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+    await approve()
+    const first = await getServer(ctx, "svc-1")
+    await connectSeeing()
+
+    expect(
+      (
+        await register({
+          name: "Docling two",
+          definition: first.slug,
+          service: DEFINITION,
+          ssh_server: host.slug,
+        })
+      ).text,
+    ).toMatch(/leave service out/)
+
+    const asked = await register({
+      name: "Docling two",
+      definition: first.slug,
+      ssh_server: host.slug,
+      publish_ports: [{ container: 5001, host: 5002 }],
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+    expect(asked.isError).toBe(false)
+    expect((await shown()).lines).toEqual(
+      expect.arrayContaining([
+        `Another service of Docling service, beside ${first.slug}: it shares their definition, so a change to it changes every one of them`,
+      ]),
+    )
+
+    await approve()
+    expect(launched[1]).toMatchObject({
+      name: "Docling two",
+      definitionId: first.definitionId,
+    })
+    expect(launched[1]!.definition).toBeUndefined()
+
+    // Asked again, then the definition changes: nothing is launched.
+    await register({
+      name: "Docling three",
+      definition: first.slug,
+      ssh_server: host.slug,
+      publish_ports: [{ container: 5001, host: 5003 }],
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+    await writeServiceDefinition(first.id, {
+      ...parseServiceDefinition(DEFINITION),
+      image: `ghcr.io/docling-project/docling-serve-cpu@sha256:${"d".repeat(64)}`,
+    })
+    expect(JSON.stringify(await approve())).toMatch(/has changed since/)
+    expect(launched).toHaveLength(2)
   })
 })

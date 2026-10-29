@@ -45,6 +45,8 @@ import { createSecret, deleteSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
 import { createSkill, deleteSkill, listSkills, setTokenSkills } from "./skills"
 import { saveWrapperByOwner } from "./wrappers/admin"
+import { createSshExit, writeExitAccess } from "./exits/exits"
+import { createSshServer } from "./ssh/hosts"
 import { addLinkedRepo } from "./repos/test-vault"
 import {
   getRepo,
@@ -593,6 +595,73 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect((await db().permissionRequest.findFirst())?.targetKey).toBeNull()
   })
 
+  it("carries a call's answer kept for an identical call, and restores a file from before it as none", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    const outcome = await runMemoryCommand(
+      { ctx, tokenId },
+      {
+        command: "str_replace",
+        path: "/memories/shared/notes.md",
+        old_str: "this",
+        new_str: "that",
+      },
+    )
+    if (!("ask" in outcome)) {
+      throw new Error("expected a request")
+    }
+    await withPermission(
+      { ctx, tokenId, publicUrl: "https://pcp.example" },
+      outcome.ask,
+    )
+    const [row] = await db().permissionRequest.findMany()
+    const reuseUntil = new Date(Date.now() + 60_000)
+    const json = encryptString(
+      ctx.dek,
+      JSON.stringify({ ok: true, value: 1 }),
+      `permission_request:${row!.id}:result_json`,
+    )
+    await db().permissionRequest.update({
+      where: { id: row!.id },
+      data: { reuseUntil, resultJsonCiphertext: asBytes(json) },
+    })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    const restored = await db().permissionRequest.findFirstOrThrow()
+    expect(restored.reuseUntil).toEqual(reuseUntil)
+    expect(
+      Buffer.from(restored.resultJsonCiphertext!).equals(Buffer.from(json)),
+    ).toBe(true)
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    for (const request of older.tables.permissionRequests as Record<
+      string,
+      unknown
+    >[]) {
+      delete request.reuseUntil
+      delete request.resultJsonCiphertext
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().permissionRequest.findFirstOrThrow()).toMatchObject({
+      reuseUntil: null,
+      resultJsonCiphertext: null,
+    })
+  })
+
   it("carries what a tool declares it answers and its icons, and restores a file from before them as none", async () => {
     const { ctx, serverId } = await populate()
     const outputSchema = {
@@ -810,6 +879,52 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await db().apiToken.findFirstOrThrow()).toMatchObject({
       manageWrappers: false,
     })
+  })
+
+  it("carries exits and their levels, and restores a file from before exits", async () => {
+    const { ctx } = await populate()
+    const { id: sshId } = await createSshServer(ctx, {
+      name: "VPS",
+      host: "vps.example",
+      username: "deploy",
+    })
+    const { id: exitId } = await createSshExit(ctx, {
+      serverId: sshId,
+      name: "us-vps",
+      label: "US — home VPS",
+    })
+    await writeExitAccess(ctx.vaultId, null, exitId, "ask")
+    const before = await db().exit.findUniqueOrThrow({ where: { id: exitId } })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      await db().exit.findUniqueOrThrow({ where: { id: exitId } }),
+    ).toEqual(before)
+    expect(
+      await db().webFetchRule.findFirstOrThrow({
+        where: { kind: "exit", key: exitId },
+      }),
+    ).toMatchObject({ scope: "all", access: "ask" })
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    delete (older.tables as Record<string, unknown>).exits
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+
+    expect(await db().exit.count()).toBe(0)
   })
 
   it("carries linked repositories and their items, and restores a file from before them", async () => {

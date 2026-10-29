@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { connectResult, isConnectResult } from "./connect"
+import { OWNER_LINK_RULE } from "./owner-link"
 
 describe("connectResult", () => {
   const server = { id: "s1", slug: "mail", name: "Mail" }
@@ -15,8 +16,10 @@ describe("connectResult", () => {
 
     expect(said(result)).toMatch(/Mail needs connecting/)
     expect(said(result)).toContain("chooses Connect")
-    expect(said(result)).toContain("End your reply with this link")
-    expect(said(result).split("\n").at(-1)).toBe("https://pcp.x/servers/s1")
+    expect(said(result)).toContain(OWNER_LINK_RULE)
+    expect(said(result).split("\n").at(-1)).toBe(
+      "[Connect Mail in PCP](https://pcp.x/servers/s1)",
+    )
     expect(said(result)).toContain(
       'When they say they have, call check_server with server "mail"',
     )
@@ -24,6 +27,7 @@ describe("connectResult", () => {
       kind: "needs_owner",
       reason: "connect",
       url: "https://pcp.x/servers/s1",
+      label: "Connect Mail in PCP",
       connect: { startUrl: "https://pcp.x/api/servers/s1/oauth/start" },
     })
     expect(isConnectResult(result)).toBe(true)
@@ -38,7 +42,12 @@ describe("connectResult", () => {
     expect(said(result)).toMatch(
       /Mail needs an OAuth client from the owner before it can be connected/,
     )
-    expect(said(result)).toContain("https://pcp.x/servers/s1")
+    expect(said(result).split("\n").at(-1)).toBe(
+      "[Set up Mail in PCP](https://pcp.x/servers/s1)",
+    )
+    expect(result.structuredContent).toMatchObject({
+      label: "Set up Mail in PCP",
+    })
   })
 
   it("tells a connect result from any other", () => {

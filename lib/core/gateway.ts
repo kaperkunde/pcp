@@ -83,6 +83,7 @@ import {
   type SkillOutcome,
 } from "./skills"
 import { connectResult, type ServerState } from "./connect"
+import { OWNER_LINK_RULE } from "./owner-link"
 import { waitForOwner } from "./owner-wait"
 import {
   MAX_CALLS_PER_RUN,
@@ -93,8 +94,10 @@ import {
   RUN_TIMEOUT_MS,
 } from "./code/limits"
 import {
+  bareHandles,
   checkRun,
   runCode,
+  type CodeDescriber,
   type CodeLister,
   type RunProgress,
 } from "./code/run"
@@ -107,6 +110,7 @@ import {
 } from "./code/sandbox"
 import type { Executor } from "./code/types"
 import {
+  askCodeCall,
   checkPermission,
   defaultExecutor,
   getPermissionView,
@@ -155,6 +159,7 @@ import {
   resolveKind,
   type RegisterKind,
 } from "./register-rules"
+import { prepareServiceProposal } from "./services/proposals"
 import {
   checkPersonalNote,
   clipNote,
@@ -163,6 +168,9 @@ import {
   readServerNote,
 } from "./personal-notes"
 import {
+  clientPrefixed,
+  clientPrefixNote,
+  describeOwnTool,
   LIST_PAGE_SIZE,
   listTools,
   ownerNotesFor,
@@ -191,9 +199,16 @@ import {
   RESULT_PAGE_CHARS,
 } from "./tool-results"
 import { resultUri } from "./answers"
-import { needsConnecting, serviceStateLine, syncServerTools } from "./upstream"
+import {
+  needsConnecting,
+  serviceStateLine,
+  syncServerTools,
+  openExitForCall,
+} from "./upstream"
 import { PCP_VERSION } from "./version"
 import { decideFetch, runFetch } from "./web-fetch"
+import { MAX_EXIT_NAME_CHARS } from "./exits/limits"
+import { checkExit } from "./exits/use"
 import {
   getWrapper,
   proposeWrapper,
@@ -227,7 +242,7 @@ import {
 } from "./wrappers/limits"
 import { findPlaceholders } from "./wrappers/placeholders"
 import { withWrappers } from "./wrappers/run"
-import { defineTool, type ToolSpec } from "./tools/define"
+import { defineTool, type Tool, type ToolSpec } from "./tools/define"
 import {
   NEEDS_OWNER,
   SERVER_STATE,
@@ -630,7 +645,7 @@ export function buildInstructions(
   return [
     ...lead,
     `PCP is a gateway to the owner's MCP servers, APIs, mail and calendar accounts. Tool names are not listed here: ${discovery(hasSkills, memories !== null)} call_tool takes no server or tool name, only the call_handle, and checks the arguments before anything runs. Refer to tools as server/tool.`,
-    "The owner decides per tool what you may run. A tool they have not allowed yet answers \"Not done yet\" with a link: end your reply with it, on a line of its own, and call no tool after it in that reply, because some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result; withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.",
+    `The owner decides per tool what you may run. A tool they have not allowed yet answers "Not done yet" with a link. ${OWNER_LINK_RULE} Some apps hide the text written before a tool call. When the owner says they have answered, call check_permission with the id it gave for the result; withdraw_request takes back a request you no longer need. A server that needs them to sign in answers with a link to connect it, handed over the same way; check_server then says whether it is connected. register_server proposes something new, which the owner agrees to in PCP: an MCP server by its address, an API from its OpenAPI document, a mail account (JMAP, or IMAP with SMTP), or a calendar account (CalDAV: calendars and reminders, as iCloud's). A mailbox is always a mail account and a calendar a calendar account, never an API written around their servers. It takes no authentication, a secret in a header, a user name and password, or OAuth, naming secrets by name only: a new secret is typed in by the owner on PCP's page, and PCP finds out itself whether an OAuth provider lets it register. propose_tool_access proposes which tools you may run, many at once; the owner reviews and saves it in PCP.`,
     'An answer too long to pass on whole ends with a result id: read_result reads all of it, a slice at a time. Files and long values in an answer come back as handles, {"$result": "<id>", …}: pass one as it is in any later call\'s arguments, or as a send_email or create_draft attachment, and PCP puts the value there, so it never has to pass through you.',
     "Servers:",
     ...lines,
@@ -801,7 +816,13 @@ export function buildGatewayServer(
     executor,
     codeExecutor,
     runTiming = {},
+    exitNames = [],
   }: {
+    /**
+     * The exits this token may name (allowed, or asking the owner first),
+     * for web_fetch's exit argument (exits/use.ts usableExitNames).
+     */
+    exitNames?: string[]
     /** What to say about memories; read only for a token that keeps them. */
     memories?: InstructionMemories | null
     /** The skills the token sees, for the instructions (instructionSkills). */
@@ -959,13 +980,62 @@ export function buildGatewayServer(
         ...(note.asked ? { asked: true } : {}),
         ...(note.request ? { request: note.request } : {}),
         ...(note.secret ? { secret: note.secret, origin: note.origin } : {}),
+        ...(note.exit ? { exit: note.exit } : {}),
       }),
   }
 
+  /**
+   * PCP's own tools this token has, as registered: search finds them (kind
+   * pcp) and describe reads them, by their bare names.
+   */
+  const ownTools: Tool[] = []
+
   /** One of PCP's own tools, on the common interface (lib/core/tools/). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const register = <I extends z.ZodObject<any>>(spec: ToolSpec<I>) =>
-    registerTool(server, defineTool(spec), hooks)
+  const register = <I extends z.ZodObject<any>>(spec: ToolSpec<I>) => {
+    const tool = defineTool(spec)
+    ownTools.push(tool)
+    registerTool(server, tool, hooks)
+  }
+
+  /**
+   * One of PCP's own tools by the name an assistant gave: as it is, or with
+   * its app's prefix (mcp__<server>__run_code), which the note explains.
+   */
+  const ownTool = (
+    given: string,
+  ): { tool: Tool; note: string | null } | null => {
+    const exact = ownTools.find((tool) => tool.name === given.trim())
+
+    if (exact) {
+      return { tool: exact, note: null }
+    }
+
+    const prefixed = clientPrefixed(
+      given,
+      ownTools.map((tool) => tool.name),
+    )
+    const tool =
+      prefixed && ownTools.find((entry) => entry.name === prefixed.name)
+
+    return tool ? { tool, note: clientPrefixNote(prefixed) } : null
+  }
+
+  /** describe's answer for one of PCP's own tools. */
+  const describeOwn = ({ tool, note }: { tool: Tool; note: string | null }) =>
+    text(
+      describeOwnTool(
+        {
+          name: tool.name,
+          title: tool.title,
+          description: tool.description,
+          inputSchema: tool.inputSchema(),
+          outputSchema: tool.outputSchema(),
+          annotations: tool.annotations,
+        },
+        note,
+      ),
+    )
 
   /** The owner is asked; the answer is the request's, passed on. */
   const asked = async (ask: Parameters<typeof withPermission>[1]) =>
@@ -1047,7 +1117,7 @@ export function buildGatewayServer(
   register({
     name: "search",
     title: "Search",
-    description: `Find what helps with a task by describing it in a few words (e.g. "create a github issue", "send email", "write release notes"): ${finds}. Discovery only. Each result is its kind (tool, skill or memory), its ref and one line about it; describe takes the ref: for a tool it gives the call_handle, which call_tool takes, for a skill or a memory its text. To see every tool on a server, use list_tools. ${CORE_RULE}`,
+    description: `Find what helps with a task by describing it in a few words (e.g. "create a github issue", "send email", "write release notes"), or by a tool's name: ${finds}, and PCP's own tools. Discovery only. Each result is its kind (tool, pcp, skill or memory), its ref and one line about it; describe takes the ref: for a tool it gives the call_handle, which call_tool takes, for one of PCP's own tools (kind pcp) its schema, and you call it directly, for a skill or a memory its text. To see every tool on a server, use list_tools. ${CORE_RULE}`,
     input: z.object({
       query: z
         .string()
@@ -1063,14 +1133,16 @@ export function buildGatewayServer(
       kind: z
         .enum(
           scope.manageEndpoints
-            ? ["tool", "skill", "memory", "repo"]
-            : ["tool", "skill", "memory"],
+            ? ["tool", "pcp", "skill", "memory", "repo"]
+            : ["tool", "pcp", "skill", "memory"],
         )
         .optional()
         .describe(
-          scope.manageEndpoints
-            ? "Only one kind of result. repo: changes from linked repositories waiting for the owner (a conflict, or a change to review), which you can help with."
-            : "Only one kind of result.",
+          `Only one kind of result. pcp: PCP's own tools, which you call directly.${
+            scope.manageEndpoints
+              ? " repo: changes from linked repositories waiting for the owner (a conflict, or a change to review), which you can help with."
+              : ""
+          }`,
         ),
       limit: searchLimit,
     }),
@@ -1120,7 +1192,7 @@ export function buildGatewayServer(
           : Promise.resolve([]),
       ])
       const results = searchEverything(
-        { tools: candidates(servers), skills, memories },
+        { tools: candidates(servers), pcp: ownTools, skills, memories },
         args.query,
         { limit: args.limit ?? 10, server: args.server, kind: args.kind },
       )
@@ -1132,12 +1204,26 @@ export function buildGatewayServer(
       }
 
       const notes = ownerNotesFor(
-        results.map((result) => result.ref),
+        results
+          .filter((result) => result.kind !== "pcp")
+          .map((result) => result.ref),
         ownerNotes(servers, skills),
       )
+      // A name with an app's prefix: say what the name is.
+      const prefixed = args.query
+        .trim()
+        .split(/\s+/)
+        .map((term) =>
+          clientPrefixed(
+            term,
+            ownTools.map((tool) => tool.name),
+          ),
+        )
+        .find((found) => found !== null)
 
       return text(
         [
+          ...(prefixed ? [clientPrefixNote(prefixed), ""] : []),
           ...results.map(
             (result) =>
               `${result.kind} ${result.ref}${result.title ? ` (${result.title})` : ""} — ${result.description}`,
@@ -1331,6 +1417,13 @@ export function buildGatewayServer(
   /** describe: a tool, a skill or a memory, by the ref search gave. */
   async function describeRef(args: DescribeArgs): Promise<Outcome> {
     const tool = namedTool(args)
+    // pcp/<name>, when no server is called pcp: one of PCP's own tools.
+    const own =
+      tool?.server === "pcp" && !bySlug.has("pcp") ? ownTool(tool.tool) : null
+
+    if (own) {
+      return describeOwn(own)
+    }
 
     if (tool) {
       return describeTool(tool.server, tool.tool)
@@ -1399,7 +1492,14 @@ export function buildGatewayServer(
         : failure("describe only reads.")
     }
 
-    // A bare name: a skill by it, or the one tool by it.
+    // A bare name: one of PCP's own tools (search's ref for one), a skill
+    // by it, or the one tool by it.
+    const ownNamed = ownTool(ref)
+
+    if (ownNamed) {
+      return describeOwn(ownNamed)
+    }
+
     if (
       (await skillsFor(scope.ctx, scope.skillIds)).some((s) => s.name === ref)
     ) {
@@ -1426,14 +1526,14 @@ export function buildGatewayServer(
   register({
     name: "describe",
     title: "Describe",
-    description: `What search found, in full, by its ref. A tool (ref server/tool, or server and tool): its full description and the JSON Schema of its arguments, whether it runs at once ("allowed") or asks the owner first ("ask"), for an API the shape of what it answers ("returns"), and the call_handle that call_tool takes to run it; call this before call_tool, and again when its call_handle stops working. A skill (ref ${SKILL_REF}<name>): its ${SKILL_FILE}, a procedure the owner approved, to follow when the task matches, with its files (${SKILL_REF}<name>/<file>) and the call_handle of each tool it uses.${scope.keepMemories ? ` A memory (its path, ${MEMORY_ROOT}/…): its text.` : ""}`,
+    description: `What search found, in full, by its ref. A tool (ref server/tool, or server and tool): its full description and the JSON Schema of its arguments, whether it runs at once ("allowed") or asks the owner first ("ask"), for an API the shape of what it answers ("returns"), and the call_handle that call_tool takes to run it; call this before call_tool, and again when its call_handle stops working. One of PCP's own tools (kind pcp, ref its name): its description and schemas; you call it directly, not through call_tool. A skill (ref ${SKILL_REF}<name>): its ${SKILL_FILE}, a procedure the owner approved, to follow when the task matches, with its files (${SKILL_REF}<name>/<file>) and the call_handle of each tool it uses.${scope.keepMemories ? ` A memory (its path, ${MEMORY_ROOT}/…): its text.` : ""}`,
     input: z.object({
       ref: z
         .string()
         .max(500)
         .optional()
         .describe(
-          `As search gives it: server/tool, ${SKILL_REF}<name> (or ${SKILL_REF}<name>/<file>)${scope.keepMemories ? ", or a memory's path" : ""}.`,
+          `As search gives it: server/tool, the name of one of PCP's own tools, ${SKILL_REF}<name> (or ${SKILL_REF}<name>/<file>)${scope.keepMemories ? ", or a memory's path" : ""}.`,
         ),
       server: z
         .string()
@@ -1491,9 +1591,30 @@ export function buildGatewayServer(
    * still carries it. The recovery answers of call_tool give the same.
    */
   function described(
-    { server: entry, tool }: { server: GatewayServer; tool: GatewayTool },
+    found: { server: GatewayServer; tool: GatewayTool },
     row: ToolRow,
   ): string {
+    const json = JSON.stringify(
+      describedTool(found, row, { handle: true }),
+      null,
+      1,
+    )
+
+    return json.length > MAX_DESCRIBED_CHARS
+      ? `${json.slice(0, MAX_DESCRIBED_CHARS)}\n… (truncated by PCP)`
+      : json
+  }
+
+  /**
+   * A tool as describe gives it, as a value: with its call_handle for
+   * describe itself, without one for run_code's pcp.describe, whose
+   * pcp.call takes names.
+   */
+  function describedTool(
+    { server: entry, tool }: { server: GatewayServer; tool: GatewayTool },
+    row: ToolRow,
+    { handle }: { handle: boolean },
+  ): Record<string, unknown> {
     let inputSchema: unknown
     let annotations: unknown
 
@@ -1507,49 +1628,41 @@ export function buildGatewayServer(
     const outputSchema = parsedOrNothing(row.outputSchema)
     const icons = parsedOrNothing(row.icons)
 
-    const json = JSON.stringify(
-      {
-        call_handle: handleFor(entry, row),
-        server: entry.slug,
-        serverName: entry.name,
-        ...(entry.description
-          ? { serverDescription: summarize(entry.description, 300) }
+    return {
+      ...(handle ? { call_handle: handleFor(entry, row) } : {}),
+      server: entry.slug,
+      serverName: entry.name,
+      ...(entry.description
+        ? { serverDescription: summarize(entry.description, 300) }
+        : {}),
+      // The owner's own words about this server: which host, what for.
+      ...(entry.note ? { ownerNote: entry.note } : {}),
+      tool: tool.name,
+      title: tool.title ?? undefined,
+      description: tool.descriptionOverride ?? tool.description,
+      access: tool.access,
+      inputSchema,
+      // What a successful call answers: the JSON Schema of its
+      // structuredContent when the tool declares one, else the outline an
+      // API's schema gives.
+      ...(outputSchema !== undefined
+        ? { outputSchema }
+        : row.output
+          ? { returns: row.output }
           : {}),
-        // The owner's own words about this server: which host, what for.
-        ...(entry.note ? { ownerNote: entry.note } : {}),
-        tool: tool.name,
-        title: tool.title ?? undefined,
-        description: tool.descriptionOverride ?? tool.description,
-        access: tool.access,
-        inputSchema,
-        // What a successful call answers: the JSON Schema of its
-        // structuredContent when the tool declares one, else the outline
-        // an API's schema gives.
-        ...(outputSchema !== undefined
-          ? { outputSchema }
-          : row.output
-            ? { returns: row.output }
-            : {}),
-        ...(icons !== undefined ? { icons } : {}),
-        // A wrapper's tool: the tools its program calls.
-        ...(entry.kind === "wrapper"
-          ? {
-              calls: readWrapperOperation(row.operation).calls.map(
-                (call) =>
-                  `${servers.find((other) => other.id === call.serverId)?.slug ?? "(another server)"}/${call.tool}`,
-              ),
-            }
-          : {}),
-        ...(tool.hiddenBy ? { replacedBy: tool.hiddenBy } : {}),
-        annotations,
-      },
-      null,
-      1,
-    )
-
-    return json.length > MAX_DESCRIBED_CHARS
-      ? `${json.slice(0, MAX_DESCRIBED_CHARS)}\n… (truncated by PCP)`
-      : json
+      ...(icons !== undefined ? { icons } : {}),
+      // A wrapper's tool: the tools its program calls.
+      ...(entry.kind === "wrapper"
+        ? {
+            calls: readWrapperOperation(row.operation).calls.map(
+              (call) =>
+                `${servers.find((other) => other.id === call.serverId)?.slug ?? "(another server)"}/${call.tool}`,
+            ),
+          }
+        : {}),
+      ...(tool.hiddenBy ? { replacedBy: tool.hiddenBy } : {}),
+      annotations,
+    }
   }
 
   /**
@@ -1655,7 +1768,14 @@ export function buildGatewayServer(
       )
     }
 
-    return failure(NOT_A_HANDLE, "invalid_arguments")
+    const own = ownTool(value)
+
+    return failure(
+      own
+        ? `${own.tool.name} is PCP's own tool: call it directly, not through call_tool, so nothing was run or asked.${own.note ? ` ${own.note}` : ""}`
+        : NOT_A_HANDLE,
+      "invalid_arguments",
+    )
   }
 
   const callInput = z.object({
@@ -1826,7 +1946,12 @@ export function buildGatewayServer(
 
     logAs({ server: handled.server.slug, upstreamTool: handled.tool.name })
 
-    const callArgs = args.arguments ?? {}
+    // A handle as PCP wrote it into an answer stands for its value, as in a
+    // program's call: the same call asks (and hashes) the same either way.
+    const callArgs = bareHandles(args.arguments ?? {}) as Record<
+      string,
+      unknown
+    >
     const found = await resolveCall(
       handled.server.slug,
       handled.tool.name,
@@ -1853,7 +1978,6 @@ export function buildGatewayServer(
       callArgs,
       { fix: "Fix them and call again with the same call_handle." },
     )
-
     // An endpoint whose schema no longer builds says how to fix it, with
     // whatever its call comes to.
     const migration = await endpointMigration(target)
@@ -1918,8 +2042,7 @@ export function buildGatewayServer(
   register({
     name: "call_tool",
     title: "Call a tool",
-    description:
-      'Run a tool on one of the owner\'s servers: takes only the call_handle describe gives for it, with the arguments its inputSchema asks for, which PCP checks before anything runs. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them: end your reply with it, and call check_permission once they say they have answered. A long JSON answer comes back as a preview: pass fields to get only the parts you need, and decode for text an API sends base64-encoded.',
+    description: `Run a tool on one of the owner's servers: takes only the call_handle describe gives for it, with the arguments its inputSchema asks for, which PCP checks before anything runs. PCP adds the credentials; you never see them. A tool the owner has not allowed yet answers "Not done yet" with a link for them. ${OWNER_LINK_RULE} Call check_permission once they say they have answered. A long JSON answer comes back as a preview: pass fields to get only the parts you need, and decode for text an API sends base64-encoded.`,
     input: callInput,
     // What it runs is any of the owner's tools.
     annotations: {
@@ -2403,12 +2526,13 @@ export function buildGatewayServer(
 
   register({
     name: "register_server",
-    title: "Add a server, an API, a mail or a calendar account",
+    title: "Add a server, an API, a mail or a calendar account, or a service",
     description: [
-      "Propose something new for PCP to reach; the owner must agree on PCP's page before it is added, and nothing exists until they do. kind says what it is: mcp (an MCP server, by url), api (a REST API, from its OpenAPI 3 document in openapi_schema or openapi_url), jmap or imap (a mail account), caldav (calendars and reminders). An SSH server cannot be proposed: the owner adds one on PCP's Servers page.",
+      "Propose something new for PCP to reach; the owner must agree on PCP's page before it is added, and nothing exists until they do. kind says what it is: mcp (an MCP server, by url), api (a REST API, from its OpenAPI 3 document in openapi_schema or openapi_url), jmap or imap (a mail account), caldav (calendars and reminders), service (a container on the owner's SSH server). An SSH server cannot be proposed: the owner adds one on PCP's Servers page.",
       "A mailbox is always a mail account (jmap or imap), never an API you write around its mail server: PCP signs in to a mail account itself, over an encrypted connection, and gives every account the same tools (list, search, read, move, flag, delete into the Trash, send). Calendars and reminders are always a calendar account (caldav), never an API: PCP finds the calendars itself and gives every account the same tools (events, free time, reminders).",
       `Authentication is auth_type: none, header (a secret in a header), basic (username and a password) or oauth (the owner signs in once they agree; PCP finds out itself whether the provider lets it register, so client_id is only for one that does not). Secrets are named by their NAME in secret (and extra_headers): one the owner stored is reused, a new name is typed in by the owner on PCP's page when they agree. ${scope.manageEndpoints ? "list_secrets gives the names of the secrets the owner stored and what already uses each: name one of its text secrets to reuse it rather than inventing a name. " : "A token that may read and change API endpoints can list the names of the owner's secrets with list_secrets. "}Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.`,
-      "Another server of one you see (the same API or MCP server at another address): pass its short name in definition. note proposes the owner's note on what is new.",
+      "A service is a container on one of the owner's SSH servers (ssh_server): its definition in service, its variables' secrets by NAME in env_secrets. Nothing runs until the owner agrees.",
+      "Another server of one you see (the same API, MCP server or service elsewhere): pass its short name in definition. note proposes the owner's note on what is new.",
     ].join("\n\n"),
     input: z.object({
       name: z
@@ -2419,10 +2543,10 @@ export function buildGatewayServer(
           'What to call it, e.g. "Linear", "Pet store API" or "Personal mail".',
         ),
       kind: z
-        .enum(["mcp", "api", "jmap", "imap", "caldav"])
+        .enum(["mcp", "api", "jmap", "imap", "caldav", "service"])
         .optional()
         .describe(
-          "What it is: mcp (an MCP server), api (a REST API from an OpenAPI document), jmap (a mailbox on a JMAP server: Stalwart, Fastmail, Cyrus), imap (a mailbox over IMAP, with SMTP to send) or caldav (calendars and reminders over CalDAV: iCloud, Fastmail, Nextcloud, Radicale). Left out: api when openapi_schema or openapi_url is passed, mcp otherwise. A mailbox is always jmap or imap, and a calendar caldav, never an api.",
+          "What it is: mcp (an MCP server), api (a REST API from an OpenAPI document), jmap (a mailbox on a JMAP server: Stalwart, Fastmail, Cyrus), imap (a mailbox over IMAP, with SMTP to send), caldav (calendars and reminders over CalDAV: iCloud, Fastmail, Nextcloud, Radicale) or service (a container on one of the owner's SSH servers). Left out: service when service is passed, api when openapi_schema or openapi_url is, mcp otherwise. A mailbox is always jmap or imap, and a calendar caldav, never an api.",
         ),
       url: z
         .string()
@@ -2542,7 +2666,66 @@ export function buildGatewayServer(
         .max(100)
         .optional()
         .describe(
-          "For mcp and api: the short name of a server you see to make another of, at the address in url, with its own sign-in. Its description, schema, edits and tool descriptions come from there: pass only this one's name, url, authentication and read_only, and leave description, openapi_schema, openapi_url and spec_patches out.",
+          "For mcp and api: the short name of a server you see to make another of, at the address in url, with its own sign-in. Its description, schema, edits and tool descriptions come from there: pass only this one's name, url, authentication and read_only, and leave description, openapi_schema, openapi_url and spec_patches out. For service: the short name of a service you see to launch another of; what it runs comes from there: pass only this one's name, ssh_server, publish_address, publish_ports and env_secrets, and leave service and description out.",
+        ),
+      service: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe(
+          'For kind service: its definition, as PCP\'s own launch takes it: {"image": "ghcr.io/org/app@sha256:<64 hex>", "source": "ghcr.io/org/app:latest", "ports": [{"container": 5001}], "env": [{"name": "API_KEY", "required": true, "description": "…"}, {"name": "LOG_LEVEL", "value": "info"}], "volumes": [{"name": "data", "path": "/data"}], "args": [], "health": {"kind": "http", "port": 5001, "path": "/health"}, "registers": {"kind": "openapi", "port": 5001, "specPath": "/openapi.json", "auth": {"env": "API_KEY", "header": "X-Api-Key", "template": "{{secret}}"}}}. registers is {"kind": "mcp", "port", "path"} for an MCP server, or {"kind": "none"}. A fixed value is no secret; a secret goes to a variable through env_secrets.',
+        ),
+      ssh_server: z
+        .string()
+        .max(100)
+        .optional()
+        .describe(
+          "For kind service: the short name of the owner's SSH server it runs on, one this token sees.",
+        ),
+      publish_address: z
+        .string()
+        .max(64)
+        .optional()
+        .describe(
+          "For kind service: the SSH server's IP address its ports listen on (default 0.0.0.0, every address). PCP reaches what it serves there, so not 127.0.0.1 unless PCP runs on that machine.",
+        ),
+      publish_ports: z
+        .array(
+          z.object({
+            container: z
+              .number()
+              .int()
+              .min(1)
+              .max(65535)
+              .describe("The service's port."),
+            host: z
+              .number()
+              .int()
+              .min(1)
+              .max(65535)
+              .describe("The SSH server's port it is published on."),
+          }),
+        )
+        .max(8)
+        .optional()
+        .describe(
+          "For kind service: the SSH server's port for each of the service's; a port left out keeps its own number.",
+        ),
+      env_secrets: z
+        .array(
+          z.object({
+            name: z.string().max(128).describe("The variable's name."),
+            secret: z
+              .string()
+              .max(200)
+              .describe(
+                "The NAME of the secret it takes: one the owner stored, or one new name they type in on PCP's page.",
+              ),
+          }),
+        )
+        .max(64)
+        .optional()
+        .describe(
+          "For kind service: the secret each variable takes, by name, never a value.",
         ),
       note: noteArg,
     }),
@@ -2573,6 +2756,11 @@ export function buildGatewayServer(
       client_id?: string
       definition?: string
       note?: string
+      service?: Record<string, unknown>
+      ssh_server?: string
+      publish_address?: string
+      publish_ports?: Array<{ container: number; host: number }>
+      env_secrets?: Array<{ name: string; secret: string }>
     }) {
       // Another server of a definition the token sees: what it is comes
       // from there, and only what is this server's own comes from here.
@@ -2581,13 +2769,19 @@ export function buildGatewayServer(
           ? await findBindableDefinition(scope.ctx, args.definition, servers, [
               "mcp",
               "openapi",
+              "service",
             ])
           : null
       const kind = resolveKind(args, bound?.kind)
+      const boundKind: Record<string, RegisterKind> = {
+        openapi: "api",
+        mcp: "mcp",
+        service: "service",
+      }
 
-      if (bound && kind !== (bound.kind === "openapi" ? "api" : "mcp")) {
+      if (bound && kind !== boundKind[bound.kind]) {
         return failure(
-          `${args.definition!.trim()} is ${bound.kind === "openapi" ? "an API endpoint: its kind is api" : "an MCP server: its kind is mcp"}; leave kind out.`,
+          `${args.definition!.trim()} is ${bound.kind === "openapi" ? "an API endpoint: its kind is api" : bound.kind === "service" ? "a service: its kind is service" : "an MCP server: its kind is mcp"}; leave kind out.`,
         )
       }
 
@@ -2599,6 +2793,62 @@ export function buildGatewayServer(
 
       // The owner reads it whole; checked before they are asked.
       const note = checkPersonalNote(args.note)
+
+      if (kind === "service") {
+        if (
+          !checkRateLimit(
+            `endpoint-register:${scope.tokenId}`,
+            ENDPOINT_CHANGES,
+          )
+        ) {
+          return tooManyCalls(
+            "That is a lot of registrations in a short time. Wait a few minutes.",
+          )
+        }
+
+        // Only an SSH server this token sees: the owner's other machines
+        // are not its to name.
+        const host = bySlug.get(args.ssh_server!.trim())
+
+        if (!host || host.kind !== "ssh") {
+          return failure(
+            `No SSH server called ${args.ssh_server!.trim()} that this token sees. Those it sees: ${
+              servers
+                .filter((server) => server.kind === "ssh")
+                .map((server) => server.slug)
+                .join(", ") ||
+              "(none): the owner adds one on PCP's Servers page"
+            }.`,
+          )
+        }
+
+        const input = await prepareServiceProposal(scope.ctx, {
+          name: args.name,
+          ...(args.description !== undefined
+            ? { description: args.description }
+            : {}),
+          ...(args.service !== undefined ? { service: args.service } : {}),
+          ...(bound
+            ? {
+                definition: {
+                  id: bound.id,
+                  name: bound.name,
+                  basis: bound.basis,
+                  instances: bound.instances.map((each) => each.slug),
+                },
+              }
+            : {}),
+          sshServerId: host.id,
+          ...(args.publish_address !== undefined
+            ? { publishAddress: args.publish_address }
+            : {}),
+          ...(args.publish_ports ? { publishPorts: args.publish_ports } : {}),
+          ...(args.env_secrets ? { envSecrets: args.env_secrets } : {}),
+          ...(note ? { note } : {}),
+        })
+
+        return asked({ kind: "service_change", input })
+      }
 
       const authType: AuthType = args.auth_type ?? "none"
       const isApi = kind === "api"
@@ -2967,8 +3217,7 @@ export function buildGatewayServer(
   register({
     name: "propose_tool_access",
     title: "Propose tool access",
-    description:
-      'Propose which tools this token may run, many at once and across servers: "allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). This changes nothing by itself: PCP fills your levels in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and a level. Later changes override earlier ones, so set a whole server first and the exceptions after. End your reply with the link it returns, and call check_permission with its id once the owner says they have saved; it says what they saved.',
+    description: `Propose which tools this token may run, many at once and across servers: "allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). This changes nothing by itself: PCP fills your levels in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and a level. Later changes override earlier ones, so set a whole server first and the exceptions after. ${OWNER_LINK_RULE} Call check_permission with its id once the owner says they have saved; it says what they saved.`,
     input: z.object({
       changes: z
         .array(
@@ -3041,8 +3290,7 @@ export function buildGatewayServer(
     register({
       name: "update_endpoint",
       title: "Change an API endpoint",
-      description:
-        "Change an API endpoint: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Change a schema with edits (a JSON Patch kept beside it and applied whenever tools are made, also after the document is read again) rather than sending it whole: add_patches adds to the edits, patches replaces them all. Read the part you are changing first with get_endpoint's spec_pointer. On an endpoint you registered, a change other assistants would see disables it until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: turning read-only on happens at once; its name, description, edits, tool descriptions and a new read of its schema URL are put to the owner, who sees every edit and description in full, and nothing changes until they agree (end your reply with the link, and call check_permission once they say they have answered); its address and document are theirs alone. You can never change a credential. get_endpoint says what you may change. In calls of their own, on an endpoint or an MCP server you see: note proposes the owner's note on it, and detach a definition of its own for one that shares its schema with other servers; both ask the owner.",
+      description: `Change an API endpoint: its name, description, OpenAPI document, base URL, read-only setting, or the descriptions of its tools. Pass only what changes. Change a schema with edits (a JSON Patch kept beside it and applied whenever tools are made, also after the document is read again) rather than sending it whole: add_patches adds to the edits, patches replaces them all. Read the part you are changing first with get_endpoint's spec_pointer. On an endpoint you registered, a change other assistants would see disables it until the owner enables it again. Once the owner attaches a secret or allows private addresses the endpoint is theirs: turning read-only on happens at once; its name, description, edits, tool descriptions and a new read of its schema URL are put to the owner, who sees every edit and description in full, and nothing changes until they agree; its address and document are theirs alone. You can never change a credential. get_endpoint says what you may change. In calls of their own, on an endpoint or an MCP server you see: note proposes the owner's note on it, and detach a definition of its own for one that shares its schema with other servers; both ask the owner. A change that asks the owner answers with a link. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       input: z.object({
         endpoint: z
           .string()
@@ -3484,7 +3732,7 @@ export function buildGatewayServer(
             ]
           : []),
         "Another wrapper of one you see: pass its short name in definition and a name, and no tools; it shares that wrapper's programs. note proposes the owner's note on it: one line they read whole.",
-        "Nothing is made yet: the owner is shown every program, schema, call and secret in full on PCP's page and decides. End your reply with the link, and call check_permission once they say they have answered.",
+        `Nothing is made yet: the owner is shown every program, schema, call and secret in full on PCP's page and decides. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       ].join("\n\n"),
       input: z.object({
         name: z
@@ -3601,8 +3849,7 @@ export function buildGatewayServer(
     register({
       name: "update_wrapper",
       title: "Propose a change to a wrapper",
-      description:
-        "Propose a change to a wrapper: its name, its description, tools added or replaced whole (by name), tools removed, where secrets go (the whole list, replacing it), or whose levels its calls follow (call_levels). Read it with get_wrapper first. The owner is shown every new or changed program in full, before and after, and decides on PCP's page; nothing changes until they do, and then only if the wrapper is as it was when they were asked. In calls of their own: note proposes the owner's note on it, and detach a definition of its own for one that shares its programs with other wrappers. End your reply with the link, and call check_permission once they say they have answered.",
+      description: `Propose a change to a wrapper: its name, its description, tools added or replaced whole (by name), tools removed, where secrets go (the whole list, replacing it), or whose levels its calls follow (call_levels). Read it with get_wrapper first. The owner is shown every new or changed program in full, before and after, and decides on PCP's page; nothing changes until they do, and then only if the wrapper is as it was when they were asked. In calls of their own: note proposes the owner's note on it, and detach a definition of its own for one that shares its programs with other wrappers. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       input: z.object({
         wrapper: z
           .string()
@@ -3733,8 +3980,7 @@ export function buildGatewayServer(
     register({
       name: "delete_wrapper",
       title: "Propose deleting a wrapper",
-      description:
-        "Propose deleting a wrapper: its tools stop working for every assistant, and the tools it stood in for come back to search. The owner decides on PCP's page. End your reply with the link, and call check_permission once they say they have answered.",
+      description: `Propose deleting a wrapper: its tools stop working for every assistant, and the tools it stood in for come back to search. The owner decides on PCP's page. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       input: z.object({
         wrapper: z
           .string()
@@ -4040,6 +4286,13 @@ export function buildGatewayServer(
           .describe(
             "Where to start in the text, to read on from an earlier call.",
           ),
+        exit: z
+          .string()
+          .max(MAX_EXIT_NAME_CHARS)
+          .optional()
+          .describe(
+            `An exit's name, to send the request from somewhere else than PCP's own address (an SSH server of the owner's, or a VPN), redirects on the site included. ${exitNames.length > 0 ? `Exits this token may use: ${exitNames.join(", ")}.` : "This token has no exit yet: the owner allows them on its page."} Without it, the request leaves from PCP.`,
+          ),
       }),
       // A POST or a DELETE can change anything on a site.
       annotations: {
@@ -4079,13 +4332,45 @@ export function buildGatewayServer(
           )
         }
 
+        // An exit the token may use only after asking is asked about
+        // with the request itself: the owner sees the exit and the site
+        // in one request, and allowing it once sends this request.
+        const exitCheck = input.exit
+          ? await checkExit(scope.ctx, scope.tokenId, input.exit)
+          : null
+
+        if (exitCheck?.kind === "refused") {
+          return failure(exitCheck.message, "forbidden")
+        }
+
+        if (exitCheck?.kind === "ask") {
+          return asked({
+            kind: "exit_use",
+            input: {
+              exitId: exitCheck.exit.id,
+              exitName: exitCheck.exit.name,
+              exitLabel: exitCheck.exit.label,
+              via: "web_fetch",
+              fetch: input,
+            },
+          })
+        }
+
         if (decided.access === "ask") {
           return asked({ kind: "fetch", input })
         }
 
+        const exit = exitCheck
+          ? await openExitForCall(scope.ctx, scope.tokenId, exitCheck.exit, {
+              publicUrl: scope.publicUrl,
+              tool: "web_fetch",
+            })
+          : null
+
         return passOn(
           await runFetch(scope.ctx, scope.tokenId, input, {
             publicUrl: scope.publicUrl,
+            ...(exit ? { exit: exit.dialer } : {}),
           }),
         )
       },
@@ -4102,7 +4387,7 @@ export function buildGatewayServer(
       .enum(["javascript", ...shells] as [string, ...string[]])
       .optional()
       .describe(
-        `javascript (the default), or ${shells.join(" or ")} in PCP's sandbox: a container with no network, where bash has jq, the usual command-line tools and Python 3 with its standard library, and nothing is kept between runs. The pcp command calls tools: pcp call SERVER TOOL '{"arg": 1}' [--fields a,b] [--decode a] [--keep a] prints the answer as JSON (- reads the arguments from stdin); pcp read [--base64 | --bytes] HANDLE prints a kept text, or a file's bytes as base64 or as they are; pcp keep [--name NAME] [--type TYPE] [--bytes] [FILE] keeps a text, or with --bytes a file, and prints its handle; pcp tools [SERVER] lists the servers, or a server's tools; pcp image [--max-width N] [--max-height N] [--crop X,Y,W,H] [--grayscale] [--format F] [--quality Q] HANDLE and pcp frames [--at T,T | --every S | --count N] [--max-width N] HANDLE work as pcp.image.compress and pcp.video.frames do (ffmpeg is there too). A refusal or a tool's error goes to stderr with status 1. In Python, import pcp, then pcp.call(server, tool, args, fields=…, keep=…), pcp.read(handle) (as_="base64" for a file, as_="bytes" for bytes), pcp.keep(text or bytes, name=…, type=…), pcp.tools(server=None), pcp.image(handle, max_width=…, crop=(x, y, w, h), grayscale=…, format=…, quality=…) and pcp.frames(handle, at=… | every=… | count=…, max_width=…), which raise pcp.PcpError (a paced call's has .code "paced" and .retry_after_ms). What it prints, stdout and stderr together, comes back with how it exited; one program runs at a time.`,
+        `javascript (the default), or ${shells.join(" or ")} in PCP's sandbox: a container with no network, where bash has jq, the usual command-line tools and Python 3 with its standard library, and nothing is kept between runs. The pcp command calls tools: pcp call SERVER TOOL '{"arg": 1}' [--fields a,b] [--decode a] [--keep a] prints the answer as JSON (- reads the arguments from stdin); pcp read [--base64 | --bytes] HANDLE prints a kept text, or a file's bytes as base64 or as they are; pcp keep [--name NAME] [--type TYPE] [--bytes] [FILE] keeps a text, or with --bytes a file, and prints its handle; pcp tools [SERVER] lists the servers, or a server's tools; pcp describe SERVER TOOL prints one tool's inputSchema, what it returns and its access, as describe does; pcp image [--max-width N] [--max-height N] [--crop X,Y,W,H] [--grayscale] [--format F] [--quality Q] HANDLE and pcp frames [--at T,T | --every S | --count N] [--max-width N] HANDLE work as pcp.image.compress and pcp.video.frames do (ffmpeg is there too). A refusal or a tool's error goes to stderr with status 1. In Python, import pcp, then pcp.call(server, tool, args, fields=…, keep=…), pcp.read(handle) (as_="base64" for a file, as_="bytes" for bytes), pcp.keep(text or bytes, name=…, type=…), pcp.tools(server=None), pcp.describe(server, tool), pcp.image(handle, max_width=…, crop=(x, y, w, h), grayscale=…, format=…, quality=…) and pcp.frames(handle, at=… | every=… | count=…, max_width=…), which raise pcp.PcpError (a paced call's has .code "paced" and .retry_after_ms). What it prints, stdout and stderr together, comes back with how it exited; one program runs at a time.`,
       )
     const limits = resourceLimits()
     /** The token's servers, or one's tools, as list_tools gives them. */
@@ -4140,15 +4425,38 @@ export function buildGatewayServer(
           .sort((a, b) => a.name.localeCompare(b.name)),
       }
     }
+    /**
+     * One tool the token can see, as describe gives it, with no call_handle:
+     * a tool it cannot see (blocked, or not there) is refused as findTool
+     * refuses it, and no server is read for it.
+     */
+    const describeForCode: CodeDescriber = async (slug, name) => {
+      const found = findTool(bySlug, slug, name)
+
+      if ("error" in found) {
+        return { ok: false, error: found.error }
+      }
+
+      const row = await toolRow(found.server.id, found.tool.name)
+
+      if (!row) {
+        return {
+          ok: false,
+          error: `${slug} has no tool called ${name}. pcp.tools("${slug}") lists its tools.`,
+        }
+      }
+
+      return { ok: true, value: describedTool(found, row, { handle: false }) }
+    }
 
     // What a program has, in the code argument's description: the tool's
     // own says what it is for and the rules around a run.
     const programDescription = [
       'The program: the body of an async function. await works at the top, return hands back a value (as JSON), console.log(...) prints. For example: const issues = await pcp.call("github", "list_issues", { repo: "pcp" }); return issues.filter((issue) => issue.labels.length === 0).map((issue) => issue.number)',
       "It has the JavaScript language, with atob, btoa, TextEncoder, TextDecoder (UTF-8), crypto.getRandomValues and crypto.randomUUID, and nothing else: no network, no files, no timers, no require or import.",
-      `await pcp.call(server, tool, args, { fields, decode, keep }) calls a tool as call_tool does, but by its server and name as search gives them (no call_handle), with the arguments describe's inputSchema asks for, and returns its answer as a value: the parsed JSON, or the text. The options are call_tool's, and nothing is cut to a preview: the program gets the whole answer, up to ${limits.answerChars.toLocaleString("en")} characters of JSON. A tool's error, a refusal, arguments that do not fit its inputSchema and a blocked tool throw an Error the program may catch. A call that PCP's pacing holds waits, within the run; past the run's end, pcp.call throws an Error with code "paced" and retryAfterMs.`,
+      `await pcp.call(server, tool, args, { fields, decode, keep }) calls a tool as call_tool does, but by its server and name as search gives them (no call_handle), with the arguments its inputSchema asks for (pcp.describe gives it), and returns its answer as a value: the parsed JSON, or the text. The options are call_tool's, and nothing is cut to a preview: the program gets the whole answer, up to ${limits.answerChars.toLocaleString("en")} characters of JSON. A tool's error, a refusal, arguments that do not fit its inputSchema and a blocked tool throw an Error the program may catch. A call that PCP's pacing holds waits, within the run; past the run's end, pcp.call throws an Error with code "paced" and retryAfterMs.`,
       'Files in an answer (attachments, images) come back as handles, {"$result": id, "type", "size", …}: pass a handle as it is where a tool wants the file, and PCP puts the file there (as base64 where the tool wants a string). keep works as in call_tool: pcp.call(…, { keep: ["password"] }) hands the program a handle in place of that value, so a secret one tool makes goes into another tool\'s arguments without the program or you ever reading it. A handle stands for a whole string; to put a file inside a text you build (a MIME message), read its bytes.',
-      'await pcp.read(handle) reads a kept text, and pcp.read(handle, { as: "base64" }) a file\'s bytes as base64 ({ as: "bytes" } as a Uint8Array). await pcp.keep(text, { name, type }) keeps a text and returns its handle; pcp.keep(base64, { encoding: "base64", name, type }), or a Uint8Array, keeps a file. await pcp.tools() lists the servers, and pcp.tools(server) every tool on one, as list_tools does. await pcp.step("name", async () => { … }) runs a part under a name: its calls are listed under it, and an error from it reads "failed at step \'name\'" (error.step names it).',
+      'await pcp.read(handle) reads a kept text, and pcp.read(handle, { as: "base64" }) a file\'s bytes as base64 ({ as: "bytes" } as a Uint8Array). await pcp.keep(text, { name, type }) keeps a text and returns its handle; pcp.keep(base64, { encoding: "base64", name, type }), or a Uint8Array, keeps a file. await pcp.tools() lists the servers, and pcp.tools(server) every tool on one, as list_tools does. await pcp.describe(server, tool) gives one tool as describe does, without a call_handle: its inputSchema (the arguments pcp.call takes), what it returns, its access and annotations; read it before calling a tool whose arguments you have not seen. await pcp.step("name", async () => { … }) runs a part under a name: its calls are listed under it, and an error from it reads "failed at step \'name\'" (error.step names it).',
       `Images and videos: await pcp.image.compress(handle, { maxWidth, maxHeight, crop: { x, y, width, height }, grayscale, format: "jpeg" | "webp" | "png", quality }) makes a smaller copy of a kept PNG, JPEG, WebP or GIF and returns { handle, width, height, bytes, type }; await pcp.video.frames(handle, { at: [seconds] | every: seconds | count, maxWidth }) returns { duration, width, height, frames: [{ t, handle }] }${shells.length > 0 ? "." : ", and needs PCP's sandbox, which is not running."} Compress an image before you read it or return it: to read text or a screen, crop to the part you need, grayscale, about 1200 pixels wide; to judge a layout or a design, keep the colour at a lower quality; to pass an image to another tool (OCR, an upload), send the original handle. From a video, take a few frames and compress those.`,
     ].join("\n\n")
 
@@ -4223,6 +4531,7 @@ export function buildGatewayServer(
               ...(progress ? { progress } : {}),
               ...(runner ? { executor: runner } : {}),
               list,
+              describe: describeForCode,
               call: async ({
                 server: slug,
                 tool: name,
@@ -4250,7 +4559,7 @@ export function buildGatewayServer(
                       row,
                       callArgs,
                       {
-                        fix: `Fix them; describe ${found.server.slug}/${found.tool.name} gives its inputSchema.`,
+                        fix: `Fix them; pcp.describe("${found.server.slug}", "${found.tool.name}") gives its inputSchema.`,
                         showSchema: false,
                       },
                     )
@@ -4261,34 +4570,44 @@ export function buildGatewayServer(
                 }
 
                 const sent = unfit.args
+                // An old argument name, renamed: the program is told, in
+                // what the run prints, what to call it.
+                const noted = <T extends object>(outcome: T) =>
+                  unfit.notes.length > 0 && "ok" in outcome && outcome.ok
+                    ? { ...outcome, notes: unfit.notes }
+                    : outcome
 
+                // The owner is asked, unless this is the call they allowed
+                // once a moment ago: then the program gets what it answered.
                 if (found.tool.access === "ask") {
-                  return {
-                    owner: await withPermission(scope, {
+                  return noted(
+                    await askCodeCall(scope, {
                       kind: "call",
                       server: found.server,
                       tool: found.tool,
                       args: sent,
                       ...shape,
                     }),
-                  }
+                  )
                 }
 
                 // The run's own signal, not the request's: a run that goes
                 // on past its call keeps its calls (and a wrapper's) going.
-                return runCodeCall(
-                  scope.ctx,
-                  found.server,
-                  found.tool.name,
-                  sent,
-                  {
-                    publicUrl: scope.publicUrl,
-                    tokenId: scope.tokenId,
-                    max: resourceLimits().answerChars,
-                    executor: callsFor(run.signal),
-                    run,
-                    ...shape,
-                  },
+                return noted(
+                  await runCodeCall(
+                    scope.ctx,
+                    found.server,
+                    found.tool.name,
+                    sent,
+                    {
+                      publicUrl: scope.publicUrl,
+                      tokenId: scope.tokenId,
+                      max: resourceLimits().answerChars,
+                      executor: callsFor(run.signal),
+                      run,
+                      ...shape,
+                    },
+                  ),
                 )
               },
             },

@@ -1,4 +1,5 @@
 import type { ToolAccess } from "../constants"
+import type { FetchArgs } from "../fetch/request"
 
 /**
  * What the rest of PCP knows about the browser without loading it: a tab
@@ -41,6 +42,28 @@ export type BrowseAsk = {
   url: string
   /** The tool that asked, for the owner's page and the request's name. */
   toolName: "tabs" | "navigate"
+  /**
+   * The exit a new tab goes out through, by name (lib/core/exits/): its
+   * own context, through that exit. Only for a new tab.
+   */
+  exit?: string
+}
+
+/**
+ * An exit the token may use only after asking (lib/core/exits/), asked
+ * about together with what it is for: a web_fetch request, or a new tab
+ * opening a site. Allowing it once sends that one; Always allow sets the
+ * token's own level for the exit.
+ */
+export type ExitUseAsk = {
+  exitId: string
+  exitName: string
+  exitLabel: string
+  via: "web_fetch" | "browser"
+  /** The request, for web_fetch. */
+  fetch?: FetchArgs
+  /** The tab to open, for the browser (its `exit` is this exit's name). */
+  browse?: BrowseAsk
 }
 
 /** An assistant asking the owner to do something in a tab themselves. */
@@ -96,6 +119,7 @@ export type BrowserAsk =
   | { kind: "browser_handover"; input: HandoverAsk }
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
+  | { kind: "exit_use"; input: ExitUseAsk }
 
 /** Where a call types a secret: what upstream.ts is told when it is typed. */
 export type SecretUseContext = {

@@ -3,10 +3,11 @@ import type { Metadata } from "next"
 
 import { PageColumn } from "@/components/page-column"
 import { PageHeader } from "@/components/page-header"
-import { AddRepoDialog } from "@/components/repo-forms"
+import { AddCommonRepoButton, AddRepoDialog } from "@/components/repo-forms"
 import { Badge } from "@/components/ui/badge"
 import { IconTile } from "@/components/ui/icon-tile"
 import { List, ListRow, ListSection } from "@/components/ui/list"
+import { isCommonRepository } from "@/lib/core/repos/common"
 import { githubSignInOffered } from "@/lib/core/repos/signin"
 import {
   githubSignInSecret,
@@ -38,7 +39,7 @@ export default async function RepositoriesPage() {
       <PageHeader
         back={{ href: "/settings", label: "Settings" }}
         title="Repositories"
-        description="Share skills, wrappers, browser flows, API endpoints and MCP servers with other people through GitHub, as plain files. Not a backup: nothing secret goes there."
+        description="Share skills, wrappers, browser flows, API endpoints, MCP servers and services with other people through GitHub, as plain files. Not a backup: nothing secret goes there."
         action={
           <AddRepoDialog
             secrets={secrets
@@ -49,6 +50,17 @@ export default async function RepositoriesPage() {
           />
         }
       />
+
+      {repos.some(isCommonRepository) ? null : (
+        <ListSection
+          title="PCP's common items"
+          description="Ready-made definitions kept by pcp.gg in a public repository, kaperkunde/pcp-gg-common: services to run on your own SSH server, to start. It is added read-only and not trusted: you read every item before adding it, what you add stays as you read it, and a change there waits for you as an update. It never holds a secret."
+        >
+          <div className="flex justify-start">
+            <AddCommonRepoButton />
+          </div>
+        </ListSection>
+      )}
 
       <ListSection
         title="Linked repositories"
