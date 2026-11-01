@@ -40,6 +40,12 @@ export type ToolErrorCode =
 /** Where a failed result's code and hint are, in its `_meta`. */
 export const ERROR_META_KEY = "gg.pcp/error"
 
+/**
+ * Where a structured answer's notes (a renamed argument) are, in its
+ * `_meta`, beside their own text blocks: the output schema is closed.
+ */
+export const NOTES_META_KEY = "gg.pcp/notes"
+
 /** A server as check_server and a connect link describe it. */
 export const SERVER_STATE = z.object({
   id: z.string(),
@@ -81,6 +87,13 @@ export const NEEDS_OWNER = z.object({
   request: z.string().optional(),
   connect: CONNECT_LINKS.optional(),
   server: SERVER_STATE.optional(),
+  /**
+   * The whole answer in words, as its text says it: what the owner is
+   * asked and how to hand the link over. Set for every tool (serve.ts), so
+   * a client that shows structuredContent in place of the text loses none
+   * of it.
+   */
+  message: z.string().optional(),
 })
 
 export type NeedsOwner = z.infer<typeof NEEDS_OWNER>
@@ -228,9 +241,17 @@ export function toCallToolResult(
       result = outcome.result
   }
 
-  return lead.length > 0
-    ? { ...result, content: [...lead, ...result.content] }
-    : result
+  if (lead.length === 0) {
+    return result
+  }
+
+  return {
+    ...result,
+    content: [...lead, ...result.content],
+    ...(result.structuredContent !== undefined
+      ? { _meta: { ...result._meta, [NOTES_META_KEY]: notes } }
+      : {}),
+  }
 }
 
 /** The error code a result carries, when PCP wrote it. */

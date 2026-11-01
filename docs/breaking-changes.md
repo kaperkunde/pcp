@@ -119,15 +119,24 @@ Passing an old name and its new one together is refused.
   `{"kind": "needs_owner", "reason": "permission" | "connect", "url",
 "label", …}`, on every tool. A permission request names its id in
   `request`; a server to connect has `connect` (its links) and, from
-  `check_server`, `server`. This replaces `{"kind": "connect", …}`.
+  `check_server`, `server`. This replaces `{"kind": "connect", …}`. Its
+  `message` is the whole text (what the owner is asked, and how to hand
+  the link over), for a client that shows `structuredContent` in place of
+  the text.
 - `check_server`, `check_permission`, `register_server`,
   `propose_tool_access`, `update_endpoint`, `get_endpoint`, `list_secrets`,
   the wrapper tools, `share_result` and `receive_file` declare an
   `outputSchema`, and their answers carry matching `structuredContent`.
   `check_permission` answers `{"kind": "done", "request", "status",
-"server"?}` once a request is settled and `{"kind": "requests",
+"result", "server"?}` once a request is settled (`result` is what it came
+  to in words: for a call that ran, its answer) and `{"kind": "requests",
 "requests": […]}` without an id; `check_server` answers `{"kind": "done",
-"server"}` once connected.
+"server", "message"}` once connected. A declared answer's notes (a renamed
+  argument) are also in `_meta["gg.pcp/notes"]`.
+- A tool that declares no `outputSchema` (`call_tool`, `run_code`, …)
+  sends `structuredContent` only when its text is that value's JSON and
+  nothing more; when PCP's text says more (a note, a lead, a preview), the
+  text alone is the answer.
 - A refusal PCP writes carries its code in `_meta["gg.pcp/error"]`
   (`{"code": "not_found" | "forbidden" | "invalid_arguments" |
 "rate_limited" | "internal" | …, "hint"?}`).

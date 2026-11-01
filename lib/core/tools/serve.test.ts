@@ -5,7 +5,13 @@ import { z } from "zod"
 
 import { PcpError } from "../errors"
 import { defineTool } from "./define"
-import { ERROR_META_KEY, NEEDS_OWNER, ok, passOn } from "./outcome"
+import {
+  ERROR_META_KEY,
+  NEEDS_OWNER,
+  NOTES_META_KEY,
+  ok,
+  passOn,
+} from "./outcome"
 import {
   ARGUMENTS_DID_NOT_FIT,
   permissionLinkIn,
@@ -125,6 +131,52 @@ beforeEach(async () => {
           content: [{ type: "text", text: "upstream said: token sk_123 bad" }],
           isError: true,
         }),
+    }),
+    hooks,
+  )
+
+  registerTool(
+    server,
+    defineTool({
+      name: "forwards",
+      title: "Forwards",
+      description: "Passes on another tool's answer, with or without a lead.",
+      input: z.object({
+        lead: z.boolean().describe("Put a note of PCP's before it."),
+      }),
+      aliases: { oldLead: "lead" },
+      annotations,
+      run: async (args) =>
+        passOn({
+          content: [
+            ...(args.lead
+              ? [
+                  {
+                    type: "text" as const,
+                    text: "This is the earlier run's answer.",
+                  },
+                ]
+              : []),
+            { type: "text", text: JSON.stringify({ id: 7 }) },
+          ],
+          structuredContent: { id: 7 },
+        }),
+    }),
+    hooks,
+  )
+  registerTool(
+    server,
+    defineTool({
+      name: "counts_renamed",
+      title: "Counts, renamed",
+      description: "Counts, with an old argument name.",
+      input: z.object({
+        by: z.number().optional().describe("How much to count by."),
+      }),
+      aliases: { step: "by" },
+      output: z.object({ n: z.number() }),
+      annotations,
+      run: async () => ok({ n: 3 }),
     }),
     hooks,
   )
@@ -256,10 +308,40 @@ describe("serveTool", () => {
       url: `${PUBLIC_URL}/permissions/req_1`,
       label: "Answer the request in PCP",
       request: "req_1",
+      // The whole text too, for a client that shows only structuredContent.
+      message: `Not done yet.\n\nEnd your reply with this link.\n${PUBLIC_URL}/permissions/req_1`,
     })
     expect(answer.texts.at(-1)!.split("\n").at(-1)).toBe(
       `${PUBLIC_URL}/permissions/req_1`,
     )
+  })
+})
+
+describe("what a client that shows only structuredContent gets", () => {
+  it("keeps another tool's structuredContent when the text is just its JSON", async () => {
+    const answer = await call("forwards", { lead: false })
+
+    expect(answer.result.structuredContent).toEqual({ id: 7 })
+  })
+
+  it("leaves it out when PCP's text says more, so nothing is hidden", async () => {
+    const answer = await call("forwards", { lead: true })
+
+    expect(answer.result.structuredContent).toBeUndefined()
+    expect(answer.texts[0]).toBe("This is the earlier run's answer.")
+
+    const renamed = await call("forwards", { oldLead: false })
+    expect(renamed.result.structuredContent).toBeUndefined()
+    expect(renamed.texts[0]).toMatch(/oldLead was renamed to lead/)
+  })
+
+  it("puts a declared answer's notes in _meta as well as the text", async () => {
+    const answer = await call("counts_renamed", { step: 2 })
+
+    expect(answer.result.structuredContent).toEqual({ n: 3 })
+    expect(answer.result._meta?.[NOTES_META_KEY]).toEqual([
+      expect.stringMatching(/step was renamed to by/),
+    ])
   })
 })
 

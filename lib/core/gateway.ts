@@ -2100,6 +2100,11 @@ export function buildGatewayServer(
         request: z.string(),
         /** How it ended: executed, failed, declined, withdrawn and the like. */
         status: z.string(),
+        /**
+         * What it came to, in words, as the text says it: for a call that
+         * ran, its answer as call_tool would have given it.
+         */
+        result: z.string(),
         /** A server it added, as it is now. */
         server: SERVER_STATE.optional(),
       }),
@@ -2165,6 +2170,7 @@ export function buildGatewayServer(
           kind: "done",
           request: args.id,
           status: view?.status ?? "unknown",
+          result: textOf(result),
           ...(structured?.kind === "done" && structured.server
             ? { server: structured.server }
             : {}),
@@ -2205,7 +2211,12 @@ export function buildGatewayServer(
     }),
     output: z.discriminatedUnion("kind", [
       NEEDS_OWNER,
-      z.object({ kind: z.literal("done"), server: SERVER_STATE }),
+      z.object({
+        kind: z.literal("done"),
+        server: SERVER_STATE,
+        /** What the text says: connected, switched off, the owner's note. */
+        message: z.string(),
+      }),
     ]),
     annotations: READS,
     log: serverNamed("server"),
@@ -2267,7 +2278,7 @@ export function buildGatewayServer(
       const service = await serviceStateLine(scope.ctx, row, scope.publicUrl)
       const said = `${row.name} is connected, with ${state.toolCount} tool${state.toolCount === 1 ? "" : "s"}.${row.enabled ? "" : " The owner has switched it off in PCP."}${service ? ` ${service}` : (row.status === "error" || row.status === "refused") && row.statusMessage ? ` Last contact failed: ${row.statusMessage}` : ""}${note ? ` ${ownerNoteLine(note)}` : ""}`
 
-      return ok({ kind: "done", server: state }, { text: said })
+      return ok({ kind: "done", server: state, message: said }, { text: said })
     },
   })
 

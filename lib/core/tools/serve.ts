@@ -20,7 +20,7 @@ import {
   type NeedsOwner,
   type Outcome,
 } from "./outcome"
-import { argumentsRefusal, validate, zodProblems } from "./validate"
+import { argumentsRefusal, sameJson, validate, zodProblems } from "./validate"
 
 /**
  * How a call of a tool defined with defineTool runs, from the arguments as
@@ -117,6 +117,66 @@ function markOwner(outcome: Outcome, publicUrl: string): Outcome {
     : outcome
 }
 
+/** A result's text, its text blocks one after another. */
+function textOfResult(result: CallToolResult): string {
+  return result.content
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join("\n\n")
+}
+
+/** Whether a result's text is its structuredContent's JSON and nothing more. */
+function textIsStructured(result: CallToolResult): boolean {
+  const texts = result.content.filter((part) => part.type === "text")
+
+  if (texts.length !== 1 || result.content.length !== 1) {
+    return false
+  }
+
+  try {
+    return sameJson(JSON.parse(texts[0].text), result.structuredContent)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The result as every client reads it whole. Some clients show
+ * structuredContent in place of the text, so what the text says must be
+ * there too: a needs_owner answer carries its text as `message`, and a tool
+ * that declares no output schema sends structuredContent only when its text
+ * is that value's JSON and nothing more (a note, a lead or a preview that
+ * the value does not hold would be lost otherwise; the text alone is a
+ * whole answer).
+ */
+export function fitForClients(
+  result: CallToolResult,
+  declared: boolean,
+): CallToolResult {
+  const structured = result.structuredContent as
+    { kind?: unknown; message?: unknown } | undefined
+
+  if (structured === undefined || result.isError === true) {
+    return result
+  }
+
+  if (structured.kind === "needs_owner") {
+    return typeof structured.message === "string"
+      ? result
+      : {
+          ...result,
+          structuredContent: { ...structured, message: textOfResult(result) },
+        }
+  }
+
+  if (declared || textIsStructured(result)) {
+    return result
+  }
+
+  const rest: CallToolResult = { ...result }
+  delete rest.structuredContent
+  return rest
+}
+
 /** What a tool names for its log line, from arguments not yet checked. */
 function logNames(tool: Tool, args: Record<string, unknown>): LogNames {
   try {
@@ -185,10 +245,13 @@ export function serveTool(
     }
 
     outcome = markOwner(outcome, hooks.publicUrl)
-    let result = toCallToolResult(outcome, {
-      structured: tool.output !== undefined,
-      notes,
-    })
+    let result = fitForClients(
+      toCallToolResult(outcome, {
+        structured: tool.output !== undefined,
+        notes,
+      }),
+      tool.output !== undefined,
+    )
 
     // What a tool declares it answers, it answers: anything else is a bug.
     // Checked against the schema as published, by the same check as

@@ -285,6 +285,8 @@ describe("PCP's own tools", () => {
     )
     expect(asked.structuredContent).toMatchObject({
       label: "Add the server Linear?",
+      // What the owner is asked, for a client that shows only this.
+      message: texts.join("\n\n"),
     })
 
     const open = await client.callTool({
@@ -308,6 +310,10 @@ describe("PCP's own tools", () => {
       kind: "done",
       request: owner.request,
       status: "withdrawn",
+      // What the text says, so a client that shows only this loses nothing.
+      result: (settled.content as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join(""),
     })
 
     const unknown = await client.callTool({
