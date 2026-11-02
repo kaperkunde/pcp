@@ -25,8 +25,9 @@ const ALL_TOOLS = [
   "search",
   "list_tools",
   "describe",
-  "call_tool",
-  "call_read_only_tool",
+  "call_tool_read",
+  "call_tool_write",
+  "call_tool_destructive",
   "check_permission",
   "withdraw_request",
   "check_server",
@@ -47,7 +48,9 @@ const ALL_TOOLS = [
   "read_memory",
   "memory",
   "web_fetch",
-  "run_code",
+  "run_code_read",
+  "run_code_write",
+  "run_code_destructive",
   "check_run",
 ]
 
@@ -192,12 +195,14 @@ describe("PCP's own tools", () => {
     }
   })
 
-  it("keep run_code's and register_server's own descriptions short", async () => {
+  it("keep the run_code entries' and register_server's own descriptions short", async () => {
     const { tools } = await client.listTools()
     const length = (name: string) =>
       tools.find((tool) => tool.name === name)!.description!.length
 
-    expect(length("run_code")).toBeLessThan(3_000)
+    for (const tier of ["read", "write", "destructive"]) {
+      expect(length(`run_code_${tier}`)).toBeLessThan(3_000)
+    }
     expect(length("register_server")).toBeLessThan(2_500)
   })
 
@@ -349,7 +354,7 @@ describe("PCP's own tools in search and describe (#41)", () => {
       query: "check_permission PCP",
     })
     expect(found.text.split("\n")[0]).toMatch(
-      /^pcp check_permission \(.+\) — .+ PCP's own tool: call it directly \(not through call_tool\)\.$/,
+      /^pcp check_permission \(.+\) \[read\] — .+ PCP's own tool: call it directly \(not through call_tool_\*\)\.$/,
     )
     expect(
       (await said(client, "search", { query: "withdraw" })).text.split("\n")[0],
@@ -377,7 +382,7 @@ describe("PCP's own tools in search and describe (#41)", () => {
     })
     expect(tool.call_handle).toBeUndefined()
 
-    const handle = await said(client, "call_tool", {
+    const handle = await said(client, "call_tool_destructive", {
       call_handle: "check_permission",
       arguments: {},
     })
@@ -387,19 +392,22 @@ describe("PCP's own tools in search and describe (#41)", () => {
 
   it("reads a name with an app's prefix as the bare name, and says so", async () => {
     const found = await said(client, "search", {
-      query: "mcp__PCP_Bazzite__run_code",
+      query: "mcp__PCP_Bazzite__run_code_read",
     })
     const lines = found.text.split("\n")
     expect(lines[0]).toBe(
-      "\"mcp__PCP_Bazzite__\" is your app's prefix for PCP's tools, not part of the name: the tool is run_code, and you call it directly.",
+      "\"mcp__PCP_Bazzite__\" is your app's prefix for PCP's tools, not part of the name: the tool is run_code_read, and you call it directly.",
     )
-    expect(lines[2]).toMatch(/^pcp run_code /)
+    expect(lines[2]).toMatch(/^pcp run_code_read /)
 
     const described = JSON.parse(
-      (await said(client, "describe", { ref: "mcp__PCP_Bazzite__run_code" }))
-        .text,
+      (
+        await said(client, "describe", {
+          ref: "mcp__PCP_Bazzite__run_code_read",
+        })
+      ).text,
     )
-    expect(described.tool).toBe("run_code")
+    expect(described.tool).toBe("run_code_read")
     expect(described.note).toContain('"mcp__PCP_Bazzite__"')
   })
 
@@ -416,9 +424,9 @@ describe("PCP's own tools in search and describe (#41)", () => {
     const plain = new Client({ name: "test", version: "1.0.0" })
     await plain.connect(clientSide)
 
-    const found = await said(plain, "search", { query: "run_code" })
+    const found = await said(plain, "search", { query: "run_code_read" })
     expect(found.text).not.toContain("pcp run_code")
-    const described = await said(plain, "describe", { ref: "run_code" })
+    const described = await said(plain, "describe", { ref: "run_code_read" })
     expect(described.isError).toBe(true)
     expect(
       (await said(plain, "search", { query: "check_permission" })).text,

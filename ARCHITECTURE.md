@@ -1196,8 +1196,8 @@ owner turns it on) gets one more tool, `memory`, with the commands of Claude's
 memory tool (view, create, str_replace, insert, delete, rename, over files
 under `/memories`) plus search and every, a second one, `read_memory`, with
 only every, view and search, and a paragraph in the instructions saying when
-to use them. `read_memory` and `call_read_only_tool` (call_tool for a tool
-whose stored annotations say `readOnlyHint`) are marked read-only, so a
+to use them. `read_memory` and `call_tool_read` (the entry for a tool in
+the Read tier, below) are marked read-only, so a
 client that holds back other tools, as Claude Code's plan mode does, lets
 them through; the token's levels apply to them as to the rest. The rules are in `lib/core/memories.ts`. Like endpoint
 management, they are drawn around the fact that what one assistant writes
@@ -1833,7 +1833,14 @@ that `web_fetch` was called and not where to.
 ## Running code
 
 A token made with "run code" (`api_token.run_code`, off unless the owner
-turns it on) gets `run_code(code)`: a JavaScript program, the body of an
+turns it on) gets `run_code_read(code)`, `run_code_write(code)` and
+`run_code_destructive(code)`, one implementation with the tier as its
+parameter: a program's `pcp.call` reaches tools at or below the entry's
+tier only, and one above refuses with an error the program may catch
+(before its arguments are checked or the owner asked); the duplicate
+guard's key (`code/runs.ts programKey`) holds the tier, so the same
+program through another entry is a run of its own. Each is a JavaScript
+program, the body of an
 async function, that calls the token's tools and works on their answers, so
 a large answer is filtered or moved without passing through the assistant.
 It is the pattern of Anthropic's programmatic tool calling, which does not
@@ -1876,8 +1883,8 @@ three parts:
   minutes.
 - **The caller** is the gateway's: `resolveCall` looks the tool up among
   the token's own and refuses a blocked one or a handle the token has no
-  result for, as for `call_tool`. An "ask" tool leaves the same permission
-  request a `call_tool` would and stops the run, which answers with what ran
+  result for, as for `call_tool_<tier>`. An "ask" tool leaves the same permission
+  request a `call_tool_<tier>` would and stops the run, which answers with what ran
   before it and the owner's link last; the owner's Allow once runs that one
   call for `check_permission`, and Always allow (or Allow for, while it
   lasts) lets the next run make it.
@@ -1943,7 +1950,9 @@ while a runner is connected, so a token on an install without the sandbox
 never sees one. Its state is kept on `globalThis`, like the browser's,
 because the boot code that listens and the gateway are bundled apart.
 
-Each call is in the request log under `run_code`, by server and tool; the
+Each call is in the request log under the entry the program came through
+(`run_code_read`, `run_code_write`, `run_code_destructive`), by server and
+tool; the
 program, what it printed and its errors are not logged or kept. What it
 printed (up to a million characters) and what it returned come back in the
 answer, and a long part is kept as a result of the token's (the returned
@@ -1958,8 +1967,8 @@ run_code cannot learn in time that nobody is waiting. It does not try to:
 - Every run (run_code's, and a wrapper tool's) has an id, `run_` and random
   hex, and a trace (`code/runs.ts`) of its calls: server, tool, how it went
   (ok, error, asked the owner, refused, under way), how long it took, and
-  whether its server marks it read-only (`read-only.ts markedReadOnly`, as
-  `call_read_only_tool` decides). The trace never holds arguments or
+  whether it is in the Read tier (`read-only.ts markedReadOnly`, on
+  `tool-tiers.ts`). The trace never holds arguments or
   results. Every answer but a plain success says the run's id and state,
   the exit reason (uncaught error, wall-clock, CPU, call or memory limit,
   the client went away, stopped for the owner's answer, or PCP failing
@@ -1968,7 +1977,7 @@ run_code cannot learn in time that nobody is waiting. It does not try to:
   completed, with a warning to check them before running it again when
   there are any. A call that changes things and failed on its way (a
   `PcpError` "upstream": not reached, timed out) is marked as one that may
-  have gone through; `call_tool` says the same in one line.
+  have gone through; `call_tool_<tier>` says the same in one line.
 - run_code answers at most `RUN_ANSWER_MS` (45 seconds) after it started.
   A program not done by then, or whose request's signal aborted, is not
   stopped: it goes on within `RUN_TIMEOUT_MS`, and the answer says it is
@@ -2722,7 +2731,7 @@ small server or a busy page can be overloaded by one. The rate limits
 
 - `callServerTool` (`upstream.ts`), for a server's tools: MCP servers, API
   endpoints, mail and calendar accounts and SSH servers, paced by the
-  server. call_tool and call_read_only_tool, run_code's `pcp.call`, a
+  server. call_tool_<tier>, run_code_<tier>'s `pcp.call`, a
   wrapper's calls and a call the owner allowed all end there. The browser's
   actions go through it too, and are paced in `browser/call.ts` by the tab's
   site (for a navigation, the site it opens), before the call queues on its
@@ -2761,7 +2770,7 @@ calls carry the run's end (`code/run.ts CallRun.deadline`: its start plus
 `RUN_TIMEOUT_MS`), and a wrapper's calls their run's (its own limit, or the
 calling run's end when that comes first), so a program waits for its turn
 instead of failing with work half done. A call straight from an assistant's
-request (call_tool, call_read_only_tool, web_fetch) or from the owner's
+request (call_tool_<tier>, web_fetch) or from the owner's
 answer to one carries `callDeadline()`: a wait up to
 `PACING_CALL_WAIT_MS`, 45 seconds, the same clock as `RUN_ANSWER_MS`. A
 caller that names none waits `PACING_MAX_WAIT_MS` at most.
@@ -3506,7 +3515,7 @@ message each (`app/mcp/route.ts`). The tools:
   after it, a memory as one named by its path and described by its text),
   and returns `kind ref — line` lines: `tool server/tool`, `pcp <name>`
   with its title, first sentence and that it is called directly (not
-  through `call_tool`), `skill skill:<name>` with its description, `memory
+  through `call_tool_<tier>`), `skill skill:<name>` with its description, `memory
 /memories/…` with the line that says most of the query. A name the query
   gives exactly (the whole query, or a term in it that reads as a name;
   `server/name` too; case, `-`, `_`, `.` and spaces aside, and without an
@@ -3535,7 +3544,9 @@ message each (`app/mcp/route.ts`). The tools:
   from the schema (`openapi/outline.ts`, stored as `mcp_tool.output`); text
   the schema marks base64 (`format: byte`) shows as `string (base64)`.
   First in its answer is the tool's `call_handle` (below).
-- `call_tool(call_handle, arguments, fields?, decode?, keep?)` takes no
+- `call_tool_read`, `call_tool_write` and `call_tool_destructive`
+  (`call_handle, arguments, fields?, decode?, keep?`), one per tier (Tool
+  tiers, below), take no
   server or tool name, only the handle `describe` gave, so a tool is
   always described before it is called. It checks the arguments against
   the tool's stored inputSchema, then opens a connection
@@ -3551,17 +3562,57 @@ message each (`app/mcp/route.ts`). The tools:
   become handles (below). A call that waits for the owner keeps its fields,
   decode and keep paths on the request (`permission_request.fields`,
   `permission_request.decode`, `permission_request.keep`).
-  `call_read_only_tool` takes the same handle.
+  Every tier's entry takes the same handle; a tool above the entry's tier
+  is refused, naming the entry that runs it, before anything else.
 - `search_tools` and `describe_tool`, the old names, are gone after their
   release (docs/breaking-changes.md).
 - `check_permission(id?)`, `withdraw_request(id)`, `check_server(server)`,
   `register_server(...)` and `propose_tool_access(changes)` belong to the
   permission flow below.
-- `check_run(id)`, beside `run_code` for a token that runs code, says how
+- `check_run(id)`, beside `run_code_<tier>` for a token that runs code, says how
   one of the token's runs went (Running code, above). It only reads.
 - `read_result(id, offset?, length?, find?)` reads a slice of an answer
   PCP shortened and kept whole, or of a kept value; a file that is not text
   is described, not shown (below).
+
+### Tool tiers
+
+Some clients ask before every call to a tool annotated `destructiveHint:
+true` however the owner answered before (Claude's voice mode on iOS), and
+some let only read-only tools through (Claude Code's plan mode). So every
+tool has a tier, and every tier its own entry tools: `call_tool_read`,
+`call_tool_write` and `call_tool_destructive`, and `run_code_read`,
+`run_code_write` and `run_code_destructive`. Each runs tools at or below
+its own tier and advertises its tier in its annotations; the owner's
+levels apply in every tier, and a tier adds no right.
+
+`lib/core/tool-tiers.ts` is the one place a tier comes from: the owner's
+choice, else for a wrapper's tool the highest tier of the tools it calls (a
+call PCP does not know counts as Destructive; the wrapper definition's own
+annotations only propose), else the annotations as MCP reads them
+(`readOnlyHint: true` is Read, else `destructiveHint: false` is Write, else
+Destructive, so a tool without hints is Destructive). An API endpoint's
+tools state both hints (`openapi/generate.ts`): GET Read, POST, PUT and
+PATCH Write, DELETE Destructive. Derived tiers are worked out when asked,
+never stored. Everything that asks whether a tool reads asks there: the
+entry gates in `gateway.ts` (`callUpstream`, run_code's `pcp.call`),
+`read-only.ts markedReadOnly` (pacing's read or change, a run's trace),
+the permission page's warning, the wrapper review's badges, describe
+(`tier`, `run_with`), list_tools, search and pcp.tools, and
+`loadGatewayServers`, which puts each tool's tier on the request's view.
+
+The owner's choices: for a server's tool a `tool_tier` row, kept apart
+from `mcp_tool` so it outlives a tool that drops out of a refresh, on the
+server's definition (every instance reads it there; `setToolTier`, and a
+detach copies them, a merge keeps the kept definition's), or on the server
+for one without a definition (mail, calendar, SSH, the browser); for PCP's
+own tools the vault's `toolTiers` setting, which the gateway reads per
+request into what those tools advertise (`ownTiers`). An assistant proposes
+tiers only through `propose_tool_access` (`tier` beside `access`), saved on
+the request's page with what the owner left there. A wrapper tool's row
+keeps the tier its calls came to when the owner chose (`seen_tier`); the
+header's bell names one whose calls come to more since and whose choice is
+below them (`owner-notices.ts tierNotices`), until the owner chooses again.
 
 ### Call handles
 
@@ -3574,7 +3625,7 @@ server, tool name, row id and the first bytes of the schema's hash), those
 bytes, and a 128-bit call MAC over the same with the whole hash of the
 tool's canonical inputSchema (`canonicalJson`). So a handle cannot be made
 without the vault's key, works for its own token only, and goes stale when
-the schema changes. `call_tool` resolves it against the catalogue as it is
+the schema changes. `call_tool_<tier>` resolves it against the catalogue as it is
 and answers, as a tool error and with nothing run or asked:
 
 - a genuine handle for an older schema: "The tool changed since you
@@ -3728,7 +3779,7 @@ Every token has a level per tool (`api_token_tool_access`,
 row, **ask**. Rows are keyed by the tool's name, so a tool that drops out of
 a refresh and comes back keeps its level. Blocked tools are left out of the
 instructions, `search`, `list_tools` and `describe`, and
-`call_tool` and `run_code` refuse them. The gateway loads the levels by
+`call_tool_<tier>` and `run_code_<tier>` refuse them. The gateway loads the levels by
 token id. A wrapper's tool comes out at the strictest of its own level and
 those of the tools it calls (Wrappers, above).
 
@@ -3795,7 +3846,7 @@ own.
 no level: it leaves an allowance (`lib/core/allowances.ts`,
 `api_token_tool_allowance` and `api_token_site_allowance`), the token, the
 tool or site, and when it ends. It is read only where the levels come out
-at "ask" (`loadGatewayServers` for tools, which `call_tool` and run_code
+at "ask" (`loadGatewayServers` for tools, which `call_tool_<tier>` and run_code
 both go through; `resolveFetchAccess` for sites, which web fetch and the
 browser's page gate both go through) and lifts that to "allowed" until it
 ends. It never lifts a block, and when it ends the levels decide as they

@@ -1,5 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
+import type { ToolTier } from "../constants"
 import { readFields, type AnswerShape } from "../answers"
 import { isConnectResult } from "../connect"
 import { isPcpError } from "../errors"
@@ -146,7 +147,7 @@ export type CodeCaller = (
      * where a call to a wrapper's tool says the run it started.
      */
     run: CallRun
-    /** Says, once the tool is found, whether its server marks it read-only. */
+    /** Says, once the tool is found, whether it is in the Read tier. */
     lookedUp?: (readOnly: boolean) => void
   } & AnswerShape,
 ) => Promise<CodeCallOutcome>
@@ -273,6 +274,11 @@ export async function runCode(
     language?: string
     /** Run it even when the same program runs, or ran a moment ago. */
     rerun?: boolean
+    /**
+     * The tier of the entry it came through (run_code_<tier>): the same
+     * program through another entry is another run.
+     */
+    tier?: ToolTier
   },
   {
     signal,
@@ -293,7 +299,11 @@ export async function runCode(
     )
   }
 
-  const key = programKey(input.language ?? "javascript", input.code)
+  const key = programKey(
+    input.language ?? "javascript",
+    input.code,
+    input.tier ?? "destructive",
+  )
 
   if (input.rerun !== true) {
     const earlier = duplicateRun(
@@ -321,7 +331,11 @@ export async function runCode(
   // The client's signal is not the run's: the run ends by its own limits.
   const outcome = runProgram(
     scope,
-    { code: input.code },
+    {
+      code: input.code,
+      // Its calls are logged under the entry it came through.
+      logAs: `run_code_${input.tier ?? "destructive"}`,
+    },
     { ...options, runId: record.id, trace: record.trace },
   )
     .then(
@@ -704,7 +718,14 @@ export async function runProgram(
     code,
     input,
     label = "run_code",
-  }: { code: string; input?: string; label?: "run_code" | "wrapper" },
+    logAs = label,
+  }: {
+    code: string
+    input?: string
+    label?: "run_code" | "wrapper"
+    /** The tool its calls are logged under: the entry it came through. */
+    logAs?: string
+  },
   {
     call,
     list,
@@ -919,7 +940,7 @@ export async function runProgram(
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
         tokenId: scope.tokenId,
-        tool: label,
+        tool: logAs,
         server,
         upstreamTool: tool,
         ok: owner || outcome.ok,

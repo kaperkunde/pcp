@@ -17,6 +17,7 @@ import {
 } from "@/lib/core/permissions"
 import { type ActionState, guarded } from "@/lib/server/action-state"
 import { publicUrlFor } from "@/lib/server/public-url"
+import { listOwnToolTiers } from "@/lib/core/own-tool-tiers"
 import { requireContext } from "@/lib/server/session"
 
 /**
@@ -134,6 +135,7 @@ export async function decidePermissionAction(
 export async function saveAccessRequestAction(
   id: string,
   levels: Array<{ serverId: string; tool: string; access: string }>,
+  tiers: Array<{ serverId: string | null; tool: string; tier: string }> = [],
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -145,7 +147,12 @@ export async function saveAccessRequestAction(
       throw notFound("That request")
     }
 
-    const outcome = await applyAccessRequest(ctx, id, levels, { publicUrl })
+    const outcome = await applyAccessRequest(ctx, id, levels, {
+      publicUrl,
+      tiers,
+      ownNames: async () =>
+        (await listOwnToolTiers(ctx)).map((tool) => tool.name),
+    })
     const message = outcome.content
       .flatMap((part) => (part.type === "text" ? [part.text] : []))
       .join("\n")

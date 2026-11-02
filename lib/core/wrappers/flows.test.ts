@@ -121,7 +121,10 @@ async function call(name: string, args: Record<string, unknown>) {
   await client.connect(clientSide)
   const result = await client.callTool({
     name,
-    arguments: name === "call_tool" ? await withCallHandle(client, args) : args,
+    arguments:
+      name === "call_tool_destructive"
+        ? await withCallHandle(client, args)
+        : args,
   })
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
@@ -206,7 +209,7 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
       arguments: { url: `${api.origin}/thread`, text: "hello there" },
     }
 
-    const first = await call("call_tool", args)
+    const first = await call("call_tool_destructive", args)
     expect(first.isError, first.text).toBe(false)
     expect(JSON.parse(first.text)).toEqual({
       ok: true,
@@ -214,7 +217,7 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
     })
     expect(messages).toEqual(["hello there"])
 
-    const again = await call("call_tool", args)
+    const again = await call("call_tool_destructive", args)
     expect(again.isError, again.text).toBe(false)
     expect(JSON.parse(again.text)).toEqual({
       ok: true,
@@ -243,7 +246,7 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
     })
     await approvedFlow()
 
-    const result = await call("run_code", {
+    const result = await call("run_code_destructive", {
       code: `
         const url = ${JSON.stringify(`${api.origin}/thread`)}
         const first = await pcp.call("chat", "post_message", { url, text: "from a program" })
@@ -267,7 +270,7 @@ describe.skipIf(!executable)("a browser flow", { timeout: 90_000 }, () => {
   it("names the step that failed, on a page it did not expect", async () => {
     await approvedFlow()
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "chat",
       tool: "post_message",
       arguments: { url: `${api.origin}/moved`, text: "lost" },

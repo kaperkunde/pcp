@@ -12,8 +12,8 @@ import { pacingNow, waitForSlot, type PacedRefusal } from "./pace"
 /**
  * One pacing for everything an assistant does (limits.ts says why), applied
  * at two places only, which every way of calling passes: upstream.ts
- * callServerTool for a server's tools (call_tool and call_read_only_tool,
- * run_code's pcp.call, a wrapper's calls, a call the owner allowed; the
+ * callServerTool for a server's tools (call_tool_<tier>, run_code_<tier>'s
+ * pcp.call, a wrapper's calls, a call the owner allowed; the
  * browser's actions are paced inside browser/call.ts by the tab's site),
  * and web fetch's request path (fetch/fetch.ts each request and redirect,
  * web-fetch.ts the read through the browser). Each answers null when the
@@ -40,8 +40,8 @@ export type PaceOptions = {
 }
 
 /**
- * The deadline of a call made straight from an assistant's request (call_tool,
- * call_read_only_tool, web_fetch) or from the owner's answer to one: its wait
+ * The deadline of a call made straight from an assistant's request (call_tool_<tier>,
+ * web_fetch) or from the owner's answer to one: its wait
  * comes to PACING_CALL_WAIT_MS at most.
  */
 export function callDeadline(): number {
@@ -57,8 +57,8 @@ function siteKey(vaultId: string, host: string): string {
 }
 
 /**
- * A call to a server's tool, paced by the server: one that changes things,
- * or one its server marks read-only (read-only.ts).
+ * A call to a server's tool, paced by the server: one in the Read tier
+ * (tool-tiers.ts, through read-only.ts), or one that changes things.
  */
 export async function paceServerCall(
   vaultId: string,

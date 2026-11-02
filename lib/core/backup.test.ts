@@ -66,6 +66,12 @@ import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
 import { keepResult, readResult } from "./tool-results"
 import {
+  readOwnToolTiers,
+  setOwnToolTier,
+  setToolTier,
+  toolTier,
+} from "./tool-tiers"
+import {
   ownerVault,
   resetPasswordWithRecoveryKey,
   setupVault,
@@ -885,6 +891,39 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await db().apiToken.findFirstOrThrow()).toMatchObject({
       manageWrappers: false,
     })
+  })
+
+  it("carries the owner's tiers, and restores a file from before tiers", async () => {
+    const { ctx, serverId } = await populate()
+    await setToolTier(ctx, serverId, "alpha", "read")
+    await setOwnToolTier(ctx, "search", "write")
+    const before = await db().toolTier.findMany()
+    expect(before).toHaveLength(1)
+
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().toolTier.findMany()).toEqual(before)
+    expect(await toolTier(serverId, "alpha")).toBe("read")
+    expect(await readOwnToolTiers(ctx)).toEqual({ search: "write" })
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    delete (older.tables as Record<string, unknown>).toolTiers
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().toolTier.count()).toBe(0)
+    expect(await toolTier(serverId, "alpha")).toBe("destructive")
   })
 
   it("carries exits and their levels, and restores a file from before exits", async () => {

@@ -474,7 +474,7 @@ describe.skipIf(!executable)(
 
       try {
         const result = await client.callTool({
-          name: "run_code",
+          name: "run_code_destructive",
           arguments: {
             code: `
 const form = await pcp.call("browser", "tabs", { action: "open", url: "${api.origin}/form" })
@@ -545,7 +545,7 @@ return { file: got.file, sent: sent.includes("Thank you") }
       }
       const browser = async (tool: string, args: Record<string, unknown>) =>
         client.callTool({
-          name: "call_tool",
+          name: "call_tool_destructive",
           arguments: {
             call_handle: await describedHandle(client, "browser", tool),
             arguments: args,

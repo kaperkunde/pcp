@@ -148,7 +148,7 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
     tool: "lookup",
   })
   expect(toolText(described)).toMatch(/"outputSchema": \{\s*"type": "string"/)
-  const answer = await callTool(baseURL!, token, "call_tool", {
+  const answer = await callTool(baseURL!, token, "call_tool_destructive", {
     server: WRAPPER_SLUG,
     tool: "lookup",
     arguments: { text: "hello" },
@@ -162,7 +162,7 @@ test("the wrapper's tool puts the key in, and the assistant never sees it", asyn
   })
 
   // The assistant cannot put the secret in itself.
-  const own = await callTool(baseURL!, token, "call_tool", {
+  const own = await callTool(baseURL!, token, "call_tool_destructive", {
     server: SLUG,
     tool: "keyed_echo",
     arguments: { api_key: { $secret: KEY_NAME }, text: "x" },

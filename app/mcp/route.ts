@@ -13,6 +13,7 @@ import {
 import { usableExitNames } from "@/lib/core/exits/use"
 import { instructionMemories } from "@/lib/core/memories"
 import { instructionSkills } from "@/lib/core/skills"
+import { readOwnToolTiers } from "@/lib/core/tool-tiers"
 import { bearerChallenge } from "@/lib/core/oauth-server/metadata"
 import {
   ACCESS_TOKEN_PREFIX,
@@ -64,6 +65,8 @@ const mcpHandler = createMcpHandler(
       exitNames: scope.webFetch
         ? await usableExitNames(scope.ctx, scope.tokenId)
         : [],
+      // What PCP's own tools advertise follows the owner's tiers for them.
+      ownTiers: await readOwnToolTiers(scope.ctx),
     })
   },
   {

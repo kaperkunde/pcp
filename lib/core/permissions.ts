@@ -15,12 +15,14 @@ import {
 import {
   accessReview,
   checkAccessLevels,
+  checkAccessTiers,
+  writeAccessTiers,
+  type OwnToolNames,
   describeAccessAsk,
   describeSavedAccess,
   listAccessLevels,
   writeAccessLevels,
   type AccessAsk,
-  type AccessLevel,
 } from "./access-requests"
 import { allowSiteFor, allowToolFor, parseAllowForMinutes } from "./allowances"
 import type { SyncResult } from "./catalogue"
@@ -118,6 +120,7 @@ import {
   type ServerInput,
 } from "./servers"
 import { effectiveAccess, loadToolAccess, writeToolAccess } from "./tool-access"
+import { toolTier } from "./tool-tiers"
 import { noteOwnerAsked } from "./request-log"
 import { collectHandleIds } from "./result-handles"
 import {
@@ -1091,15 +1094,24 @@ async function summarizeRow(
   }
 
   if (row.kind === "access") {
-    const { levels } = args as AccessAsk["input"]
+    const { levels, tiers = [] } = args as AccessAsk["input"]
     const servers = await db().mcpServer.findMany({
       where: {
         vaultId: ctx.vaultId,
-        id: { in: [...new Set(levels.map((level) => level.serverId))] },
+        id: {
+          in: [
+            ...new Set([
+              ...levels.map((level) => level.serverId),
+              ...tiers.flatMap((entry) =>
+                entry.serverId ? [entry.serverId] : [],
+              ),
+            ]),
+          ],
+        },
       },
       select: { id: true, name: true, slug: true },
     })
-    const asked = describeAccessAsk(levels, servers)
+    const asked = describeAccessAsk(levels, servers, tiers)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1321,15 +1333,12 @@ async function summarizeRow(
         },
       })
     : null
-  let destructive = false
-
-  try {
-    destructive =
-      (JSON.parse(tool?.annotations ?? "{}") as { destructiveHint?: boolean })
-        .destructiveHint === true
-  } catch {
-    destructive = false
-  }
+  // The tool's tier (tool-tiers.ts): the owner's choice, a wrapper's calls,
+  // or its annotations, where hints left out count as Destructive.
+  const destructive =
+    tool !== null &&
+    row.serverId !== null &&
+    (await toolTier(row.serverId, row.toolName)) === "destructive"
 
   const about = tool
     ? summarize(tool.descriptionOverride ?? tool.description)
@@ -1355,7 +1364,7 @@ async function summarizeRow(
       ...(await handleLines(ctx, row.tokenId, args)),
     ],
     warning: destructive
-      ? "The server marks this tool as destructive: it can change or delete things for good."
+      ? "This is a Destructive tool: it can change or delete things for good."
       : null,
     full: argsInFull(
       args,
@@ -1838,12 +1847,18 @@ export async function withPermission(
               vaultId: scope.ctx.vaultId,
               id: {
                 in: [
-                  ...new Set(ask.input.levels.map((level) => level.serverId)),
+                  ...new Set([
+                    ...ask.input.levels.map((level) => level.serverId),
+                    ...(ask.input.tiers ?? []).flatMap((entry) =>
+                      entry.serverId ? [entry.serverId] : [],
+                    ),
+                  ]),
                 ],
               },
             },
             select: { id: true, slug: true },
           }),
+          ask.input.tiers ?? [],
         )
       : undefined
 
@@ -3513,6 +3528,8 @@ function ageText(ms: number): string {
 export async function getAccessProposal(
   ctx: VaultContext,
   id: string,
+  /** PCP's own tools, for tiers proposed for them (own-tool-tiers.ts). */
+  ownTools: Parameters<typeof accessReview>[4] = [],
 ): Promise<
   (Awaited<ReturnType<typeof accessReview>> & { tokenId: string }) | null
 > {
@@ -3522,11 +3539,11 @@ export async function getAccessProposal(
     return null
   }
 
-  const { levels } = readArgs(ctx, row) as AccessAsk["input"]
+  const { levels, tiers = [] } = readArgs(ctx, row) as AccessAsk["input"]
 
   return {
     tokenId: row.tokenId,
-    ...(await accessReview(ctx, row.tokenId, levels)),
+    ...(await accessReview(ctx, row.tokenId, levels, tiers, ownTools)),
   }
 }
 
@@ -3655,7 +3672,17 @@ export async function applyAccessRequest(
   ctx: VaultContext,
   id: string,
   levels: unknown,
-  { publicUrl }: { publicUrl: string },
+  {
+    publicUrl,
+    tiers,
+    ownNames,
+  }: {
+    publicUrl: string
+    /** The tiers the owner left on the page (only what changes). */
+    tiers?: unknown
+    /** PCP's own tools' names, for a tier chosen for one of them. */
+    ownNames?: OwnToolNames
+  },
 ): Promise<CallToolResult> {
   const row = await loadRow({ id, vaultId: ctx.vaultId })
 
@@ -3679,6 +3706,7 @@ export async function applyAccessRequest(
 
   // Refused before the row is claimed, so the owner can fix it and save.
   const chosen = await checkAccessLevels(ctx, row.tokenId, levels)
+  const chosenTiers = await checkAccessTiers(ctx, row.tokenId, tiers, ownNames)
   const claimed = await claim(row.id)
 
   if (claimed.count !== 1) {
@@ -3692,10 +3720,15 @@ export async function applyAccessRequest(
 
   try {
     await writeAccessLevels(ctx, row.tokenId, chosen)
-    const { levels: proposed } = readArgs(ctx, row) as {
-      levels: AccessLevel[]
+    await writeAccessTiers(ctx, chosenTiers)
+    const { levels: proposed, tiers: proposedTiers = [] } = readArgs(
+      ctx,
+      row,
+    ) as AccessAsk["input"]
+    outcome = {
+      failed: false,
+      text: describeSavedAccess(proposed, chosen, proposedTiers, chosenTiers),
     }
-    outcome = { failed: false, text: describeSavedAccess(proposed, chosen) }
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] saving tool levels failed", {

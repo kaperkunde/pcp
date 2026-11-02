@@ -32,6 +32,7 @@ import { ShownInFull } from "@/components/shown-in-full"
 import { SkillReview } from "@/components/skill-review"
 import { WrapperReview } from "@/components/wrapper-review"
 import { tabFor } from "@/lib/core/browser/owner"
+import { listOwnToolTiers } from "@/lib/core/own-tool-tiers"
 import { getAccessProposal, getPermissionView } from "@/lib/core/permissions"
 import type { PermissionView } from "@/lib/core/permissions"
 import type { ServerKind } from "@/lib/core/servers"
@@ -130,7 +131,10 @@ export default async function PermissionPage({
     redirect(`/browser?tab=${encodeURIComponent(view.browserTabId)}`)
   }
 
-  const proposal = access && pending ? await getAccessProposal(ctx, id) : null
+  const proposal =
+    access && pending
+      ? await getAccessProposal(ctx, id, await listOwnToolTiers(ctx))
+      : null
   // A long list of levels, a wrapper's programs or a skill want room.
   const roomy = Boolean(
     (access && pending) ||
@@ -217,9 +221,10 @@ export default async function PermissionPage({
         {pending && proposal ? (
           <>
             <p className="text-muted-foreground">
-              The assistant&apos;s levels are filled in below and every change
-              is marked. Change any of them, then save; you can change them
-              again on the token&apos;s page.
+              The assistant&apos;s levels and tiers are filled in below and
+              every change is marked. Change any of them, then save; you can
+              change levels again on the token&apos;s page, and tiers on each
+              server&apos;s.
               {proposal.gone > 0
                 ? ` ${proposal.gone} of the proposed tools are no longer on this token and are left out.`
                 : null}
@@ -228,6 +233,10 @@ export default async function PermissionPage({
               id={view.id}
               servers={proposal.servers}
               proposed={proposal.proposed}
+              tiers={proposal.tiers}
+              proposedTiers={proposal.proposedTiers}
+              ownTools={proposal.ownTools}
+              sharedWith={proposal.sharedWith}
             />
           </>
         ) : pending ? (

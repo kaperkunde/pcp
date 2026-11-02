@@ -1075,7 +1075,7 @@ describe("search and describe", () => {
     // The tool and the skill both name the task; the memory only mentions it.
     expect(lines.slice(0, 2).sort()).toEqual([
       "skill skill:send-postcards — Send a postcard to a friend: who, what to write, and when.",
-      "tool postcards/send_postcard — send postcards for the owner.",
+      "tool postcards/send_postcard [destructive: call_tool_destructive] — send postcards for the owner.",
     ])
     expect(lines.slice(2)).toContain(
       "memory /memories/shared/friends.md — Grace likes postcards from the sea.",
@@ -1088,7 +1088,10 @@ describe("search and describe", () => {
     })
     expect(friend.text).toContain("skill skill:send-postcards")
     expect(friend.text).toContain("memory /memories/shared/friends.md")
-    expect(friend.text).not.toContain("tool ")
+    // (PCP's own call_tool_write is named by "write": not a server's tool.)
+    expect(
+      friend.text.split("\n").filter((line) => line.startsWith("tool ")),
+    ).toEqual([])
 
     const skillsOnly = await call(client, "search", {
       query: "postcard",
@@ -1138,7 +1141,7 @@ describe("search and describe", () => {
       "- skill:send-postcards/addresses.md (20 characters)",
     )
     expect(described.text).toMatch(
-      /- postcards\/send_postcard \(asks the owner first\): call_handle ch_\S+/,
+      /- postcards\/send_postcard \(asks the owner first; Destructive, run with call_tool_destructive\): call_handle ch_\S+/,
     )
     expect(described.text).toContain(
       "- postcards/gone_tool: not a tool this token can call",

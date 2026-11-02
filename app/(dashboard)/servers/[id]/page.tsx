@@ -36,10 +36,25 @@ import { sshServerView } from "@/lib/core/ssh/hosts"
 import { describeOAuthConnection } from "@/lib/core/upstream"
 import { getWrapper, replacedTools } from "@/lib/core/wrappers/admin"
 import { itemAbout } from "@/lib/core/item-about"
+import {
+  loadToolTiers,
+  tierBelowCalls,
+  type TierInfo,
+} from "@/lib/core/tool-tiers"
 import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
 export const metadata: Metadata = { title: "Server" }
+
+/** A tool's tier as the page shows it. */
+function shownTier(info: TierInfo) {
+  return {
+    tier: info.tier,
+    derived: info.derived,
+    override: info.override,
+    below: tierBelowCalls(info),
+  }
+}
 
 export default async function ServerPage({
   params,
@@ -73,6 +88,8 @@ export default async function ServerPage({
   const wrapper = kind === "wrapper" ? await getWrapper(ctx, { id }) : null
   const service = kind === "service" ? await serviceView(ctx, id) : null
   const replaced = await replacedTools(ctx, server.id)
+  // Each tool's tier, and whether the owner chose it (tool-tiers.ts).
+  const tiers = await loadToolTiers(ctx.vaultId, [server])
   const about = await itemAbout(ctx, "server", server.id)
   const spec = endpoint
     ? await db().openApiSpec.findUnique({
@@ -327,6 +344,14 @@ export default async function ServerPage({
             descriptionOverride: tool.descriptionOverride,
             operation: plan ? { method: plan.method, path: plan.path } : null,
             replacedBy: replaced.get(tool.name) ?? [],
+            tier: shownTier(
+              tiers.get(`${server.id}/${tool.name}`) ?? {
+                tier: "destructive",
+                derived: "destructive",
+                override: null,
+                seen: null,
+              },
+            ),
           }
         })}
         notice={notice}

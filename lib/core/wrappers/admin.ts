@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 
+import type { ToolTier } from "../constants"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { invalid, notFound, PcpError } from "../errors"
@@ -7,6 +8,7 @@ import type { GatewayServer } from "../gateway-servers"
 import { newId } from "../ids"
 import { canonicalJson } from "../permission-rules"
 import { createSecretNamedAfter, findTextSecretByName } from "../secrets"
+import { tierOfCalls } from "../tool-tiers"
 import {
   contentInstance,
   definitionForNew,
@@ -78,6 +80,12 @@ export type WrapperShownTool = {
   flow?: boolean
   /** A flow's sites, as far as its program's text says (flow-sites.ts). */
   sites?: FlowSites
+  /**
+   * Its tier once made (tool-tiers.ts): the highest of the tools it calls,
+   * whatever its annotations propose. Left out of a request made before
+   * tiers.
+   */
+  tier?: ToolTier
 }
 
 export type WrapperShownSecret = {
@@ -311,6 +319,7 @@ async function describe(
       replaces: tool.replaces,
       flow,
       ...(flow ? { sites: flowSites(tool.program, browsers) } : {}),
+      tier: await tierOfCalls(ctx, after!.tools[index]!.calls),
     })
   }
 

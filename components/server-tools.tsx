@@ -18,7 +18,9 @@ import {
   setToolDescriptionAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
+import { setToolTierAction } from "@/lib/actions/tool-tiers"
 import { showReplacedToolAction } from "@/lib/actions/wrappers"
+import { ToolTierSelect, type ShownTier } from "@/components/tool-tier-select"
 import type { ServerKind } from "@/lib/core/servers"
 import { cn } from "@/lib/utils"
 
@@ -31,7 +33,13 @@ export type ServerTool = {
   operation: { method: string; path: string } | null
   /** Wrappers' tools that stand in for this one in search. */
   replacedBy?: Array<{ id: string; name: string; tool: string }>
+  /** Its tier: Read, Write or Destructive, and whether you chose it. */
+  tier: ShownTier
 }
+
+/** What a tool's tier is for, under every server's tools. */
+const TIERS_ABOUT =
+  "Each tool's tier (Read, Write or Destructive) says how much it can do: assistants run it through the entry for its tier, and an app can let Read tools through without asking each time. Default is what the tool says of itself."
 
 /** How many tools the page shows before "Show all". */
 const PREVIEW = 5
@@ -134,7 +142,7 @@ export function ServerTools({
           </Button>
         ) : null
       }
-      footer={about(kind)}
+      footer={`${about(kind)} ${TIERS_ABOUT}`}
     >
       {tools.length === 0 ? (
         <List>
@@ -165,7 +173,10 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
   const shared = instances.length > 1
 
   return (
-    <li className="flex flex-col gap-1.5 px-4 py-3 text-sm">
+    <li
+      id={`tool-${encodeURIComponent(tool.name)}`}
+      className="flex scroll-mt-20 flex-col gap-1.5 px-4 py-3 text-sm"
+    >
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           {tool.operation ? (
@@ -191,13 +202,26 @@ function ToolRow({ serverId, tool }: { serverId: string; tool: ServerTool }) {
             <Badge variant="secondary">Left out of search</Badge>
           ) : null}
         </div>
-        <Button
-          variant="ghost"
-          size="xs"
-          onClick={() => setEditing((value) => !value)}
-        >
-          {editing ? "Cancel" : "Edit description"}
-        </Button>
+        <div className="flex flex-wrap items-start justify-end gap-2">
+          <ToolTierSelect
+            action={setToolTierAction}
+            fields={{ serverId, tool: tool.name }}
+            tool={tool.name}
+            shown={tool.tier}
+            confirmText={
+              shared
+                ? `${changesServers(instances)}. Change this tool's tier for all of them?`
+                : undefined
+            }
+          />
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => setEditing((value) => !value)}
+          >
+            {editing ? "Cancel" : "Edit description"}
+          </Button>
+        </div>
       </div>
       {editing ? (
         <form

@@ -29,7 +29,7 @@
 A self-hosted gateway between your AI assistant and the MCP servers you use.
 PCP keeps the credentials those servers need in an encrypted store, signs in
 to the ones that use OAuth, and exposes a single MCP endpoint built around
-three tools — `search`, `describe` and `call_tool` — so an
+a few tools — `search`, `describe` and a `call_tool` per tier — so an
 assistant can reach dozens of servers without carrying every tool definition
 in its context. You decide, per token and per tool, what an assistant may run
 on its own, what it has to ask you about first, and what it cannot touch.
@@ -46,8 +46,8 @@ on its own, what it has to ask you about first, and what it cannot touch.
 - **Web pages, on your terms.** A token can be given a `web_fetch` tool that
   reads public web pages as Markdown. You decide per method and per site, and
   every site an assistant tried is listed for you to allow or block.
-- **Large answers that never reach the assistant.** A token can be given a
-  `run_code` tool: a short JavaScript program, run inside PCP, that calls
+- **Large answers that never reach the assistant.** A token can be given
+  the `run_code` tools: a short JavaScript program, run inside PCP, that calls
   the token's tools and filters, counts or passes on what they answer. Every
   call follows the token's levels, and the program reaches nothing else.
 - **A browser that keeps your sign-ins.** Add PCP's browser and an assistant
@@ -495,41 +495,56 @@ To remove PCP itself:
 The assistant then sees a short description of the servers behind the token
 and these tools:
 
-| Tool                  | What it does                                                                                                                                                                                                                                                                |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `search`              | Finds tools across servers, your skills, and the memories the token reads, from a few words ("create a github issue"), each with a ref for `describe`.                                                                                                                      |
-| `list_tools`          | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                                                                                                                                    |
-| `describe`            | For a tool, its full description, JSON Schema, whether it asks you first, for an API what it answers, and the `call_handle` that calls it; for a skill or a memory, its text.                                                                                               |
-| `call_tool`           | Runs the tool a `call_handle` stands for, after checking the arguments against its schema, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer.                                                                                         |
-| `call_read_only_tool` | `call_tool` for a tool its server marks read-only (an API's GET, a mail search, an MCP tool with `readOnlyHint`); anything else is refused.                                                                                                                                 |
-| `check_permission`    | Says how a request went once you have answered it; waits a little if you are still on it. Without an id, lists the token's own requests still waiting for you.                                                                                                              |
-| `withdraw_request`    | Takes back one of the token's own requests while it still waits for you: it leaves your list, and nothing runs.                                                                                                                                                             |
-| `check_server`        | Says whether a server is connected; waits a little if you are still signing in.                                                                                                                                                                                             |
-| `read_result`         | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                                                                                                                                        |
-| `register_server`     | Proposes a new MCP server, an API from an OpenAPI 3 schema, a mail account (JMAP or IMAP) or a calendar account (CalDAV), with no auth, a secret by name, a user name and password, or OAuth; or another server of one it sees (`definition`), with a note for you to keep. |
-| `propose_tool_access` | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                                                                                                 |
+| Tool                    | What it does                                                                                                                                                                                                                                                                |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search`                | Finds tools across servers, your skills, and the memories the token reads, from a few words ("create a github issue"), each with a ref for `describe`.                                                                                                                      |
+| `list_tools`            | Lists every tool on one server, with whether it runs at once or asks you first, a page of 200 at a time.                                                                                                                                                                    |
+| `describe`              | For a tool, its full description, JSON Schema, whether it asks you first, for an API what it answers, and the `call_handle` that calls it; for a skill or a memory, its text.                                                                                               |
+| `call_tool_read`        | Runs the Read tool a `call_handle` stands for, after checking the arguments against its schema, with PCP adding the credentials; `fields`, `decode` and `keep` shape a long JSON answer. A Write or Destructive tool is refused, naming the entry that runs it.             |
+| `call_tool_write`       | The same, for a Write tool (it changes things, deletes nothing for good) or a Read one.                                                                                                                                                                                     |
+| `call_tool_destructive` | The same, for any tool, a Destructive one (it can change or delete for good, or says nothing about it) included.                                                                                                                                                            |
+| `check_permission`      | Says how a request went once you have answered it; waits a little if you are still on it. Without an id, lists the token's own requests still waiting for you.                                                                                                              |
+| `withdraw_request`      | Takes back one of the token's own requests while it still waits for you: it leaves your list, and nothing runs.                                                                                                                                                             |
+| `check_server`          | Says whether a server is connected; waits a little if you are still signing in.                                                                                                                                                                                             |
+| `read_result`           | Reads a long answer or a kept value, a slice at a time from any offset or from where a text appears; a file is described, not shown.                                                                                                                                        |
+| `register_server`       | Proposes a new MCP server, an API from an OpenAPI 3 schema, a mail account (JMAP or IMAP) or a calendar account (CalDAV), with no auth, a secret by name, a user name and password, or OAuth; or another server of one it sees (`definition`), with a note for you to keep. |
+| `propose_tool_access`   | Proposes which tools its token may run, many at once and across servers, and hears which tools would change; you review and save it in PCP.                                                                                                                                 |
 
 Options on a token's page, each off until you tick it, add more tools,
 described further down:
 
-| Tool                 | Option (**Let an assistant with this token …**)     | What it does                                                                                                                                                                                                |
-| -------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `get_endpoint`       | **read and change API endpoints**                   | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.                                                                          |
-| `update_endpoint`    | **read and change API endpoints**                   | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again; asks you for your note on it or an MCP server, or to detach one. |
-| `list_secrets`       | **read and change API endpoints**                   | Lists your secrets by name, with what uses each, so an assistant can name one when it proposes an endpoint; never a value.                                                                                  |
-| `get_wrapper`        | **propose wrappers**                                | Reads a wrapper's tools as you approved them: each one's program, schemas, the tools it calls, and where a secret goes in (by name).                                                                        |
-| `create_wrapper`     | **propose wrappers**                                | Proposes a wrapper, a server whose tools are short programs over your other tools, or another wrapper of one it sees (`definition`); you read every program first.                                          |
-| `update_wrapper`     | **propose wrappers**                                | Proposes a change to a wrapper, shown to you in full before and after; asks you for your note on it, or to detach one.                                                                                      |
-| `delete_wrapper`     | **propose wrappers**                                | Proposes deleting a wrapper.                                                                                                                                                                                |
-| `memory`             | **keep memories**                                   | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                                                                                                |
-| `read_memory`        | **keep memories**                                   | Reads those notes (`every`, `view`, `search`) and nothing else.                                                                                                                                             |
-| `web_fetch`          | **fetch web pages**                                 | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.                                                                               |
-| `run_code`           | **run code that calls its tools**                   | Runs a program that calls the token's tools and works on their answers inside PCP.                                                                                                                          |
-| `check_run`          | **run code that calls its tools**                   | Says how one of its runs went, by the run's id: still running, with its calls so far, or how it ended.                                                                                                      |
-| `share_result`       | **move files to and from its own computer by link** | A link the assistant's own computer downloads a file PCP keeps for it from with curl (a browser download, a mail attachment).                                                                               |
-| `receive_file`       | **move files to and from its own computer by link** | A link its own computer sends one file to with curl, and the handle the file is then kept under.                                                                                                            |
-| `create_upload_link` | **move files to and from its own computer by link** | A link for you: a page where you upload files from your phone or computer (a photo, a scan, a file you dropped into the chat), for an hour, until you tap Done.                                             |
-| `check_upload`       | **move files to and from its own computer by link** | Which files you uploaded to that page, each as a handle the assistant passes on (an attachment, an upload).                                                                                                 |
+| Tool                                                      | Option (**Let an assistant with this token …**)     | What it does                                                                                                                                                                                                |
+| --------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_endpoint`                                            | **read and change API endpoints**                   | Reads an endpoint's settings and tools, its edits, one part of its schema at a time, and likely mistakes in it with fixes to make.                                                                          |
+| `update_endpoint`                                         | **read and change API endpoints**                   | Changes an endpoint's name, description, schema or edits, base URL, read-only setting or tool descriptions, or reads its schema URL again; asks you for your note on it or an MCP server, or to detach one. |
+| `list_secrets`                                            | **read and change API endpoints**                   | Lists your secrets by name, with what uses each, so an assistant can name one when it proposes an endpoint; never a value.                                                                                  |
+| `get_wrapper`                                             | **propose wrappers**                                | Reads a wrapper's tools as you approved them: each one's program, schemas, the tools it calls, and where a secret goes in (by name).                                                                        |
+| `create_wrapper`                                          | **propose wrappers**                                | Proposes a wrapper, a server whose tools are short programs over your other tools, or another wrapper of one it sees (`definition`); you read every program first.                                          |
+| `update_wrapper`                                          | **propose wrappers**                                | Proposes a change to a wrapper, shown to you in full before and after; asks you for your note on it, or to detach one.                                                                                      |
+| `delete_wrapper`                                          | **propose wrappers**                                | Proposes deleting a wrapper.                                                                                                                                                                                |
+| `memory`                                                  | **keep memories**                                   | Keeps notes under `/memories` that last between conversations and follow you from one assistant to the next.                                                                                                |
+| `read_memory`                                             | **keep memories**                                   | Reads those notes (`every`, `view`, `search`) and nothing else.                                                                                                                                             |
+| `web_fetch`                                               | **fetch web pages**                                 | Fetches an address and returns the page as Markdown, a part at a time; with a method, headers and a body, other requests too.                                                                               |
+| `run_code_read`, `run_code_write`, `run_code_destructive` | **run code that calls its tools**                   | Runs a program that calls the token's tools of that tier and below and works on their answers inside PCP.                                                                                                   |
+| `check_run`                                               | **run code that calls its tools**                   | Says how one of its runs went, by the run's id: still running, with its calls so far, or how it ended.                                                                                                      |
+| `share_result`                                            | **move files to and from its own computer by link** | A link the assistant's own computer downloads a file PCP keeps for it from with curl (a browser download, a mail attachment).                                                                               |
+| `receive_file`                                            | **move files to and from its own computer by link** | A link its own computer sends one file to with curl, and the handle the file is then kept under.                                                                                                            |
+| `create_upload_link`                                      | **move files to and from its own computer by link** | A link for you: a page where you upload files from your phone or computer (a photo, a scan, a file you dropped into the chat), for an hour, until you tap Done.                                             |
+| `check_upload`                                            | **move files to and from its own computer by link** | Which files you uploaded to that page, each as a handle the assistant passes on (an attachment, an upload).                                                                                                 |
+
+Every tool has a tier: **Read** (it only reads), **Write** (it changes
+things, but deletes nothing for good) or **Destructive** (it can change or
+delete for good). PCP takes it from what the server says of the tool (a tool
+that says nothing is Destructive; an API's GET is Read, POST, PUT and PATCH
+Write, DELETE Destructive; a wrapper's tool is the highest tier of the tools
+it calls), and `describe` names the entry that runs it. Some apps ask you
+before every call to a destructive tool, even one you always allow, so an
+assistant reads with `call_tool_read` and changes with `call_tool_write`, and
+those apps let them through. Set a tool's tier yourself on its server's page
+(for every server of the same definition), and what PCP's own tools tell apps
+on **Settings → PCP's own tools**; an assistant can propose tiers with
+`propose_tool_access`, which you save on the request's page. A tier never
+lets a tool run that your levels would stop.
 
 The **Log** page lists what assistants did with their tokens: every call,
 by token, tool and server, how long it took and whether it was done, failed
@@ -549,7 +564,7 @@ call's arguments and PCP puts the value there: a text as text, a file as
 base64. `get_attachment` reads any attachment that way, and `send_email` and
 `create_draft` take handles as attachments, so an attachment from one mail
 account can be sent from another, or handed to an API. The permission page
-shows what each handle is, never its content. A `call_tool` answer also links
+shows what each handle is, never its content. A `call_tool_<tier>` answer also links
 its handles as MCP resources (`pcp://results/<id>`), so a client that reads
 resources can open a kept file itself.
 
@@ -699,7 +714,9 @@ Authorization or Cookie header at all. The sites a token reached are on its
 page, not in the request log.
 
 A token made with **Let an assistant with this token run code that calls its
-tools** gets a `run_code` tool. The assistant sends a JavaScript program, the
+tools** gets the `run_code` tools, one per tier (`run_code_read`,
+`run_code_write`, `run_code_destructive`), whose programs call tools of that
+tier and below. The assistant sends a JavaScript program, the
 body of an async function, which PCP runs in a sandbox of its own: QuickJS,
 compiled to WebAssembly, with nothing of the machine it runs on. The program
 calls the token's tools with `await pcp.call(server, tool, args)` and gets
@@ -724,18 +741,19 @@ screenshot, an attachment) and hands back its handle with its size; the
 original stays as it was, for a tool that needs it whole. PCP decodes the
 image itself, as WebAssembly, the same in the container, a checkout and the
 desktop app, one image at a time and up to 50 million pixels; the copy
-carries no metadata (no camera details or place). The `run_code` description
+carries no metadata (no camera details or place). The `run_code` descriptions
 tells the assistant when to crop, when grey is enough, and when to send the
 original instead. `pcp.video.frames(handle, { at, every, count })` takes
 frames from a kept video as JPEGs, with ffmpeg in the sandbox (below); without
 the sandbox it says so.
 
-Each call is decided as if the assistant had made it with `call_tool`: an
+Each call is decided as if the assistant had made it with `call_tool_<tier>`: a
+tool above the program's tier is an error the program sees, an
 allowed tool runs, a blocked one is an error the program sees, and one that
 asks you first stops the program at that call (the calls before it have run),
 with the usual request for you to answer; for the program to make that call
 itself next time, choose **Always allow**, or **Allow for** while that lasts. Every call is in the request log
-under `run_code`, and on the **Log** page. A program has no network, no files, no timers and none of
+under the `run_code` entry it came through, and on the **Log** page. A program has no network, no files, no timers and none of
 your secrets, and stops after 3 minutes, 15 seconds of computing, its memory
 (**Settings → Resources**, above) or 100 calls (five of them at a time).
 

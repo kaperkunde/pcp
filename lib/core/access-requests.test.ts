@@ -8,6 +8,7 @@ import {
   listAccessLevels,
   MAX_LISTED_TOOLS,
   resolveAccessChanges,
+  resolveAccessProposal,
   type AccessServer,
 } from "./access-requests"
 import { createApiToken, resolveApiToken, revokeApiToken } from "./api-tokens"
@@ -25,6 +26,7 @@ import {
 import { createServer } from "./servers"
 import { scratchDatabase } from "./test-db"
 import { listTokenToolAccess } from "./tool-access"
+import { readOwnToolTiers, setToolTier, toolTier } from "./tool-tiers"
 import { setupVault } from "./vault"
 
 // Tool levels an assistant proposes for its own token: resolved from names
@@ -143,6 +145,99 @@ describe("resolveAccessChanges", () => {
       ]),
     ).toThrow(/no tool matching/)
     expect(performance.now() - started).toBeLessThan(100)
+  })
+})
+
+describe("resolveAccessProposal with tiers", () => {
+  const servers: AccessServer[] = [
+    {
+      id: "s1",
+      slug: "billing",
+      tools: [
+        {
+          name: "list_invoices",
+          access: "ask",
+          tier: "read",
+          tierOverride: null,
+        },
+        {
+          name: "send_invoice",
+          access: "ask",
+          tier: "destructive",
+          tierOverride: null,
+        },
+        {
+          name: "delete_invoice",
+          access: "allowed",
+          tier: "write",
+          tierOverride: "write",
+        },
+        {
+          name: "secret_admin",
+          access: "blocked",
+          tier: "read",
+          tierOverride: null,
+        },
+      ],
+    },
+  ]
+  const own = [{ name: "web_fetch", tier: "write" as const, override: null }]
+
+  it("takes a level and a tier together, or either alone, leaving out what is so", () => {
+    expect(
+      resolveAccessProposal(servers, [
+        {
+          server: "billing",
+          tools: ["send_invoice"],
+          access: "allowed",
+          tier: "write",
+        },
+        { server: "billing", tools: ["list_*"], tier: "read" },
+        { server: "billing", tools: ["delete_invoice"], tier: "default" },
+      ]),
+    ).toEqual({
+      levels: [{ serverId: "s1", tool: "send_invoice", access: "allowed" }],
+      tiers: [
+        { serverId: "s1", tool: "delete_invoice", tier: "default" },
+        { serverId: "s1", tool: "send_invoice", tier: "write" },
+      ],
+    })
+  })
+
+  it("refuses a tier it does not know, a change with neither, and a blocked tool", () => {
+    expect(() =>
+      resolveAccessProposal(servers, [
+        // @ts-expect-error: not a tier
+        { server: "billing", tier: "harmless" },
+      ]),
+    ).toThrow(/not a tier/)
+    expect(() =>
+      resolveAccessProposal(servers, [
+        { server: "billing", tools: ["list_invoices"] },
+      ]),
+    ).toThrow(/a level, a tier, or both|an access level, a tier, or both/)
+    expect(() =>
+      resolveAccessProposal(servers, [
+        { server: "billing", tools: ["secret_admin"], tier: "write" },
+      ]),
+    ).toThrow(/no tool matching/)
+  })
+
+  it("names PCP's own tools on the server pcp, for a tier only", () => {
+    expect(
+      resolveAccessProposal(
+        servers,
+        [{ server: "pcp", tools: ["web_fetch"], tier: "read" }],
+        own,
+      ).tiers,
+    ).toEqual([{ serverId: null, tool: "web_fetch", tier: "read" }])
+    expect(() =>
+      resolveAccessProposal(
+        servers,
+        [{ server: "pcp", tools: ["web_fetch"], access: "allowed" }],
+        own,
+      ),
+    ).toThrow(/tier only/)
   })
 })
 
@@ -458,5 +553,119 @@ describe("proposing tool levels", () => {
         })
       ).status,
     ).toBe("declined")
+  })
+
+  it("proposes tiers, writes nothing until the owner saves, then their choice, on the definition", async () => {
+    const { ctx, scope, tokenId, billing } = await setup()
+    // Another server of Billing's definition: a tier there is the same.
+    const twin = await addServer(ctx, "Billing2", ["list_invoices"])
+    const definitionId = (
+      await db().mcpServer.findUniqueOrThrow({ where: { id: billing } })
+    ).definitionId
+    await db().mcpServer.update({
+      where: { id: twin },
+      data: { definitionId },
+    })
+
+    const { levels, tiers } = resolveAccessProposal(
+      await loadGatewayServers(scope),
+      [
+        {
+          server: "billing",
+          tools: ["list_*"],
+          access: "allowed",
+          tier: "read",
+        },
+        { server: "billing", tools: ["delete_invoice"], tier: "write" },
+      ],
+    )
+    expect(tiers).toHaveLength(3)
+    const asked = await withPermission(scope, {
+      kind: "access",
+      input: { levels, tiers },
+    })
+    expect(textOf(asked)).toContain("Tiers that would change")
+    expect(textOf(asked)).toContain(
+      "- billing, to Read: list_clients, list_invoices",
+    )
+    const id = (await db().permissionRequest.findFirstOrThrow()).id
+
+    // Nothing is written before the save.
+    expect(await toolTier(billing, "list_invoices")).toBe("destructive")
+    expect(await db().toolTier.count()).toBe(0)
+    const proposal = await getAccessProposal(ctx, id)
+    expect(proposal?.proposedTiers).toHaveLength(3)
+    expect(proposal?.tiers[`${billing}/list_invoices`]).toEqual({
+      tier: "destructive",
+      derived: "destructive",
+      override: null,
+    })
+    expect(proposal?.sharedWith[billing]).toEqual(["Billing2"])
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+    expect(view?.lines.join("\n")).toContain("3 tools would get another tier")
+
+    // The owner takes Read for list_invoices, says Destructive for
+    // delete_invoice and leaves list_clients as it is.
+    await applyAccessRequest(
+      ctx,
+      id,
+      [{ serverId: billing, tool: "list_invoices", access: "allowed" }],
+      {
+        publicUrl: PUBLIC_URL,
+        tiers: [
+          { serverId: billing, tool: "list_invoices", tier: "read" },
+          { serverId: billing, tool: "delete_invoice", tier: "destructive" },
+        ],
+      },
+    )
+
+    expect(await toolTier(billing, "list_invoices")).toBe("read")
+    expect(await toolTier(twin, "list_invoices")).toBe("read")
+    expect(await toolTier(billing, "list_clients")).toBe("destructive")
+    expect(
+      (await db().toolTier.findMany()).map((row) => row.definitionId),
+    ).toEqual([definitionId, definitionId])
+    expect((await levelsOf(ctx, tokenId))["billing/list_invoices"]).toBe(
+      "allowed",
+    )
+    const outcome = textOf(await checkPermission(scope, id))
+    expect(outcome).toContain("They saved new tiers for 2 tools")
+    expect(outcome).toContain("They did not take 2 of the 3 tiers you proposed")
+  })
+
+  it("refuses a tier it does not know on save, and a tool of PCP's own it does not have", async () => {
+    const { ctx, scope, billing } = await setup()
+    const { tiers } = resolveAccessProposal(await loadGatewayServers(scope), [
+      { server: "billing", tools: ["list_invoices"], tier: "write" },
+    ])
+    await withPermission(scope, {
+      kind: "access",
+      input: { levels: [], tiers },
+    })
+    const id = (await db().permissionRequest.findFirstOrThrow()).id
+
+    await expect(
+      applyAccessRequest(ctx, id, [], {
+        publicUrl: PUBLIC_URL,
+        tiers: [{ serverId: billing, tool: "list_invoices", tier: "harmless" }],
+      }),
+    ).rejects.toThrow(/not a tier/)
+    await expect(
+      applyAccessRequest(ctx, id, [], {
+        publicUrl: PUBLIC_URL,
+        tiers: [{ serverId: null, tool: "web_fetch", tier: "read" }],
+        ownNames: async () => ["search"],
+      }),
+    ).rejects.toThrow(/no longer reaches web_fetch/)
+    expect(await db().toolTier.count()).toBe(0)
+
+    // PCP's own tool, known: its tier goes in the vault's setting.
+    await applyAccessRequest(ctx, id, [], {
+      publicUrl: PUBLIC_URL,
+      tiers: [{ serverId: null, tool: "search", tier: "write" }],
+      ownNames: async () => ["search"],
+    })
+    expect(await readOwnToolTiers(ctx)).toEqual({ search: "write" })
+    await setToolTier(ctx, billing, "list_invoices", null)
   })
 })

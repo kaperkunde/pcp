@@ -567,10 +567,13 @@ function buildTool(
 
   const summary = shorten(ownString(operation, "summary"), 500)
   const title = summary && summary.length <= 100 ? summary : null
+  // Both hints stated, so the tier is never MCP's default (Destructive):
+  // GET reads, DELETE destroys, POST, PUT and PATCH write
+  // (lib/core/tool-tiers.ts).
   const annotations: ToolAnnotations = {
     ...(title ? { title } : {}),
     readOnlyHint: method === "get",
-    ...(method === "delete" ? { destructiveHint: true } : {}),
+    destructiveHint: method === "delete",
     ...(method === "get" || method === "put" || method === "delete"
       ? { idempotentHint: true }
       : {}),

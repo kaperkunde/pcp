@@ -45,6 +45,7 @@ model Vault {
   repos              Repo[]
   serverDefinitions  ServerDefinition[]
   exits              Exit[]
+  toolTiers          ToolTier[]
 
   @@map("vault")
 }
@@ -733,6 +734,7 @@ model McpServer {
   repoItems          RepoItem[]
   exits              Exit[]              @relation("ExitHost")
   exitServices       Exit[]              @relation("ExitService")
+  toolTiers          ToolTier[]
 
   @@unique([vaultId, slug])
   @@index([definitionId])
@@ -766,9 +768,38 @@ model ServerDefinition {
 
   instances      McpServer[]
   repoExclusions RepoExclusion[]
+  toolTiers      ToolTier[]
 
   @@unique([vaultId, slug])
   @@map("server_definition")
+}
+
+/// The owner's tier for a tool (lib/core/tool-tiers.ts): Read, Write or
+/// Destructive in place of what its annotations say. Kept apart from
+/// mcp_tool so it outlives a tool that drops out of a refresh. A server
+/// with a definition keeps it on the definition, shared by every instance
+/// (definitionId set); a server without one (mail, calendar, SSH, the
+/// browser) on the server (serverId set). Exactly one of the two is set.
+model ToolTier {
+  id           String            @id
+  vaultId      String            @map("vault_id")
+  vault        Vault             @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  definitionId String?           @map("definition_id")
+  definition   ServerDefinition? @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  serverId     String?           @map("server_id")
+  server       McpServer?        @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  toolName     String            @map("tool_name")
+  /// read | write | destructive
+  tier         String
+  /// A wrapper's tool: the tier its calls came to when the owner chose
+  /// this one, so the header's bell says when they come to more since.
+  seenTier     String?           @map("seen_tier")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+
+  @@unique([definitionId, toolName])
+  @@unique([serverId, toolName])
+  @@index([vaultId])
+  @@map("tool_tier")
 }
 
 /// header auth: a further header carrying a secret, sent with the one on

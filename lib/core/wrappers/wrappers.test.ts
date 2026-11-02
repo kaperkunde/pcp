@@ -32,6 +32,8 @@ import { createFakeJmap } from "../mail/fake-jmap"
 import { scratchDatabase } from "../test-db"
 import { catalogueHandle, withCallHandle } from "../test-handles"
 import { writeToolAccess } from "../tool-access"
+import { setToolTier, toolTier, toolTierInfo } from "../tool-tiers"
+import { tierNotices } from "../owner-notices"
 import { setupVault } from "../vault"
 import { setPacingServer } from "../pacing/config"
 import { resetPacing, setPacingClock } from "../pacing/pace"
@@ -173,10 +175,9 @@ async function call(name: string, args: Record<string, unknown>) {
   const connected = await connect()
   const result = await connected.callTool({
     name,
-    arguments:
-      name === "call_tool" || name === "call_read_only_tool"
-        ? await withCallHandle(connected, args)
-        : args,
+    arguments: name.startsWith("call_tool_")
+      ? await withCallHandle(connected, args)
+      : args,
   })
   const text = (result.content as Array<{ type: string; text?: string }>)
     .map((part) => part.text ?? "")
@@ -358,7 +359,7 @@ describe("calling a wrapper's tool", () => {
     expect(wrapper.slug).toBe("lookup")
 
     // Its own level asks first, like any new tool.
-    const asked = await call("call_tool", {
+    const asked = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hello" },
@@ -366,7 +367,7 @@ describe("calling a wrapper's tool", () => {
     expect(asked.text).toContain("Not done yet")
 
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hello" },
@@ -414,7 +415,7 @@ describe("calling a wrapper's tool", () => {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hello" },
@@ -439,7 +440,7 @@ describe("calling a wrapper's tool", () => {
     const wrapper = await approvedWrapper()
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: {},
@@ -458,7 +459,7 @@ describe("calling a wrapper's tool", () => {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hello" },
@@ -476,7 +477,7 @@ describe("calling a wrapper's tool", () => {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hello" },
@@ -489,7 +490,7 @@ describe("calling a wrapper's tool", () => {
 
   it("never takes a secret placeholder from an assistant", async () => {
     await approvedWrapper()
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "things",
       tool: "echo",
       arguments: { key: { $secret: "Things key" } },
@@ -508,7 +509,7 @@ describe("calling a wrapper's tool", () => {
     const listed = await call("list_tools", { server: "lookup" })
     expect(listed.text).toMatch(/lookup.*ask/)
 
-    const asked = await call("call_tool", {
+    const asked = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hi" },
@@ -539,7 +540,7 @@ describe("calling a wrapper's tool", () => {
     await writeToolAccess(scope.tokenId, endpointId, "echo", "blocked")
 
     // Described before, so its handle is genuine; blocked now all the same.
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       call_handle: await catalogueHandle(scope, "lookup", "lookup"),
       arguments: { word: "hi" },
     })
@@ -567,7 +568,7 @@ describe("what a wrapper replaces", () => {
     })
     expect(described.text).toContain('"replacedBy": "lookup/lookup"')
 
-    const direct = await call("call_tool", {
+    const direct = await call("call_tool_destructive", {
       server: "things",
       tool: "echo",
       arguments: { key: "mine", q: "x" },
@@ -1035,11 +1036,12 @@ describe("what an assistant can set", () => {
   })
 })
 
-describe("calling a wrapper's tool as read-only", () => {
-  it("counts only when every tool it calls only reads", async () => {
+describe("a wrapper's tool's tier", () => {
+  it("is the highest tier of the tools it calls, whatever its own hints propose", async () => {
     const wrapper = await approvedWrapper({
       ...ECHO_TOOL,
-      annotations: { readOnlyHint: true },
+      // Its own hints only propose: its calls decide.
+      annotations: { readOnlyHint: false, destructiveHint: true },
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
     const args = {
@@ -1049,17 +1051,63 @@ describe("calling a wrapper's tool as read-only", () => {
     }
 
     // An API's GET only reads, so the wrapper's tool does too.
-    const read = await call("call_read_only_tool", args)
+    const read = await call("call_tool_read", args)
     expect(read.isError, read.text).toBe(false)
+    expect(await toolTier(wrapper.id, "lookup")).toBe("read")
 
-    // Once the tool it calls is not marked so, its own word is not enough.
+    // Once the tool it calls is Write, so is the wrapper's: worked out
+    // when asked, never stored.
     await db().mcpTool.updateMany({
       where: { serverId: endpointId, name: "echo" },
-      data: { annotations: JSON.stringify({ readOnlyHint: false }) },
+      data: {
+        annotations: JSON.stringify({
+          readOnlyHint: false,
+          destructiveHint: false,
+        }),
+      },
     })
-    const refused = await call("call_read_only_tool", args)
+    const refused = await call("call_tool_read", args)
     expect(refused.isError).toBe(true)
-    expect(refused.text).toContain("not marked read-only")
+    expect(refused.text).toContain("run it with call_tool_write")
+    expect(await toolTier(wrapper.id, "lookup")).toBe("write")
+  })
+
+  it("takes the owner's choice, and the bell says when its calls come to more since", async () => {
+    const wrapper = await approvedWrapper(ECHO_TOOL)
+    expect(await toolTierInfo(wrapper.id, "lookup")).toMatchObject({
+      tier: "read",
+      derived: "read",
+      override: null,
+    })
+
+    await setToolTier(ctx, wrapper.id, "lookup", "read")
+    expect(await tierNotices(ctx)).toEqual([])
+
+    // The tool it calls becomes Destructive: the owner's Read is now below.
+    await db().mcpTool.updateMany({
+      where: { serverId: endpointId, name: "echo" },
+      data: { annotations: null },
+    })
+    expect(await toolTierInfo(wrapper.id, "lookup")).toMatchObject({
+      tier: "read",
+      derived: "destructive",
+      override: "read",
+      seen: "read",
+    })
+    const [notice] = await tierNotices(ctx)
+    expect(notice).toMatchObject({
+      kind: "tiers",
+      href: `/servers/${wrapper.id}#tool-lookup`,
+    })
+    expect(notice!.title).toContain("Read")
+    expect(notice!.title).toContain("Destructive")
+
+    // Choosing again records what the calls come to now.
+    await setToolTier(ctx, wrapper.id, "lookup", "read")
+    expect(await tierNotices(ctx)).toEqual([])
+    // Back to the default: what its calls come to.
+    await setToolTier(ctx, wrapper.id, "lookup", null)
+    expect(await toolTier(wrapper.id, "lookup")).toBe("destructive")
   })
 })
 
@@ -1105,7 +1153,7 @@ describe("a tool's output schema", () => {
     const read = await call("get_wrapper", { wrapper: "lookup" })
     expect(read.text).toContain('"output_schema"')
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hello" },
@@ -1154,7 +1202,7 @@ describe("a tool's output schema", () => {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hello" },
@@ -1176,7 +1224,7 @@ describe("a tool's output schema", () => {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hello" },
@@ -1240,7 +1288,7 @@ describe("whose levels a wrapper's calls follow", () => {
     // Asking and blocked for the token do not reach the wrapper's calls.
     for (const level of ["ask", "blocked"] as const) {
       await writeToolAccess(scope.tokenId, endpointId, "echo", level)
-      const result = await call("call_tool", {
+      const result = await call("call_tool_destructive", {
         server: "lookup",
         tool: "lookup",
         arguments: { word: level },
@@ -1265,7 +1313,7 @@ describe("whose levels a wrapper's calls follow", () => {
     const listed = await call("list_tools", { server: "things" })
     expect(listed.isError).toBe(true)
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "hidden" },
@@ -1281,7 +1329,7 @@ describe("whose levels a wrapper's calls follow", () => {
     })
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const unlisted = await call("call_tool", {
+    const unlisted = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "x" },
@@ -1293,7 +1341,7 @@ describe("whose levels a wrapper's calls follow", () => {
       where: { id: endpointId },
       data: { enabled: false },
     })
-    const off = await call("call_tool", {
+    const off = await call("call_tool_destructive", {
       server: "lookup",
       tool: "lookup",
       arguments: { word: "x" },
@@ -1557,7 +1605,7 @@ describe("a browser flow", () => {
     await writeToolAccess(scope.tokenId, browser.id, "type", "allowed")
     await writeToolAccess(scope.tokenId, browser.id, "press_key", "allowed")
 
-    const pressed = await call("call_tool", {
+    const pressed = await call("call_tool_destructive", {
       server: "browser",
       tool: "press_key",
       arguments: { tab: "t1", key: { $secret: "Chat password" } },
@@ -1567,7 +1615,7 @@ describe("a browser flow", () => {
 
     // Through to the browser, which has no such tab: nothing was refused
     // for the secret on the way.
-    const typed = await call("call_tool", {
+    const typed = await call("call_tool_destructive", {
       server: "browser",
       tool: "type",
       arguments: { tab: "t1", ref: "e1", text: { $secret: "Chat password" } },
@@ -1598,7 +1646,7 @@ describe("a browser flow", () => {
       ["post_message", "ask"],
       ["read_thread", DEFAULT_TOOL_ACCESS],
     ])
-    const asked = await call("call_tool", {
+    const asked = await call("call_tool_destructive", {
       server: "chat",
       tool: "post_message",
       arguments: { thread: "1", text: "hi" },
@@ -1642,14 +1690,14 @@ describe("a browser flow", () => {
     await writeToolAccess(scope.tokenId, wrapper.id, "post_message", "allowed")
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const plain = await call("call_tool", {
+    const plain = await call("call_tool_destructive", {
       server: "chat",
       tool: "lookup",
       arguments: { word: "x" },
     })
     expect(plain.text).toContain("took longer than 1 seconds")
 
-    const flow = await call("call_tool", {
+    const flow = await call("call_tool_destructive", {
       server: "chat",
       tool: "post_message",
       arguments: { thread: "1", text: "hi" },
@@ -1672,7 +1720,7 @@ describe("a wrapper's steps", () => {
     ])
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: "chat",
       tool: "lookup",
       arguments: { word: "hello" },
@@ -1728,8 +1776,11 @@ describe("a wrapper called from run_code", () => {
     ])
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
     await writeToolAccess(scope.tokenId, wrapper.id, "broken", "allowed")
+    // Its calls only read, so its tier would be Read and a failed run would
+    // not list it among the calls that change things: the owner says Write.
+    await setToolTier(ctx, wrapper.id, "lookup", "write")
 
-    const result = await call("run_code", {
+    const result = await call("run_code_destructive", {
       code: `
         const one = await pcp.call("chat", "lookup", { word: "one" })
         const two = await pcp.call("chat", "lookup", { word: "two" })
@@ -1858,7 +1909,7 @@ describe("a wrapper whose calls no longer fit", () => {
     ])
     await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "allowed")
 
-    const result = await call("call_tool", {
+    const result = await call("call_tool_destructive", {
       server: wrapper.slug,
       tool: "lookup",
       arguments: { word: "hello" },
@@ -1912,7 +1963,7 @@ describe("a wrapper whose calls no longer fit", () => {
       ])
       await writeToolAccess(scope.tokenId, wrapper.id, "with_files", "allowed")
 
-      const result = await call("call_tool", {
+      const result = await call("call_tool_destructive", {
         server: wrapper.slug,
         tool: "with_files",
         arguments: {},

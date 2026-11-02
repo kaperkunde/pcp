@@ -6,6 +6,56 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## Entry tools per tier: call_tool_read, call_tool_write, call_tool_destructive
+
+Some clients (Claude's voice mode on iOS) ask before every call to a tool
+annotated `destructiveHint: true`, even one the owner always allows. Every
+PCP call went through `call_tool` or `run_code`, both destructive, so every
+call asked. Each tool now has a tier, and each tier its own entry tools.
+
+### Renamed tools (no old names kept)
+
+| Old tool              | New tools                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------- |
+| `call_read_only_tool` | `call_tool_read`                                                                            |
+| `call_tool`           | `call_tool_read`, `call_tool_write` or `call_tool_destructive`, by the tool's tier          |
+| `run_code`            | `run_code_read`, `run_code_write` or `run_code_destructive`, by the tiers the program calls |
+
+The old names are gone: a client that still calls them gets "unknown tool".
+The new entries take the same arguments as the old ones did (the same
+`call_handle` from describe, for every tier), and answer the same.
+
+### Tiers
+
+- **Read** (`readOnlyHint: true`), **Write** (`readOnlyHint: false`,
+  `destructiveHint: false`) and **Destructive** (anything else). A tool
+  with no hints, or only `readOnlyHint: false`, is Destructive, as MCP's
+  defaults say.
+- A wrapper's tool is the highest tier of the tools it calls; what its
+  definition declares is only a proposal.
+- The owner can set a tool's tier (Read, Write or Destructive) on its
+  server's page, for every server of the same definition, and the tier PCP's
+  own tools advertise on Settings → PCP's own tools. An assistant proposes
+  tiers with `propose_tool_access`'s new `tier` (`read`, `write`,
+  `destructive` or `default`), saved only on the request's page.
+- Each `call_tool_<tier>` runs tools at or below its tier; a tool above is
+  refused (`forbidden`) naming the entry that runs it, before its arguments
+  are checked or the owner asked. A `run_code_<tier>` program's `pcp.call`
+  to a tool above refuses with an error the program may catch.
+- describe gives each tool's `tier` and `run_with` (the entry); list_tools
+  and search lines end the level with the tier and its entry
+  (`[allowed, write: call_tool_write]`); pcp.tools and pcp.describe give
+  `tier` and `run_with` (a `run_code_<tier>`).
+- The request log names the entry a call came through (`call_tool_write`,
+  `run_code_read`).
+
+### API endpoints state both hints
+
+PCP's tools for an API state both hints: GET is Read (`readOnlyHint: true`,
+`destructiveHint: false`), POST, PUT and PATCH are Write (`readOnlyHint:
+false`, `destructiveHint: false`; before, POST, PUT and PATCH left
+`destructiveHint` out, which read as destructive), DELETE is Destructive.
+
 ## The families behind call_tool on the same interface
 
 The browser, mail and calendar accounts, SSH servers and services define
