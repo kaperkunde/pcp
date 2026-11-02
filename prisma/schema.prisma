@@ -39,6 +39,7 @@ model Vault {
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
   fileLinks          FileLink[]
+  uploadLinks        UploadLink[]
   browserProfile     BrowserProfile?
   oauthCredentials   OAuthCredential[]
   repos              Repo[]
@@ -173,6 +174,7 @@ model ApiToken {
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
   fileLinks          FileLink[]
+  uploadLinks        UploadLink[]
   oauthCredentials   OAuthCredential[]
   toolAllowances     ApiTokenToolAllowance[]
   siteAllowances     ApiTokenSiteAllowance[]
@@ -1008,10 +1010,51 @@ model FileLink {
   /// become a kept result.
   expiresAt  DateTime  @map("expires_at")
   receivedAt DateTime? @map("received_at")
+  /// The upload page this is one file of (UploadLink), or null for a
+  /// receive_file link. Not a relation: a file that arrived outlives its
+  /// page until the token uses it, and the cleanup removes each by its date.
+  uploadLinkId String? @map("upload_link_id")
 
   @@index([tokenId, resultId])
   @@index([expiresAt])
+  @@index([uploadLinkId])
   @@map("file_link")
+}
+
+/// A page the owner uploads files to (lib/core/upload-links.ts): an
+/// assistant with `shareFiles` asks for one with create_upload_link, and the
+/// owner opens /upload/<secret> on their phone or computer. The link's secret
+/// is the credential. Each file it takes is one of its FileLink rows (kind
+/// "upload", `uploadLinkId` set), made with it, each with its result id and
+/// its key wrapped under the vault's data key, so the file becomes a kept
+/// result once the token uses its handle.
+model UploadLink {
+  id          String    @id
+  vaultId     String    @map("vault_id")
+  vault       Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId     String    @map("token_id")
+  token       ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  /// SHA-256 of the link's secret, which the page and its uploads look it up by.
+  secretHash  String    @unique @map("secret_hash")
+  /// What the files are for, as the assistant said it: AES-256-GCM under the
+  /// link's key with "upload_link:<id>", so only the link shows it.
+  purpose     Bytes
+  maxFiles    Int       @map("max_files")
+  /// The result ids its files are kept under, in order: a JSON array.
+  resultIds   String    @map("result_ids")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  /// It takes files until then: its first hour (or less), then a quarter of
+  /// an hour from the first file.
+  acceptUntil DateTime  @map("accept_until")
+  firstAt     DateTime? @map("first_at")
+  /// The owner said Done, or it took as many files as it was made for.
+  closedAt    DateTime? @map("closed_at")
+  /// The row is kept until then, for check_upload: a day past acceptUntil.
+  expiresAt   DateTime  @map("expires_at")
+
+  @@index([tokenId])
+  @@index([expiresAt])
+  @@map("upload_link")
 }
 
 /// The browser's sign-ins (lib/core/browser/): the cookies, local storage

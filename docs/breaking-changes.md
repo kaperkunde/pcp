@@ -116,16 +116,18 @@ Passing an old name and its new one together is refused.
 - `get_endpoint`'s `changes` names the fields as `update_endpoint` takes
   them (`tool_descriptions`, `refresh_spec`, `base_url`, `read_only`).
 - A call that waits for the owner carries `structuredContent`
-  `{"kind": "needs_owner", "reason": "permission" | "connect", "url",
-"label", …}`, on every tool. A permission request names its id in
+  `{"kind": "needs_owner", "reason": "permission" | "connect" | "upload",
+"url", "label", …}`, on every tool. A permission request names its id in
   `request`; a server to connect has `connect` (its links) and, from
-  `check_server`, `server`. This replaces `{"kind": "connect", …}`. Its
+  `check_server`, `server`; an upload link (`create_upload_link`) has
+  `upload` (its id for `check_upload`, its files and its time). This replaces `{"kind": "connect", …}`. Its
   `message` is the whole text (what the owner is asked, and how to hand
   the link over), for a client that shows `structuredContent` in place of
   the text.
 - `check_server`, `check_permission`, `register_server`,
   `propose_tool_access`, `update_endpoint`, `get_endpoint`, `list_secrets`,
-  the wrapper tools, `share_result` and `receive_file` declare an
+  the wrapper tools, `share_result`, `receive_file`, `create_upload_link`
+  and `check_upload` declare an
   `outputSchema`, and their answers carry matching `structuredContent`.
   `check_permission` answers `{"kind": "done", "request", "status",
 "result", "server"?}` once a request is settled (`result` is what it came

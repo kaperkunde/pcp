@@ -105,7 +105,11 @@ export type ResolvedToken = {
   runCode: boolean
   /** May read wrappers and propose new ones and changes (get_wrapper, …). */
   manageWrappers: boolean
-  /** May move files to and from its own computer by link (share_result, receive_file). */
+  /**
+   * May move files to and from its own computer by link (share_result,
+   * receive_file), and ask the owner to upload files (create_upload_link,
+   * check_upload).
+   */
   shareFiles: boolean
   /**
    * The owner's instructions for the assistant (lib/core/instructions.ts),

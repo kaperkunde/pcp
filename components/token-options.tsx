@@ -59,10 +59,10 @@ export const TOKEN_OPTIONS: Record<
   shareFiles: {
     label: "Move files by link",
     caption:
-      "Links its own computer downloads a kept file from, or uploads one to. Each works for an hour.",
-    ask: "Let an assistant with this token move files to and from its own computer by link",
+      "Links its own computer downloads a kept file from or uploads one to, and a page where you upload files from your phone. Each works for an hour.",
+    ask: "Let an assistant with this token move files to and from its own computer by link, and ask you to upload files",
     detail:
-      "It gets share_result and receive_file: a link its own computer (a sandbox, a terminal) downloads a file PCP keeps for it from, such as a browser download or a mail attachment, or uploads a file to, which it can then attach or upload through its tools. The file's bytes never pass through the assistant. Each link is for one file and this token alone, works for an hour, and whoever has the link can use it in that time.",
+      "It gets share_result and receive_file: a link its own computer (a sandbox, a terminal) downloads a file PCP keeps for it from, such as a browser download or a mail attachment, or uploads a file to, which it can then attach or upload through its tools. It also gets create_upload_link: a page it gives you a link to, where you upload files from your phone or computer (a photo, a scan, a file you dropped into the chat) for it to attach or send on. The file's bytes never pass through the assistant. Each link is for this token alone, works for an hour (an upload page for a quarter of an hour once the first file arrives, or until you tap Done), and whoever has the link can use it in that time.",
   },
   manageEndpoints: {
     label: "Manage API endpoints",

@@ -7,6 +7,7 @@ import { prunePermissionRequests, pruneReusableAnswers } from "../permissions"
 import { pruneRequestLog } from "../request-log"
 import { pruneExpiredSessions } from "../sessions"
 import { pruneToolResults } from "../tool-results"
+import { pruneUploadLinks } from "../upload-links"
 import { reclaimSpace } from "./space"
 import {
   describeRemoved,
@@ -58,9 +59,12 @@ const PARTS: Part[] = [
   {
     key: "results",
     label: "kept results past their day",
-    // With the links that move them, which last an hour.
+    // With the links that move them, which last an hour, and the upload
+    // pages the owner sends them from, kept a day for check_upload.
     run: async (_, now) =>
-      (await pruneToolResults(now)) + (await pruneFileLinks(now)),
+      (await pruneToolResults(now)) +
+      (await pruneFileLinks(now)) +
+      (await pruneUploadLinks(now)),
   },
   {
     key: "allowances",

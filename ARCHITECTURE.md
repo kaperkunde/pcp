@@ -3637,7 +3637,8 @@ model: handles keep them out of its answers, and a link keeps them out of
 the commands it writes. Only a token the owner made with **Move files by
 link** (`api_token.share_files`, off by default) gets the two tools:
 `share_result` makes a download link for one of its kept results, and
-`receive_file` an upload link plus the handle the file will be kept under.
+`receive_file` an upload link plus the handle the file will be kept under
+(and `create_upload_link` and `check_upload`, below).
 The assistant runs curl with the link; nothing else signs the request.
 
 The link's secret (256 bits, base64url) is the credential for that one file
@@ -3658,6 +3659,42 @@ the route is rate-limited per address, and a download is served as an
 attachment with `nosniff` and a `sandbox` CSP, so nothing in it runs under
 PCP's address. Links are not exported, are wiped with the vault, go with
 their token, and the cleanup removes them with the kept results.
+
+**Upload links** (`lib/core/upload-links.ts`, `app/upload/[secret]/`) go the
+other way, for files the owner has and the assistant cannot reach: a file
+dropped into a chat stays in the assistant's sandbox, and a voice
+conversation cannot send one at all. The same token option gives
+`create_upload_link`, which answers `needs_owner` (`reason: "upload"`) with a
+link to `/upload/<secret>` for the assistant to end its reply with, as
+`linkLastText` hands over every link for the owner, and `check_upload`,
+which waits like `check_permission` (`waitForOwner`) and lists what arrived
+as handles. The page is outside the dashboard and needs no session: the
+link alone is the credential, as a file link's is, because the owner opens
+it on their phone, where PCP may not be signed in. It is a file input with
+`multiple` and no `capture`, so a phone offers its camera, a scan or its
+files; each file goes to `app/api/files/[secret]/` as a PUT of its own (the
+name percent-encoded in `X-File-Name`, cleaned of a path and of characters
+that do not show), read as it comes up to the largest-file limit, and Done
+is a DELETE there. No Server Action: a photo can be larger than an action
+takes.
+
+`upload_link` stores the secret's SHA-256 and the purpose the page shows,
+encrypted under a key derived from the secret (`upload_link:<id>`). Each
+file it may take is a `file_link` row of kind `upload` made with it
+(`upload_link_id` set, not a relation, its own hash that no request looks
+up): its result id fixed and its key wrapped under the vault's data key from
+the start, so a file that arrives fills one such row and becomes a kept
+result exactly as a `receive_file` upload does, when the token first uses
+its handle (`tool_name` `create_upload_link`). A link takes 1 to 10 files
+(5 by default) for up to an hour until the first arrives, then for a quarter
+of an hour from it, until it has its files or the owner taps Done; then
+the rows of files that never came are deleted. A token keeps at most five
+open. Every file and every Done is a request-log line
+(`upload_link/upload`, `upload_link/done`), the creation is logged as an
+ask, the page and the route share the file links' rate limit, and the page
+sends no referrer and is not indexed. The row is kept a day past its last
+file time for `check_upload`; the cleanup removes it then, and the empty
+rows when the link stops taking files. Not exported, wiped with the vault.
 
 ## Tool access and the owner's permission
 

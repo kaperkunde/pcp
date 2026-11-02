@@ -582,8 +582,10 @@ export async function wipeVault(
   // Answers kept for read_result are not exported: a day's cache, bound to
   // the tokens this restore replaces.
   await tx.toolResult.deleteMany(byVault)
-  // Nor are the links that move them to and from an assistant's computer.
+  // Nor are the links that move them to and from an assistant's computer,
+  // or the pages the owner uploads them from.
   await tx.fileLink.deleteMany(byVault)
+  await tx.uploadLink.deleteMany(byVault)
   // Nor are tools and sites allowed for a while: an answer to a request,
   // for the tokens this restore replaces, and over within hours.
   await tx.apiTokenToolAllowance.deleteMany(byToken)

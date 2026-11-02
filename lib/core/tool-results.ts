@@ -315,7 +315,8 @@ export function handleOf(kept: KeptResult, preview?: string): ResultHandle {
 }
 
 /**
- * Files that arrived through an upload link (lib/core/file-links.ts) whose
+ * Files that arrived through an upload link (lib/core/file-links.ts, or an
+ * upload page's, lib/core/upload-links.ts) whose
  * handles name these ids, kept now as the token's results under those ids.
  * The link holds the file under a key of its own, which only the vault's
  * key unwraps: so it becomes a result the first time the token, holding the
@@ -369,7 +370,8 @@ async function claimUploads(
           vaultId: ctx.vaultId,
           tokenId,
           serverId: null,
-          toolName: "receive_file",
+          // An upload page's file, or a receive_file link's.
+          toolName: link.uploadLinkId ? "create_upload_link" : "receive_file",
           kind: "bytes",
           name: cleanName(link.name),
           mediaType: link.mediaType.slice(0, MAX_MEDIA_TYPE_CHARS),
