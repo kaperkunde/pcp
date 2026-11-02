@@ -117,7 +117,7 @@ function behindProxies(entries: string[], list: BlockList): string {
 /**
  * The client's address, for rate limits.
  *
- * Next (15.5, `server/base-server.js`) sets X-Forwarded-For to the socket's
+ * Next (16.3, `server/base-server.js`) sets X-Forwarded-For to the socket's
  * address only when the request has none (`??=`), and never appends to it.
  * So the header is exactly what the nearest proxy sent, and the address that
  * connected to PCP is in it only when nothing set the header. PCP's own
