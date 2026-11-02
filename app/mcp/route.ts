@@ -3,7 +3,8 @@ import { after } from "next/server"
 
 import { afterAnswerScope } from "@/lib/core/after-answer"
 import { resolveApiToken } from "@/lib/core/api-tokens"
-import { clientHello, clientSeen } from "@/lib/core/client-hello"
+import { clientHello, clientSeen, requestClient } from "@/lib/core/client-hello"
+import { detectClient, noteClientSeen } from "@/lib/core/clients/detect"
 import {
   buildGatewayServer,
   ensureCatalogue,
@@ -160,11 +161,11 @@ async function handle(request: Request): Promise<Response> {
     )
   }
 
+  const body = request.method === "POST" ? await request.clone().text() : ""
+
   // The rate limit counts requests. A JSON-RPC batch is many calls in one, so
   // it would get around it: the current protocol has no batches either.
   if (request.method === "POST") {
-    const body = await request.clone().text()
-
     if (body.trimStart().startsWith("[")) {
       return withCors(
         jsonRpcError(
@@ -195,9 +196,17 @@ async function handle(request: Request): Promise<Response> {
     }
   }
 
+  // The app on the other end and the profile it is answered with
+  // (lib/core/clients/): the owner's choice for the token, else what this
+  // request and the token's last initialize show. The client last seen is
+  // kept on the token for its Advanced page once this answer is sent.
+  const client = detectClient(resolved, requestClient(body, request.headers))
+  after(() => noteClientSeen(resolved, client).catch(() => {}))
+
   const scope: GatewayScope = {
     ...resolved,
     publicUrl: await publicUrlFor(resolved.ctx, request),
+    client,
   }
 
   // What a call hands on to do once it has answered (an IMAP send's look

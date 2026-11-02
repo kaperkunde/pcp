@@ -6,6 +6,23 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## Front-loaded descriptions, and lines search and describe add once
+
+No tool or argument was renamed. Every PCP tool's description now opens
+with a verb and what it acts on (`read_memory`: "START HERE: owner's rules
+
+- memories."; `memory`: "Save memories in PCP, not your own memory: …"), so
+  a client that compares descriptions sees them all change once.
+
+`search` and `describe` answers can carry one or two text blocks after the
+answer itself, once a session: a reminder to call `read_memory` with
+`every` while it has not run, and, for an app that does not show the
+server's instructions (Claude's apps), their key rules. `read_memory`
+`every` carries those rules at the end of its text for such an app. The
+first block is the answer as before (`describe`'s JSON stays parseable): a
+client that reads `content[0]` is unaffected; one that joins every block
+gets the extra lines too.
+
 ## Entry tools per tier: call_tool_read, call_tool_write, call_tool_destructive
 
 Some clients (Claude's voice mode on iOS) ask before every call to a tool

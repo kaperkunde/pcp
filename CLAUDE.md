@@ -154,6 +154,17 @@ so in the summary; the bump itself waits for the request.
   renamed one is an alias for one release with a note (and a wrapper's
   answer says how to change its program), then `retired`, refused with the
   name to use. Each rename goes in `docs/breaking-changes.md`.
+- A PCP tool's description opens with a verb, its object and what sets it
+  apart, in a search's words, within its first 25 characters: Claude's apps
+  show the model little more of a deferred tool (`gateway-tools.test.ts`
+  checks every one; a new tool adds its keyword there). Names and
+  descriptions are the same for every client and session. What differs per
+  app is in answers only, by its client profile (`lib/core/clients/`: a
+  typed list with `observed` dates, detected per request from clientInfo,
+  label headers, user agent and OAuth client name, the owner's choice per
+  token winning): whether the instructions' key rules are repeated, once a
+  session, and link style. The client last seen is `api_token.client_seen`
+  (its own name, version, profile, time), never the request log.
 - `call_tool_read`, `call_tool_write` and `call_tool_destructive` take only
   a `call_handle` from `describe` (`lib/core/call-handles.ts`: an HMAC under
   the vault key over the token, the tool and its schema's hash, the same for

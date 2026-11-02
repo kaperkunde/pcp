@@ -3772,6 +3772,60 @@ sends no referrer and is not indexed. The row is kept a day past its last
 file time for `check_upload`; the cleanup removes it then, and the empty
 rows when the link stops taking files. Not exported, wiped with the vault.
 
+### Descriptions read in a few words, and client profiles
+
+Clients that defer tools show the model very little of each before it is
+loaded. Seen in Claude for iOS voice (2026-11-02): every PCP tool deferred
+on its own as `name — <description cut at about 80 characters>`, of which
+`[Custom connector "…", added by the user] ` takes about 50, so some 25
+characters of PCP's own words; the server's `instructions` never reach the
+model, nor the annotations, and the model's tool search is by keywords over
+names and that text. So every PCP tool's description opens with a verb, its
+object and what sets it apart, in the words a search would use ("Search
+tools, skills, memory: start here", "Call a Read-tier tool by call_handle",
+"START HERE: owner's rules + memories", "Save memories in PCP, not your own
+memory"); the rules follow. `gateway-tools.test.ts` checks every opening
+against a list of leading verbs and the keyword each needs. Names and
+descriptions are the same for every client and every session: a client's
+"Always allow" is keyed on them.
+
+What does differ per client is in answers, decided by a client profile
+(`lib/core/clients/profiles.ts`): a typed list with the date each app was
+last looked at, so adding one is a data change. A profile says whether the
+app shows the server's instructions (`mirrorInstructions`) and how a link
+for the owner is written (`linkStyle`; every app known today reads a
+markdown link). `claude-ai` (Claude's chat, voice and mobile apps) mirrors,
+`claude-code` and `generic` do not, `chatgpt` is assumed to mirror until
+observed. `clients/detect.ts` picks the profile per request from what it
+carries (`client-hello.ts requestClient`): the client's name from
+`initialize`, or from a 2026-07-28 request's `_meta`; then the values of the
+headers that label it (`x-anthropic-client`), its user agent, and the name
+it signed in with (`api_token.oauth_client_name`). Under the older protocol
+only `initialize` names the client, so the last name per token is kept in
+memory (bounded) and, past a restart, read from the token's `client_seen`.
+The owner can choose the profile per token on its Advanced page
+(`api_token.client_profile`, null to detect), which always wins; the page
+shows the client last seen ("Detected as": its name, version, profile and
+time). `client_seen` is the client's own words about itself, written at
+most every few minutes unless it changed, never a request's content or a
+header but the client's label, and it is not the request log, which lists
+calls.
+
+Sessions are kept in memory too (`clients/sessions.ts`), as /mcp is
+stateless and no request carries a session id: a session is a token and its
+client, begun again by an `initialize` and forgotten after half an hour
+without a request; two conversations at once share one, which is accepted.
+In it, PCP says two things once. `search` and `describe` add a line of
+their own, after their answer, while `read_memory` `every` has not run
+("Owner's rules: call read_memory with command "every" first."), for a token
+that keeps memories. For a profile that mirrors, the instructions' key
+rules (how to find and call a tool, the owner's link, check_permission,
+read_result) follow `read_memory` `every`'s answer, or else the first
+`search` or `describe` answer, as a text of its own so a JSON answer stays
+JSON; with the owner's own instructions when the token keeps no memories,
+since `read_memory` `every` gives them otherwise. A scope without a client
+(the owner's pages, tests) says neither.
+
 ## Tool access and the owner's permission
 
 Every token has a level per tool (`api_token_tool_access`,

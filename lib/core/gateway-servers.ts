@@ -5,6 +5,7 @@ import type {
 
 import { allowanceHolds, loadToolAllowances } from "./allowances"
 import type { ResolvedToken } from "./api-tokens"
+import type { DetectedClient } from "./clients/detect"
 import type { ToolAccess, ToolTier } from "./constants"
 import { db } from "./db"
 import { readServerNote } from "./personal-notes"
@@ -18,7 +19,15 @@ import { readWrapperOperation } from "./wrappers/definition"
  * calls through (lib/core/wrappers/run.ts).
  */
 
-export type GatewayScope = ResolvedToken & { publicUrl: string }
+export type GatewayScope = ResolvedToken & {
+  publicUrl: string
+  /**
+   * The app the request comes from and the profile it is answered with
+   * (clients/detect.ts), set by /mcp. Without one (the owner's own pages,
+   * tests) nothing is said once per session and nothing is repeated.
+   */
+  client?: DetectedClient
+}
 
 /**
  * A tool as the gateway keeps it for a request: enough to search and list,

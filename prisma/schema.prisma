@@ -166,6 +166,15 @@ model ApiToken {
   /// The version of PCP's suggested instructions (instructions-defaults.ts)
   /// the text was copied or merged from. Null with no instructions.
   instructionsBase Int?    @map("instructions_base")
+  /// The owner's choice of client profile for this token
+  /// (lib/core/clients/profiles.ts: what PCP repeats of its instructions in
+  /// answers, and how it formats links), by id. Null: detected per request.
+  clientProfile    String?  @map("client_profile")
+  /// The client PCP last saw use this token, as JSON: its name and version
+  /// as the client gave them, the profile it was detected as, and when
+  /// (lib/core/clients/detect.ts). Nothing of a request's content, never a
+  /// header's value but the client's own label; not the request log.
+  clientSeen       String?  @map("client_seen")
 
   servers            ApiTokenServer[]
   skills             ApiTokenSkill[]
