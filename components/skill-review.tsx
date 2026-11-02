@@ -95,7 +95,12 @@ export function SkillReview({ skill }: { skill: SkillShown }) {
   )
 }
 
-/** Lines in and out, each marked with + or − as well as its colour. */
+/**
+ * Lines in and out, each marked with + or − as well as its colour. The box
+ * is `relative` so the words each line carries for a screen reader (`sr-only`,
+ * positioned absolutely) are clipped by its scroll: positioned against the
+ * page instead, they stretch it by the whole diff, below the footer (#50).
+ */
 export function Diff({
   lines,
   testId,
@@ -105,7 +110,7 @@ export function Diff({
 }) {
   return (
     <div
-      className="max-h-[28rem] overflow-auto rounded-xl bg-field py-2 font-mono text-[12px] leading-relaxed"
+      className="relative max-h-[28rem] overflow-auto rounded-xl bg-field py-2 font-mono text-[12px] leading-relaxed"
       data-testid={testId}
     >
       {lines.map((line, index) => (

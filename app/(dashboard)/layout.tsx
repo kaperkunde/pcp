@@ -50,7 +50,7 @@ export default async function DashboardLayout({
         notices,
       }}
     >
-      <div className="flex min-h-screen flex-col md:flex-row">
+      <div className="flex min-h-dvh flex-col md:flex-row">
         <AppSidebar
           vaultName={vault.name}
           version={PCP_VERSION}

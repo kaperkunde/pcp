@@ -229,6 +229,9 @@ values live in `app/globals.css`; use the Tailwind names, not hex values.
 - Targets are 36px or more (44px on a phone's decision buttons); rows 56px.
 - Every page works at 390px wide: rows wrap their right-hand controls under
   the title, grids fall to one column, wide tables scroll inside their box.
+  A box that scrolls and holds `sr-only` text is `relative`: that text is
+  positioned absolutely, and against the page it stretches the page by
+  everything the box hides.
 - Focus shows as a teal ring; nothing removes it without a replacement.
 
 ## Tests and the design
