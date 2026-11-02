@@ -9,6 +9,7 @@ import {
   requireLiveToken,
   revivesToken,
   revokeApiToken,
+  setTokenClientProfile,
   updateApiToken,
 } from "@/lib/core/api-tokens"
 import {
@@ -347,6 +348,30 @@ export async function copyTokenAccessAction(
 
   const result = await guarded(async () => {
     await copyTokenAccess(ctx, tokenId, sourceTokenId)
+    return {}
+  })
+
+  revalidateToken(tokenId)
+
+  return result
+}
+
+/**
+ * The client profile a token is answered with: one the owner picks, or
+ * "auto" to detect it per request again.
+ */
+export async function setClientProfileAction(
+  tokenId: string,
+  profile: string,
+): Promise<ActionState> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    await setTokenClientProfile(
+      ctx,
+      tokenId,
+      profile === "auto" ? null : profile,
+    )
     return {}
   })
 

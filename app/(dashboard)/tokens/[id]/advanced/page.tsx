@@ -4,6 +4,7 @@ import Link from "next/link"
 import { LocalDate } from "@/components/local-date"
 import { PageColumn } from "@/components/page-column"
 import { PageHeader } from "@/components/page-header"
+import { TokenClientProfile } from "@/components/token-client-profile"
 import { TokenCopyAccess } from "@/components/token-detail"
 import { TokenInstructionsEditor } from "@/components/token-instructions"
 import { TOKEN_OPTIONS, TokenOptionRow } from "@/components/token-options"
@@ -15,6 +16,7 @@ import { Disclosure } from "@/components/ui/disclosure"
 import { Input, Select } from "@/components/ui/input"
 import { List, ListRow, ListSection, RowValue } from "@/components/ui/list"
 import { listApiTokens } from "@/lib/core/api-tokens"
+import { CLIENT_PROFILES, clientProfile } from "@/lib/core/clients/profiles"
 import { instructionsPreview } from "@/lib/core/gateway"
 import { getTokenInstructions } from "@/lib/core/instructions"
 import { listTokenToolAccess } from "@/lib/core/tool-access"
@@ -55,6 +57,12 @@ export default async function TokenAdvancedPage({
   const otherTokens = tokens
     .filter((other) => other.id !== id)
     .map(({ id, name }) => ({ id, name }))
+  // The app it was last used from, and the profile it is answered with.
+  const seen = token.clientSeen
+  const detected = clientProfile(seen?.profile)
+  const answeredAs = token.clientProfile
+    ? clientProfile(token.clientProfile)
+    : detected
 
   return (
     <PageColumn width="narrow">
@@ -134,6 +142,28 @@ export default async function TokenAdvancedPage({
           {otherTokens.length > 0 && !locked ? (
             <TokenCopyAccess tokenId={id} otherTokens={otherTokens} />
           ) : null}
+          <TokenClientProfile
+            tokenId={id}
+            chosen={token.clientProfile}
+            detectedLabel={detected.label}
+            profiles={CLIENT_PROFILES.map(({ id, label }) => ({ id, label }))}
+            locked={locked}
+          />
+          <ListRow
+            title="Detected as"
+            description={
+              seen
+                ? `${seen.name ?? "An app that gave no name"}${seen.version ? ` ${seen.version}` : ""}: ${detected.label}`
+                : "No app has used it since PCP began keeping track."
+            }
+            trailing={
+              seen ? (
+                <RowValue>
+                  <LocalDate value={seen.at} />
+                </RowValue>
+              ) : undefined
+            }
+          />
           <ListRow
             title={token.oauthClient ? "Signed in from" : "API token"}
             trailing={
@@ -181,7 +211,11 @@ export default async function TokenAdvancedPage({
         </Card>
         <Disclosure
           title="What it receives"
-          description="Exactly what PCP gives this assistant when a conversation starts, as it would be now."
+          description={
+            answeredAs.mirrorInstructions
+              ? `Exactly what PCP gives this assistant when a conversation starts, as it would be now. It is answered as ${answeredAs.label}, which does not show these to the assistant, so PCP also repeats the key rules in its answers.`
+              : "Exactly what PCP gives this assistant when a conversation starts, as it would be now."
+          }
         >
           <pre className="max-h-[28rem] overflow-auto rounded-lg bg-field p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap">
             {preview}

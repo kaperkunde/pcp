@@ -166,6 +166,11 @@ const ApiTokenRow = z.strictObject({
   // An older file has neither: the token shows them as not set yet.
   instructions: bytesOrNull.default(null),
   instructionsBase: z.number().int().positive().nullable().default(null),
+  // Client profiles, added in 0.5: the owner's choice for the token (null
+  // detects it per request) and the client last seen using it. An older
+  // file has neither: the token detects its client again.
+  clientProfile: str.nullable().default(null),
+  clientSeen: str.nullable().default(null),
 })
 
 const ApiTokenServerRow = z.strictObject({ tokenId: id, serverId: id })
