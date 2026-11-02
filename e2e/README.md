@@ -12,7 +12,7 @@ address). Nothing leaves the machine.
 
 ```bash
 pnpm test:e2e                                  # build, fresh database, whole suite
-pnpm test:e2e:build                            # the build alone (PCP_TEST_BUILD=1 next build)
+pnpm test:e2e:build                            # the build alone (PCP_TEST_BUILD=1 next build --webpack)
 pnpm exec playwright test --project=gateway    # one project against the last build, no reset
 PCP_E2E_DEV=1 pnpm exec playwright test --project=oauth --headed   # against pnpm dev
 ```

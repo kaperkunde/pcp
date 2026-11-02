@@ -1,21 +1,23 @@
-import { dirname } from "path"
-import { fileURLToPath } from "url"
-import { FlatCompat } from "@eslint/eslintrc"
+import { defineConfig, globalIgnores } from "eslint/config"
+import nextVitals from "eslint-config-next/core-web-vitals"
+import nextTs from "eslint-config-next/typescript"
 import prettier from "eslint-config-prettier"
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
-
-const compat = new FlatCompat({
-  baseDirectory: __dirname,
-})
-
-const eslintConfig = [
-  ...compat.extends("next/core-web-vitals", "next/typescript"),
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  ...nextTs,
   prettier,
   {
     rules: {
       semi: ["error", "never"],
+      // eslint-plugin-react-hooks 7 (with eslint-config-next 16) adds the
+      // React Compiler's diagnostics as errors. PCP does not build with the
+      // compiler, and the code they flag (a state set once after mount, a
+      // hook's object that carries a ref, a server component's Date.now())
+      // is what it means to do. Off until the compiler is taken up.
+      "react-hooks/purity": "off",
+      "react-hooks/refs": "off",
+      "react-hooks/set-state-in-effect": "off",
     },
   },
   {
@@ -63,29 +65,27 @@ const eslintConfig = [
       "@typescript-eslint/no-require-imports": "off",
     },
   },
-  {
-    ignores: [
-      "node_modules/**",
-      ".next/**",
-      "out/**",
-      "build/**",
-      "lib/generated/**",
-      "next-env.d.ts",
-      "data/**",
-      // Claude Code's worktrees: other checkouts, each with its own deps.
-      ".claude/**",
-      // Playwright output (reports, traces) and captured auth/state.
-      "e2e/.artifacts/**",
-      "e2e/.auth/**",
-      "e2e/.state/**",
-      // The desktop app's staged server, native-module cache and installers.
-      "desktop/server/**",
-      "desktop/.cache/**",
-      "desktop/dist/**",
-      "desktop/native/keychain/build/**",
-      "desktop/native-staged/**",
-    ],
-  },
-]
+  globalIgnores([
+    "node_modules/**",
+    ".next/**",
+    "out/**",
+    "build/**",
+    "lib/generated/**",
+    "next-env.d.ts",
+    "data/**",
+    // Claude Code's worktrees: other checkouts, each with its own deps.
+    ".claude/**",
+    // Playwright output (reports, traces) and captured auth/state.
+    "e2e/.artifacts/**",
+    "e2e/.auth/**",
+    "e2e/.state/**",
+    // The desktop app's staged server, native-module cache and installers.
+    "desktop/server/**",
+    "desktop/.cache/**",
+    "desktop/dist/**",
+    "desktop/native/keychain/build/**",
+    "desktop/native-staged/**",
+  ]),
+])
 
 export default eslintConfig

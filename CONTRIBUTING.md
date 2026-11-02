@@ -24,7 +24,7 @@ pnpm lint            # ESLint
 pnpm format          # Prettier, writing
 pnpm format:check    # Prettier, reporting — what the hook and CI run
 pnpm typecheck       # tsc --noEmit
-pnpm build           # next build
+pnpm build           # next build --webpack (see Desktop app)
 pnpm test            # unit tests (vitest; the browser's skip without Chromium)
 pnpm test:e2e        # Playwright: a production build, then a fresh e2e database
 shellcheck --shell=sh install.sh   # the install script, which the tests run
@@ -124,6 +124,12 @@ knows the wrapper only as `PCP_DESKTOP=1` (and `PCP_DESKTOP_UPDATER`, whether
 it can install an update itself); a change to PCP reaches the app through
 `pnpm build`, and a change to how the server is laid out (what the Dockerfile
 copies) is mirrored in `desktop/scripts/stage.mjs`.
+
+`pnpm build` is `next build --webpack`, not Next 16's default Turbopack: a
+Turbopack build reaches the packages in `serverExternalPackages` through
+symlinks it makes in `.next/node_modules` whatever the linker, which the
+staged app refuses, and its better-sqlite3 would miss the rebuild for
+Electron. `pnpm dev` is Turbopack.
 
 ```bash
 pnpm install --frozen-lockfile --config.node-linker=hoisted   # flat node_modules: no symlinks in the output
