@@ -3,6 +3,8 @@ import { findIdenticalDefinitions } from "./definitions"
 import { countOutdatedInstructions } from "./instructions"
 import { networkNotices } from "./network/runtime"
 import { repoNotices } from "./repos/notices"
+import { TOOL_TIER_LABELS } from "./constants"
+import { wrapperTiersBelowCalls } from "./tool-tiers"
 
 /**
  * What PCP itself wants the owner to look at, beside the requests from
@@ -20,6 +22,8 @@ export type OwnerNoticeKind =
   | "repos"
   /** API endpoints with the same schema, which could share one definition. */
   | "definitions"
+  /** A wrapper's tool set to a lower tier than its calls now come to. */
+  | "tiers"
 
 export type OwnerNotice = {
   id: string
@@ -78,11 +82,26 @@ export async function definitionNotices(
   })
 }
 
+/**
+ * A wrapper's tool whose tier the owner set below what the tools it calls
+ * came to since (tool-tiers.ts wrapperTiersBelowCalls): look again.
+ */
+export async function tierNotices(ctx: VaultContext): Promise<OwnerNotice[]> {
+  return (await wrapperTiersBelowCalls(ctx)).map((found) => ({
+    id: `tiers:${found.serverId}/${found.tool}`,
+    kind: "tiers" as const,
+    title: `${found.slug}/${found.tool} is set to ${TOOL_TIER_LABELS[found.override]}, but the tools it calls are ${TOOL_TIER_LABELS[found.derived]} now`,
+    href: `/servers/${found.serverId}#tool-${encodeURIComponent(found.tool)}`,
+    detail: "Raise its tier, or keep yours",
+  }))
+}
+
 const SOURCES: NoticeSource[] = [
   network,
   instructions,
   repoNotices,
   definitionNotices,
+  tierNotices,
 ]
 
 /** Every notice for the owner now, the machine's first. */

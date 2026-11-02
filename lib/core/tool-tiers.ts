@@ -443,6 +443,15 @@ export async function setToolTier(
     return
   }
 
+  const tool = await db().mcpTool.findUnique({
+    where: { serverId_name: { serverId, name: toolName } },
+    select: { id: true },
+  })
+
+  if (!tool) {
+    throw notFound(`A tool called ${toolName}`)
+  }
+
   const info = await toolTierInfo(serverId, toolName)
   const server = await db().mcpServer.findUnique({
     where: { id: serverId },
@@ -588,6 +597,18 @@ export type TierBelowCalls = {
 }
 
 /**
+ * A wrapper tool's choice below what its calls come to now, where they came
+ * to less when the owner chose (or PCP does not know what they came to).
+ */
+export function tierBelowCalls(info: TierInfo): boolean {
+  return (
+    info.override !== null &&
+    RANK[info.override] < RANK[info.derived] &&
+    (info.seen === null || RANK[info.derived] > RANK[info.seen])
+  )
+}
+
+/**
  * The wrappers' tools whose tier the owner set lower than their calls come
  * to now, where the calls came to less when they chose (or PCP does not
  * know what they came to): a tool a call makes riskier waits for a look.
@@ -619,16 +640,12 @@ export async function wrapperTiersBelowCalls(
     for (const tool of wrapper.tools) {
       const info = await resolver.tierOf(wrapper.id, tool.name)
 
-      if (
-        info.override &&
-        RANK[info.override] < RANK[info.derived] &&
-        (info.seen === null || RANK[info.derived] > RANK[info.seen])
-      ) {
+      if (tierBelowCalls(info)) {
         found.push({
           serverId: wrapper.id,
           slug: wrapper.slug,
           tool: tool.name,
-          override: info.override,
+          override: info.override!,
           derived: info.derived,
         })
       }

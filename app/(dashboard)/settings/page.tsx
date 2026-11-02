@@ -1,4 +1,4 @@
-import { FolderGit2, Link2 } from "lucide-react"
+import { FolderGit2, Link2, Wrench } from "lucide-react"
 import type { Metadata } from "next"
 
 import { ExportCard, RestoreCard } from "@/components/backup-cards"
@@ -106,6 +106,12 @@ export default async function SettingsPage({
             autoUpdated={autoUpdated()}
             hostUpdater={hostUpdater()}
             hostUpdaterChannels={hostUpdaterFollowsChannel()}
+          />
+          <ListRow
+            href="/settings/tools"
+            icon={<IconTile icon={Wrench} size="sm" />}
+            title="PCP's own tools"
+            description="Read, Write or Destructive for search, the call_tool and run_code tools, memory and the rest: what assistants' apps are told each one can do"
           />
         </List>
       </ListSection>

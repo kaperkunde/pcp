@@ -835,6 +835,14 @@ export function gatewayIcons(publicUrl: string): Icon[] {
 
 export { markedReadOnly }
 
+/** PCP's own tools each built gateway registered, for ownToolsOf. */
+const OWN_TOOLS = new WeakMap<McpServer, Tool[]>()
+
+/** PCP's own tools a gateway built by buildGatewayServer has. */
+export function ownToolsOf(server: McpServer): Tool[] {
+  return OWN_TOOLS.get(server) ?? []
+}
+
 export function buildGatewayServer(
   scope: GatewayScope,
   servers: GatewayServer[],
@@ -4742,6 +4750,7 @@ export function buildGatewayServer(
     })
   }
 
+  OWN_TOOLS.set(server, ownTools)
   return server
 }
 
