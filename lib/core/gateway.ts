@@ -10,7 +10,7 @@ import { z } from "zod"
 
 import type { McpServer as McpServerRow } from "@/lib/generated/prisma/client"
 
-import { resolveAccessChanges, type AccessChange } from "./access-requests"
+import { resolveAccessProposal, type AccessChange } from "./access-requests"
 import { resolveTokenForOwner } from "./api-tokens"
 import type { VaultContext } from "./context"
 import {
@@ -3302,27 +3302,41 @@ export function buildGatewayServer(
   register({
     name: "propose_tool_access",
     title: "Propose tool access",
-    description: `Propose which tools this token may run, many at once and across servers: "allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). This changes nothing by itself: PCP fills your levels in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and a level. Later changes override earlier ones, so set a whole server first and the exceptions after. ${OWNER_LINK_RULE} Call check_permission with its id once the owner says they have saved; it says what they saved.`,
+    description: `Propose tool levels and tiers in bulk, for the owner to save: which tools this token may run ("allowed" runs without asking, "ask" asks the owner first, "blocked" hides it from you), and how much each can do (tier "read", "write", "destructive", or "default" for its own, which decides the call_tool_* entry that runs it). Many at once and across servers. This changes nothing by itself: PCP fills them in on a page, marks what would change, and the owner reviews them, adjusts them if they like, and saves. Each change names a server, the tools (exact names, or patterns with * such as "list_*" or "*_invoice"; leave tools out for every tool on the server) and an access level, a tier, or both. A tier is every token's, and every server of the same definition's; PCP's own tools take a tier on the server "pcp". Later changes override earlier ones, so set a whole server first and the exceptions after. ${OWNER_LINK_RULE} Call check_permission with its id once the owner says they have saved; it says what they saved.`,
     input: z.object({
       changes: z
         .array(
-          z.object({
-            server: z
-              .string()
-              .describe("The server's short name, as in server/tool."),
-            tools: z
-              .array(z.string().min(1).max(200))
-              .max(500)
-              .optional()
-              .describe(
-                'Tool names or patterns with * ("list_*"). Leave out for every tool on the server.',
-              ),
-            access: z
-              .enum(TOOL_ACCESS_LEVELS)
-              .describe(
-                '"allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you).',
-              ),
-          }),
+          z
+            .object({
+              server: z
+                .string()
+                .describe("The server's short name, as in server/tool."),
+              tools: z
+                .array(z.string().min(1).max(200))
+                .max(500)
+                .optional()
+                .describe(
+                  'Tool names or patterns with * ("list_*"). Leave out for every tool on the server.',
+                ),
+              access: z
+                .enum(TOOL_ACCESS_LEVELS)
+                .optional()
+                .describe(
+                  '"allowed" (runs without asking), "ask" (asks the owner first) or "blocked" (hidden from you). Leave out to change the tier only.',
+                ),
+              tier: z
+                .enum([...TOOL_TIERS, "default"])
+                .optional()
+                .describe(
+                  '"read" (only reads), "write" (changes things, deletes nothing for good), "destructive" (can change or delete for good), or "default" for what the tool says of itself. Leave out to change the level only.',
+                ),
+            })
+            // A change sets a level, a tier, or both.
+            .meta({
+              allOf: [
+                { anyOf: [{ required: ["access"] }, { required: ["tier"] }] },
+              ],
+            }),
         )
         .min(1)
         .max(100)
@@ -3343,18 +3357,30 @@ export function buildGatewayServer(
         )
       }
 
-      const levels = resolveAccessChanges([...bySlug.values()], args.changes)
+      const { levels, tiers } = resolveAccessProposal(
+        [...bySlug.values()],
+        args.changes,
+        // PCP's own tools, as the server "pcp", for their tiers.
+        ownTools.map((tool) => ({
+          name: tool.name,
+          tier: tierFromAnnotations(tool.annotations),
+          override: ownTiers[tool.name] ?? null,
+        })),
+      )
 
-      if (levels.length === 0) {
+      if (levels.length === 0 && tiers.length === 0) {
         return ok(
           { kind: "unchanged" },
           {
-            text: "Nothing to propose: those tools already have those levels.",
+            text: "Nothing to propose: those tools already have those levels and tiers.",
           },
         )
       }
 
-      return asked({ kind: "access", input: { levels } })
+      return asked({
+        kind: "access",
+        input: { levels, ...(tiers.length > 0 ? { tiers } : {}) },
+      })
     },
   })
 

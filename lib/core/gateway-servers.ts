@@ -36,6 +36,8 @@ export type GatewayTool = Pick<
    * (call_tool_<tier> and the ones above).
    */
   tier: ToolTier
+  /** The owner's tier for it, when they chose one (else its default). */
+  tierOverride: ToolTier | null
   /**
    * A wrapper's tool this token sees stands in for this one ("wrapper/tool"):
    * left out of search and list_tools, still called by its name.
@@ -112,6 +114,8 @@ export async function loadGatewayServers(
       return {
         ...tool,
         tier: tiers.get(accessKey(server.id, tool.name))?.tier ?? "destructive",
+        tierOverride:
+          tiers.get(accessKey(server.id, tool.name))?.override ?? null,
         access:
           level === "ask" && allowanceHolds(until, now.getTime())
             ? "allowed"
