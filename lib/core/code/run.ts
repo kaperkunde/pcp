@@ -1,5 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
+import type { ToolTier } from "../constants"
 import { readFields, type AnswerShape } from "../answers"
 import { isConnectResult } from "../connect"
 import { isPcpError } from "../errors"
@@ -146,7 +147,7 @@ export type CodeCaller = (
      * where a call to a wrapper's tool says the run it started.
      */
     run: CallRun
-    /** Says, once the tool is found, whether its server marks it read-only. */
+    /** Says, once the tool is found, whether it is in the Read tier. */
     lookedUp?: (readOnly: boolean) => void
   } & AnswerShape,
 ) => Promise<CodeCallOutcome>
@@ -273,6 +274,11 @@ export async function runCode(
     language?: string
     /** Run it even when the same program runs, or ran a moment ago. */
     rerun?: boolean
+    /**
+     * The tier of the entry it came through (run_code_<tier>): the same
+     * program through another entry is another run.
+     */
+    tier?: ToolTier
   },
   {
     signal,
@@ -293,7 +299,11 @@ export async function runCode(
     )
   }
 
-  const key = programKey(input.language ?? "javascript", input.code)
+  const key = programKey(
+    input.language ?? "javascript",
+    input.code,
+    input.tier ?? "destructive",
+  )
 
   if (input.rerun !== true) {
     const earlier = duplicateRun(

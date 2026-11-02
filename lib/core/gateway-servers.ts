@@ -5,10 +5,11 @@ import type {
 
 import { allowanceHolds, loadToolAllowances } from "./allowances"
 import type { ResolvedToken } from "./api-tokens"
-import type { ToolAccess } from "./constants"
+import type { ToolAccess, ToolTier } from "./constants"
 import { db } from "./db"
 import { readServerNote } from "./personal-notes"
 import { accessKey, effectiveAccess, loadToolAccess } from "./tool-access"
+import { loadToolTiers } from "./tool-tiers"
 import { readWrapperOperation } from "./wrappers/definition"
 
 /**
@@ -30,6 +31,11 @@ export type GatewayTool = Pick<
   "id" | "name" | "title" | "description" | "descriptionOverride"
 > & {
   access: ToolAccess
+  /**
+   * Its effective tier (lib/core/tool-tiers.ts): which entry tools run it
+   * (call_tool_<tier> and the ones above).
+   */
+  tier: ToolTier
   /**
    * A wrapper's tool this token sees stands in for this one ("wrapper/tool"):
    * left out of search and list_tools, still called by its name.
@@ -95,6 +101,7 @@ export async function loadGatewayServers(
     loadToolAllowances(scope.tokenId, now),
   ])
 
+  const tiers = await loadToolTiers(scope.ctx.vaultId, servers)
   const loaded: GatewayServer[] = servers.map((server) => ({
     ...server,
     note: readServerNote(scope.ctx, server),
@@ -104,6 +111,7 @@ export async function loadGatewayServers(
 
       return {
         ...tool,
+        tier: tiers.get(accessKey(server.id, tool.name))?.tier ?? "destructive",
         access:
           level === "ask" && allowanceHolds(until, now.getTime())
             ? "allowed"

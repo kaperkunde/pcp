@@ -61,6 +61,29 @@ export const TOOL_ACCESS_LABELS: Record<ToolAccess, string> = {
 }
 
 /**
+ * How much a tool can do (lib/core/tool-tiers.ts): read, change (write) or
+ * change or delete for good (destructive). Each tier has its own entry
+ * tools (call_tool_<tier>, run_code_<tier>), which run tools at or below
+ * it, so a client can let Read through without asking each time.
+ */
+export const TOOL_TIERS = ["read", "write", "destructive"] as const
+
+export type ToolTier = (typeof TOOL_TIERS)[number]
+
+export const TOOL_TIER_LABELS: Record<ToolTier, string> = {
+  read: "Read",
+  write: "Write",
+  destructive: "Destructive",
+}
+
+/** What each tier means, in a line, for the owner's pages. */
+export const TOOL_TIER_HINTS: Record<ToolTier, string> = {
+  read: "Only reads.",
+  write: "Changes things, but deletes nothing for good.",
+  destructive: "Can change or delete things for good.",
+}
+
+/**
  * How the owner can answer an assistant's request. Each kind offers some of
  * them (lib/core/permission-rules.ts); "discard" is only for a memory an
  * assistant wants to share, and "allow_for" (for one of ALLOW_FOR_MINUTES)

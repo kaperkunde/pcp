@@ -93,7 +93,7 @@ export default async function SettingsPage({
               />
             }
             title="Connection address"
-            description="Add this as a remote MCP server in your assistant, with an API token as the bearer token. It offers three tools — search, describe and call_tool — that reach every server you connected, and your skills."
+            description="Add this as a remote MCP server in your assistant, with an API token as the bearer token. It offers search, describe and the call_tool tools (Read, Write and Destructive), which reach every server you connected, and your skills."
           >
             <div className="basis-full">
               <CopyableValue value={`${publicUrl}/mcp`} />

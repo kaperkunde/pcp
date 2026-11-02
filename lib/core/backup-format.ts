@@ -24,6 +24,7 @@ import type {
   Exit,
   Setting,
   Skill,
+  ToolTier,
   Vault,
   VaultToolAccess,
   WebFetchRule,
@@ -467,6 +468,19 @@ const RepoExclusionRow = z.strictObject({
   createdAt: date,
 })
 
+// The owner's tiers for tools (lib/core/tool-tiers.ts), added with tiers:
+// absent from older files.
+const ToolTierRow = z.strictObject({
+  id,
+  vaultId: id,
+  definitionId: id.nullable().default(null),
+  serverId: id.nullable().default(null),
+  toolName: str,
+  tier: str,
+  seenTier: str.nullable().default(null),
+  updatedAt: date,
+})
+
 const SettingRow = z.strictObject({ vaultId: id, key: str, value: str })
 
 // The browser's sign-ins, added in 0.3: absent from older files.
@@ -535,6 +549,7 @@ export const PayloadSchema = z.strictObject({
     repos: z.array(RepoRow).default([]),
     repoItems: z.array(RepoItemRow).default([]),
     repoExclusions: z.array(RepoExclusionRow).default([]),
+    toolTiers: z.array(ToolTierRow).default([]),
     settings: z.array(SettingRow),
     browserProfiles: z.array(BrowserProfileRow).default([]),
   }),
@@ -671,6 +686,7 @@ export function checkReferences(payload: ExportPayload): void {
   const repos = idsOf(tables.repos, "repository")
   idsOf(tables.repoItems, "linked item")
   idsOf(tables.repoExclusions, "excluded item")
+  idsOf(tables.toolTiers, "tool's tier")
 
   for (const grant of tables.keyGrants) {
     if (!GRANT_KINDS.has(grant.kind)) {
@@ -705,6 +721,7 @@ export function checkReferences(payload: ExportPayload): void {
   ownedBy(tables.settings, "setting")
   ownedBy(tables.browserProfiles, "browser profile")
   ownedBy(tables.repos, "repository")
+  ownedBy(tables.toolTiers, "tool's tier")
 
   if (tables.browserProfiles.length > 1) {
     throw problem("it holds more than one browser profile")
@@ -795,6 +812,15 @@ export function checkReferences(payload: ExportPayload): void {
 
   for (const repo of tables.repos) {
     pointsAt(repo.secretId, secrets, "a repository's secret")
+  }
+
+  for (const tier of tables.toolTiers) {
+    pointsAt(tier.definitionId, definitions, "a tier's definition")
+    pointsAt(tier.serverId, servers, "a tier's server")
+
+    if ((tier.definitionId === null) === (tier.serverId === null)) {
+      throw problem("a tool's tier names neither or both of its places")
+    }
   }
 
   for (const site of tables.secretBrowserOrigins) {
@@ -958,6 +984,7 @@ export const FORMAT_COVERS_SCHEMA: {
   repo: Covers<Repo, z.output<typeof RepoRow>>
   repoItem: Covers<RepoItem, z.output<typeof RepoItemRow>>
   repoExclusion: Covers<RepoExclusion, z.output<typeof RepoExclusionRow>>
+  toolTier: Covers<ToolTier, z.output<typeof ToolTierRow>>
   setting: Covers<Setting, z.output<typeof SettingRow>>
   browserProfile: Covers<BrowserProfile, z.output<typeof BrowserProfileRow>>
   hostSetting: Covers<HostSetting, z.output<typeof HostSettingRow>>
@@ -986,6 +1013,7 @@ export const FORMAT_COVERS_SCHEMA: {
   repo: true,
   repoItem: true,
   repoExclusion: true,
+  toolTier: true,
   setting: true,
   browserProfile: true,
   hostSetting: true,

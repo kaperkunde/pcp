@@ -118,6 +118,7 @@ import {
   type ServerInput,
 } from "./servers"
 import { effectiveAccess, loadToolAccess, writeToolAccess } from "./tool-access"
+import { toolTier } from "./tool-tiers"
 import { noteOwnerAsked } from "./request-log"
 import { collectHandleIds } from "./result-handles"
 import {
@@ -1321,15 +1322,12 @@ async function summarizeRow(
         },
       })
     : null
-  let destructive = false
-
-  try {
-    destructive =
-      (JSON.parse(tool?.annotations ?? "{}") as { destructiveHint?: boolean })
-        .destructiveHint === true
-  } catch {
-    destructive = false
-  }
+  // The tool's tier (tool-tiers.ts): the owner's choice, a wrapper's calls,
+  // or its annotations, where hints left out count as Destructive.
+  const destructive =
+    tool !== null &&
+    row.serverId !== null &&
+    (await toolTier(row.serverId, row.toolName)) === "destructive"
 
   const about = tool
     ? summarize(tool.descriptionOverride ?? tool.description)
@@ -1355,7 +1353,7 @@ async function summarizeRow(
       ...(await handleLines(ctx, row.tokenId, args)),
     ],
     warning: destructive
-      ? "The server marks this tool as destructive: it can change or delete things for good."
+      ? "This is a Destructive tool: it can change or delete things for good."
       : null,
     full: argsInFull(
       args,

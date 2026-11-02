@@ -209,9 +209,10 @@ describe("generateTools", () => {
     })
   })
 
-  it("annotates by method", () => {
+  it("annotates by method, both hints stated: GET reads, POST writes, DELETE destroys", () => {
     expect(byName.listPets!.annotations).toMatchObject({
       readOnlyHint: true,
+      destructiveHint: false,
       idempotentHint: true,
       openWorldHint: true,
       title: "List pets",
@@ -220,7 +221,10 @@ describe("generateTools", () => {
       readOnlyHint: false,
       destructiveHint: true,
     })
-    expect(byName.createPet!.annotations.destructiveHint).toBeUndefined()
+    expect(byName.createPet!.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+    })
     expect(byName.createPet!.annotations.idempotentHint).toBeUndefined()
   })
 

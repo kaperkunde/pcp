@@ -110,7 +110,7 @@ export const PACING_MAX_WAIT_MS = 30_000
 
 /**
  * The budget of a call made straight from an assistant's request:
- * call_tool and call_read_only_tool, web_fetch, and a call the owner
+ * call_tool_<tier>, web_fetch, and a call the owner
  * allowed. The same clock as run_code's RUN_ANSWER_MS (code/limits.ts):
  * under the minute after which clients give up, with time left for the
  * call itself.

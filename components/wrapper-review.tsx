@@ -2,6 +2,11 @@ import { Globe, KeyRound } from "lucide-react"
 import type { ReactNode } from "react"
 
 import { Badge } from "@/components/ui/badge"
+import {
+  TOOL_TIER_HINTS,
+  TOOL_TIER_LABELS,
+  type ToolTier,
+} from "@/lib/core/constants"
 import type { WrapperShown, WrapperShownTool } from "@/lib/core/wrappers/admin"
 import { cn } from "@/lib/utils"
 
@@ -226,7 +231,8 @@ function ToolReview({ tool }: { tool: WrapperShownTool }) {
             {STATUS[tool.status]}
           </Badge>
           {tool.flow ? <Badge variant="secondary">Browser flow</Badge> : null}
-          <Hints annotations={tool.annotations} />
+          {tool.tier ? <TierBadge tier={tool.tier} /> : null}
+          <Hints annotations={tool.annotations} tiered={!!tool.tier} />
         </div>
         <p className="leading-relaxed break-words whitespace-pre-wrap">
           {tool.description}
@@ -331,7 +337,32 @@ function Code({
   )
 }
 
-function Hints({ annotations }: { annotations: string | null }) {
+/**
+ * A tool's tier: the highest of the tools it calls, which decides over what
+ * its hints propose.
+ */
+function TierBadge({ tier }: { tier: ToolTier }) {
+  return (
+    <Badge
+      variant={tier === "read" ? "secondary" : "warning"}
+      title={`${TOOL_TIER_LABELS[tier]}, from the tools it calls: ${TOOL_TIER_HINTS[tier]}`}
+    >
+      {TOOL_TIER_LABELS[tier]}
+    </Badge>
+  )
+}
+
+/** The hints a tier stands for, which its badge shows in their place. */
+const TIER_HINTS = new Set(["readOnlyHint", "destructiveHint"])
+
+function Hints({
+  annotations,
+  tiered = false,
+}: {
+  annotations: string | null
+  /** The tool's tier is shown: its read-only and destructive hints are not. */
+  tiered?: boolean
+}) {
   if (!annotations) {
     return null
   }
@@ -344,10 +375,16 @@ function Hints({ annotations }: { annotations: string | null }) {
     hints = {}
   }
 
-  const entries = Object.entries(hints)
+  const entries = Object.entries(hints).filter(
+    ([key]) => !(tiered && TIER_HINTS.has(key)),
+  )
   const known = entries.every(
     ([key, value]) => key in HINTS && typeof value === "boolean",
   )
+
+  if (tiered && entries.length === 0) {
+    return null
+  }
 
   if (!known || entries.length === 0) {
     // Not the four hints the definition allows: shown as given.
