@@ -21,6 +21,7 @@ import { scratchDatabase } from "./test-db"
 import { keepResult } from "./tool-results"
 import { setExcluded } from "./repos/store"
 import { addLinkedRepo } from "./repos/test-vault"
+import { setToolTier } from "./tool-tiers"
 import { isSetUp, ownerVault, setupVault, unlockOwnerVault } from "./vault"
 import { deleteVault } from "./vault-reset"
 
@@ -151,6 +152,8 @@ async function populate() {
     name: "us-vps",
   })
   await writeExitAccess(vaultId, tokenId, exitId, "allowed")
+  // The owner's tier for a tool, kept apart from its row.
+  await setToolTier(ctx, server.id, "alpha", "read")
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
   await setHostJson(DDNS_CONFIG_KEY, { provider: "duckdns", subdomain: "ada" })
   const { cookieValue } = await createSession(ctx)
@@ -180,6 +183,7 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.server_definition).toBe(1)
     expect(before.service_spec).toBe(1)
     expect(before.exit).toBe(1)
+    expect(before.tool_tier).toBe(1)
 
     await deleteVault(ctx)
 

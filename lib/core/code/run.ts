@@ -331,7 +331,11 @@ export async function runCode(
   // The client's signal is not the run's: the run ends by its own limits.
   const outcome = runProgram(
     scope,
-    { code: input.code },
+    {
+      code: input.code,
+      // Its calls are logged under the entry it came through.
+      logAs: `run_code_${input.tier ?? "destructive"}`,
+    },
     { ...options, runId: record.id, trace: record.trace },
   )
     .then(
@@ -714,7 +718,14 @@ export async function runProgram(
     code,
     input,
     label = "run_code",
-  }: { code: string; input?: string; label?: "run_code" | "wrapper" },
+    logAs = label,
+  }: {
+    code: string
+    input?: string
+    label?: "run_code" | "wrapper"
+    /** The tool its calls are logged under: the entry it came through. */
+    logAs?: string
+  },
   {
     call,
     list,
@@ -929,7 +940,7 @@ export async function runProgram(
       void appendRequestLog({
         vaultId: scope.ctx.vaultId,
         tokenId: scope.tokenId,
-        tool: label,
+        tool: logAs,
         server,
         upstreamTool: tool,
         ok: owner || outcome.ok,

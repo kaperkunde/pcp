@@ -305,7 +305,11 @@ export function resolveAccessProposal(
   const tierNow = new Map(
     [...servers, ...(own ? [own] : [])].flatMap((server) =>
       server.tools.map(
-        (tool) => [accessKey(server.id, tool.name), tool] as const,
+        (tool) =>
+          [
+            accessKey(server.id, tool.name),
+            { tier: tool.tier, override: tool.tierOverride },
+          ] as const,
       ),
     ),
   )

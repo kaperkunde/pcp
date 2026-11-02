@@ -48,6 +48,20 @@ export const INSTRUCTION_TEMPLATES: readonly InstructionTemplate[] = [
       "- If this app cannot load call_tool, run_code makes the same calls: await pcp.call(server, tool, args).",
     ].join("\n"),
   },
+  {
+    // call_tool and run_code became one entry per tier (call_tool_read,
+    // call_tool_write, call_tool_destructive and run_code_* the same), and
+    // call_read_only_tool went: describe names the entry for each tool.
+    version: 4,
+    text: [
+      "- Find tools, skills and memories with search. Describe a tool with describe before you call it, and call it with the call_handle that describe gives, through the entry it names for the tool's tier: call_tool_read, call_tool_write or call_tool_destructive. Do not guess argument names.",
+      "- When a skill fits the task, describe it and follow its steps: the owner approved them.",
+      "- After an action failed or is waiting for the owner, check before you try it again (check_permission, or look at what it would have changed), so nothing happens twice.",
+      "- When an answer gives you a link to PCP, end your reply with it as a markdown link with a short label naming the action, on a line of its own, never the bare address.",
+      "- Read a memory before you change or replace it.",
+      "- If this app cannot load the call_tool entries, run_code_read, run_code_write or run_code_destructive make the same calls: await pcp.call(server, tool, args).",
+    ].join("\n"),
+  },
 ]
 
 /** The suggested instructions new tokens get now. */

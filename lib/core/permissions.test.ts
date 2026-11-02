@@ -47,6 +47,7 @@ import { OwnerNeeded } from "./browser/types"
 import { keepBytes } from "./tool-results"
 import { callServerTool, syncServerTools } from "./upstream"
 import { copyTokenAccess, writeToolAccess } from "./tool-access"
+import { setToolTier } from "./tool-tiers"
 import { setupVault } from "./vault"
 import { createSshServer } from "./ssh/hosts"
 
@@ -370,7 +371,31 @@ describe("asking the owner", () => {
     expect(view?.title).toBe("Allow postcards/send_postcard?")
     expect(view?.lines).toContain("to: Ada")
     expect(view?.lines).toContain('Asked by the token "Claude"')
-    expect(view?.warning).toMatch(/destructive/)
+    expect(view?.warning).toMatch(/a Destructive tool/)
+
+    // The tier decides, the owner's choice over the hints.
+    await setToolTier(ctx, server.id, "send_postcard", "write")
+    expect(
+      (
+        await getPermissionView(ctx, await onlyRequestId(), {
+          publicUrl: PUBLIC_URL,
+        })
+      )?.warning,
+    ).toBeNull()
+  })
+
+  it("warns about a tool without hints, which counts as Destructive", async () => {
+    const { ctx, scope, server } = await setup()
+    await db().mcpTool.updateMany({
+      where: { serverId: server.id, name: "send_postcard" },
+      data: { annotations: null },
+    })
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+
+    const view = await getPermissionView(ctx, await onlyRequestId(), {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(view?.warning).toMatch(/a Destructive tool/)
   })
   it("shows everything a call runs with when the lines cut it short, with what does not show written out", async () => {
     const { ctx, scope, server } = await setup()
