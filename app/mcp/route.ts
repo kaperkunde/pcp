@@ -3,7 +3,8 @@ import { after } from "next/server"
 
 import { afterAnswerScope } from "@/lib/core/after-answer"
 import { resolveApiToken } from "@/lib/core/api-tokens"
-import { clientHello, clientSeen } from "@/lib/core/client-hello"
+import { clientHello, clientSeen, requestClient } from "@/lib/core/client-hello"
+import { detectClient, noteClientSeen } from "@/lib/core/clients/detect"
 import {
   buildGatewayServer,
   ensureCatalogue,
@@ -13,6 +14,7 @@ import {
 import { usableExitNames } from "@/lib/core/exits/use"
 import { instructionMemories } from "@/lib/core/memories"
 import { instructionSkills } from "@/lib/core/skills"
+import { readOwnToolTiers } from "@/lib/core/tool-tiers"
 import { bearerChallenge } from "@/lib/core/oauth-server/metadata"
 import {
   ACCESS_TOKEN_PREFIX,
@@ -59,11 +61,13 @@ const mcpHandler = createMcpHandler(
       memories: scope.keepMemories
         ? await instructionMemories(scope.ctx, scope.tokenId)
         : null,
-      skills: await instructionSkills(scope.ctx, scope.skillIds),
+      skills: await instructionSkills(scope.ctx, scope.skillIds, scope.tokenId),
       // web_fetch's exit argument names the exits this token may use.
       exitNames: scope.webFetch
         ? await usableExitNames(scope.ctx, scope.tokenId)
         : [],
+      // What PCP's own tools advertise follows the owner's tiers for them.
+      ownTiers: await readOwnToolTiers(scope.ctx),
     })
   },
   {
@@ -157,11 +161,11 @@ async function handle(request: Request): Promise<Response> {
     )
   }
 
+  const body = request.method === "POST" ? await request.clone().text() : ""
+
   // The rate limit counts requests. A JSON-RPC batch is many calls in one, so
   // it would get around it: the current protocol has no batches either.
   if (request.method === "POST") {
-    const body = await request.clone().text()
-
     if (body.trimStart().startsWith("[")) {
       return withCors(
         jsonRpcError(
@@ -192,9 +196,17 @@ async function handle(request: Request): Promise<Response> {
     }
   }
 
+  // The app on the other end and the profile it is answered with
+  // (lib/core/clients/): the owner's choice for the token, else what this
+  // request and the token's last initialize show. The client last seen is
+  // kept on the token for its Advanced page once this answer is sent.
+  const client = detectClient(resolved, requestClient(body, request.headers))
+  after(() => noteClientSeen(resolved, client).catch(() => {}))
+
   const scope: GatewayScope = {
     ...resolved,
     publicUrl: await publicUrlFor(resolved.ctx, request),
+    client,
   }
 
   // What a call hands on to do once it has answered (an IMAP send's look

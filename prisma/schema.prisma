@@ -39,11 +39,13 @@ model Vault {
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
   fileLinks          FileLink[]
+  uploadLinks        UploadLink[]
   browserProfile     BrowserProfile?
   oauthCredentials   OAuthCredential[]
   repos              Repo[]
   serverDefinitions  ServerDefinition[]
   exits              Exit[]
+  toolTiers          ToolTier[]
 
   @@map("vault")
 }
@@ -164,15 +166,26 @@ model ApiToken {
   /// The version of PCP's suggested instructions (instructions-defaults.ts)
   /// the text was copied or merged from. Null with no instructions.
   instructionsBase Int?    @map("instructions_base")
+  /// The owner's choice of client profile for this token
+  /// (lib/core/clients/profiles.ts: what PCP repeats of its instructions in
+  /// answers, and how it formats links), by id. Null: detected per request.
+  clientProfile    String?  @map("client_profile")
+  /// The client PCP last saw use this token, as JSON: its name and version
+  /// as the client gave them, the profile it was detected as, and when
+  /// (lib/core/clients/detect.ts). Nothing of a request's content, never a
+  /// header's value but the client's own label; not the request log.
+  clientSeen       String?  @map("client_seen")
 
   servers            ApiTokenServer[]
   skills             ApiTokenSkill[]
   toolAccess         ApiTokenToolAccess[]
   permissionRequests PermissionRequest[]
   memories           Memory[]
+  privateSkills      Skill[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
   fileLinks          FileLink[]
+  uploadLinks        UploadLink[]
   oauthCredentials   OAuthCredential[]
   toolAllowances     ApiTokenToolAllowance[]
   siteAllowances     ApiTokenSiteAllowance[]
@@ -469,9 +482,20 @@ model Skill {
   vault      Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   /// owner | assistant: who wrote the text as it is now.
   author     String   @default("owner")
+  /// shared | private. A shared skill is seen by the tokens the owner
+  /// chooses (allSkills, ApiTokenSkill); a private one only by the token
+  /// that keeps it (`tokenId`), which writes it without asking, and by the
+  /// owner. A private one is never in a linked repository.
+  visibility String   @default("shared")
+  /// The token a private skill is kept by. Null for a shared skill, and for
+  /// a private one once its token is deleted: it stays, the owner's alone,
+  /// seen by no token.
+  tokenId    String?   @map("token_id")
+  token      ApiToken? @relation(fields: [tokenId], references: [id], onDelete: SetNull)
   /// The name, description, version, body, tools and files as JSON,
   /// AES-256-GCM under the vault's data key with "skill:<id>" as associated
-  /// data. Names are unique per vault by checking, as memory paths are.
+  /// data. Shared names are unique per vault, a private skill's per token,
+  /// by checking, as memory paths are.
   ciphertext Bytes
   /// The owner's own note on the skill (its one instance), at most 300
   /// characters on one line: AES-256-GCM under the vault's data key with
@@ -487,6 +511,7 @@ model Skill {
   repoExclusions RepoExclusion[]
 
   @@index([vaultId])
+  @@index([tokenId])
   @@map("skill")
 }
 
@@ -718,6 +743,7 @@ model McpServer {
   repoItems          RepoItem[]
   exits              Exit[]              @relation("ExitHost")
   exitServices       Exit[]              @relation("ExitService")
+  toolTiers          ToolTier[]
 
   @@unique([vaultId, slug])
   @@index([definitionId])
@@ -751,9 +777,38 @@ model ServerDefinition {
 
   instances      McpServer[]
   repoExclusions RepoExclusion[]
+  toolTiers      ToolTier[]
 
   @@unique([vaultId, slug])
   @@map("server_definition")
+}
+
+/// The owner's tier for a tool (lib/core/tool-tiers.ts): Read, Write or
+/// Destructive in place of what its annotations say. Kept apart from
+/// mcp_tool so it outlives a tool that drops out of a refresh. A server
+/// with a definition keeps it on the definition, shared by every instance
+/// (definitionId set); a server without one (mail, calendar, SSH, the
+/// browser) on the server (serverId set). Exactly one of the two is set.
+model ToolTier {
+  id           String            @id
+  vaultId      String            @map("vault_id")
+  vault        Vault             @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  definitionId String?           @map("definition_id")
+  definition   ServerDefinition? @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  serverId     String?           @map("server_id")
+  server       McpServer?        @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  toolName     String            @map("tool_name")
+  /// read | write | destructive
+  tier         String
+  /// A wrapper's tool: the tier its calls came to when the owner chose
+  /// this one, so the header's bell says when they come to more since.
+  seenTier     String?           @map("seen_tier")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+
+  @@unique([definitionId, toolName])
+  @@unique([serverId, toolName])
+  @@index([vaultId])
+  @@map("tool_tier")
 }
 
 /// header auth: a further header carrying a secret, sent with the one on
@@ -1008,10 +1063,51 @@ model FileLink {
   /// become a kept result.
   expiresAt  DateTime  @map("expires_at")
   receivedAt DateTime? @map("received_at")
+  /// The upload page this is one file of (UploadLink), or null for a
+  /// receive_file link. Not a relation: a file that arrived outlives its
+  /// page until the token uses it, and the cleanup removes each by its date.
+  uploadLinkId String? @map("upload_link_id")
 
   @@index([tokenId, resultId])
   @@index([expiresAt])
+  @@index([uploadLinkId])
   @@map("file_link")
+}
+
+/// A page the owner uploads files to (lib/core/upload-links.ts): an
+/// assistant with `shareFiles` asks for one with create_upload_link, and the
+/// owner opens /upload/<secret> on their phone or computer. The link's secret
+/// is the credential. Each file it takes is one of its FileLink rows (kind
+/// "upload", `uploadLinkId` set), made with it, each with its result id and
+/// its key wrapped under the vault's data key, so the file becomes a kept
+/// result once the token uses its handle.
+model UploadLink {
+  id          String    @id
+  vaultId     String    @map("vault_id")
+  vault       Vault     @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  tokenId     String    @map("token_id")
+  token       ApiToken  @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  /// SHA-256 of the link's secret, which the page and its uploads look it up by.
+  secretHash  String    @unique @map("secret_hash")
+  /// What the files are for, as the assistant said it: AES-256-GCM under the
+  /// link's key with "upload_link:<id>", so only the link shows it.
+  purpose     Bytes
+  maxFiles    Int       @map("max_files")
+  /// The result ids its files are kept under, in order: a JSON array.
+  resultIds   String    @map("result_ids")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  /// It takes files until then: its first hour (or less), then a quarter of
+  /// an hour from the first file.
+  acceptUntil DateTime  @map("accept_until")
+  firstAt     DateTime? @map("first_at")
+  /// The owner said Done, or it took as many files as it was made for.
+  closedAt    DateTime? @map("closed_at")
+  /// The row is kept until then, for check_upload: a day past acceptUntil.
+  expiresAt   DateTime  @map("expires_at")
+
+  @@index([tokenId])
+  @@index([expiresAt])
+  @@map("upload_link")
 }
 
 /// The browser's sign-ins (lib/core/browser/): the cookies, local storage

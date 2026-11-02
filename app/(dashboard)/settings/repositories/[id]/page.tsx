@@ -329,7 +329,7 @@ function ItemsTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl bg-card">
+    <div className="relative overflow-x-auto rounded-xl bg-card">
       <table className="w-full min-w-[40rem] text-sm" data-testid="repo-table">
         <thead className="sr-only">
           <tr>

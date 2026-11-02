@@ -234,6 +234,7 @@ async function readVault(vaultId: string): Promise<ExportPayloadJson> {
           repoExclusions: (
             await tx.repoExclusion.findMany({ where: { repo: { vaultId } } })
           ).map(rowJson),
+          toolTiers: (await tx.toolTier.findMany(byVault)).map(rowJson),
           settings: settings.map(rowJson),
           browserProfiles: (await tx.browserProfile.findMany(byVault)).map(
             rowJson,
@@ -541,6 +542,9 @@ async function writeExport(
         await inChunks(tables.repoExclusions, (data) =>
           tx.repoExclusion.createMany({ data }),
         )
+        await inChunks(tables.toolTiers, (data) =>
+          tx.toolTier.createMany({ data }),
+        )
         await inChunks(tables.settings, (data) =>
           tx.setting.createMany({ data }),
         )
@@ -582,8 +586,10 @@ export async function wipeVault(
   // Answers kept for read_result are not exported: a day's cache, bound to
   // the tokens this restore replaces.
   await tx.toolResult.deleteMany(byVault)
-  // Nor are the links that move them to and from an assistant's computer.
+  // Nor are the links that move them to and from an assistant's computer,
+  // or the pages the owner uploads them from.
   await tx.fileLink.deleteMany(byVault)
+  await tx.uploadLink.deleteMany(byVault)
   // Nor are tools and sites allowed for a while: an answer to a request,
   // for the tokens this restore replaces, and over within hours.
   await tx.apiTokenToolAllowance.deleteMany(byToken)
@@ -593,6 +599,7 @@ export async function wipeVault(
   await tx.repoItem.deleteMany({ where: { repo: { vaultId } } })
   await tx.repoExclusion.deleteMany({ where: { repo: { vaultId } } })
   await tx.repo.deleteMany(byVault)
+  await tx.toolTier.deleteMany(byVault)
   await tx.apiTokenSkill.deleteMany(byToken)
   await tx.skill.deleteMany(byVault)
   await tx.permissionRequest.deleteMany(byVault)

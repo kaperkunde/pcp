@@ -18,7 +18,7 @@ import { ButtonLink } from "@/components/ui/button"
 import { List, ListRow } from "@/components/ui/list"
 import { listTokenAllowances } from "@/lib/core/allowances"
 import { listOpenPermissions } from "@/lib/core/permissions"
-import { listSkills, tokenSkills } from "@/lib/core/skills"
+import { listSharedSkills, tokenSkills } from "@/lib/core/skills"
 import { listTokenToolAccess } from "@/lib/core/tool-access"
 import { listFetchRules } from "@/lib/core/web-fetch"
 import { publicUrlFor } from "@/lib/server/public-url"
@@ -52,7 +52,7 @@ export default async function TokenPage({
       listOpenPermissions(ctx, id, publicUrl),
       listTokenAllowances(ctx, id),
       token.webFetch || browser ? listFetchRules(ctx, id) : null,
-      listSkills(ctx),
+      listSharedSkills(ctx),
       tokenSkills(ctx, id),
     ])
   const advanced = `/tokens/${id}/advanced`

@@ -5,10 +5,12 @@ import type {
 
 import { allowanceHolds, loadToolAllowances } from "./allowances"
 import type { ResolvedToken } from "./api-tokens"
-import type { ToolAccess } from "./constants"
+import type { DetectedClient } from "./clients/detect"
+import type { ToolAccess, ToolTier } from "./constants"
 import { db } from "./db"
 import { readServerNote } from "./personal-notes"
 import { accessKey, effectiveAccess, loadToolAccess } from "./tool-access"
+import { loadToolTiers } from "./tool-tiers"
 import { readWrapperOperation } from "./wrappers/definition"
 
 /**
@@ -17,7 +19,15 @@ import { readWrapperOperation } from "./wrappers/definition"
  * calls through (lib/core/wrappers/run.ts).
  */
 
-export type GatewayScope = ResolvedToken & { publicUrl: string }
+export type GatewayScope = ResolvedToken & {
+  publicUrl: string
+  /**
+   * The app the request comes from and the profile it is answered with
+   * (clients/detect.ts), set by /mcp. Without one (the owner's own pages,
+   * tests) nothing is said once per session and nothing is repeated.
+   */
+  client?: DetectedClient
+}
 
 /**
  * A tool as the gateway keeps it for a request: enough to search and list,
@@ -30,6 +40,13 @@ export type GatewayTool = Pick<
   "id" | "name" | "title" | "description" | "descriptionOverride"
 > & {
   access: ToolAccess
+  /**
+   * Its effective tier (lib/core/tool-tiers.ts): which entry tools run it
+   * (call_tool_<tier> and the ones above).
+   */
+  tier: ToolTier
+  /** The owner's tier for it, when they chose one (else its default). */
+  tierOverride: ToolTier | null
   /**
    * A wrapper's tool this token sees stands in for this one ("wrapper/tool"):
    * left out of search and list_tools, still called by its name.
@@ -95,6 +112,7 @@ export async function loadGatewayServers(
     loadToolAllowances(scope.tokenId, now),
   ])
 
+  const tiers = await loadToolTiers(scope.ctx.vaultId, servers)
   const loaded: GatewayServer[] = servers.map((server) => ({
     ...server,
     note: readServerNote(scope.ctx, server),
@@ -104,6 +122,9 @@ export async function loadGatewayServers(
 
       return {
         ...tool,
+        tier: tiers.get(accessKey(server.id, tool.name))?.tier ?? "destructive",
+        tierOverride:
+          tiers.get(accessKey(server.id, tool.name))?.override ?? null,
         access:
           level === "ask" && allowanceHolds(until, now.getTime())
             ? "allowed"

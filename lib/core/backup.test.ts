@@ -43,7 +43,13 @@ import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
 import { UPDATE_CONFIG_KEY, UPDATE_STATUS_KEY } from "./updates/state"
 import { createSecret, deleteSecret, revealSecret } from "./secrets"
 import { createServer } from "./servers"
-import { createSkill, deleteSkill, listSkills, setTokenSkills } from "./skills"
+import {
+  createSkill,
+  deleteSkill,
+  listSkills,
+  runSkillCommand,
+  setTokenSkills,
+} from "./skills"
 import { saveWrapperByOwner } from "./wrappers/admin"
 import { createSshExit, writeExitAccess } from "./exits/exits"
 import { createSshServer } from "./ssh/hosts"
@@ -59,6 +65,12 @@ import { createSession, resolveSession } from "./sessions"
 import { getSetting, SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
 import { keepResult, readResult } from "./tool-results"
+import {
+  readOwnToolTiers,
+  setOwnToolTier,
+  setToolTier,
+  toolTier,
+} from "./tool-tiers"
 import {
   ownerVault,
   resetPasswordWithRecoveryKey,
@@ -881,6 +893,39 @@ describe("restoring", { timeout: 60_000 }, () => {
     })
   })
 
+  it("carries the owner's tiers, and restores a file from before tiers", async () => {
+    const { ctx, serverId } = await populate()
+    await setToolTier(ctx, serverId, "alpha", "read")
+    await setOwnToolTier(ctx, "search", "write")
+    const before = await db().toolTier.findMany()
+    expect(before).toHaveLength(1)
+
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().toolTier.findMany()).toEqual(before)
+    expect(await toolTier(serverId, "alpha")).toBe("read")
+    expect(await readOwnToolTiers(ctx)).toEqual({ search: "write" })
+
+    const older = structuredClone(await openRaw(file, EXPORT_PASSWORD))
+    delete (older.tables as Record<string, unknown>).toolTiers
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await db().toolTier.count()).toBe(0)
+    expect(await toolTier(serverId, "alpha")).toBe("destructive")
+  })
+
   it("carries exits and their levels, and restores a file from before exits", async () => {
     const { ctx } = await populate()
     const { id: sshId } = await createSshServer(ctx, {
@@ -1138,6 +1183,51 @@ describe("restoring", { timeout: 60_000 }, () => {
     expect(await db().apiTokenSkill.count()).toBe(0)
     // Every token of an older file sees every skill, as before skills.
     expect((await resolveApiToken(token))!.skillIds).toBeNull()
+  })
+
+  it("carries a token's own skills with their token, and reads an older file's as shared", async () => {
+    const { ctx, token } = await populate()
+    const { tokenId } = (await resolveApiToken(token))!
+    await runSkillCommand(
+      { ctx, tokenId, skillIds: null },
+      {
+        command: "create",
+        path: "/skills/mine/diary/SKILL.md",
+        file_text: "---\nname: diary\ndescription: Keep a diary.\n---\nWrite.",
+      },
+    )
+    const before = await listSkills(ctx)
+    expect(before[0]).toMatchObject({ visibility: "private", tokenId })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const { payload: read } = await readExport(file, EXPORT_PASSWORD)
+
+    await restoreExport(
+      read,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(await listSkills(ctx)).toEqual(before)
+
+    const raw = await openRaw(file, EXPORT_PASSWORD)
+    const older = structuredClone(raw)
+    for (const row of older.tables.skills as Record<string, unknown>[]) {
+      delete row.visibility
+      delete row.tokenId
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    expect(old.tables.skills[0]).toMatchObject({
+      visibility: "shared",
+      tokenId: null,
+    })
+
+    const broken = structuredClone(raw)
+    ;(broken.tables.skills as Record<string, unknown>[])[0]!.tokenId = "gone"
+    await expect(
+      readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow("a token is missing")
   })
 
   it("refuses a file whose token sees a skill it does not carry", async () => {

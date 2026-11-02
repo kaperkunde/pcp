@@ -114,7 +114,7 @@ export default async function LogPage({
             type="search"
             defaultValue={query.text ?? ""}
             maxLength={MAX_LOG_SEARCH_CHARS}
-            placeholder="call_tool, gmail, web_fetch…"
+            placeholder="call_tool_write, gmail, web_fetch…"
           />
         </Field>
         <div className="flex gap-2">

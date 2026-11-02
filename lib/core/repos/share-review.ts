@@ -12,7 +12,7 @@ import {
   setPersonalNote,
 } from "../definitions"
 import { changeEndpoint, storedSpec } from "../endpoints"
-import { invalid, PcpError } from "../errors"
+import { invalid, notFound, PcpError } from "../errors"
 import type { DiffLine } from "../line-merge"
 import { canonicalJson } from "../permission-rules"
 import { getServer, normalizeNameAndDescription } from "../servers"
@@ -665,6 +665,12 @@ export async function setSharedDescription(
 ): Promise<void> {
   if (item.kind === "skill") {
     const skill = await getSkill(ctx, item.id)
+
+    // A token's own skill is never shared from here.
+    if (skill.visibility !== "shared") {
+      throw notFound("That skill")
+    }
+
     await updateSkill(ctx, item.id, {
       name: skill.name,
       description,

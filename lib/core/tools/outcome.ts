@@ -74,12 +74,16 @@ export type ConnectLinks = z.infer<typeof CONNECT_LINKS>
 /**
  * A call that waits for the owner, as structuredContent: the link to hand
  * over and what it is for. A permission request names its id, for
- * check_permission; a server to connect names its links, for check_server.
+ * check_permission; a server to connect names its links, for check_server;
+ * an upload link (create_upload_link) its id, for check_upload.
  */
 export const NEEDS_OWNER = z.object({
   kind: z.literal("needs_owner"),
-  reason: z.enum(["permission", "connect"]),
-  /** The page the owner opens, signed in to PCP. */
+  reason: z.enum(["permission", "connect", "upload"]),
+  /**
+   * The page the owner opens: signed in to PCP, but for an upload link's,
+   * which the link alone opens.
+   */
   url: z.string(),
   /** A few words for the link. */
   label: z.string(),
@@ -87,6 +91,10 @@ export const NEEDS_OWNER = z.object({
   request: z.string().optional(),
   connect: CONNECT_LINKS.optional(),
   server: SERVER_STATE.optional(),
+  /** The upload link's id, for check_upload, and until when it takes files. */
+  upload: z
+    .object({ id: z.string(), maxFiles: z.number(), until: z.string() })
+    .optional(),
   /**
    * The whole answer in words, as its text says it: what the owner is
    * asked and how to hand the link over. Set for every tool (serve.ts), so

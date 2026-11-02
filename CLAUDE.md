@@ -91,7 +91,10 @@ so in the summary; the bump itself waits for the request.
   copied on each of them. Anything that writes shared content goes through
   `endpoints.ts applySpec`, `shareDescription`, `setToolDescription`,
   `writeWrapper` or `services.ts writeServiceDefinition`, so every instance gets it and
-  rebuilds its tools; a server made on a definition takes its content, never
+  rebuilds its tools; the owner's tool tiers are the definition's own rows
+  (`tool_tier`), written only through `tool-tiers.ts setToolTier`, which
+  every instance reads (a detach copies them, a merge keeps the kept
+  definition's); a server made on a definition takes its content, never
   its own. An endpoint shares the owner's rules with its siblings: it is the
   assistant's only while every instance is. Merge is the owner's alone. An
   assistant only proposes the rest, each a permission request that writes
@@ -123,7 +126,15 @@ so in the summary; the bump itself waits for the request.
   sees through `search` and `describe`, and proposes a change only through
   the `memory` tool's `/skills/…` paths: a `skill_change` request that shows
   the whole skill and its diff and writes only that, while the skill is
-  still at the version the owner was shown. A change to the SKILL.md shape
+  still at the version the owner was shown. The exception is a token's own
+  skills (`/skills/mine/<name>/`, `visibility` `private` with its
+  `tokenId`), as `/memories/notes.md` is: written at once, seen only by that
+  token (`skill:mine/<name>`, never framed as approved) and the owner (the
+  Skills page, marked with the token), never offered to another token and
+  never in a linked repository (`repos/` reads `listSharedSkills` only). One
+  becomes shared only by the owner's hand (`shareSkill`) or a `skill_change`
+  with `share` (renaming it out of `/skills/mine/`), written as shown. A
+  deleted token's stay, the owner's alone. A change to the SKILL.md shape
   stays backward compatible.
 - Every tool PCP exposes is defined through `lib/core/tools/`: PCP's own
   at `/mcp` with `defineTool`, the families behind call_tool (browser, mail,
@@ -133,8 +144,8 @@ so in the summary; the bump itself waits for the request.
   `allOf`, all four annotations, an `output` when every answer is one
   shape. One validator (`tools/validate.ts`) checks every call's
   arguments before anything runs, connects or asks the owner, on every
-  path (`lib/core/call-arguments.ts`: call_tool, run_code's `pcp.call`, a
-  wrapper's or flow's calls; the family again before it runs); zod adds
+  path (`lib/core/call-arguments.ts`: call_tool_<tier>, run_code_<tier>'s
+  `pcp.call`, a wrapper's or flow's calls; the family again before it runs); zod adds
   only what JSON Schema cannot say. An answer is one of the outcome kinds
   (`tools/outcome.ts`: `ok`, `toolError` with its code in
   `_meta["gg.pcp/error"]`, `needsOwner`, passed on): a family throws only
@@ -143,15 +154,46 @@ so in the summary; the bump itself waits for the request.
   renamed one is an alias for one release with a note (and a wrapper's
   answer says how to change its program), then `retired`, refused with the
   name to use. Each rename goes in `docs/breaking-changes.md`.
-- `call_tool` and `call_read_only_tool` take only a `call_handle` from
-  `describe` (`lib/core/call-handles.ts`: an HMAC under the vault key over
-  the token, the tool and its schema's hash), and check the arguments with
-  that validator before anything runs or asks the owner. run_code's
-  `pcp.call` keeps names.
+- A PCP tool's description opens with a verb, its object and what sets it
+  apart, in a search's words, within its first 25 characters: Claude's apps
+  show the model little more of a deferred tool (`gateway-tools.test.ts`
+  checks every one; a new tool adds its keyword there). Names and
+  descriptions are the same for every client and session. What differs per
+  app is in answers only, by its client profile (`lib/core/clients/`: a
+  typed list with `observed` dates, detected per request from clientInfo,
+  label headers, user agent and OAuth client name, the owner's choice per
+  token winning): whether the instructions' key rules are repeated, once a
+  session, and link style. The client last seen is `api_token.client_seen`
+  (its own name, version, profile, time), never the request log.
+- `call_tool_read`, `call_tool_write` and `call_tool_destructive` take only
+  a `call_handle` from `describe` (`lib/core/call-handles.ts`: an HMAC under
+  the vault key over the token, the tool and its schema's hash, the same for
+  every tier), and check the arguments with that validator before anything
+  runs or asks the owner. run_code_<tier>'s `pcp.call` keeps names.
+- Tool tiers (`lib/core/tool-tiers.ts`): every tool is Read, Write or
+  Destructive, and `effectiveTier` is the one truth: the owner's choice,
+  else for a wrapper's tool the highest tier of its calls (an unknown call
+  is Destructive; the definition's own annotations only propose), else the
+  annotations as MCP reads them (no hints is Destructive). An API
+  endpoint's tools state both hints (GET Read, POST/PUT/PATCH Write, DELETE
+  Destructive). Everything that asks whether a tool reads or destroys asks
+  there, never the raw annotations: the entry gates, `markedReadOnly`
+  (pacing, a run's trace), the permission page's warning, the wrapper
+  review's badges, describe, list_tools, search, pcp.tools, and what PCP's
+  own tools advertise. Each `call_tool_<tier>` and `run_code_<tier>` runs
+  tools at or below its tier only and refuses one above, naming the entry
+  that runs it, before its arguments are checked or the owner asked (in a
+  program, an error it may catch); the run's duplicate key holds the tier.
+  The owner's levels apply in every tier; a tier adds no right. Derived
+  tiers are worked out when asked, never stored. The owner's choices are
+  `tool_tier` rows (per definition, or per server without one) and the
+  vault's `toolTiers` setting for PCP's own tools; a wrapper tool's choice
+  below what its calls came to since goes to the bell (`tierNotices`).
 - Pacing (`lib/core/pacing/`) applies only in `upstream.ts callServerTool`
   (the browser by the tab's site, in `browser/call.ts`) and web fetch's
   request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
-  is paced: call_tool, run_code, wrappers and flows, owner-approved calls.
+  is paced: call_tool_<tier>, run_code_<tier>, wrappers and flows,
+  owner-approved calls, each as a read or a change by its tier.
   New defaults and bounds go in `pacing/limits.ts`, by class of action;
   nothing names a site or vendor. The owner's overrides are the vault's
   `pacing` setting, never a host setting.
@@ -163,8 +205,9 @@ so in the summary; the bump itself waits for the request.
   (`repos/limits.ts`) and read against a schema, every file checked against
   its git id. It never reads a secret: `upstream.ts githubCredential` hands
   it the header, from a text secret or PCP's own sign-in (`oauth/github`).
-  A server's document is its definition only (`PCP_FORMAT` 2): sync never
-  writes an instance's own fields (name and short name, address,
+  A token's own skill is never an item: not listed, pushed, imported onto
+  or kept out. A server's document is its definition only (`PCP_FORMAT`
+  2): sync never writes an instance's own fields (name and short name, address,
   credential and secrets, read-only, public-only, enabled, pace, levels,
   note; a service's SSH server, publish address, variables' secrets and
   typed values, container, what it registered, its exit), and what a format-1 document says of its
@@ -194,11 +237,14 @@ so in the summary; the bump itself waits for the request.
   Confirm on the push's review (`confirmProposedShare`, which is
   `confirmShare` unchanged). A new way in gets a test against
   `fake-github.ts`.
-- Tool levels an assistant proposes for its token (`propose_tool_access`,
-  `lib/core/access-requests.ts`) are written only by the owner's save on the
-  request's page (`applyAccessRequest`), with what they chose there. No
-  decision and nothing the assistant sends writes them, and blocked tools
-  stay out of what it can name.
+- Tool levels and tiers an assistant proposes (`propose_tool_access`,
+  `lib/core/access-requests.ts`: `access`, `tier` or both per change; PCP's
+  own tools by tier only, on the server "pcp") are written only by the
+  owner's save on the request's page (`applyAccessRequest`), with what they
+  chose there: levels for its token, tiers through `setToolTier` (every
+  server of the definition, which the page says) or the vault's setting.
+  No decision and nothing the assistant sends writes them, and blocked
+  tools stay out of what it can name.
 - Mail accounts (`lib/core/mail/`) never read a secret: `upstream.ts` hands
   in a `MailCredential` (the header, the login, or an OAuth bearer from
   `credential()`, renewed through `endpointToken` like an API endpoint's). Mail travels encrypted only (TLS, or STARTTLS that
@@ -325,7 +371,15 @@ so in the summary; the bump itself waits for the request.
   upload's key also wrapped under the vault's, so it becomes a kept result
   only when the token uses its handle); an hour, a few downloads or one
   upload, its token live, every use in the request log, never exported, and
-  pruned by the cleanup. Nothing else serves a kept result over HTTP.
+  pruned by the cleanup. Upload links (`lib/core/upload-links.ts`, same
+  option) are the one link for the owner: `create_upload_link` hands the
+  assistant `/upload/<secret>` (a page outside the dashboard, no session,
+  the link alone its credential) to give the owner as a markdown link, and
+  `check_upload` waits for what arrived; it takes a few files for an hour,
+  then a quarter of an hour from the first or until Done, each file a
+  `file_link` slot made with it (result id and wrapped key up front), so it
+  too becomes a kept result only when the token uses its handle. Nothing
+  else serves a kept result over HTTP.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:
   tool, server, upstream tool, time, outcome, the permission request an
   ask made, and for a secret the browser typed, its name and the origin.
@@ -387,7 +441,8 @@ so in the summary; the bump itself waits for the request.
   QuickJS instance, `args` handed in as text). A program calls only the
   tools its definition lists for it, never a wrapper's, at the calling
   token's own levels; a wrapper's tool comes out at the strictest of its
-  own level and those of the tools it calls (`gateway-servers.ts`), and a
+  own level and those of the tools it calls (`gateway-servers.ts`), and at
+  the highest tier of those tools unless the owner chose one, and a
   call that asks runs only in a call the owner allowed (`approved`); that is
   `callLevels` "token". With `callLevels` "approved", the default for a new
   wrapper, the owner's approval of the wrapper is the level for the calls it
@@ -494,8 +549,9 @@ so in the summary; the bump itself waits for the request.
   request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
   origin itself, `lib/server/same-origin.ts`), file links
-  (`app/api/files/[secret]/`: curl from an assistant's own computer, the
-  link's secret its only credential), and the browser's live view
+  (`app/api/files/[secret]/`: curl from an assistant's own computer, and
+  the upload page's PUTs and Done, the link's secret its only credential),
+  and the browser's live view
   (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
   owner's input, which an action cannot carry; the same origin check and
   session).

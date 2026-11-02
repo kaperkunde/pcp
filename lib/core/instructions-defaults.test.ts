@@ -34,7 +34,10 @@ describe("PCP's suggested instructions", () => {
       "check_permission",
       "link",
       "memory",
-      "run_code",
+      "run_code_read",
+      "call_tool_read",
+      "call_tool_write",
+      "call_tool_destructive",
     ]) {
       expect(text).toContain(word)
     }
@@ -59,5 +62,15 @@ describe("PCP's suggested instructions", () => {
     const merged = mergeLines(v2, mine, v3)
     expect(merged.conflicts).toBe(0)
     expect(merged.text).toBe(`${v3}\n- Answer in Dutch.`)
+  })
+
+  it("name the entry tools per tier from version 4, offered as a merge", () => {
+    const v3 = templateText(3)!
+    const v4 = templateText(4)!
+
+    expect(v3).toContain("call_tool, run_code")
+    expect(v4).not.toContain("call_tool, run_code")
+    expect(v4).toContain("call_tool_destructive")
+    expect(mergeLines(v3, v3, v4)).toEqual({ text: v4, conflicts: 0 })
   })
 })

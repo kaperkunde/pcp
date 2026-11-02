@@ -5,7 +5,7 @@ import { db } from "./db"
 import type { GatewayScope } from "./gateway"
 
 /**
- * For tests that call tools through the gateway: call_tool takes the
+ * For tests that call tools through the gateway: call_tool_<tier> takes the
  * call_handle describe gives, so a test describes the tool first, as
  * an assistant does.
  */

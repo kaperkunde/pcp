@@ -13,6 +13,8 @@ export type ToolCandidate = {
   name: string
   title: string | null
   description: string
+  /** Its tier (tool-tiers.ts), which search's line names. */
+  tier?: "read" | "write" | "destructive"
 }
 
 export type ToolMatch = ToolCandidate & { score: number }
@@ -312,7 +314,15 @@ export function searchTools(
 }
 
 /** A skill as search sees it: its name and description. */
-export type SkillCandidate = { name: string; description: string }
+/**
+ * A skill as search sees it: its name, and how its ref names it when that
+ * is not its name (mine/<name> for a token's own).
+ */
+export type SkillCandidate = {
+  name: string
+  description: string
+  pathName?: string
+}
 
 /** A memory as search sees it: its full path and its text. */
 export type MemoryCandidate = { path: string; text: string }
@@ -325,13 +335,15 @@ export type PcpToolCandidate = {
   name: string
   title: string
   description: string
+  /** Its tier, as its annotations (the owner's choice included) say. */
+  tier?: "read" | "write" | "destructive"
 }
 
 export type SearchKind = "tool" | "pcp" | "skill" | "memory"
 
 /** What a result of kind pcp says after its line. */
 export const PCP_TOOL_NOTE =
-  "PCP's own tool: call it directly (not through call_tool)."
+  "PCP's own tool: call it directly (not through call_tool_*)."
 
 /** One result of search: what it is, how describe names it, one line on it. */
 export type SearchResult = {
@@ -344,6 +356,8 @@ export type SearchResult = {
   /** A tool's title, when it has one. */
   title: string | null
   description: string
+  /** A tool's tier, or one of PCP's own. */
+  tier?: "read" | "write" | "destructive"
   score: number
 }
 
@@ -364,6 +378,7 @@ function pcpCandidate(tool: PcpToolCandidate): ToolCandidate {
     name: tool.name,
     title: tool.title,
     description: tool.description,
+    ...(tool.tier ? { tier: tool.tier } : {}),
   }
 }
 
@@ -433,6 +448,7 @@ export function searchEverything(
           ref: `${tool.server}/${tool.name}`,
           title: tool.title,
           description: summarize(tool.description) || "no description",
+          ...(tool.tier ? { tier: tool.tier } : {}),
           score: words.length ? scoreOne(tool, read, named) : 0,
         }),
       )
@@ -443,6 +459,7 @@ export function searchEverything(
         ref: tool.name,
         title: tool.title,
         description: `${summarize(tool.description)} ${PCP_TOOL_NOTE}`,
+        ...(tool.tier ? { tier: tool.tier } : {}),
         // The app lists PCP's tools whole already: one comes up by its
         // name or title (or for "pcp"), not by a word of its description.
         score:
@@ -456,7 +473,7 @@ export function searchEverything(
     : []
   const skillResults = wants("skill")
     ? skills.map((skill): SearchResult => {
-        const ref = `skill:${skill.name}`
+        const ref = `skill:${skill.pathName ?? skill.name}`
         const score = words.length
           ? scoreOne(
               {
@@ -531,6 +548,8 @@ export type OwnToolDescription = PcpToolCandidate & {
   inputSchema: Record<string, unknown>
   outputSchema?: Record<string, unknown> | undefined
   annotations: Record<string, boolean>
+  /** Its tier, as its annotations (the owner's choice included) say. */
+  tier?: "read" | "write" | "destructive"
 }
 
 /**
@@ -547,7 +566,8 @@ export function describeOwnTool(
       ...(note ? { note } : {}),
       tool: tool.name,
       kind: "pcp",
-      call: `PCP's own tool: call ${tool.name} directly, with arguments that match its inputSchema, not through call_tool. It has no call_handle.`,
+      call: `PCP's own tool: call ${tool.name} directly, with arguments that match its inputSchema, not through call_tool_*. It has no call_handle.`,
+      ...(tool.tier ? { tier: tool.tier } : {}),
       title: tool.title,
       description: tool.description,
       inputSchema: tool.inputSchema,
@@ -604,6 +624,8 @@ export type ListedTool = {
   title: string | null
   description: string
   access: "allowed" | "ask"
+  /** Its tier (tool-tiers.ts): which call_tool_<tier> runs it. */
+  tier?: "read" | "write" | "destructive"
 }
 
 /**
@@ -655,7 +677,7 @@ export function listTools(
     }`,
     ...page.map(
       (tool) =>
-        `${server}/${tool.name} [${tool.access}]${tool.title ? ` (${tool.title})` : ""} — ${summarize(tool.description) || "no description"}`,
+        `${server}/${tool.name} [${tool.access}${tool.tier ? `, ${tool.tier}: call_tool_${tool.tier}` : ""}]${tool.title ? ` (${tool.title})` : ""} — ${summarize(tool.description) || "no description"}`,
     ),
     ...(end < sorted.length
       ? [`More: call list_tools again with offset ${end}.`]

@@ -125,6 +125,31 @@ describe("listTools", () => {
     ])
   })
 
+  it("names each tool's tier and the entry that runs it, when it has one", () => {
+    expect(
+      listTools("porkbun", [
+        {
+          name: "delete_domain",
+          title: null,
+          description: "Deletes a domain.",
+          access: "ask",
+          tier: "destructive",
+        },
+        {
+          name: "list_domains",
+          title: null,
+          description: "Lists domains.",
+          access: "allowed",
+          tier: "read",
+        },
+      ]).split("\n"),
+    ).toEqual([
+      "porkbun: 2 tools, 1 allowed and 1 ask the owner first.",
+      "porkbun/delete_domain [ask, destructive: call_tool_destructive] — Deletes a domain.",
+      "porkbun/list_domains [allowed, read: call_tool_read] — Lists domains.",
+    ])
+  })
+
   it("pages through a long list without losing a tool", () => {
     const first = listTools("porkbun", many, { size: 2 }).split("\n")
     expect(first[0]).toContain("These are 1–2.")

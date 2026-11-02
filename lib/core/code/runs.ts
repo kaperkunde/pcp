@@ -28,8 +28,8 @@ export type TraceEntry = {
   /** How long it took, once it ended. */
   ms: number | null
   /**
-   * Whether its server marks it read-only (as call_read_only_tool decides);
-   * null until the call was looked up, and for one that was refused.
+   * Whether it is in the Read tier (tool-tiers.ts); null until the call was
+   * looked up, and for one that was refused.
    */
   readOnly: boolean | null
   /** It failed on the way (not reached, timed out): it may have gone through. */
@@ -88,9 +88,20 @@ export function newRunId(): string {
   return `run_${randomBytes(8).toString("hex")}`
 }
 
-/** What tells one program from another for the duplicate guard. */
-export function programKey(language: string, code: string): string {
-  return createHash("sha256").update(`${language}\n${code}`).digest("hex")
+/**
+ * What tells one program from another for the duplicate guard: its
+ * language, its text and the tier of the entry it came through, so the
+ * same program sent again through run_code_destructive after
+ * run_code_read refused a call runs rather than answering with that run.
+ */
+export function programKey(
+  language: string,
+  code: string,
+  tier: string,
+): string {
+  return createHash("sha256")
+    .update(`${language}\n${tier}\n${code}`)
+    .digest("hex")
 }
 
 /** A call of the trace, as a line of an answer. */
@@ -116,7 +127,7 @@ export function callLine(entry: TraceEntry, now = Date.now()): string {
 }
 
 /**
- * The calls that may have changed something: not marked read-only, and
+ * The calls that may have changed something: not in the Read tier, and
  * completed (well or not) or still under way.
  */
 export function sideEffects(trace: TraceEntry[]): TraceEntry[] {

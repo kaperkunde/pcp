@@ -3,7 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
-import { buildGatewayServer, type GatewayScope } from "../gateway"
+import { requestClient } from "../client-hello"
+import { detectClient } from "../clients/detect"
+import type { ClientProfileId } from "../clients/profiles"
+import {
+  buildGatewayServer,
+  MEMORY_REMINDER,
+  MIRRORED_LEAD,
+  type GatewayScope,
+} from "../gateway"
 import { appendRequestLog } from "../request-log"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
@@ -25,14 +33,17 @@ const ALL_TOOLS = [
   "search",
   "list_tools",
   "describe",
-  "call_tool",
-  "call_read_only_tool",
+  "call_tool_read",
+  "call_tool_write",
+  "call_tool_destructive",
   "check_permission",
   "withdraw_request",
   "check_server",
   "read_result",
   "share_result",
   "receive_file",
+  "create_upload_link",
+  "check_upload",
   "register_server",
   "propose_tool_access",
   "update_endpoint",
@@ -45,7 +56,9 @@ const ALL_TOOLS = [
   "read_memory",
   "memory",
   "web_fetch",
-  "run_code",
+  "run_code_read",
+  "run_code_write",
+  "run_code_destructive",
   "check_run",
 ]
 
@@ -162,6 +175,8 @@ describe("PCP's own tools", () => {
       [
         "check_permission",
         "check_server",
+        "check_upload",
+        "create_upload_link",
         "create_wrapper",
         "delete_wrapper",
         "get_endpoint",
@@ -188,12 +203,72 @@ describe("PCP's own tools", () => {
     }
   })
 
-  it("keep run_code's and register_server's own descriptions short", async () => {
+  it("open each description with a verb and what it acts on, in the words a deferred list shows", async () => {
+    // Claude's apps show some 25 characters of a deferred tool's
+    // description after the connector's name (observed 2026-11-02).
+    const { tools } = await client.listTools()
+    const opening = (name: string) =>
+      tools.find((tool) => tool.name === name)!.description!.slice(0, 25)
+
+    for (const tool of tools) {
+      const first = tool.description!.slice(0, 25)
+
+      expect(first, tool.name).toMatch(
+        /^(START HERE: |(Search|List|Get|Call|Run|Check|Withdraw|Read|Share|Receive|Propose|Change|Fetch|Save) )/,
+      )
+      // A verb and an object, not a verb alone.
+      expect(first.trim().split(/\s+/).length, tool.name).toBeGreaterThan(2)
+    }
+
+    // The words a search for the tool would use, where it can see them.
+    const keywords: Record<string, RegExp> = {
+      search: /^Search tools, skills, mem/,
+      read_memory: /^START HERE: owner's rules/,
+      memory: /^Save memories/,
+      describe: /call_handle/,
+      call_tool_read: /^Call a Read/,
+      call_tool_write: /^Call a Write/,
+      call_tool_destructive: /^Call a Destructive/,
+      run_code_read: /code/,
+      run_code_write: /code/,
+      run_code_destructive: /code/,
+      check_permission: /permission/,
+      withdraw_request: /request/,
+      check_server: /server/,
+      check_run: /run_code/,
+      read_result: /result/,
+      share_result: /file/,
+      receive_file: /file/,
+      create_upload_link: /files/,
+      check_upload: /upload/,
+      register_server: /server/,
+      list_secrets: /secret/,
+      get_endpoint: /endpoint/,
+      get_wrapper: /wrapper/,
+      create_wrapper: /wrapper/,
+      update_wrapper: /wrapper/,
+      delete_wrapper: /wrapper/,
+      update_endpoint: /endpoint/,
+      propose_tool_access: /tool/,
+      list_tools: /tool/,
+      web_fetch: /web/,
+    }
+
+    expect(Object.keys(keywords).sort()).toEqual([...ALL_TOOLS].sort())
+
+    for (const [name, pattern] of Object.entries(keywords)) {
+      expect(opening(name), name).toMatch(pattern)
+    }
+  })
+
+  it("keep the run_code entries' and register_server's own descriptions short", async () => {
     const { tools } = await client.listTools()
     const length = (name: string) =>
       tools.find((tool) => tool.name === name)!.description!.length
 
-    expect(length("run_code")).toBeLessThan(3_000)
+    for (const tier of ["read", "write", "destructive"]) {
+      expect(length(`run_code_${tier}`)).toBeLessThan(3_000)
+    }
     expect(length("register_server")).toBeLessThan(2_500)
   })
 
@@ -345,7 +420,7 @@ describe("PCP's own tools in search and describe (#41)", () => {
       query: "check_permission PCP",
     })
     expect(found.text.split("\n")[0]).toMatch(
-      /^pcp check_permission \(.+\) — .+ PCP's own tool: call it directly \(not through call_tool\)\.$/,
+      /^pcp check_permission \(.+\) \[read\] — .+ PCP's own tool: call it directly \(not through call_tool_\*\)\.$/,
     )
     expect(
       (await said(client, "search", { query: "withdraw" })).text.split("\n")[0],
@@ -373,7 +448,7 @@ describe("PCP's own tools in search and describe (#41)", () => {
     })
     expect(tool.call_handle).toBeUndefined()
 
-    const handle = await said(client, "call_tool", {
+    const handle = await said(client, "call_tool_destructive", {
       call_handle: "check_permission",
       arguments: {},
     })
@@ -383,19 +458,22 @@ describe("PCP's own tools in search and describe (#41)", () => {
 
   it("reads a name with an app's prefix as the bare name, and says so", async () => {
     const found = await said(client, "search", {
-      query: "mcp__PCP_Bazzite__run_code",
+      query: "mcp__PCP_Bazzite__run_code_read",
     })
     const lines = found.text.split("\n")
     expect(lines[0]).toBe(
-      "\"mcp__PCP_Bazzite__\" is your app's prefix for PCP's tools, not part of the name: the tool is run_code, and you call it directly.",
+      "\"mcp__PCP_Bazzite__\" is your app's prefix for PCP's tools, not part of the name: the tool is run_code_read, and you call it directly.",
     )
-    expect(lines[2]).toMatch(/^pcp run_code /)
+    expect(lines[2]).toMatch(/^pcp run_code_read /)
 
     const described = JSON.parse(
-      (await said(client, "describe", { ref: "mcp__PCP_Bazzite__run_code" }))
-        .text,
+      (
+        await said(client, "describe", {
+          ref: "mcp__PCP_Bazzite__run_code_read",
+        })
+      ).text,
     )
-    expect(described.tool).toBe("run_code")
+    expect(described.tool).toBe("run_code_read")
     expect(described.note).toContain('"mcp__PCP_Bazzite__"')
   })
 
@@ -412,13 +490,126 @@ describe("PCP's own tools in search and describe (#41)", () => {
     const plain = new Client({ name: "test", version: "1.0.0" })
     await plain.connect(clientSide)
 
-    const found = await said(plain, "search", { query: "run_code" })
+    const found = await said(plain, "search", { query: "run_code_read" })
     expect(found.text).not.toContain("pcp run_code")
-    const described = await said(plain, "describe", { ref: "run_code" })
+    const described = await said(plain, "describe", { ref: "run_code_read" })
     expect(described.isError).toBe(true)
     expect(
       (await said(plain, "search", { query: "check_permission" })).text,
     ).toMatch(/^pcp check_permission /)
     await plain.close()
+  })
+})
+
+describe("once a session, for the app on the other end (#53)", () => {
+  /** A gateway for a new token, answered as the profile given. */
+  async function connectAs(
+    profile: ClientProfileId,
+    { keepMemories = true, instructions = false } = {},
+  ): Promise<Client> {
+    const { id, token } = await createApiToken(ctx, {
+      name: profile,
+      allowAllServers: true,
+      keepMemories,
+    })
+    const resolved = (await resolveApiToken(token))!
+    const scope: GatewayScope = {
+      ...resolved,
+      instructions: instructions ? "Answer in Dutch." : null,
+      publicUrl: PUBLIC_URL,
+      client: detectClient(
+        { ...resolved, tokenId: id, clientProfile: profile },
+        requestClient(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 0,
+            method: "initialize",
+            params: { clientInfo: { name: `app-${profile}` } },
+          }),
+          new Headers(),
+        ),
+      ),
+    }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await buildGatewayServer(scope, []).connect(serverSide)
+    const connected = new Client({ name: "test", version: "1.0.0" })
+    await connected.connect(clientSide)
+    return connected
+  }
+
+  async function texts(
+    on: Client,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<string[]> {
+    const result = await on.callTool({ name, arguments: args })
+    return (result.content as Array<{ text: string }>).map((part) => part.text)
+  }
+
+  it("reminds search and describe once to read the owner's memories, until read_memory every runs", async () => {
+    const generic = await connectAs("generic")
+    const first = await texts(generic, "search", { query: "memory" })
+
+    expect(first.slice(1)).toEqual([MEMORY_REMINDER])
+    expect(await texts(generic, "search", { query: "memory" })).toHaveLength(1)
+    expect(await texts(generic, "describe", { ref: "search" })).toHaveLength(1)
+    await generic.close()
+
+    const reader = await connectAs("generic")
+    await texts(reader, "read_memory", { command: "every" })
+    expect(await texts(reader, "describe", { ref: "search" })).toHaveLength(1)
+    await reader.close()
+
+    // A token that keeps no memories has nothing to be reminded of.
+    const forgetful = await connectAs("generic", { keepMemories: false })
+    expect(await texts(forgetful, "search", { query: "memory" })).toHaveLength(
+      1,
+    )
+    await forgetful.close()
+  })
+
+  it("repeats the instructions' key rules for Claude's apps, once, and not for Claude Code", async () => {
+    const app = await connectAs("claude-ai")
+    const every = await texts(app, "read_memory", { command: "every" })
+
+    expect(every).toHaveLength(1)
+    expect(every[0]).toContain(MIRRORED_LEAD)
+    expect(every[0]).toContain("call_handle")
+    expect(every[0]).toContain("End your reply with the link")
+    // read_memory every had them: search does not repeat them.
+    expect(await texts(app, "search", { query: "memory" })).toHaveLength(1)
+    await app.close()
+
+    // Without read_memory, the first search carries them (and the
+    // reminder), and the next nothing.
+    const other = await connectAs("claude-ai")
+    const searched = await texts(other, "search", { query: "memory" })
+    expect(searched).toHaveLength(3)
+    expect(searched[1]).toBe(MEMORY_REMINDER)
+    expect(searched[2]).toContain(MIRRORED_LEAD)
+    expect(await texts(other, "describe", { ref: "search" })).toHaveLength(1)
+    await other.close()
+
+    const code = await connectAs("claude-code")
+    expect(
+      (await texts(code, "read_memory", { command: "every" }))[0],
+    ).not.toContain(MIRRORED_LEAD)
+    expect(
+      (await texts(code, "search", { query: "memory" })).join("\n"),
+    ).not.toContain(MIRRORED_LEAD)
+    await code.close()
+  })
+
+  it("brings the owner's instructions along where read_memory does not", async () => {
+    const app = await connectAs("claude-ai", {
+      keepMemories: false,
+      instructions: true,
+    })
+    const searched = await texts(app, "search", { query: "search" })
+
+    expect(searched).toHaveLength(2)
+    expect(searched[1]).toContain(MIRRORED_LEAD)
+    expect(searched[1]).toContain("Answer in Dutch.")
+    await app.close()
   })
 })

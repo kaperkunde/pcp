@@ -1134,15 +1134,23 @@ describe("the token setting and the instructions", () => {
       'IMPORTANT: BEFORE YOUR FIRST REPLY, EVEN TO A GREETING, CALL THE read_memory TOOL WITH command "every".',
     )
 
-    // claude.ai shows a deferred tool's first sentence until it is loaded,
-    // and keeps the tool list after the memories change, so it never varies.
+    // Claude's apps show some 25 characters of a deferred tool's
+    // description (after the connector's name) until it is loaded, and keep
+    // the tool list after the memories change, so it never varies.
+    expect(READ_MEMORY_TOOL_DESCRIPTION.slice(0, 25)).toBe(
+      "START HERE: owner's rules",
+    )
     expect(
       READ_MEMORY_TOOL_DESCRIPTION.slice(
         0,
-        READ_MEMORY_TOOL_DESCRIPTION.indexOf(". ") + 1,
+        READ_MEMORY_TOOL_DESCRIPTION.indexOf(". ", 40) + 1,
       ),
     ).toBe(
-      'Before your first reply in a conversation, even to a greeting, call this with command "every": it returns what the owner wants followed in every conversation and lists their other memories.',
+      'START HERE: owner\'s rules + memories. Before your first reply in a conversation, even to a greeting, call this with command "every": it returns what the owner wants followed in every conversation and lists their other memories.',
+    )
+    // The writing tool says first where memories go.
+    expect(MEMORY_TOOL_DESCRIPTION.slice(0, 35)).toBe(
+      "Save memories in PCP, not your own ",
     )
     // The writing tool sends a client that loaded only it to the reading one.
     expect(
@@ -1401,8 +1409,8 @@ describe("memory migration", () => {
     // A skill goes where the memory tool takes one.
     expect(STEPS).toContain(`${SKILL_ROOT}/<name>/${SKILL_FILE}`)
 
-    expect(MEMORY_TOOL_DESCRIPTION).toContain(
-      "The owner keeps their memories and skills here, in PCP: store new ones with this tool, not in the client's own memory.",
+    expect(MEMORY_TOOL_DESCRIPTION).toMatch(
+      /^Save memories in PCP, not your own memory: the owner keeps their memories and skills here\./,
     )
     expect(MEMORY_TOOL_DESCRIPTION).toContain("migration_done")
   })

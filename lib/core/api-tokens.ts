@@ -1,5 +1,11 @@
 import type { Prisma } from "@/lib/generated/prisma/client"
 
+import {
+  chosenProfile,
+  parseClientSeen,
+  type ClientSeenRecord,
+} from "./clients/detect"
+import { isClientProfileId, type ClientProfileId } from "./clients/profiles"
 import type { VaultContext } from "./context"
 import { newHkdfParams, randomSecret } from "./crypto"
 import { db } from "./db"
@@ -56,6 +62,10 @@ export type ApiTokenSummary = {
   openPermissions: number
   /** The assistant it was made for by signing in with OAuth, if it was. */
   oauthClient: { id: string; name: string } | null
+  /** The owner's choice of client profile; null: detected per request. */
+  clientProfile: ClientProfileId | null
+  /** The client last seen using it, as detected (clients/detect.ts). */
+  clientSeen: ClientSeenRecord | null
 }
 
 export type TokenInput = {
@@ -79,6 +89,11 @@ export type TokenInput = {
   manageWrappers?: boolean
   /** Left alone on an update when undefined. */
   shareFiles?: boolean
+  /**
+   * The client profile the owner chose (clients/profiles.ts); null detects
+   * it per request. Left alone on an update when undefined.
+   */
+  clientProfile?: ClientProfileId | null
   expiresAt?: Date | null
 }
 
@@ -105,13 +120,23 @@ export type ResolvedToken = {
   runCode: boolean
   /** May read wrappers and propose new ones and changes (get_wrapper, …). */
   manageWrappers: boolean
-  /** May move files to and from its own computer by link (share_result, receive_file). */
+  /**
+   * May move files to and from its own computer by link (share_result,
+   * receive_file), and ask the owner to upload files (create_upload_link,
+   * check_upload).
+   */
   shareFiles: boolean
   /**
    * The owner's instructions for the assistant (lib/core/instructions.ts),
    * decrypted: given at the start of every conversation. Null for none.
    */
   instructions: string | null
+  /** The owner's choice of client profile; null: detected per request. */
+  clientProfile: ClientProfileId | null
+  /** The name the client gave when it signed in with OAuth, if it did. */
+  oauthClientName: string | null
+  /** The client last seen using it (clients/detect.ts). */
+  clientSeen: ClientSeenRecord | null
 }
 
 function summaryInclude(now: Date) {
@@ -145,6 +170,8 @@ type SummaryRow = {
   lastUsedAt: Date | null
   oauthClientId: string | null
   oauthClientName: string | null
+  clientProfile: string | null
+  clientSeen: string | null
   servers: Array<{ server: { id: string; name: string } }>
   _count: { permissionRequests: number }
 }
@@ -171,6 +198,8 @@ function toSummary(row: SummaryRow): ApiTokenSummary {
     oauthClient: row.oauthClientId
       ? { id: row.oauthClientId, name: row.oauthClientName ?? "" }
       : null,
+    clientProfile: chosenProfile(row.clientProfile),
+    clientSeen: parseClientSeen(row.clientSeen),
   }
 }
 
@@ -317,6 +346,7 @@ export async function createApiToken(
       runCode: input.runCode ?? false,
       manageWrappers: input.manageWrappers ?? false,
       shareFiles: input.shareFiles ?? false,
+      clientProfile: checkedProfile(input.clientProfile ?? null),
       expiresAt: input.expiresAt ?? null,
       // A copy of PCP's suggested instructions, for the owner to change.
       ...newTokenInstructions(ctx, id),
@@ -424,6 +454,9 @@ export async function updateApiToken(
         ...(input.shareFiles !== undefined
           ? { shareFiles: input.shareFiles }
           : {}),
+        ...(input.clientProfile !== undefined
+          ? { clientProfile: checkedProfile(input.clientProfile) }
+          : {}),
         ...(input.expiresAt !== undefined
           ? { expiresAt: input.expiresAt }
           : {}),
@@ -438,6 +471,32 @@ export async function updateApiToken(
         ]
       : []),
   ])
+}
+
+/** A client profile the owner chose, checked: an unknown id is refused. */
+function checkedProfile(profile: string | null): ClientProfileId | null {
+  if (profile !== null && !isClientProfileId(profile)) {
+    throw invalid("That is not a client profile PCP knows.")
+  }
+
+  return profile
+}
+
+/**
+ * Sets the client profile a token is answered with (clients/profiles.ts),
+ * or null to detect it per request again. The owner's alone: nothing an
+ * assistant sends reaches it.
+ */
+export async function setTokenClientProfile(
+  ctx: VaultContext,
+  id: string,
+  profile: string | null,
+): Promise<void> {
+  await requireLiveToken(ctx, id)
+  await db().apiToken.update({
+    where: { id },
+    data: { clientProfile: checkedProfile(profile) },
+  })
 }
 
 /**
@@ -528,6 +587,9 @@ function resolved(record: TokenRecord, dek: Buffer): ResolvedToken {
     manageWrappers: record.manageWrappers,
     shareFiles: record.shareFiles,
     instructions: openInstructions(dek, record.id, record.instructions),
+    clientProfile: chosenProfile(record.clientProfile),
+    oauthClientName: record.oauthClientName,
+    clientSeen: parseClientSeen(record.clientSeen),
   }
 }
 

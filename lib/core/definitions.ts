@@ -16,6 +16,7 @@ import { checkPersonalNote, setPersonalNote } from "./personal-notes"
 import { canonicalJson } from "./permission-rules"
 import { createServer, getServer, type ExtraAuthHeaderInput } from "./servers"
 import { getSetting, setSetting } from "./settings"
+import { copyToolTiers, mergeToolTiers } from "./tool-tiers"
 
 /**
  * Definitions and instances, as the owner works with them.
@@ -318,9 +319,11 @@ export async function detachServer(
     )
   }
 
-  return {
-    definitionId: await db().$transaction((tx) => newDefinitionFor(tx, server)),
-  }
+  const detached = await db().$transaction((tx) => newDefinitionFor(tx, server))
+  // The owner's tiers for its tools stay what they were (tool-tiers.ts).
+  await copyToolTiers(ctx.vaultId, definitionId, detached)
+
+  return { definitionId: detached }
 }
 
 // ---- The same schema twice -------------------------------------------------
@@ -549,6 +552,10 @@ export async function mergeDefinitions(
   if (!source) {
     throw notFound("The kept definition's endpoint")
   }
+
+  // The owner's tiers: the kept definition's stay, and the others' come
+  // along for tools it has none for, before their definitions go.
+  await mergeToolTiers(ctx.vaultId, keepId, others)
 
   await db().$transaction([
     db().mcpServer.updateMany({

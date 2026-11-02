@@ -54,15 +54,15 @@ export const TOKEN_OPTIONS: Record<
       "Short programs inside PCP, using only its own tools at their levels.",
     ask: "Let an assistant with this token run code that calls its tools",
     detail:
-      "It gets a run_code tool: a short JavaScript program, run inside PCP, that calls this token's tools and filters or passes on what they answer, so large answers never have to pass through the assistant. Every call follows the token's levels: a tool that asks you first stops the program until you answer, and a blocked tool stays blocked. The program reaches nothing else: no network, no files, and never your secrets.",
+      "It gets the run_code tools (Read, Write and Destructive, each calling tools up to its tier): a short JavaScript program, run inside PCP, that calls this token's tools and filters or passes on what they answer, so large answers never have to pass through the assistant. Every call follows the token's levels: a tool that asks you first stops the program until you answer, and a blocked tool stays blocked. The program reaches nothing else: no network, no files, and never your secrets.",
   },
   shareFiles: {
     label: "Move files by link",
     caption:
-      "Links its own computer downloads a kept file from, or uploads one to. Each works for an hour.",
-    ask: "Let an assistant with this token move files to and from its own computer by link",
+      "Links its own computer downloads a kept file from or uploads one to, and a page where you upload files from your phone. Each works for an hour.",
+    ask: "Let an assistant with this token move files to and from its own computer by link, and ask you to upload files",
     detail:
-      "It gets share_result and receive_file: a link its own computer (a sandbox, a terminal) downloads a file PCP keeps for it from, such as a browser download or a mail attachment, or uploads a file to, which it can then attach or upload through its tools. The file's bytes never pass through the assistant. Each link is for one file and this token alone, works for an hour, and whoever has the link can use it in that time.",
+      "It gets share_result and receive_file: a link its own computer (a sandbox, a terminal) downloads a file PCP keeps for it from, such as a browser download or a mail attachment, or uploads a file to, which it can then attach or upload through its tools. It also gets create_upload_link: a page it gives you a link to, where you upload files from your phone or computer (a photo, a scan, a file you dropped into the chat) for it to attach or send on. The file's bytes never pass through the assistant. Each link is for this token alone, works for an hour (an upload page for a quarter of an hour once the first file arrives, or until you tap Done), and whoever has the link can use it in that time.",
   },
   manageEndpoints: {
     label: "Manage API endpoints",

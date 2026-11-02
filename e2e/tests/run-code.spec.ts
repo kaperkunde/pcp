@@ -43,7 +43,9 @@ function callsOf(tool: string) {
 }
 
 async function run(baseURL: string, code: string) {
-  return toolText(await callTool(baseURL, token, "run_code", { code }))
+  return toolText(
+    await callTool(baseURL, token, "run_code_destructive", { code }),
+  )
 }
 
 function returned(text: string): unknown {
@@ -77,9 +79,9 @@ test("a token made to run code gets run_code and is told how", async ({
 
   // The gateway's own part about run_code, not the owner's instructions
   // for the token, whose suggested text names run_code for every token.
-  const runCodePart = "This token can also run code with run_code"
+  const runCodePart = "This token can also run code with run_code_read"
   const told = await initialize(baseURL!, token)
-  expect(told.tools).toContain("run_code")
+  expect(told.tools).toContain("run_code_destructive")
   expect(told.instructions).toContain(runCodePart)
   // A token without the switch gets neither: lib/core/code/run.test.ts.
 })

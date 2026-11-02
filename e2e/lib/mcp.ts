@@ -108,7 +108,11 @@ export function lastToolText(response: McpResponse): string {
 }
 
 /** The gateway's tools that take a call_handle rather than a name. */
-const HANDLED = new Set(["call_tool", "call_read_only_tool"])
+const HANDLED = new Set([
+  "call_tool_read",
+  "call_tool_write",
+  "call_tool_destructive",
+])
 
 /**
  * The call_handle describe gives for server/tool, or describe's
@@ -136,8 +140,8 @@ export async function describeForCall(
 }
 
 /**
- * A tool's arguments as an assistant sends them: call_tool and
- * call_read_only_tool written with a server and a tool name describe the
+ * A tool's arguments as an assistant sends them: a call_tool_<tier>
+ * written with a server and a tool name describes the
  * tool first and pass its call_handle in their place, as the gateway's
  * instructions say. When describe refuses, its answer is the result.
  */

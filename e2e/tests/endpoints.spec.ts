@@ -145,14 +145,20 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
   ) as {
     description: string
     inputSchema: { properties: Record<string, unknown>; required: string[] }
-    annotations: { readOnlyHint: boolean }
+    annotations: { readOnlyHint: boolean; destructiveHint: boolean }
+    tier: string
   }
   expect(Object.keys(described.inputSchema.properties)).toEqual(["petId"])
   expect(described.inputSchema.required).toEqual(["petId"])
-  expect(described.annotations.readOnlyHint).toBe(true)
+  // A GET reads, both hints stated.
+  expect(described.annotations).toMatchObject({
+    readOnlyHint: true,
+    destructiveHint: false,
+  })
+  expect(described.tier).toBe("read")
   expect(described.description).toContain("GET /pets/{petId}")
 
-  const list = await callTool(baseURL!, token, "call_tool", {
+  const list = await callTool(baseURL!, token, "call_tool_read", {
     server: SLUG,
     tool: "listPets",
     arguments: { status: "available", limit: 1 },
@@ -168,7 +174,8 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
     authorization: `Bearer ${upstream.expectedToken}`,
   })
 
-  const created = await callTool(baseURL!, token, "call_tool", {
+  // A POST writes: call_tool_write runs it.
+  const created = await callTool(baseURL!, token, "call_tool_write", {
     server: SLUG,
     tool: "createPet",
     arguments: { body: { name: "Rex", status: "available" } },
@@ -184,7 +191,7 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
     status: "available",
   })
 
-  const one = await callTool(baseURL!, token, "call_tool", {
+  const one = await callTool(baseURL!, token, "call_tool_destructive", {
     server: SLUG,
     tool: "getPet",
     arguments: { petId: 3 },
@@ -199,7 +206,7 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
 
   // Bad input never leaves PCP.
   const before = upstream.requests.length
-  const unknown = await callTool(baseURL!, token, "call_tool", {
+  const unknown = await callTool(baseURL!, token, "call_tool_destructive", {
     server: SLUG,
     tool: "listPets",
     arguments: { bogus: 1 },
@@ -207,7 +214,7 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
   expect(unknown.body.result?.isError).toBe(true)
   // Checked against the tool's schema before anything runs or asks.
   expect(toolText(unknown)).toContain('"bogus" is not an argument')
-  const dots = await callTool(baseURL!, token, "call_tool", {
+  const dots = await callTool(baseURL!, token, "call_tool_destructive", {
     server: SLUG,
     tool: "getPet",
     arguments: { petId: ".." },
@@ -218,7 +225,7 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
   expect(toolText(dots)).toContain(
     '"petId" is string, but the inputSchema says integer',
   )
-  const absent = await callTool(baseURL!, token, "call_tool", {
+  const absent = await callTool(baseURL!, token, "call_tool_destructive", {
     server: SLUG,
     tool: "getPet",
     arguments: {},
@@ -232,7 +239,7 @@ test("an assistant finds and calls the operations, with the secret added by PCP,
   await page.getByRole("button", { name: `Remove ${NAME}` }).click()
   await expect(page).toHaveURL(/\/servers$/)
 
-  const gone = await callTool(baseURL!, token, "call_tool", {
+  const gone = await callTool(baseURL!, token, "call_tool_destructive", {
     server: SLUG,
     tool: "listPets",
     arguments: {},
@@ -245,8 +252,9 @@ const GATEWAY_TOOLS = [
   "search",
   "list_tools",
   "describe",
-  "call_tool",
-  "call_read_only_tool",
+  "call_tool_read",
+  "call_tool_write",
+  "call_tool_destructive",
   "check_permission",
   "withdraw_request",
   "check_server",
@@ -355,11 +363,16 @@ test("an assistant proposes an API as OpenAPI text; nothing exists until the own
   // PCP will not send to a private address for an endpoint an assistant
   // registered: the request never leaves.
   const requests = upstream.requests.length
-  const refused = await callTool(baseURL!, managerToken, "call_tool", {
-    server: MANAGED_SLUG,
-    tool: "listPets",
-    arguments: {},
-  })
+  const refused = await callTool(
+    baseURL!,
+    managerToken,
+    "call_tool_destructive",
+    {
+      server: MANAGED_SLUG,
+      tool: "listPets",
+      arguments: {},
+    },
+  )
   expect(refused.body.result?.isError).toBe(true)
   expect(toolText(refused)).toMatch(
     /127\.0\.0\.1 is, or resolves to, a private or local address/,
@@ -448,11 +461,16 @@ test("the owner attaches a secret, typing the address to confirm it; then the en
   ).toBeVisible()
 
   // Now it goes through, with the owner's secret added by PCP.
-  const listed = await callTool(baseURL!, managerToken, "call_tool", {
-    server: MANAGED_SLUG,
-    tool: "listPets",
-    arguments: { status: "available" },
-  })
+  const listed = await callTool(
+    baseURL!,
+    managerToken,
+    "call_tool_destructive",
+    {
+      server: MANAGED_SLUG,
+      tool: "listPets",
+      arguments: { status: "available" },
+    },
+  )
   expect(listed.body.result?.isError ?? false, toolText(listed)).toBe(false)
   expect(lastRequest()).toMatchObject({
     method: "GET",

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { clientHello, clientSeen } from "./client-hello"
+import { clientHello, clientSeen, requestClient } from "./client-hello"
 
 const initialize = {
   jsonrpc: "2.0",
@@ -163,5 +163,66 @@ describe("clientSeen", () => {
         headers,
       ),
     ).toBeNull()
+  })
+})
+
+describe("requestClient", () => {
+  it("names the client of an initialize, and says it is one", () => {
+    expect(
+      requestClient(
+        JSON.stringify(initialize),
+        new Headers({ "User-Agent": "Claude-User", Authorization: "Bearer x" }),
+      ),
+    ).toEqual({
+      initialize: true,
+      client: { name: "claude-ai", title: undefined, version: "0.1.0" },
+      userAgent: "Claude-User",
+      labels: {},
+    })
+  })
+
+  it("names the client of a 2026-07-28 request from its _meta", () => {
+    const call = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "search",
+        _meta: {
+          "io.modelcontextprotocol/clientInfo": {
+            name: "claude-code",
+            version: "2.1",
+          },
+        },
+      },
+    })
+
+    expect(requestClient(call, new Headers())).toMatchObject({
+      initialize: false,
+      client: { name: "claude-code", version: "2.1" },
+    })
+  })
+
+  it("has only headers for an older protocol's later request", () => {
+    const call = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "search" },
+    })
+    const seen = requestClient(
+      call,
+      new Headers({
+        "X-Anthropic-Client": "claude-ai",
+        Authorization: "Bearer pcp_secret",
+      }),
+    )
+
+    expect(seen).toEqual({
+      initialize: false,
+      userAgent: undefined,
+      labels: { "x-anthropic-client": "claude-ai" },
+    })
+    expect(JSON.stringify(seen)).not.toContain("pcp_secret")
   })
 })
