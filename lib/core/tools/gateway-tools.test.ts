@@ -33,6 +33,8 @@ const ALL_TOOLS = [
   "read_result",
   "share_result",
   "receive_file",
+  "create_upload_link",
+  "check_upload",
   "register_server",
   "propose_tool_access",
   "update_endpoint",
@@ -162,6 +164,8 @@ describe("PCP's own tools", () => {
       [
         "check_permission",
         "check_server",
+        "check_upload",
+        "create_upload_link",
         "create_wrapper",
         "delete_wrapper",
         "get_endpoint",

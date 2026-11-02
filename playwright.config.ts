@@ -278,7 +278,8 @@ export default defineConfig({
     {
       // File links: a token that may move files by link gets share_result
       // and receive_file; a file PUT to one link is downloaded from another,
-      // as a file, a few times and then no more.
+      // as a file, a few times and then no more; an upload link's page takes
+      // the owner's files without a session, and check_upload hands them on.
       name: "file-links",
       testMatch: /file-links\.spec\.ts/,
       dependencies: ["setup"],

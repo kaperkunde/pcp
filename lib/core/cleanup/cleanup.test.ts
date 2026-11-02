@@ -18,6 +18,7 @@ import { registerClient } from "../oauth-server/clients"
 import { scratchDatabase } from "../test-db"
 import { EMPTY_CONFIG, saveResourceConfig } from "../resources/state"
 import { keepBytes, keepResult, RESULT_TTL_MS } from "../tool-results"
+import { createUploadLink, UPLOAD_LINK_TTL_MS } from "../upload-links"
 import { setupVault } from "../vault"
 import { DEFAULT_CLEANUP_CRON, DEFAULT_LOG_DAYS } from "./limits"
 import { runCleanup } from "./run"
@@ -188,6 +189,25 @@ describe("a run", () => {
     expect(status.removed?.results).toBe(1)
     expect(await db().fileLink.count()).toBe(2)
     expect(await db().toolResult.count()).toBe(1)
+  })
+
+  it("removes upload links a day after they stop taking files, with their empty places", async () => {
+    const now = new Date()
+    const link = { tokenId, publicUrl: "https://pcp.example", purpose: "x" }
+    await createUploadLink(ctx, link)
+    // One that stopped taking files a day and a minute ago.
+    await createUploadLink(
+      ctx,
+      { ...link, maxFiles: 2 },
+      new Date(now.getTime() - UPLOAD_LINK_TTL_MS - RESULT_TTL_MS - 60_000),
+    )
+
+    const status = await runCleanup("owner", now)
+
+    // The old link and its two places.
+    expect(status.removed?.results).toBe(3)
+    expect(await db().uploadLink.count()).toBe(1)
+    expect(await db().fileLink.count()).toBe(5)
   })
 
   it("removes kept results past their day and the days of log not kept, and says so", async () => {

@@ -47,6 +47,16 @@ import { isPcpError } from "./errors"
 import { instructionsBlock } from "./instructions-block"
 import { receiveFile, shareResult } from "./file-links"
 import {
+  createUploadLink,
+  DEFAULT_UPLOAD_FILES,
+  MAX_PURPOSE_CHARS,
+  MAX_UPLOAD_FILES,
+  MIN_UPLOAD_LINK_MINUTES,
+  UPLOAD_LINK_TTL_MS,
+  uploadStatus,
+  type UploadStatus,
+} from "./upload-links"
+import {
   DEFAULT_FETCH_LENGTH,
   MAX_FETCH_BODY_BYTES,
   MAX_FETCH_LENGTH,
@@ -83,7 +93,7 @@ import {
   type SkillOutcome,
 } from "./skills"
 import { connectResult, type ServerState } from "./connect"
-import { OWNER_LINK_RULE } from "./owner-link"
+import { linkLastText, OWNER_LINK_RULE } from "./owner-link"
 import { waitForOwner } from "./owner-wait"
 import {
   MAX_CALLS_PER_RUN,
@@ -127,7 +137,7 @@ import {
 import { MAX_PATCH_OPERATIONS } from "./openapi/limits"
 import type { SchemaProblem } from "./openapi/lint"
 import { checkRateLimit } from "./rate-limit"
-import { appendRequestLog } from "./request-log"
+import { appendRequestLog, noteOwnerAsked } from "./request-log"
 import {
   requireEncryptedOrPrivate as requireCalDavEncryptedOrPrivate,
   validateCalDavUrl,
@@ -246,6 +256,7 @@ import { defineTool, type Tool, type ToolSpec } from "./tools/define"
 import {
   NEEDS_OWNER,
   SERVER_STATE,
+  needsOwner,
   ok,
   passOn,
   toolError,
@@ -374,7 +385,7 @@ const CODE_INSTRUCTIONS =
   "This token can also run code with run_code: a JavaScript program (an async function's body) that calls the owner's tools with await pcp.call(server, tool, args) and works on what they answer, so a large answer can be filtered, joined or passed from one tool to another without passing through you; console.log prints and return hands back a value. Each call follows this token's levels as call_tool does: one the owner has not allowed yet stops the program with their link, handed over as a tool's is. Files come back as handles, {\"$result\": …}, to pass on as they are; with keep, so does a secret one tool makes for another, unread by you or the program. The program reaches nothing else: no network, no files, no timers. Every run has an id (run_…); a program still going after about 45 seconds keeps running, and the answer says so: call check_run with its id for how it ends, and don't start it again. A run that failed or is still running may have done part of its work: check it (check_run) before running it again; to run the same program again on purpose pass rerun: true."
 
 const FILES_INSTRUCTIONS =
-  "This token can also move files between PCP and your own computer (a sandbox or terminal you run commands in) by link, so a file's bytes never pass through you: share_result gives a link to download a file PCP keeps for you (a browser download, a mail attachment, any handle {\"$result\": …}) with curl, and receive_file gives a link to send a file to with curl -T, and the handle it becomes, to pass to upload_file, send_email's attachments or any tool that takes a file. A link is for one file, works for an hour, and anyone holding it can use it: run it, do not repeat it to the owner or put it anywhere else."
+  "This token can also move files between PCP and your own computer (a sandbox or terminal you run commands in) by link, so a file's bytes never pass through you: share_result gives a link to download a file PCP keeps for you (a browser download, a mail attachment, any handle {\"$result\": …}) with curl, and receive_file gives a link to send a file to with curl -T, and the handle it becomes, to pass to upload_file, send_email's attachments or any tool that takes a file. Such a link is for one file, works for an hour, and anyone holding it can use it: run it, do not repeat it to the owner or put it anywhere else. create_upload_link is the one link for the owner: a page where they upload files from their phone or computer (one they dropped into the chat, a photo, a scan) that you cannot reach yourself; hand it to them as the answer says, and call check_upload once they say they have uploaded, for the files' handles."
 
 const WRAPPER_INSTRUCTIONS =
   'This token can also propose wrappers with create_wrapper: a server whose tools are short JavaScript programs over the owner\'s other tools, for a cleaner way to use a server (fewer arguments, several calls made one, an answer cut to what matters, a secret put where an API wants it, as {"$secret": "<name>"} in a call, where the owner allowed it). Each tool calls only the tools it lists, and can stand in for them in search; it can declare the shape of its answer (output_schema). By default the calls it lists run on the owner\'s approval of the wrapper, so a token needs a level only for the wrapper\'s tool and the server behind it can be hidden from search; call_levels "token" holds them to the calling token\'s own levels instead. The owner reads every program and decides; get_wrapper reads one, update_wrapper and delete_wrapper propose changes.'
@@ -2531,6 +2542,167 @@ export function buildGatewayServer(
           curl: `curl -fsS -T ${shellWord(args.name ?? "FILE")} ${shellWord(link.url)}`,
           note: `Send the file (curl -T, or --data-binary @file), then pass {"$result": "${link.resultId}"} where a tool wants it. Until the file has arrived, the handle names nothing.`,
         })
+      },
+    })
+
+    // A page the owner opens on their phone or computer to hand over files
+    // the assistant cannot reach (lib/core/upload-links.ts, app/upload/).
+    register({
+      name: "create_upload_link",
+      title: "Ask the owner to upload files",
+      description: `Get a link to upload files for the owner: a page they open on their phone or computer to send you files they have there (photos, scans, documents) that you cannot reach otherwise, such as a file they dropped into the chat or one they mention in a voice conversation. Each file becomes a handle {"$result": id} to pass where a tool wants a file (send_email's attachments, upload_file). The page takes up to max_files files for up to an hour, and for a quarter of an hour once the first arrives, or until the owner taps Done; whoever has the link can upload to it, so give it to the owner only. ${OWNER_LINK_RULE} Call check_upload once they say they have uploaded.`,
+      input: z.object({
+        purpose: z
+          .string()
+          .min(1)
+          .max(MAX_PURPOSE_CHARS)
+          .regex(/^[^\u0000-\u001f\u007f]+$/, {
+            message: "One line, without control characters.",
+          })
+          .describe(
+            'What the files are for, in a few words the owner reads at the top of the page, e.g. "the receipts for the March expense report".',
+          ),
+        max_files: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_UPLOAD_FILES)
+          .optional()
+          .describe(
+            `How many files the page takes; ${DEFAULT_UPLOAD_FILES} by default.`,
+          ),
+        expires_in_minutes: z
+          .number()
+          .int()
+          .min(MIN_UPLOAD_LINK_MINUTES)
+          .max(UPLOAD_LINK_TTL_MS / 60_000)
+          .optional()
+          .describe(
+            `How long the page waits for the first file, in minutes; ${UPLOAD_LINK_TTL_MS / 60_000} by default.`,
+          ),
+      }),
+      output: NEEDS_OWNER,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      async run(args: {
+        purpose: string
+        max_files?: number
+        expires_in_minutes?: number
+      }) {
+        const link = await createUploadLink(scope.ctx, {
+          tokenId: scope.tokenId,
+          publicUrl: scope.publicUrl,
+          purpose: args.purpose,
+          maxFiles: args.max_files,
+          minutes: args.expires_in_minutes,
+        })
+        const until = link.acceptUntil.toISOString()
+        const label = "Upload files"
+
+        noteOwnerAsked()
+        return needsOwner(
+          {
+            kind: "needs_owner",
+            reason: "upload",
+            url: link.url,
+            label,
+            upload: { id: link.id, maxFiles: link.maxFiles, until },
+          },
+          `Not done yet: the owner uploads the files on PCP's page, from their phone or computer. It takes up to ${link.maxFiles} file${link.maxFiles === 1 ? "" : "s"} until ${until} (a quarter of an hour once the first arrives), or until they tap Done. Whoever has the link can upload to it: give it to the owner and no one else. When they say they have uploaded, call check_upload with id "${link.id}"; it gives each file as a handle {"$result": …} to pass where a tool wants a file.\n\n${linkLastText(link.url, label)}`,
+        )
+      },
+    })
+
+    register({
+      name: "check_upload",
+      title: "Check an upload link",
+      description:
+        'Says which files the owner has uploaded to a link from create_upload_link, each as a handle {"$result": id} to pass where a tool wants a file, and whether the link takes more. Call it once they say they have uploaded, not in the same reply as the link; while the link is open, it waits up to 45 seconds for them to finish (Done, or the last file).',
+      input: z.object({
+        id: z
+          .string()
+          .min(1)
+          .max(64)
+          .describe("The upload link's id, from create_upload_link."),
+      }),
+      output: z.object({
+        id: z.string(),
+        /** Whether the page takes more files. */
+        open: z.boolean(),
+        remaining: z.number(),
+        until: z.string(),
+        files: z.array(
+          z.object({
+            handle: z.object({ $result: z.string() }),
+            name: z.string().nullable(),
+            type: z.string(),
+            size: z.number(),
+            readableUntil: z.string(),
+          }),
+        ),
+        /** What the text says. */
+        message: z.string(),
+      }),
+      annotations: READS,
+      async run(args: { id: string }, ctx) {
+        const read = () => uploadStatus(scope.ctx, scope.tokenId, args.id)
+        const first = await read()
+        const status: UploadStatus | null = first?.open
+          ? ((await waitForOwner(
+              async () => {
+                const now = await read()
+                return !now || !now.open ? now : null
+              },
+              { signal: ctx.signal },
+            )) ?? (await read()))
+          : first
+
+        if (!status) {
+          return failure(
+            "No upload link with that id for this token, or it is more than a day past its time. Call create_upload_link for a new one.",
+            "not_found",
+          )
+        }
+
+        const files = status.files.map((file) => ({
+          handle: { $result: file.resultId },
+          name: file.name,
+          type: file.mediaType,
+          size: file.size,
+          readableUntil: file.readableUntil.toISOString(),
+        }))
+        const until = status.acceptUntil.toISOString()
+        const listed = files
+          .map(
+            (file) =>
+              `${file.name ?? "a file"} (${file.type}, ${file.size} bytes): {"$result": "${file.handle.$result}"}`,
+          )
+          .join("; ")
+        const state = status.open
+          ? `The link takes up to ${status.remaining} more until ${until}, or until the owner taps Done.`
+          : "The link is closed."
+        const message =
+          files.length === 0
+            ? status.open
+              ? `No file has arrived yet. ${state} If the owner says they have uploaded, call check_upload again; if they lost the link, create_upload_link makes a new one.`
+              : "No file arrived, and the link is closed. If the owner still wants to send files, create_upload_link makes a new one."
+            : `${files.length} file${files.length === 1 ? "" : "s"} arrived: ${listed}. ${state} Pass a file's handle where a tool wants it; each is kept for a day.`
+
+        return ok(
+          {
+            id: status.id,
+            open: status.open,
+            remaining: status.remaining,
+            until,
+            files,
+            message,
+          },
+          { text: message },
+        )
       },
     })
   }

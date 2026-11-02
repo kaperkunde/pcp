@@ -5,6 +5,7 @@ import {
   type LinkRefusal,
 } from "@/lib/core/file-links"
 import { checkRateLimit } from "@/lib/core/rate-limit"
+import { closeUploadPage, uploadToPage } from "@/lib/core/upload-links"
 import { UNEXPECTED_ERROR } from "@/lib/server/action-state"
 import { clientIp } from "@/lib/server/client-ip"
 
@@ -18,6 +19,11 @@ export const dynamic = "force-dynamic"
  * with curl, so there is no session, no page and no origin to check: the
  * link's secret is the credential, for that one file. A route handler, not
  * an action: a file needs Content-Disposition, and a body of its own.
+ *
+ * The upload page (app/upload/[secret]/, lib/core/upload-links.ts) sends
+ * the owner's files here too, one PUT each under its own secret, the file's
+ * name percent-encoded in X-File-Name; DELETE is its Done. Its bodies can be
+ * larger than an action takes, and are read as they come.
  */
 
 /** Guesses at secrets, per address; a real client makes a few calls. */
@@ -67,16 +73,36 @@ async function receive(request: Request, { params }: Params) {
   }
 
   const length = request.headers.get("content-length")
+  const secret = (await params).secret
+  const body = request.body as AsyncIterable<Uint8Array> | null
+  const sent = {
+    contentType: request.headers.get("content-type"),
+    contentLength: length && /^\d+$/.test(length) ? Number(length) : null,
+  }
 
   try {
-    const received = await uploadByLink(
-      (await params).secret,
-      request.body as AsyncIterable<Uint8Array> | null,
-      {
-        contentType: request.headers.get("content-type"),
-        contentLength: length && /^\d+$/.test(length) ? Number(length) : null,
-      },
-    )
+    const page = await uploadToPage(secret, body, {
+      ...sent,
+      name: request.headers.get("x-file-name"),
+    })
+
+    if (page) {
+      return page.ok
+        ? Response.json(
+            {
+              received: page.size,
+              name: page.name,
+              type: page.mediaType,
+              open: page.open,
+              remaining: page.remaining,
+              until: page.until.toISOString(),
+            },
+            { status: 201, headers: { "Cache-Control": "no-store" } },
+          )
+        : problem(page)
+    }
+
+    const received = await uploadByLink(secret, body, sent)
 
     if (!received.ok) {
       return problem(received)
@@ -104,6 +130,29 @@ async function receive(request: Request, { params }: Params) {
 
 export const PUT = receive
 export const POST = receive
+
+/** An upload page's Done: it takes no more files. */
+export async function DELETE(_request: Request, { params }: Params) {
+  const limited = await rateLimited()
+
+  if (limited) {
+    return limited
+  }
+
+  try {
+    const done = await closeUploadPage((await params).secret)
+
+    return done.ok
+      ? Response.json(
+          { closed: true, files: done.files },
+          { status: 200, headers: { "Cache-Control": "no-store" } },
+        )
+      : problem(done)
+  } catch (error) {
+    console.error("[files] closing an upload page failed", error)
+    return problem({ ok: false, status: 500, message: UNEXPECTED_ERROR })
+  }
+}
 
 async function rateLimited(): Promise<Response | null> {
   return checkRateLimit(`file-link:${await clientIp()}`, RATE_LIMIT)

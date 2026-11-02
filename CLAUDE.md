@@ -325,7 +325,15 @@ so in the summary; the bump itself waits for the request.
   upload's key also wrapped under the vault's, so it becomes a kept result
   only when the token uses its handle); an hour, a few downloads or one
   upload, its token live, every use in the request log, never exported, and
-  pruned by the cleanup. Nothing else serves a kept result over HTTP.
+  pruned by the cleanup. Upload links (`lib/core/upload-links.ts`, same
+  option) are the one link for the owner: `create_upload_link` hands the
+  assistant `/upload/<secret>` (a page outside the dashboard, no session,
+  the link alone its credential) to give the owner as a markdown link, and
+  `check_upload` waits for what arrived; it takes a few files for an hour,
+  then a quarter of an hour from the first or until Done, each file a
+  `file_link` slot made with it (result id and wrapped key up front), so it
+  too becomes a kept result only when the token uses its handle. Nothing
+  else serves a kept result over HTTP.
 - The request log (`lib/core/request-log.ts`) is a token's calls by name:
   tool, server, upstream tool, time, outcome, the permission request an
   ask made, and for a secret the browser typed, its name and the origin.
@@ -494,8 +502,9 @@ so in the summary; the bump itself waits for the request.
   request for the wrapper to read), the export download (`app/api/export/route.ts`: a file needs
   `Content-Disposition`, which an action cannot send; it checks the request's
   origin itself, `lib/server/same-origin.ts`), file links
-  (`app/api/files/[secret]/`: curl from an assistant's own computer, the
-  link's secret its only credential), and the browser's live view
+  (`app/api/files/[secret]/`: curl from an assistant's own computer, and
+  the upload page's PUTs and Done, the link's secret its only credential),
+  and the browser's live view
   (`app/api/browser/tabs/[id]/`: a stream of a tab's pictures and the
   owner's input, which an action cannot carry; the same origin check and
   session).

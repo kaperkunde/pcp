@@ -19,6 +19,7 @@ import { createSession, resolveSession } from "./sessions"
 import { SETTING_PUBLIC_URL, setSetting } from "./settings"
 import { scratchDatabase } from "./test-db"
 import { keepResult } from "./tool-results"
+import { createUploadLink } from "./upload-links"
 import { setExcluded } from "./repos/store"
 import { addLinkedRepo } from "./repos/test-vault"
 import { isSetUp, ownerVault, setupVault, unlockOwnerVault } from "./vault"
@@ -116,6 +117,12 @@ async function populate() {
     mediaType: "text/plain",
   })
   await receiveFile(ctx, { tokenId, publicUrl: "https://pcp.example" })
+  await createUploadLink(ctx, {
+    tokenId,
+    publicUrl: "https://pcp.example",
+    purpose: "Receipts",
+    maxFiles: 2,
+  })
   await grantSecretUse(ctx, {
     tokenId,
     secretId: secret.id,
@@ -180,6 +187,7 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.server_definition).toBe(1)
     expect(before.service_spec).toBe(1)
     expect(before.exit).toBe(1)
+    expect(before.upload_link).toBe(1)
 
     await deleteVault(ctx)
 
