@@ -3704,7 +3704,7 @@ export function buildGatewayServer(
         })
         .optional()
         .describe(
-          "MCP's hints about the tool, for clients; the owner reads them too.",
+          "MCP's hints about the tool, for clients; the owner reads them too. Its tier (which call_tool_* runs it) is the highest of the tools it calls, whatever readOnlyHint and destructiveHint say here, unless the owner chooses one.",
         ),
       program: z
         .string()
