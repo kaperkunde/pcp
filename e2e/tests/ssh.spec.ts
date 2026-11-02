@@ -91,7 +91,7 @@ test("an assistant's command is shown to the owner before it runs", async ({
     arguments: { command: "uptime" },
   }
 
-  const asked = await callTool(baseURL!, token, "call_tool", args)
+  const asked = await callTool(baseURL!, token, "call_tool_destructive", args)
   expect(toolText(asked)).toContain("Not done yet")
   const id = toolText(asked).match(/\/permissions\/([\w-]+)/)?.[1]
   expect(id, toolText(asked)).toBeTruthy()
@@ -110,7 +110,7 @@ test("an assistant's command is shown to the owner before it runs", async ({
   expect(toolText(outcome)).toContain("ran uptime")
 
   // Allowed now: the next command runs at once, with its standard input.
-  const direct = await callTool(baseURL!, token, "call_tool", {
+  const direct = await callTool(baseURL!, token, "call_tool_destructive", {
     ...args,
     arguments: { command: "cat", stdin: "hello" },
   })
@@ -132,7 +132,7 @@ test("a server with another host key is refused until the owner forgets the old 
   expect(fake.hostKey).not.toBe(before)
 
   const call = () =>
-    callTool(baseURL!, token, "call_tool", {
+    callTool(baseURL!, token, "call_tool_destructive", {
       server: SLUG,
       tool: "run_command",
       arguments: { command: "uptime" },

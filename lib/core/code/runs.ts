@@ -127,7 +127,7 @@ export function callLine(entry: TraceEntry, now = Date.now()): string {
 }
 
 /**
- * The calls that may have changed something: not marked read-only, and
+ * The calls that may have changed something: not in the Read tier, and
  * completed (well or not) or still under way.
  */
 export function sideEffects(trace: TraceEntry[]): TraceEntry[] {

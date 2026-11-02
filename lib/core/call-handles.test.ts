@@ -26,7 +26,7 @@ import { describedHandle } from "./test-handles"
 import { writeToolAccess } from "./tool-access"
 import { setupVault } from "./vault"
 
-// call_tool takes the call_handle describe gives, never a server and a
+// The call_tool_* entries take the call_handle describe gives, never a server and a
 // tool name: a tool is described before it is called, a handle goes stale
 // with its schema, and arguments that cannot work never reach the owner.
 

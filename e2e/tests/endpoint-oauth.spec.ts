@@ -117,7 +117,7 @@ test("the owner connects it, and the assistant's calls carry the token, which it
   expect(upstream.closedSignIns.at(-1)).not.toHaveProperty("resource")
 
   await allowAllTools(page, TOKEN_NAME, slug)
-  const result = await callTool(baseURL!, token, "call_tool", {
+  const result = await callTool(baseURL!, token, "call_tool_destructive", {
     server: slug,
     tool: "whoami",
     arguments: {},

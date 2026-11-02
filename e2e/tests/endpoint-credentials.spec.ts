@@ -126,7 +126,7 @@ test("an assistant proposes an API with a user name and a password, which the ow
   )
   expect(described).not.toMatch(/authorization/i)
 
-  const result = await callTool(baseURL!, token, "call_tool", {
+  const result = await callTool(baseURL!, token, "call_tool_destructive", {
     server: slug,
     tool: "whoami",
     arguments: {},
@@ -214,7 +214,7 @@ test("an assistant proposes an API with a key and a secret key in two headers, a
   )
   expect(described).not.toMatch(/X-Secret-API-Key/i)
 
-  const result = await callTool(baseURL!, token, "call_tool", {
+  const result = await callTool(baseURL!, token, "call_tool_destructive", {
     server: slug,
     tool: "ping",
     arguments: {},
