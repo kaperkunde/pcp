@@ -214,6 +214,12 @@ export const MAX_SKILL_FILE_CHARS = 20_000
 export const MAX_SKILL_FILE_PATH = 100
 export const MAX_SKILL_TOOLS = 30
 export const MAX_SKILLS = 200
+/**
+ * How many skills one token keeps for itself (/skills/mine/), of the
+ * vault's MAX_SKILLS: written without asking, so one token cannot fill the
+ * vault.
+ */
+export const MAX_OWN_SKILLS = 50
 
 /**
  * The owner's own note on a server or skill (lib/core/definitions.ts): one

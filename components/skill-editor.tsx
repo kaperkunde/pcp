@@ -15,6 +15,7 @@ import {
   deleteSkillAction,
   deleteSkillFileAction,
   saveSkillFileAction,
+  shareSkillAction,
   updateSkillAction,
   type SkillActionResult,
 } from "@/lib/actions/skills"
@@ -214,6 +215,61 @@ export function SkillDelete({
       </Button>
       <p className="text-[13px] text-muted-foreground">
         No assistant sees it any more, and its files go with it.
+      </p>
+      <FormError error={error} />
+    </div>
+  )
+}
+
+/**
+ * An assistant's own skill made shared, by the owner: it becomes theirs,
+ * seen by every assistant that sees all skills, and still by the one that
+ * kept it.
+ */
+export function SkillShare({
+  skillId,
+  name,
+  tokenName,
+}: {
+  skillId: string
+  name: string
+  tokenName: string | null
+}) {
+  const [pending, startTransition] = useTransition()
+  const [error, setError] = useState<string | null>(null)
+
+  function share() {
+    if (
+      !window.confirm(
+        `Share the skill ${name}? Every assistant that sees all skills will follow it as your procedure.`,
+      )
+    ) {
+      return
+    }
+
+    startTransition(async () => {
+      const result = await shareSkillAction(skillId)
+
+      if (result.status === "error") {
+        setError(result.error)
+      }
+    })
+  }
+
+  return (
+    <div className="flex flex-col items-center gap-1 pt-2 text-center">
+      <Button
+        type="button"
+        variant="secondary"
+        disabled={pending}
+        onClick={share}
+      >
+        Make shared
+      </Button>
+      <p className="text-[13px] text-muted-foreground">
+        {tokenName
+          ? `Only ${tokenName} sees it now. Shared, it is yours, and every assistant that sees all skills follows it.`
+          : "No assistant sees it now. Shared, it is yours, and every assistant that sees all skills follows it."}
       </p>
       <FormError error={error} />
     </div>

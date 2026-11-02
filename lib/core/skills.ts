@@ -10,6 +10,7 @@ import {
   MAX_SKILL_FILE_PATH,
   MAX_SKILL_FILES,
   MAX_SKILL_NAME,
+  MAX_OWN_SKILLS,
   MAX_SKILL_TOOLS,
   MAX_SKILLS,
 } from "./constants"
@@ -54,6 +55,24 @@ import { readStrictYaml } from "./strict-yaml"
  * gateway's search and describe; the instructions list the skills a token
  * sees by name and description.
  *
+ * A token's own skills, as a token's own memories are (/memories/notes.md
+ * beside /memories/shared/): a token that keeps memories writes skills for
+ * itself at /skills/mine/<name>/ (visibility "private", its tokenId) without
+ * asking: create, edit, rename and delete. Only that token sees and follows
+ * them (search and describe name one `skill:mine/<name>`, and its
+ * instructions list it beside the shared ones), and the owner, who reads,
+ * edits, deletes and shares them on the Skills page, marked with the token's
+ * name. Nothing the owner did not read becomes theirs this way: an own skill
+ * is never described as approved, is never in a linked repository (repos/
+ * read listSharedSkills only), is never offered to another token, and
+ * becomes shared only through the usual skill_change request (`share`:
+ * renaming /skills/mine/<name> to /skills/<name>), which shows the whole
+ * skill, or by the owner's own hand (shareSkill). Its name is unique among
+ * the token's own (MAX_OWN_SKILLS of them) and may be a shared skill's too:
+ * the path tells them apart, and "mine" is no skill's name. When its token
+ * is deleted it stays, private to no token: the owner's alone, until they
+ * share or delete it.
+ *
  * The name, description, version, body, tools and files are one ciphertext
  * under the vault's key with "skill:<id>" as associated data, so names are
  * unique by checking here, not by an index, as memory paths are.
@@ -61,12 +80,26 @@ import { readStrictYaml } from "./strict-yaml"
 
 export const SKILL_ROOT = "/skills"
 export const SKILL_FILE = "SKILL.md"
+/**
+ * The folder under /skills that holds a token's own skills; never a skill's
+ * name. A private skill's path name (and ref) is mine/<name>.
+ */
+export const OWN_SKILLS = "mine"
 /** How search and describe name a skill: skill:<name>, or skill:<name>/<file>. */
 export const SKILL_REF = "skill:"
 
 /** The line describe puts above a skill. */
 export const SKILL_FRAME =
   "A procedure the owner approved: follow it when the task matches."
+
+/** The line describe puts above a token's own skill. */
+export const OWN_SKILL_FRAME =
+  "Your own skill, which you keep for yourself: the owner has not approved it, and no other assistant sees it. Follow it when the task matches."
+
+/** The line above a skill a token sees, by whose it is. */
+export function skillFrame(entry: Pick<SkillEntry, "visibility">): string {
+  return entry.visibility === "private" ? OWN_SKILL_FRAME : SKILL_FRAME
+}
 
 /**
  * How many characters of skill names and descriptions the gateway's
@@ -80,6 +113,8 @@ export const MAX_INSTRUCTION_SKILLS = 60
 const MAX_FRONTMATTER_CHARS = 4_000
 
 export type SkillAuthor = "owner" | "assistant"
+/** shared: the tokens the owner chooses see it; private: one token's own. */
+export type SkillVisibility = "shared" | "private"
 export type SkillFile = { path: string; text: string }
 /**
  * Frontmatter keys PCP does not use itself, which other tools write
@@ -107,6 +142,17 @@ export type SkillBody = {
 export type SkillEntry = SkillBody & {
   id: string
   author: SkillAuthor
+  visibility: SkillVisibility
+  /**
+   * The token a private skill is kept by; null for a shared skill, and for a
+   * private one whose token was deleted (the owner's alone).
+   */
+  tokenId: string | null
+  /**
+   * How paths and refs name it: its name, or mine/<name> for a private
+   * skill (/skills/mine/<name>/SKILL.md, skill:mine/<name>).
+   */
+  pathName: string
   /**
    * The owner's own note on the skill (lib/core/personal-notes.ts): not part
    * of its SKILL.md, never in a repository, read by assistants beside it.
@@ -317,6 +363,12 @@ export function checkSkillName(input: string): string {
   if (name.length > MAX_SKILL_NAME || !NAME.test(name)) {
     throw invalid(
       `"${name.slice(0, MAX_SKILL_NAME)}" is not a usable skill name: lower-case letters, numbers and single hyphens, like release-notes, at most ${MAX_SKILL_NAME} characters.`,
+    )
+  }
+
+  if (name === OWN_SKILLS) {
+    throw invalid(
+      `"${OWN_SKILLS}" is not a skill's name: ${SKILL_ROOT}/${OWN_SKILLS}/ holds an assistant's own skills. Pick another name.`,
     )
   }
 
@@ -597,6 +649,8 @@ function unseal(ctx: VaultContext, row: Skill): SkillEntry {
   const body = JSON.parse(
     decryptString(ctx.dek, Buffer.from(row.ciphertext), aad(row.id)),
   ) as SkillBody
+  const visibility: SkillVisibility =
+    row.visibility === "private" ? "private" : "shared"
 
   return {
     id: row.id,
@@ -608,6 +662,9 @@ function unseal(ctx: VaultContext, row: Skill): SkillEntry {
     files: body.files ?? [],
     extra: body.extra ?? {},
     author: row.author === "assistant" ? "assistant" : "owner",
+    visibility,
+    tokenId: visibility === "private" ? row.tokenId : null,
+    pathName: visibility === "private" ? ownPathName(body.name) : body.name,
     note: readSkillNote(ctx, row),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -622,8 +679,35 @@ async function load(ctx: VaultContext): Promise<SkillEntry[]> {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
-function taken(entries: SkillEntry[], name: string, exceptId?: string) {
-  return entries.some((entry) => entry.name === name && entry.id !== exceptId)
+/** A private skill's path name: mine/<name>. */
+function ownPathName(name: string): string {
+  return `${OWN_SKILLS}/${name}`
+}
+
+/**
+ * Whether a skill of that name is on the same shelf: among the shared ones
+ * (`tokenId` null), or among one token's own. A private skill whose token
+ * was deleted is on no shelf, so it holds no name.
+ */
+function taken(
+  entries: SkillEntry[],
+  name: string,
+  tokenId: string | null,
+  exceptId?: string,
+) {
+  return entries.some(
+    (entry) =>
+      entry.name === name &&
+      entry.id !== exceptId &&
+      (tokenId === null
+        ? entry.visibility === "shared"
+        : entry.visibility === "private" && entry.tokenId === tokenId),
+  )
+}
+
+/** The shelf a skill's name is unique on: null for the shared ones. */
+function shelfOf(entry: SkillEntry): string | null {
+  return entry.visibility === "shared" ? null : (entry.tokenId ?? entry.id)
 }
 
 function takenError(name: string): PcpError {
@@ -644,19 +728,55 @@ async function roomForOneMore(ctx: VaultContext): Promise<void> {
   }
 }
 
-/** The skills a token sees: all of them (null), or the ones it was given. */
+/** Room for one more of a token's own skills, of MAX_OWN_SKILLS. */
+async function roomForOneMoreOwn(
+  ctx: VaultContext,
+  tokenId: string,
+): Promise<void> {
+  await roomForOneMore(ctx)
+  const count = await db().skill.count({
+    where: { vaultId: ctx.vaultId, visibility: "private", tokenId },
+  })
+
+  if (count >= MAX_OWN_SKILLS) {
+    throw new PcpError(
+      "conflict",
+      `You already keep ${MAX_OWN_SKILLS} skills of your own, the most one token keeps. Delete one first, or ask the owner to share one.`,
+    )
+  }
+}
+
+/**
+ * The skills a token sees: the shared ones, all of them (null) or the ones
+ * it was given, then its own (`tokenId`; null for none).
+ */
 export async function skillsFor(
   ctx: VaultContext,
   skillIds: string[] | null,
+  tokenId: string | null,
 ): Promise<SkillEntry[]> {
-  const entries = await load(ctx)
+  return seenBy(await load(ctx), skillIds, tokenId)
+}
 
-  if (skillIds === null) {
-    return entries
-  }
+function seenBy(
+  entries: SkillEntry[],
+  skillIds: string[] | null,
+  tokenId: string | null,
+): SkillEntry[] {
+  const seen = skillIds === null ? null : new Set(skillIds)
 
-  const seen = new Set(skillIds)
-  return entries.filter((entry) => seen.has(entry.id))
+  return [
+    ...entries.filter(
+      (entry) =>
+        entry.visibility === "shared" && (seen === null || seen.has(entry.id)),
+    ),
+    ...entries.filter(
+      (entry) =>
+        tokenId !== null &&
+        entry.visibility === "private" &&
+        entry.tokenId === tokenId,
+    ),
+  ]
 }
 
 /** A skill's whole SKILL.md text. */
@@ -666,7 +786,9 @@ export function skillText(skill: SkillBody): string {
 
 /** What the gateway's instructions name of the skills a token sees. */
 export type InstructionSkill = {
+  /** As its ref names it: mine/<name> for the token's own. */
   name: string
+  /** A token's own says so first: the owner has not approved it. */
   description: string
   /** The owner's note on it, when they wrote one. */
   note?: string | null
@@ -675,22 +797,69 @@ export type InstructionSkill = {
 export async function instructionSkills(
   ctx: VaultContext,
   skillIds: string[] | null,
+  tokenId: string | null,
 ): Promise<InstructionSkill[]> {
-  return (await skillsFor(ctx, skillIds)).map(
-    ({ name, description, note }) => ({ name, description, note }),
+  return (await skillsFor(ctx, skillIds, tokenId)).map(
+    ({ pathName, description, note, visibility }) => ({
+      name: pathName,
+      description:
+        visibility === "private" ? `(Your own.) ${description}` : description,
+      note,
+    }),
   )
 }
 
 // ---- The owner's own changes ------------------------------------------------
 
-/** A skill as the owner sees it in PCP. */
-export type SkillSummary = SkillEntry & { text: string }
+/**
+ * A skill as the owner sees it in PCP. `tokenName` names the token a
+ * private skill is kept by; null for a shared one, and for a private one
+ * whose token was deleted.
+ */
+export type SkillSummary = SkillEntry & {
+  text: string
+  tokenName: string | null
+}
 
-export async function listSkills(ctx: VaultContext): Promise<SkillSummary[]> {
-  return (await load(ctx)).map((entry) => ({
+async function summaries(
+  ctx: VaultContext,
+  entries: SkillEntry[],
+): Promise<SkillSummary[]> {
+  const tokenIds = [...new Set(entries.flatMap((entry) => entry.tokenId ?? []))]
+  const names = new Map(
+    tokenIds.length
+      ? (
+          await db().apiToken.findMany({
+            where: { vaultId: ctx.vaultId, id: { in: tokenIds } },
+            select: { id: true, name: true },
+          })
+        ).map((token) => [token.id, token.name])
+      : [],
+  )
+
+  return entries.map((entry) => ({
     ...entry,
     text: skillText(entry),
+    tokenName: entry.tokenId ? (names.get(entry.tokenId) ?? null) : null,
   }))
+}
+
+/** Every skill of the vault, the tokens' own ones included. */
+export async function listSkills(ctx: VaultContext): Promise<SkillSummary[]> {
+  return summaries(ctx, await load(ctx))
+}
+
+/**
+ * The shared skills only: what tokens are offered and what a linked
+ * repository may hold (lib/core/repos/). A token's own skill is never one.
+ */
+export async function listSharedSkills(
+  ctx: VaultContext,
+): Promise<SkillSummary[]> {
+  return summaries(
+    ctx,
+    (await load(ctx)).filter((entry) => entry.visibility === "shared"),
+  )
 }
 
 export async function getSkill(
@@ -703,7 +872,7 @@ export async function getSkill(
     throw notFound("That skill")
   }
 
-  return { ...entry, text: skillText(entry) }
+  return (await summaries(ctx, [entry]))[0]!
 }
 
 /** A skill the owner writes themselves, at version 1. */
@@ -714,7 +883,7 @@ export async function createSkill(
   const skill = checkSkill(arrived(input))
   const entries = await load(ctx)
 
-  if (taken(entries, skill.name)) {
+  if (taken(entries, skill.name, null)) {
     throw takenError(skill.name)
   }
 
@@ -749,9 +918,15 @@ export async function importSkill(
   })
 }
 
-async function ownerEntry(ctx: VaultContext, id: string) {
+async function ownerEntry(
+  ctx: VaultContext,
+  id: string,
+  { sharedOnly = false }: { sharedOnly?: boolean } = {},
+) {
   const entries = await load(ctx)
-  const entry = entries.find((item) => item.id === id)
+  const entry = entries.find(
+    (item) => item.id === id && (!sharedOnly || item.visibility === "shared"),
+  )
 
   if (!entry) {
     throw notFound("That skill")
@@ -795,7 +970,7 @@ export async function updateSkill(
     }),
   )
 
-  if (taken(entries, skill.name, id)) {
+  if (taken(entries, skill.name, shelfOf(entry), id)) {
     throw takenError(skill.name)
   }
 
@@ -822,7 +997,7 @@ export async function saveSkillByOwner(
   if (id === null) {
     const entries = await load(ctx)
 
-    if (taken(entries, skill.name)) {
+    if (taken(entries, skill.name, null)) {
       throw takenError(skill.name)
     }
 
@@ -841,9 +1016,10 @@ export async function saveSkillByOwner(
     return { id: newSkillId, name: skill.name, version: input.version }
   }
 
-  const { entries, entry } = await ownerEntry(ctx, id)
+  // A token's own skill is never a repository's to change.
+  const { entries, entry } = await ownerEntry(ctx, id, { sharedOnly: true })
 
-  if (taken(entries, skill.name, id)) {
+  if (taken(entries, skill.name, null, id)) {
     throw takenError(skill.name)
   }
 
@@ -932,6 +1108,69 @@ export async function deleteSkill(
   }
 }
 
+/**
+ * The owner makes a token's own skill shared, as it is: it is theirs now
+ * (author "owner"), seen by the tokens that see every skill, and still by
+ * the token that kept it.
+ */
+export async function shareSkill(
+  ctx: VaultContext,
+  id: string,
+): Promise<{ name: string }> {
+  const { entries, entry } = await ownerEntry(ctx, id)
+
+  if (entry.visibility === "shared") {
+    return { name: entry.name }
+  }
+
+  if (taken(entries, entry.name, null)) {
+    throw new PcpError(
+      "conflict",
+      `A shared skill called ${entry.name} exists already. Rename one of them first.`,
+    )
+  }
+
+  await makeShared(ctx, entry.id, entry.tokenId, {
+    author: "owner",
+    ciphertext: null,
+  })
+
+  return { name: entry.name }
+}
+
+/**
+ * A private skill turned shared: no token is its keeper any more, and the
+ * one that kept it goes on seeing it when it sees only some skills.
+ */
+async function makeShared(
+  ctx: VaultContext,
+  id: string,
+  keeper: string | null,
+  change: { author: SkillAuthor; ciphertext: Uint8Array<ArrayBuffer> | null },
+): Promise<void> {
+  const token = keeper
+    ? await db().apiToken.findFirst({
+        where: { id: keeper, vaultId: ctx.vaultId },
+        select: { allSkills: true },
+      })
+    : null
+
+  await db().$transaction([
+    db().skill.update({
+      where: { id },
+      data: {
+        visibility: "shared",
+        tokenId: null,
+        author: change.author,
+        ...(change.ciphertext ? { ciphertext: change.ciphertext } : {}),
+      },
+    }),
+    ...(keeper && token && !token.allSkills
+      ? [db().apiTokenSkill.create({ data: { tokenId: keeper, skillId: id } })]
+      : []),
+  ])
+}
+
 // ---- Which tokens see which skills ----------------------------------------
 
 export type TokenSkills = { all: boolean; skillIds: string[] }
@@ -968,8 +1207,13 @@ export async function setTokenSkills(
   const skillIds = input.all ? [] : [...new Set(input.skillIds)]
 
   if (skillIds.length > 0) {
+    // A token's own skill is never another token's to see.
     const known = await db().skill.count({
-      where: { vaultId: ctx.vaultId, id: { in: skillIds } },
+      where: {
+        vaultId: ctx.vaultId,
+        id: { in: skillIds },
+        visibility: "shared",
+      },
     })
 
     if (known !== skillIds.length) {
@@ -1013,6 +1257,11 @@ export type SkillChangeAsk = {
   basis: number | null
   before: SkillBody | null
   after: SkillBody | null
+  /**
+   * The token's own skill (`skillId`, at `basis`, as `before`) made shared
+   * as `after`: renaming /skills/mine/<name> to /skills/<name>.
+   */
+  share?: true
 }
 
 /**
@@ -1044,6 +1293,8 @@ export type SkillShown = {
   name: string
   /** Set when it gets a new name. */
   newName: string | null
+  /** An assistant's own skill (/skills/mine/<name>) becoming shared. */
+  sharing: boolean
   /** null for a new skill. */
   basis: number | null
   /** The version it becomes; null when it is deleted. */
@@ -1079,6 +1330,7 @@ export function describeSkillAsk(ask: SkillAsk): {
   skill: SkillShown
 } {
   const { before, after, basis } = ask.input
+  const sharing = ask.input.share === true && before !== null && after !== null
   const shown = after ?? before!
   const beforeText = before ? skillText(before) : null
   const afterText = after ? skillText(after) : null
@@ -1124,6 +1376,7 @@ export function describeSkillAsk(ask: SkillAsk): {
   const skill: SkillShown = {
     name: before?.name ?? shown.name,
     newName: renamed ? after.name : null,
+    sharing,
     basis,
     version: after ? after.version : null,
     deleting: !after,
@@ -1146,6 +1399,23 @@ export function describeSkillAsk(ask: SkillAsk): {
       ? [`Files removed: ${changes("removed").join(", ")}`]
       : []),
   ]
+
+  if (sharing) {
+    return {
+      title: `Share the skill ${after.name} with your assistants?`,
+      lines: [
+        `Skill: ${skillPath(after.name)} (version ${after.version})`,
+        `From: ${skillPath(ownPathName(before.name))}, an assistant's own skill (version ${before.version}), which only it sees until you agree`,
+        `Description: ${after.description}`,
+        ...(after.tools.length ? [`Tools: ${after.tools.join(", ")}`] : []),
+        ...(after.files.length
+          ? [`Files: ${after.files.map((file) => file.path).join(", ")}`]
+          : []),
+      ],
+      warning: SKILL_WARNING,
+      skill,
+    }
+  }
 
   if (!before) {
     return {
@@ -1196,9 +1466,13 @@ export function describeSkillAsk(ask: SkillAsk): {
   }
 }
 
-type SkillPath = { name: string | null; file: string | null }
+/** `own`: under /skills/mine/, the token's own skills. */
+type SkillPath = { name: string | null; file: string | null; own: boolean }
 
-/** A path as the memory tool takes it: /skills, /skills/<name>[/<file>]. */
+/**
+ * A path as the memory tool takes it: /skills, /skills/<name>[/<file>],
+ * /skills/mine, /skills/mine/<name>[/<file>].
+ */
 function parseSkillPath(input: string): SkillPath {
   const raw = input.trim().replace(/\/+$/, "")
 
@@ -1208,10 +1482,12 @@ function parseSkillPath(input: string): SkillPath {
     )
   }
 
-  const rest = raw.slice(SKILL_ROOT.length + 1)
+  const below = raw.slice(SKILL_ROOT.length + 1)
+  const own = below === OWN_SKILLS || below.startsWith(`${OWN_SKILLS}/`)
+  const rest = own ? below.slice(OWN_SKILLS.length + 1) : below
 
   if (!rest) {
-    return { name: null, file: null }
+    return { name: null, file: null, own }
   }
 
   const slash = rest.indexOf("/")
@@ -1220,12 +1496,32 @@ function parseSkillPath(input: string): SkillPath {
 
   return {
     name,
+    own,
     file:
       file === null
         ? null
         : file === SKILL_FILE || file === NOTE_FILE
           ? file
           : checkSkillFilePath(file),
+  }
+}
+
+/**
+ * A ref after "skill:" (or a path after "/skills/"), as describe takes it:
+ * the skill's path name (mine/<name> for a token's own) and the file.
+ */
+export function splitSkillRef(rest: string): {
+  pathName: string
+  file: string | null
+} {
+  const own = rest.startsWith(`${OWN_SKILLS}/`)
+  const inner = own ? rest.slice(OWN_SKILLS.length + 1) : rest
+  const slash = inner.indexOf("/")
+  const name = slash < 0 ? inner : inner.slice(0, slash)
+
+  return {
+    pathName: own ? ownPathName(name) : name,
+    file: slash < 0 ? null : inner.slice(slash + 1),
   }
 }
 
@@ -1286,12 +1582,16 @@ function day(date: Date): string {
 }
 
 function aboutSkill(entry: SkillEntry): string {
+  if (entry.visibility === "private") {
+    return `${skillPath(entry.pathName)}: version ${entry.version}, ${entry.author === "owner" ? "last edited by the owner" : "written by you"}, updated ${day(entry.updatedAt)}. ${OWN_SKILL_FRAME}`
+  }
+
   return `${skillPath(entry.name)}: version ${entry.version}, ${entry.author === "owner" ? "written by the owner" : "written by an assistant, and the owner agreed to it"}, updated ${day(entry.updatedAt)}. ${SKILL_FRAME}`
 }
 
 /** One line per skill, for a listing. */
 function skillLine(entry: SkillEntry): string {
-  return `- ${skillPath(entry.name)} (version ${entry.version}${entry.files.length ? `, files: ${entry.files.map((file) => file.path).join(", ")}` : ""}): ${entry.description}`
+  return `- ${skillPath(entry.pathName)} (version ${entry.version}${entry.files.length ? `, files: ${entry.files.map((file) => file.path).join(", ")}` : ""}): ${entry.description}`
 }
 
 /** A skill's SKILL.md, or one of its files, as describe and view give it. */
@@ -1307,10 +1607,10 @@ export function viewSkill(
   const found = entry.files.find((item) => item.path === file)
 
   if (!found) {
-    throw missing(skillPath(entry.name, file))
+    throw missing(skillPath(entry.pathName, file))
   }
 
-  return `${skillPath(entry.name, file)}: a file of the skill ${entry.name} (version ${entry.version}).\n${numbered(found.text, range)}`
+  return `${skillPath(entry.pathName, file)}: a file of the skill ${entry.pathName} (version ${entry.version}).\n${numbered(found.text, range)}`
 }
 
 /**
@@ -1342,15 +1642,7 @@ function change(
   const before: SkillBody | null = fold
     ? fold.args.before
     : entry
-      ? {
-          name: entry.name,
-          description: entry.description,
-          version: entry.version,
-          body: entry.body,
-          tools: entry.tools,
-          files: entry.files,
-          extra: entry.extra ?? {},
-        }
+      ? bodyOf(entry)
       : null
   const basis = fold ? fold.args.basis : (entry?.version ?? null)
 
@@ -1369,6 +1661,135 @@ function change(
   }
 }
 
+/** What the ciphertext holds of a skill. */
+function bodyOf(entry: SkillEntry): SkillBody {
+  return {
+    name: entry.name,
+    description: entry.description,
+    version: entry.version,
+    body: entry.body,
+    tools: entry.tools,
+    files: entry.files,
+    extra: entry.extra ?? {},
+  }
+}
+
+/**
+ * The token's own skill made shared under `name`: a request, since every
+ * token that sees every skill would follow it. Until the owner agrees, it
+ * stays the token's own.
+ */
+function shareAsk(
+  all: SkillEntry[],
+  entry: SkillEntry,
+  name: string,
+): SkillOutcome {
+  if (taken(all, name, null)) {
+    throw new PcpError(
+      "conflict",
+      `A shared skill called ${name} exists already. Pick another name, or propose your change to ${skillPath(name)} itself.`,
+    )
+  }
+
+  const before = bodyOf(entry)
+  const skill = checkSkill(arrived({ ...before, name }))
+
+  return {
+    ask: {
+      kind: "skill_change",
+      input: {
+        skillId: entry.id,
+        basis: entry.version,
+        before,
+        after: { ...skill, version: entry.version + 1 },
+        share: true,
+      },
+    },
+    lead: `Sharing a skill of your own with other assistants asks the owner. ${ASKS_FIRST} Until they agree, it stays yours alone at ${skillPath(entry.pathName)}.`,
+  }
+}
+
+/**
+ * A write to the token's own skill, made at once: `base` null creates it.
+ * Only a skill still the token's own is written.
+ */
+async function saveOwn(
+  scope: SkillScope,
+  base: SkillEntry | null,
+  next: Omit<SkillBody, "version">,
+): Promise<SkillOutcome> {
+  const skill = checkSkill(arrived(next))
+  const path = skillPath(ownPathName(skill.name))
+
+  if (!base) {
+    const id = newId()
+
+    await db().skill.create({
+      data: {
+        id,
+        vaultId: scope.ctx.vaultId,
+        author: "assistant",
+        visibility: "private",
+        tokenId: scope.tokenId,
+        ciphertext: seal(scope.ctx, id, { ...skill, version: 1 }),
+      },
+    })
+
+    return {
+      text: `Saved ${path}, version 1: your own skill, which only you see and follow. Sharing it with other assistants asks the owner: rename it to ${skillPath(skill.name)}.`,
+    }
+  }
+
+  if (
+    skillText({ ...skill, version: base.version }) === skillText(base) &&
+    JSON.stringify(skill.files) === JSON.stringify(base.files)
+  ) {
+    return { text: "Nothing changed: the skill is the same." }
+  }
+
+  const version = base.version + 1
+  const { count } = await db().skill.updateMany({
+    where: {
+      id: base.id,
+      vaultId: scope.ctx.vaultId,
+      visibility: "private",
+      tokenId: scope.tokenId,
+    },
+    data: {
+      author: "assistant",
+      ciphertext: seal(scope.ctx, base.id, { ...skill, version }),
+    },
+  })
+
+  if (count === 0) {
+    throw missing(skillPath(base.pathName))
+  }
+
+  return { text: `Saved ${path}, version ${version}.` }
+}
+
+async function deleteOwn(
+  scope: SkillScope,
+  entry: SkillEntry,
+): Promise<SkillOutcome> {
+  const { count } = await db().skill.deleteMany({
+    where: {
+      id: entry.id,
+      vaultId: scope.ctx.vaultId,
+      visibility: "private",
+      tokenId: scope.tokenId,
+    },
+  })
+
+  if (count === 0) {
+    throw missing(skillPath(entry.pathName))
+  }
+
+  return {
+    text: `Deleted ${skillPath(entry.pathName)}, and its files with it.`,
+  }
+}
+
 function deleteAsk(
   entry: SkillEntry,
   fold: OpenRequest<SkillChangeAsk> | null = null,
@@ -1380,15 +1801,7 @@ function deleteAsk(
       input: {
         skillId: entry.id,
         basis: entry.version,
-        before: {
-          name: entry.name,
-          description: entry.description,
-          version: entry.version,
-          body: entry.body,
-          tools: entry.tools,
-          files: entry.files,
-          extra: entry.extra ?? {},
-        },
+        before: bodyOf(entry),
         after: null,
       },
     },
@@ -1472,7 +1885,7 @@ async function noteCommand(
   entry: SkillEntry,
   args: SkillCommand,
 ): Promise<SkillOutcome> {
-  const path = skillPath(entry.name, NOTE_FILE)
+  const path = skillPath(entry.pathName, NOTE_FILE)
 
   if (args.command === "view") {
     return {
@@ -1501,8 +1914,8 @@ async function noteCommand(
         {
           kind: "skill",
           row,
-          name: entry.name,
-          label: skillPath(entry.name),
+          name: entry.pathName,
+          label: skillPath(entry.pathName),
         },
         args.command === "create" ? required(args.file_text, "file_text") : "",
         "memory",
@@ -1514,22 +1927,25 @@ async function noteCommand(
 
 /**
  * One memory tool command on a /skills path. Reads are answered here; every
- * write comes back as an ask for the owner, which the gateway hands to
- * permissions.ts. Only the skills the token sees can be read or changed.
+ * write to a shared skill comes back as an ask for the owner, which the
+ * gateway hands to permissions.ts, and a write to the token's own
+ * (/skills/mine/) is made at once. Only the skills the token sees can be
+ * read or changed.
  */
 export async function runSkillCommand(
   scope: SkillScope,
   args: SkillCommand,
 ): Promise<SkillOutcome> {
   const all = await load(scope.ctx)
-  const visible =
-    scope.skillIds === null
-      ? all
-      : all.filter((entry) => scope.skillIds!.includes(entry.id))
+  const shared = seenBy(all, scope.skillIds, null)
+  const own = seenBy(all, [], scope.tokenId)
+  const visible = [...shared, ...own]
   const target = parseSkillPath(required(args.path, "path"))
   const entry =
     target.name !== null
-      ? (visible.find((item) => item.name === target.name) ?? null)
+      ? ((target.own ? own : shared).find(
+          (item) => item.name === target.name,
+        ) ?? null)
       : null
   const needEntry = (): SkillEntry => {
     if (!entry) {
@@ -1554,11 +1970,22 @@ export async function runSkillCommand(
 
   switch (args.command) {
     case "view": {
+      const ownList = [
+        `${SKILL_ROOT}/${OWN_SKILLS}: your own skills, which only you see and the owner has not approved; write them freely (${own.length})`,
+        ...(own.length ? own.map(skillLine) : ["  (none)"]),
+      ]
+
+      if (target.name === null && target.own) {
+        return { text: ownList.join("\n") }
+      }
+
       if (target.name === null) {
         return {
           text: [
-            `${SKILL_ROOT}: procedures the owner approved, to follow when a task matches (${visible.length})`,
-            ...(visible.length ? visible.map(skillLine) : ["  (none)"]),
+            `${SKILL_ROOT}: procedures the owner approved, to follow when a task matches (${shared.length})`,
+            ...(shared.length ? shared.map(skillLine) : ["  (none)"]),
+            "",
+            ...ownList,
           ].join("\n"),
         }
       }
@@ -1575,7 +2002,9 @@ export async function runSkillCommand(
         .filter(Boolean)
       const inside = target.name
         ? visible.filter((item) => item === entry)
-        : visible
+        : target.own
+          ? own
+          : visible
       const hits = inside
         .map((item) => {
           const haystack =
@@ -1600,7 +2029,10 @@ export async function runSkillCommand(
     case "insert":
     case "delete":
     case "rename":
-      return writeCommand(scope, all, target, entry, args)
+      // The token's own: written at once, nothing to fold into.
+      return target.own
+        ? writeSkill(scope, all, target, entry, args, null)
+        : writeCommand(scope, all, target, entry, args)
 
     default:
       throw invalid(
@@ -1658,6 +2090,10 @@ function asEntry(stored: SkillEntry | null, after: SkillBody): SkillEntry {
   return {
     id: stored?.id ?? "",
     author: stored?.author ?? "assistant",
+    // Only a shared skill's changes wait on the owner.
+    visibility: "shared",
+    tokenId: null,
+    pathName: after.name,
     note: stored?.note ?? null,
     createdAt: stored?.createdAt ?? new Date(0),
     updatedAt: stored?.updatedAt ?? new Date(0),
@@ -1717,6 +2153,11 @@ async function writeCommand(
   }
 }
 
+/**
+ * One write on a skill path: an ask for the owner on a shared skill, or
+ * made at once on the token's own (`target.own`). Renaming one of its own
+ * out of /skills/mine/ is the ask to share it.
+ */
 async function writeSkill(
   scope: SkillScope,
   all: SkillEntry[],
@@ -1725,6 +2166,10 @@ async function writeSkill(
   args: SkillCommand,
   fold: OpenRequest<SkillChangeAsk> | null,
 ): Promise<SkillOutcome> {
+  const own = target.own
+  const shelf = own ? scope.tokenId : null
+  const here = (name: string, file?: string) =>
+    skillPath(own ? ownPathName(name) : name, file)
   const entry = fold ? asEntry(stored, fold.args.after!) : stored
   const needEntry = (): SkillEntry => {
     if (!entry) {
@@ -1737,13 +2182,23 @@ async function writeSkill(
     base: SkillEntry | null,
     next: Omit<SkillBody, "version">,
     verb: string,
-  ) => change(base, next, verb, fold)
+  ): SkillOutcome | Promise<SkillOutcome> =>
+    own ? saveOwn(scope, base, next) : change(base, next, verb, fold)
+  const takenHere = (name: string, exceptId?: string): PcpError | null =>
+    taken(all, name, shelf, exceptId)
+      ? new PcpError(
+          "conflict",
+          own
+            ? `You keep a skill called ${name} already, at ${here(name)}. Pick another name.`
+            : `A skill called ${name} exists already. Pick another name.`,
+        )
+      : null
 
   switch (args.command as WriteCommand) {
     case "create": {
       if (target.name === null || target.file === null) {
         throw invalid(
-          `Name the skill's ${SKILL_FILE} or one of its files, like ${skillPath("release-notes")}.`,
+          `Name the skill's ${SKILL_FILE} or one of its files, like ${here("release-notes")}.`,
         )
       }
 
@@ -1758,15 +2213,16 @@ async function writeSkill(
           )
         }
 
-        if (!entry && taken(all, target.name)) {
-          throw new PcpError(
-            "conflict",
-            `A skill called ${target.name} exists already. Pick another name.`,
-          )
+        const clash = entry ? null : takenHere(target.name)
+
+        if (clash) {
+          throw clash
         }
 
         if (!entry) {
-          await roomForOneMore(scope.ctx)
+          await (own
+            ? roomForOneMoreOwn(scope.ctx, scope.tokenId)
+            : roomForOneMore(scope.ctx))
         }
 
         return changed(entry, next, entry ? "Changing" : "Adding")
@@ -1805,12 +2261,11 @@ async function writeSkill(
 
       if (target.file === null || target.file === SKILL_FILE) {
         const next = fromText(found, edit(skillText(found)), found.name)
+        const clash =
+          next.name !== found.name ? takenHere(next.name, found.id) : null
 
-        if (next.name !== found.name && taken(all, next.name, found.id)) {
-          throw new PcpError(
-            "conflict",
-            `A skill called ${next.name} exists already. Pick another name.`,
-          )
+        if (clash) {
+          throw clash
         }
 
         return changed(found, next, "Changing")
@@ -1837,13 +2292,17 @@ async function writeSkill(
     case "delete": {
       if (target.name === null) {
         throw invalid(
-          `Name the skill to delete, like ${SKILL_ROOT}/release-notes.`,
+          `Name the skill to delete, like ${here("release-notes")}.`,
         )
       }
 
       const found = needEntry()
 
       if (target.file === null || target.file === SKILL_FILE) {
+        if (own) {
+          return deleteOwn(scope, found)
+        }
+
         if (fold) {
           if (fold.args.skillId === null) {
             throw new PcpError(
@@ -1877,15 +2336,24 @@ async function writeSkill(
       const to = parseSkillPath(required(args.new_path, "new_path"))
 
       if (to.name === null) {
-        throw invalid(
-          `new_path names where it goes, like ${SKILL_ROOT}/new-name.`,
-        )
+        throw invalid(`new_path names where it goes, like ${here("new-name")}.`)
       }
 
       if (target.file === null || target.file === SKILL_FILE) {
         if (to.file !== null && to.file !== SKILL_FILE) {
           throw invalid(
-            `A skill moves to ${SKILL_ROOT}/<new name>; its files go with it.`,
+            `A skill moves to ${here("<new name>")}; its files go with it.`,
+          )
+        }
+
+        // Out of /skills/mine/: the ask to share it.
+        if (own && !to.own) {
+          return shareAsk(all, found, to.name)
+        }
+
+        if (!own && to.own) {
+          throw invalid(
+            `A shared skill stays shared: to keep a copy of your own, create ${skillPath(ownPathName(found.name))}.`,
           )
         }
 
@@ -1893,23 +2361,23 @@ async function writeSkill(
           return { text: "Nothing changed: that is its name already." }
         }
 
-        if (taken(all, to.name, found.id)) {
-          throw new PcpError(
-            "conflict",
-            `A skill called ${to.name} exists already. Pick another name.`,
-          )
+        const clash = takenHere(to.name, found.id)
+
+        if (clash) {
+          throw clash
         }
 
         return changed(found, { ...found, name: to.name }, "Renaming")
       }
 
       if (
+        to.own !== own ||
         to.name !== found.name ||
         to.file === null ||
         to.file === SKILL_FILE
       ) {
         throw invalid(
-          `A file moves within its skill: new_path is ${skillPath(found.name, "<new path>")}.`,
+          `A file moves within its skill: new_path is ${here(found.name, "<new path>")}.`,
         )
       }
 
@@ -1922,7 +2390,7 @@ async function writeSkill(
       if (found.files.some((item) => item.path === to.file)) {
         throw new PcpError(
           "conflict",
-          `${skillPath(found.name, to.file)} is taken. Pick another path.`,
+          `${here(found.name, to.file)} is taken. Pick another path.`,
         )
       }
 
@@ -1993,12 +2461,16 @@ export async function applySkillChange(
 ): Promise<string> {
   const entries = await load(ctx)
 
+  if (ask.share) {
+    return applyShare(ctx, tokenId, entries, ask)
+  }
+
   if (ask.skillId === null) {
     if (!ask.after) {
       throw invalid("There is nothing to add.")
     }
 
-    if (taken(entries, ask.after.name)) {
+    if (taken(entries, ask.after.name, null)) {
       throw new PcpError(
         "conflict",
         `A skill called ${ask.after.name} was added since the owner was asked, so nothing was written. Describe it (ref "${SKILL_REF}${ask.after.name}") and propose your change on top of it, or pick another name.`,
@@ -2031,7 +2503,9 @@ export async function applySkillChange(
     return `The owner agreed: the skill ${skill.name} is added, at version ${ask.after.version}. Read it with describe and ref "${SKILL_REF}${skill.name}".`
   }
 
-  const entry = entries.find((item) => item.id === ask.skillId)
+  const entry = entries.find(
+    (item) => item.id === ask.skillId && item.visibility === "shared",
+  )
   const name = ask.before?.name ?? ask.after?.name ?? "it"
 
   if (!entry) {
@@ -2050,7 +2524,7 @@ export async function applySkillChange(
     return `The owner agreed: the skill ${entry.name} is deleted.`
   }
 
-  if (taken(entries, ask.after.name, entry.id)) {
+  if (taken(entries, ask.after.name, null, entry.id)) {
     throw new PcpError(
       "conflict",
       `A skill called ${ask.after.name} was added since the owner was asked, so nothing was written. Pick another name and propose it anew.`,
@@ -2068,4 +2542,53 @@ export async function applySkillChange(
   })
 
   return `The owner agreed: the skill ${skill.name} is saved as version ${ask.after.version}.`
+}
+
+/**
+ * The owner agreed to share the token's own skill: written as they read it,
+ * while it is still the token's own at the version they were shown.
+ */
+async function applyShare(
+  ctx: VaultContext,
+  tokenId: string,
+  entries: SkillEntry[],
+  ask: SkillChangeAsk,
+): Promise<string> {
+  const entry = entries.find(
+    (item) =>
+      item.id === ask.skillId &&
+      item.visibility === "private" &&
+      item.tokenId === tokenId,
+  )
+  const name = ask.before?.name ?? "it"
+
+  if (!entry || !ask.after) {
+    throw new PcpError(
+      "conflict",
+      `Your skill ${name} was deleted or shared since the owner was asked, so nothing was written.`,
+    )
+  }
+
+  if (entry.version !== ask.basis) {
+    throw new PcpError(
+      "conflict",
+      `Your skill ${entry.name} changed since the owner was asked (they were shown version ${ask.basis ?? 0}; it is at version ${entry.version} now), so nothing was shared. Rename ${skillPath(entry.pathName)} again to ask anew.`,
+    )
+  }
+
+  if (taken(entries, ask.after.name, null)) {
+    throw new PcpError(
+      "conflict",
+      `A shared skill called ${ask.after.name} was added since the owner was asked, so nothing was written. Pick another name and ask anew.`,
+    )
+  }
+
+  const skill = asShown(ask.after)
+
+  await makeShared(ctx, entry.id, tokenId, {
+    author: "assistant",
+    ciphertext: seal(ctx, entry.id, { ...skill, version: ask.after.version }),
+  })
+
+  return `The owner agreed: your skill is shared as ${skill.name}, at version ${ask.after.version}, and ${skillPath(entry.pathName)} is gone. Read it with describe and ref "${SKILL_REF}${skill.name}".`
 }

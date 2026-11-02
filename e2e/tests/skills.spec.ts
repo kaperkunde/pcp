@@ -7,7 +7,8 @@ import { connectAssistant, permissionFrom, clickHydrated } from "../lib/ui"
 // about it, finds it with search and reads it with describe; its change to
 // it waits for the owner, who reads what changes and the whole skill, and is
 // written as the next version only once they agree; a second edit while it
-// waits joins the same request.
+// waits joins the same request. An assistant's own skill is written at once,
+// and the owner sees it, marked with its token, and makes it shared.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -175,4 +176,37 @@ test("a long skill's request fits a phone: nothing past the footer, nothing to t
   expect(size.scrollWidth).toBeLessThanOrEqual(size.clientWidth)
 
   await callTool(baseURL!, token, "withdraw_request", { id })
+})
+
+test("an assistant keeps a skill of its own, which the owner sees and shares", async ({
+  page,
+  baseURL,
+}) => {
+  const own = `e2e-${RUN}-diary`
+  const saved = await callTool(baseURL!, token, "memory", {
+    command: "create",
+    path: `/skills/mine/${own}/SKILL.md`,
+    file_text: `---\nname: ${own}\ndescription: Keep a diary of the day (${RUN}).\n---\n\n1. Write what was done.\n`,
+  })
+  // Written at once: no request.
+  expect(toolText(saved)).toContain(`Saved /skills/mine/${own}/SKILL.md`)
+  expect(toolText(saved)).not.toContain("Not done yet")
+  const described = await callTool(baseURL!, token, "describe", {
+    ref: `skill:mine/${own}`,
+  })
+  expect(toolText(described)).toContain("Your own skill")
+
+  await page.goto("/skills")
+  const row = page.getByRole("link", { name: new RegExp(own) })
+  await expect(row).toContainText(`${TOKEN_NAME}'s own`)
+  await row.click()
+  await expect(page.getByRole("heading", { name: own })).toBeVisible()
+  page.once("dialog", (dialog) => void dialog.accept())
+  await clickHydrated(page.getByRole("button", { name: "Make shared" }))
+  await expect(page.getByRole("button", { name: "Make shared" })).toBeHidden()
+
+  const shared = await callTool(baseURL!, token, "describe", {
+    ref: `skill:${own}`,
+  })
+  expect(toolText(shared)).toContain("A procedure the owner approved")
 })

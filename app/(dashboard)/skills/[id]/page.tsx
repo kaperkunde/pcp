@@ -9,6 +9,7 @@ import {
   SkillDelete,
   SkillEditForm,
   SkillFiles,
+  SkillShare,
 } from "@/components/skill-editor"
 import { List, ListSection } from "@/components/ui/list"
 import { isPcpError } from "@/lib/core/errors"
@@ -21,7 +22,8 @@ export const metadata: Metadata = { title: "Skill" }
 /**
  * One skill: About (what it is, where it came from, how it syncs, your
  * note), its fields to edit, the reference files it carries, its whole
- * SKILL.md as assistants read it, and deleting it, last.
+ * SKILL.md as assistants read it, sharing it when it is an assistant's own,
+ * and deleting it, last.
  */
 export default async function SkillPage({
   params,
@@ -56,6 +58,11 @@ export default async function SkillPage({
               ? "written by you"
               : "written by an assistant, and you agreed"}{" "}
             · updated <RelativeDate value={skill.updatedAt} />
+            {skill.visibility === "private"
+              ? skill.tokenName
+                ? ` · ${skill.tokenName}'s own: only that assistant sees it`
+                : " · kept by an assistant whose token was deleted: no assistant sees it"
+              : null}
           </>
         }
       />
@@ -90,6 +97,13 @@ export default async function SkillPage({
           {skill.text}
         </pre>
       </details>
+      {skill.visibility === "private" ? (
+        <SkillShare
+          skillId={skill.id}
+          name={skill.name}
+          tokenName={skill.tokenName}
+        />
+      ) : null}
       <SkillDelete skillId={skill.id} name={skill.name} />
     </PageColumn>
   )

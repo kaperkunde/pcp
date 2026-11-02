@@ -12,7 +12,7 @@ import {
   readPublish,
   readServiceDefinition,
 } from "../services/definition"
-import { listSkills, type SkillEntry } from "../skills"
+import { listSharedSkills, type SkillEntry } from "../skills"
 import { getWrapper } from "../wrappers/admin"
 import type { WrapperAnnotations } from "../wrappers/definition"
 
@@ -415,7 +415,7 @@ export async function localItem(
   id: string,
 ): Promise<LocalItem> {
   if (kind === "skill") {
-    const entry = (await listSkills(ctx)).find((skill) => skill.id === id)
+    const entry = (await listSharedSkills(ctx)).find((skill) => skill.id === id)
 
     if (!entry) {
       throw notFound("That skill")
@@ -513,7 +513,7 @@ export async function localItems(
   ctx: VaultContext,
   skipped: Array<{ id: string; name: string; message: string }> = [],
 ): Promise<LocalItem[]> {
-  const skills = (await listSkills(ctx)).map((entry) => ({
+  const skills = (await listSharedSkills(ctx)).map((entry) => ({
     id: entry.id,
     document: skillDocument(entry) as ItemDocument,
   }))
@@ -557,7 +557,7 @@ export async function findLocalItem(
   ref: { kind: ItemKind; name: string },
 ): Promise<{ id: string; kind: ItemKind | null } | null> {
   if (ref.kind === "skill") {
-    const entry = (await listSkills(ctx)).find(
+    const entry = (await listSharedSkills(ctx)).find(
       (skill) => skill.name === ref.name,
     )
     return entry ? { id: entry.id, kind: "skill" } : null
