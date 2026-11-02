@@ -123,7 +123,15 @@ so in the summary; the bump itself waits for the request.
   sees through `search` and `describe`, and proposes a change only through
   the `memory` tool's `/skills/…` paths: a `skill_change` request that shows
   the whole skill and its diff and writes only that, while the skill is
-  still at the version the owner was shown. A change to the SKILL.md shape
+  still at the version the owner was shown. The exception is a token's own
+  skills (`/skills/mine/<name>/`, `visibility` `private` with its
+  `tokenId`), as `/memories/notes.md` is: written at once, seen only by that
+  token (`skill:mine/<name>`, never framed as approved) and the owner (the
+  Skills page, marked with the token), never offered to another token and
+  never in a linked repository (`repos/` reads `listSharedSkills` only). One
+  becomes shared only by the owner's hand (`shareSkill`) or a `skill_change`
+  with `share` (renaming it out of `/skills/mine/`), written as shown. A
+  deleted token's stay, the owner's alone. A change to the SKILL.md shape
   stays backward compatible.
 - Every tool PCP exposes is defined through `lib/core/tools/`: PCP's own
   at `/mcp` with `defineTool`, the families behind call_tool (browser, mail,
@@ -163,8 +171,9 @@ so in the summary; the bump itself waits for the request.
   (`repos/limits.ts`) and read against a schema, every file checked against
   its git id. It never reads a secret: `upstream.ts githubCredential` hands
   it the header, from a text secret or PCP's own sign-in (`oauth/github`).
-  A server's document is its definition only (`PCP_FORMAT` 2): sync never
-  writes an instance's own fields (name and short name, address,
+  A token's own skill is never an item: not listed, pushed, imported onto
+  or kept out. A server's document is its definition only (`PCP_FORMAT`
+  2): sync never writes an instance's own fields (name and short name, address,
   credential and secrets, read-only, public-only, enabled, pace, levels,
   note; a service's SSH server, publish address, variables' secrets and
   typed values, container, what it registered, its exit), and what a format-1 document says of its

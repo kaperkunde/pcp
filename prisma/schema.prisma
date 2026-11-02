@@ -170,6 +170,7 @@ model ApiToken {
   toolAccess         ApiTokenToolAccess[]
   permissionRequests PermissionRequest[]
   memories           Memory[]
+  privateSkills      Skill[]
   webFetchRules      WebFetchRule[]
   toolResults        ToolResult[]
   fileLinks          FileLink[]
@@ -469,9 +470,20 @@ model Skill {
   vault      Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
   /// owner | assistant: who wrote the text as it is now.
   author     String   @default("owner")
+  /// shared | private. A shared skill is seen by the tokens the owner
+  /// chooses (allSkills, ApiTokenSkill); a private one only by the token
+  /// that keeps it (`tokenId`), which writes it without asking, and by the
+  /// owner. A private one is never in a linked repository.
+  visibility String   @default("shared")
+  /// The token a private skill is kept by. Null for a shared skill, and for
+  /// a private one once its token is deleted: it stays, the owner's alone,
+  /// seen by no token.
+  tokenId    String?   @map("token_id")
+  token      ApiToken? @relation(fields: [tokenId], references: [id], onDelete: SetNull)
   /// The name, description, version, body, tools and files as JSON,
   /// AES-256-GCM under the vault's data key with "skill:<id>" as associated
-  /// data. Names are unique per vault by checking, as memory paths are.
+  /// data. Shared names are unique per vault, a private skill's per token,
+  /// by checking, as memory paths are.
   ciphertext Bytes
   /// The owner's own note on the skill (its one instance), at most 300
   /// characters on one line: AES-256-GCM under the vault's data key with
@@ -487,6 +499,7 @@ model Skill {
   repoExclusions RepoExclusion[]
 
   @@index([vaultId])
+  @@index([tokenId])
   @@map("skill")
 }
 

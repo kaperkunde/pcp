@@ -312,7 +312,15 @@ export function searchTools(
 }
 
 /** A skill as search sees it: its name and description. */
-export type SkillCandidate = { name: string; description: string }
+/**
+ * A skill as search sees it: its name, and how its ref names it when that
+ * is not its name (mine/<name> for a token's own).
+ */
+export type SkillCandidate = {
+  name: string
+  description: string
+  pathName?: string
+}
 
 /** A memory as search sees it: its full path and its text. */
 export type MemoryCandidate = { path: string; text: string }
@@ -456,7 +464,7 @@ export function searchEverything(
     : []
   const skillResults = wants("skill")
     ? skills.map((skill): SearchResult => {
-        const ref = `skill:${skill.name}`
+        const ref = `skill:${skill.pathName ?? skill.name}`
         const score = words.length
           ? scoreOne(
               {

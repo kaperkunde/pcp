@@ -1305,8 +1305,9 @@ the owner's or one they read:
 - **Stored whole, encrypted.** A `skill` row holds one ciphertext of the
   name, description, version, body, tools and files, under the vault's key
   with `skill:<id>` as associated data, and `author` (`owner`, or
-  `assistant` once the owner agreed to an assistant's text). Names are
-  unique per vault by checking after decrypting, as memory paths are.
+  `assistant` once the owner agreed to an assistant's text). Shared names
+  are unique per vault, an own skill's per token (below), by checking after
+  decrypting, as memory paths are.
   Limits are in `lib/core/constants.ts` (`MAX_SKILL_*`, `MAX_SKILLS`), and
   text with characters that do not show on screen is refused, as for a
   memory (`hiddenCharacter`). The frontmatter is read with `yaml` in its
@@ -1359,9 +1360,33 @@ the owner's or one they read:
   waiting request for the same item is shown on both pages as a conflict:
   approving one makes the other stale, and check_permission then says why
   and, for a skill, the version it is at now.
-- **Exported** as rows (`skill`, `api_token_skill`, `all_skills`); an older
-  file restores with none, every token seeing every skill. Deleting the
-  vault wipes them.
+- **A token's own skills.** As `/memories/notes.md` is a token's own beside
+  `/memories/shared/`, a token that keeps memories writes skills for itself
+  at `/skills/mine/<name>/SKILL.md` and `/skills/mine/<name>/<file>`
+  (`skill.visibility` `private`, `skill.token_id` the token): create,
+  str_replace, insert, delete and rename are made at once, no request. Only
+  that token sees them (`skillsFor` takes the token; search and describe
+  name one `skill:mine/<name>`, the instructions list it as "(Your own.)",
+  and describe frames it as the assistant's own, never as approved), and the
+  owner, on the Skills page, marked with the token's name, where they read,
+  edit, delete and share it (`shareSkill`: theirs from then on). An own
+  skill's name is unique among that token's own (at most `MAX_OWN_SKILLS`,
+  which count toward `MAX_SKILLS`) and may be a shared skill's too: the path
+  tells them apart, and `mine` is no skill's name. Renaming one out of
+  `/skills/mine/` is the request to share it (`skill_change` with `share`,
+  showing the whole skill as it would be shared); the owner's yes turns that
+  row shared, as shown and only while it is still the token's own at the
+  version they read; until then nothing changes. It is never offered to
+  another token (`setTokenSkills` and the token's page take shared skills
+  only) and never in a linked repository: `lib/core/repos/` reads
+  `listSharedSkills`, and refuses an own skill's id wherever one could be
+  named (a review, an exclusion, an import onto it). A deleted token's own
+  skills stay (`ON DELETE SET NULL`), seen by no token and holding no name:
+  the owner's alone, marked "From a deleted token".
+- **Exported** as rows (`skill` with its `visibility` and `token_id`,
+  `api_token_skill`, `all_skills`); an older file restores with none, every
+  token seeing every skill, and an older file's skills as shared. Deleting
+  the vault wipes them.
 
 ## Shared items in repositories
 

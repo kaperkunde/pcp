@@ -248,6 +248,10 @@ const SkillRow = z.strictObject({
   id,
   vaultId: id,
   author: str,
+  // A token's own skill, added with private skills: an older file's are all
+  // shared.
+  visibility: str.default("shared"),
+  tokenId: id.nullable().default(null),
   ciphertext: bytes,
   // The owner's note, added with definitions: absent from older files.
   personalNote: bytesOrNull.default(null),
@@ -756,6 +760,14 @@ export function checkReferences(payload: ExportPayload): void {
 
   for (const memory of tables.memories) {
     pointsAt(memory.tokenId, tokens, "a token")
+  }
+
+  for (const skill of tables.skills) {
+    pointsAt(skill.tokenId, tokens, "a token")
+
+    if (skill.visibility === "shared" && skill.tokenId !== null) {
+      throw problem("a shared skill names a token")
+    }
   }
 
   for (const server of tables.servers) {

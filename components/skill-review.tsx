@@ -20,15 +20,22 @@ export function SkillReview({ skill }: { skill: SkillShown }) {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-        <code className="break-all">/skills/{skill.name}/SKILL.md</code>
-        {skill.newName ? (
+        <code className="break-all">
+          /skills/{skill.sharing ? "mine/" : ""}
+          {skill.name}/SKILL.md
+        </code>
+        {skill.newName || skill.sharing ? (
           <>
             <span aria-hidden>→</span>
             <span className="sr-only">moves to</span>
-            <code className="break-all">/skills/{skill.newName}/SKILL.md</code>
+            <code className="break-all">
+              /skills/{skill.newName ?? skill.name}/SKILL.md
+            </code>
           </>
         ) : null}
-        {skill.deleting ? (
+        {skill.sharing ? (
+          <Badge variant="secondary">Shared with your assistants</Badge>
+        ) : skill.deleting ? (
           <Badge variant="destructive">Deleted</Badge>
         ) : skill.basis === null ? (
           <Badge variant="secondary">New skill</Badge>

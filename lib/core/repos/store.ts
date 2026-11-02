@@ -6,7 +6,7 @@ import { db } from "../db"
 import { invalid, notFound, PcpError } from "../errors"
 import { newId } from "../ids"
 import { ensureDefinition } from "../definition-rows"
-import { listSkills } from "../skills"
+import { listSharedSkills } from "../skills"
 import { githubCredential } from "../upstream"
 
 import {
@@ -601,7 +601,7 @@ export async function linkedItemNames(
   const names = new Map<string, string>()
 
   if (items.some((item) => item.kind === "skill")) {
-    for (const skill of await listSkills(ctx)) {
+    for (const skill of await listSharedSkills(ctx)) {
       names.set(skill.id, skill.name)
     }
   }
@@ -642,8 +642,9 @@ async function exclusionTarget(
   itemId: string,
 ): Promise<{ skillId: string } | { definitionId: string }> {
   if (kind === "skill") {
+    // A token's own skill is never offered, so never kept out either.
     const skill = await db().skill.findFirst({
-      where: { id: itemId, vaultId: ctx.vaultId },
+      where: { id: itemId, vaultId: ctx.vaultId, visibility: "shared" },
       select: { id: true },
     })
 

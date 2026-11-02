@@ -59,7 +59,7 @@ const mcpHandler = createMcpHandler(
       memories: scope.keepMemories
         ? await instructionMemories(scope.ctx, scope.tokenId)
         : null,
-      skills: await instructionSkills(scope.ctx, scope.skillIds),
+      skills: await instructionSkills(scope.ctx, scope.skillIds, scope.tokenId),
       // web_fetch's exit argument names the exits this token may use.
       exitNames: scope.webFetch
         ? await usableExitNames(scope.ctx, scope.tokenId)
