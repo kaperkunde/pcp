@@ -123,3 +123,56 @@ test("its change asks the owner, who reads what changes and allows it", async ({
     page.getByRole("link", { name: new RegExp(NAME) }),
   ).toContainText("Version 2")
 })
+
+test("a long skill's request fits a phone: nothing past the footer, nothing to the side", async ({
+  page,
+  baseURL,
+}) => {
+  // A diff taller than its box: each line's words for a screen reader once
+  // stretched the page by the whole of it (#50).
+  const name = `${NAME}-long`
+  const steps = Array.from(
+    { length: 120 },
+    (_, at) => `${at + 1}. Step ${at + 1} of the long way round.`,
+  ).join("\n")
+
+  await page.goto("/skills")
+  await clickHydrated(page.getByRole("button", { name: "Add a skill" }))
+  const dialog = page.getByRole("dialog", { name: "Add a skill" })
+  await dialog.getByLabel("Name").fill(name)
+  await dialog.getByLabel("When to use it").fill(DESCRIPTION)
+  await dialog.getByLabel("Steps").fill(steps)
+  await dialog.getByRole("button", { name: "Save skill" }).click()
+  await expect(page.getByRole("heading", { name })).toBeVisible()
+
+  const asked = await callTool(baseURL!, token, "memory", {
+    command: "str_replace",
+    path: `/skills/${name}/SKILL.md`,
+    old_str: "60. Step 60",
+    new_str: "60. Step sixty",
+  })
+  const { path, id } = permissionFrom(toolText(asked))
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(path)
+  await expect(page.getByTestId("skill-diff")).toContainText("Step sixty")
+
+  const size = await page.evaluate(() => {
+    const footer = document
+      .querySelector('nav[aria-label="Footer"]')!
+      .closest("footer")!
+    const root = document.documentElement
+    return {
+      scrollHeight: root.scrollHeight,
+      footerBottom: footer.getBoundingClientRect().bottom + window.scrollY,
+      scrollWidth: root.scrollWidth,
+      clientWidth: root.clientWidth,
+    }
+  })
+  expect(size.scrollHeight).toBeLessThanOrEqual(
+    Math.ceil(size.footerBottom) + 2,
+  )
+  expect(size.scrollWidth).toBeLessThanOrEqual(size.clientWidth)
+
+  await callTool(baseURL!, token, "withdraw_request", { id })
+})
