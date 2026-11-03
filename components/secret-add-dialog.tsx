@@ -54,6 +54,7 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
         description: String(formData.get("description") ?? ""),
         value: String(formData.get("value") ?? ""),
         origins: String(formData.get("origins") ?? ""),
+        loginName: String(formData.get("loginName") ?? ""),
       })
       const result = await createSecretAction(previous, formData)
 
@@ -148,6 +149,22 @@ function AddSecretForm({ onSaved }: { onSaved: () => void }) {
           className="min-h-16 font-mono"
         />
       </Field>
+      {kind === "text" ? (
+        <Field
+          label="Login name (optional)"
+          htmlFor="secret-login"
+          hint="The email or user name this password signs in with. Assistants see it, never the value."
+        >
+          <Input
+            id="secret-login"
+            name="loginName"
+            defaultValue={typed.loginName}
+            maxLength={200}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </Field>
+      ) : null}
       <Field
         label="Sites for the browser (optional)"
         htmlFor="secret-origins"

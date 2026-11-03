@@ -73,6 +73,7 @@ import {
   type VaultBrowser,
 } from "./runtime"
 import { takePicture } from "./screenshot"
+import { signInHint } from "./sign-in-hint"
 import {
   allNodes,
   findInSnapshot,
@@ -535,6 +536,7 @@ async function report(
     first = [] as string[],
     maxSnapshot,
     tree: taken,
+    signIns = false,
   }: {
     snapshot?: boolean
     lead?: string[]
@@ -543,19 +545,24 @@ async function report(
     maxSnapshot?: number
     /** The tab's snapshot, when the caller has just taken it. */
     tree?: string
+    /** Name the owner's sign-ins at the page's site (sign-in-hint.ts). */
+    signIns?: boolean
   } = {},
 ): Promise<CallToolResult> {
   const title = await tabTitle(tab)
+  const hint = signIns ? await signInHint(scope.ctx, tab.page) : null
   const lines = [
     ...first,
     ...checkLead(tab),
     ...offeredLead(tab),
     ...lead,
+    ...(hint?.loud ? [hint.line] : []),
     ...popupLead(scope, tab),
     `Tab ${tab.id}: ${title || "(no title)"}`,
     `Address: ${tab.page.url()}`,
     `The owner can watch it or take over: ${markdownLink(`Watch tab ${title || tab.id}`, tabLink(scope.publicUrl, tab.id))}`,
     ...(await blockedNote(scope, tab)),
+    ...(hint && !hint.loud ? [hint.line] : []),
   ]
   const dialog = dialogNote(tab)
 
@@ -996,7 +1003,7 @@ export async function performNavigate(
 
     await passCheck(current)
     await saveVaultProfile(scope.ctx, vault, { force: true })
-    return report(scope, current, { first })
+    return report(scope, current, { first, signIns: true })
   })
 
   return withLead(await answer, note)
@@ -2077,7 +2084,9 @@ async function runCheckedTool(
         })
       })
     case "snapshot":
-      return onTab(scope, tab, spec, (current) => report(scope, current))
+      return onTab(scope, tab, spec, (current) =>
+        report(scope, current, { signIns: true }),
+      )
     case "read_page":
       return onTab(scope, tab, spec, (current) => readPage(current, args))
     case "find":

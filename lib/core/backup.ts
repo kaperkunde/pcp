@@ -477,7 +477,24 @@ async function writeExport(
         await tx.vault.create({ data: vault })
         await inChunks(keyGrants, (data) => tx.keyGrant.createMany({ data }))
         await inChunks(apiTokens, (data) => tx.apiToken.createMany({ data }))
-        await inChunks(tables.secrets, (data) => tx.secret.createMany({ data }))
+        // A secret names its TOTP companion, another secret: each is written
+        // first, then pointed at the other.
+        await inChunks(tables.secrets, (data) =>
+          tx.secret.createMany({
+            data: data.map((secret) => ({ ...secret, totpCompanionId: null })),
+          }),
+        )
+        for (const secret of tables.secrets) {
+          if (secret.totpCompanionId) {
+            await tx.secret.update({
+              where: { id: secret.id },
+              data: {
+                totpCompanionId: secret.totpCompanionId,
+                updatedAt: secret.updatedAt,
+              },
+            })
+          }
+        }
         await inChunks(tables.secretBrowserOrigins, (data) =>
           tx.secretBrowserOrigin.createMany({ data }),
         )

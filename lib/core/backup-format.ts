@@ -276,6 +276,11 @@ const SecretRow = z.strictObject({
   createdAt: date,
   updatedAt: date,
   lastUsedAt: dateOrNull,
+  // The owner's login name and note (encrypted) and the TOTP secret that goes
+  // with the sign-in, added with sign-in hints: absent from older files.
+  loginName: bytesOrNull.default(null),
+  note: bytesOrNull.default(null),
+  totpCompanionId: id.nullable().default(null),
 })
 
 // The sites a secret is typed at in the browser, added with typed secrets:
@@ -838,6 +843,10 @@ export function checkReferences(payload: ExportPayload): void {
     if ((tier.definitionId === null) === (tier.serverId === null)) {
       throw problem("a tool's tier names neither or both of its places")
     }
+  }
+
+  for (const secret of tables.secrets) {
+    pointsAt(secret.totpCompanionId, secrets, "a secret's one-time codes")
   }
 
   for (const site of tables.secretBrowserOrigins) {

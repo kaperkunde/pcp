@@ -39,6 +39,7 @@ export async function createSecretAction(
       value: field(formData, "value"),
       description: field(formData, "description"),
       kind,
+      loginName: field(formData, "loginName"),
     })
 
     for (const origin of origins) {
@@ -67,6 +68,16 @@ export async function updateSecretAction(
       name: field(formData, "name"),
       description: field(formData, "description"),
       ...(value ? { value } : {}),
+      // The sign-in it belongs to, on the form of one of the owner's own.
+      ...(formData.has("loginName")
+        ? {
+            loginName: field(formData, "loginName"),
+            note: field(formData, "note"),
+          }
+        : {}),
+      ...(formData.has("totpCompanionId")
+        ? { totpCompanionId: field(formData, "totpCompanionId") || null }
+        : {}),
     })
 
     if (!value) {

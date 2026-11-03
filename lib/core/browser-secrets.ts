@@ -17,6 +17,7 @@ import {
   createSecret,
   findOwnerSecretByName,
   isOwnerSecretKind,
+  openSecretDetails,
   validateSecretName,
   validateSecretValue,
   type OwnerSecretKind,
@@ -233,6 +234,64 @@ export async function listBrowserOrigins(
   }
 
   return bySecret
+}
+
+/**
+ * A secret the owner bound to a site, as the browser names it to an
+ * assistant on a page there: its name and the sign-in it belongs to, never
+ * its value.
+ */
+export type SiteSignIn = {
+  name: string
+  kind: OwnerSecretKind
+  loginName: string | null
+  note: string | null
+  /** The TOTP secret whose code goes with it, by name. */
+  totp: string | null
+}
+
+/**
+ * The owner's secrets bound to an origin, for the browser's note of the
+ * sign-ins at a page's site (browser/sign-in-hint.ts): each text secret
+ * with its login name, note and TOTP companion, then each TOTP secret bound
+ * there that is none of theirs' companion. At most `max`. Naming them gives
+ * no right to them: typing one is still the gate's (admitSecretUse).
+ */
+export async function signInsAt(
+  ctx: VaultContext,
+  origin: string,
+  max: number,
+): Promise<SiteSignIn[]> {
+  const rows = await db().secret.findMany({
+    where: {
+      vaultId: ctx.vaultId,
+      kind: { in: ["text", "totp"] },
+      browserOrigins: { some: { origin } },
+    },
+    orderBy: [{ kind: "asc" }, { name: "asc" }],
+    select: {
+      id: true,
+      name: true,
+      kind: true,
+      loginName: true,
+      note: true,
+      totpCompanion: { select: { name: true } },
+    },
+    take: max * 2,
+  })
+  const companions = new Set(
+    rows.flatMap((row) => (row.totpCompanion ? [row.totpCompanion.name] : [])),
+  )
+
+  return rows
+    .filter((row) => row.kind === "text" || !companions.has(row.name))
+    .slice(0, max)
+    .map((row) => ({
+      name: row.name,
+      kind: row.kind as OwnerSecretKind,
+      ...openSecretDetails(ctx, row),
+      totp: row.totpCompanion?.name ?? null,
+    }))
 }
 
 // ---- Allowances ---------------------------------------------------------------
