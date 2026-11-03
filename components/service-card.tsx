@@ -298,8 +298,11 @@ function PodmanRestartHint({ view }: { view: ServiceView }) {
           <code className={code}>
             systemctl --user enable podman-restart.service
           </code>{" "}
-          and <code className={code}>loginctl enable-linger {user}</code>, so
-          its user services run without a session
+          and{" "}
+          <code className={code}>
+            loginctl enable-linger {user || "<login>"}
+          </code>
+          , so its user services run without a session
         </>
       )}
       . A Quadlet unit for {view.containerName} does the same for this container
