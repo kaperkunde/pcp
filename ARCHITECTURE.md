@@ -2719,6 +2719,64 @@ revision `patchright-core` drives, so after an update to a newer one the
 page offers to install that, which removes the older build. Nothing runs
 until the owner clicks.
 
+## Search's embeddings
+
+Keyword search misses a task said in other words than a tool's ("launch a
+container" for a tool that starts a service). The owner can give search an
+embeddings provider on Settings → Search (`lib/core/embeddings/`); without
+one, search is keywords alone, as above, and nothing below runs.
+
+**Providers.** Voyage AI (`VOYAGE_EMBEDDINGS_URL`, public addresses only,
+its API key one of the owner's text secrets), any OpenAI-compatible
+`/v1/embeddings` address the owner types (an optional text secret as the
+bearer; any address but PCP's own), or one of the owner's API endpoints, as
+a service registers one: text-embeddings-inference from PCP's common items,
+launched on an SSH server like any service. An endpoint is called at its own
+address with its own credential and its public-only rule. The choice is the
+vault's setting `embeddings` (`embeddings/config.ts`): the provider, the
+model, a secret and a server by id, never a value, and what it may embed.
+Saving tries the provider once and says what failed; a change of provider
+drops every cached vector.
+
+**What leaves PCP.** Only the kinds the owner ticked (`EmbeddedKinds`):
+tools (each one's title, `server/name` and description, PCP's own
+included), skills (name and description), memories (path and text); and
+the query. Nothing else: no server description, owner's note, argument or
+secret. Settings starts a provider elsewhere (Voyage AI, an address that
+does not read as the owner's own network, `looksSelfHosted`) at tools only,
+and the owner's own service (an endpoint, an address on their network) at
+everything (`defaultEmbedded`).
+
+**The request.** upstream.ts `embeddingProvider` reads the secret and hands
+`embeddings/provider.ts requestEmbeddings` the finished header, as it hands
+an API endpoint's calls theirs. The request follows no redirect, reads a
+bounded answer (`EMBED_MAX_RESPONSE_BYTES`), checks every vector (one per
+text, numbers only, one length, `EMBED_MAX_DIMENSIONS`), scrubs the
+credential from what it says back, and is paced as a read
+(`pacing/index.ts paceEmbeddings`: by the endpoint with its own calls, or by
+the vault's provider), waiting `EMBED_PACE_WAIT_MS` at most for its turn.
+
+**The cache.** Vectors are rows of `embedding_vector`: the vector encrypted
+under the vault's key with `embedding_vector:<id>`, found by an HMAC (a key
+derived from the vault's key) of the provider, address and model and the
+text embedded. A changed text has another hash, so it is embedded again and
+the old row is no longer used; a row's `used_at` is written once a day at
+most, and the cleanup removes rows no search used for `EMBED_STALE_MS`. The
+cache is never exported, and a restore or a deleted vault wipes it.
+
+**A search.** Inside the search's request only, never on a timer: the
+query is embedded (`EMBED_QUERY_TIMEOUT_MS`) while the items' cached
+vectors are read and up to `EMBED_MAX_NEW_PER_SEARCH` missing ones are
+embedded, `EMBED_BATCH_SIZE` at a time within `EMBED_ITEMS_TIMEOUT_MS`;
+what is not back in time waits for a later search. Each item with a vector
+gets its cosine similarity, and `search.ts semanticBoosts` turns those into
+points relative to the others (the nearest `SEMANTIC_WEIGHT`, one below the
+middle or past `SEMANTIC_BAND` from the nearest none), added to the keyword
+score, so a name given exactly (1,000) still comes first and an item no
+keyword found can come up. A provider that fails, is slow, or answers what
+PCP cannot read leaves search to keywords, quietly: the assistant's answer
+says nothing of it.
+
 ## Pacing
 
 Assistants act far faster than a person, and a site that sees a quick run of
@@ -2727,7 +2785,9 @@ small server or a busy page can be overloaded by one. The rate limits
 (`lib/core/rate-limit.ts`) only refuse past a count; pacing
 (`lib/core/pacing/`) spaces actions out, the same way whatever made them.
 
-**Where it applies.** At two places, which every way of calling passes:
+**Where it applies.** At two places, which every way of calling passes
+(and to search's embeddings requests, as a read: Search's embeddings,
+above):
 
 - `callServerTool` (`upstream.ts`), for a server's tools: MCP servers, API
   endpoints, mail and calendar accounts and SSH servers, paced by the
@@ -3291,7 +3351,8 @@ nothing else: no arguments, no results, no sites.
 ended sign-ins, unfinished OAuth sign-ins, apps' codes and tokens past their
 expiry (with their grants) and registrations no sign-in used within a day
 (PCP's authorization server), permission requests a week past
-their expiry, kept results past their day, and days of the request log older
+their expiry, kept results past their day, search's cached embeddings no
+search used for a month, and days of the request log older
 than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
 then on a node-cron task, one per process and kept on `globalThis` like the
 update timer, unref'd, with no overlap: runs from the start, the schedule and
@@ -3511,7 +3572,12 @@ message each (`app/mcp/route.ts`). The tools:
   tools the token has (as `buildGatewayServer` registered them), the skills
   the token sees and (for a token that keeps memories) the memories it reads
   together (`lib/core/search.ts searchEverything`: name, title, description
-  and server words, with light stemming; a skill scores as a tool named
+  and server words, stemmed so a word's forms meet ("storage" and
+  "stored", "launching" and "launch"), with a short table of synonyms
+  ("container", "service", "docker", "podman"; "launch", "start", "run",
+  "deploy"; "file", "document") that score about half the word itself; a
+  word in a description's lead (up to its first clause) scores a little
+  more than one further on; a skill scores as a tool named
   after it, a memory as one named by its path and described by its text),
   and returns `kind ref — line` lines: `tool server/tool`, `pcp <name>`
   with its title, first sentence and that it is called directly (not
@@ -3524,9 +3590,16 @@ message each (`app/mcp/route.ts`). The tools:
   description or the owner's note on it only when no candidate has that
   word in its name, its title or its server's name, so "PCP" does not lift
   every tool on a server described as hosting PCP. One of PCP's own tools
-  comes up by its name or title only (the app lists them whole already),
-  and with an empty query only for kind `pcp`. `server` keeps to one
-  server's tools, `kind` to one kind (`tool`, `pcp`, `skill`, `memory`).
+  comes up by its name or title, or by what its description's lead says it
+  is for (its task phrases: share_result's "store, move or download a
+  file", register_server's "launch or run a container, start a service"),
+  and its title and lead then score as its name does; never by a word
+  further on (which says how it works with the others), nor by a word the
+  leads of a fifth of PCP's tools share ("owner", "tool"). With an empty
+  query it comes up only for kind `pcp`. `server` keeps to one server's
+  tools, `kind` to one kind (`tool`, `pcp`, `skill`, `memory`). With an
+  embeddings provider (Search's embeddings, below), each item's nearness to
+  the query is added to its keyword score.
 - `list_tools(server, offset?)` names every tool the token sees on one
   server, by name, with its level (`allowed` or `ask`) and a summary,
   `LIST_PAGE_SIZE` at a time (`listTools` in `lib/core/search.ts`), so an

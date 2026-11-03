@@ -1,7 +1,9 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
+import type { VaultContext } from "./context"
+import { writeEmbeddingsConfig } from "./embeddings/config"
 import { buildGatewayServer, type GatewayScope } from "./gateway"
 import {
   searchEverything,
@@ -148,10 +150,12 @@ const OWNER_TOOLS: ToolCandidate[] = [
 
 let cleanup: () => Promise<void>
 let pcp: PcpToolCandidate[]
+let client: Client
+let ctx: VaultContext
 
 beforeAll(async () => {
   ;({ cleanup } = await scratchDatabase())
-  const ctx = await setupVault({
+  ctx = await setupVault({
     name: "Ada",
     password: "correct horse battery staple",
   })
@@ -171,17 +175,17 @@ beforeAll(async () => {
   }
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
   await buildGatewayServer(scope, []).connect(serverSide)
-  const client = new Client({ name: "test", version: "1.0.0" })
+  client = new Client({ name: "test", version: "1.0.0" })
   await client.connect(clientSide)
   pcp = (await client.listTools()).tools.map((tool) => ({
     name: tool.name,
     title: tool.title ?? tool.name,
     description: tool.description ?? "",
   }))
-  await client.close()
 })
 
 afterAll(async () => {
+  await client.close()
   await cleanup()
 })
 
@@ -211,5 +215,26 @@ describe("task-phrased search with no provider (#61)", () => {
       "bazzite-files-service/upload_file",
     )
     expect(topFive("list servers")[0]).toBe("coolify-gaaf/list_servers")
+  })
+
+  it("answers by keywords when the embeddings provider cannot be reached", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+    await writeEmbeddingsConfig(ctx, {
+      provider: "openai",
+      url: "http://127.0.0.1:9/v1",
+      model: "m",
+      secretId: null,
+      embed: { tools: true, skills: false, memories: false },
+    })
+
+    const result = await client.callTool({
+      name: "search",
+      arguments: { query: "store a file" },
+    })
+    const text = (result.content as Array<{ text: string }>)[0]!.text
+
+    expect(result.isError ?? false).toBe(false)
+    expect(text).toContain("pcp share_result")
+    await writeEmbeddingsConfig(ctx, null)
   })
 })

@@ -5,6 +5,7 @@ import { ExportCard, RestoreCard } from "@/components/backup-cards"
 import { CleanupCard } from "@/components/cleanup-card"
 import { CopyableValue } from "@/components/copyable-value"
 import { DeleteVaultCard } from "@/components/delete-vault-card"
+import { EmbeddingsCard } from "@/components/embeddings-card"
 import { FormNote } from "@/components/form-status"
 import { PageColumn } from "@/components/page-column"
 import { PacingCard } from "@/components/pacing-card"
@@ -22,6 +23,7 @@ import { List, ListRow, ListSection } from "@/components/ui/list"
 import { UpdatesCard } from "@/components/updates-card"
 import { cleanupOverview } from "@/lib/core/cleanup/runtime"
 import { deviceKeyInfo } from "@/lib/core/device-keys"
+import { embeddingsOverview } from "@/lib/core/embeddings/config"
 import { isLocalAddress } from "@/lib/core/local-address"
 import { networkNotices, networkOverview } from "@/lib/core/network/runtime"
 import { pacingOverview } from "@/lib/core/pacing/config"
@@ -61,6 +63,7 @@ export default async function SettingsPage({
     cleanup,
     resources,
     pacing,
+    embeddings,
   ] = await Promise.all([
     getSetting(ctx, SETTING_PUBLIC_URL),
     requestOrigin(),
@@ -73,6 +76,7 @@ export default async function SettingsPage({
     cleanupOverview(),
     resourcesOverview(),
     pacingOverview(ctx),
+    embeddingsOverview(ctx),
   ])
 
   return (
@@ -113,6 +117,7 @@ export default async function SettingsPage({
             title="PCP's own tools"
             description="Read, Write or Destructive for search, the call_tool and run_code tools, memory and the rest: what assistants' apps are told each one can do"
           />
+          <EmbeddingsCard overview={embeddings} />
         </List>
       </ListSection>
 

@@ -193,7 +193,8 @@ so in the summary; the bump itself waits for the request.
   (the browser by the tab's site, in `browser/call.ts`) and web fetch's
   request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
   is paced: call_tool_<tier>, run_code_<tier>, wrappers and flows,
-  owner-approved calls, each as a read or a change by its tier.
+  owner-approved calls, each as a read or a change by its tier; and to
+  search's embeddings requests, as a read (`paceEmbeddings`).
   New defaults and bounds go in `pacing/limits.ts`, by class of action;
   nothing names a site or vendor. The owner's overrides are the vault's
   `pacing` setting, never a host setting.
@@ -357,6 +358,26 @@ so in the summary; the bump itself waits for the request.
   `after()`. A launch that fails takes back everything it did. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
+- Search (`lib/core/search.ts`, pure) finds a tool by keywords with no
+  provider: stems, a short synonym table, and for PCP's own tools what
+  their description's lead says they are for (task phrases there, in a
+  search's words). Embeddings (`lib/core/embeddings/`) are optional and the
+  owner's: a provider chosen on Settings → Search (Voyage AI, an
+  OpenAI-compatible address, or one of their API endpoints such as a
+  text-embeddings-inference service), kept as the vault's `embeddings`
+  setting, never a host setting. Only what the owner ticked leaves PCP,
+  with the query: tools' names and descriptions, skills, memories
+  (`itemsToEmbed`, nothing else of the vault: no server description, note,
+  argument or secret); a provider elsewhere starts at tools only
+  (`defaultEmbedded`). The secret is read in `upstream.ts
+embeddingProvider`, which hands `embeddings/provider.ts` the header;
+  Voyage AI at public addresses only, an address the owner typed never PCP's
+  own, an endpoint by its own rules. Vectors are cached encrypted
+  (`embedding_vector:<id>`) under a keyed hash of the provider and the text,
+  rebuilt when either changes, embedded only inside a search's request
+  within `embeddings/limits.ts` (never on a timer), removed by the cleanup
+  once unused, in `wipeVault`, never exported. Any provider failure or
+  timeout is keyword search, quietly; a name given exactly stays first.
 - Long tool answers and files are kept only through
   `lib/core/tool-results.ts`: text or bytes, encrypted with
   `tool_result:<id>`, readable by the token whose call produced them, gone
