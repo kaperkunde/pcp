@@ -217,7 +217,7 @@ describe("asking the owner", () => {
       `[Allow postcards/send_postcard?](${PUBLIC_URL}/permissions/${id})`,
     )
     expect(textOf(first)).toContain(
-      `When they say they have answered, call check_permission with id "${id}"`,
+      `On the owner's next message, whatever it says, call check_permission with id "${id}" before you send the link again or assume the request is still open.`,
     )
     expect((first as CallToolResult).structuredContent).toBeUndefined()
 
@@ -685,7 +685,7 @@ describe("check_permission", () => {
     const late = await checkPermission(scope, id, { waitMs: 50 })
     expect(textOf(late)).toContain("Still waiting for the owner")
     expect(textOf(late)).toContain(
-      "call check_permission again when they say they have answered",
+      `On the owner's next message, whatever it says, call check_permission with id "${id}" again before you send the link again`,
     )
     expect(textOf(late).split("\n").at(-1)).toBe(
       `[Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${id})`,

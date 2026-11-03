@@ -1764,7 +1764,7 @@ describe("the same program again", () => {
     const first = await run(program)
     expect(first.text).toContain("stopped at postcards/send_postcard")
     expect(first.text).toContain(
-      "If the owner allows it once, that one call runs right then: don't run the program again for it — check_permission gives its answer (an identical call within 15 minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.",
+      "If the owner allows it once, that one call runs right then: don't run the program again for it — on the owner's next message, whatever it says, call check_permission with the id below for its answer (an identical call within 15 minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.",
     )
     const request = await db().permissionRequest.findFirstOrThrow()
     await decidePermission(

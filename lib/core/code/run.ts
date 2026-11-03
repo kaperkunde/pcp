@@ -512,8 +512,8 @@ async function answerFor(
         ...(output ? [`It printed:\n${output}`] : []),
         ...effectLines(trace),
         isConnectResult(stop.result)
-          ? "Once the owner has connected it (check_server says when), run the program again."
-          : `If the owner allows it once, that one call runs right then: don't run the program again for it — check_permission gives its answer (an identical call within ${REUSE_EXECUTED_MS / 60_000} minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.`,
+          ? "On the owner's next message, whatever it says, call check_server as below; once it is connected, run the program again."
+          : `If the owner allows it once, that one call runs right then: don't run the program again for it — on the owner's next message, whatever it says, call check_permission with the id below for its answer (an identical call within ${REUSE_EXECUTED_MS / 60_000} minutes also gets that answer instead of a new ask). For the program to make the call itself, they choose Always allow or Allow for; once they have, run the program again.`,
       ].join("\n\n"),
       stop.result,
     )

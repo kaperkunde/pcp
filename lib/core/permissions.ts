@@ -70,7 +70,7 @@ import {
   type ConnectLinks,
   type ServerState,
 } from "./connect"
-import { markdownLink } from "./owner-link"
+import { markdownLink, nextMessageCheck } from "./owner-link"
 import {
   handoverTab,
   queueHref,
@@ -80,10 +80,14 @@ import {
 import { waitForOwner } from "./owner-wait"
 import { foldedText, isFoldingKind, targetKey } from "./permission-fold"
 import {
+  ANSWERED_STATUSES,
+  ANSWERED_WINDOW_MS,
   argsInFull,
   canonicalJson,
   decisionsFor,
   isOpen,
+  MAX_ANSWERED_LISTED,
+  MAX_ANSWERED_SEEN,
   PERMISSION_KEEP_MS,
   PERMISSION_TTL_MS,
   previewArgs,
@@ -207,8 +211,8 @@ import {
  * trusts the assistant: only the owner's answer on that page runs anything.
  *
  * The assistant ends its reply with the link and calls check_permission
- * once the owner says they have answered; it holds the call while they are
- * still on it (lib/core/owner-wait.ts). The link has to come last: Claude's
+ * on the owner's next message, whatever it says (their words rarely say
+ * whether they answered); it holds the call while they are still on it (lib/core/owner-wait.ts). The link has to come last: Claude's
  * apps fold the text written before a tool call into the tool's row and
  * show a summary of their own, so a link followed by check_permission in
  * the same reply was often never seen. Prompts in the client (elicitation)
@@ -1675,7 +1679,7 @@ function outcomeOf(view: PermissionView): CallToolResult {
       )
     default:
       return text(
-        `Still waiting for the owner. They can answer until ${view.expiresAt.toISOString()}. When they say they have, call check_permission with id "${view.id}" for the result.\n\n${linkLastText(view.url, view.title)}`,
+        `Still waiting for the owner. They can answer until ${view.expiresAt.toISOString()}. ${nextMessageCheck(`check_permission with id "${view.id}"`)}\n\n${linkLastText(view.url, view.title)}`,
       )
   }
 }
@@ -1694,7 +1698,7 @@ async function outcomeFromRow(
 
 function pendingText(view: PermissionView, detail?: string): string {
   if (view.kind === "access") {
-    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}${detail ? `\n\n${detail}` : ""}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. When they say they have saved, call check_permission with id "${view.id}": it says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
+    return `Not done yet: the owner saves tool levels themselves.\n\n${summaryText(view)}${detail ? `\n\n${detail}` : ""}\n\nThe owner opens the link below signed in to PCP. Your levels are filled in there and each change is marked; they can adjust any of them, and nothing changes until they save. ${nextMessageCheck(`check_permission with id "${view.id}"`)} It says what they saved (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
   }
 
   const typed = view.secretToEnter
@@ -1710,7 +1714,7 @@ function pendingText(view: PermissionView, detail?: string): string {
     lines: view.lines.filter((line) => !view.ownerOnly.includes(line)),
   }
 
-  return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} When they say they have answered, call check_permission with id "${view.id}" for the result (it waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
+  return `Not done yet: this needs the owner's permission.\n\n${summaryText(told)}\n\nThe owner answers on the page at the link below, signed in to PCP.${typed} ${nextMessageCheck(`check_permission with id "${view.id}"`)} It gives the result (and waits a little if they are still on it). The request stays open until ${view.expiresAt.toISOString()}.\n\n${linkLastText(view.url, view.title)}`
 }
 
 /**
@@ -3367,7 +3371,7 @@ export async function checkPermission(
 
   if (view.status === "pending") {
     return text(
-      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer until ${view.expiresAt.toISOString()}. Stop here, and call check_permission again when they say they have answered.\n\n${linkLastText(view.url, view.title)}`,
+      `Still waiting for the owner:\n\n${summaryText(view)}\n\nThey can answer until ${view.expiresAt.toISOString()}. Stop here. ${nextMessageCheck(`check_permission with id "${view.id}" again`)}\n\n${linkLastText(view.url, view.title)}`,
     )
   }
 
@@ -3421,37 +3425,191 @@ export async function checkPermission(
   return outcome
 }
 
+/** A request the owner answered, as the token that asked is told of it. */
+export type AnsweredRequest = {
+  id: string
+  kind: PermissionKind
+  title: string
+  status: string
+  decidedAt: Date
+  /** What it came to, in a line: the first of check_permission's answer. */
+  outcome: string
+}
+
+/** The most characters of an answered request's outcome line. */
+const ANSWERED_OUTCOME_CHARS = 200
+
+/**
+ * The token's own requests the owner answered since `since` (allowed,
+ * running or done, or declined; never one it withdrew or that closed),
+ * newest first: `seen` names every one by id and time (up to
+ * MAX_ANSWERED_SEEN, in one query on the token's rows), `answered` reads
+ * the first `limit` of those not in `skip` in full, and `more` counts the
+ * rest left out. Only reads.
+ */
+export async function listAnsweredRequests(
+  scope: PermissionScope,
+  {
+    since,
+    limit = MAX_ANSWERED_LISTED,
+    skip,
+  }: { since: Date; limit?: number; skip?: ReadonlySet<string> },
+): Promise<{
+  seen: { id: string; decidedAt: Date }[]
+  answered: AnsweredRequest[]
+  more: number
+}> {
+  const found = await db().permissionRequest.findMany({
+    where: {
+      vaultId: scope.ctx.vaultId,
+      tokenId: scope.tokenId,
+      status: { in: [...ANSWERED_STATUSES] },
+      decidedAt: { gte: since },
+    },
+    select: { id: true, decidedAt: true },
+    orderBy: { decidedAt: "desc" },
+    take: MAX_ANSWERED_SEEN,
+  })
+  const seen = found.map((row) => ({
+    id: row.id,
+    decidedAt: row.decidedAt ?? since,
+  }))
+  const fresh = seen.filter((row) => !skip?.has(row.id))
+  const picked = fresh.slice(0, Math.max(0, limit))
+
+  if (picked.length === 0) {
+    return { seen, answered: [], more: fresh.length }
+  }
+
+  const rows = await db().permissionRequest.findMany({
+    where: {
+      id: { in: picked.map((row) => row.id) },
+      vaultId: scope.ctx.vaultId,
+      tokenId: scope.tokenId,
+    },
+    include: ROW_INCLUDE,
+  })
+  const byId = new Map(rows.map((row) => [row.id, row]))
+  const answered: AnsweredRequest[] = []
+
+  for (const { id, decidedAt } of picked) {
+    const row = byId.get(id)
+
+    if (!row) {
+      continue
+    }
+
+    const view = await toView(scope.ctx, row, scope.publicUrl)
+    const said = outcomeOf(view).content.find((part) => part.type === "text")
+    const line =
+      said?.type === "text"
+        ? (said.text
+            .split("\n")
+            .find((part) => part.trim())
+            ?.trim() ?? "")
+        : ""
+
+    answered.push({
+      id,
+      kind: view.kind,
+      title: view.title,
+      status: view.status,
+      decidedAt,
+      outcome:
+        line.length > ANSWERED_OUTCOME_CHARS
+          ? `${line.slice(0, ANSWERED_OUTCOME_CHARS - 1).trimEnd()}…`
+          : line,
+    })
+  }
+
+  return { seen, answered, more: fresh.length - picked.length }
+}
+
+/** One answered request's line, as check_permission and the note say it. */
+export function answeredLine(
+  request: AnsweredRequest,
+  now = new Date(),
+): string {
+  return `- ${request.id} (${request.kind}, answered ${ageText(now.getTime() - request.decidedAt.getTime())}): ${request.title} ${request.outcome}`
+}
+
+/**
+ * What a session's next answer says of requests the owner answered since
+ * it last heard (clients/sessions.ts), once each; null for none.
+ */
+export function answeredNote(
+  answered: AnsweredRequest[],
+  more: number,
+  now = new Date(),
+): string | null {
+  if (answered.length === 0 && more <= 0) {
+    return null
+  }
+
+  const lines = answered.map((request) => answeredLine(request, now))
+  const rest =
+    more > 0
+      ? [`- and ${more} more: check_permission with no id lists them.`]
+      : []
+
+  return `Answered by the owner since PCP last told you (check_permission with an id gives the whole outcome; none of them needs its link sent again):\n${[...lines, ...rest].join("\n")}`
+}
+
 /**
  * check_permission with no id: the token's own requests still waiting for
- * the owner, oldest first, each with its id, kind, title, age and link.
- * Only reads.
+ * the owner, oldest first, each with its id, kind, title, age and link;
+ * then those the owner answered in the last ANSWERED_WINDOW_MS, newest
+ * first, each with its id, kind, title and outcome. Only reads.
  */
+export async function ownRequests(
+  scope: PermissionScope,
+  now = new Date(),
+): Promise<{
+  open: PermissionView[]
+  answered: AnsweredRequest[]
+  text: string
+}> {
+  const [open, { answered, more }] = await Promise.all([
+    listOpenPermissions(scope.ctx, scope.tokenId, scope.publicUrl),
+    listAnsweredRequests(scope, {
+      since: new Date(now.getTime() - ANSWERED_WINDOW_MS),
+    }),
+  ])
+
+  const waiting =
+    open.length === 0
+      ? "You have no requests waiting for the owner."
+      : `${
+          open.length === 1
+            ? "1 request of yours is"
+            : `${open.length} requests of yours are`
+        } waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need. Hand a link to the owner as a markdown link with its label, never the bare address.\n\n${open
+          .map(
+            (view) =>
+              `- ${view.id} (${view.kind}, asked ${ageText(now.getTime() - view.createdAt.getTime())}): ${view.title}\n  ${markdownLink(view.title, view.url)}`,
+          )
+          .join("\n")}`
+
+  if (answered.length === 0) {
+    return { open, answered, text: waiting }
+  }
+
+  const listed = answered.map((request) => answeredLine(request, now))
+  const rest = more > 0 ? [`- and ${more} more, not listed.`] : []
+
+  return {
+    open,
+    answered,
+    text: `${waiting}\n\nAnswered by the owner in the last hour, newest first (check_permission with an id gives the whole outcome):\n${[...listed, ...rest].join("\n")}`,
+  }
+}
+
+/** ownRequests' text, as check_permission with no id answers. */
 export async function listOwnOpenRequests(
   scope: PermissionScope,
   now = new Date(),
 ): Promise<CallToolResult> {
-  const views = await listOpenPermissions(
-    scope.ctx,
-    scope.tokenId,
-    scope.publicUrl,
-  )
-
-  if (views.length === 0) {
-    return text("You have no requests waiting for the owner.")
-  }
-
-  const lines = views.map(
-    (view) =>
-      `- ${view.id} (${view.kind}, asked ${ageText(now.getTime() - view.createdAt.getTime())}): ${view.title}\n  ${markdownLink(view.title, view.url)}`,
-  )
-  const count =
-    views.length === 1
-      ? "1 request of yours is"
-      : `${views.length} requests of yours are`
-
-  return text(
-    `${count} waiting for the owner. check_permission with an id says where one stands; withdraw_request with an id takes back one you no longer need. Hand a link to the owner as a markdown link with its label, never the bare address.\n\n${lines.join("\n")}`,
-  )
+  return text((await ownRequests(scope, now)).text)
 }
 
 /**

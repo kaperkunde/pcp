@@ -435,6 +435,9 @@ model PermissionRequest {
   decidedAt        DateTime?  @map("decided_at")
 
   @@index([tokenId, argsHash])
+  /// The owner's answers to a token's requests since a time
+  /// (listAnsweredRequests), looked for on every answer in a session.
+  @@index([tokenId, decidedAt])
   @@index([vaultId, targetKey])
   @@index([vaultId, status])
   @@index([expiresAt])
