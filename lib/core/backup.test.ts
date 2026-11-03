@@ -41,7 +41,13 @@ import { openRequestFor } from "./permission-fold"
 import { withPermission } from "./permissions"
 import { DDNS_CONFIG_KEY, DDNS_STATUS_KEY } from "./network/ddns"
 import { UPDATE_CONFIG_KEY, UPDATE_STATUS_KEY } from "./updates/state"
-import { createSecret, deleteSecret, revealSecret } from "./secrets"
+import {
+  createSecret,
+  deleteSecret,
+  listSecrets,
+  revealSecret,
+  updateSecret,
+} from "./secrets"
 import { createServer } from "./servers"
 import {
   createSkill,
@@ -1126,6 +1132,75 @@ describe("restoring", { timeout: 60_000 }, () => {
     await expect(
       readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
     ).rejects.toThrow(/a secret's site is missing/)
+  })
+
+  it("carries a secret's login name, note and one-time codes, and restores a file from before them as none", async () => {
+    const { ctx } = await populate()
+    const shop = await createSecret(ctx, {
+      name: "A shop password",
+      value: "hunter2",
+      loginName: "ada@example.com",
+      note: "The family account",
+    })
+    // The companion comes after the secret that names it, in the file as in
+    // the vault: the restore writes both before pointing one at the other.
+    const codes = await createSecret(ctx, {
+      name: "Shop code",
+      value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      kind: "totp",
+    })
+    await updateSecret(ctx, shop.id, { totpCompanionId: codes.id })
+    const file = await exportVault(ctx, EXPORT_PASSWORD)
+    const raw = await openRaw(file, EXPORT_PASSWORD)
+    const order = raw.tables.secrets.map((secret) => secret.id)
+    expect(order.indexOf(shop.id)).toBeLessThan(order.indexOf(codes.id))
+    // Encrypted in the file as in the vault.
+    expect(JSON.stringify(raw)).not.toContain("ada@example.com")
+    expect(JSON.stringify(raw)).not.toContain("family account")
+
+    const { payload } = await readExport(file, EXPORT_PASSWORD)
+    await restoreExport(
+      payload,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    const restored = (await listSecrets(ctx)).find(
+      (secret) => secret.id === shop.id,
+    )
+    expect(restored).toMatchObject({
+      loginName: "ada@example.com",
+      note: "The family account",
+      totpCompanion: { id: codes.id, name: "Shop code" },
+    })
+
+    const older = structuredClone(raw)
+    for (const row of older.tables.secrets as Array<Record<string, unknown>>) {
+      delete row.loginName
+      delete row.note
+      delete row.totpCompanionId
+    }
+    const { payload: old } = await readExport(
+      await encodeExport(older, EXPORT_PASSWORD),
+      EXPORT_PASSWORD,
+    )
+    await restoreExport(
+      old,
+      { into: "vault", ctx },
+      { restoreHostSettings: false },
+    )
+    expect(
+      (await listSecrets(ctx)).find((secret) => secret.id === shop.id),
+    ).toMatchObject({ loginName: null, note: null, totpCompanion: null })
+
+    // A companion the file does not hold is refused.
+    const broken = structuredClone(raw)
+    const row = (
+      broken.tables.secrets as Array<{ id: string; totpCompanionId: string }>
+    ).find((secret) => secret.id === shop.id)!
+    row.totpCompanionId = "missing"
+    await expect(
+      readExport(await encodeExport(broken, EXPORT_PASSWORD), EXPORT_PASSWORD),
+    ).rejects.toThrow(/a secret's one-time codes is missing/)
   })
 
   it("carries skills and which tokens see them, and restores a file from before skills", async () => {

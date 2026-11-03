@@ -3,7 +3,8 @@ import { expect, test } from "@playwright/test"
 import { acceptNextDialog, addSecret, clickHydrated } from "../lib/ui"
 
 // The secret store from the owner's side: a value is hidden until the owner
-// asks for it, and the secret can be renamed, rotated and deleted.
+// asks for it, and the secret can be renamed, rotated, given the sign-in it
+// belongs to and deleted.
 const RUN = Date.now().toString(36)
 const NAME = `Postcard key ${RUN}`
 
@@ -39,10 +40,16 @@ test("a secret is hidden until revealed, refuses a duplicate name, and can be ro
   await row.getByRole("button", { name: "Edit" }).click()
   await row.getByLabel("Name", { exact: true }).fill(`${NAME} v2`)
   await row.getByLabel("New value").fill("pk_live_rotated")
+  // The sign-in it belongs to: what assistants see beside its name.
+  await row.getByLabel("Login name").fill("ada@example.com")
+  await row.getByLabel("Note", { exact: true }).fill("The family account")
   await row.getByRole("button", { name: "Save" }).click()
 
   const renamed = page.getByRole("listitem").filter({ hasText: `${NAME} v2` })
   await expect(renamed).toBeVisible()
+  await expect(
+    renamed.getByText("Login: ada@example.com · The family account"),
+  ).toBeVisible()
   await renamed.getByRole("button", { name: "Reveal" }).click()
   await expect(renamed.getByText("pk_live_rotated")).toBeVisible()
 

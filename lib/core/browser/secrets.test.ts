@@ -4,12 +4,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest"
 import type { McpServer } from "@/lib/generated/prisma/client"
 
 import { createApiToken, resolveApiToken } from "../api-tokens"
-import { grantSecretUse } from "../browser-secrets"
+import { bindOrigin, grantSecretUse } from "../browser-secrets"
 import type { VaultContext } from "../context"
 import { db } from "../db"
 import { startTestApi, type TestApi } from "../openapi/test-api"
 import { logDays, readRequestLog, withLogNote } from "../request-log"
-import { createSecret } from "../secrets"
+import { createSecret, updateSecret } from "../secrets"
 import { scratchDatabase } from "../test-db"
 import { callServerTool } from "../upstream"
 import { setupVault } from "../vault"
@@ -432,3 +432,68 @@ describe.skipIf(!executable)("typing a secret", { timeout: 90_000 }, () => {
     ).rejects.toThrow(/no secret called "No such secret"/)
   })
 })
+
+describe.skipIf(!executable)(
+  "the sign-ins at a page's site",
+  { timeout: 90_000 },
+  () => {
+    it("are named on navigate, snapshot and tabs open there, louder at a password field, never elsewhere", async () => {
+      const { id: codes } = await createSecret(ctx, {
+        name: "Shop code",
+        value: SEED,
+        kind: "totp",
+      })
+      await updateSecret(ctx, secretId, {
+        loginName: "ada@example.com",
+        totpCompanionId: codes,
+      })
+
+      // Not bound to the site yet: nothing named.
+      const before = await open("/login")
+      expect(textOf(before.opened)).not.toContain("Shop password")
+
+      await bindOrigin(ctx, secretId, site.origin)
+
+      const { tab, opened } = await open("/login")
+      const lines = textOf(opened).split("\n")
+      const loud = lines.findIndex((line) =>
+        line.startsWith("This page has a password field"),
+      )
+      expect(loud, textOf(opened)).toBeGreaterThanOrEqual(0)
+      // Ahead of the tab's own lines.
+      expect(loud).toBeLessThan(
+        lines.findIndex((line) => line.startsWith(`Tab ${tab}:`)),
+      )
+      expect(lines[loud]).toContain(
+        '"Shop password" (login: ada@example.com, one-time codes: "Shop code")',
+      )
+      expect(textOf(opened)).not.toContain(VALUE)
+
+      // A page of the site with no password field: named, quietly.
+      const elsewhere = await call("navigate", {
+        tab,
+        url: `${site.origin}/elsewhere`,
+      })
+      expect(textOf(elsewhere)).toContain(
+        `Sign-ins the owner keeps for ${site.origin}: "Shop password"`,
+      )
+      expect(textOf(elsewhere)).not.toContain("password field")
+
+      const snapshot = await call("snapshot", { tab })
+      expect(textOf(snapshot)).toContain("Sign-ins the owner keeps for")
+
+      // Not on every action: a read of the page leaves it out.
+      expect(textOf(await call("read_page", { tab }))).not.toContain(
+        "Sign-ins the owner keeps",
+      )
+
+      // Another site's page: nothing.
+      await setFetchSite(ctx, tokenId, new URL(framed.origin).host, "allowed")
+      const other = await call("navigate", {
+        tab,
+        url: `${framed.origin}/inner`,
+      })
+      expect(textOf(other), textOf(other)).not.toContain("Shop password")
+    })
+  },
+)

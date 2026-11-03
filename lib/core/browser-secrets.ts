@@ -51,7 +51,12 @@ import {
  * uses go; the assistant hears its name. A name PCP holds already is never
  * written over.
  *
- * Nothing here decrypts: secrets.ts does, for upstream.ts.
+ * The names of the secrets bound to a page's site, with the sign-in each
+ * belongs to, are what the browser's note of the sign-ins there lists
+ * (signInsAt, browser/sign-in-hint.ts); never a value.
+ *
+ * Nothing here decrypts: secrets.ts does, for upstream.ts (a value) and
+ * here (a login name and note, openSecretDetails).
  */
 
 /** A once allowance waits this long for its use. */

@@ -516,7 +516,13 @@ so in the summary; the bump itself waits for the request.
   request log has the secret's name and origin, never the value.
   `request_secret` asks the owner to type a new one on PCP's page and never
   writes over a name PCP holds. Allowances are not exported; origins are.
-  Add a test for each new way in.
+  `navigate`, `snapshot` and `tabs` open name the owner's secrets bound to
+  the page's origin (`browser/sign-in-hint.ts`, louder at a password
+  field) with the login name, note and TOTP companion the owner gave each
+  (`secret.login_name` and `note`, encrypted under `secret:<id>:login` and
+  `:note`, opened only in `secrets.ts`); never a value, and naming one
+  grants nothing: typing it is still the gate above. Add a test for each
+  new way in.
 - PCP's own authorization server (`lib/core/oauth-server/`), for apps that
   sign in to `/mcp` with a URL alone (claude.ai's connectors, ChatGPT), is
   PCP's and never a relay's: whoever issues the tokens could mint one for

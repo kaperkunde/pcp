@@ -2,6 +2,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import { createApiToken, resolveApiToken } from "./api-tokens"
+import { bindOrigin } from "./browser-secrets"
 import type { VaultContext } from "./context"
 import { db } from "./db"
 import { buildGatewayServer, type GatewayScope } from "./gateway"
@@ -199,6 +200,43 @@ describe("list_secrets", () => {
 
     expect(listed.secrets).toHaveLength(MAX_LISTED_SECRETS)
     expect(listed.more).toContain("3 more")
+  })
+})
+
+describe("list_secrets and a secret's sign-in", () => {
+  it("names its sites, login name, note and one-time codes, never a value", async () => {
+    const codes = await createSecret(ctx, {
+      name: "Shop code",
+      value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      kind: "totp",
+    })
+    const shop = await createSecret(ctx, {
+      name: "Shop password",
+      value: SPARE_VALUE,
+      loginName: "ada@example.com",
+      note: "The family account",
+      totpCompanionId: codes.id,
+    })
+    await bindOrigin(ctx, shop.id, "https://shop.example/login")
+    await bindOrigin(ctx, shop.id, "https://account.shop.example")
+
+    await connect(true)
+    const listed = await listSecrets({ query: "shop password" })
+
+    expect(listed.text).not.toContain(SPARE_VALUE)
+    expect(JSON.parse(listed.text).secrets).toEqual([
+      {
+        name: "Shop password",
+        description: "",
+        kind: "text",
+        reusable: true,
+        usedBy: [],
+        sites: ["https://account.shop.example", "https://shop.example"],
+        login_name: "ada@example.com",
+        note: "The family account",
+        totp: "Shop code",
+      },
+    ])
   })
 })
 
