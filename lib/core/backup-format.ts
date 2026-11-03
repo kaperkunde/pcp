@@ -420,6 +420,10 @@ const ServiceSpecRow = z.strictObject({
   // Added with exits' VPN services: absent from older files.
   plainValues: str.default("{}"),
   registeredId: id.nullable(),
+  // Added with services reached through the SSH connection and started on
+  // demand: absent from older files, whose services are reached directly.
+  reach: str.default("direct"),
+  intendedState: str.default("running"),
   createdAt: date,
   updatedAt: date,
 })
