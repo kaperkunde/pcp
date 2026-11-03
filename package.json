@@ -66,6 +66,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@kaperkunde/config": "0.1.1",
     "@playwright/test": "1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/better-sqlite3": "^9.6.0",
@@ -86,13 +87,5 @@
     "vitest": "5.0.2",
     "ws": "^8.22.0"
   },
-  "lint-staged": {
-    "*.{js,jsx,ts,tsx,mjs,cjs}": [
-      "eslint --fix",
-      "prettier --write"
-    ],
-    "*.{json,md,css,yml,yaml}": [
-      "prettier --write"
-    ]
-  }
+  "prettier": "@kaperkunde/config/prettier"
 }

@@ -5,6 +5,11 @@ packages:
 # guard: a hijacked release is usually pulled within a day).
 minimumReleaseAge: 1440
 
+# Kaperkunde's own packages (kaperkunde/common-public) are trusted first-party
+# releases, taken as soon as they are published.
+minimumReleaseAgeExclude:
+  - "@kaperkunde/*"
+
 allowBuilds:
   "@prisma/engines": true
   better-sqlite3: true
