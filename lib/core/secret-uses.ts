@@ -1,13 +1,15 @@
 import type { VaultContext } from "./context"
 import { db } from "./db"
-import type { SecretKind } from "./secrets"
+import { openSecretDetails, type SecretKind } from "./secrets"
 import { readEnvBindings } from "./services/definition"
 import { readDefinition } from "./wrappers/definition"
 
 /**
  * What uses each secret, by name, and the secrets' names for a token that
- * manages endpoints (list_secrets). Never a value: nothing here selects a
- * ciphertext, and nothing decrypts.
+ * manages endpoints (list_secrets), with the sign-in each belongs to (the
+ * owner's login name and note, opened by secrets.ts, its TOTP companion and
+ * the sites the browser types it at). Never a value: nothing here selects
+ * a value's ciphertext or decrypts one.
  */
 
 /**
@@ -166,11 +168,20 @@ export type ListedSecret = {
   usedBy: SecretUse[]
   /** Further uses past MAX_LISTED_USES. */
   moreUses?: number
+  /** The sites the browser may type it at (SecretBrowserOrigin). */
+  sites?: string[]
+  /** The owner's login name for the sign-in it is the password of. */
+  login_name?: string
+  /** The owner's note on it. */
+  note?: string
+  /** The TOTP secret whose code goes with it, by name. */
+  totp?: string
 }
 
 /**
  * The vault's secrets as a token that manages endpoints sees them: names,
- * descriptions, kinds and what uses each. Never a value or a date.
+ * descriptions, kinds and what uses each, and for the owner's own the
+ * sign-in they belong to, where the owner said. Never a value or a date.
  */
 export async function listSecretNames(
   ctx: VaultContext,
@@ -180,7 +191,19 @@ export async function listSecretNames(
   const rows = (
     await db().secret.findMany({
       where: { vaultId: ctx.vaultId },
-      select: { id: true, name: true, description: true, kind: true },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        kind: true,
+        loginName: true,
+        note: true,
+        totpCompanion: { select: { name: true } },
+        browserOrigins: {
+          select: { origin: true },
+          orderBy: { origin: "asc" },
+        },
+      },
       orderBy: [{ kind: "desc" }, { name: "asc" }],
     })
   ).filter(
@@ -199,6 +222,8 @@ export async function listSecretNames(
     secrets: shown.map((row) => {
       const usedBy = uses.get(row.id) ?? []
       const kind = (row.kind in KIND_SHOWN ? row.kind : "text") as SecretKind
+      const { loginName, note } = openSecretDetails(ctx, row)
+      const sites = row.browserOrigins.map((site) => site.origin)
 
       return {
         name: row.name,
@@ -209,6 +234,10 @@ export async function listSecretNames(
         ...(usedBy.length > MAX_LISTED_USES
           ? { moreUses: usedBy.length - MAX_LISTED_USES }
           : {}),
+        ...(sites.length > 0 ? { sites } : {}),
+        ...(loginName ? { login_name: loginName } : {}),
+        ...(note ? { note } : {}),
+        ...(row.totpCompanion ? { totp: row.totpCompanion.name } : {}),
       }
     }),
     more: rows.length - shown.length,

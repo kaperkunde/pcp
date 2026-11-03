@@ -63,7 +63,10 @@ associated data (a ciphertext cannot be moved to another row):
 - the browser's sign-ins (`browser_profile`, bound to the vault's id, as
   there is one per vault),
 - the owner's note on a server or a skill (`mcp_server.personal_note`,
-  `skill.personal_note` with `skill:<id>:note`).
+  `skill.personal_note` with `skill:<id>:note`),
+- the login name and note of one of the owner's secrets
+  (`secret.login_name` with `secret:<id>:login`, `secret.note` with
+  `secret:<id>:note`): not secret, but theirs.
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -409,8 +412,10 @@ change an endpoint decides where PCP sends requests:
   its tokens, and a wrapper whose definition has a place for it:
   `lib/core/secret-uses.ts`), so an assistant proposing an endpoint names a
   secret the owner already has instead of inventing one they would type in
-  again. It reads no ciphertext and no dates, and a query and a cap bound
-  it. Only a text secret is reused by its name; the name of an OAuth sign-in
+  again. Where the owner said, it adds the sign-in a secret belongs to: the
+  sites the browser types it at, the login name and note (opened by
+  `secrets.ts openSecretDetails`) and the TOTP secret that goes with it. It
+  reads no value's ciphertext and no dates, and a query and a cap bound it. Only a text secret is reused by its name; the name of an OAuth sign-in
   or an SSH key in `register_server` still means a new secret. When a
   registration reuses one, the owner's page says what already uses it, and
   so does the assistant's answer for a token with this option; for any other
@@ -2510,6 +2515,22 @@ change the origins, and saves it with the requesting token's allowance at
 each (one use, an hour, or always); the assistant hears the name. Origins
 are exported; allowances are not, are listed with End on the token's page
 and on the secret's row under Secrets, and are pruned once run out.
+
+**Sign-ins at a page's site** (`sign-in-hint.ts`). So an assistant types a
+password rather than asking the owner for it in the conversation, the
+answers of `navigate`, `snapshot` and `tabs` open (not every action) name
+the owner's secrets bound to the page's origin (`SecretBrowserOrigin`,
+`browser-secrets.ts signInsAt`, at most `MAX_SIGN_IN_HINTS`): each by name
+with what the owner said of it on the Secrets page, a login name (the email
+or user name it is the password of), a one-line note and its TOTP companion
+(a TOTP secret a text secret names, `secret.totp_companion_id`, set null
+when that one is deleted; a companion is named with its secret, not again
+on its own). Never a value: the login name and note are encrypted like the
+value and opened in `secrets.ts`, and naming a secret gives no right to it,
+since typing it is still the gate's above. When a frame of the page has a
+password field the note goes ahead of the tab's lines and says so; otherwise
+it follows them. Login names, notes and companions are exported with the
+secret.
 
 **Turns and deadlines** (`queue.ts`). The calls on one tab run one at a
 time, in its own lane, so a slow page holds up only its tab. Each has a

@@ -3926,7 +3926,7 @@ export function buildGatewayServer(
     register({
       name: "list_secrets",
       title: "List the owner's secrets",
-      description: `List secret names (never values) the owner keeps in PCP, each with its description, its kind and what uses it (servers, API endpoints, mail and calendar accounts and wrappers, by name and short name). Never a value. A text secret (reusable: true) can be named in register_server's secret or extra_headers to send it to what you propose, so the owner does not enter it again; they still see what it is already used by and decide. An OAuth sign-in or an SSH key is PCP's own for one server: naming one in register_server asks for a new secret instead. Up to ${MAX_LISTED_SECRETS} at a time; query narrows them.`,
+      description: `List secret names (never values) the owner keeps in PCP, each with its description, its kind and what uses it (servers, API endpoints, mail and calendar accounts and wrappers, by name and short name), and where the owner said, the sign-in it belongs to: the sites the browser types it at, the login name, a note and the one-time codes secret that goes with it. Never a value. A text secret (reusable: true) can be named in register_server's secret or extra_headers to send it to what you propose, so the owner does not enter it again; they still see what it is already used by and decide. An OAuth sign-in or an SSH key is PCP's own for one server: naming one in register_server asks for a new secret instead. Up to ${MAX_LISTED_SECRETS} at a time; query narrows them.`,
       input: z.object({
         query: z
           .string()

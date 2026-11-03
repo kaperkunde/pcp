@@ -8,7 +8,7 @@ import { SubmitButton } from "@/components/submit-button"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { Input, Textarea } from "@/components/ui/input"
+import { Input, Select, Textarea } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import { List, ListRow, ListSection } from "@/components/ui/list"
 import {
@@ -42,12 +42,18 @@ export type SecretItem = SecretSummary & {
 /**
  * The stored secrets, one row each: its name, what it is for, the servers
  * that use it and when it was last used; Reveal shows the value on the
- * owner's own screen, Edit renames it or rotates its value. A one-time
- * codes secret also shows its code of the moment (Code). Browser lists the
+ * owner's own screen, Edit renames it, rotates its value or says what
+ * sign-in it belongs to (a login name, a note and, for a text secret, the
+ * one-time codes that go with it: what assistants see beside its name). A
+ * one-time codes secret also shows its code of the moment (Code). Browser lists the
  * sites the browser may type one of the owner's secrets at, and the tokens
  * allowed to have it typed there, each with a way to take it back.
  */
 export function SecretsManager({ secrets }: { secrets: SecretItem[] }) {
+  const codes = secrets
+    .filter((secret) => secret.kind === "totp")
+    .map((secret) => ({ id: secret.id, name: secret.name }))
+
   return (
     <ListSection
       title={`Stored secrets (${secrets.length})`}
@@ -63,7 +69,7 @@ export function SecretsManager({ secrets }: { secrets: SecretItem[] }) {
       ) : (
         <List as="ul">
           {secrets.map((secret) => (
-            <SecretRow key={secret.id} secret={secret} />
+            <SecretRow key={secret.id} secret={secret} codes={codes} />
           ))}
         </List>
       )}
@@ -71,7 +77,14 @@ export function SecretsManager({ secrets }: { secrets: SecretItem[] }) {
   )
 }
 
-function SecretRow({ secret }: { secret: SecretItem }) {
+function SecretRow({
+  secret,
+  codes,
+}: {
+  secret: SecretItem
+  /** The one-time code secrets a text secret can name as its companion. */
+  codes: Array<{ id: string; name: string }>
+}) {
   const [revealed, setRevealed] = useState<string | null>(null)
   const [code, setCode] = useState<{
     code: string
@@ -197,6 +210,19 @@ function SecretRow({ secret }: { secret: SecretItem }) {
               {secret.description}
             </span>
           ) : null}
+          {secret.loginName || secret.totpCompanion || secret.note ? (
+            <span className="block text-sm break-words text-foreground/80">
+              {[
+                secret.loginName ? `Login: ${secret.loginName}` : null,
+                secret.totpCompanion
+                  ? `Codes: ${secret.totpCompanion.name}`
+                  : null,
+                secret.note,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          ) : null}
           <span className="block">
             Updated <LocalDate value={secret.updatedAt} /> · last used{" "}
             <RelativeDate value={secret.lastUsedAt} />
@@ -301,6 +327,54 @@ function SecretRow({ secret }: { secret: SecretItem }) {
                   />
                 </Field>
               </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field
+                  label="Login name"
+                  htmlFor={`secret-${secret.id}-login`}
+                  hint="The email or user name it signs in with. Assistants see it, never the value."
+                >
+                  <Input
+                    id={`secret-${secret.id}-login`}
+                    name="loginName"
+                    defaultValue={secret.loginName ?? ""}
+                    maxLength={200}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </Field>
+                <Field
+                  label="Note"
+                  htmlFor={`secret-${secret.id}-note`}
+                  hint="One line assistants see with its name."
+                >
+                  <Input
+                    id={`secret-${secret.id}-note`}
+                    name="note"
+                    defaultValue={secret.note ?? ""}
+                    maxLength={300}
+                  />
+                </Field>
+              </div>
+              {!totp ? (
+                <Field
+                  label="One-time codes"
+                  htmlFor={`secret-${secret.id}-totp`}
+                  hint="The one-time code secret that goes with this sign-in, named with it."
+                >
+                  <Select
+                    id={`secret-${secret.id}-totp`}
+                    name="totpCompanionId"
+                    defaultValue={secret.totpCompanion?.id ?? ""}
+                  >
+                    <option value="">None</option>
+                    {codes.map((code) => (
+                      <option key={code.id} value={code.id}>
+                        {code.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              ) : null}
               <Field
                 label={totp ? "New seed" : "New value"}
                 htmlFor={`secret-${secret.id}-value`}

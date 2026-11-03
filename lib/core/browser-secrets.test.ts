@@ -15,6 +15,7 @@ import {
   originOf,
   parseOrigins,
   SECRET_ONCE_MS,
+  signInsAt,
   takeSecretUse,
   unbindOrigin,
 } from "./browser-secrets"
@@ -164,6 +165,57 @@ describe("a secret's sites", () => {
 
     expect(await isBoundOrigin(secretId, SHOP)).toBe(false)
     expect(await listSecretAllowances(ctx)).toEqual([])
+  })
+})
+
+describe("the sign-ins at a site", () => {
+  it("are the owner's secrets bound to its origin, with what they said of each, never a value", async () => {
+    const codes = await createSecret(ctx, {
+      name: "Shop code",
+      value: SEED,
+      kind: "totp",
+    })
+    const loose = await createSecret(ctx, {
+      name: "Old code",
+      value: SEED,
+      kind: "totp",
+    })
+    const elsewhere = await createSecret(ctx, {
+      name: "Bank password",
+      value: "bank-value",
+    })
+    await updateSecret(ctx, secretId, {
+      loginName: "ada@example.com",
+      note: "The family account",
+      totpCompanionId: codes.id,
+    })
+    await bindOrigin(ctx, secretId, SHOP)
+    await bindOrigin(ctx, codes.id, SHOP)
+    await bindOrigin(ctx, loose.id, SHOP)
+    await bindOrigin(ctx, elsewhere.id, "https://bank.example")
+
+    const found = await signInsAt(ctx, SHOP, 5)
+
+    // The companion is named with its secret, not again on its own.
+    expect(found).toEqual([
+      {
+        name: "Shop password",
+        kind: "text",
+        loginName: "ada@example.com",
+        note: "The family account",
+        totp: "Shop code",
+      },
+      {
+        name: "Old code",
+        kind: "totp",
+        loginName: null,
+        note: null,
+        totp: null,
+      },
+    ])
+    expect(JSON.stringify(found)).not.toContain(VALUE)
+    expect(await signInsAt(ctx, "https://other.example", 5)).toEqual([])
+    expect(await signInsAt(ctx, SHOP, 1)).toHaveLength(1)
   })
 })
 

@@ -534,6 +534,21 @@ model Secret {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
   lastUsedAt  DateTime? @map("last_used_at")
+  /// The owner's login name for the sign-in this secret is the password of
+  /// (an email or a user name): not a secret, but theirs, so AES-256-GCM
+  /// under the vault's data key with "secret:<id>:login" as associated
+  /// data. Shown to assistants with the secret's name (list_secrets, and the
+  /// browser's note of the sign-ins at a page's site). Owner's kinds only.
+  loginName   Bytes?   @map("login_name")
+  /// The owner's one-line note on the secret, shown with it as the login
+  /// name is; encrypted the same way, as "secret:<id>:note".
+  note        Bytes?
+  /// The TOTP secret whose code goes with this one's sign-in, named with it
+  /// wherever its login name is: a text secret's, naming a TOTP one of the
+  /// same vault. Unset when that one is deleted.
+  totpCompanionId  String?  @map("totp_companion_id")
+  totpCompanion    Secret?  @relation("SecretTotpCompanion", fields: [totpCompanionId], references: [id], onDelete: SetNull)
+  totpCompanionFor Secret[] @relation("SecretTotpCompanion")
 
   authFor       McpServer[] @relation("ServerAuthSecret")
   authHeaderFor ServerAuthHeader[]
