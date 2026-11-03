@@ -10,6 +10,12 @@ import {
   QUIET_DECISION,
 } from "@/components/permission-actions"
 import { PermissionOutcome } from "@/components/permission-outcome"
+import {
+  chosenAccess,
+  initialAccessRows,
+  ProposedAccessEditor,
+  type AccessRow,
+} from "@/components/proposed-access-editor"
 import { Button } from "@/components/ui/button"
 import { Input, Select, Textarea } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
@@ -22,6 +28,7 @@ import {
   allowForLabel,
   type PermissionDecision as Decision,
 } from "@/lib/core/constants"
+import type { ProposedAccessShown } from "@/lib/core/proposed-access"
 
 /** The answers that carry out the request, rather than turn it down. */
 const AGREES: Decision[] = ["allow_once", "allow_for", "always"]
@@ -61,6 +68,10 @@ const QUIET: Decision[] = ["block", "discard"]
  *
  * `revision` is the request as the page shows it: when an assistant has
  * added to it since, the answer is refused and the owner reads it again.
+ *
+ * A new or changed server whose assistant proposed levels and tiers for its
+ * tools (`access`) shows them filled in and editable above the buttons; the
+ * yes sends what the owner left there, and nothing else writes them.
  */
 export function PermissionDecision({
   id,
@@ -70,6 +81,7 @@ export function PermissionDecision({
   advance = true,
   allowForFixed = false,
   revision,
+  access = null,
 }: {
   advance?: boolean
   id: string
@@ -89,6 +101,7 @@ export function PermissionDecision({
     origins?: string[]
   } | null
   every?: { asked: boolean } | null
+  access?: ProposedAccessShown | null
 }) {
   const { submit, pending, error, setError, done } = useAnswer(
     { request: id },
@@ -99,6 +112,9 @@ export function PermissionDecision({
   const [always, setAlways] = useState(every?.asked === true)
   const [minutes, setMinutes] = useState<number>(DEFAULT_ALLOW_FOR_MINUTES)
   const [origins, setOrigins] = useState((secret?.origins ?? []).join("\n"))
+  const [accessRows, setAccessRows] = useState<AccessRow[]>(() =>
+    access ? initialAccessRows(access) : [],
+  )
 
   function decide(value: Decision) {
     const agrees = AGREES.includes(value)
@@ -136,6 +152,7 @@ export function PermissionDecision({
               .filter(Boolean)
           : undefined,
         revision,
+        access && agrees ? chosenAccess(accessRows) : undefined,
       )
 
       return result.status === "ok"
@@ -235,6 +252,14 @@ export function PermissionDecision({
             disabled={pending}
           />
         </Field>
+      ) : null}
+      {access ? (
+        <ProposedAccessEditor
+          shown={access}
+          rows={accessRows}
+          onChange={setAccessRows}
+          disabled={pending}
+        />
       ) : null}
       {every ? (
         <List>

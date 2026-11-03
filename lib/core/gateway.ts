@@ -3446,7 +3446,7 @@ export function buildGatewayServer(
 
           return asked({
             kind: "register",
-            input: withRegisterAccess(
+            input: await withRegisterAccess(
               {
                 ...common,
                 name: normalizeNameAndDescription({
@@ -3601,7 +3601,7 @@ export function buildGatewayServer(
 
       const ask = await asked({
         kind: "register",
-        input: withRegisterAccess(input, args.tool_access),
+        input: await withRegisterAccess(input, args.tool_access),
       })
 
       // The assistant hears about mistakes PCP found in the schema, with
@@ -4153,7 +4153,7 @@ export function buildGatewayServer(
               `A tool that calls ${browserServer.slug}'s tools is a browser flow: a site task you did once, made one call. Wrap each step in pcp.step(name, fn), target elements by role and name, never by ref, open a tab of its own, take an argument for every value typed or chosen, check first whether it is done already (return {already: true}) and confirm the result after acting, and call hand_over and stop on a CAPTCHA, a sign-in or an unexpected page. It runs for up to ${FLOW_RUN_TIMEOUT_MS / 1000} seconds.`,
             ]
           : []),
-        "Another wrapper of one you see: pass its short name in definition and a name, and no tools; it shares that wrapper's programs. note proposes the owner's note on it: one line they read whole.",
+        "Another wrapper of one you see: pass its short name in definition and a name, and no tools; it shares that wrapper's programs. note proposes the owner's note on it: one line they read whole. tool_access proposes this token's levels and the tiers of its tools, which the owner sees filled in beside the approval, can change, and saves with it.",
         `Nothing is made yet: the owner is shown every program, schema, call and secret in full on PCP's page and decides. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       ].join("\n\n"),
       input: z.object({
@@ -4285,7 +4285,7 @@ export function buildGatewayServer(
     register({
       name: "update_wrapper",
       title: "Propose a change to a wrapper",
-      description: `Propose a wrapper change: its name, its description, tools added or replaced whole (by name), tools removed, where secrets go (the whole list, replacing it), or whose levels its calls follow (call_levels). Read it with get_wrapper first. The owner is shown every new or changed program in full, before and after, and decides on PCP's page; nothing changes until they do, and then only if the wrapper is as it was when they were asked. In calls of their own: note proposes the owner's note on it, and detach a definition of its own for one that shares its programs with other wrappers. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
+      description: `Propose a wrapper change: its name, its description, tools added or replaced whole (by name), tools removed, where secrets go (the whole list, replacing it), or whose levels its calls follow (call_levels). Read it with get_wrapper first. The owner is shown every new or changed program in full, before and after, and decides on PCP's page; nothing changes until they do, and then only if the wrapper is as it was when they were asked. tool_access, beside a change, proposes this token's levels and the tiers of its tools, saved with the owner's approval as they leave them. In calls of their own: note proposes the owner's note on it, and detach a definition of its own for one that shares its programs with other wrappers. ${OWNER_LINK_RULE} Call check_permission once they say they have answered.`,
       input: z.object({
         wrapper: z
           .string()

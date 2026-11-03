@@ -244,7 +244,20 @@ so in the summary; the bump itself waits for the request.
   chose there: levels for its token, tiers through `setToolTier` (every
   server of the definition, which the page says) or the vault's setting.
   No decision and nothing the assistant sends writes them, and blocked
-  tools stay out of what it can name.
+  tools stay out of what it can name. The same holds for `tool_access` on
+  `register_server`, `create_wrapper` and `update_wrapper`
+  (`lib/core/proposed-access.ts`): stored on the request, shown filled in
+  and editable beside the approval on the same page, and written only with
+  the owner's yes there (`decidePermission`'s `access`, checked by
+  `checkChosenAccess`), as they left it, through the access request's own
+  checks and writes. By tool where the names are known up front (a
+  wrapper's tools, an endpoint's operations, a mail or calendar account's
+  tools); by name pattern otherwise (an MCP server, an OAuth one, what a
+  service registers), kept on the server (`pending_access`) and applied
+  once to the tools its first read finds (`syncServerTools`), then
+  cleared, never lifting a block set since. Add a test for each new field
+  (`proposed-access.test.ts`, `register-server.test.ts`,
+  `wrappers.test.ts`).
 - Mail accounts (`lib/core/mail/`) never read a secret: `upstream.ts` hands
   in a `MailCredential` (the header, the login, or an OAuth bearer from
   `credential()`, renewed through `endpointToken` like an API endpoint's). Mail travels encrypted only (TLS, or STARTTLS that

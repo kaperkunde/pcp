@@ -266,6 +266,7 @@ export default async function PermissionPage({
                   ? { asked: view.memory.always }
                   : null
               }
+              access={view.proposedAccess}
             />
           </>
         ) : (

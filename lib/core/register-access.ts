@@ -1,5 +1,6 @@
 import { calendarTools } from "./caldav/tools"
-import { generateEndpointTools } from "./endpoints"
+import { contentInstance } from "./definition-rows"
+import { generateEndpointTools, storedSpec } from "./endpoints"
 import { mailTools } from "./mail/tools"
 import type { RegisterArgs } from "./permissions"
 import {
@@ -15,9 +16,18 @@ import {
  * a mail or calendar account's fixed tools. Null for an MCP server, whose
  * tools are known once PCP reads them.
  */
-export function knownRegisterTools(input: RegisterArgs): KnownTool[] | null {
+export async function knownRegisterTools(
+  input: RegisterArgs,
+): Promise<KnownTool[] | null> {
   if (input.endpoint) {
-    return generateEndpointTools(input.endpoint.spec, {
+    // Another endpoint of a definition: the schema they share.
+    const source =
+      !input.endpoint.spec && input.definition
+        ? await contentInstance(input.definition.id)
+        : null
+    const spec = source ? (await storedSpec(source.id))?.text : null
+
+    return generateEndpointTools(spec ?? input.endpoint.spec, {
       readOnly: input.endpoint.readOnly,
       authHeaderNames: [],
       patches: input.endpoint.patches ?? [],
@@ -46,11 +56,15 @@ export function knownRegisterTools(input: RegisterArgs): KnownTool[] | null {
 }
 
 /** register_server's tool_access, read against what it would add. */
-export function proposeRegisterAccess(
+export async function proposeRegisterAccess(
   input: RegisterArgs,
   arg: ToolAccessArg | undefined,
-): ProposedAccess | null {
-  const tools = knownRegisterTools(input)
+): Promise<ProposedAccess | null> {
+  if (arg === undefined) {
+    return null
+  }
+
+  const tools = await knownRegisterTools(input)
 
   return proposeToolAccess(arg, {
     ...(tools ? { tools } : {}),
@@ -65,11 +79,11 @@ export function proposeRegisterAccess(
 }
 
 /** The request with what the assistant proposed for its tools, if anything. */
-export function withRegisterAccess(
+export async function withRegisterAccess(
   input: RegisterArgs,
   arg: ToolAccessArg | undefined,
-): RegisterArgs {
-  const proposedAccess = proposeRegisterAccess(input, arg)
+): Promise<RegisterArgs> {
+  const proposedAccess = await proposeRegisterAccess(input, arg)
 
   return proposedAccess ? { ...input, proposedAccess } : input
 }

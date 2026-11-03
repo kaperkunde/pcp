@@ -77,6 +77,11 @@ export async function decidePermissionAction(
   origins?: string[],
   /** The request as the owner read it (PermissionView `revision`). */
   revision?: string,
+  /**
+   * A new or changed server: the levels and tiers left beside the approval
+   * (PermissionView `proposedAccess`), checked against the request.
+   */
+  access?: Array<{ pattern: string; access?: string; tier?: string }>,
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -107,6 +112,7 @@ export async function decidePermissionAction(
             ? origins.filter((origin) => typeof origin === "string")
             : undefined,
           revision: typeof revision === "string" ? revision : undefined,
+          access: Array.isArray(access) ? access : undefined,
         },
       )
       const message = outcome.content
