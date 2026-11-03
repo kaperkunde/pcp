@@ -71,6 +71,7 @@ import {
   type ServerState,
 } from "./connect"
 import { markdownLink } from "./owner-link"
+import { withPublicOnlyLink } from "./public-only"
 import {
   handoverTab,
   queueHref,
@@ -385,6 +386,12 @@ export type PermissionView = {
   decisions: Array<{ value: PermissionDecision; label: string }>
   /** Set once an allowed request left an OAuth server needing connecting. */
   connect: ConnectLinks | null
+  /**
+   * A proposed MCP server or API endpoint whose address is private: the page
+   * offers "Allow private addresses", off, so it is public-only unless the
+   * owner ticks it (decidePermission's `allowPrivate`).
+   */
+  offersPrivateAddresses: boolean
   /**
    * A new server that sends a secret PCP does not hold yet: the owner types
    * its value in on PCP's page, so that is the only place to agree. `exists`
@@ -1305,7 +1312,7 @@ async function summarizeRow(
     }
 
     const flagged = input.privateAddress
-      ? `${input.privateAddress} A server an assistant proposes reaches public addresses only: if you agree, it connects once you allow private addresses on its page.`
+      ? `${input.privateAddress} A server an assistant proposes reaches public addresses only: allow private addresses below as you agree, or later on its page.`
       : null
 
     return {
@@ -1514,7 +1521,27 @@ async function toView(
         ? connectLinks(row.server, publicUrl)
         : null,
     secretToEnter: await secretToEnter(ctx, row),
+    offersPrivateAddresses:
+      kind === "register" &&
+      registersPrivateAddress(readArgs(ctx, row) as RegisterArgs),
   }
+}
+
+/**
+ * Whether a proposed MCP server or endpoint was flagged as being at a private
+ * address: the only kind of request on which the owner may allow private
+ * addresses as they agree. A mail or calendar account has no such rule.
+ */
+function registersPrivateAddress(asked: RegisterArgs): boolean {
+  if (asked.mail || asked.calendar) {
+    return false
+  }
+
+  return Boolean(
+    asked.endpoint
+      ? asked.endpoint.preview.privateAddress
+      : asked.privateAddress,
+  )
 }
 
 /** The other requests waiting on what this one changes (`conflicts`). */
@@ -2099,9 +2126,16 @@ export async function decidePermission(
     minutes,
     origins,
     revision,
+    allowPrivate,
   }: {
     publicUrl: string
     tokenId?: string
+    /**
+     * A proposed server at a private address: the owner ticked "Allow
+     * private addresses" on PCP's page. Taken only where the page offered it
+     * (`offersPrivateAddresses`); nothing an assistant sends sets it.
+     */
+    allowPrivate?: boolean
     /**
      * The view's `revision` the owner answered: a request an assistant
      * changed since (a change folded in) is not answered on what they read.
@@ -2421,6 +2455,7 @@ export async function decidePermission(
                                     publicUrl,
                                     executor,
                                     secretValue,
+                                    allowPrivate === true,
                                   )
   } catch (error) {
     if (!isPcpError(error)) {
@@ -2976,8 +3011,13 @@ async function executeRegister(
   publicUrl: string,
   executor: PermissionExecutor,
   secretValue?: string,
+  allowPrivate = false,
 ): Promise<CallToolResult> {
   const asked = readArgs(ctx, row) as RegisterArgs
+  // Public addresses only, unless the owner ticked "Allow private addresses"
+  // on a request flagged as private; whatever the stored arguments say.
+  const flagged = registersPrivateAddress(asked)
+  const publicOnly = !(allowPrivate && flagged)
 
   // Another server of a definition shares what the owner was shown of it,
   // or nothing is made.
@@ -3008,6 +3048,7 @@ async function executeRegister(
           ...secretFields(asked, secret.id),
           endpoint: asked.endpoint,
           definitionId: asked.definition?.id ?? null,
+          publicOnly,
         })
       : asked.mail
         ? await createMailAccount(ctx, {
@@ -3041,9 +3082,10 @@ async function executeRegister(
               authValueTemplate: asked.authValueTemplate,
               authExtraHeaders: asked.authExtraHeaders,
               ...secretFields(asked, secret.id),
-              // The address is the assistant's: public ones only, until the
-              // owner allows private addresses on the server's page.
-              publicOnly: true,
+              // The address is the assistant's: public ones only, unless the
+              // owner allowed private addresses as they agreed, or does so
+              // on the server's page.
+              publicOnly,
               definitionId: asked.definition?.id ?? null,
             })
   } catch (error) {
@@ -3093,15 +3135,29 @@ async function executeRegister(
   // An endpoint's tools were read from the text the owner just approved.
   const sync =
     created.sync ?? (await executor.syncTools(ctx, server, { publicUrl }))
+  // Left public-only at a private address: the link to its switch, last.
+  const leftPublic = flagged && server.publicOnly
+  const linked = (message: string) =>
+    leftPublic ? withPublicOnlyLink(message, server, publicUrl) : message
 
   if (sync.status !== "ok") {
     return text(
-      `${added}, but its tools could not be read yet: ${sync.message}${saved}`,
+      linked(
+        `${added}, but its tools could not be read yet: ${sync.message}${saved}`,
+      ),
     )
   }
 
+  const done = `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search finds them.${saved}`
+
+  // An endpoint's tools come from its schema, so they are there; its calls
+  // are refused until the owner allows private addresses.
   return text(
-    `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search finds them.${saved}`,
+    leftPublic && asked.endpoint
+      ? linked(
+          `${done} Its address is private and it reaches public addresses only, so its calls are refused until the owner allows private addresses on its page.`,
+        )
+      : done,
   )
 }
 

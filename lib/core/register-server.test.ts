@@ -557,9 +557,121 @@ describe("an address on the owner's own network", () => {
 
       const host = new URL(url).hostname.replace(/^\[|\]$/g, "")
       expect((await shown()).lines, url).toContainEqual(
-        `${host} is, or resolves to, a private or local address. A server an assistant proposes reaches public addresses only: if you agree, it connects once you allow private addresses on its page.`,
+        `${host} is, or resolves to, a private or local address. A server an assistant proposes reaches public addresses only: allow private addresses below as you agree, or later on its page.`,
       )
+      expect((await shown()).offersPrivateAddresses, url).toBe(true)
     }
+  })
+
+  it("offers the owner no private addresses for a public server or a mail account", async () => {
+    await register({ name: "Linear", url: "https://mcp.linear.example/mcp" })
+    expect((await shown()).offersPrivateAddresses).toBe(false)
+
+    await db().permissionRequest.deleteMany()
+    await register({
+      kind: "imap",
+      name: "Home mail",
+      url: "mail.lan",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Home mail password",
+    })
+    expect((await shown()).offersPrivateAddresses).toBe(false)
+  })
+
+  it("never takes public-only from the assistant", async () => {
+    for (const extra of [
+      { public_only: false },
+      { allow_private: true },
+      { private_addresses: true },
+    ]) {
+      const asked = await register({
+        name: "Linear",
+        url: "http://192.168.1.30:8080/mcp",
+        ...extra,
+      })
+      expect(asked.isError, JSON.stringify(extra)).toBe(true)
+    }
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  describe("approved", () => {
+    const NO_SYNC = {
+      callTool: async () => {
+        throw new Error("no call runs here")
+      },
+      syncTools: async () => ({
+        status: "error" as const,
+        message: "It could not be reached.",
+        toolCount: 0,
+      }),
+    }
+
+    async function approve(allowPrivate?: boolean) {
+      const row = await db().permissionRequest.findFirstOrThrow({
+        orderBy: { createdAt: "desc" },
+      })
+      const result = await decidePermission(
+        ctx,
+        row.id,
+        "allow_once",
+        { publicUrl: PUBLIC_URL, allowPrivate },
+        NO_SYNC,
+      )
+      const after = await db().permissionRequest.findUniqueOrThrow({
+        where: { id: row.id },
+      })
+      const text = (result.content as Array<{ text?: string }>)
+        .map((part) => part.text ?? "")
+        .join("")
+
+      return { server: await getServer(ctx, after.serverId!), text }
+    }
+
+    it("stays public-only unless the owner ticks Allow private addresses, and links its switch", async () => {
+      await register({ name: "Home", url: "http://192.168.1.30:8080/mcp" })
+      const left = await approve()
+      expect(left.server.publicOnly).toBe(true)
+      expect(left.text.trimEnd().split("\n").at(-1)).toBe(
+        `[Allow private addresses for Home](${PUBLIC_URL}/servers/${left.server.id}#public-only)`,
+      )
+
+      await register({ name: "Home 2", url: "http://192.168.1.30:8080/mcp" })
+      const allowed = await approve(true)
+      expect(allowed.server.publicOnly).toBe(false)
+      expect(allowed.text).not.toContain("#public-only")
+    })
+
+    it("ignores the tick on a request that was not flagged private", async () => {
+      await register({ name: "Linear", url: "https://mcp.linear.example/mcp" })
+      const { server, text } = await approve(true)
+
+      expect(server.publicOnly).toBe(true)
+      expect(text).not.toContain("#public-only")
+    })
+
+    it("makes an endpoint at a private address the same way", async () => {
+      const local = JSON.stringify({
+        openapi: "3.0.3",
+        info: { title: "Local" },
+        servers: [{ url: "http://127.0.0.1:9/v1" }],
+        paths: { "/pets": { get: { operationId: "listPets" } } },
+      })
+
+      await register({ name: "Local", openapi_schema: local })
+      expect((await shown()).offersPrivateAddresses).toBe(true)
+      const left = await approve()
+      expect(left.server.publicOnly).toBe(true)
+      expect(left.text).toContain("its calls are refused")
+      expect(left.text).toContain(
+        `(${PUBLIC_URL}/servers/${left.server.id}#public-only)`,
+      )
+
+      await register({ name: "Local 2", openapi_schema: local })
+      const allowed = await approve(true)
+      expect(allowed.server.publicOnly).toBe(false)
+      expect(allowed.text).not.toContain("#public-only")
+    })
   })
 
   it("does not flag a name that does not resolve", async () => {

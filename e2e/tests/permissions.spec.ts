@@ -78,10 +78,9 @@ async function allowPrivateAddresses(page: Page, slug: string) {
     .filter({ has: page.getByText(slug, { exact: true }) })
     .click()
   await expect(page).toHaveURL(/\/servers\/[0-9a-f-]+$/)
-  await showServerSettings(page)
+  // On the page, outside Advanced: the switch saves as it is turned.
   await expect(page.getByLabel("Public addresses only")).toBeChecked()
   await page.getByLabel("Public addresses only").uncheck()
-  await page.getByRole("button", { name: "Save changes" }).click()
 }
 
 const PRIVATE_FLAG =
@@ -510,12 +509,21 @@ test("an assistant can propose a server with a stored secret; it is added once y
   // is not.
   await expect(page.getByText(PRIVATE_FLAG)).toBeVisible()
   expect(toolText(asked)).not.toContain("private or local")
+  // Offered, and off: left alone it reaches public addresses only.
+  await expect(page.getByLabel("Allow private addresses")).not.toBeChecked()
   await page.getByRole("button", { name: "Add server" }).click()
-  await expect(page.getByTestId("permission-outcome")).toContainText(
-    "only reaches public ones",
-  )
+  const outcome = page.getByTestId("permission-outcome")
+  await expect(outcome).toContainText("only reaches public ones")
 
-  await allowPrivateAddresses(page, `proposed-${RUN}`)
+  // The outcome links the server's page at its switch, which has the focus.
+  const link = (await outcome.innerText()).match(
+    /\((https?:\/\/[^)\s]+#public-only)\)/,
+  )
+  expect(link).not.toBeNull()
+  await page.goto(new URL(link![1]!).pathname + "#public-only")
+  await expect(page.getByLabel("Public addresses only")).toBeFocused()
+  await expect(page.getByLabel("Public addresses only")).toBeChecked()
+  await page.getByLabel("Public addresses only").uncheck()
   await expect(
     page.getByRole("status").filter({ hasText: "Saved. Found 3 tools." }),
   ).toBeVisible()
@@ -524,6 +532,36 @@ test("an assistant can propose a server with a stored secret; it is added once y
   expect(after.instructions).toContain(
     `proposed-${RUN}: Proposed by an assistant. (3 tools)`,
   )
+})
+
+test("allowing private addresses as you agree adds a proposed server that reaches them", async ({
+  page,
+  baseURL,
+}) => {
+  const name = `Proposed private ${RUN}`
+
+  const asked = await callTool(baseURL!, token, "register_server", {
+    name,
+    url: upstream.mcpUrl,
+    auth_type: "header",
+    secret: SECRET_NAME,
+  })
+  const { path } = permissionFrom(toolText(asked))
+
+  await page.goto(path)
+  await expect(page.getByText(PRIVATE_FLAG)).toBeVisible()
+  await page.getByLabel("Allow private addresses").check()
+  await page.getByRole("button", { name: "Add server" }).click()
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "with 3 tools",
+  )
+
+  await page.goto("/servers")
+  await page
+    .getByRole("link")
+    .filter({ has: page.getByText(`proposed-private-${RUN}`, { exact: true }) })
+    .click()
+  await expect(page.getByLabel("Public addresses only")).not.toBeChecked()
 })
 
 test("an assistant can propose a server with a secret you do not have yet; you type it in PCP", async ({

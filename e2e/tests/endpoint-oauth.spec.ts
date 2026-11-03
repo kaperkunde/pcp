@@ -98,8 +98,8 @@ test("the owner connects it, and the assistant's calls carry the token, which it
   // provider is on loopback.
   await showServerSettings(page)
   const slug = await page.getByLabel("Short name").inputValue()
+  // On the page, outside Advanced: the switch saves as it is turned.
   await page.getByLabel("Public addresses only").uncheck()
-  await page.getByRole("button", { name: "Save changes" }).click()
   await expect(
     page.getByRole("status").filter({ hasText: "Saved." }),
   ).toBeVisible()

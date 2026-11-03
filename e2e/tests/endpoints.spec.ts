@@ -439,10 +439,15 @@ test("the owner attaches a secret, typing the address to confirm it; then the en
 }) => {
   await page.goto("/servers")
   await page.getByRole("link").filter({ hasText: MANAGED }).click()
-  await showServerSettings(page)
 
+  // On the page, outside Advanced: the switch saves as it is turned.
   await expect(page.getByLabel("Public addresses only")).toBeChecked()
   await page.getByLabel("Public addresses only").uncheck()
+  await expect(
+    page.getByRole("status").filter({ hasText: "Saved." }),
+  ).toBeVisible()
+
+  await showServerSettings(page)
   await chooseSegment(page, "Secret in a header")
   await page
     .getByLabel("Secret", { exact: true })

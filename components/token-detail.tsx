@@ -62,6 +62,8 @@ export type WaitingRequest = {
   allowForFixed?: boolean
   /** A memory to share: the toggle for reading it in every conversation. */
   every: { asked: boolean } | null
+  /** A proposed server at a private address: "Allow private addresses". */
+  privateAddresses: boolean
 }
 
 /** A tool or a site allowed for a while, as the page is handed it. */
@@ -146,6 +148,7 @@ export function TokenWaiting({ waiting }: { waiting: WaitingRequest[] }) {
                 decisions={item.decisions}
                 secret={item.secret}
                 every={item.every}
+                privateAddresses={item.privateAddresses}
                 // The page lists them all: answered, the owner stays here.
                 advance={false}
                 allowForFixed={item.allowForFixed}

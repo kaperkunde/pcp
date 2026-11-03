@@ -77,6 +77,8 @@ export async function decidePermissionAction(
   origins?: string[],
   /** The request as the owner read it (PermissionView `revision`). */
   revision?: string,
+  /** A proposed server at a private address: "Allow private addresses". */
+  allowPrivate?: boolean,
 ): Promise<DecidePermissionResult> {
   const ctx = await requireContext()
   const publicUrl = await publicUrlFor(ctx)
@@ -107,6 +109,7 @@ export async function decidePermissionAction(
             ? origins.filter((origin) => typeof origin === "string")
             : undefined,
           revision: typeof revision === "string" ? revision : undefined,
+          allowPrivate: allowPrivate === true,
         },
       )
       const message = outcome.content

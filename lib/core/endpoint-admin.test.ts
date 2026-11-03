@@ -1238,6 +1238,14 @@ describe("what an assistant registers cannot reach the owner's network", () => {
     expect(api.requests).toHaveLength(0)
     // A refused address is the rule working, not an outage.
     expect((await getServer(ctx, id)).status).toBe("ok")
+    // The assistant hands the owner the endpoint's switch, last.
+    const refusal = await callServerTool(ctx, row, "listPets", {}, PUBLIC).then(
+      () => "",
+      (error: Error) => error.message,
+    )
+    expect(refusal.trimEnd().split("\n").at(-1)).toBe(
+      `[Allow private addresses for ${row.name}](${PUBLIC.publicUrl}/servers/${id}#public-only)`,
+    )
 
     // The owner decides: private addresses allowed for this endpoint.
     await updateEndpoint(ctx, id, {
@@ -1257,6 +1265,17 @@ describe("what an assistant registers cannot reach the owner's network", () => {
     )
     expect(allowed.isError).toBeUndefined()
     expect(api.requests).toHaveLength(1)
+
+    // Saving the form under Advanced, which leaves the page's switch out,
+    // keeps it as the owner set it.
+    await updateEndpoint(ctx, id, {
+      name: "Renamed",
+      baseUrl: row.url,
+      specSource: "upload",
+      readOnly: false,
+      authType: "none",
+    })
+    expect((await getServer(ctx, id)).publicOnly).toBe(false)
   })
 
   it("cannot be unlocked by the assistant, by any update, and the endpoint then belongs to the owner", async () => {

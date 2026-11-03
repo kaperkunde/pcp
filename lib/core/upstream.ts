@@ -93,6 +93,7 @@ import { makeRedactor } from "./openapi/redact"
 import { paceServerCall, pacedResult } from "./pacing"
 import { checkedFetch } from "./openapi/transport"
 import { markdownLink } from "./owner-link"
+import { PublicOnlyRefusal, withPublicOnlyLink } from "./public-only"
 import {
   applyAuthorizeParams,
   applySignInDefaults,
@@ -1716,6 +1717,14 @@ async function callEndpoint(
       throw new PcpError("unauthorized", message)
     }
 
+    // Its address rule at work: the assistant hands the owner the switch.
+    if (error instanceof PublicOnlyRefusal) {
+      throw new PcpError(
+        "forbidden",
+        withPublicOnlyLink(error.message, server, publicUrl),
+      )
+    }
+
     throw error
   }
 }
@@ -2186,16 +2195,34 @@ async function dispatchKind(
     // "unauthorized" tells the gateway the server needs connecting (or its
     // credential was refused), not that it could not be reached. A server
     // that turned a signed-in request down needs the owner, but not a
-    // sign-in.
+    // sign-in. A public-only server refusing a private address hands the
+    // owner its switch (the status above stays plain text, for its page).
     throw new PcpError(
       failure.status === "auth_required" || failure.status === "client_required"
         ? "unauthorized"
         : "upstream",
-      failure.message,
+      addressBlocked(error)
+        ? withPublicOnlyLink(failure.message, server, publicUrl)
+        : failure.message,
     )
   } finally {
     await connection?.close()
   }
+}
+
+/**
+ * Whether a failure is a public-only server's address rule at work: the
+ * refusal itself, or one the MCP client wrapped (`cause`).
+ */
+function addressBlocked(error: unknown): boolean {
+  for (let at = error, depth = 0; at && depth < 5; depth++) {
+    if (at instanceof AddressBlockedError) {
+      return true
+    }
+    at = at instanceof Error ? at.cause : undefined
+  }
+
+  return false
 }
 
 function describeFailure(
