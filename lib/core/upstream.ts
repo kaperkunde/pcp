@@ -129,6 +129,7 @@ import {
   MAX_OUTPUT_SCHEMA_CHARS,
   MAX_TOOL_ICONS,
 } from "./tools/limits"
+import { applyPendingAccess } from "./proposed-access"
 import { PCP_VERSION } from "./version"
 import { syncWrapperTools } from "./wrappers/catalogue"
 import {
@@ -1534,9 +1535,27 @@ export function browserExitsFor(
 
 /**
  * Reads the server's tool list into the catalogue. Tools that disappeared
- * are removed; the owner's description overrides survive a resync.
+ * are removed; the owner's description overrides survive a resync. A read
+ * that found tools applies, once, the levels and tiers the owner saved by
+ * name with their approval of the server (proposed-access.ts).
  */
 export async function syncServerTools(
+  ctx: VaultContext,
+  server: McpServer,
+  options: Parameters<typeof readServerTools>[2],
+): Promise<SyncResult> {
+  const result = await readServerTools(ctx, server, options)
+
+  // Read from the row: the server handed in may be from before they were
+  // saved.
+  if (result.status === "ok") {
+    await applyPendingAccess(ctx, server.id)
+  }
+
+  return result
+}
+
+async function readServerTools(
   ctx: VaultContext,
   server: McpServer,
   {

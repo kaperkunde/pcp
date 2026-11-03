@@ -102,6 +102,7 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
     secrets: [
       { secret: KEY_NAME, tool: `${SLUG}/keyed_echo`, argument: "/api_key" },
     ],
+    tool_access: [{ tools: ["lookup"], access: "allowed" }],
   })
   expect(toolText(asked)).toContain("Not done yet")
   const id = toolText(asked).match(/\/permissions\/([\w-]+)/)?.[1]
@@ -123,10 +124,18 @@ test("an assistant proposes a wrapper; the owner reads it and types the key in",
   await expect(places.getByRole("row").nth(1)).toContainText(
     `${SLUG}/keyed_echo /api_key`,
   )
+  // The level the assistant proposed, filled in beside the approval: the
+  // owner takes it back to asking first before agreeing.
+  const levels = page.getByRole("region", { name: "Levels and tiers" })
+  await expect(levels.getByLabel("Level of lookup")).toHaveValue("allowed")
+  await levels.getByLabel("Level of lookup").selectOption("ask")
   await page.getByLabel(`Value of the secret "${KEY_NAME}"`).fill(KEY)
   await page.getByRole("button", { name: "Make the change" }).click()
   await expect(page.getByTestId("permission-outcome")).toContainText(
     `was added as ${WRAPPER_SLUG}`,
+  )
+  await expect(page.getByTestId("permission-outcome")).toContainText(
+    "set this token's level for 1 tool",
   )
 })
 

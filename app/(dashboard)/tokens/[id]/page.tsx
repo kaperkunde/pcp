@@ -120,7 +120,10 @@ export default async function TokenPage({
                     ? "Review the change"
                     : request.kind === "repo_share"
                       ? "Review the push"
-                      : null,
+                      : // Its levels and tiers are set beside the approval.
+                        request.proposedAccess
+                        ? "Review levels and decide"
+                        : null,
             revision: request.revision,
             conflicts: request.conflicts.map(({ id, tokenName }) => ({
               id,

@@ -1036,6 +1036,135 @@ describe("what an assistant can set", () => {
   })
 })
 
+describe("levels and tiers proposed with a wrapper (tool_access)", () => {
+  const COUNT_TOOL = {
+    name: "how_many",
+    description: "Counts the things.",
+    input_schema: { type: "object", properties: {} },
+    program: 'return await pcp.call("things", "count", {})',
+    calls: ["things/count"],
+  }
+
+  async function levelsOf(serverId: string) {
+    return (
+      await db().apiTokenToolAccess.findMany({
+        where: { tokenId: scope.tokenId, serverId },
+        orderBy: { toolName: "asc" },
+      })
+    ).map((row) => [row.toolName, row.access])
+  }
+
+  it("shows the proposal per tool and writes on the yes only what the owner left", async () => {
+    const asked = await call("create_wrapper", {
+      name: "Lookup",
+      tools: [ECHO_TOOL, COUNT_TOOL],
+      secrets: [
+        { secret: "Things key", tool: "things/echo", argument: "/key" },
+      ],
+      tool_access: [
+        { access: "allowed" },
+        { tools: ["lookup"], tier: "write" },
+      ],
+    })
+    expect(asked.text).toContain("Not done yet")
+    const row = await newestRequest()
+    const view = await getPermissionView(ctx, row.id, {
+      publicUrl: PUBLIC_URL,
+    })
+
+    expect(view!.proposedAccess).toEqual({
+      tools: [
+        { name: "lookup", title: null },
+        { name: "how_many", title: null },
+      ],
+      rules: [
+        { pattern: "lookup", access: "allowed", tier: "write" },
+        { pattern: "how_many", access: "allowed" },
+      ],
+      tokenName: "Claude",
+    })
+    expect(view!.lines.join("\n")).toContain(
+      "the levels are for the token \"Claude\" only, a tier is every token's and every server's of the same definition",
+    )
+
+    // The owner keeps the tier, but lets only how_many run unasked.
+    const result = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      secretValue: KEY,
+      access: [
+        { pattern: "lookup", tier: "write" },
+        { pattern: "how_many", access: "allowed" },
+      ],
+    })
+
+    expect(result.isError).not.toBe(true)
+    const wrapper = await db().mcpServer.findFirstOrThrow({
+      where: { kind: "wrapper" },
+    })
+    expect(await levelsOf(wrapper.id)).toEqual([["how_many", "allowed"]])
+    expect(await toolTier(wrapper.id, "lookup")).toBe("write")
+    expect(JSON.stringify(result.content)).toContain(
+      "The owner set this token's level for 1 tool",
+    )
+  })
+
+  it("refuses a name the wrapper will not have, and one the token has blocked", async () => {
+    const unknown = await call("create_wrapper", {
+      name: "Lookup",
+      tools: [COUNT_TOOL],
+      tool_access: [{ tools: ["lookup"], access: "allowed" }],
+    })
+    expect(unknown.isError).toBe(true)
+    expect(unknown.text).toMatch(/has no tool matching "lookup"/)
+
+    const wrapper = await approvedWrapper()
+    await writeToolAccess(scope.tokenId, wrapper.id, "lookup", "blocked")
+    const blocked = await call("update_wrapper", {
+      wrapper: "lookup",
+      tools: [COUNT_TOOL],
+      tool_access: [{ tools: ["lookup"], access: "allowed" }],
+    })
+    expect(blocked.isError).toBe(true)
+    expect(blocked.text).toMatch(/has no tool matching "lookup"/)
+  })
+
+  it("takes tool_access on update_wrapper only beside a change, and never with a note", async () => {
+    await approvedWrapper()
+
+    const alone = await call("update_wrapper", {
+      wrapper: "lookup",
+      tool_access: [{ access: "allowed" }],
+    })
+    expect(alone.isError).toBe(true)
+    expect(alone.text).toContain("propose_tool_access")
+
+    const withNote = await call("update_wrapper", {
+      wrapper: "lookup",
+      note: "Mine.",
+      tool_access: [{ access: "allowed" }],
+    })
+    expect(withNote.isError).toBe(true)
+    expect(withNote.text).toContain("note goes in a call of its own")
+
+    const asked = await call("update_wrapper", {
+      wrapper: "lookup",
+      tools: [COUNT_TOOL],
+      tool_access: [{ tools: ["how_*"], access: "allowed" }],
+    })
+    expect(asked.text).toContain("Not done yet")
+    const row = await newestRequest()
+    const result = await decidePermission(ctx, row.id, "allow_once", {
+      publicUrl: PUBLIC_URL,
+      access: [{ pattern: "how_many", access: "allowed" }],
+    })
+    expect(result.isError).not.toBe(true)
+    const wrapper = await db().mcpServer.findFirstOrThrow({
+      where: { kind: "wrapper" },
+    })
+    expect(await levelsOf(wrapper.id)).toEqual([["how_many", "allowed"]])
+  })
+})
+
 describe("a wrapper's tool's tier", () => {
   it("is the highest tier of the tools it calls, whatever its own hints propose", async () => {
     const wrapper = await approvedWrapper({

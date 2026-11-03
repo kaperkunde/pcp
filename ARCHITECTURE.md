@@ -3998,6 +3998,36 @@ now", and `decidePermission` refuses any other, so an assistant cannot raise
 its own access. `check_permission` waits for the save as for any answer and
 says what was saved, and how it differs from what was proposed.
 
+`register_server`, `create_wrapper` and `update_wrapper` take the same kind
+of proposal with what they propose (`tool_access`,
+`lib/core/proposed-access.ts`): entries of tool names or `*` patterns (none
+for every tool), each with a level for the calling token, a tier, or both,
+later entries winning field by field. It rides on the request itself
+(`proposedAccess` on its input) and is shown, filled in and editable, in the
+same page as the approval (`components/proposed-access-editor.tsx` inside
+the decision); the yes sends what the owner left there
+(`decidePermission`'s `access`, checked by `checkChosenAccess` before the
+row is claimed, so a mistake leaves the request open), and nothing else
+writes it: an answer without it writes no level, and the token's page sends
+the owner to the request's page for one that has a proposal. Where the
+tools are known before the server exists (a wrapper's tools, an API
+endpoint's operations from the schema the owner is shown, a mail or calendar
+account's fixed tools, `register-access.ts`) the proposal is one rule per
+tool and a name that matches none of them is refused before the owner is
+asked; a tool the token has blocked is hidden, as for `propose_tool_access`.
+Where they are not (an MCP server by its address, one that signs in with
+OAuth, what a service registers) the rules stay patterns, which the owner
+can change, remove or add to. On the yes, `settleChosenAccess` writes them
+through the access request's own checks and writes (`checkAccessLevels`,
+`checkAccessTiers`, `writeAccessLevels`, `writeAccessTiers`, so tiers go
+through `setToolTier` on the definition) to the tools the server has; with
+none yet, they are kept on the server (`mcp_server.pending_access`: the
+token's id and the rules, no secret) and `upstream.ts syncServerTools`
+applies them once, after the first read that finds tools, and clears them.
+Applied later, they leave alone a tool the token has blocked since, and give
+a revoked or deleted token nothing. With no proposal the approval reads as
+before: a new server's tools ask the owner first, for every token.
+
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.
 Once the owner agrees, PCP adds the server (or the mail account: `executeRegister`

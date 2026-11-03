@@ -161,6 +161,16 @@ import {
   type SecretUseLevel,
 } from "./browser-secrets"
 import { resourceLimits } from "./resources/state"
+import {
+  askFirstLine,
+  checkChosenAccess,
+  proposedAccessLine,
+  proposedAccessShown,
+  settleChosenAccess,
+  type AccessRule,
+  type ProposedAccess,
+  type ProposedAccessShown,
+} from "./proposed-access"
 import { namesInWords, secretUses } from "./secret-uses"
 import {
   browserExitsFor,
@@ -274,6 +284,13 @@ export type RegisterArgs = Omit<ServerInput, "authExtraHeaders"> & {
   }
   /** The owner's note it gets, which they read whole. */
   note?: string | null
+  /**
+   * Levels and tiers the assistant proposed for its tools
+   * (proposed-access.ts): by tool where they are known up front (an API
+   * endpoint, a mail or calendar account), by name pattern otherwise.
+   * Shown filled in on the page and saved only as the owner leaves them.
+   */
+  proposedAccess?: ProposedAccess | null
 }
 
 export type PermissionAsk =
@@ -414,6 +431,12 @@ export type PermissionView = {
     kind?: "text" | "totp"
     origins?: string[]
   } | null
+  /**
+   * A new or changed server's levels and tiers the assistant proposed
+   * (proposed-access.ts), for the page to show filled in and editable
+   * beside the approval; null when it proposed none, or when answered.
+   */
+  proposedAccess: ProposedAccessShown | null
 }
 
 type Row = PermissionRequest & {
@@ -1180,7 +1203,7 @@ async function summarizeRow(
     const boundLines = bound
       ? [
           `Another server of ${bound.name}, beside ${bound.instances.join(", ") || "(none)"}: it shares their description${input.endpoint ? ", schema, edits" : ""} and tool descriptions, so a change to those changes every one of them`,
-          "Its tools ask you first, for every token, as a new server's do",
+          askFirstLine(Boolean(input.proposedAccess)),
         ]
       : []
     // The owner's words once they agree: shown whole.
@@ -1481,6 +1504,7 @@ async function toView(
       ? "expired"
       : (row.status as PermissionStatus)
   const finished = status === "executed" || status === "failed"
+  const proposal = proposedAccessOf(ctx, row)
 
   return {
     id: row.id,
@@ -1495,7 +1519,10 @@ async function toView(
     ...summary,
     // Whatever made the lines, nothing in them hides from the owner.
     title: visible(summary.title),
-    lines: summary.lines.map((line) => visible(line)),
+    lines: [
+      ...summary.lines,
+      ...(proposal ? [proposedAccessLine(proposal, row.token.name)] : []),
+    ].map((line) => visible(line)),
     ownerOnly: ownerOnly.map((line) => visible(line)),
     full,
     memory,
@@ -1524,6 +1551,10 @@ async function toView(
     offersPrivateAddresses:
       kind === "register" &&
       registersPrivateAddress(readArgs(ctx, row) as RegisterArgs),
+    proposedAccess:
+      proposal && status === "pending"
+        ? proposedAccessShown(proposal, row.token.name)
+        : null,
   }
 }
 
@@ -1541,6 +1572,25 @@ function registersPrivateAddress(asked: RegisterArgs): boolean {
     asked.endpoint
       ? asked.endpoint.preview.privateAddress
       : asked.privateAddress,
+  )
+}
+
+/**
+ * The levels and tiers a request for a new or changed server carries from
+ * the assistant (proposed-access.ts), or null.
+ */
+function proposedAccessOf(ctx: VaultContext, row: Row): ProposedAccess | null {
+  if (
+    row.kind !== "register" &&
+    row.kind !== "wrapper_change" &&
+    row.kind !== "service_change"
+  ) {
+    return null
+  }
+
+  return (
+    (readArgs(ctx, row) as { proposedAccess?: ProposedAccess | null })
+      .proposedAccess ?? null
   )
 }
 
@@ -2127,6 +2177,7 @@ export async function decidePermission(
     origins,
     revision,
     allowPrivate,
+    access,
   }: {
     publicUrl: string
     tokenId?: string
@@ -2149,6 +2200,12 @@ export async function decidePermission(
     always?: boolean
     /** "Allow for": how long, one of ALLOW_FOR_MINUTES. */
     minutes?: number
+    /**
+     * A new or changed server: the levels and tiers the owner left on the
+     * page, from the assistant's proposal (proposed-access.ts). Nothing
+     * else writes them, and left out, none are written.
+     */
+    access?: unknown
   },
   executor: PermissionExecutor = defaultExecutor,
 ): Promise<CallToolResult> {
@@ -2328,6 +2385,23 @@ export async function decidePermission(
     }
   }
 
+  // The levels and tiers the owner left beside the approval, checked before
+  // anything is written, so a mistake can be fixed and answered again.
+  const proposal = proposedAccessOf(ctx, row)
+  let chosenAccess: AccessRule[] = []
+
+  if (proposal && access !== undefined) {
+    try {
+      chosenAccess = checkChosenAccess(proposal, access)
+    } catch (error) {
+      if (isPcpError(error)) {
+        return text(error.message, true)
+      }
+
+      throw error
+    }
+  }
+
   // A secret's answer is about the secret, never the browser tool's level;
   // an exit's was written above.
   if (isSecretKind(kind) || kind === "exit_use") {
@@ -2380,6 +2454,7 @@ export async function decidePermission(
                     {
                       tokenId: row.tokenId,
                       ...(secretValue ? { secretValue } : {}),
+                      access: chosenAccess,
                     },
                   ),
                 )
@@ -2406,6 +2481,7 @@ export async function decidePermission(
                           {
                             tokenId: row.tokenId,
                             ...(secretValue ? { secretValue } : {}),
+                            access: chosenAccess,
                             launch: (launchCtx, input) =>
                               (executor.launchService ?? launchService)(
                                 launchCtx,
@@ -2456,6 +2532,7 @@ export async function decidePermission(
                                     executor,
                                     secretValue,
                                     allowPrivate === true,
+                                    chosenAccess,
                                   )
   } catch (error) {
     if (!isPcpError(error)) {
@@ -3012,6 +3089,8 @@ async function executeRegister(
   executor: PermissionExecutor,
   secretValue?: string,
   allowPrivate = false,
+  /** The levels and tiers the owner left on the page (proposed-access.ts). */
+  access: AccessRule[] = [],
 ): Promise<CallToolResult> {
   const asked = readArgs(ctx, row) as RegisterArgs
   // Public addresses only, unless the owner ticked "Allow private addresses"
@@ -3129,7 +3208,19 @@ async function executeRegister(
     : ""
 
   if (server.authType === "oauth") {
-    return connectResult(server, publicUrl, { lead: added })
+    // Its tools are read once the owner connects it: what they saved
+    // applies to those, unless it has them already.
+    const levels = await settleChosenAccess(ctx, {
+      serverId: id,
+      tokenId: row.tokenId,
+      rules: access,
+    })
+
+    return connectResult(server, publicUrl, {
+      lead: levels
+        ? `${added}, with the levels and tiers the owner saved for its tools`
+        : added,
+    })
   }
 
   // An endpoint's tools were read from the text the owner just approved.
@@ -3139,16 +3230,23 @@ async function executeRegister(
   const leftPublic = flagged && server.publicOnly
   const linked = (message: string) =>
     leftPublic ? withPublicOnlyLink(message, server, publicUrl) : message
+  // What the owner saved beside the approval: on the tools read now, or
+  // once, on the first ones read later.
+  const levels = await settleChosenAccess(ctx, {
+    serverId: id,
+    tokenId: row.tokenId,
+    rules: access,
+  })
 
   if (sync.status !== "ok") {
     return text(
       linked(
-        `${added}, but its tools could not be read yet: ${sync.message}${saved}`,
+        `${added}, but its tools could not be read yet: ${sync.message}${levels ? ` ${levels}` : ""}${saved}`,
       ),
     )
   }
 
-  const done = `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} They ask the owner the first time they are used; search finds them.${saved}`
+  const done = `${added} with ${sync.toolCount} tool${sync.toolCount === 1 ? "" : "s"}.${created.sync && sync.message ? ` ${sync.message}` : ""} ${levels ? `${levels.replace(/\.$/, "")}; search finds them.` : "They ask the owner the first time they are used; search finds them."}${saved}`
 
   // An endpoint's tools come from its schema, so they are there; its calls
   // are refused until the owner allows private addresses.

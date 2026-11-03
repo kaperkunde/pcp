@@ -23,6 +23,14 @@ import {
 } from "../definitions"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import {
+  askFirstLine,
+  proposeToolAccess,
+  settleChosenAccess,
+  type AccessRule,
+  type ProposedAccess,
+  type ToolAccessArg,
+} from "../proposed-access"
+import {
   deleteServer,
   normalizeNameAndDescription,
   slugify,
@@ -135,6 +143,12 @@ export type WrapperChangeAsk = {
   detachFrom?: { definitionId: string }
   /** create: the owner's note it gets, which they read whole. */
   note?: string | null
+  /**
+   * create, update: levels and tiers the assistant proposed for its tools
+   * (proposed-access.ts), shown filled in on the page and saved only as the
+   * owner leaves them. Absent from a request made before there were any.
+   */
+  proposedAccess?: ProposedAccess | null
 }
 
 /** What get_wrapper and the owner's form read: other tools by short name. */
@@ -519,6 +533,47 @@ export function withWrapperNote(
 }
 
 /**
+ * The levels and tiers an assistant proposes with a new or changed wrapper
+ * (tool_access), against the tools it will have; `hidden` are the tools of
+ * the wrapper it changes that the token has blocked, which it cannot name.
+ */
+export function withWrapperAccess(
+  ask: WrapperChangeAsk,
+  arg: ToolAccessArg | undefined,
+  hidden: Set<string> = new Set(),
+): WrapperChangeAsk {
+  if (arg === undefined) {
+    return ask
+  }
+
+  if (!ask.definition || (ask.action !== "create" && ask.action !== "update")) {
+    throw invalid(
+      "tool_access goes with a new wrapper or a change to one's tools.",
+    )
+  }
+
+  const proposedAccess = proposeToolAccess(arg, {
+    tools: ask.definition.tools.map((tool) => ({
+      name: tool.name,
+      title: tool.title ?? null,
+    })),
+    hidden,
+    label: `The wrapper ${ask.name}`,
+  })
+
+  return {
+    ...ask,
+    proposedAccess,
+    shown: {
+      ...ask.shown,
+      lines: ask.shown.lines.map((line) =>
+        line === askFirstLine(false) ? askFirstLine(true) : line,
+      ),
+    },
+  }
+}
+
+/**
  * The request for another wrapper of a definition the token sees: the
  * definition's programs, calls, secret places and descriptions, shown in
  * full as a new wrapper's are, under a name of its own. Nothing of it comes
@@ -564,7 +619,7 @@ export async function proposeWrapperInstance(
       title: `Add the wrapper ${name}, another of ${bound.name}?`,
       lines: [
         `Another wrapper of ${bound.name}, beside ${bound.instances.map((each) => each.slug).join(", ")}: it shares their programs, calls, secret places and tool descriptions, so a change to those changes every one of them`,
-        "Its tools ask you first, for every token, as a new server's do",
+        askFirstLine(false),
         ...shown.lines,
       ],
     },
@@ -828,7 +883,16 @@ async function checkBoundAddresses(
 export async function applyWrapperChange(
   ctx: VaultContext,
   ask: WrapperChangeAsk,
-  { tokenId, secretValue }: { tokenId: string; secretValue?: string },
+  {
+    tokenId,
+    secretValue,
+    access = [],
+  }: {
+    tokenId: string
+    secretValue?: string
+    /** The levels and tiers the owner left on the page (proposed-access.ts). */
+    access?: AccessRule[]
+  },
 ): Promise<string> {
   if (ask.action === "create") {
     await assertRoomForWrapper(ctx)
@@ -878,7 +942,13 @@ export async function applyWrapperChange(
       select: { slug: true },
     })
 
-    return `The wrapper ${ask.name} was added as ${slug}, with ${definition.tools.length} tool${definition.tools.length === 1 ? "" : "s"}: ${definition.tools.map((tool) => `${slug}/${tool.name}`).join(", ")}.`
+    const levels = await settleChosenAccess(ctx, {
+      serverId: id,
+      tokenId,
+      rules: access,
+    })
+
+    return `The wrapper ${ask.name} was added as ${slug}, with ${definition.tools.length} tool${definition.tools.length === 1 ? "" : "s"}: ${definition.tools.map((tool) => `${slug}/${tool.name}`).join(", ")}.${levels ? ` ${levels}` : ""}`
   }
 
   const { server, spec } = await loadWrapper(ctx, { id: ask.serverId! })
@@ -914,8 +984,13 @@ export async function applyWrapperChange(
   })
   await checkBoundAddresses(ctx, definition)
   await writeWrapper(ctx, server.id, ask.name, ask.description, definition)
+  const levels = await settleChosenAccess(ctx, {
+    serverId: server.id,
+    tokenId,
+    rules: access,
+  })
 
-  return `The wrapper ${ask.name} (${server.slug}) was changed as asked.`
+  return `The wrapper ${ask.name} (${server.slug}) was changed as asked.${levels ? ` ${levels}` : ""}`
 }
 
 async function createWrapperRow(
