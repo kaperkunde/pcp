@@ -23,7 +23,9 @@ import { httpConnect, socks5Connect, type ProxyAuth } from "../exits/handshake"
 import { newId } from "../ids"
 import { errorToolResult, jsonToolResult } from "../json-result"
 import { argumentsResult, familyError } from "../tools/family"
+import { readCapped } from "../openapi/http"
 import { makeRedactor } from "../openapi/redact"
+import { send, type SendOptions } from "../openapi/transport"
 import { markdownLink } from "../owner-link"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import { writeManagedSecret } from "../secrets"
@@ -43,16 +45,19 @@ import {
   EXIT_PUBLISH_ADDRESS,
   parsePublish,
   parseServiceDefinition,
-  reachUrl,
   readEnvBindings,
   readPlainValues,
   readPublish,
+  readReach,
   readServiceDefinition,
   serviceDefinitionHash,
+  serviceOrigin,
+  tunnelAddress,
   type ServiceDefinition,
   type ServiceEnvBindings,
   type ServicePlainValues,
   type ServicePublish,
+  type ServiceReach,
 } from "./definition"
 import {
   CONTAINER_NAME,
@@ -72,9 +77,13 @@ import {
   type ServiceHost,
 } from "./engine"
 import {
+  HEALTH_BODY_BYTES,
   HEALTH_INTERVAL_MS,
   HEALTH_REQUEST_TIMEOUT_MS,
   HEALTH_WAIT_MS,
+  SERVICE_RECONCILE_BUDGET_MS,
+  SERVICE_RECONCILE_INTERVAL_MS,
+  START_ON_DEMAND_WAIT_MS,
 } from "./limits"
 import { readServiceCall, SERVICE_TOOL_NAMES, serviceTools } from "./tools"
 
@@ -93,6 +102,21 @@ import { readServiceCall, SERVICE_TOOL_NAMES, serviceTools } from "./tools"
  * container, waits for it to be healthy and registers what it serves, an
  * API endpoint or an MCP server, in the same step; anything that fails
  * takes back what was done.
+ *
+ * PCP reaches what a service publishes through the SSH connection (`reach`
+ * "tunnel"): a direct-tcpip channel to the address its ports are bound to
+ * on the SSH server, its loopback unless the owner chose its network, for
+ * calls and health checks alike (serviceDial), so it works when PCP runs
+ * in a container on that same machine. A service launched before reaches
+ * it directly ("direct") until it is updated or made again.
+ *
+ * What the owner asked of it last is kept (`intendedState`): stopping it,
+ * by the owner or an assistant's stop, is "stopped"; starting, restarting,
+ * launching or making it again is "running". While it is "running", a
+ * call to what it serves that finds its container stopped starts it in the
+ * same request and tries once more (startOnDemand), and the reconcile pass
+ * after a request brings it back up (reconcileServicesWith): never on a
+ * timer, and never with a key kept between requests.
  *
  * Only the owner launches, changes and removes one. Nothing here reads a
  * secret: upstream.ts builds the ServiceAccess (a way to run commands on the
@@ -113,6 +137,12 @@ export type ServiceAccess = {
    */
   loopback?: (port: number, signal?: AbortSignal) => Promise<Duplex>
   /**
+   * A direct-tcpip channel through the SSH connection to an address and
+   * port as the SSH server reaches them: how PCP reaches what a service
+   * publishes, its port checked first (serviceDial).
+   */
+  forward?: ServiceForward
+  /**
    * An exit's proxy login (registers.auth), which PCP made: handed to the
    * container among the variables, and used here for its health check.
    */
@@ -120,6 +150,16 @@ export type ServiceAccess = {
   /** Waiting for health; tests shorten it. */
   timing?: { waitMs: number; intervalMs: number }
 }
+
+/** A channel through the SSH connection, as the SSH server reaches the address. */
+export type ServiceForward = (
+  address: string,
+  port: number,
+  signal?: AbortSignal,
+) => Promise<Duplex>
+
+/** What the owner asked of a service last. */
+export type ServiceIntent = "running" | "stopped"
 
 /** The user name of an exit's proxy; its password is random, per instance. */
 export const EXIT_PROXY_USER = "pcp"
@@ -138,6 +178,10 @@ export type LoadedService = {
   /** What the owner typed for its plain variables. */
   values: ServicePlainValues
   engine: ServiceEngine
+  /** How PCP reaches what it publishes. */
+  reach: ServiceReach
+  /** What the owner asked of it last. */
+  intent: ServiceIntent
   /** The SSH server it runs on; null once that was deleted. */
   host: McpServer | null
 }
@@ -171,7 +215,43 @@ export async function loadService(
     env: readEnvBindings(spec.env),
     values: readPlainValues(spec.plainValues),
     engine: engineOf(spec.engine),
+    reach: readReach(spec.reach),
+    intent: spec.intendedState === "stopped" ? "stopped" : "running",
     host: host && host.vaultId === ctx.vaultId ? host : null,
+  }
+}
+
+/**
+ * How a request reaches what a tunnelled service publishes: a channel
+ * through the SSH connection to the address its ports are bound to on the
+ * SSH server, for one of its published ports only, whatever the URL's host
+ * (the loopback, the published address or the SSH server's own name: what
+ * its server was registered with, before or since tunnels). Nothing else on
+ * the SSH server is reached this way.
+ */
+export function serviceDial(
+  publish: ServicePublish,
+  sshHost: string,
+  forward: ServiceForward,
+): NonNullable<SendOptions["dial"]> {
+  const target = tunnelAddress(publish)
+  const names = new Set(
+    ["127.0.0.1", "::1", "localhost", publish.address, target, sshHost].map(
+      (name) => name.toLowerCase(),
+    ),
+  )
+  const ports = new Set(publish.ports.map((entry) => entry.host))
+
+  return (host, port, signal) => {
+    if (!names.has(host.toLowerCase()) || !ports.has(port)) {
+      return Promise.reject(
+        new Error(
+          `PCP reaches only the ports the service publishes on its SSH server, not ${host}:${port}.`,
+        ),
+      )
+    }
+
+    return forward(target, port, signal)
   }
 }
 
@@ -312,17 +392,6 @@ export async function prepareLaunch(
     }
   }
 
-  // An exit's proxy is reached through the SSH connection instead.
-  if (
-    definition.registers.kind !== "none" &&
-    definition.registers.kind !== "exit" &&
-    !reachUrl(publish, sshHostOf(host), definition.registers.port)
-  ) {
-    throw invalid(
-      `PCP reaches what the service serves at the address its port is published on, and ${publish.address} is ${host.name}'s own loopback. Publish it on an address PCP can reach: 0.0.0.0, or one of ${host.name}'s own.`,
-    )
-  }
-
   let exit: PreparedLaunch["exit"] = null
 
   if (definition.registers.kind === "exit") {
@@ -454,8 +523,7 @@ export async function launchServiceOn(
       host,
       found.engine,
       prepared.containerName,
-      prepared.definition,
-      prepared.publish,
+      { ...prepared, reach: "tunnel" },
       access,
     )
 
@@ -513,6 +581,8 @@ export async function launchServiceOn(
           publish: JSON.stringify(prepared.publish),
           env: JSON.stringify(prepared.env),
           plainValues: JSON.stringify(prepared.values),
+          reach: "tunnel",
+          intendedState: "running",
         },
       }),
     ])
@@ -527,7 +597,7 @@ export async function launchServiceOn(
       await setPersonalNote(ctx, "server", id, prepared.note)
     }
 
-    const registered = await register(ctx, prepared, id)
+    const registered = await register(ctx, prepared, id, access)
     const exitId = registered?.kind === "exit" ? registered.id : null
     registeredId =
       registered && registered.kind !== "exit" ? registered.id : null
@@ -642,6 +712,7 @@ async function register(
   ctx: VaultContext,
   prepared: PreparedLaunch,
   serviceId: string,
+  access: ServiceAccess,
 ): Promise<{ id: string; kind: "openapi" | "mcp" | "exit" } | null> {
   const registers = prepared.definition.registers
 
@@ -660,10 +731,14 @@ async function register(
     return { id, kind: "exit" }
   }
 
-  const origin = reachUrl(
+  // On the SSH server's side: PCP reaches it through the SSH connection
+  // (upstream.ts serviceTunnel), whatever address it is published on.
+  const sshHost = sshHostOf(prepared.host)
+  const origin = serviceOrigin(
     prepared.publish,
-    sshHostOf(prepared.host),
+    sshHost,
     registers.port,
+    "tunnel",
   )!
 
   if (registers.kind === "mcp") {
@@ -688,6 +763,7 @@ async function register(
     baseUrl: `${origin}${registers.basePath === "/" ? "" : registers.basePath}`,
     readOnly: false,
     publicOnly: false,
+    reach: { dial: serviceDial(prepared.publish, sshHost, forwardOf(access)) },
     ...(auth
       ? {
           authType: "header" as const,
@@ -713,15 +789,38 @@ async function register(
 
 type Health = { ok: true } | { ok: false; detail: string }
 
-/** One look at the health check's address from PCP: 2xx or 3xx is healthy. */
-export async function probeHealth(url: string): Promise<Health> {
+/** The way through the SSH connection; upstream.ts always hands one in. */
+function forwardOf(access: Pick<ServiceAccess, "forward">): ServiceForward {
+  if (!access.forward) {
+    throw new PcpError(
+      "state",
+      "PCP has no connection to the service's SSH server to reach it through.",
+    )
+  }
+
+  return access.forward
+}
+
+/**
+ * One look at the health check's address: 2xx or 3xx is healthy. With
+ * `dial`, through the SSH connection (a tunnelled service), else from PCP.
+ */
+export async function probeHealth(
+  url: string,
+  dial?: SendOptions["dial"],
+): Promise<Health> {
   try {
-    const response = await fetch(url, {
-      redirect: "manual",
-      signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
-      headers: { accept: "*/*" },
-    })
-    await response.body?.cancel().catch(() => {})
+    const response = await send(
+      url,
+      {
+        signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
+        headers: { accept: "*/*" },
+      },
+      dial ? { dial } : {},
+    )
+    // Read to its end (a health answer is short), not cancelled: a body
+    // cancelled under node:http (send's) can still be written to.
+    await readCapped(response, HEALTH_BODY_BYTES).catch(() => {})
 
     return response.status >= 200 && response.status < 400
       ? { ok: true }
@@ -731,11 +830,23 @@ export async function probeHealth(url: string): Promise<Health> {
         }
   } catch (error) {
     const cause = (error as { cause?: { code?: string } }).cause?.code
+    const why = dial
+      ? error instanceof Error
+        ? error.message.slice(0, 300)
+        : "no answer"
+      : (cause ?? (error instanceof Error ? error.name : "no answer"))
     return {
       ok: false,
-      detail: `its health check did not answer (${cause ?? (error instanceof Error ? error.name : "no answer")})`,
+      detail: `its health check did not answer (${why})`,
     }
   }
+}
+
+/** Where a service is, as its health check and status read it. */
+type Reached = {
+  definition: ServiceDefinition
+  publish: ServicePublish
+  reach: ServiceReach
 }
 
 /**
@@ -791,17 +902,38 @@ export async function probeExitProxy(
   }
 }
 
-function healthUrl(
-  definition: ServiceDefinition,
-  publish: ServicePublish,
+/**
+ * The health check's address and how to reach it: through the SSH
+ * connection for a tunnelled service (none without one), from PCP's machine
+ * for one reached directly. Null when PCP cannot make the check itself.
+ */
+function healthCheck(
+  service: Reached,
   sshHost: string,
-): string | null {
+  access?: Pick<ServiceAccess, "forward">,
+): { url: string; dial?: SendOptions["dial"] } | null {
+  const { definition, publish, reach } = service
+
   if (definition.health.kind !== "http") {
     return null
   }
 
-  const origin = reachUrl(publish, sshHost, definition.health.port)
-  return origin ? `${origin}${definition.health.path}` : null
+  if (reach === "tunnel" && !access?.forward) {
+    return null
+  }
+
+  const origin = serviceOrigin(publish, sshHost, definition.health.port, reach)
+
+  if (!origin) {
+    return null
+  }
+
+  return {
+    url: `${origin}${definition.health.path}`,
+    ...(reach === "tunnel"
+      ? { dial: serviceDial(publish, sshHost, access!.forward!) }
+      : {}),
+  }
 }
 
 /**
@@ -810,11 +942,12 @@ function healthUrl(
  */
 async function healthOf(
   state: ContainerState,
-  definition: ServiceDefinition,
-  publish: ServicePublish,
+  service: Reached,
   sshHost: string,
-  access?: Pick<ServiceAccess, "loopback" | "proxyAuth">,
+  access?: Pick<ServiceAccess, "loopback" | "proxyAuth" | "forward">,
 ): Promise<{ health: ServiceHealth; detail: string | null }> {
+  const { definition, publish } = service
+
   if (state.state !== "running") {
     return { health: "unchecked", detail: null }
   }
@@ -835,10 +968,10 @@ async function healthOf(
       : { health: "unhealthy", detail: probe.detail }
   }
 
-  const url = healthUrl(definition, publish, sshHost)
+  const check = healthCheck(service, sshHost, access)
 
-  if (url) {
-    const probe = await probeHealth(url)
+  if (check) {
+    const probe = await probeHealth(check.url, check.dial)
     return probe.ok
       ? { health: "healthy", detail: null }
       : { health: "unhealthy", detail: probe.detail }
@@ -863,8 +996,7 @@ async function waitHealthy(
   host: ServiceHost,
   engine: ServiceEngine,
   containerName: string,
-  definition: ServiceDefinition,
-  publish: ServicePublish,
+  service: Reached,
   access: ServiceAccess,
 ): Promise<Health> {
   const { waitMs, intervalMs } = access.timing ?? {
@@ -895,13 +1027,7 @@ async function waitHealthy(
     }
 
     if (state.state === "running") {
-      const { health, detail } = await healthOf(
-        state,
-        definition,
-        publish,
-        sshHost,
-        access,
-      )
+      const { health, detail } = await healthOf(state, service, sshHost, access)
 
       if (health === "healthy" || health === "unchecked") {
         return { ok: true }
@@ -961,8 +1087,10 @@ export type ServiceStatus = {
   foreign: boolean
   engine: ServiceEngine
   engineVersion: string
-  /** Where PCP reaches it, when it can. */
+  /** Where PCP reaches it, when it can (as the SSH server does, for a tunnel). */
   url: string | null
+  /** Through the SSH connection, or directly from PCP's machine. */
+  reach: ServiceReach
 }
 
 /** The service's state on its SSH server now, read through the engine. */
@@ -982,13 +1110,7 @@ export async function serviceStatusOn(
     state.state !== "missing" && state.serviceLabel !== loaded.server.id
   const { health, detail } = foreign
     ? { health: "unchecked" as const, detail: null }
-    : await healthOf(
-        state,
-        loaded.definition,
-        loaded.publish,
-        access.host.address,
-        access,
-      )
+    : await healthOf(state, loaded, access.host.address, access)
   const port =
     loaded.definition.registers.kind !== "none"
       ? loaded.definition.registers.port
@@ -1007,11 +1129,18 @@ export async function serviceStatusOn(
     engine: loaded.engine,
     engineVersion: loaded.spec.engineVersion,
     // An exit's proxy is no address of PCP's to show: it is reached
-    // through the SSH connection only.
+    // through the SSH connection only. A tunnelled service's is as the SSH
+    // server reaches it.
     url:
       port === undefined || loaded.definition.registers.kind === "exit"
         ? null
-        : reachUrl(loaded.publish, access.host.address, port),
+        : serviceOrigin(
+            loaded.publish,
+            access.host.address,
+            port,
+            loaded.reach,
+          ),
+    reach: loaded.reach,
   }
 
   await recordStatus(loaded, status)
@@ -1059,10 +1188,25 @@ async function recordStatus(
 
 // ---- Running it --------------------------------------------------------------
 
+/** Keeps what the owner (or an assistant's start or stop) asked of it last. */
+async function recordIntent(
+  loaded: LoadedService,
+  intent: ServiceIntent,
+): Promise<void> {
+  if (loaded.intent !== intent) {
+    await db().serviceSpec.update({
+      where: { serverId: loaded.server.id },
+      data: { intendedState: intent },
+    })
+    loaded.intent = intent
+  }
+}
+
 /**
  * Start, stop or restart. Starting one whose container is gone makes it
  * again from the definition (the variables are in `access`); starting and
- * restarting wait for it to be healthy.
+ * restarting wait for it to be healthy. What was asked is kept: a service
+ * stopped here is not started again by a call or the reconcile pass.
  */
 export async function serviceActionOn(
   loaded: LoadedService,
@@ -1078,6 +1222,8 @@ export async function serviceActionOn(
         " PCP leaves it alone: remove or rename it on the SSH server, then start the service again.",
     )
   }
+
+  await recordIntent(loaded, action === "stop" ? "stopped" : "running")
 
   if (action === "start" && before.state === "missing") {
     return recreateServiceOn(loaded, access)
@@ -1099,8 +1245,7 @@ export async function serviceActionOn(
       access.host,
       loaded.engine,
       loaded.spec.containerName,
-      loaded.definition,
-      loaded.publish,
+      loaded,
       access,
     )
 
@@ -1122,13 +1267,16 @@ export async function serviceActionOn(
 
 /**
  * Makes the container again from the definition and the variables as they
- * are now (after a secret changed, or an update), keeping its volumes.
+ * are now (after a secret changed, or an update), keeping its volumes. A
+ * service reached directly until now is reached through the SSH connection
+ * from here on, once it is healthy that way.
  */
 export async function recreateServiceOn(
   loaded: LoadedService,
   access: ServiceAccess,
 ): Promise<ServiceStatus> {
   const name = loaded.spec.containerName
+  const reach: ServiceReach = access.forward ? "tunnel" : loaded.reach
 
   await engineCall(async () => {
     await pullImage(access.host, loaded.engine, loaded.definition.image)
@@ -1146,14 +1294,23 @@ export async function recreateServiceOn(
     )
   })
 
+  await recordIntent(loaded, "running")
   const health = await waitHealthy(
     access.host,
     loaded.engine,
     name,
-    loaded.definition,
-    loaded.publish,
+    { ...loaded, reach },
     access,
   )
+
+  if (health.ok && reach !== loaded.reach) {
+    await db().serviceSpec.update({
+      where: { serverId: loaded.server.id },
+      data: { reach },
+    })
+    loaded.reach = reach
+  }
+
   const status = await serviceStatusOn(loaded, access)
 
   if (!health.ok) {
@@ -1500,7 +1657,175 @@ export async function stoppedServiceMessage(
     return null
   }
 
-  return `${statusWords(loaded.server.name, status)} It runs on ${where}. ${loaded.server.slug}/start starts it, at the owner's level for that tool; the owner can also start it on the service's page:\n${page}`
+  const onPurpose =
+    loaded.intent === "stopped"
+      ? " It was stopped through PCP, so PCP does not start it by itself."
+      : ""
+
+  return `${statusWords(loaded.server.name, status)}${onPurpose} It runs on ${where}. ${loaded.server.slug}/start starts it, at the owner's level for that tool; the owner can also start it on the service's page:\n${page}`
+}
+
+/** States a call or the reconcile pass starts a container from. */
+const STARTABLE = new Set(["exited", "created"])
+
+export type StartOnDemand =
+  { started: true; note: string } | { started: false; reason: string | null }
+
+/** Starts under way, by service: a second call waits for the first's. */
+const waking = new Map<string, Promise<StartOnDemand>>()
+
+/**
+ * After a call to what the service serves failed: when the owner left it
+ * running and its container is stopped (exited, or made and never
+ * started), starts it and waits, bounded, for it to be healthy, so the
+ * caller can try once more. Nothing when it was stopped through PCP, is
+ * running (the failure is the server's own), is gone or is another's.
+ * `reason` says why a start it tried did not work.
+ */
+export function startOnDemand(
+  loaded: LoadedService,
+  access: ServiceAccess,
+): Promise<StartOnDemand> {
+  const under = waking.get(loaded.server.id)
+
+  if (under) {
+    return under
+  }
+
+  const run = wake(loaded, access).finally(() =>
+    waking.delete(loaded.server.id),
+  )
+  waking.set(loaded.server.id, run)
+  return run
+}
+
+async function wake(
+  loaded: LoadedService,
+  access: ServiceAccess,
+): Promise<StartOnDemand> {
+  if (loaded.intent === "stopped") {
+    return { started: false, reason: null }
+  }
+
+  let before: ServiceStatus
+
+  try {
+    before = await serviceStatusOn(loaded, access)
+  } catch {
+    return { started: false, reason: null }
+  }
+
+  if (before.foreign || !STARTABLE.has(before.state)) {
+    return { started: false, reason: null }
+  }
+
+  const was = before.state === "exited" ? "stopped" : before.state
+
+  try {
+    await serviceActionOn(loaded, "start", {
+      ...access,
+      timing: access.timing ?? {
+        waitMs: START_ON_DEMAND_WAIT_MS,
+        intervalMs: HEALTH_INTERVAL_MS,
+      },
+    })
+  } catch (error) {
+    return {
+      started: false,
+      reason: `${loaded.server.name} was ${was}, and PCP could not start it: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`,
+    }
+  }
+
+  return {
+    started: true,
+    note: `PCP started the service ${loaded.server.name} (${loaded.server.slug}), which was ${was}, for this call.`,
+  }
+}
+
+export type ReconcileRun = {
+  /** The services it started. */
+  started: string[]
+  skipped?: "busy" | "recent"
+}
+
+const reconciling = new Set<string>()
+const lastReconcile = new Map<string, number>()
+
+/**
+ * Brings the vault's services the owner left running back up when their
+ * container stopped (the SSH server restarted, and Podman without its
+ * restart unit does not start them): after a request that holds the
+ * vault's key was answered (app/mcp/route.ts, the owner's pages, through
+ * Next's after()), at most once in SERVICE_RECONCILE_INTERVAL_MS, within a
+ * budget. Never on a timer, never with a key kept between requests. Never
+ * throws: what it finds is each service's status.
+ */
+export async function reconcileServicesWith(
+  ctx: VaultContext,
+  accessFor: (loaded: LoadedService) => Promise<ServiceAccess | null>,
+  {
+    now = Date.now(),
+    budgetMs = SERVICE_RECONCILE_BUDGET_MS,
+  }: { now?: number; budgetMs?: number } = {},
+): Promise<ReconcileRun> {
+  if (reconciling.has(ctx.vaultId)) {
+    return { started: [], skipped: "busy" }
+  }
+
+  if (
+    now - (lastReconcile.get(ctx.vaultId) ?? -Infinity) <
+    SERVICE_RECONCILE_INTERVAL_MS
+  ) {
+    return { started: [], skipped: "recent" }
+  }
+
+  reconciling.add(ctx.vaultId)
+  lastReconcile.set(ctx.vaultId, now)
+  const began = Date.now()
+  const started: string[] = []
+
+  try {
+    const specs = await db()
+      .serviceSpec.findMany({
+        where: {
+          intendedState: "running",
+          hostId: { not: null },
+          server: { vaultId: ctx.vaultId, enabled: true },
+        },
+        select: { serverId: true },
+        orderBy: { createdAt: "asc" },
+      })
+      .catch(() => [])
+
+    for (const { serverId } of specs) {
+      if (Date.now() - began > budgetMs) {
+        break
+      }
+
+      try {
+        const loaded = await loadService(ctx, serverId)
+        const access = await accessFor(loaded)
+
+        if (!access) {
+          continue
+        }
+
+        const outcome = await startOnDemand(loaded, access)
+
+        if (outcome.started) {
+          started.push(serverId)
+        } else if (outcome.reason) {
+          await setServerStatus(serverId, "error", outcome.reason)
+        }
+      } catch {
+        // One service that cannot be read leaves the others to go on.
+      }
+    }
+  } finally {
+    reconciling.delete(ctx.vaultId)
+  }
+
+  return { started }
 }
 
 /** For the server page: the services' rows of the vault, by SSH server. */
@@ -1533,9 +1858,14 @@ export type ServiceView = {
   containerName: string
   engine: ServiceEngine
   engineVersion: string
-  host: { id: string; name: string } | null
+  /** The SSH server, and the login PCP runs the engine as there. */
+  host: { id: string; name: string; username: string } | null
   definition: ServiceDefinition
   publish: ServicePublish
+  /** Through the SSH connection, or directly from PCP's machine. */
+  reach: ServiceReach
+  /** Whether it was last started or stopped through PCP. */
+  intent: ServiceIntent
   /** Variable name → the secret's name, or the value typed for a plain one. */
   env: Array<{
     name: string
@@ -1575,9 +1905,17 @@ export async function serviceView(
     containerName: loaded.spec.containerName,
     engine: loaded.engine,
     engineVersion: loaded.spec.engineVersion,
-    host: loaded.host ? { id: loaded.host.id, name: loaded.host.name } : null,
+    host: loaded.host
+      ? {
+          id: loaded.host.id,
+          name: loaded.host.name,
+          username: loaded.host.authUsername ?? "",
+        }
+      : null,
     definition: loaded.definition,
     publish: loaded.publish,
+    reach: loaded.reach,
+    intent: loaded.intent,
     env: loaded.definition.env.map((entry) => {
       const secretId = loaded.env[entry.name] ?? null
       return {

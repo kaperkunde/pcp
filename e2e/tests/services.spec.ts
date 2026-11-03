@@ -18,9 +18,10 @@ import {
 // A service, launched by the owner on an SSH server PCP already holds: the
 // test SSH server runs each command in a real sh with a fake `docker` on its
 // PATH (lib/core/services/fake-docker.ts), and what the "container" serves
-// is an HTTP server in this process, at the port the form publishes. The
-// launch registers its API endpoint in the same step; the secret for its
-// variable reaches the engine only through the env file.
+// is an HTTP server in this process, at the port the form publishes, which
+// PCP reaches through the SSH connection. The launch registers its API
+// endpoint in the same step; the secret for its variable reaches the engine
+// only through the env file.
 test.describe.configure({ mode: "serial" })
 
 const RUN = Date.now().toString(36)
@@ -40,6 +41,9 @@ test.beforeAll(async () => {
   ssh = await startFakeSsh({
     authorizedKey: () => authorized,
     run: docker.run,
+    // PCP reaches the service through the SSH connection, at the port it
+    // is published on the SSH server's 127.0.0.1.
+    allowForwarding: true,
   })
   http = createServer((request, response) => {
     const body =
@@ -105,7 +109,8 @@ test("a service launches on an SSH server and registers its API endpoint", async
       registers: { kind: "openapi", port: 5001, specPath: "/openapi.json" },
     }),
   )
-  await page.getByLabel("Publish on").fill("127.0.0.1")
+  // Published on the SSH server's own 127.0.0.1 unless chosen otherwise.
+  await expect(page.getByLabel("Publish on")).toHaveCount(0)
   await page.getByLabel("The SSH server's port for 5001").fill(String(port))
   await page.getByLabel("API_KEY").selectOption({ label: SECRET })
   await page.getByRole("button", { name: "Launch" }).click()

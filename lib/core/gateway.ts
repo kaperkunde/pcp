@@ -3069,7 +3069,7 @@ export function buildGatewayServer(
         .max(64)
         .optional()
         .describe(
-          "For kind service: the SSH server's IP address its ports listen on (default 0.0.0.0, every address). PCP reaches what it serves there, so not 127.0.0.1 unless PCP runs on that machine.",
+          "For kind service: the SSH server's IP address its ports listen on (default 127.0.0.1, that machine alone; PCP reaches what it serves through the SSH connection). Name 0.0.0.0 or one of its own addresses only when its network should reach the service too.",
         ),
       publish_ports: z
         .array(

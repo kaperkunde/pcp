@@ -13,9 +13,10 @@ import {
 import { getServer, normalizeNameAndDescription } from "../servers"
 import { parseSshAddress } from "../ssh/hosts"
 import {
+  DEFAULT_PUBLISH_ADDRESS,
+  isLoopback,
   parsePublish,
   parseServiceDefinition,
-  reachUrl,
   type ServiceDefinition,
   type ServicePublish,
 } from "./definition"
@@ -32,8 +33,10 @@ import { serviceOfDefinition, type ServiceLaunchInput } from "./services"
  *
  * Everything is checked before they are asked: the definition as the
  * owner's own launch checks it, the SSH server (one this token sees, whose
- * host key the owner pinned), the publish address against the definition,
- * and that PCP can reach what it registers. Secrets are named, never sent:
+ * host key the owner pinned) and the publish address against the
+ * definition: the SSH server's own 127.0.0.1 unless the assistant names an
+ * address of its network, which the owner then sees. PCP reaches what it
+ * registers through the SSH connection either way. Secrets are named, never sent:
  * one the vault holds as a text secret is reused; one new name at most is
  * typed in by the owner on PCP's page, and its value never reaches the
  * assistant. Another instance of a service definition the token sees
@@ -143,7 +146,7 @@ export async function prepareServiceProposal(
   const address = parseSshAddress(host.url).host
   const publish = parsePublish(
     {
-      address: args.publishAddress?.trim() || "0.0.0.0",
+      address: args.publishAddress?.trim() || DEFAULT_PUBLISH_ADDRESS,
       ports: definition.ports.map(({ container }) => ({
         container,
         host:
@@ -160,15 +163,6 @@ export async function prepareServiceProposal(
         `publish_ports names port ${entry.container}, which the service does not publish.`,
       )
     }
-  }
-
-  if (
-    definition.registers.kind !== "none" &&
-    !reachUrl(publish, address, definition.registers.port)
-  ) {
-    throw invalid(
-      `PCP reaches what the service serves at the address its port is published on, and ${publish.address} is ${host.name}'s own loopback: leave publish_address out (0.0.0.0), or name one of ${host.name}'s own addresses.`,
-    )
   }
 
   const known = new Set(definition.env.map((entry) => entry.name))
@@ -277,7 +271,7 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
       ? `Updates from: ${definition.source}, when you update it on its page`
       : "Updates: by hand only (it names no image to update from)",
     publish.ports.length > 0
-      ? `Published on ${publish.address}: ${publish.ports.map((port) => `${port.host} → ${port.container}`).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server)" : ""}`
+      ? `Published on ${publish.address}: ${publish.ports.map((port) => `${port.host} → ${port.container}`).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server: anything on its network reaches it)" : isLoopback(publish.address) ? " (the SSH server's own loopback: PCP reaches it through the SSH connection)" : " (that address of the SSH server: anything that reaches it reaches the service)"}`
       : "Publishes no port",
     ...ask.env.map((entry) => {
       const fixed = definition.env.find(

@@ -19,6 +19,7 @@ import { invalid, isPcpError, PcpError } from "./errors"
 import { newId } from "./ids"
 import { executeCall } from "./openapi/call"
 import { fetchSpec } from "./openapi/fetch-spec"
+import type { SendOptions } from "./openapi/transport"
 import {
   generateTools,
   resolveBaseUrl,
@@ -102,6 +103,11 @@ export type EndpointInput = {
   readOnly: boolean
   /** Refuse private, loopback and link-local addresses (see address.ts). */
   publicOnly?: boolean
+  /**
+   * How the schema is downloaded when that is not from PCP's machine: a
+   * service's, through the SSH connection (services.ts register). Not kept.
+   */
+  reach?: Pick<SendOptions, "dial">
   /** Off until the owner enables it. Default on. */
   enabled?: boolean
   authType: "none" | "header" | "basic" | "oauth"
@@ -884,6 +890,7 @@ export async function createEndpoint(
   } else {
     ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
       publicOnly: data.publicOnly,
+      ...input.reach,
     }))
   }
 
@@ -1288,15 +1295,40 @@ export async function changeEndpoint(
   }
 }
 
-/** Downloads an endpoint's schema URL again, under the endpoint's rules. */
+/**
+ * Downloads an endpoint's schema URL again, under the endpoint's rules. A
+ * service's endpoint reached through the SSH connection is downloaded only
+ * with that way in (`reach`, from upstream.ts), never from PCP's machine,
+ * whose own loopback is another one.
+ */
 export async function downloadSpec(
-  server: Pick<McpServer, "specUrl" | "publicOnly">,
+  server: Pick<McpServer, "id" | "name" | "specUrl" | "publicOnly">,
+  reach?: Pick<SendOptions, "dial">,
 ): Promise<{ text: string; url: string }> {
   if (!server.specUrl) {
     throw invalid("This endpoint has no schema URL.")
   }
 
-  return fetchSpec(server.specUrl, { publicOnly: server.publicOnly })
+  if (!reach?.dial && (await reachedThroughService(server.id))) {
+    throw new PcpError(
+      "state",
+      `${server.name} is a service's, reached through its SSH server: re-read its schema on its page in PCP.`,
+    )
+  }
+
+  return fetchSpec(server.specUrl, {
+    publicOnly: server.publicOnly,
+    ...reach,
+  })
+}
+
+/** Whether a service registered this server and PCP reaches it through SSH. */
+async function reachedThroughService(serverId: string): Promise<boolean> {
+  return (
+    (await db().serviceSpec.count({
+      where: { registeredId: serverId, reach: "tunnel" },
+    })) > 0
+  )
 }
 
 /**
@@ -1316,10 +1348,13 @@ export async function syncEndpointTools(
   {
     byOwner = false,
     fromCopy = false,
+    reach,
   }: {
     byOwner?: boolean
     /** Rebuild from the copy PCP holds, without downloading the schema. */
     fromCopy?: boolean
+    /** A service's way in, through its SSH server (see downloadSpec). */
+    reach?: Pick<SendOptions, "dial">
   } = {},
 ): Promise<SyncResult> {
   try {
@@ -1332,7 +1367,7 @@ export async function syncEndpointTools(
       server.specUrl &&
       !(fromCopy && stored)
     ) {
-      ;({ text, url: fetchedFrom } = await downloadSpec(server))
+      ;({ text, url: fetchedFrom } = await downloadSpec(server, reach))
 
       if (
         server.specUrlFromAssistant &&
@@ -1492,8 +1527,14 @@ export async function callEndpointTool(
     redact,
     renew,
     open,
+    reach,
   }: {
     authHeaders: Record<string, string>
+    /**
+     * How the request leaves when that is not from PCP's machine: a
+     * service's endpoint, through its SSH server (upstream.ts serviceTunnel).
+     */
+    reach?: Pick<SendOptions, "dial">
     /**
      * Opens a result the token kept: handles in the arguments, and the
      * files of an upload.
@@ -1548,6 +1589,7 @@ export async function callEndpointTool(
         {
           redact: secrets,
           publicOnly: server.publicOnly,
+          ...reach,
         },
       )
     } catch (error) {

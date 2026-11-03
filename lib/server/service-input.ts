@@ -1,6 +1,7 @@
 import type { VaultContext } from "@/lib/core/context"
 import { invalid } from "@/lib/core/errors"
 import { createSecret, deleteSecret } from "@/lib/core/secrets"
+import { DEFAULT_PUBLISH_ADDRESS } from "@/lib/core/services/definition"
 
 import { field, fields } from "./action-state"
 
@@ -92,7 +93,8 @@ export function publishFrom(formData: FormData) {
   const hosts = fields(formData, "port.host")
 
   return {
-    address: field(formData, "address"),
+    // The SSH server's own loopback unless the owner chose its network.
+    address: field(formData, "address") || DEFAULT_PUBLISH_ADDRESS,
     ports: containers.map((container, at) => {
       const host = Number(hosts[at])
       if (!Number.isInteger(host)) {

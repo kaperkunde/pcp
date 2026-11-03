@@ -1,4 +1,9 @@
-import { createServer as createHttpServer, type Server } from "node:http"
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http"
 import type { AddressInfo } from "node:net"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -12,10 +17,12 @@ import { deleteServer, getServer } from "../servers"
 import { startFakeSsh, type FakeSsh } from "../ssh/fake-server"
 import { createSshServer } from "../ssh/hosts"
 import { scratchDatabase } from "../test-db"
+import { closeAllSshConnections } from "../ssh/client"
 import {
   callServerTool,
   launchService,
   readServiceStatus,
+  reconcileServices,
   removeService,
   restartServicesUsingSecret,
   runServiceAction,
@@ -26,13 +33,19 @@ import {
 import { setupVault } from "../vault"
 import { startFakeDocker, type FakeDocker } from "./fake-docker"
 import type { ServiceDefinitionInput } from "./definition"
-import { serviceOfDefinition, type ServiceLaunchInput } from "./services"
+import {
+  serviceDial,
+  serviceOfDefinition,
+  serviceView,
+  type ServiceLaunchInput,
+} from "./services"
 
 // Services end to end in the core: launched by the owner on an SSH server
 // (the test server on 127.0.0.1) whose login runs commands in a real sh,
 // with a fake `docker` on its PATH that records what it was given; what the
 // service serves is an HTTP server of the test's own, at the port the
-// container is published on.
+// container is published on, which PCP reaches through the SSH connection:
+// the test server's forwarding opens it while the container runs.
 
 const PUBLIC = { publicUrl: "http://localhost:3000" }
 const FAST = { ...PUBLIC, timing: { waitMs: 1500, intervalMs: 50 } }
@@ -48,6 +61,10 @@ let http: Server
 let httpPort: number
 /** What the test's HTTP server answers, by path. */
 let answers: Record<string, { status: number; body: string }>
+/** Whether the SSH server lets PCP open channels (TCP forwarding on). */
+let forwarding: boolean
+/** The tools the MCP server at /mcp lists. */
+let mcpTools: Array<{ name: string; description: string }>
 
 const SPEC = JSON.stringify({
   openapi: "3.0.3",
@@ -63,8 +80,58 @@ const SPEC = JSON.stringify({
   },
 })
 
+/**
+ * Just enough of an MCP server, over Streamable HTTP with JSON answers:
+ * initialize, its notification and tools/list.
+ */
+function answerMcp(request: IncomingMessage, response: ServerResponse) {
+  if (request.method !== "POST") {
+    response.writeHead(405).end()
+    return
+  }
+
+  let body = ""
+  request.on("data", (chunk: Buffer) => (body += chunk.toString()))
+  request.on("end", () => {
+    const message = JSON.parse(body) as {
+      id?: number
+      method: string
+      params?: { protocolVersion?: string }
+    }
+
+    if (message.id === undefined) {
+      response.writeHead(202).end()
+      return
+    }
+
+    const result =
+      message.method === "initialize"
+        ? {
+            protocolVersion: message.params?.protocolVersion,
+            capabilities: { tools: {} },
+            serverInfo: { name: "docs", version: "1" },
+          }
+        : message.method === "tools/list"
+          ? {
+              tools: mcpTools.map((tool) => ({
+                ...tool,
+                inputSchema: { type: "object" },
+              })),
+            }
+          : {}
+
+    response.writeHead(200, { "content-type": "application/json" })
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }))
+  })
+}
+
 async function startHttp(port = 0) {
   http = createHttpServer((request, response) => {
+    if (request.url === "/mcp") {
+      answerMcp(request, response)
+      return
+    }
+
     const answer = answers[request.url ?? ""] ?? { status: 404, body: "no" }
     response.writeHead(answer.status, { "content-type": "application/json" })
     response.end(answer.body)
@@ -80,10 +147,24 @@ async function setup(engine: "docker" | "podman" = "docker") {
     password: "correct horse battery staple",
   })
   authorized = null
+  forwarding = true
+  mcpTools = [{ name: "convert", description: "Converts a document" }]
   docker = startFakeDocker({ engine })
   ssh = await startFakeSsh({
     authorizedKey: () => authorized,
     run: docker.run,
+    allowForwarding: true,
+    // The SSH server's own 127.0.0.1 at the published port: the test's
+    // HTTP server, while a container runs (a stopped one refuses).
+    connectTo: (host, port) =>
+      forwarding &&
+      host === "127.0.0.1" &&
+      port === httpPort &&
+      Object.values(docker.state().containers).some(
+        (container) => container.state === "running",
+      )
+        ? { host, port }
+        : null,
   })
   answers = {
     "/health": { status: 200, body: "{}" },
@@ -94,6 +175,8 @@ async function setup(engine: "docker" | "podman" = "docker") {
 }
 
 async function teardown() {
+  closeAllSshConnections()
+  http.closeAllConnections()
   await new Promise<void>((resolve) => http.close(() => resolve()))
   await ssh.close()
   docker.close()
@@ -305,15 +388,90 @@ describe("launching a service", { timeout: 30_000 }, () => {
     expect(docker.commands.length).toBe(before)
   })
 
-  it("refuses a port PCP could not reach on another machine's loopback", async () => {
-    const { id } = await createSshServer(ctx, {
-      name: "Far box",
-      host: "box.example",
-      username: "deploy",
+  it("reaches what it serves through the SSH connection, on the SSH server's loopback", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(ctx, await launchInput(hostId), FAST)
+    const spec = await db().serviceSpec.findUniqueOrThrow({
+      where: { serverId: launched.id },
     })
-    await expect(
-      launchService(ctx, await launchInput(id), FAST),
-    ).rejects.toThrow(/loopback/)
+
+    expect(spec.reach).toBe("tunnel")
+    expect(spec.intendedState).toBe("running")
+    // Its health check and its schema came through a channel to the
+    // published port on the SSH server's own 127.0.0.1.
+    expect(ssh.forwards).toContain(`127.0.0.1:${httpPort}`)
+    const before = ssh.forwards.length
+    const endpoint = await getServer(ctx, launched.registeredId!)
+    const listed = await callServerTool(
+      ctx,
+      endpoint,
+      "list_things",
+      {},
+      PUBLIC,
+    )
+    expect(listed.isError).toBeFalsy()
+    expect(ssh.forwards.length).toBeGreaterThan(before)
+    // Only ever to the port it publishes, nothing else on that machine.
+    expect(new Set(ssh.forwards)).toEqual(new Set([`127.0.0.1:${httpPort}`]))
+  })
+
+  it("registers an MCP server it serves and reads its tools through the SSH connection", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        definition: definition({
+          env: [],
+          registers: { kind: "mcp", port: 5001, path: "/mcp" },
+        }),
+        env: {},
+      }),
+      FAST,
+    )
+
+    expect(launched.registeredKind).toBe("mcp")
+    const server = await getServer(ctx, launched.registeredId!)
+    expect(server.url).toBe(`http://127.0.0.1:${httpPort}/mcp`)
+    expect(server.tools.map((tool) => tool.name)).toEqual(["convert"])
+    expect(ssh.forwards).toContain(`127.0.0.1:${httpPort}`)
+  })
+
+  it("takes everything back when the SSH server does not let PCP through", async () => {
+    const hostId = await pinnedHost()
+    forwarding = false
+
+    const failure = await launchService(
+      ctx,
+      await launchInput(hostId),
+      FAST,
+    ).catch((error: Error) => error)
+
+    expect((failure as Error).message).toMatch(/did not become healthy/)
+    expect((failure as Error).message).toMatch(/health check did not answer/)
+    expect(docker.state().containers).toEqual({})
+    expect(await db().serviceSpec.count()).toBe(0)
+  })
+
+  it("publishes on the SSH server's network only when the owner chooses it", async () => {
+    const hostId = await pinnedHost()
+    const launched = await launchService(
+      ctx,
+      await launchInput(hostId, {
+        publish: {
+          address: "0.0.0.0",
+          ports: [{ container: 5001, host: httpPort }],
+        },
+      }),
+      FAST,
+    )
+
+    expect(docker.state().containers["pcp-docs"]!.publish).toEqual([
+      `0.0.0.0:${httpPort}:5001`,
+    ])
+    // PCP still goes through the SSH connection, to the loopback.
+    const endpoint = await getServer(ctx, launched.registeredId!)
+    expect(endpoint.url).toBe(`http://127.0.0.1:${httpPort}`)
+    expect((await serviceView(ctx, launched.id)).reach).toBe("tunnel")
   })
 
   it("takes everything back when the container does not stay up", async () => {
@@ -457,6 +615,13 @@ describe("a running service", { timeout: 30_000 }, () => {
 
     const stopped = await callServerTool(ctx, service, "stop", {}, PUBLIC)
     expect(JSON.parse(textOf(stopped))).toMatchObject({ state: "exited" })
+    expect(
+      (
+        await db().serviceSpec.findUniqueOrThrow({
+          where: { serverId: service.id },
+        })
+      ).intendedState,
+    ).toBe("stopped")
     expect(docker.state().calls).toContainEqual([
       "stop",
       "--time",
@@ -474,6 +639,11 @@ describe("a running service", { timeout: 30_000 }, () => {
       PUBLIC,
     ).catch((error: Error) => error)
     expect((failure as Error).message).toMatch(/Docs service is stopped/)
+    // Stopped through PCP, it stays stopped: the call starts nothing.
+    expect((failure as Error).message).toMatch(/stopped through PCP/)
+    expect(docker.state().calls.filter((call) => call[0] === "start")).toEqual(
+      [],
+    )
     expect((failure as Error).message).toContain(`${service.slug}/start`)
     expect((failure as Error).message).toContain(
       `page in PCP](http://localhost:3000/servers/${service.id})`,
@@ -486,6 +656,13 @@ describe("a running service", { timeout: 30_000 }, () => {
     await startHttp(httpPort)
     const status = await runServiceAction(ctx, service.id, "start", FAST)
     expect(status).toMatchObject({ state: "running", health: "healthy" })
+    expect(
+      (
+        await db().serviceSpec.findUniqueOrThrow({
+          where: { serverId: service.id },
+        })
+      ).intendedState,
+    ).toBe("running")
     expect(docker.state().containers["pcp-docs"]!.state).toBe("running")
     const listed = await callServerTool(
       ctx,
@@ -495,6 +672,129 @@ describe("a running service", { timeout: 30_000 }, () => {
       PUBLIC,
     )
     expect(listed.isError).toBeFalsy()
+  })
+
+  it("starts a service left running when a call finds its container stopped, and tries once more", async () => {
+    const { endpoint } = await launched()
+    // The SSH server restarted, and the engine did not start it again.
+    docker.update((state) => {
+      state.containers["pcp-docs"]!.state = "exited"
+    })
+
+    const result = await callServerTool(
+      ctx,
+      endpoint,
+      "list_things",
+      {},
+      PUBLIC,
+    )
+
+    expect(result.isError).toBeFalsy()
+    expect(textOf(result)).toMatch(
+      /^PCP started the service Docs service \(docs-service\), which was stopped, for this call\./,
+    )
+    expect(docker.state().calls).toContainEqual(["start", "pcp-docs"])
+    expect(docker.state().containers["pcp-docs"]!.state).toBe("running")
+  })
+
+  it("says why when a call's start does not work", async () => {
+    const { endpoint } = await launched()
+    docker.update((state) => {
+      state.containers["pcp-docs"]!.state = "exited"
+    })
+    answers["/health"] = { status: 503, body: "broken" }
+
+    const failure = await callServerTool(
+      ctx,
+      endpoint,
+      "list_things",
+      {},
+      { ...PUBLIC },
+    ).catch((error: Error) => error)
+
+    expect((failure as Error).message).toMatch(
+      /could not be reached\. Docs service was stopped, and PCP could not start it: .*HTTP 503/,
+    )
+  }, 90_000)
+
+  it("brings services left running back up after a request, at most once in a while", async () => {
+    const { service } = await launched()
+    docker.update((state) => {
+      state.containers["pcp-docs"]!.state = "exited"
+    })
+    const now = Date.now() + 60 * 60_000
+
+    expect(await reconcileServices(ctx, PUBLIC, { now })).toEqual({
+      started: [service.id],
+    })
+    expect(docker.state().containers["pcp-docs"]!.state).toBe("running")
+    expect(await reconcileServices(ctx, PUBLIC, { now: now + 1000 })).toEqual({
+      started: [],
+      skipped: "recent",
+    })
+
+    // One stopped through PCP stays stopped.
+    await runServiceAction(ctx, service.id, "stop", FAST)
+    const before = docker.state().calls.length
+    expect(
+      await reconcileServices(ctx, PUBLIC, { now: now + 60 * 60_000 }),
+    ).toEqual({ started: [] })
+    expect(docker.state().containers["pcp-docs"]!.state).toBe("exited")
+    expect(docker.state().calls.length).toBe(before)
+  })
+
+  it("reaches a service launched before tunnels directly, until it is made again", async () => {
+    const { service, endpoint } = await launched()
+    await db().serviceSpec.update({
+      where: { serverId: service.id },
+      data: { reach: "direct" },
+    })
+    const before = ssh.forwards.length
+
+    const direct = await callServerTool(
+      ctx,
+      endpoint,
+      "list_things",
+      {},
+      PUBLIC,
+    )
+    expect(direct.isError).toBeFalsy()
+    expect(ssh.forwards.length).toBe(before)
+
+    await updateService(ctx, service.id, FAST)
+    expect(
+      (
+        await db().serviceSpec.findUniqueOrThrow({
+          where: { serverId: service.id },
+        })
+      ).reach,
+    ).toBe("tunnel")
+    const tunnelled = await callServerTool(
+      ctx,
+      endpoint,
+      "list_things",
+      {},
+      PUBLIC,
+    )
+    expect(tunnelled.isError).toBeFalsy()
+    expect(ssh.forwards.length).toBeGreaterThan(before)
+  })
+
+  it("never reaches a tunnelled service's endpoint from PCP's machine", async () => {
+    const { endpoint } = await launched()
+    // Its SSH server's host key forgotten: no channel, and no way around.
+    await db().mcpServer.updateMany({
+      where: { kind: "ssh" },
+      data: { sshHostKey: null },
+    })
+    closeAllSshConnections()
+
+    await expect(
+      callServerTool(ctx, endpoint, "list_things", {}, PUBLIC),
+    ).rejects.toThrow(/not pinned/)
+    const sync = await syncServerTools(ctx, endpoint, PUBLIC)
+    expect(sync.status).toBe("error")
+    expect(sync.message).toMatch(/not pinned/)
   })
 
   it("makes the container again when a secret it takes changes", async () => {
@@ -570,6 +870,17 @@ describe("a running service", { timeout: 30_000 }, () => {
     expect(await db().serverDefinition.count()).toBe(0)
   })
 
+  it("tells the owner of a Podman service how it starts again with its machine", async () => {
+    await teardown()
+    await setup("podman")
+    const { service } = await launched()
+    const view = await serviceView(ctx, service.id)
+
+    expect(view.engine).toBe("podman")
+    expect(view.host?.username).toBe("deploy")
+    expect(view.intent).toBe("running")
+  })
+
   it("travels in an export and comes back with a restore", async () => {
     const { service } = await launched()
     const before = await db().serviceSpec.findUniqueOrThrow({
@@ -593,5 +904,49 @@ describe("a running service", { timeout: 30_000 }, () => {
         where: { serverId: service.id },
       }),
     ).toEqual(before)
+  })
+})
+
+describe("a tunnel to a service", () => {
+  const publish = {
+    address: "0.0.0.0",
+    ports: [{ container: 5001, host: 8001 }],
+  }
+
+  it("opens a channel to the SSH server's loopback, at a published port only", async () => {
+    const opened: string[] = []
+    const dial = serviceDial(publish, "box.lan", async (address, port) => {
+      opened.push(`${address}:${port}`)
+      return {} as never
+    })
+
+    await dial("127.0.0.1", 8001)
+    await dial("box.lan", 8001)
+    await dial("localhost", 8001)
+    expect(opened).toEqual([
+      "127.0.0.1:8001",
+      "127.0.0.1:8001",
+      "127.0.0.1:8001",
+    ])
+
+    await expect(dial("127.0.0.1", 22)).rejects.toThrow(/not 127.0.0.1:22/)
+    await expect(dial("10.0.0.5", 8001)).rejects.toThrow(/only the ports/)
+    await expect(dial("metadata.google.internal", 80)).rejects.toThrow()
+    expect(opened).toHaveLength(3)
+  })
+
+  it("goes to the address the ports are bound to when that is one of the SSH server's", async () => {
+    const opened: string[] = []
+    const dial = serviceDial(
+      { ...publish, address: "192.168.1.5" },
+      "box.lan",
+      async (address, port) => {
+        opened.push(`${address}:${port}`)
+        return {} as never
+      },
+    )
+
+    await dial("192.168.1.5", 8001)
+    expect(opened).toEqual(["192.168.1.5:8001"])
   })
 })
