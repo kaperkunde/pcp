@@ -22,7 +22,10 @@ import {
   checkPermission,
   decidePermission,
   getPermissionView,
+  listAnsweredRequests,
   listOwnOpenRequests,
+  answeredNote,
+  ownRequests,
   listPendingRequests,
   prunePermissionRequests,
   pruneReusableAnswers,
@@ -217,7 +220,7 @@ describe("asking the owner", () => {
       `[Allow postcards/send_postcard?](${PUBLIC_URL}/permissions/${id})`,
     )
     expect(textOf(first)).toContain(
-      `When they say they have answered, call check_permission with id "${id}"`,
+      `On the owner's next message, whatever it says, call check_permission with id "${id}" before you send the link again or assume the request is still open.`,
     )
     expect((first as CallToolResult).structuredContent).toBeUndefined()
 
@@ -685,7 +688,7 @@ describe("check_permission", () => {
     const late = await checkPermission(scope, id, { waitMs: 50 })
     expect(textOf(late)).toContain("Still waiting for the owner")
     expect(textOf(late)).toContain(
-      "call check_permission again when they say they have answered",
+      `On the owner's next message, whatever it says, call check_permission with id "${id}" again before you send the link again`,
     )
     expect(textOf(late).split("\n").at(-1)).toBe(
       `[Allow postcards/add_numbers?](${PUBLIC_URL}/permissions/${id})`,
@@ -2245,6 +2248,75 @@ describe("an assistant withdrawing its own request", () => {
     expect(
       await db().permissionRequest.count({ where: { status: "pending" } }),
     ).toBe(3)
+  })
+
+  it("lists the token's requests answered in the last hour after the open ones (#59)", async () => {
+    const { ctx, scope, server } = await setup()
+    const other = await otherScope(ctx)
+    const { executor } = stub()
+    const web = { publicUrl: PUBLIC_URL }
+
+    await withPermission(scope, call(server, "add_numbers", { a: 1 }))
+    await withPermission(scope, call(server, "send_postcard", { to: "Ada" }))
+    await withPermission(scope, call(server, "add_numbers", { a: 2 }))
+    await withPermission(scope, call(server, "add_numbers", { a: 3 }))
+    await withPermission(other, call(server, "add_numbers", { a: 9 }))
+    const [declined, withdrawn, old, open] =
+      await db().permissionRequest.findMany({
+        where: { tokenId: scope.tokenId },
+        orderBy: { createdAt: "asc" },
+      })
+    const theirs = await db().permissionRequest.findFirstOrThrow({
+      where: { tokenId: other.tokenId },
+    })
+    await decidePermission(ctx, declined!.id, "decline", web, executor)
+    await decidePermission(ctx, theirs.id, "decline", web, executor)
+    await decidePermission(ctx, old!.id, "decline", web, executor)
+    await db().permissionRequest.update({
+      where: { id: old!.id },
+      data: { decidedAt: new Date(Date.now() - 2 * 60 * 60_000) },
+    })
+    // Taken back by the assistant: not an answer of the owner's.
+    await withdrawPermission(scope, withdrawn!.id)
+
+    const listed = await ownRequests(scope)
+    expect(listed.open.map((view) => view.id)).toEqual([open!.id])
+    expect(listed.answered).toEqual([
+      expect.objectContaining({
+        id: declined!.id,
+        kind: "call",
+        status: "declined",
+        outcome: "The owner said no, so nothing ran.",
+      }),
+    ])
+    expect(listed.text.split("\n").slice(-2)).toEqual([
+      "Answered by the owner in the last hour, newest first (check_permission with an id gives the whole outcome):",
+      `- ${declined!.id} (call, answered just now): Allow postcards/add_numbers? The owner said no, so nothing ran.`,
+    ])
+    expect(listed.text).not.toContain(theirs.id)
+
+    // The note a session gets names those it has not heard of, and counts
+    // what it leaves out.
+    const { seen, answered, more } = await listAnsweredRequests(scope, {
+      since: new Date(Date.now() - 60 * 60_000),
+      limit: 0,
+      skip: new Set(),
+    })
+    expect(seen.map((row) => row.id)).toEqual([declined!.id])
+    expect(answered).toEqual([])
+    expect(more).toBe(1)
+    expect(answeredNote(answered, more)).toContain(
+      "- and 1 more: check_permission with no id lists them.",
+    )
+    expect(
+      (
+        await listAnsweredRequests(scope, {
+          since: new Date(Date.now() - 60 * 60_000),
+          skip: new Set([declined!.id]),
+        })
+      ).answered,
+    ).toEqual([])
+    expect(answeredNote([], 0)).toBeNull()
   })
 })
 

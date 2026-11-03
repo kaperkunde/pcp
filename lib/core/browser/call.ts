@@ -298,7 +298,7 @@ function ownerHas(tab: Tab): boolean {
 function ownerHolds(tab: Tab): CallToolResult {
   return text(
     tab.handoverSince !== null
-      ? `The owner is working in tab ${tab.id} after your hand_over, and the browser tools leave it alone until they are done. When they say they are, call check_permission with the id hand_over gave, then take a snapshot.`
+      ? `The owner is working in tab ${tab.id} after your hand_over, and the browser tools leave it alone until they are done. On the owner's next message, whatever it says, call check_permission with the id hand_over gave before you ask again; once it is done, take a snapshot.`
       : `The owner has taken over tab ${tab.id} in PCP, and the browser tools leave it alone until they hand it back. Ask them, or use another tab.`,
     true,
   )

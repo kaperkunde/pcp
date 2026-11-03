@@ -249,8 +249,8 @@ function finished(
       withLead(
         [
           isConnectResult(stop.result)
-            ? `${label} calls ${stop.at}, which the owner has to connect first; nothing after that call ran. Once they have (check_server says when), call ${label} again.`
-            : `${label} calls ${stop.at}, which needs the owner first; nothing after that call ran. Once they have answered below, call ${label} again.`,
+            ? `${label} calls ${stop.at}, which the owner has to connect first; nothing after that call ran. On the owner's next message, whatever it says, call check_server as below; once it is connected, call ${label} again.`
+            : `${label} calls ${stop.at}, which needs the owner first; nothing after that call ran. On the owner's next message, whatever it says, call check_permission with the id below; once they allowed it, call ${label} again.`,
           ...report,
         ].join("\n\n"),
         passOn(stop.result),

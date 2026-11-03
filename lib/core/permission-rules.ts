@@ -37,6 +37,38 @@ export const REUSE_EXECUTED_MS = 15 * 60_000
  */
 export const REUSE_VALUE_MAX_CHARS = 200_000
 
+/**
+ * How far back the owner's answers are told to the token that asked:
+ * check_permission with no id lists those answered this long ago at most,
+ * and a new session's first answer names those it has not heard of
+ * (clients/sessions.ts), so a conversation started after the owner
+ * answered still learns of it.
+ */
+export const ANSWERED_WINDOW_MS = 60 * 60_000
+
+/** The most answered requests check_permission with no id lists. */
+export const MAX_ANSWERED_LISTED = 20
+
+/**
+ * The most answered requests one answer's note names in full; the rest are
+ * counted, for check_permission with no id to list.
+ */
+export const MAX_ANSWERED_NOTED = 5
+
+/**
+ * The most answered requests one look reads the ids of, newest first: a
+ * bound on the look, far above what a token asks in an hour.
+ */
+export const MAX_ANSWERED_SEEN = 200
+
+/** The statuses of a request the owner answered (decidedAt is when). */
+export const ANSWERED_STATUSES = [
+  "running",
+  "executed",
+  "failed",
+  "declined",
+] as const
+
 /** What an identical call answered from an earlier run says first. */
 export function reusedNote(ranAt: Date, now = new Date()): string {
   const minutes = Math.max(

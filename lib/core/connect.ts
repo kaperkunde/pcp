@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/server"
 
-import { linkLabel, linkLastText } from "./owner-link"
+import { linkLabel, linkLastText, nextMessageCheck } from "./owner-link"
 import { noteOwnerAsked } from "./request-log"
 import type { ConnectLinks, NeedsOwner, ServerState } from "./tools/outcome"
 import { oauthStartUrl } from "./upstream"
@@ -9,8 +9,8 @@ import { oauthStartUrl } from "./upstream"
  * An OAuth server the owner has to sign in to before its tools work. The
  * assistant is handed a link to the server's page in PCP, where Connect
  * starts the sign-in (it needs the owner's PCP session, which that page
- * asks for first), to end its reply with, and check_server to call once the
- * owner says they have connected it. `structuredContent`
+ * asks for first), to end its reply with, and check_server to call on the
+ * owner's next message, whatever it says. `structuredContent`
  * carries the same in fields, as every call that waits for the owner does
  * (tools/outcome.ts NEEDS_OWNER, reason "connect").
  */
@@ -47,7 +47,7 @@ export function connectResult(
       ? `Set up ${server.name} in PCP`
       : `Connect ${server.name} in PCP`
   noteOwnerAsked()
-  const wait = `When they say they have, call check_server with server "${server.slug}": it answers once it is connected (and waits a little if they are still signing in). Then try again.`
+  const wait = `${nextMessageCheck(`check_server with server "${server.slug}"`, "it is still not connected")} It answers once it is connected (and waits a little if they are still signing in). Then try again.`
 
   // The server will not let PCP register itself: signing in cannot work
   // until the owner creates a client with the provider and gives it to PCP.

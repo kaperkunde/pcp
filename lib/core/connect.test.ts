@@ -21,7 +21,7 @@ describe("connectResult", () => {
       "[Connect Mail in PCP](https://pcp.x/servers/s1)",
     )
     expect(said(result)).toContain(
-      'When they say they have, call check_server with server "mail"',
+      'On the owner\'s next message, whatever it says, call check_server with server "mail" before you send the link again or assume it is still not connected.',
     )
     expect(result.structuredContent).toMatchObject({
       kind: "needs_owner",
