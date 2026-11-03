@@ -11,7 +11,8 @@ import { pacingNow, waitForSlot, type PacedRefusal } from "./pace"
 
 /**
  * One pacing for everything an assistant does (limits.ts says why), applied
- * at two places only, which every way of calling passes: upstream.ts
+ * at two places, which every way of calling passes, and to search's
+ * embeddings requests (paceEmbeddings): upstream.ts
  * callServerTool for a server's tools (call_tool_<tier>, run_code_<tier>'s
  * pcp.call, a wrapper's calls, a call the owner allowed; the
  * browser's actions are paced inside browser/call.ts by the tab's site),
@@ -85,6 +86,40 @@ export async function paceServerCall(
     signal,
     deadline,
   })
+}
+
+/**
+ * A request to search's embeddings provider (lib/core/embeddings/), which
+ * PCP makes for a search, not an assistant's action, but which a busy
+ * assistant's searches would otherwise send as fast as it searches: paced
+ * as a read, by the endpoint it goes to (with that server's own calls and
+ * its override) or else by the vault's provider.
+ */
+export async function paceEmbeddings(
+  vaultId: string,
+  provider: { serverId?: string; name: string },
+  { signal, deadline }: PaceOptions = {},
+): Promise<PacedRefusal | null> {
+  if (pacingOff()) {
+    return null
+  }
+
+  const policy = resolvePolicy(await readPacingConfig(vaultId), "server_read", {
+    serverId: provider.serverId,
+  })
+
+  if (!policy) {
+    return null
+  }
+
+  return waitForSlot(
+    provider.serverId
+      ? serverKey(vaultId, provider.serverId)
+      : `${vaultId}\nembeddings`,
+    provider.name,
+    policy,
+    { signal, deadline },
+  )
 }
 
 /**

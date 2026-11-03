@@ -215,11 +215,13 @@ import {
 } from "./tool-results"
 import { resultUri } from "./answers"
 import {
+  embeddingProvider,
   needsConnecting,
   serviceStateLine,
   syncServerTools,
   openExitForCall,
 } from "./upstream"
+import { searchSimilarities } from "./embeddings/index"
 import { PCP_VERSION } from "./version"
 import { decideFetch, runFetch } from "./web-fetch"
 import { MAX_EXIT_NAME_CHARS } from "./exits/limits"
@@ -1379,21 +1381,31 @@ export function buildGatewayServer(
         ? readableMemories(scope.ctx, scope.tokenId)
         : Promise.resolve([]),
     ])
-    const results = searchEverything(
-      {
-        tools: candidates(servers),
-        pcp: ownTools.map((tool) => ({
-          name: tool.name,
-          title: tool.title,
-          description: tool.description,
-          tier: tierFromAnnotations(tool.annotations),
-        })),
-        skills,
-        memories,
-      },
+    const items = {
+      tools: candidates(servers),
+      pcp: ownTools.map((tool) => ({
+        name: tool.name,
+        title: tool.title,
+        description: tool.description,
+        tier: tierFromAnnotations(tool.annotations),
+      })),
+      skills,
+      memories,
+    }
+    // The owner's embeddings provider, when they set one (Settings →
+    // Search): null, and keywords alone, without one or when it fails.
+    const similarities = await searchSimilarities(
+      scope.ctx,
+      items,
       args.query,
-      { limit: args.limit ?? 10, server: args.server, kind: args.kind },
+      embeddingProvider,
     )
+    const results = searchEverything(items, args.query, {
+      limit: args.limit ?? 10,
+      server: args.server,
+      kind: args.kind,
+      similarities,
+    })
 
     if (results.length === 0 && repoResults.length === 0) {
       return text(

@@ -1,4 +1,5 @@
 import { pruneAllowances } from "../allowances"
+import { pruneEmbeddingVectors } from "../embeddings/index"
 import { pruneFileLinks } from "../file-links"
 import { pruneOAuthStates } from "../oauth"
 import { pruneUnusedClients } from "../oauth-server/clients"
@@ -72,6 +73,11 @@ const PARTS: Part[] = [
     run: (_, now) => pruneAllowances(now),
   },
   {
+    key: "vectors",
+    label: "search vectors no search used for a month",
+    run: (_, now) => pruneEmbeddingVectors(now),
+  },
+  {
     key: "logDays",
     label: "old days of the log",
     run: (logDays, now) => pruneRequestLog(logDays, now),
@@ -91,6 +97,7 @@ export async function runCleanup(
     requests: 0,
     results: 0,
     allowances: 0,
+    vectors: 0,
     logDays: 0,
   }
   const problems: string[] = []

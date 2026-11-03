@@ -574,6 +574,58 @@ const KIND_ORDER: Record<SearchKind, number> = {
   memory: 3,
 }
 
+/** How a result is named among search's similarities (embeddings/). */
+export function semanticKey(kind: SearchKind, ref: string): string {
+  return `${kind} ${ref}`
+}
+
+/** The most an item's nearness to the query adds to its keyword score. */
+export const SEMANTIC_WEIGHT = 30
+
+/**
+ * How far below the nearest item an item may be and still be lifted: the
+ * band of similarities that counts, whatever the model's own scale.
+ */
+const SEMANTIC_BAND = 0.2
+
+/** A similarity below this lifts nothing, however near the rest are. */
+const SEMANTIC_MIN = 0.05
+
+/**
+ * Points for each item's similarity to the query (cosine), relative to
+ * the others: the nearest gets SEMANTIC_WEIGHT, one at the edge of the
+ * band or below the middle of all of them nothing, the rest in between,
+ * the nearer the steeper. Relative, because each model has its own scale
+ * (one puts unrelated texts at 0.1, another at 0.4).
+ */
+export function semanticBoosts(
+  similarities: ReadonlyMap<string, number>,
+): Map<string, number> {
+  const values = [...similarities.values()].sort((a, b) => a - b)
+  const boosts = new Map<string, number>()
+
+  if (values.length === 0) {
+    return boosts
+  }
+
+  const top = values.at(-1)!
+  const middle = values[Math.floor(values.length / 2)]!
+  let floor = Math.max(middle, top - SEMANTIC_BAND)
+
+  if (floor >= top) {
+    floor = top - SEMANTIC_BAND
+  }
+
+  for (const [key, similarity] of similarities) {
+    if (similarity > floor && similarity >= SEMANTIC_MIN) {
+      const share = (similarity - floor) / (top - floor)
+      boosts.set(key, SEMANTIC_WEIGHT * share * share)
+    }
+  }
+
+  return boosts
+}
+
 /** One of PCP's own tools, scored as a tool on a server called pcp. */
 function pcpCandidate(tool: PcpToolCandidate): ToolCandidate {
   return {
@@ -637,7 +689,19 @@ export function searchEverything(
     limit = 10,
     server,
     kind,
-  }: { limit?: number; server?: string | null; kind?: SearchKind | null } = {},
+    similarities = null,
+  }: {
+    limit?: number
+    server?: string | null
+    kind?: SearchKind | null
+    /**
+     * How near each item is to the query by the owner's embeddings
+     * provider, by semanticKey (embeddings/): blended into the keyword
+     * score, so a name given exactly still comes first. Null for keywords
+     * alone.
+     */
+    similarities?: ReadonlyMap<string, number> | null
+  } = {},
 ): SearchResult[] {
   const read = readQuery(query)
   const { cleaned, words } = read
@@ -728,6 +792,22 @@ export function searchEverything(
       }))
     : []
 
+  // Nearness by the provider, on top of the keywords: it also brings in
+  // what no keyword found, PCP's own tools included.
+  const boosts =
+    similarities && cleaned && words.length
+      ? semanticBoosts(similarities)
+      : null
+  const blend = (results: SearchResult[]) =>
+    boosts
+      ? results.map((result) => ({
+          ...result,
+          score:
+            result.score +
+            (boosts.get(semanticKey(result.kind, result.ref)) ?? 0),
+        }))
+      : results
+
   const order = (a: SearchResult, b: SearchResult) =>
     b.score - a.score ||
     KIND_ORDER[a.kind] - KIND_ORDER[b.kind] ||
@@ -746,7 +826,12 @@ export function searchEverything(
       .slice(0, limit)
   }
 
-  return [...toolResults, ...pcpResults, ...skillResults, ...memoryResults]
+  return blend([
+    ...toolResults,
+    ...pcpResults,
+    ...skillResults,
+    ...memoryResults,
+  ])
     .filter((result) => result.score > 0)
     .sort(order)
     .slice(0, limit)

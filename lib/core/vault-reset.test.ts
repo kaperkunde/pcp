@@ -162,6 +162,16 @@ async function populate() {
   // The owner's tier for a tool, kept apart from its row.
   await setToolTier(ctx, server.id, "alpha", "read")
   await setSetting(ctx, SETTING_PUBLIC_URL, "https://pcp.example")
+  // A search vector cached for the owner's embeddings provider.
+  await db().embeddingVector.create({
+    data: {
+      id: "vec1",
+      vaultId,
+      hash: "h",
+      dimensions: 1,
+      ciphertext: new Uint8Array([1]),
+    },
+  })
   await setHostJson(DDNS_CONFIG_KEY, { provider: "duckdns", subdomain: "ada" })
   const { cookieValue } = await createSession(ctx)
   const deviceKey = await createDeviceKey(ctx)
@@ -192,6 +202,7 @@ describe("deleteVault", { timeout: 30_000 }, () => {
     expect(before.exit).toBe(1)
     expect(before.upload_link).toBe(1)
     expect(before.tool_tier).toBe(1)
+    expect(before.embedding_vector).toBe(1)
 
     await deleteVault(ctx)
 

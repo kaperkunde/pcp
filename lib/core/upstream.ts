@@ -90,7 +90,17 @@ import {
   isPublicAddress,
 } from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
-import { paceServerCall, pacedResult } from "./pacing"
+import { paceEmbeddings, paceServerCall, pacedResult } from "./pacing"
+import { PACING_DEADLINE_MARGIN_MS } from "./pacing/limits"
+import { pacingNow } from "./pacing/pace"
+import { VOYAGE_EMBEDDINGS_URL } from "./constants"
+import { embeddingsUrl, type EmbeddingsConfig } from "./embeddings/config"
+import { EMBED_PACE_WAIT_MS } from "./embeddings/limits"
+import {
+  requestEmbeddings,
+  type EmbeddingProvider,
+  type EmbeddingsRequest,
+} from "./embeddings/provider"
 import { checkedFetch } from "./openapi/transport"
 import { markdownLink } from "./owner-link"
 import {
@@ -151,7 +161,8 @@ import {
  * lib/core/services/, with a way to run commands on their SSH server and
  * their variables' values (ServiceAccess), built here. Linked repositories' GitHub client
  * (lib/core/repos/github.ts) gets its Authorization header from
- * githubCredential, the same way.
+ * githubCredential, the same way, and search's embeddings provider
+ * (lib/core/embeddings/) its header from embeddingProvider.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -1011,6 +1022,131 @@ export async function githubCredential(
   const header = `Bearer ${token}`
 
   return { headers: { Authorization: header }, redact: [token, header, value] }
+}
+
+/**
+ * A text secret as a bearer header, for a provider PCP calls itself (search's
+ * embeddings), with the values to keep out of what is repeated.
+ */
+async function bearerFromTextSecret(
+  ctx: VaultContext,
+  secretId: string,
+): Promise<{ headers: Record<string, string>; redact: string[] }> {
+  const row = await db().secret.findFirst({
+    where: { id: secretId, vaultId: ctx.vaultId },
+    select: { kind: true },
+  })
+
+  if (row?.kind !== "text") {
+    throw new PcpError(
+      "state",
+      "The embeddings provider's API key is gone. Choose it again on Settings.",
+    )
+  }
+
+  const value = await readSecretValue(ctx, secretId)
+  const token = value.trim()
+
+  if (!token || /[\u0000-\u001f\u007f\s]/.test(token)) {
+    throw new PcpError(
+      "state",
+      "The embeddings provider's API key is empty or has a character a header cannot carry.",
+    )
+  }
+
+  const header = `Bearer ${token}`
+  return { headers: { Authorization: header }, redact: [token, header, value] }
+}
+
+/**
+ * Search's embeddings provider, as the owner set it on Settings: the
+ * request it takes (address, model, the header made from its secret here)
+ * and the addresses it may reach. Voyage AI at its own public address
+ * only; an OpenAI-compatible address the owner typed anywhere but PCP's own;
+ * an API endpoint (a service's text-embeddings-inference) with its own
+ * credential and public-only rule, as its calls go. Paced as a read
+ * (paceEmbeddings); a turn too far off fails the request, and search goes
+ * on with keywords. The header goes to requestEmbeddings and nowhere else.
+ */
+export async function embeddingProvider(
+  ctx: VaultContext,
+  config: EmbeddingsConfig,
+): Promise<EmbeddingProvider> {
+  let request: EmbeddingsRequest
+  let pace: { serverId?: string; name: string } = {
+    name: "the embeddings provider",
+  }
+  const notOwn = (address: string, port: number) => !isOwnAddress(address, port)
+
+  switch (config.provider) {
+    case "voyage":
+      request = {
+        url: VOYAGE_EMBEDDINGS_URL,
+        style: "voyage",
+        model: config.model,
+        ...(await bearerFromTextSecret(ctx, config.secretId)),
+        sendOptions: { publicOnly: true },
+      }
+      break
+    case "openai":
+      request = {
+        url: embeddingsUrl(config.url),
+        style: "openai",
+        model: config.model,
+        ...(config.secretId
+          ? await bearerFromTextSecret(ctx, config.secretId)
+          : { headers: {}, redact: [] }),
+        sendOptions: { publicOnly: true, addressCheck: notOwn },
+      }
+      break
+    case "endpoint": {
+      const server = await db().mcpServer.findFirst({
+        where: { id: config.serverId, vaultId: ctx.vaultId, kind: "openapi" },
+      })
+
+      if (!server || !server.enabled) {
+        throw new PcpError(
+          "state",
+          "The embeddings provider's API endpoint is gone or turned off.",
+        )
+      }
+
+      const { headers, redact } = await credential(ctx, server)
+      request = {
+        url: embeddingsUrl(server.url),
+        style: "openai",
+        model: config.model,
+        headers,
+        redact,
+        sendOptions: server.publicOnly
+          ? { publicOnly: true }
+          : { publicOnly: true, addressCheck: notOwn },
+      }
+      pace = { serverId: server.id, name: server.name }
+      break
+    }
+  }
+
+  return {
+    fingerprint: [
+      config.provider,
+      config.provider === "endpoint" ? config.serverId : "",
+      request.url,
+      config.model,
+    ].join("\n"),
+    async embed(texts, input, signal) {
+      const paced = await paceEmbeddings(ctx.vaultId, pace, {
+        signal,
+        deadline: pacingNow() + EMBED_PACE_WAIT_MS + PACING_DEADLINE_MARGIN_MS,
+      })
+
+      if (paced) {
+        throw new PcpError("upstream", paced.message)
+      }
+
+      return requestEmbeddings(request, texts, input, signal)
+    },
+  }
 }
 
 async function basicCredential(

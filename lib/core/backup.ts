@@ -590,6 +590,8 @@ export async function wipeVault(
   // or the pages the owner uploads them from.
   await tx.fileLink.deleteMany(byVault)
   await tx.uploadLink.deleteMany(byVault)
+  // Nor are search's cached embeddings, which a search makes again.
+  await tx.embeddingVector.deleteMany(byVault)
   // Nor are tools and sites allowed for a while: an answer to a request,
   // for the tokens this restore replaces, and over within hours.
   await tx.apiTokenToolAllowance.deleteMany(byToken)

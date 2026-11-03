@@ -46,6 +46,7 @@ model Vault {
   serverDefinitions  ServerDefinition[]
   exits              Exit[]
   toolTiers          ToolTier[]
+  embeddingVectors   EmbeddingVector[]
 
   @@map("vault")
 }
@@ -1025,6 +1026,32 @@ model ToolResult {
   @@index([tokenId, createdAt])
   @@index([expiresAt])
   @@map("tool_result")
+}
+
+/// A cached embedding of one text search ranks (a tool's name and
+/// description, a skill, a memory), made by the provider the owner chose on
+/// Settings (lib/core/embeddings/). A cache: rebuilt when its text or the
+/// provider changes (another hash), never exported, and removed by the
+/// cleanup once no search has used it for a while.
+model EmbeddingVector {
+  id         String   @id
+  vaultId    String   @map("vault_id")
+  vault      Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// HMAC-SHA256, under a key derived from the vault's data key, of the
+  /// provider and model and the text embedded: what the vector is found by.
+  /// Keyed, so it says nothing of the text without the key.
+  hash       String
+  dimensions Int
+  /// The vector (float32, base64), AES-256-GCM under the vault's data key
+  /// with "embedding_vector:<id>" as associated data.
+  ciphertext Bytes
+  createdAt  DateTime @default(now()) @map("created_at")
+  /// The last search that used it, to a day: what the cleanup goes by.
+  usedAt     DateTime @default(now()) @map("used_at")
+
+  @@unique([vaultId, hash])
+  @@index([usedAt])
+  @@map("embedding_vector")
 }
 
 /// A link that moves one file between PCP and an assistant's own computer
