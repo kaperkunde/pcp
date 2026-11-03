@@ -8,6 +8,7 @@ import { findBrowserServer } from "@/lib/core/browser/server"
 import { listOwnerNotices } from "@/lib/core/owner-notices"
 import { listPendingRequests } from "@/lib/core/permissions"
 import { runDueSyncs } from "@/lib/core/repos/sync"
+import { reconcileServices } from "@/lib/core/upstream"
 import { availableUpdate } from "@/lib/core/updates/state"
 import { getVault } from "@/lib/core/vault"
 import { PCP_VERSION } from "@/lib/core/version"
@@ -27,9 +28,10 @@ export default async function DashboardLayout({
   children: ReactNode
 }) {
   const { ctx } = await requireSession()
+  const publicUrl = await publicUrlFor(ctx)
   const [vault, pending, notices, update, browser] = await Promise.all([
     getVault(ctx.vaultId),
-    publicUrlFor(ctx).then((publicUrl) => listPendingRequests(ctx, publicUrl)),
+    listPendingRequests(ctx, publicUrl),
     listOwnerNotices(ctx),
     availableUpdate(),
     findBrowserServer(ctx),
@@ -38,6 +40,9 @@ export default async function DashboardLayout({
   // Linked repositories due a sync are synced once this page is sent, with
   // the key the owner's session brought: nothing holds one in between.
   after(() => runDueSyncs(ctx))
+  // Services you left running whose container stopped (the SSH server
+  // restarted) are started again the same way, throttled.
+  after(() => reconcileServices(ctx, { publicUrl }))
 
   return (
     <OwnerQueueProvider

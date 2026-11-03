@@ -3,6 +3,7 @@ import { STATUS_CODES } from "node:http"
 import type { CallToolResult } from "@modelcontextprotocol/client"
 
 import { PcpError } from "../errors"
+import { PublicOnlyRefusal } from "../public-only"
 import { AddressBlockedError } from "./address"
 import { describeFetchError, discard, readCapped } from "./http"
 import {
@@ -72,6 +73,7 @@ export async function executeCall(
     redact = [],
     publicOnly = false,
     addressCheck,
+    dial,
   }: {
     timeoutMs?: number
     maxResponseBytes?: number
@@ -94,12 +96,12 @@ export async function executeCall(
         body: request.body,
         signal: AbortSignal.timeout(timeoutMs),
       },
-      { publicOnly, addressCheck },
+      { publicOnly, addressCheck, dial },
     )
   } catch (error) {
     // A refused address is the endpoint's rule at work, not an outage.
     if (error instanceof AddressBlockedError) {
-      throw new PcpError("forbidden", error.message)
+      throw new PublicOnlyRefusal(error.message)
     }
 
     throw new PcpError(

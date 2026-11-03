@@ -198,7 +198,9 @@ export type ServerInput = {
   /**
    * Refuse private, loopback and link-local addresses, and PCP's own, for
    * every request PCP makes to the server, its OAuth requests included. Set
-   * on a server an assistant proposed; the owner's form sets or clears it.
+   * on a server an assistant proposed. The owner's add form sets it; on an
+   * existing server it is the page's own switch (setServerPublicOnly), and
+   * an update that leaves it out keeps it as it is.
    */
   publicOnly?: boolean
   /**
@@ -972,6 +974,8 @@ export async function updateServer(
 
   const { data, authExtraHeaders, newSecret } = await normalizeInput(ctx, input)
   const extrasBefore = await extraAuthHeaders(id)
+  // The page's switch sets it (setServerPublicOnly); the form leaves it out.
+  data.publicOnly = input.publicOnly ?? existing.publicOnly
 
   // Switching away from OAuth, or to a different client, drops the tokens
   // PCP obtained: they belong to the old configuration.
@@ -1138,6 +1142,29 @@ export async function setServerEnabled(
 ): Promise<void> {
   await getServer(ctx, id)
   await db().mcpServer.update({ where: { id }, data: { enabled } })
+}
+
+/**
+ * The owner's "Public addresses only" switch on an MCP server's or an API
+ * endpoint's page. Only the owner reaches this: no assistant's tool clears
+ * it (endpoint-admin.ts never writes it, and register_server has no
+ * argument for it).
+ */
+export async function setServerPublicOnly(
+  ctx: VaultContext,
+  id: string,
+  publicOnly: boolean,
+): Promise<McpServer> {
+  const existing = await getServer(ctx, id)
+
+  if (existing.kind !== "mcp" && existing.kind !== "openapi") {
+    throw new PcpError(
+      "state",
+      `This is ${kindNoun(existing.kind)}, which has no public addresses switch.`,
+    )
+  }
+
+  return db().mcpServer.update({ where: { id }, data: { publicOnly } })
 }
 
 export async function deleteServer(ctx: VaultContext, id: string) {

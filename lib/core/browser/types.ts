@@ -114,12 +114,28 @@ export type SecretRequestAsk = {
   kind: "text" | "totp"
 }
 
+/**
+ * An assistant's script to run in a tab (evaluate) at a site where the
+ * owner has not allowed scripts for the token: the site, the page and the
+ * whole script, which the owner reads before it runs.
+ */
+export type ScriptUseAsk = {
+  serverId: string
+  tabId: string
+  /** The site (siteKey), and the page's address and title then. */
+  site: string
+  url: string
+  title: string
+  script: string
+}
+
 export type BrowserAsk =
   | { kind: "browse"; input: BrowseAsk }
   | { kind: "browser_handover"; input: HandoverAsk }
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
+  | { kind: "script_use"; input: ScriptUseAsk }
 
 /** Where a call types a secret: what upstream.ts is told when it is typed. */
 export type SecretUseContext = {

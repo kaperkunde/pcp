@@ -12,6 +12,8 @@ import {
   MIRRORED_LEAD,
   type GatewayScope,
 } from "../gateway"
+import { db } from "../db"
+import { decidePermission } from "../permissions"
 import { appendRequestLog } from "../request-log"
 import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
@@ -200,6 +202,34 @@ describe("PCP's own tools", () => {
         JSON.stringify(tools.find((tool) => tool.name === name)!.outputSchema),
         name,
       ).toContain("needs_owner")
+    }
+  })
+
+  it("say to check on the owner's next message, never to wait until they say they answered (#59)", async () => {
+    const { tools } = await client.listTools()
+
+    for (const tool of tools) {
+      expect(tool.description, tool.name).not.toMatch(
+        /says? they (have|are)|once they have answered/,
+      )
+    }
+
+    for (const name of [
+      "call_tool_read",
+      "check_permission",
+      "check_server",
+      "create_upload_link",
+      "check_upload",
+      "propose_tool_access",
+      "update_endpoint",
+      "create_wrapper",
+      "update_wrapper",
+      "delete_wrapper",
+    ]) {
+      expect(
+        tools.find((tool) => tool.name === name)!.description,
+        name,
+      ).toMatch(/next message[^.]*whatever it says/)
     }
   })
 
@@ -502,16 +532,31 @@ describe("PCP's own tools in search and describe (#41)", () => {
 })
 
 describe("once a session, for the app on the other end (#53)", () => {
+  /** The token connectAs made or reused last. */
+  let made: { id: string; token: string }
+
   /** A gateway for a new token, answered as the profile given. */
   async function connectAs(
     profile: ClientProfileId,
-    { keepMemories = true, instructions = false } = {},
+    {
+      keepMemories = true,
+      instructions = false,
+      reuse,
+    }: {
+      keepMemories?: boolean
+      instructions?: boolean
+      /** A token made before, for a second session of it. */
+      reuse?: { id: string; token: string }
+    } = {},
   ): Promise<Client> {
-    const { id, token } = await createApiToken(ctx, {
-      name: profile,
-      allowAllServers: true,
-      keepMemories,
-    })
+    const { id, token } =
+      reuse ??
+      (await createApiToken(ctx, {
+        name: profile,
+        allowAllServers: true,
+        keepMemories,
+      }))
+    made = { id, token }
     const resolved = (await resolveApiToken(token))!
     const scope: GatewayScope = {
       ...resolved,
@@ -598,6 +643,98 @@ describe("once a session, for the app on the other end (#53)", () => {
       (await texts(code, "search", { query: "memory" })).join("\n"),
     ).not.toContain(MIRRORED_LEAD)
     await code.close()
+  })
+
+  it("notes the owner's answers in the next answer, once each, and lists them in check_permission (#59)", async () => {
+    const app = await connectAs("generic", { keepMemories: true })
+    await texts(app, "read_memory", { command: "every" })
+
+    const asked = await app.callTool({
+      name: "memory",
+      arguments: {
+        command: "create",
+        path: "/memories/shared/coffee.md",
+        file_text: "The owner drinks coffee black.",
+      },
+    })
+    const said = (asked.content as Array<{ text: string }>)
+      .map((part) => part.text)
+      .join("\n")
+    expect(said).toContain(
+      "On the owner's next message, whatever it says, call check_permission",
+    )
+    const row = await db().permissionRequest.findFirstOrThrow()
+
+    // Not answered yet: nothing to note.
+    expect(await texts(app, "describe", { ref: "search" })).toHaveLength(1)
+
+    await decidePermission(ctx, row.id, "allow_once", { publicUrl: PUBLIC_URL })
+
+    // The next answer of any of PCP's own tools says so, first...
+    const next = await texts(app, "describe", { ref: "search" })
+    expect(next).toHaveLength(2)
+    expect(next[0]).toContain("Answered by the owner since PCP last told you")
+    expect(next[0]).toContain(`- ${row.id} (memory_share, answered just now)`)
+    // ...and the one after that, nothing.
+    expect(await texts(app, "describe", { ref: "search" })).toHaveLength(1)
+
+    // check_permission with no id lists it, with its outcome.
+    const listed = await app.callTool({
+      name: "check_permission",
+      arguments: {},
+    })
+    const structured = listed.structuredContent as {
+      requests: unknown[]
+      answered: Array<{ id: string; status: string; outcome: string }>
+    }
+    expect(structured.requests).toEqual([])
+    expect(structured.answered).toEqual([
+      expect.objectContaining({ id: row.id, status: "executed" }),
+    ])
+    const listedText = (listed.content as Array<{ text: string }>).map(
+      (part) => part.text,
+    )
+    expect(listedText).toHaveLength(1)
+    expect(listedText[0]).toContain(
+      "Answered by the owner in the last hour, newest first",
+    )
+
+    // One whose outcome check_permission gave is not noted after it.
+    await app.callTool({
+      name: "memory",
+      arguments: {
+        command: "create",
+        path: "/memories/shared/tea.md",
+        file_text: "The owner drinks tea after six.",
+      },
+    })
+    const second = await db().permissionRequest.findFirstOrThrow({
+      where: { NOT: { id: row.id } },
+    })
+    await decidePermission(ctx, second.id, "decline", {
+      publicUrl: PUBLIC_URL,
+    })
+    expect(
+      await texts(app, "check_permission", { id: second.id }),
+    ).toHaveLength(1)
+    expect(await texts(app, "describe", { ref: "search" })).toHaveLength(1)
+    await app.close()
+
+    // A new session of the token (an initialize) hears of answers from the
+    // last hour, once.
+    const later = await connectAs("generic", { reuse: made })
+    const again = await texts(later, "read_memory", { command: "every" })
+    expect(again).toHaveLength(2)
+    expect(again[0]).toContain(row.id)
+    expect(again[0]).toContain(second.id)
+    expect(await texts(later, "describe", { ref: "search" })).toHaveLength(1)
+    await later.close()
+
+    // Another token's session hears nothing of it.
+    const other = await connectAs("generic")
+    await texts(other, "read_memory", { command: "every" })
+    expect(await texts(other, "describe", { ref: "search" })).toHaveLength(1)
+    await other.close()
   })
 
   it("brings the owner's instructions along where read_memory does not", async () => {

@@ -1,8 +1,10 @@
 import type { VaultContext } from "./context"
 import { asBytes, decryptString, encryptString } from "./crypto"
 import { db } from "./db"
+import { MAX_PERSONAL_NOTE } from "./constants"
 import { invalid, notFound, PcpError } from "./errors"
 import { newId } from "./ids"
+import { hiddenCharacter } from "./memories"
 import { readEnvBindings } from "./services/definition"
 import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
 
@@ -19,6 +21,13 @@ import { parseTotpSeed, totpCode, totpSeedProblem } from "./totp"
  * made for an SSH server (lib/core/ssh/), or the password PCP made for a
  * VPN service's proxy (an exit, lib/core/exits/), kept here so they are
  * encrypted like everything else and show up in the same list.
+ *
+ * One of the owner's secrets can also say what sign-in it belongs to: a
+ * login name (the email or user name it is the password of) and a one-line
+ * note, neither of them secret but both the owner's, so encrypted too (as
+ * "secret:<id>:login" and "secret:<id>:note"), and the TOTP secret whose code
+ * goes with it. Assistants see those with the secret's name (list_secrets,
+ * and the browser's note of the sign-ins at a page's site), never its value.
  */
 
 export type SecretKind =
@@ -41,14 +50,144 @@ export type SecretSummary = {
   lastUsedAt: Date | null
   /** Servers that send this secret, or hold their OAuth tokens in it. */
   usedBy: Array<{ id: string; name: string }>
+} & SecretSignIn
+
+/**
+ * The sign-in one of the owner's secrets belongs to, opened: what an
+ * assistant may see of it beside its name. Never the value.
+ */
+export type SecretSignIn = {
+  loginName: string | null
+  note: string | null
+  /** The TOTP secret whose code goes with this one. */
+  totpCompanion: { id: string; name: string } | null
 }
 
+export const MAX_LOGIN_NAME = 200
 const MAX_NAME = 100
 const MAX_DESCRIPTION = 500
 const MAX_VALUE = 64 * 1024
 
 function aad(secretId: string): string {
   return `secret:${secretId}`
+}
+
+function detailAad(secretId: string, part: "login" | "note"): string {
+  return `secret:${secretId}:${part}`
+}
+
+/**
+ * A login name or note as it is saved: trimmed, on one line, with nothing
+ * in it that does not show on screen, at most `max` characters. Empty is
+ * none.
+ */
+function checkLine(
+  what: "login name" | "note",
+  input: string | null | undefined,
+  max: number,
+): string | null {
+  const line = (input ?? "").trim()
+
+  if (!line) {
+    return null
+  }
+
+  if (/[\r\n\u2028\u2029]/u.test(line)) {
+    throw invalid(`Keep the ${what} on one line.`)
+  }
+
+  const hidden = line.includes("\t") ? "U+0009" : hiddenCharacter(line)
+
+  if (hidden) {
+    throw invalid(
+      `The ${what} holds a character that does not show on screen (${hidden}). Take it out.`,
+    )
+  }
+
+  if ([...line].length > max) {
+    throw invalid(`Keep the ${what} to ${max} characters.`)
+  }
+
+  return line
+}
+
+export function checkLoginName(input: string | null | undefined) {
+  return checkLine("login name", input, MAX_LOGIN_NAME)
+}
+
+export function checkSecretNote(input: string | null | undefined) {
+  return checkLine("note", input, MAX_PERSONAL_NOTE)
+}
+
+function sealDetail(
+  ctx: VaultContext,
+  id: string,
+  part: "login" | "note",
+  value: string | null,
+): Uint8Array<ArrayBuffer> | null {
+  return value === null
+    ? null
+    : asBytes(encryptString(ctx.dek, value, detailAad(id, part)))
+}
+
+function openDetail(
+  ctx: VaultContext,
+  id: string,
+  part: "login" | "note",
+  sealed: Uint8Array | null,
+): string | null {
+  if (!sealed) {
+    return null
+  }
+
+  try {
+    return decryptString(ctx.dek, Buffer.from(sealed), detailAad(id, part))
+  } catch {
+    // One that does not open is not worth failing a request for.
+    return null
+  }
+}
+
+/** A secret row's login name and note, opened. */
+export function openSecretDetails(
+  ctx: VaultContext,
+  row: { id: string; loginName: Uint8Array | null; note: Uint8Array | null },
+): { loginName: string | null; note: string | null } {
+  return {
+    loginName: openDetail(ctx, row.id, "login", row.loginName),
+    note: openDetail(ctx, row.id, "note", row.note),
+  }
+}
+
+/**
+ * The TOTP companion a text secret may name: one of the vault's TOTP
+ * secrets, by id. Null for none.
+ */
+async function checkTotpCompanion(
+  ctx: VaultContext,
+  secret: { id: string | null; kind: string },
+  companionId: string | null | undefined,
+): Promise<string | null> {
+  if (!companionId) {
+    return null
+  }
+
+  if (secret.kind !== "text") {
+    throw invalid(
+      "Only a text secret names the one-time codes that go with it.",
+    )
+  }
+
+  const companion = await db().secret.findFirst({
+    where: { id: companionId, vaultId: ctx.vaultId, kind: "totp" },
+    select: { id: true },
+  })
+
+  if (!companion || companion.id === secret.id) {
+    throw invalid("Choose one of your one-time code secrets.")
+  }
+
+  return companion.id
 }
 
 export function validateSecretName(name: string): string | null {
@@ -77,6 +216,7 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
       },
       oauthClientFor: { select: { id: true, name: true } },
       oauthTokensFor: { select: { id: true, name: true } },
+      totpCompanion: { select: { id: true, name: true } },
     },
     orderBy: [{ kind: "asc" }, { name: "asc" }],
   })
@@ -102,6 +242,8 @@ export async function listSecrets(ctx: VaultContext): Promise<SecretSummary[]> {
       updatedAt: row.updatedAt,
       lastUsedAt: row.lastUsedAt,
       usedBy: [...usedBy.values()],
+      ...openSecretDetails(ctx, row),
+      totpCompanion: row.totpCompanion,
     }
   })
 }
@@ -185,6 +327,9 @@ export async function createSecret(
     value: string
     description?: string
     kind?: OwnerSecretKind
+    loginName?: string | null
+    note?: string | null
+    totpCompanionId?: string | null
   },
 ): Promise<{ id: string }> {
   await checkNewSecret(ctx, input)
@@ -192,6 +337,13 @@ export async function createSecret(
 
   const name = input.name.trim()
   const description = (input.description ?? "").trim().slice(0, MAX_DESCRIPTION)
+  const loginName = checkLoginName(input.loginName)
+  const note = checkSecretNote(input.note)
+  const totpCompanionId = await checkTotpCompanion(
+    ctx,
+    { id: null, kind },
+    input.totpCompanionId,
+  )
   const id = newId()
 
   await db().secret.create({
@@ -201,6 +353,9 @@ export async function createSecret(
       name,
       description,
       kind,
+      loginName: sealDetail(ctx, id, "login", loginName),
+      note: sealDetail(ctx, id, "note", note),
+      totpCompanionId,
       ciphertext: asBytes(
         encryptString(
           ctx.dek,
@@ -253,7 +408,15 @@ export async function createSecretNamedAfter(
 export async function updateSecret(
   ctx: VaultContext,
   id: string,
-  input: { name?: string; description?: string; value?: string },
+  input: {
+    name?: string
+    description?: string
+    value?: string
+    /** The sign-in it belongs to: each left out stays, empty takes it away. */
+    loginName?: string | null
+    note?: string | null
+    totpCompanionId?: string | null
+  },
 ): Promise<void> {
   const row = await db().secret.findFirst({
     where: { id, vaultId: ctx.vaultId },
@@ -267,7 +430,40 @@ export async function updateSecret(
     name?: string
     description?: string
     ciphertext?: Uint8Array<ArrayBuffer>
+    loginName?: Uint8Array<ArrayBuffer> | null
+    note?: Uint8Array<ArrayBuffer> | null
+    totpCompanionId?: string | null
   } = {}
+
+  if (
+    (input.loginName !== undefined ||
+      input.note !== undefined ||
+      input.totpCompanionId !== undefined) &&
+    !isOwnerSecretKind(row.kind)
+  ) {
+    throw invalid("Managed secrets belong to no sign-in of yours.")
+  }
+
+  if (input.loginName !== undefined) {
+    data.loginName = sealDetail(
+      ctx,
+      id,
+      "login",
+      checkLoginName(input.loginName),
+    )
+  }
+
+  if (input.note !== undefined) {
+    data.note = sealDetail(ctx, id, "note", checkSecretNote(input.note))
+  }
+
+  if (input.totpCompanionId !== undefined) {
+    data.totpCompanionId = await checkTotpCompanion(
+      ctx,
+      row,
+      input.totpCompanionId,
+    )
+  }
 
   if (input.name !== undefined) {
     if (!isOwnerSecretKind(row.kind)) {

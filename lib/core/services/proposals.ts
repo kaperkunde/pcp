@@ -5,6 +5,13 @@ import { invalid, PcpError } from "../errors"
 import type { ShownText } from "../permission-rules"
 import { checkPersonalNote, setPersonalNote } from "../personal-notes"
 import {
+  proposeToolAccess,
+  settleChosenAccess,
+  type AccessRule,
+  type ProposedAccess,
+  type ToolAccessArg,
+} from "../proposed-access"
+import {
   createSecretNamedAfter,
   deleteSecret,
   findTextSecretByName,
@@ -13,9 +20,10 @@ import {
 import { getServer, normalizeNameAndDescription } from "../servers"
 import { parseSshAddress } from "../ssh/hosts"
 import {
+  DEFAULT_PUBLISH_ADDRESS,
+  isLoopback,
   parsePublish,
   parseServiceDefinition,
-  reachUrl,
   type ServiceDefinition,
   type ServicePublish,
 } from "./definition"
@@ -32,8 +40,10 @@ import { serviceOfDefinition, type ServiceLaunchInput } from "./services"
  *
  * Everything is checked before they are asked: the definition as the
  * owner's own launch checks it, the SSH server (one this token sees, whose
- * host key the owner pinned), the publish address against the definition,
- * and that PCP can reach what it registers. Secrets are named, never sent:
+ * host key the owner pinned) and the publish address against the
+ * definition: the SSH server's own 127.0.0.1 unless the assistant names an
+ * address of its network, which the owner then sees. PCP reaches what it
+ * registers through the SSH connection either way. Secrets are named, never sent:
  * one the vault holds as a text secret is reused; one new name at most is
  * typed in by the owner on PCP's page, and its value never reaches the
  * assistant. Another instance of a service definition the token sees
@@ -67,6 +77,13 @@ export type ServiceChangeAsk = {
   /** A secret PCP does not hold yet, which the owner types in. */
   newSecret: string | null
   note: string | null
+  /**
+   * Levels and tiers the assistant proposed for what it registers, by name
+   * pattern (proposed-access.ts): shown filled in on the page, saved only as
+   * the owner leaves them, and applied once to the tools first read from
+   * it. Absent from a request made before there were any.
+   */
+  proposedAccess?: ProposedAccess | null
 }
 
 /** register_server's arguments for a service, as the gateway took them. */
@@ -83,6 +100,8 @@ export type ServiceProposalArgs = {
   publishPorts?: Array<{ container: number; host: number }>
   envSecrets?: Array<{ name: string; secret: string }>
   note?: string
+  /** tool_access: levels and tiers proposed for what it registers. */
+  toolAccess?: ToolAccessArg
 }
 
 /**
@@ -143,7 +162,7 @@ export async function prepareServiceProposal(
   const address = parseSshAddress(host.url).host
   const publish = parsePublish(
     {
-      address: args.publishAddress?.trim() || "0.0.0.0",
+      address: args.publishAddress?.trim() || DEFAULT_PUBLISH_ADDRESS,
       ports: definition.ports.map(({ container }) => ({
         container,
         host:
@@ -160,15 +179,6 @@ export async function prepareServiceProposal(
         `publish_ports names port ${entry.container}, which the service does not publish.`,
       )
     }
-  }
-
-  if (
-    definition.registers.kind !== "none" &&
-    !reachUrl(publish, address, definition.registers.port)
-  ) {
-    throw invalid(
-      `PCP reaches what the service serves at the address its port is published on, and ${publish.address} is ${host.name}'s own loopback: leave publish_address out (0.0.0.0), or name one of ${host.name}'s own addresses.`,
-    )
   }
 
   const known = new Set(definition.env.map((entry) => entry.name))
@@ -228,6 +238,18 @@ export async function prepareServiceProposal(
   const auth =
     definition.registers.kind === "openapi" ? definition.registers.auth : null
 
+  // What it registers is read once it runs: its tools are named by
+  // pattern. The service's own tools are the owner's to set.
+  if (args.toolAccess !== undefined && definition.registers.kind === "none") {
+    throw invalid(
+      "tool_access is for the tools of what the service registers, and this one registers nothing: leave it out.",
+    )
+  }
+
+  const proposedAccess = proposeToolAccess(args.toolAccess, {
+    label: "The service",
+  })
+
   if (auth && !given.has(auth.env)) {
     throw invalid(
       `The endpoint sends ${auth.env}'s secret in ${auth.header}: name it in env_secrets.`,
@@ -253,6 +275,7 @@ export async function prepareServiceProposal(
     env,
     newSecret,
     note,
+    ...(proposedAccess ? { proposedAccess } : {}),
   }
 }
 
@@ -277,7 +300,7 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
       ? `Updates from: ${definition.source}, when you update it on its page`
       : "Updates: by hand only (it names no image to update from)",
     publish.ports.length > 0
-      ? `Published on ${publish.address}: ${publish.ports.map((port) => `${port.host} → ${port.container}`).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server)" : ""}`
+      ? `Published on ${publish.address}: ${publish.ports.map((port) => `${port.host} → ${port.container}`).join(", ")}${publish.address === "0.0.0.0" || publish.address === "::" ? " (every address of the SSH server: anything on its network reaches it)" : isLoopback(publish.address) ? " (the SSH server's own loopback: PCP reaches it through the SSH connection)" : " (that address of the SSH server: anything that reaches it reaches the service)"}`
       : "Publishes no port",
     ...ask.env.map((entry) => {
       const fixed = definition.env.find(
@@ -309,7 +332,9 @@ export function describeServiceAsk(ask: ServiceChangeAsk): {
           `Another service of ${ask.instanceOf.name}, beside ${ask.instanceOf.instances.join(", ") || "(none)"}: it shares their definition, so a change to it changes every one of them`,
         ]
       : []),
-    "Its tools (status, logs, start, stop, restart) and what it adds ask you first, for every token, as a new server's do",
+    ask.proposedAccess
+      ? "Its tools (status, logs, start, stop, restart) and what it adds ask you first, for every token, as a new server's do, except where you set a level below for what it adds"
+      : "Its tools (status, logs, start, stop, restart) and what it adds ask you first, for every token, as a new server's do",
     ...(ask.note
       ? [
           `Your note on it, which every assistant that sees it reads as yours:\n${ask.note}`,
@@ -347,7 +372,14 @@ export async function applyServiceChange(
     tokenId,
     secretValue,
     launch,
-  }: { tokenId: string; secretValue?: string; launch: ServiceLauncher },
+    access = [],
+  }: {
+    tokenId: string
+    secretValue?: string
+    launch: ServiceLauncher
+    /** The levels and tiers the owner left on the page, for what it registers. */
+    access?: AccessRule[]
+  },
 ): Promise<string> {
   if (
     ask.instanceOf &&
@@ -436,6 +468,13 @@ export async function applyServiceChange(
     }
   }
 
+  const levels = launched.registeredId
+    ? await settleChosenAccess(ctx, {
+        serverId: launched.registeredId,
+        tokenId,
+        rules: access,
+      })
+    : ""
   const service = await getServer(ctx, launched.id)
   const registered = launched.registeredId
     ? await getServer(ctx, launched.registeredId).catch(() => null)
@@ -444,5 +483,5 @@ export async function applyServiceChange(
     ? ` The secret the owner entered is saved in PCP as "${saved.name}".`
     : ""
 
-  return `${launched.message} The service is "${service.slug}" (status, logs, start, stop, restart)${registered ? `, and what it serves is "${registered.slug}" with ${registered.tools.length} tool${registered.tools.length === 1 ? "" : "s"}` : ""}. Its tools ask the owner the first time they are used; search finds them.${keptAs}`
+  return `${launched.message} The service is "${service.slug}" (status, logs, start, stop, restart)${registered ? `, and what it serves is "${registered.slug}" with ${registered.tools.length} tool${registered.tools.length === 1 ? "" : "s"}` : ""}. ${levels ? `${levels} The service's own tools ask the owner the first time they are used` : "Its tools ask the owner the first time they are used"}; search finds them.${keptAs}`
 }

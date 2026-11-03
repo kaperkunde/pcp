@@ -72,7 +72,11 @@ so in the summary; the bump itself waits for the request.
   token addresses), so `client_id` is only for one that does not. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
-  It never changes a credential and never clears `publicOnly`. On an
+  It never changes a credential and never clears `publicOnly`: only the
+  owner does, with the switch on the server's page (`#public-only`), or by
+  ticking "Allow private addresses" on a request for a server or endpoint
+  flagged as private (`allowPrivate`, offered only then, never an
+  argument). On an
   endpoint that is the owner's (it sends a secret or an OAuth token, or private
   addresses are allowed) it can turn read-only on, and anything else it may change there
   (name, description, edits, tool descriptions, a re-read of the schema URL)
@@ -193,7 +197,8 @@ so in the summary; the bump itself waits for the request.
   (the browser by the tab's site, in `browser/call.ts`) and web fetch's
   request path (`fetch/fetch.ts`, `web-fetch.ts runFetch`), so every way in
   is paced: call_tool_<tier>, run_code_<tier>, wrappers and flows,
-  owner-approved calls, each as a read or a change by its tier.
+  owner-approved calls, each as a read or a change by its tier; and to
+  search's embeddings requests, as a read (`paceEmbeddings`).
   New defaults and bounds go in `pacing/limits.ts`, by class of action;
   nothing names a site or vendor. The owner's overrides are the vault's
   `pacing` setting, never a host setting.
@@ -244,7 +249,20 @@ so in the summary; the bump itself waits for the request.
   chose there: levels for its token, tiers through `setToolTier` (every
   server of the definition, which the page says) or the vault's setting.
   No decision and nothing the assistant sends writes them, and blocked
-  tools stay out of what it can name.
+  tools stay out of what it can name. The same holds for `tool_access` on
+  `register_server`, `create_wrapper` and `update_wrapper`
+  (`lib/core/proposed-access.ts`): stored on the request, shown filled in
+  and editable beside the approval on the same page, and written only with
+  the owner's yes there (`decidePermission`'s `access`, checked by
+  `checkChosenAccess`), as they left it, through the access request's own
+  checks and writes. By tool where the names are known up front (a
+  wrapper's tools, an endpoint's operations, a mail or calendar account's
+  tools); by name pattern otherwise (an MCP server, an OAuth one, what a
+  service registers), kept on the server (`pending_access`) and applied
+  once to the tools its first read finds (`syncServerTools`), then
+  cleared, never lifting a block set since. Add a test for each new field
+  (`proposed-access.test.ts`, `register-server.test.ts`,
+  `wrappers.test.ts`).
 - Mail accounts (`lib/core/mail/`) never read a secret: `upstream.ts` hands
   in a `MailCredential` (the header, the login, or an OAuth bearer from
   `credential()`, renewed through `endpointToken` like an API endpoint's). Mail travels encrypted only (TLS, or STARTTLS that
@@ -295,9 +313,9 @@ so in the summary; the bump itself waits for the request.
   algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
   `run_command` (`ssh/tools.ts`), its arguments checked before anything
   connects: `exec` only, never a terminal, an agent or a file transfer.
-  Forwarding is open for exits only (`openChannel`, below): outbound
-  direct-tcpip, never remote forwarding (`tcpip-forward`), streamlocal,
-  the agent or X11. Only the owner adds or changes one; `register_server` has
+  Forwarding is open for exits and services only (`openChannel`, below):
+  outbound direct-tcpip, never remote forwarding (`tcpip-forward`),
+  streamlocal, the agent or X11. Only the owner adds or changes one; `register_server` has
   no kind for it. Its limits go in `ssh/limits.ts`, and a change to how a host
   is trusted, PCP signs in or a channel opens gets a test against the test
   server (`ssh/client.test.ts`).
@@ -345,7 +363,22 @@ so in the summary; the bump itself waits for the request.
   but an exit's, which may get NET_ADMIN and /dev/net/tun only (`cap_add`
   and `devices`, allow-lists in `definition.ts`, checked again in
   `engine.ts`); a variable marked `plain` takes a value the owner types per
-  instance (`service_spec.plain_values`, no secret). Only the owner
+  instance (`service_spec.plain_values`, no secret). A service is published
+  on the SSH server's 127.0.0.1 unless the owner opts into its network on
+  the launch form, and PCP reaches it, calls and health checks alike,
+  through the SSH connection (`reach` "tunnel": `services.ts serviceDial`,
+  a direct-tcpip channel to a port it publishes, at the address it is bound
+  to there, on a pinned host with the key a request handed in, built in
+  `upstream.ts serviceTunnel`); a server it registered is never reached from
+  PCP's machine instead. One launched before ("direct") moves over when it
+  is updated or made again. What the owner asked last is
+  `service_spec.intended_state`: `stop` (theirs or an assistant's) writes
+  "stopped", start, restart, launch and remake "running"; only while it is
+  "running" does a call to what it serves that finds its container stopped
+  start it in that request (bounded, `START_ON_DEMAND_WAIT_MS`), try once
+  more and say so, and does the reconcile pass (`reconcileServices`, only
+  through `after()` from `/mcp` and the owner's pages, throttled, never a
+  timer or a stored key) bring it back up. Only the owner
   launches, changes, updates or removes one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
   owner's levels, and proposes one only through `register_server` (kind
   `service`, `services/proposals.ts`): a `service_change` request that shows
@@ -357,6 +390,26 @@ so in the summary; the bump itself waits for the request.
   `after()`. A launch that fails takes back everything it did. Limits go in
   `services/limits.ts`; a new command, tool or argument gets a test against
   the fake engine (`services/fake-docker.ts`, `services.test.ts`).
+- Search (`lib/core/search.ts`, pure) finds a tool by keywords with no
+  provider: stems, a short synonym table, and for PCP's own tools what
+  their description's lead says they are for (task phrases there, in a
+  search's words). Embeddings (`lib/core/embeddings/`) are optional and the
+  owner's: a provider chosen on Settings → Search (Voyage AI, an
+  OpenAI-compatible address, or one of their API endpoints such as a
+  text-embeddings-inference service), kept as the vault's `embeddings`
+  setting, never a host setting. Only what the owner ticked leaves PCP,
+  with the query: tools' names and descriptions, skills, memories
+  (`itemsToEmbed`, nothing else of the vault: no server description, note,
+  argument or secret); a provider elsewhere starts at tools only
+  (`defaultEmbedded`). The secret is read in `upstream.ts
+embeddingProvider`, which hands `embeddings/provider.ts` the header;
+  Voyage AI at public addresses only, an address the owner typed never PCP's
+  own, an endpoint by its own rules. Vectors are cached encrypted
+  (`embedding_vector:<id>`) under a keyed hash of the provider and the text,
+  rebuilt when either changes, embedded only inside a search's request
+  within `embeddings/limits.ts` (never on a timer), removed by the cleanup
+  once unused, in `wipeVault`, never exported. Any provider failure or
+  timeout is keyword search, quietly; a name given exactly stays first.
 - Long tool answers and files are kept only through
   `lib/core/tool-results.ts`: text or bytes, encrypted with
   `tool_result:<id>`, readable by the token whose call produced them, gone
@@ -469,8 +522,25 @@ so in the summary; the bump itself waits for the request.
   fetch does, and every page a tab's main frame opens passes the gate in
   `runtime.ts`: the driving token's web fetch site lines, a site the owner
   allowed for that tab, or the owner's own control; PCP's own site never. Service
-  workers are refused at that gate, not by a browser option. No
-  tool runs JavaScript or reads or sets cookies or storage. Files cross only
+  workers are refused at that gate, not by a browser option. No tool
+  reads or sets cookies or storage directly. JavaScript runs only through
+  `evaluate` (`browser/evaluate.ts`): Destructive, asked of the owner per
+  site with the whole script shown (`script_use`, with `noteOwnerAsked`;
+  Run it once, or a level for the site kept as a `web_fetch_rule` of kind
+  `script`, `browser-scripts.ts`), refused while a field holds a typed
+  secret, and while it runs the tab reaches its own site only (its
+  DevTools session fails every request elsewhere, the gate keeps its main
+  frame and popups there, and the proxies hold new connections elsewhere
+  until it is done, then refuse the ones it reached for); its result is
+  masked and a long one kept as a result. The logs (`console_log`,
+  `network_log`, `browser/devtools.ts`) are DevTools events only, never
+  page script; the page's own console calls only from the first
+  `console_log` on a tab (Runtime is a domain pages can detect); headers
+  that carry a credential are dropped, token-like values in addresses
+  masked, and bodies kept as results only when asked for, never a request
+  body from a page PCP typed a secret into. A point (`x`, `y` on `click`,
+  `scroll`, `drag`) is viewport CSS pixels, sent as DevTools mouse events
+  through `input.ts` as the owner's input is. Files cross only
   as the token's kept results, never a path on the machine: Chromium refuses
   every download but while `download` waits for one (`downloads.ts`, on a
   DevTools session of PCP's own), which takes the first from its tab or a
@@ -488,7 +558,7 @@ so in the summary; the bump itself waits for the request.
   process: there Chromium has a window of its own kept off the screen,
   its pages opened in the background (`launch.ts`). A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
-  a permission request (`browse`, `browser_handover`); a site is asked
+  a permission request (`browse`, `browser_handover`, `script_use`); a site is asked
   about only for the address in the call's arguments, so a call the owner
   allowed opens it without a second ask. `navigate` waits for a check that
   passes on its own; one that does not is the owner's, through `hand_over`,
@@ -516,7 +586,13 @@ so in the summary; the bump itself waits for the request.
   request log has the secret's name and origin, never the value.
   `request_secret` asks the owner to type a new one on PCP's page and never
   writes over a name PCP holds. Allowances are not exported; origins are.
-  Add a test for each new way in.
+  `navigate`, `snapshot` and `tabs` open name the owner's secrets bound to
+  the page's origin (`browser/sign-in-hint.ts`, louder at a password
+  field) with the login name, note and TOTP companion the owner gave each
+  (`secret.login_name` and `note`, encrypted under `secret:<id>:login` and
+  `:note`, opened only in `secrets.ts`); never a value, and naming one
+  grants nothing: typing it is still the gate above. Add a test for each
+  new way in.
 - PCP's own authorization server (`lib/core/oauth-server/`), for apps that
   sign in to `/mcp` with a URL alone (claude.ai's connectors, ChatGPT), is
   PCP's and never a relay's: whoever issues the tokens could mint one for
@@ -560,9 +636,12 @@ so in the summary; the bump itself waits for the request.
   Claude's apps fold it out of sight; a markdown link with a short label
   naming the action, never the bare address, so voice mode reads the label;
   `owner-link.ts` holds the label rules and the wording instructions and
-  descriptions use), and a check to call once the owner
-  says they answered (`check_permission`, `check_server`,
-  `lib/core/owner-wait.ts`). The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
+  descriptions use), and a check to call on the owner's next message,
+  whatever it says, before the link is sent again (`nextMessageCheck`;
+  `check_permission`, `check_server`, `check_upload`,
+  `lib/core/owner-wait.ts`). In a session, the next answer of any of PCP's
+  own tools names the token's requests answered since, once each, and
+  `check_permission` with no id lists the last hour's. The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
   ARCHITECTURE.md). Anything new that needs the owner works the same way.
 - The single-user assumption lives in two places: `ownerVault()` and the

@@ -109,7 +109,7 @@ export const MAX_ACCESS_LEVELS = 20_000
  * Not a RegExp: a pattern of many stars backtracks exponentially there, and
  * any token may send one, which would hold the whole process up.
  */
-function matcher(pattern: string): (name: string) => boolean {
+export function matcher(pattern: string): (name: string) => boolean {
   if (!pattern.includes("*")) {
     return (name) => name === pattern
   }

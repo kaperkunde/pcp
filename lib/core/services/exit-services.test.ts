@@ -551,7 +551,11 @@ describe("a VPN service with a SOCKS5 proxy", { timeout: 30_000 }, () => {
 describe("PCP's common items for exits", () => {
   // Copies of kaperkunde/pcp-gg-common's services/*.yaml: they read as a
   // service and are written back byte for byte.
-  for (const file of ["gluetun.yaml", "docling.yaml"]) {
+  for (const file of [
+    "gluetun.yaml",
+    "docling.yaml",
+    "text-embeddings-inference.yaml",
+  ]) {
     it(`reads services/${file} and writes it back unchanged`, async () => {
       const text = readFileSync(
         path.join(import.meta.dirname, "testdata", file),

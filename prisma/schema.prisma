@@ -46,6 +46,7 @@ model Vault {
   serverDefinitions  ServerDefinition[]
   exits              Exit[]
   toolTiers          ToolTier[]
+  embeddingVectors   EmbeddingVector[]
 
   @@map("vault")
 }
@@ -435,6 +436,9 @@ model PermissionRequest {
   decidedAt        DateTime?  @map("decided_at")
 
   @@index([tokenId, argsHash])
+  /// The owner's answers to a token's requests since a time
+  /// (listAnsweredRequests), looked for on every answer in a session.
+  @@index([tokenId, decidedAt])
   @@index([vaultId, targetKey])
   @@index([vaultId, status])
   @@index([expiresAt])
@@ -534,6 +538,21 @@ model Secret {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
   lastUsedAt  DateTime? @map("last_used_at")
+  /// The owner's login name for the sign-in this secret is the password of
+  /// (an email or a user name): not a secret, but theirs, so AES-256-GCM
+  /// under the vault's data key with "secret:<id>:login" as associated
+  /// data. Shown to assistants with the secret's name (list_secrets, and the
+  /// browser's note of the sign-ins at a page's site). Owner's kinds only.
+  loginName   Bytes?   @map("login_name")
+  /// The owner's one-line note on the secret, shown with it as the login
+  /// name is; encrypted the same way, as "secret:<id>:note".
+  note        Bytes?
+  /// The TOTP secret whose code goes with this one's sign-in, named with it
+  /// wherever its login name is: a text secret's, naming a TOTP one of the
+  /// same vault. Unset when that one is deleted.
+  totpCompanionId  String?  @map("totp_companion_id")
+  totpCompanion    Secret?  @relation("SecretTotpCompanion", fields: [totpCompanionId], references: [id], onDelete: SetNull)
+  totpCompanionFor Secret[] @relation("SecretTotpCompanion")
 
   authFor       McpServer[] @relation("ServerAuthSecret")
   authHeaderFor ServerAuthHeader[]
@@ -725,6 +744,13 @@ model McpServer {
   /// associated data. Assistants read it as the owner's note beside the
   /// description; it is never synced or shared.
   personalNote   Bytes?            @map("personal_note")
+  /// Levels and tiers the owner saved with their approval of this server,
+  /// as name patterns, for the tools PCP has not read yet (an MCP server
+  /// by its address, an OAuth one not yet connected, a service's): JSON
+  /// {"tokenId", "rules": [{"pattern", "access"?, "tier"?}]}, applied once
+  /// to the tools its first read finds, then cleared
+  /// (lib/core/proposed-access.ts). Null when there are none.
+  pendingAccess  String?           @map("pending_access")
 
   tools              McpTool[]
   tokens             ApiTokenServer[]
@@ -946,6 +972,16 @@ model ServiceSpec {
   /// registers nothing, or once that server is deleted.
   registeredId  String?    @unique @map("registered_id")
   registered    McpServer? @relation("ServiceRegistered", fields: [registeredId], references: [id], onDelete: SetNull)
+  /// How PCP reaches what the container publishes: "tunnel", a direct-tcpip
+  /// channel through the SSH connection to the address its ports are bound
+  /// to on the SSH server (every service launched, updated or made again
+  /// since), or "direct", from PCP's machine to the published address (a
+  /// service launched before, until then).
+  reach         String     @default("direct")
+  /// What the owner (or an assistant's stop tool) last asked of it:
+  /// "running" or "stopped". A call that finds it down starts it again, and
+  /// the reconcile pass brings it back up, only while it is "running".
+  intendedState String     @default("running") @map("intended_state")
   createdAt     DateTime   @default(now()) @map("created_at")
   updatedAt     DateTime   @updatedAt @map("updated_at")
 
@@ -1025,6 +1061,32 @@ model ToolResult {
   @@index([tokenId, createdAt])
   @@index([expiresAt])
   @@map("tool_result")
+}
+
+/// A cached embedding of one text search ranks (a tool's name and
+/// description, a skill, a memory), made by the provider the owner chose on
+/// Settings (lib/core/embeddings/). A cache: rebuilt when its text or the
+/// provider changes (another hash), never exported, and removed by the
+/// cleanup once no search has used it for a while.
+model EmbeddingVector {
+  id         String   @id
+  vaultId    String   @map("vault_id")
+  vault      Vault    @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  /// HMAC-SHA256, under a key derived from the vault's data key, of the
+  /// provider and model and the text embedded: what the vector is found by.
+  /// Keyed, so it says nothing of the text without the key.
+  hash       String
+  dimensions Int
+  /// The vector (float32, base64), AES-256-GCM under the vault's data key
+  /// with "embedding_vector:<id>" as associated data.
+  ciphertext Bytes
+  createdAt  DateTime @default(now()) @map("created_at")
+  /// The last search that used it, to a day: what the cleanup goes by.
+  usedAt     DateTime @default(now()) @map("used_at")
+
+  @@unique([vaultId, hash])
+  @@index([usedAt])
+  @@map("embedding_vector")
 }
 
 /// A link that moves one file between PCP and an assistant's own computer

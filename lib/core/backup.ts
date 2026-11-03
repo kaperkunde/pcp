@@ -477,7 +477,24 @@ async function writeExport(
         await tx.vault.create({ data: vault })
         await inChunks(keyGrants, (data) => tx.keyGrant.createMany({ data }))
         await inChunks(apiTokens, (data) => tx.apiToken.createMany({ data }))
-        await inChunks(tables.secrets, (data) => tx.secret.createMany({ data }))
+        // A secret names its TOTP companion, another secret: each is written
+        // first, then pointed at the other.
+        await inChunks(tables.secrets, (data) =>
+          tx.secret.createMany({
+            data: data.map((secret) => ({ ...secret, totpCompanionId: null })),
+          }),
+        )
+        for (const secret of tables.secrets) {
+          if (secret.totpCompanionId) {
+            await tx.secret.update({
+              where: { id: secret.id },
+              data: {
+                totpCompanionId: secret.totpCompanionId,
+                updatedAt: secret.updatedAt,
+              },
+            })
+          }
+        }
         await inChunks(tables.secretBrowserOrigins, (data) =>
           tx.secretBrowserOrigin.createMany({ data }),
         )
@@ -590,6 +607,8 @@ export async function wipeVault(
   // or the pages the owner uploads them from.
   await tx.fileLink.deleteMany(byVault)
   await tx.uploadLink.deleteMany(byVault)
+  // Nor are search's cached embeddings, which a search makes again.
+  await tx.embeddingVector.deleteMany(byVault)
   // Nor are tools and sites allowed for a while: an answer to a request,
   // for the tokens this restore replaces, and over within hours.
   await tx.apiTokenToolAllowance.deleteMany(byToken)

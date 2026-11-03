@@ -68,18 +68,22 @@ import {
   launchServiceOn,
   loadService,
   prepareLaunch,
+  reconcileServicesWith,
   recreateServiceOn,
   removeServiceOn,
   serviceActionOn,
   serviceBehind,
+  serviceDial,
   servicesUsingSecret,
   serviceStatusOn,
+  startOnDemand,
   statusWords,
   stoppedServiceMessage,
   syncServiceTools,
   updateServiceOn,
   type LaunchResult,
   type LoadedService,
+  type ReconcileRun,
   type ServiceAccess,
   type ServiceLaunchInput,
   type ServiceStatus,
@@ -90,9 +94,20 @@ import {
   isPublicAddress,
 } from "./openapi/address"
 import { makeRedactor } from "./openapi/redact"
-import { paceServerCall, pacedResult } from "./pacing"
-import { checkedFetch } from "./openapi/transport"
+import { paceEmbeddings, paceServerCall, pacedResult } from "./pacing"
+import { PACING_DEADLINE_MARGIN_MS } from "./pacing/limits"
+import { pacingNow } from "./pacing/pace"
+import { VOYAGE_EMBEDDINGS_URL } from "./constants"
+import { embeddingsUrl, type EmbeddingsConfig } from "./embeddings/config"
+import { EMBED_PACE_WAIT_MS } from "./embeddings/limits"
+import {
+  requestEmbeddings,
+  type EmbeddingProvider,
+  type EmbeddingsRequest,
+} from "./embeddings/provider"
+import { checkedFetch, type SendOptions } from "./openapi/transport"
 import { markdownLink } from "./owner-link"
+import { PublicOnlyRefusal, withPublicOnlyLink } from "./public-only"
 import {
   applyAuthorizeParams,
   applySignInDefaults,
@@ -128,6 +143,7 @@ import {
   MAX_OUTPUT_SCHEMA_CHARS,
   MAX_TOOL_ICONS,
 } from "./tools/limits"
+import { applyPendingAccess } from "./proposed-access"
 import { PCP_VERSION } from "./version"
 import { syncWrapperTools } from "./wrappers/catalogue"
 import {
@@ -151,7 +167,8 @@ import {
  * lib/core/services/, with a way to run commands on their SSH server and
  * their variables' values (ServiceAccess), built here. Linked repositories' GitHub client
  * (lib/core/repos/github.ts) gets its Authorization header from
- * githubCredential, the same way.
+ * githubCredential, the same way, and search's embeddings provider
+ * (lib/core/embeddings/) its header from embeddingProvider.
  *
  * Credentials are decrypted here, used for the one connection and dropped.
  * Nothing in this module returns a secret to a caller.
@@ -1013,6 +1030,153 @@ export async function githubCredential(
   return { headers: { Authorization: header }, redact: [token, header, value] }
 }
 
+/**
+ * A text secret as a bearer header, for a provider PCP calls itself (search's
+ * embeddings), with the values to keep out of what is repeated.
+ */
+async function bearerFromTextSecret(
+  ctx: VaultContext,
+  secretId: string,
+): Promise<{ headers: Record<string, string>; redact: string[] }> {
+  const row = await db().secret.findFirst({
+    where: { id: secretId, vaultId: ctx.vaultId },
+    select: { kind: true },
+  })
+
+  if (row?.kind !== "text") {
+    throw new PcpError(
+      "state",
+      "The embeddings provider's API key is gone. Choose it again on Settings.",
+    )
+  }
+
+  const value = await readSecretValue(ctx, secretId)
+  const token = value.trim()
+
+  if (!token || /[\u0000-\u001f\u007f\s]/.test(token)) {
+    throw new PcpError(
+      "state",
+      "The embeddings provider's API key is empty or has a character a header cannot carry.",
+    )
+  }
+
+  const header = `Bearer ${token}`
+  return { headers: { Authorization: header }, redact: [token, header, value] }
+}
+
+/**
+ * Search's embeddings provider, as the owner set it on Settings: the
+ * request it takes (address, model, the header made from its secret here)
+ * and the addresses it may reach. Voyage AI at its own public address
+ * only; an OpenAI-compatible address the owner typed anywhere but PCP's own;
+ * an API endpoint (a service's text-embeddings-inference) with its own
+ * credential and public-only rule, as its calls go. Paced as a read
+ * (paceEmbeddings); a turn too far off fails the request, and search goes
+ * on with keywords. The header goes to requestEmbeddings and nowhere else.
+ */
+export async function embeddingProvider(
+  ctx: VaultContext,
+  config: EmbeddingsConfig,
+  publicUrl = "",
+): Promise<EmbeddingProvider> {
+  let request: EmbeddingsRequest
+  let pace: { serverId?: string; name: string } = {
+    name: "the embeddings provider",
+  }
+  // A service's endpoint (text-embeddings-inference): reached through its
+  // SSH server when PCP reaches the service that way, and started again
+  // once if a request finds it stopped and the owner left it running.
+  let service: McpServer | null = null
+  const notOwn = (address: string, port: number) => !isOwnAddress(address, port)
+
+  switch (config.provider) {
+    case "voyage":
+      request = {
+        url: VOYAGE_EMBEDDINGS_URL,
+        style: "voyage",
+        model: config.model,
+        ...(await bearerFromTextSecret(ctx, config.secretId)),
+        sendOptions: { publicOnly: true },
+      }
+      break
+    case "openai":
+      request = {
+        url: embeddingsUrl(config.url),
+        style: "openai",
+        model: config.model,
+        ...(config.secretId
+          ? await bearerFromTextSecret(ctx, config.secretId)
+          : { headers: {}, redact: [] }),
+        sendOptions: { publicOnly: true, addressCheck: notOwn },
+      }
+      break
+    case "endpoint": {
+      const server = await db().mcpServer.findFirst({
+        where: { id: config.serverId, vaultId: ctx.vaultId, kind: "openapi" },
+      })
+
+      if (!server || !server.enabled) {
+        throw new PcpError(
+          "state",
+          "The embeddings provider's API endpoint is gone or turned off.",
+        )
+      }
+
+      const { headers, redact } = await credential(ctx, server)
+      const tunnel = await serviceTunnel(ctx, server, publicUrl)
+      request = {
+        url: embeddingsUrl(server.url),
+        style: "openai",
+        model: config.model,
+        headers,
+        redact,
+        sendOptions:
+          tunnel ??
+          (server.publicOnly
+            ? { publicOnly: true }
+            : { publicOnly: true, addressCheck: notOwn }),
+      }
+      pace = { serverId: server.id, name: server.name }
+      service = server
+      break
+    }
+  }
+
+  return {
+    fingerprint: [
+      config.provider,
+      config.provider === "endpoint" ? config.serverId : "",
+      request.url,
+      config.model,
+    ].join("\n"),
+    async embed(texts, input, signal) {
+      const paced = await paceEmbeddings(ctx.vaultId, pace, {
+        signal,
+        deadline: pacingNow() + EMBED_PACE_WAIT_MS + PACING_DEADLINE_MARGIN_MS,
+      })
+
+      if (paced) {
+        throw new PcpError("upstream", paced.message)
+      }
+
+      try {
+        return await requestEmbeddings(request, texts, input, signal)
+      } catch (error) {
+        const woke =
+          service && !signal?.aborted
+            ? await wakeService(ctx, service, publicUrl)
+            : null
+
+        if (!woke?.started) {
+          throw error
+        }
+
+        return requestEmbeddings(request, texts, input, signal)
+      }
+    },
+  }
+}
+
 async function basicCredential(
   ctx: VaultContext,
   server: McpServer,
@@ -1164,9 +1328,13 @@ export async function openUpstream(
     ...(await oauthTokens(provider)),
   ]
   const endpoint = new URL(server.url)
-  // A public-only server's requests, and its OAuth requests (the SDK makes
-  // those through this too), reach public addresses only.
-  const reach = serverFetch(server) ?? fetch
+  // A service's MCP server is reached through its SSH server; a public-only
+  // server's requests, and its OAuth requests (the SDK makes those through
+  // this too), reach public addresses only.
+  const tunnel = await serviceTunnel(ctx, server, publicUrl)
+  const reach = tunnel
+    ? checkedFetch(tunnel, { followRedirects: true })
+    : (serverFetch(server) ?? fetch)
   let refusal: Refusal | undefined
   const transport = new StreamableHTTPClientTransport(endpoint, {
     // Never cached: these are live calls carrying credentials. It also keeps
@@ -1533,9 +1701,27 @@ export function browserExitsFor(
 
 /**
  * Reads the server's tool list into the catalogue. Tools that disappeared
- * are removed; the owner's description overrides survive a resync.
+ * are removed; the owner's description overrides survive a resync. A read
+ * that found tools applies, once, the levels and tiers the owner saved by
+ * name with their approval of the server (proposed-access.ts).
  */
 export async function syncServerTools(
+  ctx: VaultContext,
+  server: McpServer,
+  options: Parameters<typeof readServerTools>[2],
+): Promise<SyncResult> {
+  const result = await readServerTools(ctx, server, options)
+
+  // Read from the row: the server handed in may be from before they were
+  // saved.
+  if (result.status === "ok") {
+    await applyPendingAccess(ctx, server.id)
+  }
+
+  return result
+}
+
+async function readServerTools(
   ctx: VaultContext,
   server: McpServer,
   {
@@ -1551,7 +1737,21 @@ export async function syncServerTools(
   },
 ): Promise<SyncResult> {
   if (server.kind === "openapi") {
-    return syncEndpointTools(server, { byOwner })
+    let reach: Pick<SendOptions, "dial"> | null
+
+    try {
+      reach = await serviceTunnel(ctx, server, publicUrl)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await setServerStatus(server.id, "error", message)
+      return {
+        status: "error",
+        message,
+        toolCount: await db().mcpTool.count({ where: { serverId: server.id } }),
+      }
+    }
+
+    return syncEndpointTools(server, { byOwner, ...(reach ? { reach } : {}) })
   }
 
   if (server.kind === "browser") {
@@ -1692,11 +1892,13 @@ async function callEndpoint(
 ): Promise<CallToolResult> {
   try {
     const { headers, redact } = await credential(ctx, server, { publicUrl })
+    const reach = await serviceTunnel(ctx, server, publicUrl)
 
     return await callEndpointTool(server, toolName, args, {
       authHeaders: headers,
       redact: [...redact, ...placed],
       open,
+      ...(reach ? { reach } : {}),
       ...(server.authType === "oauth"
         ? {
             renew: async () => {
@@ -1714,6 +1916,14 @@ async function callEndpoint(
       const message = `${server.name} needs to be connected: open it in PCP and choose Connect.`
       await setServerStatus(server.id, "auth_required", message)
       throw new PcpError("unauthorized", message)
+    }
+
+    // Its address rule at work: the assistant hands the owner the switch.
+    if (error instanceof PublicOnlyRefusal) {
+      throw new PcpError(
+        "forbidden",
+        withPublicOnlyLink(error.message, server, publicUrl),
+      )
     }
 
     throw error
@@ -1918,6 +2128,7 @@ async function callBrowser(
       exits: browserExitsFor(ctx, tokenId, options.publicUrl),
       publicUrl: options.publicUrl,
       open: options.open,
+      keep: options.keep,
       keepBytes: options.keepBytes,
       signal: options.signal,
       deadline: options.deadline,
@@ -1989,9 +2200,12 @@ async function placeSecrets(
 }
 
 /**
- * A call, and when it fails for a server a service registered, the
- * service's state in place of a bare "could not be reached": a stopped
- * service is said to be stopped.
+ * A call, and when it fails for a server a service registered: a service
+ * the owner left running whose container stopped is started, in this
+ * request, and the call tried once more (nothing went through the first
+ * time: what it serves was not there), its answer saying so; otherwise the
+ * service's state in place of a bare "could not be reached", a stopped
+ * service said to be stopped.
  */
 async function dispatchCall(
   ctx: VaultContext,
@@ -2008,7 +2222,39 @@ async function dispatchCall(
       throw error
     }
 
-    const said = await serviceFailure(ctx, server, options.publicUrl)
+    const woken = await wakeService(ctx, server, options.publicUrl)
+
+    if (woken?.started) {
+      try {
+        const again = await dispatchKind(
+          ctx,
+          server,
+          toolName,
+          args,
+          options,
+          placed,
+        )
+        // After the answer, so a client that reads its first block still
+        // gets the answer there.
+        return {
+          ...again,
+          content: [...again.content, { type: "text", text: woken.note }],
+        }
+      } catch (retried) {
+        if (!isPcpError(retried) || retried.code !== "upstream") {
+          throw retried
+        }
+
+        throw new PcpError(
+          "upstream",
+          `${woken.note} The call failed again: ${retried.message}`,
+        )
+      }
+    }
+
+    const said = woken?.reason
+      ? `${server.name} could not be reached. ${woken.reason}`
+      : await serviceFailure(ctx, server, options.publicUrl)
     throw said ? new PcpError("upstream", said) : error
   }
 }
@@ -2049,6 +2295,7 @@ async function dispatchKind(
       exits: browserExitsFor(ctx, tokenId, publicUrl),
       publicUrl,
       open,
+      keep,
       keepBytes,
       signal,
       deadline,
@@ -2186,16 +2433,34 @@ async function dispatchKind(
     // "unauthorized" tells the gateway the server needs connecting (or its
     // credential was refused), not that it could not be reached. A server
     // that turned a signed-in request down needs the owner, but not a
-    // sign-in.
+    // sign-in. A public-only server refusing a private address hands the
+    // owner its switch (the status above stays plain text, for its page).
     throw new PcpError(
       failure.status === "auth_required" || failure.status === "client_required"
         ? "unauthorized"
         : "upstream",
-      failure.message,
+      addressBlocked(error)
+        ? withPublicOnlyLink(failure.message, server, publicUrl)
+        : failure.message,
     )
   } finally {
     await connection?.close()
   }
+}
+
+/**
+ * Whether a failure is a public-only server's address rule at work: the
+ * refusal itself, or one the MCP client wrapped (`cause`).
+ */
+function addressBlocked(error: unknown): boolean {
+  for (let at = error, depth = 0; at && depth < 5; depth++) {
+    if (at instanceof AddressBlockedError) {
+      return true
+    }
+    at = at instanceof Error ? at.cause : undefined
+  }
+
+  return false
 }
 
 function describeFailure(
@@ -2334,10 +2599,12 @@ export type ServiceOptions = {
 }
 
 /**
- * A way to run commands on an SSH server for a service, and a channel to a
- * port on its own loopback (an exit's proxy, published there only): PCP's
- * key for it, decrypted here, and its pinned host key. A server whose host
- * key the owner has not pinned is not connected to, whoever asks.
+ * A way to run commands on an SSH server for a service, and channels
+ * through the SSH connection: to a port on its own loopback (an exit's
+ * proxy, published there only), and to what a service publishes (checked
+ * by services.ts serviceDial). PCP's key for it, decrypted here, and its
+ * pinned host key. A server whose host key the owner has not pinned is not
+ * connected to, whoever asks.
  */
 async function serviceConnection(
   ctx: VaultContext,
@@ -2346,6 +2613,7 @@ async function serviceConnection(
 ): Promise<{
   host: ServiceHost
   loopback: NonNullable<ServiceAccess["loopback"]>
+  forward: NonNullable<ServiceAccess["forward"]>
 }> {
   if (!isSshKind(host.kind)) {
     throw invalid("A service runs on one of your SSH servers.")
@@ -2380,6 +2648,8 @@ async function serviceConnection(
       openChannel(host.id, target, identity, EXIT_PUBLISH_ADDRESS, port, {
         signal,
       }),
+    forward: (address, port, signal) =>
+      openChannel(host.id, target, identity, address, port, { signal }),
   }
 }
 
@@ -2451,6 +2721,7 @@ async function serviceAccess(
 
   return {
     host: connection.host,
+    forward: connection.forward,
     env: await serviceEnv(ctx, loaded.definition, loaded.env, {
       typed: loaded.values,
       proxyAuth,
@@ -2459,6 +2730,57 @@ async function serviceAccess(
       ? { loopback: connection.loopback, ...(proxyAuth ? { proxyAuth } : {}) }
       : {}),
     ...(timing ? { timing } : {}),
+  }
+}
+
+/**
+ * How a request reaches a server a service registered, when PCP reaches
+ * that service through its SSH server (`reach` "tunnel"): a dial through
+ * the SSH connection to one of the ports it publishes there, with PCP's
+ * key decrypted here. Null for any other server, which is reached as its
+ * address rule says. A tunnelled service's server is never reached from
+ * PCP's machine instead: without its SSH server, or before its host key is
+ * pinned, this throws.
+ */
+async function serviceTunnel(
+  ctx: VaultContext,
+  server: Pick<McpServer, "id" | "kind" | "name">,
+  publicUrl: string,
+): Promise<Pick<SendOptions, "dial"> | null> {
+  if (server.kind !== "mcp" && server.kind !== "openapi") {
+    return null
+  }
+
+  const spec = await db().serviceSpec.findFirst({
+    where: {
+      registeredId: server.id,
+      reach: "tunnel",
+      server: { vaultId: ctx.vaultId },
+    },
+    select: { serverId: true },
+  })
+
+  if (!spec) {
+    return null
+  }
+
+  const loaded = await loadService(ctx, spec.serverId)
+
+  if (!loaded.host) {
+    throw new PcpError(
+      "upstream",
+      `${server.name} runs as the service ${loaded.server.name}, whose SSH server is no longer in PCP, so PCP cannot reach it.`,
+    )
+  }
+
+  const connection = await serviceConnection(ctx, loaded.host, { publicUrl })
+
+  return {
+    dial: serviceDial(
+      loaded.publish,
+      connection.host.address,
+      connection.forward,
+    ),
   }
 }
 
@@ -2504,6 +2826,7 @@ export async function launchService(
       : undefined
   const access: ServiceAccess = {
     host: connection.host,
+    forward: connection.forward,
     env: await serviceEnv(ctx, prepared.definition, prepared.env, {
       typed: prepared.values,
       proxyAuth,
@@ -2658,6 +2981,49 @@ export async function restartServicesUsingSecret(
   }
 
   return outcomes
+}
+
+/**
+ * After a call to a server a service registered failed: the service
+ * started again when the owner left it running and its container stopped
+ * (services.ts startOnDemand). Null for any other server, or one whose
+ * service cannot be reached.
+ */
+async function wakeService(
+  ctx: VaultContext,
+  server: McpServer,
+  publicUrl: string,
+): Promise<Awaited<ReturnType<typeof startOnDemand>> | null> {
+  try {
+    const loaded = await serviceBehind(ctx, server.id)
+
+    if (!loaded || loaded.intent === "stopped") {
+      return null
+    }
+
+    const access = await serviceAccess(ctx, loaded, { publicUrl })
+    return access ? await startOnDemand(loaded, access) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The vault's services the owner left running, brought back up when their
+ * container stopped (services.ts reconcileServicesWith): only after a
+ * request that brought the vault's key (app/mcp/route.ts, the owner's
+ * pages, through after()), throttled, never on a timer.
+ */
+export async function reconcileServices(
+  ctx: VaultContext,
+  { publicUrl }: { publicUrl: string },
+  options: { now?: number; budgetMs?: number } = {},
+): Promise<ReconcileRun> {
+  return reconcileServicesWith(
+    ctx,
+    (loaded) => serviceAccess(ctx, loaded, { publicUrl }),
+    options,
+  ).catch(() => ({ started: [] }))
 }
 
 /**

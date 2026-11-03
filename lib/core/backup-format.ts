@@ -276,6 +276,11 @@ const SecretRow = z.strictObject({
   createdAt: date,
   updatedAt: date,
   lastUsedAt: dateOrNull,
+  // The owner's login name and note (encrypted) and the TOTP secret that goes
+  // with the sign-in, added with sign-in hints: absent from older files.
+  loginName: bytesOrNull.default(null),
+  note: bytesOrNull.default(null),
+  totpCompanionId: id.nullable().default(null),
 })
 
 // The sites a secret is typed at in the browser, added with typed secrets:
@@ -346,6 +351,9 @@ const McpServerRow = z.strictObject({
   // exports, whose servers each get a definition of their own on restore.
   definitionId: id.nullable().default(null),
   personalNote: bytesOrNull.default(null),
+  // Levels the owner saved with an approval, waiting for the server's first
+  // read of its tools: absent from older exports, which had none.
+  pendingAccess: str.nullable().default(null),
 })
 
 // Definitions, added with the owner's notes: absent from older exports.
@@ -420,6 +428,10 @@ const ServiceSpecRow = z.strictObject({
   // Added with exits' VPN services: absent from older files.
   plainValues: str.default("{}"),
   registeredId: id.nullable(),
+  // Added with services reached through the SSH connection and started on
+  // demand: absent from older files, whose services are reached directly.
+  reach: str.default("direct"),
+  intendedState: str.default("running"),
   createdAt: date,
   updatedAt: date,
 })
@@ -838,6 +850,10 @@ export function checkReferences(payload: ExportPayload): void {
     if ((tier.definitionId === null) === (tier.serverId === null)) {
       throw problem("a tool's tier names neither or both of its places")
     }
+  }
+
+  for (const secret of tables.secrets) {
+    pointsAt(secret.totpCompanionId, secrets, "a secret's one-time codes")
   }
 
   for (const site of tables.secretBrowserOrigins) {

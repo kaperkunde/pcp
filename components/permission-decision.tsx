@@ -10,6 +10,12 @@ import {
   QUIET_DECISION,
 } from "@/components/permission-actions"
 import { PermissionOutcome } from "@/components/permission-outcome"
+import {
+  chosenAccess,
+  initialAccessRows,
+  ProposedAccessEditor,
+  type AccessRow,
+} from "@/components/proposed-access-editor"
 import { Button } from "@/components/ui/button"
 import { Input, Select, Textarea } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
@@ -22,6 +28,7 @@ import {
   allowForLabel,
   type PermissionDecision as Decision,
 } from "@/lib/core/constants"
+import type { ProposedAccessShown } from "@/lib/core/proposed-access"
 
 /** The answers that carry out the request, rather than turn it down. */
 const AGREES: Decision[] = ["allow_once", "allow_for", "always"]
@@ -47,6 +54,10 @@ const QUIET: Decision[] = ["block", "discard"]
  * (`every`), on when the assistant asked for that; it holds whether the
  * owner shares the memory or keeps it for that assistant.
  *
+ * A proposed MCP server or endpoint at a private address offers a switch
+ * to allow private addresses (`privateAddresses`), off: left alone, it
+ * reaches public addresses only, as everything an assistant proposes.
+ *
  * "Allow for" comes with how long, chosen beside its button, unless the
  * kind has one length only (`allowForFixed`: a secret the browser types,
  * an hour), which its label says.
@@ -61,15 +72,21 @@ const QUIET: Decision[] = ["block", "discard"]
  *
  * `revision` is the request as the page shows it: when an assistant has
  * added to it since, the answer is refused and the owner reads it again.
+ *
+ * A new or changed server whose assistant proposed levels and tiers for its
+ * tools (`access`) shows them filled in and editable above the buttons; the
+ * yes sends what the owner left there, and nothing else writes them.
  */
 export function PermissionDecision({
   id,
   decisions,
   secret,
   every,
+  privateAddresses = false,
   advance = true,
   allowForFixed = false,
   revision,
+  access = null,
 }: {
   advance?: boolean
   id: string
@@ -89,6 +106,8 @@ export function PermissionDecision({
     origins?: string[]
   } | null
   every?: { asked: boolean } | null
+  privateAddresses?: boolean
+  access?: ProposedAccessShown | null
 }) {
   const { submit, pending, error, setError, done } = useAnswer(
     { request: id },
@@ -97,8 +116,12 @@ export function PermissionDecision({
   const [chosen, setChosen] = useState<Decision | null>(null)
   const [secretValue, setSecretValue] = useState("")
   const [always, setAlways] = useState(every?.asked === true)
+  const [allowPrivate, setAllowPrivate] = useState(false)
   const [minutes, setMinutes] = useState<number>(DEFAULT_ALLOW_FOR_MINUTES)
   const [origins, setOrigins] = useState((secret?.origins ?? []).join("\n"))
+  const [accessRows, setAccessRows] = useState<AccessRow[]>(() =>
+    access ? initialAccessRows(access) : [],
+  )
 
   function decide(value: Decision) {
     const agrees = AGREES.includes(value)
@@ -136,6 +159,8 @@ export function PermissionDecision({
               .filter(Boolean)
           : undefined,
         revision,
+        privateAddresses && agrees ? allowPrivate : undefined,
+        access && agrees ? chosenAccess(accessRows) : undefined,
       )
 
       return result.status === "ok"
@@ -236,6 +261,14 @@ export function PermissionDecision({
           />
         </Field>
       ) : null}
+      {access ? (
+        <ProposedAccessEditor
+          shown={access}
+          rows={accessRows}
+          onChange={setAccessRows}
+          disabled={pending}
+        />
+      ) : null}
       {every ? (
         <List>
           <SwitchRow
@@ -251,6 +284,18 @@ export function PermissionDecision({
             }
             checked={always}
             onChange={(event) => setAlways(event.target.checked)}
+            disabled={pending}
+          />
+        </List>
+      ) : null}
+      {privateAddresses ? (
+        <List>
+          <SwitchRow
+            id={`permission-${id}-private`}
+            label="Allow private addresses"
+            description="Its address is on your own network, or this machine's. Off, it reaches public addresses only and its calls are refused; turn it on only for a server you trust. You can change it later on its page, under Public addresses only."
+            checked={allowPrivate}
+            onChange={(event) => setAllowPrivate(event.target.checked)}
             disabled={pending}
           />
         </List>

@@ -8,7 +8,7 @@ import {
   NameFields,
   ServerFormFrame,
 } from "@/components/server-form-parts"
-import { Input, Select, Textarea } from "@/components/ui/input"
+import { Checkbox, Input, Select, Textarea } from "@/components/ui/input"
 import { Field } from "@/components/ui/label"
 import type { ServerActionResult } from "@/lib/actions/servers"
 import {
@@ -308,6 +308,9 @@ export function ServiceLaunchForm({
     fixed?.definition ??
       (startFromExit ? EXAMPLE_EXIT_DEFINITION : EXAMPLE_DEFINITION),
   )
+  // The SSH server's own 127.0.0.1 unless the owner opts into its network:
+  // PCP reaches the service through the SSH connection either way.
+  const [onNetwork, setOnNetwork] = useState(false)
   const [address, setAddress] = useState("0.0.0.0")
   const [hostPorts, setHostPorts] = useState<Record<number, string>>({})
   const [env, setEnv] = useState<Record<string, string>>({})
@@ -447,21 +450,40 @@ export function ServiceLaunchForm({
           {shape.exit ? (
             <input type="hidden" name="address" value="127.0.0.1" />
           ) : (
-            <Field
-              label="Publish on"
-              htmlFor="service-address"
-              hint="The SSH server's address the ports listen on: 0.0.0.0 for every address, or one of its own. PCP reaches what the service serves there; 127.0.0.1 works only when PCP runs on that machine."
-            >
-              <Input
-                id="service-address"
-                name="address"
-                value={address}
-                onChange={(event) => setAddress(event.target.value)}
-                spellCheck={false}
-                className="font-mono"
-                required
-              />
-            </Field>
+            <>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                The ports listen on the SSH server&apos;s own 127.0.0.1, and PCP
+                reaches what the service serves through the SSH connection, so
+                nothing else on its network can.
+              </p>
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  checked={onNetwork}
+                  onChange={(event) => setOnNetwork(event.target.checked)}
+                  data-testid="service-on-network"
+                />
+                Also reachable from the SSH server&apos;s network
+              </label>
+              {onNetwork ? (
+                <Field
+                  label="Publish on"
+                  htmlFor="service-address"
+                  hint="The SSH server's address the ports listen on: 0.0.0.0 for every address, or one of its own. Anything that reaches that address reaches the service; PCP still goes through the SSH connection."
+                >
+                  <Input
+                    id="service-address"
+                    name="address"
+                    value={address}
+                    onChange={(event) => setAddress(event.target.value)}
+                    spellCheck={false}
+                    className="font-mono"
+                    required
+                  />
+                </Field>
+              ) : (
+                <input type="hidden" name="address" value="127.0.0.1" />
+              )}
+            </>
           )}
           <div className="grid gap-4 sm:grid-cols-2">
             {shape.ports.map((port) => (
@@ -495,7 +517,7 @@ export function ServiceLaunchForm({
         <input
           type="hidden"
           name="address"
-          value={shape.exit ? "127.0.0.1" : address}
+          value={shape.exit || !onNetwork ? "127.0.0.1" : address}
         />
       )}
       {plain.length > 0 ? (

@@ -63,7 +63,10 @@ associated data (a ciphertext cannot be moved to another row):
 - the browser's sign-ins (`browser_profile`, bound to the vault's id, as
   there is one per vault),
 - the owner's note on a server or a skill (`mcp_server.personal_note`,
-  `skill.personal_note` with `skill:<id>:note`).
+  `skill.personal_note` with `skill:<id>:note`),
+- the login name and note of one of the owner's secrets
+  (`secret.login_name` with `secret:<id>:login`, `secret.note` with
+  `secret:<id>:note`): not secret, but theirs.
 
 The DEK itself is stored only **wrapped** — AES-256-GCM under a **key
 encryption key (KEK)** — once per credential, in `key_grant`:
@@ -306,8 +309,8 @@ arguments.
 Private addresses are allowed, as they are for MCP servers the owner adds:
 only the owner sets a schema URL or base URL, and a self-hosted PCP often
 talks to services on its own network. What an assistant proposes, an
-endpoint or an MCP server, is public-only (below) until the owner allows
-private addresses on its page. A multi-tenant host must add an address policy
+endpoint or an MCP server, is public-only (below) unless the owner allows
+private addresses as they agree, or later on its page. A multi-tenant host must add an address policy
 before it lets anyone else set one: resolve the name, refuse loopback,
 private, link-local and metadata ranges, and connect to the address it
 checked.
@@ -409,8 +412,10 @@ change an endpoint decides where PCP sends requests:
   its tokens, and a wrapper whose definition has a place for it:
   `lib/core/secret-uses.ts`), so an assistant proposing an endpoint names a
   secret the owner already has instead of inventing one they would type in
-  again. It reads no ciphertext and no dates, and a query and a cap bound
-  it. Only a text secret is reused by its name; the name of an OAuth sign-in
+  again. Where the owner said, it adds the sign-in a secret belongs to: the
+  sites the browser types it at, the login name and note (opened by
+  `secrets.ts openSecretDetails`) and the TOTP secret that goes with it. It
+  reads no value's ciphertext and no dates, and a query and a cap bound it. Only a text secret is reused by its name; the name of an OAuth sign-in
   or an SSH key in `register_server` still means a new secret. When a
   registration reuses one, the owner's page says what already uses it, and
   so does the assistant's answer for a token with this option; for any other
@@ -423,13 +428,20 @@ change an endpoint decides where PCP sends requests:
   socket connects to (`openapi/transport.ts` resolves the name itself and
   checks every answer), so a name that resolves to a public address for a
   check and a private one for the connection cannot get through. The owner
-  turns it off per endpoint, for an API on their own network. It connects
+  turns it off per endpoint, for an API on their own network, with the
+  "Public addresses only" switch on its page (About, outside Advanced,
+  anchored `#public-only`, `setServerPublicOnly`); the form under Advanced
+  no longer carries it, and an update that leaves it out keeps it. A refused
+  call's error ends with a link to that switch (`public-only.ts
+withPublicOnlyLink`, added in `upstream.ts` where the server and PCP's
+  address are known), for the assistant to hand the owner. It connects
   directly, not through an outbound proxy (a proxy does its own name
   resolution, which PCP could not check): a host that must use one has to turn
   this off for those endpoints, and the proxy's own egress rules are then what
   protect it. What a name resolves to is neither looked up at registration nor
   told to the assistant, so the tools cannot be used to map the owner's DNS.
-  A literal private address is noted in the request the owner reads.
+  A literal private address is noted in the request the owner reads, and
+  that request offers "Allow private addresses" (below).
 - **Approved as downloaded.** A schema URL an assistant names is downloaded
   once, when it asks, from public addresses only and with no credential, and
   the copy is held (encrypted) on the request: the endpoint is made from the
@@ -876,7 +888,7 @@ An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
 `auth_username` the login) whose one tool, `run_command`, runs one command per
 call with `exec`: no shell session kept between calls, no terminal, no
 agent, no file transfer, and no forwarding but the outbound channels of an
-exit (below, and [Exits](#exits)). Only the owner adds one, on the
+exit or a service (below, [Exits](#exits) and [Services](#services)). Only the owner adds one, on the
 Servers page; `register_server` has no kind for it, because a shell on a
 machine is more than an assistant should be able to ask for in a sentence.
 `run_command` asks the owner first by default like every tool, and the
@@ -929,16 +941,19 @@ cannot be reached is an error. Limits are in `ssh/limits.ts`. The test server
 (`ssh/fake-server.ts`) is `ssh2`'s own server. The request log keeps the call
 by name like any other, never the command or its output.
 
-**Channels for exits** (`ssh/client.ts openChannel`) are the one forwarding
-PCP does: direct-tcpip channels from the SSH server to an address and port
-the exits module checked from the exit's side, or to the loopback port of an
-exit container PCP started itself, on one long-lived connection per server
+**Channels for exits and services** (`ssh/client.ts openChannel`) are the
+one forwarding PCP does: direct-tcpip channels from the SSH server to an
+address and port the exits module checked from the exit's side, to the
+loopback port of an exit container PCP started itself, or to a port a
+service PCP started publishes there, at the address it is bound to
+(`services.ts serviceDial`, below), on one long-lived connection per server
 (keepalive every 15 seconds, closed after 5 minutes without a channel, at
 most 128 channels and 32 connections; `ssh/limits.ts`). Never remote
 forwarding (`tcpip-forward`), never a Unix socket (streamlocal), never the
 agent or X11; a channel the server opens towards PCP is refused. A
 connection is made only on a host whose key the owner pinned and only with
-the key a request handed in (`upstream.ts openExit`); without one (the
+the key a request handed in (`upstream.ts openExit`, `serviceTunnel`,
+`serviceConnection`); without one (the
 browser's exit proxy, between requests) only an open connection is used, so
 nothing reconnects in the background. A server that refuses the channel
 ("administratively prohibited": `AllowTcpForwarding no`, or `restrict` /
@@ -984,8 +999,10 @@ specPath, basePath, auth?}` (an API endpoint from the schema it serves,
   vault's services on that host), `publish` (`{address, ports: [{container,
 host}]}`, the host's IP address the ports are bound to), `env` (`{NAME:
 secret id}`, never a value), `plain_values` (`{NAME: value}`, what the
-  owner typed for its plain variables) and `registered_id` (the endpoint
-  or MCP server it registered).
+  owner typed for its plain variables), `registered_id` (the endpoint
+  or MCP server it registered), `reach` (`tunnel` or `direct`: how PCP
+  reaches what it publishes, below) and `intended_state` (`running` or
+  `stopped`: what the owner asked of it last).
 
 **Commands.** Every command is words built from checked fields (image
 references, ports, names, volume names and paths, arguments, each against a
@@ -1019,16 +1036,41 @@ service that takes it again (`restartServicesUsingSecret`, through `after()`
 in that save's request: a restart alone would keep the old value), and a
 secret a service takes cannot be deleted under it.
 
+**Reaching it** (`services.ts serviceDial`, `upstream.ts serviceTunnel`). A
+service is published on the SSH server's 127.0.0.1 unless the owner ticks
+"Also reachable from the SSH server's network" on the launch form (and
+names 0.0.0.0 or one of its addresses; an assistant's proposal names it in
+`publish_address`, which the owner sees). Either way PCP reaches what it
+publishes through the SSH connection (`service_spec.reach` "tunnel"): a
+direct-tcpip channel on the pooled connection (`openChannel`, pinned host
+only, with PCP's key decrypted in `upstream.ts` for that request) to the
+address its ports are bound to on the SSH server (the loopback for 0.0.0.0).
+So it works when PCP runs in a container on that same machine, whose own
+127.0.0.1 is another. The dial is laid under the usual transports
+(`openapi/transport.ts send` with `dial`, which then neither looks the name
+up nor connects from PCP's machine): an API endpoint's calls and schema
+downloads (`callEndpointTool`, `syncEndpointTools`, `createEndpoint` at
+launch), an MCP server's requests (`openUpstream`, `checkedFetch` with the
+dial), and the health checks (`probeHealth`). It opens a channel only to a
+port the service publishes, whatever host the URL names (the loopback, the
+published address or the SSH server's own name), nothing else on that
+machine. A server a tunnelled service registered is never reached from
+PCP's machine instead: without its SSH server or a pinned host key the call
+or re-read fails, and `downloadSpec` refuses one without the dial (the
+schema is re-read on its page). A service launched before is "direct",
+reached from PCP's machine at the published address as it was, until the
+owner updates or recreates it (`recreateServiceOn`), which moves it to the
+tunnel once it is healthy that way; the service's page says which.
+
 **Launching** (`upstream.ts launchService`, `services.ts launchServiceOn`):
 everything is checked before anything connects (the SSH server, the
-definition, the publish address and ports, the secrets, and that PCP can
-reach what it registers: a port bound to the SSH server's loopback is
-reachable only when PCP runs on that machine, until it can forward through
-the SSH connection). Then PCP finds the engine, pulls the image, runs the
-container, waits up to 90 seconds for it to be healthy (its HTTP health
-check from PCP when it can reach it, else the image's own check, else
-running is enough; a container that exits fails at once), makes the
-service's own server and its tools, and registers what it serves: an API
+definition, the publish address and ports, the secrets). Then PCP finds the
+engine, pulls the image, runs the container, waits up to 90 seconds for it
+to be healthy (its HTTP health check through the SSH connection, else the
+image's own check, else running is enough; a container that exits fails at
+once, and so does an SSH server that refuses the channel, `AllowTcpForwarding
+no`), makes the service's own server and its tools, and registers what it
+serves at `http://127.0.0.1:<port>` (as the SSH server reaches it): an API
 endpoint (`createEndpoint` with the schema at `specPath`, the base URL at
 `basePath`, `publicOnly` off, since it is the owner's own machine, and the
 `auth` variable's secret as its header) or an MCP server (`createServer`,
@@ -1040,10 +1082,32 @@ become healthy.
 **Status** is read only inside a request: the service's page when it opens
 (and on Check), `check_server` (for the service and for the server it
 serves), the owner's Check, and a failing call. Nothing polls: there is no
-stored key. A call to the endpoint or MCP server a service registered that
-fails with "could not be reached" reads the service's state (`dispatchCall`
-in `upstream.ts`) and, when it is stopped, gone or unhealthy, says so, with
-the service's `start` tool and its page, instead of a bare failure.
+stored key.
+
+**Started on demand.** What the owner asked last is kept
+(`service_spec.intended_state`): `stop`, the owner's or an assistant's tool,
+writes "stopped"; start, restart, launch, update and recreate write
+"running". A call to the endpoint or MCP server a service registered that
+fails with "could not be reached" (`dispatchCall` in `upstream.ts`), for a
+service left "running" whose container is exited or created, starts it in
+the same request (`services.ts startOnDemand`: inspect, start, wait for
+health up to `START_ON_DEMAND_WAIT_MS`; one start per service at a time,
+a second call waits for the first's), sends the call once more (nothing went
+through the first time) and puts "PCP started the service …" in front of
+its answer; a start that fails says why. Otherwise, or for a service stopped
+through PCP, the call reads the service's state and, when it is stopped,
+gone or unhealthy, says so (and that it was stopped through PCP), with the
+service's `start` tool and its page, instead of a bare failure. A container
+that is gone is not made again by a call. **The reconcile pass**
+(`upstream.ts reconcileServices`, `services.ts reconcileServicesWith`)
+brings services left "running" back up the same way, after a request that
+brought the vault's key was answered (`after()` in `app/mcp/route.ts` and
+the dashboard layout, like `runDueSyncs`), at most once in
+`SERVICE_RECONCILE_INTERVAL_MS` per vault, within a budget; never a timer,
+never a stored key. Docker restarts a container itself (`--restart
+unless-stopped`); Podman only with `podman-restart.service` enabled (as root,
+or `systemctl --user` with lingering for the login PCP uses) or a Quadlet
+unit, which a Podman service's page says.
 
 **Tools** (`services/tools.ts`, on the service's own server): `status` and
 `logs` (read-only; `lines` 1 to 500, `since_minutes` up to a week), `start`
@@ -1067,11 +1131,13 @@ repositories), launched on the import page the same way.
 with kind `service` takes the definition (`service`), the owner's SSH
 server by short name (`ssh_server`: one the token sees, whose host key the
 owner pinned), where its ports listen (`publish_address`, default
-`0.0.0.0`, and `publish_ports`, default the same numbers) and the secret
-each variable takes, by name (`env_secrets`). `prepareServiceProposal`
-checks all of it before the owner is asked (the definition as a launch
-checks it, the publish address, that PCP can reach what it registers, that
-each required variable and the endpoint's `auth` variable has a secret);
+`127.0.0.1`, which the owner's page shows as the SSH server's own loopback
+and any other address as reaching the service from its network, and
+`publish_ports`, default the same numbers) and the secret each variable
+takes, by name (`env_secrets`). `prepareServiceProposal` checks all of it
+before the owner is asked (the definition as a launch checks it, the
+publish address, that each required variable and the endpoint's `auth`
+variable has a secret);
 a stored text secret is reused, and one new name at most is typed in by
 the owner on PCP's page. The request (`service_change`) shows the SSH
 server and its address, the image and its source, the ports and address,
@@ -1999,7 +2065,8 @@ run_code cannot learn in time that nobody is waiting. It does not try to:
   `DUPLICATE_RUN_MS` (5 minutes) of its end, is answered with that run's
   id, state and calls instead of running again; `rerun: true` runs it all
   the same. A run that stopped for the owner is not held to this: its
-  answer says to run it again once they have answered.
+  answer says to check on the owner's next message and to run it again
+  once they allowed the call.
 
 A wrapper's run reports the same way but does not outlive its call: it
 stops when its request goes away, as before.
@@ -2405,9 +2472,10 @@ remembered for half a minute so an answer can say why a page did not open.
 Hosts are never logged.
 
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
-`snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
+`snapshot`, `read_page`, `find`, `click`, `drag`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog`, `hand_over` and `request_secret`. Every one but
+`download`, `handle_dialog`, `hand_over`, `request_secret`, `evaluate`,
+`console_log` and `network_log`. Every one but
 `tabs`' open and list and `request_secret` names its tab (below). An assistant reads a snapshot (Playwright's
 accessibility tree, with PCP's refs, below), `find`'s elements of it as JSON (role, name,
 ref, states, and the landmark or region each is in, which tells two lines
@@ -2462,9 +2530,92 @@ an image's own budget, apart from the text's); one that never fits is kept
 and handed back as its handle. While the page shows a dialog (an alert),
 every tool that needs the page answers at once with it and how to answer
 it with `handle_dialog`, rather than waiting on a page that cannot answer.
-It never gets a cookie or storage and never runs JavaScript. A
+No tool reads or sets cookies or storage directly; JavaScript runs only
+through `evaluate` (below). A
 refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
+
+**Points** (`input.ts`). `click`, `scroll` and `drag` also take a point,
+`x` and `y` in CSS pixels of the viewport (what a full-size screenshot
+shows at that pixel), for what a page draws without elements to name: a
+canvas app (Flutter's shows only its "Enable accessibility" button until
+it is clicked), a map, a game. They are DevTools `Input.dispatchMouseEvent`
+events, the same `dispatch` the owner's live view replays, kept inside the
+viewport, each waited for: a click is a move, a press and a release (two
+for `double`, with `button` left, right or middle), the wheel turns at the
+point, and a drag presses at one end, moves in `DRAG_STEPS` steps with the
+button held and lets go at the other (an end can be an element's middle,
+scrolled into view). `screenshot`'s answer says how its pixels map to the
+viewport's: its scale, where an element's picture starts, and the sum to
+turn a point in it into `x` and `y`. A point is the tool's tier, as a
+click on an element is.
+
+**Scripts** (`evaluate.ts`, `browser-scripts.ts`). `evaluate` runs an
+assistant's JavaScript in the page's own world with DevTools'
+`Runtime.evaluate` (`replMode`: statements and top-level await; a
+function's text is called, a promise awaited), which needs no
+`Runtime.enable`, so nothing of it shows to the page but what the script
+does. It is the one way an assistant's script runs in a page, and so the
+one tool that can read what the page sees (storage, cookies scripts may
+read), which is why every part of it is narrow:
+
+- It is Destructive, and asked of the owner per site. Unless the token has
+  a level for scripts at the tab's site (a `web_fetch_rule` of kind
+  `script` keyed by the site, own or for all tokens, written only by the
+  owner's answer or the token's page), or the owner let this very script
+  run once in this tab (an allowance in memory, taken by the call the
+  answer makes), it throws `OwnerNeeded`: a `script_use` request showing
+  the site, the page and the whole script, unfolded. Its answers are Run it
+  once, Allow scripts at this site, Block scripts at this site and Not now;
+  none changes the tool's own level, and a blocked tool stays blocked.
+- It is refused while a field holds a secret PCP typed (`held.ts`), as
+  `screenshot` is.
+- While it runs the tab reaches its own site only. The tab's DevTools
+  session enables request interception (`Fetch`) for every request its
+  frames and dedicated workers make and fails the ones to another site;
+  the gate (`mayOpen`) keeps its main frame and its popups at the site, and
+  a popup it opens is closed; and since interception does not see
+  WebSockets, the proxies (`admitConnection`) hold every new connection to
+  another site until the script is done, and refuse the ones the script
+  reached for (`Network.webSocketCreated`) at once. A proxy cannot tell tabs
+  apart, so another tab's new connection elsewhere waits those few seconds
+  too. What the script leaves running (a timer) goes on as the page's own
+  scripts would.
+- It is bounded (`EVALUATE_TIMEOUT_MS`, its own work and any promise), its
+  result handed over by value (a node or a cycle in words), as JSON with
+  any secret PCP typed in the tab masked (`maskTyped`, below), and a long
+  one (`EVALUATE_INLINE_CHARS`) kept as a result of the token's, answered
+  as its handle.
+
+From a wrapper or a browser flow it is a call like the others, at the
+calling token's levels; a `{"$secret"}` in its arguments is refused, as in
+any browser tool but `type`.
+
+**Logs** (`devtools.ts`). Each tab keeps rings of its newest console
+messages and requests (`MAX_CONSOLE_ENTRIES`, `MAX_NETWORK_ENTRIES`), in
+memory with its page, so a reset or a close empties them. They are
+DevTools events on the tab's own session, never page script. The console
+has the browser's own messages (the `Log` domain, which pages cannot tell
+is on) from the start; the page's console calls and uncaught errors need
+the `Runtime` domain, which pages can detect (and which patchright keeps
+off), so it is enabled only by the first `console_log` on the tab, which
+says so (Chromium then hands over what it kept since the page loaded). A
+request's entry is its method, address, status, type, size and timing, and
+its headers less every one that carries a credential (`Cookie`,
+`Set-Cookie`, `Authorization`, `Proxy-Authorization`, and any whose name
+says token, key, secret, auth, session, password or credential); an
+address loses its user name and password, and query and fragment values
+that look like credentials (by name, or a long mix of letters and digits)
+are masked, in the entry and in `Referer`, `Location` and `Origin`.
+`network_log` with `body` keeps that entry's request and response bodies
+(as far as Chromium kept them: `MAX_NETWORK_BODY_BYTES` each,
+`NETWORK_BUFFER_BYTES` a tab) as results of the token's and answers with
+their handles, never inline. Every text there, and `evaluate`'s result,
+shows a secret PCP typed into the tab as `[secret: name]`: `held.ts`
+remembers the keyed hash of each for the page's life (`typedInto`), and
+`maskTyped` hashes each word (and its URL-decoded form) against them. A
+request a page sent after PCP typed a secret into it gives no body, since
+the body could carry the secret encoded.
 
 **Secrets in pages** (`lib/core/browser-secrets.ts`, `call.ts`, `held.ts`).
 A secret goes into a page only as `type`'s text, `{"$secret": name}`: in an
@@ -2510,6 +2661,22 @@ change the origins, and saves it with the requesting token's allowance at
 each (one use, an hour, or always); the assistant hears the name. Origins
 are exported; allowances are not, are listed with End on the token's page
 and on the secret's row under Secrets, and are pruned once run out.
+
+**Sign-ins at a page's site** (`sign-in-hint.ts`). So an assistant types a
+password rather than asking the owner for it in the conversation, the
+answers of `navigate`, `snapshot` and `tabs` open (not every action) name
+the owner's secrets bound to the page's origin (`SecretBrowserOrigin`,
+`browser-secrets.ts signInsAt`, at most `MAX_SIGN_IN_HINTS`): each by name
+with what the owner said of it on the Secrets page, a login name (the email
+or user name it is the password of), a one-line note and its TOTP companion
+(a TOTP secret a text secret names, `secret.totp_companion_id`, set null
+when that one is deleted; a companion is named with its secret, not again
+on its own). Never a value: the login name and note are encrypted like the
+value and opened in `secrets.ts`, and naming a secret gives no right to it,
+since typing it is still the gate's above. When a frame of the page has a
+password field the note goes ahead of the tab's lines and says so; otherwise
+it follows them. Login names, notes and companions are exported with the
+secret.
 
 **Turns and deadlines** (`queue.ts`). The calls on one tab run one at a
 time, in its own lane, so a slow page holds up only its tab. Each has a
@@ -2719,6 +2886,64 @@ revision `patchright-core` drives, so after an update to a newer one the
 page offers to install that, which removes the older build. Nothing runs
 until the owner clicks.
 
+## Search's embeddings
+
+Keyword search misses a task said in other words than a tool's ("launch a
+container" for a tool that starts a service). The owner can give search an
+embeddings provider on Settings → Search (`lib/core/embeddings/`); without
+one, search is keywords alone, as above, and nothing below runs.
+
+**Providers.** Voyage AI (`VOYAGE_EMBEDDINGS_URL`, public addresses only,
+its API key one of the owner's text secrets), any OpenAI-compatible
+`/v1/embeddings` address the owner types (an optional text secret as the
+bearer; any address but PCP's own), or one of the owner's API endpoints, as
+a service registers one: text-embeddings-inference from PCP's common items,
+launched on an SSH server like any service. An endpoint is called at its own
+address with its own credential and its public-only rule. The choice is the
+vault's setting `embeddings` (`embeddings/config.ts`): the provider, the
+model, a secret and a server by id, never a value, and what it may embed.
+Saving tries the provider once and says what failed; a change of provider
+drops every cached vector.
+
+**What leaves PCP.** Only the kinds the owner ticked (`EmbeddedKinds`):
+tools (each one's title, `server/name` and description, PCP's own
+included), skills (name and description), memories (path and text); and
+the query. Nothing else: no server description, owner's note, argument or
+secret. Settings starts a provider elsewhere (Voyage AI, an address that
+does not read as the owner's own network, `looksSelfHosted`) at tools only,
+and the owner's own service (an endpoint, an address on their network) at
+everything (`defaultEmbedded`).
+
+**The request.** upstream.ts `embeddingProvider` reads the secret and hands
+`embeddings/provider.ts requestEmbeddings` the finished header, as it hands
+an API endpoint's calls theirs. The request follows no redirect, reads a
+bounded answer (`EMBED_MAX_RESPONSE_BYTES`), checks every vector (one per
+text, numbers only, one length, `EMBED_MAX_DIMENSIONS`), scrubs the
+credential from what it says back, and is paced as a read
+(`pacing/index.ts paceEmbeddings`: by the endpoint with its own calls, or by
+the vault's provider), waiting `EMBED_PACE_WAIT_MS` at most for its turn.
+
+**The cache.** Vectors are rows of `embedding_vector`: the vector encrypted
+under the vault's key with `embedding_vector:<id>`, found by an HMAC (a key
+derived from the vault's key) of the provider, address and model and the
+text embedded. A changed text has another hash, so it is embedded again and
+the old row is no longer used; a row's `used_at` is written once a day at
+most, and the cleanup removes rows no search used for `EMBED_STALE_MS`. The
+cache is never exported, and a restore or a deleted vault wipes it.
+
+**A search.** Inside the search's request only, never on a timer: the
+query is embedded (`EMBED_QUERY_TIMEOUT_MS`) while the items' cached
+vectors are read and up to `EMBED_MAX_NEW_PER_SEARCH` missing ones are
+embedded, `EMBED_BATCH_SIZE` at a time within `EMBED_ITEMS_TIMEOUT_MS`;
+what is not back in time waits for a later search. Each item with a vector
+gets its cosine similarity, and `search.ts semanticBoosts` turns those into
+points relative to the others (the nearest `SEMANTIC_WEIGHT`, one below the
+middle or past `SEMANTIC_BAND` from the nearest none), added to the keyword
+score, so a name given exactly (1,000) still comes first and an item no
+keyword found can come up. A provider that fails, is slow, or answers what
+PCP cannot read leaves search to keywords, quietly: the assistant's answer
+says nothing of it.
+
 ## Pacing
 
 Assistants act far faster than a person, and a site that sees a quick run of
@@ -2727,7 +2952,9 @@ small server or a busy page can be overloaded by one. The rate limits
 (`lib/core/rate-limit.ts`) only refuse past a count; pacing
 (`lib/core/pacing/`) spaces actions out, the same way whatever made them.
 
-**Where it applies.** At two places, which every way of calling passes:
+**Where it applies.** At two places, which every way of calling passes
+(and to search's embeddings requests, as a read: Search's embeddings,
+above):
 
 - `callServerTool` (`upstream.ts`), for a server's tools: MCP servers, API
   endpoints, mail and calendar accounts and SSH servers, paced by the
@@ -3291,7 +3518,8 @@ nothing else: no arguments, no results, no sites.
 ended sign-ins, unfinished OAuth sign-ins, apps' codes and tokens past their
 expiry (with their grants) and registrations no sign-in used within a day
 (PCP's authorization server), permission requests a week past
-their expiry, kept results past their day, and days of the request log older
+their expiry, kept results past their day, search's cached embeddings no
+search used for a month, and days of the request log older
 than the owner keeps (90 by default, 1 to 3,650). It runs when PCP starts and
 then on a node-cron task, one per process and kept on `globalThis` like the
 update timer, unref'd, with no overlap: runs from the start, the schedule and
@@ -3511,7 +3739,12 @@ message each (`app/mcp/route.ts`). The tools:
   tools the token has (as `buildGatewayServer` registered them), the skills
   the token sees and (for a token that keeps memories) the memories it reads
   together (`lib/core/search.ts searchEverything`: name, title, description
-  and server words, with light stemming; a skill scores as a tool named
+  and server words, stemmed so a word's forms meet ("storage" and
+  "stored", "launching" and "launch"), with a short table of synonyms
+  ("container", "service", "docker", "podman"; "launch", "start", "run",
+  "deploy"; "file", "document") that score about half the word itself; a
+  word in a description's lead (up to its first clause) scores a little
+  more than one further on; a skill scores as a tool named
   after it, a memory as one named by its path and described by its text),
   and returns `kind ref — line` lines: `tool server/tool`, `pcp <name>`
   with its title, first sentence and that it is called directly (not
@@ -3524,9 +3757,16 @@ message each (`app/mcp/route.ts`). The tools:
   description or the owner's note on it only when no candidate has that
   word in its name, its title or its server's name, so "PCP" does not lift
   every tool on a server described as hosting PCP. One of PCP's own tools
-  comes up by its name or title only (the app lists them whole already),
-  and with an empty query only for kind `pcp`. `server` keeps to one
-  server's tools, `kind` to one kind (`tool`, `pcp`, `skill`, `memory`).
+  comes up by its name or title, or by what its description's lead says it
+  is for (its task phrases: share_result's "store, move or download a
+  file", register_server's "launch or run a container, start a service"),
+  and its title and lead then score as its name does; never by a word
+  further on (which says how it works with the others), nor by a word the
+  leads of a fifth of PCP's tools share ("owner", "tool"). With an empty
+  query it comes up only for kind `pcp`. `server` keeps to one server's
+  tools, `kind` to one kind (`tool`, `pcp`, `skill`, `memory`). With an
+  embeddings provider (Search's embeddings, below), each item's nearness to
+  the query is added to its keyword score.
 - `list_tools(server, offset?)` names every tool the token sees on one
   server, by name, with its level (`allowed` or `ask`) and a summary,
   `LIST_PAGE_SIZE` at a time (`listTools` in `lib/core/search.ts`), so an
@@ -3815,7 +4055,7 @@ Sessions are kept in memory too (`clients/sessions.ts`), as /mcp is
 stateless and no request carries a session id: a session is a token and its
 client, begun again by an `initialize` and forgotten after half an hour
 without a request; two conversations at once share one, which is accepted.
-In it, PCP says two things once. `search` and `describe` add a line of
+In it, PCP says three things once. `search` and `describe` add a line of
 their own, after their answer, while `read_memory` `every` has not run
 ("Owner's rules: call read_memory with command "every" first."), for a token
 that keeps memories. For a profile that mirrors, the instructions' key
@@ -3823,8 +4063,21 @@ rules (how to find and call a tool, the owner's link, check_permission,
 read_result) follow `read_memory` `every`'s answer, or else the first
 `search` or `describe` answer, as a text of its own so a JSON answer stays
 JSON; with the owner's own instructions when the token keeps no memories,
-since `read_memory` `every` gives them otherwise. A scope without a client
-(the owner's pages, tests) says neither.
+since `read_memory` `every` gives them otherwise. And every answer of
+PCP's own tools (`call_tool_*` and `run_code_*` among them) starts with a
+text naming the token's requests the owner answered that the session has
+not heard of, each once (`answeredLead` in the gateway, through
+`ServeHooks.lead`, `withLeadText`): in front, so an answer that asks the
+owner still ends with its link, and with structuredContent as it was (the
+text also in `_meta["gg.pcp/notes"]`). The session keeps where to look
+from and the ids it told (`answeredCursor`, `lookedForAnswers`); its first
+look reaches back `ANSWERED_WINDOW_MS`, so a conversation begun after the
+owner answered still hears of it, and each later one starts
+`ANSWERED_SLACK_MS` before the last, skipping what it told by id. A request
+`check_permission` read or listed counts as told. One query per answer, on
+the token's rows by `decidedAt` (an index of its own); the rows it names
+are read in full only when there is something new. A scope without a
+client (the owner's pages, tests) says none of these.
 
 ## Tool access and the owner's permission
 
@@ -3854,7 +4107,7 @@ arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
 and a day to answer. The result is text for the assistant: what was asked,
 the link to `/permissions/<id>` to end its reply with, and to call
-`check_permission` once the owner says they have answered. The signed-in
+`check_permission` on the owner's next message, whatever it says. The signed-in
 owner answers on that page, and only there (the header's bell lists every
 request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
 and runs the call once. "Always allow" and "Block" also write the tool's
@@ -3871,7 +4124,11 @@ browser tools (`finishHandover`). The bell drops it (it lists pending rows
 only), the request's page says "Withdrawn by the assistant", and the Log
 shows the call that asked as withdrawn. `check_permission` with no id lists
 the token's own requests still waiting (id, kind, title, age and link),
-and only reads.
+then those the owner answered in the last hour (`ANSWERED_WINDOW_MS`, at
+most `MAX_ANSWERED_LISTED`, newest first: id, kind, title, when, and the
+first line of what `check_permission` with its id says), and only reads.
+Answered means running, executed, failed or declined, with `decidedAt` as
+the time; a request withdrawn or closed is not an answer of the owner's.
 
 What waits for the owner is one queue, oldest first
 (`lib/core/owner-queue.ts`): the requests from live tokens
@@ -3921,8 +4178,11 @@ says to end the reply with the link (`owner-link.ts: linkLastText`, the link
 on its own last line as a markdown link whose label names the action, such
 as `[Allow gmail-imap/send_email?](…)`: an app that reads the reply aloud
 says the label rather than an address of ids, so the bare address is never
-to be pasted) and to call `check_permission` once the owner says they
-have answered. In case they are still on it, the check holds the call while
+to be pasted) and to call `check_permission` on the owner's next message,
+whatever it says, before sending the link again or assuming the request is
+still open (`owner-link.ts: nextMessageCheck`): the owner's words rarely say
+whether they answered, and an assistant that waited to be told sent links
+again for requests already decided. In case they are still on it, the check holds the call while
 the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
 minute at which clients and proxies give up, checking every second, and
 dropping out when the client goes away) and answers as soon as they have.
@@ -3940,8 +4200,10 @@ protocol version in its `_meta`, which that line carries, with the values of
 `x-anthropic-client` and `mcp-protocol-version`.
 An OAuth server that needs signing in (a call to it, or one the owner just
 agreed to add) answers with a link to its page in PCP, handed over the same
-way, where Connect starts the sign-in; `check_server` then says whether it
-is connected, waiting the same way, and its tools are read. A server that needs a client from the owner first (status
+way, where Connect starts the sign-in; `check_server`, called on the
+owner's next message the same way, says whether it is connected, waiting
+the same way, and its tools are read (`check_upload` for an upload link
+likewise). A server that needs a client from the owner first (status
 `client_required`) gets the same link; its page says what to create.
 
 The client's own prompts (form and URL elicitation, with `input_required`
@@ -3970,6 +4232,36 @@ now", and `decidePermission` refuses any other, so an assistant cannot raise
 its own access. `check_permission` waits for the save as for any answer and
 says what was saved, and how it differs from what was proposed.
 
+`register_server`, `create_wrapper` and `update_wrapper` take the same kind
+of proposal with what they propose (`tool_access`,
+`lib/core/proposed-access.ts`): entries of tool names or `*` patterns (none
+for every tool), each with a level for the calling token, a tier, or both,
+later entries winning field by field. It rides on the request itself
+(`proposedAccess` on its input) and is shown, filled in and editable, in the
+same page as the approval (`components/proposed-access-editor.tsx` inside
+the decision); the yes sends what the owner left there
+(`decidePermission`'s `access`, checked by `checkChosenAccess` before the
+row is claimed, so a mistake leaves the request open), and nothing else
+writes it: an answer without it writes no level, and the token's page sends
+the owner to the request's page for one that has a proposal. Where the
+tools are known before the server exists (a wrapper's tools, an API
+endpoint's operations from the schema the owner is shown, a mail or calendar
+account's fixed tools, `register-access.ts`) the proposal is one rule per
+tool and a name that matches none of them is refused before the owner is
+asked; a tool the token has blocked is hidden, as for `propose_tool_access`.
+Where they are not (an MCP server by its address, one that signs in with
+OAuth, what a service registers) the rules stay patterns, which the owner
+can change, remove or add to. On the yes, `settleChosenAccess` writes them
+through the access request's own checks and writes (`checkAccessLevels`,
+`checkAccessTiers`, `writeAccessLevels`, `writeAccessTiers`, so tiers go
+through `setToolTier` on the definition) to the tools the server has; with
+none yet, they are kept on the server (`mcp_server.pending_access`: the
+token's id and the rules, no secret) and `upstream.ts syncServerTools`
+applies them once, after the first read that finds tools, and clears them.
+Applied later, they leave alone a tool the token has blocked since, and give
+a revoked or deleted token nothing. With no proposal the approval reads as
+before: a new server's tools ask the owner first, for every token.
+
 `register_server` takes a secret's name, never its value, and always asks:
 otherwise an assistant could point a stored secret at an address it chose.
 Once the owner agrees, PCP adds the server (or the mail account: `executeRegister`
@@ -3988,9 +4280,17 @@ over `openapi/transport.ts` with the address checked as the socket connects,
 refusing private, loopback, link-local and PCP's own addresses. It follows
 redirects as fetch does (`checkedFetch`), each hop a request of its own that
 is checked again, so a redirect cannot lead past the check. The owner clears
-it under "Public addresses only" on the server's form, for a server on their
-own network; a server the owner adds is not public-only unless they tick it.
+it with the "Public addresses only" switch on the server's page (outside
+Advanced, `#public-only`), for a server on their own network; a server the
+owner adds is not public-only unless they tick it on the add form.
 Before the owner is asked, the server's host is resolved and a private or
 local one is flagged on the approval page (an owner-only line, as for a mail
-account), saying it connects only once they allow private addresses.
+account). A request flagged so (an MCP server's resolved host, or an
+endpoint's literal private base URL; never a mail or calendar account) offers
+"Allow private addresses" on its page, off (`PermissionView
+offersPrivateAddresses`): ticked, `decidePermission`'s `allowPrivate` makes
+the server with `public_only` off; left alone, or on a request not flagged,
+it is public-only whatever the stored arguments say. register_server has no
+argument for it, so nothing an assistant sends sets it. Approved and left
+public-only, the outcome ends with the link to the switch.
 Requests are deleted at boot a week after they expire.

@@ -73,4 +73,21 @@ describe("PCP's suggested instructions", () => {
     expect(v4).toContain("call_tool_destructive")
     expect(mergeLines(v3, v3, v4)).toEqual({ text: v4, conflicts: 0 })
   })
+
+  it("check on the owner's next message from version 5, offered as a merge", () => {
+    const v4 = templateText(4)!
+    const v5 = templateText(5)!
+
+    expect(v4).not.toContain("next message")
+    expect(v5).toContain(
+      "On the owner's next message after such a link, whatever it says, call check_permission with its id",
+    )
+    expect(mergeLines(v4, v4, v5)).toEqual({ text: v5, conflicts: 0 })
+
+    const mine = `${v4}\n- Answer in Dutch.`
+    expect(mergeLines(v4, mine, v5)).toEqual({
+      text: `${v5}\n- Answer in Dutch.`,
+      conflicts: 0,
+    })
+  })
 })

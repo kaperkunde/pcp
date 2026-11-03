@@ -14,6 +14,7 @@ import {
   setOAuthClient,
   setOAuthSignInParams,
   setServerEnabled,
+  setServerPublicOnly,
   setToolDescription,
   updateServer,
   type AuthType,
@@ -84,7 +85,11 @@ export async function updateServerAction(
   const id = field(formData, "id")
 
   const result = await guarded(async () => {
-    const { reconnect } = await updateServer(ctx, id, inputFrom(formData))
+    // "Public addresses only" is the page's own switch, not the form's.
+    const { reconnect } = await updateServer(ctx, id, {
+      ...inputFrom(formData),
+      publicOnly: undefined,
+    })
 
     const slug = field(formData, "slug")
     if (slug) {
@@ -221,6 +226,43 @@ export async function setToolDescriptionAction(
   })
 
   revalidatePath(`/servers/${serverId}`)
+
+  return result
+}
+
+/**
+ * The "Public addresses only" switch on an MCP server's or an endpoint's
+ * page. An MCP server's tools are read again, since what it reaches now
+ * can change them; an endpoint's calls follow it from the next one.
+ */
+export async function setServerPublicOnlyAction(
+  id: string,
+  publicOnly: boolean,
+): Promise<ServerActionResult> {
+  const ctx = await requireContext()
+
+  const result = await guarded(async () => {
+    const server = await setServerPublicOnly(ctx, id, publicOnly === true)
+
+    if (server.kind !== "mcp") {
+      return { message: "Saved." }
+    }
+
+    const sync = await syncServerTools(ctx, server, {
+      publicUrl: await publicUrlFor(ctx),
+    })
+
+    return {
+      message:
+        sync.status === "ok"
+          ? `Saved. Found ${toolCount(sync.toolCount)}.`
+          : `Saved. ${sync.message}`,
+    }
+  })
+
+  revalidatePath("/servers")
+  revalidatePath(`/servers/${id}`)
+  revalidatePath("/tokens/[id]", "page")
 
   return result
 }

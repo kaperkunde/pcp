@@ -14,6 +14,7 @@ import {
 } from "./define"
 import {
   errorOutcome,
+  NOTES_META_KEY,
   passOn,
   toCallToolResult,
   toolError,
@@ -53,6 +54,12 @@ export type ServeHooks = {
   publicUrl: string
   /** Writes the call's line in the request log. */
   log: (line: CallLine) => void
+  /**
+   * A text to put in front of the answer, after the tool ran (what the
+   * session has not heard of yet: the owner's answers to its requests);
+   * null for none. Its failure costs the answer nothing.
+   */
+  lead?: () => Promise<string | null>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -177,6 +184,35 @@ export function fitForClients(
   return rest
 }
 
+/**
+ * A text of its own in front of a served result. structuredContent stays
+ * as it is, and carries the text in `_meta` as a renamed argument's note
+ * does; in front, so an answer that asks the owner still ends with its
+ * link.
+ */
+export function withLeadText(
+  result: CallToolResult,
+  lead: string,
+): CallToolResult {
+  const notes = result._meta?.[NOTES_META_KEY]
+
+  return {
+    ...result,
+    content: [{ type: "text", text: lead }, ...result.content],
+    ...(result.structuredContent !== undefined
+      ? {
+          _meta: {
+            ...result._meta,
+            [NOTES_META_KEY]: [
+              lead,
+              ...(Array.isArray(notes) ? (notes as string[]) : []),
+            ],
+          },
+        }
+      : {}),
+  }
+}
+
 /** What a tool names for its log line, from arguments not yet checked. */
 function logNames(tool: Tool, args: Record<string, unknown>): LogNames {
   try {
@@ -273,6 +309,20 @@ export function serveTool(
           code: "internal",
         })
         result = toCallToolResult(outcome, { notes })
+      }
+    }
+
+    if (hooks.lead) {
+      const lead = await hooks.lead().catch((error: unknown) => {
+        console.error("[gateway] an answer's lead failed", {
+          tool: tool.name,
+          error,
+        })
+        return null
+      })
+
+      if (lead) {
+        result = withLeadText(result, lead)
       }
     }
 

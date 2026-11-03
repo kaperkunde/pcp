@@ -12,7 +12,12 @@ import { createFakeJmap, type FakeJmap } from "./mail/fake-jmap"
 import { oauthRedirectUrl } from "./oauth-client"
 import { json, startTestApi, type TestApi } from "./openapi/test-api"
 import { checkedFetch } from "./openapi/transport"
-import { createServer, getServer, updateServer } from "./servers"
+import {
+  createServer,
+  getServer,
+  setServerPublicOnly,
+  updateServer,
+} from "./servers"
 import { scratchDatabase } from "./test-db"
 import {
   callServerTool,
@@ -435,6 +440,43 @@ describe("an MCP server limited to public addresses", () => {
       status: "ok",
       toolCount: 1,
     })
+  })
+
+  it("hands the assistant the server's switch when a call is refused", async () => {
+    const server = await localServer(true)
+
+    const refused = await callServerTool(ctx, server, "ping", {}, PUBLIC).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(refused).toBeInstanceOf(Error)
+    const message = (refused as Error).message
+    expect(message).toMatch(/only reaches public ones/)
+    expect(message.trimEnd().split("\n").at(-1)).toBe(
+      `[Allow private addresses for Local](http://localhost:3000/servers/${server.id}#public-only)`,
+    )
+    // The status the owner reads on the server's page stays plain text.
+    expect((await getServer(ctx, server.id)).statusMessage).not.toContain("](")
+    expect(mcp.requests).toHaveLength(0)
+  })
+
+  it("is lifted by the owner's switch on the server's page", async () => {
+    const server = await localServer(true)
+
+    await setServerPublicOnly(ctx, server.id, false)
+    const allowed = await getServer(ctx, server.id)
+    expect(allowed.publicOnly).toBe(false)
+    expect((await syncServerTools(ctx, allowed, PUBLIC)).status).toBe("ok")
+
+    // Saving the form under Advanced, which no longer carries the switch,
+    // keeps what the switch set.
+    await setServerPublicOnly(ctx, server.id, true)
+    await updateServer(ctx, server.id, {
+      name: "Local again",
+      url: server.url,
+      authType: "none",
+    })
+    expect((await getServer(ctx, server.id)).publicOnly).toBe(true)
   })
 
   it("is not set on a server the owner adds", async () => {

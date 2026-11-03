@@ -113,9 +113,9 @@ Use a `Card` for what is not rows: a form, a block of text, a code sample.
 
 | Shown on the page                                           | Folded (Disclosure) or one page down                                                     |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| A server's description, sign-in state, on/off               | Its address, headers, sign-in app (OAuth client), private addresses                      |
+| A server's description, sign-in state, on/off, public-only  | Its address, headers, sign-in app (OAuth client)                                         |
 | Its tools                                                   | Each tool's description in the owner's words                                             |
-| An endpoint's read-only switch                              | Schema source, base URL, sign-in kind, JSON Patch edits, public-only                     |
+| An endpoint's read-only and public-only switches            | Schema source, base URL, sign-in kind, JSON Patch edits                                  |
 | What it reaches and the skills it sees; memories, web, code | Expiry, its instructions, every tool's level, web methods and sites, what it may propose |
 | Connecting an assistant: which app, name, reach             | More options: expiry, memories, web, code, endpoints, wrappers                           |
 | Settings: address, updates, sign-in, backup                 | Network (public address, outside access, pcp.gg, DNS, HTTPS), upkeep                     |
@@ -186,7 +186,10 @@ Opinionated, and each one the safe side:
   off (the add form says so).
 - A new assistant reaches all servers, but every tool asks first; memories,
   web pages, running code and proposing are off until turned on.
-- A server an assistant proposes reaches public addresses only.
+- A server an assistant proposes reaches public addresses only. One at a
+  private address offers "Allow private addresses" on its request, off;
+  the "Public addresses only" switch stays on the server's page, where a
+  refusal's link (`#public-only`) leads.
 - Advanced and More options start folded, except where something in them
   needs the owner now.
 

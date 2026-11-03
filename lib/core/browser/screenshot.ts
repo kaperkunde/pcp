@@ -104,7 +104,15 @@ export async function takePicture(
     maxWidth,
     quality,
   }: { element?: Locator; maxWidth?: number; quality?: number },
-): Promise<(Picture & { width: number; height: number }) | null> {
+): Promise<
+  | (Picture & {
+      width: number
+      height: number
+      /** Where its top left is in the viewport, in CSS pixels. */
+      origin: { x: number; y: number }
+    })
+  | null
+> {
   if (element) {
     await element
       .scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT_MS })
@@ -162,5 +170,6 @@ export async function takePicture(
     ...picture,
     width: Math.round(area.width * picture.scale),
     height: Math.round(area.height * picture.scale),
+    origin: { x: area.x - view.pageX, y: area.y - view.pageY },
   }
 }

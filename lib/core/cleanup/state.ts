@@ -43,6 +43,11 @@ export type CleanupCounts = {
   requests: number
   results: number
   allowances: number
+  /**
+   * Search's cached embeddings no search used for a while. Missing from a
+   * status saved before it.
+   */
+  vectors?: number
   logDays: number
 }
 
@@ -195,6 +200,7 @@ const REMOVED: Array<[keyof CleanupCounts, string, string]> = [
     "ended time-limited allowance",
     "ended time-limited allowances",
   ],
+  ["vectors", "unused search vector", "unused search vectors"],
   ["logDays", "day of log", "days of log"],
 ]
 

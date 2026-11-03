@@ -24,6 +24,7 @@ import { checkRateLimit } from "@/lib/core/rate-limit"
 import { publicUrlFor, publicUrlWithoutSession } from "@/lib/server/public-url"
 import { loadResourceLimits } from "@/lib/core/resources/state"
 import { runDueSyncs } from "@/lib/core/repos/sync"
+import { reconcileServices } from "@/lib/core/upstream"
 
 /**
  * The gateway endpoint: https://<pcp>/mcp
@@ -228,6 +229,9 @@ async function handle(request: Request): Promise<Response> {
   // Linked repositories due a sync are synced once this answer is sent,
   // with the key this request brought: nothing holds one in between.
   after(() => runDueSyncs(resolved.ctx))
+  // Services the owner left running whose container stopped are started
+  // again the same way, throttled: never on a timer.
+  after(() => reconcileServices(resolved.ctx, { publicUrl: scope.publicUrl }))
 
   return withCors(response)
 }

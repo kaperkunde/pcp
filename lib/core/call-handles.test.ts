@@ -513,7 +513,9 @@ describe("call_tool with a call handle", () => {
       },
     })
     expect(both.isError).toBe(true)
-    expect(both.text).toContain("Give a ref or a target, one of them.")
+    expect(both.text).toContain(
+      "Give a ref, a target or a point (x and y), one of them.",
+    )
     expect(await db().permissionRequest.count()).toBe(0)
 
     const asked = await call(client, "call_tool_destructive", {

@@ -557,9 +557,121 @@ describe("an address on the owner's own network", () => {
 
       const host = new URL(url).hostname.replace(/^\[|\]$/g, "")
       expect((await shown()).lines, url).toContainEqual(
-        `${host} is, or resolves to, a private or local address. A server an assistant proposes reaches public addresses only: if you agree, it connects once you allow private addresses on its page.`,
+        `${host} is, or resolves to, a private or local address. A server an assistant proposes reaches public addresses only: allow private addresses below as you agree, or later on its page.`,
       )
+      expect((await shown()).offersPrivateAddresses, url).toBe(true)
     }
+  })
+
+  it("offers the owner no private addresses for a public server or a mail account", async () => {
+    await register({ name: "Linear", url: "https://mcp.linear.example/mcp" })
+    expect((await shown()).offersPrivateAddresses).toBe(false)
+
+    await db().permissionRequest.deleteMany()
+    await register({
+      kind: "imap",
+      name: "Home mail",
+      url: "mail.lan",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Home mail password",
+    })
+    expect((await shown()).offersPrivateAddresses).toBe(false)
+  })
+
+  it("never takes public-only from the assistant", async () => {
+    for (const extra of [
+      { public_only: false },
+      { allow_private: true },
+      { private_addresses: true },
+    ]) {
+      const asked = await register({
+        name: "Linear",
+        url: "http://192.168.1.30:8080/mcp",
+        ...extra,
+      })
+      expect(asked.isError, JSON.stringify(extra)).toBe(true)
+    }
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  describe("approved", () => {
+    const NO_SYNC = {
+      callTool: async () => {
+        throw new Error("no call runs here")
+      },
+      syncTools: async () => ({
+        status: "error" as const,
+        message: "It could not be reached.",
+        toolCount: 0,
+      }),
+    }
+
+    async function approve(allowPrivate?: boolean) {
+      const row = await db().permissionRequest.findFirstOrThrow({
+        orderBy: { createdAt: "desc" },
+      })
+      const result = await decidePermission(
+        ctx,
+        row.id,
+        "allow_once",
+        { publicUrl: PUBLIC_URL, allowPrivate },
+        NO_SYNC,
+      )
+      const after = await db().permissionRequest.findUniqueOrThrow({
+        where: { id: row.id },
+      })
+      const text = (result.content as Array<{ text?: string }>)
+        .map((part) => part.text ?? "")
+        .join("")
+
+      return { server: await getServer(ctx, after.serverId!), text }
+    }
+
+    it("stays public-only unless the owner ticks Allow private addresses, and links its switch", async () => {
+      await register({ name: "Home", url: "http://192.168.1.30:8080/mcp" })
+      const left = await approve()
+      expect(left.server.publicOnly).toBe(true)
+      expect(left.text.trimEnd().split("\n").at(-1)).toBe(
+        `[Allow private addresses for Home](${PUBLIC_URL}/servers/${left.server.id}#public-only)`,
+      )
+
+      await register({ name: "Home 2", url: "http://192.168.1.30:8080/mcp" })
+      const allowed = await approve(true)
+      expect(allowed.server.publicOnly).toBe(false)
+      expect(allowed.text).not.toContain("#public-only")
+    })
+
+    it("ignores the tick on a request that was not flagged private", async () => {
+      await register({ name: "Linear", url: "https://mcp.linear.example/mcp" })
+      const { server, text } = await approve(true)
+
+      expect(server.publicOnly).toBe(true)
+      expect(text).not.toContain("#public-only")
+    })
+
+    it("makes an endpoint at a private address the same way", async () => {
+      const local = JSON.stringify({
+        openapi: "3.0.3",
+        info: { title: "Local" },
+        servers: [{ url: "http://127.0.0.1:9/v1" }],
+        paths: { "/pets": { get: { operationId: "listPets" } } },
+      })
+
+      await register({ name: "Local", openapi_schema: local })
+      expect((await shown()).offersPrivateAddresses).toBe(true)
+      const left = await approve()
+      expect(left.server.publicOnly).toBe(true)
+      expect(left.text).toContain("its calls are refused")
+      expect(left.text).toContain(
+        `(${PUBLIC_URL}/servers/${left.server.id}#public-only)`,
+      )
+
+      await register({ name: "Local 2", openapi_schema: local })
+      const allowed = await approve(true)
+      expect(allowed.server.publicOnly).toBe(false)
+      expect(allowed.text).not.toContain("#public-only")
+    })
   })
 
   it("does not flag a name that does not resolve", async () => {
@@ -1295,7 +1407,7 @@ describe("proposing a service", () => {
         "Runs on your SSH server Build box (build.ada-home.net), with the Docker or Podman there",
         `Image: ${IMAGE}`,
         "Updates from: ghcr.io/docling-project/docling-serve-cpu:latest, when you update it on its page",
-        "Published on 0.0.0.0: 8001 → 5001 (every address of the SSH server)",
+        "Published on 127.0.0.1: 8001 → 5001 (the SSH server's own loopback: PCP reaches it through the SSH connection)",
         'Variable DOCLING_SERVE_API_KEY: a new secret, saved as "Docling key", which you enter here when you agree',
         "Variable DOCLING_SERVE_ENABLE_UI: its fixed value, false",
         "Named volumes (never a folder of the server): cache at /opt/cache",
@@ -1315,6 +1427,23 @@ describe("proposing a service", () => {
       "Not now",
     ])
     expect(await db().mcpServer.count({ where: { kind: "service" } })).toBe(0)
+  })
+
+  it("shows a publish address on the SSH server's network as reaching the service", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      publish_address: "0.0.0.0",
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+
+    expect((await shown()).lines).toContain(
+      "Published on 0.0.0.0: 5001 → 5001 (every address of the SSH server: anything on its network reaches it)",
+    )
   })
 
   it("launches exactly what was shown on approval, with the secret the owner typed", async () => {
@@ -1337,8 +1466,9 @@ describe("proposing a service", () => {
       expect.objectContaining({
         name: "Docling",
         hostId: host.id,
+        // The SSH server's own loopback unless the assistant names another.
         publish: {
-          address: "0.0.0.0",
+          address: "127.0.0.1",
           ports: [{ container: 5001, host: 5001 }],
         },
         env: { DOCLING_SERVE_API_KEY: secret.id },
@@ -1392,8 +1522,8 @@ describe("proposing a service", () => {
     expect((await propose({ ssh_server: unpinned.slug })).text).toMatch(
       /has not pinned Spare box's host key/,
     )
-    expect((await propose({ publish_address: "127.0.0.1" })).text).toMatch(
-      /own loopback/,
+    expect((await propose({ publish_address: "box; id" })).text).toMatch(
+      /IP address/,
     )
     expect((await propose({ env_secrets: [] })).text).toMatch(
       /needs DOCLING_SERVE_API_KEY/,
@@ -1500,5 +1630,281 @@ describe("proposing a service", () => {
     })
     expect(JSON.stringify(await approve())).toMatch(/has changed since/)
     expect(launched).toHaveLength(2)
+  })
+
+  it("takes tool_access for what it registers, by name, and refuses it for a service that registers nothing", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    const asked = await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+      tool_access: [{ tools: ["convert_*"], access: "allowed", tier: "read" }],
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.proposedAccess).toEqual({
+      tools: null,
+      rules: [{ pattern: "convert_*", access: "allowed", tier: "read" }],
+      tokenName: "Claude",
+    })
+    expect(view.lines).toContain(
+      "Its tools (status, logs, start, stop, restart) and what it adds ask you first, for every token, as a new server's do, except where you set a level below for what it adds",
+    )
+
+    const none = await register({
+      name: "Plain",
+      service: { ...DEFINITION, registers: { kind: "none" } },
+      ssh_server: host.slug,
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+      tool_access: [{ access: "allowed" }],
+    })
+
+    expect(none.isError).toBe(true)
+    expect(none.text).toMatch(/this one registers nothing/)
+  })
+})
+
+describe("levels and tiers proposed with it (tool_access)", () => {
+  const NO_SYNC = {
+    callTool: async () => {
+      throw new Error("no call runs here")
+    },
+    syncTools: async () => ({
+      status: "ok" as const,
+      message: "",
+      toolCount: 0,
+    }),
+  }
+  const ZOO = JSON.stringify({
+    openapi: "3.0.3",
+    info: { title: "Zoo" },
+    servers: [{ url: "https://api.example.com/v1" }],
+    paths: {
+      "/pets": {
+        get: { operationId: "listPets" },
+        post: { operationId: "addPet" },
+      },
+      "/pets/{id}": {
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+          },
+        ],
+        delete: { operationId: "deletePet" },
+      },
+    },
+  })
+
+  async function tokenId() {
+    return (await db().apiToken.findFirstOrThrow({ where: { name: "Claude" } }))
+      .id
+  }
+
+  async function decide(access?: unknown) {
+    const row = await db().permissionRequest.findFirstOrThrow({
+      orderBy: { createdAt: "desc" },
+    })
+
+    return decidePermission(
+      ctx,
+      row.id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL, ...(access !== undefined ? { access } : {}) },
+      NO_SYNC,
+    )
+  }
+
+  async function levels(serverId: string) {
+    return (
+      await db().apiTokenToolAccess.findMany({
+        where: { tokenId: await tokenId(), serverId },
+        orderBy: { toolName: "asc" },
+      })
+    ).map((row) => [row.toolName, row.access])
+  }
+
+  it("shows an API's proposal per tool, filled in, and says whose levels they are", async () => {
+    const asked = await register({
+      name: "Zoo",
+      openapi_schema: ZOO,
+      tool_access: [
+        { tools: ["list*"], access: "allowed", tier: "read" },
+        { tools: ["deletePet"], access: "blocked" },
+      ],
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.proposedAccess).toEqual({
+      tools: [
+        { name: "listPets", title: null },
+        { name: "addPet", title: null },
+        { name: "deletePet", title: null },
+      ],
+      rules: [
+        { pattern: "listPets", access: "allowed", tier: "read" },
+        { pattern: "deletePet", access: "blocked" },
+      ],
+      tokenName: "Claude",
+    })
+    expect(view.lines.join("\n")).toContain(
+      'The assistant proposes levels for 2 tools: 1 to Allowed, 1 to Blocked; tiers for 1 tool: 1 to Read. They are filled in below: the levels are for the token "Claude" only',
+    )
+    // Nothing exists, and no level is written, before the owner agrees.
+    expect(await db().mcpServer.count({ where: { kind: "openapi" } })).toBe(0)
+    expect(await db().apiTokenToolAccess.count()).toBe(0)
+  })
+
+  it("writes on the yes only what the owner left on the page: levels for the token, tiers on the definition", async () => {
+    await register({
+      name: "Zoo",
+      openapi_schema: ZOO,
+      tool_access: [{ access: "allowed" }],
+    })
+
+    const done = await decide([
+      { pattern: "listPets", access: "allowed", tier: "read" },
+      { pattern: "addPet", access: "ask" },
+    ])
+
+    expect(done.isError).not.toBe(true)
+    const server = await db().mcpServer.findFirstOrThrow({
+      where: { kind: "openapi" },
+    })
+    expect(await levels(server.id)).toEqual([["listPets", "allowed"]])
+    expect(
+      await db().toolTier.findMany({
+        where: { definitionId: server.definitionId },
+        select: { toolName: true, tier: true },
+      }),
+    ).toEqual([{ toolName: "listPets", tier: "read" }])
+    expect(JSON.stringify(done)).toContain(
+      "The owner set this token's level for 2 tools",
+    )
+  })
+
+  it("writes nothing when the yes carries no levels, as before", async () => {
+    await register({
+      name: "Zoo",
+      openapi_schema: ZOO,
+      tool_access: [{ access: "allowed" }],
+    })
+
+    const done = await decide()
+
+    expect(done.isError).not.toBe(true)
+    expect(await db().apiTokenToolAccess.count()).toBe(0)
+    expect(JSON.stringify(done)).toContain(
+      "They ask the owner the first time they are used",
+    )
+  })
+
+  it("refuses an owner's level for a tool the request does not have, and leaves it open", async () => {
+    await register({
+      name: "Zoo",
+      openapi_schema: ZOO,
+      tool_access: [{ access: "allowed" }],
+    })
+
+    const done = await decide([{ pattern: "dropTables", access: "allowed" }])
+
+    expect(done.isError).toBe(true)
+    expect(JSON.stringify(done)).toMatch(/not one of its tools/)
+    expect(await db().mcpServer.count({ where: { kind: "openapi" } })).toBe(0)
+    expect((await shown()).status).toBe("pending")
+  })
+
+  it("refuses a name the API does not have before the owner is asked", async () => {
+    const asked = await register({
+      name: "Zoo",
+      openapi_schema: ZOO,
+      tool_access: [{ tools: ["feedPets"], access: "allowed" }],
+    })
+
+    expect(asked.isError).toBe(true)
+    expect(asked.text).toMatch(/The API Zoo has no tool matching "feedPets"/)
+    expect(await db().permissionRequest.count()).toBe(0)
+  })
+
+  it("takes a mail account's fixed tools by name, as the account will have them", async () => {
+    const asked = await register({
+      name: "Personal mail",
+      kind: "imap",
+      url: "mail.example.com",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Mail password",
+      read_only: true,
+      tool_access: [{ tools: ["search_emails", "get_*"], access: "allowed" }],
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.proposedAccess?.tools?.map((tool) => tool.name)).not.toContain(
+      "send_email",
+    )
+    expect(view.proposedAccess?.rules.map((rule) => rule.pattern)).toEqual(
+      expect.arrayContaining(["search_emails", "get_email"]),
+    )
+
+    const sending = await register({
+      name: "Personal mail",
+      kind: "imap",
+      url: "mail.example.com",
+      auth_type: "basic",
+      username: "ada@example.com",
+      secret: "Mail password",
+      read_only: true,
+      tool_access: [{ tools: ["send_email"], access: "allowed" }],
+    })
+
+    expect(sending.isError).toBe(true)
+    expect(sending.text).toMatch(/no tool matching "send_email"/)
+  })
+
+  it("keeps an MCP server's names as patterns, saved with the yes and applied once its tools are read", async () => {
+    const asked = await register({
+      name: "Linear",
+      url: "https://mcp.linear.example/mcp",
+      tool_access: [{ tools: ["search_*"], access: "allowed", tier: "read" }],
+    })
+
+    expect(asked.isError).toBe(false)
+    const view = await shown()
+    expect(view.proposedAccess).toEqual({
+      tools: null,
+      rules: [{ pattern: "search_*", access: "allowed", tier: "read" }],
+      tokenName: "Claude",
+    })
+    expect(view.lines.join("\n")).toContain(
+      "The assistant proposes levels and tiers by tool name, as its tools are not known until PCP first reads them: search_* → Allowed, Read.",
+    )
+
+    const done = await decide([
+      { pattern: "search_*", access: "allowed" },
+      { pattern: "get_issue", tier: "read" },
+    ])
+
+    expect(done.isError).not.toBe(true)
+    expect(JSON.stringify(done)).toContain(
+      "they apply once, to the tools PCP first reads from it",
+    )
+    const server = await db().mcpServer.findFirstOrThrow({
+      where: { kind: "mcp" },
+    })
+    expect(JSON.parse(server.pendingAccess!)).toEqual({
+      tokenId: await tokenId(),
+      rules: [
+        { pattern: "search_*", access: "allowed" },
+        { pattern: "get_issue", tier: "read" },
+      ],
+    })
   })
 })

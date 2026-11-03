@@ -2,7 +2,7 @@ import dns from "node:dns"
 import http from "node:http"
 import https from "node:https"
 import { isIP, type Socket } from "node:net"
-import { Readable, type Duplex } from "node:stream"
+import type { Duplex } from "node:stream"
 import tls from "node:tls"
 
 import { AddressBlockedError, bareHostname, isPublicAddress } from "./address"
@@ -32,10 +32,13 @@ export type SendOptions = {
   addressCheck?: (address: string, port: number) => boolean
   /**
    * Connects somewhere else than from PCP's machine: web_fetch through an
-   * exit (lib/core/exits/dial.ts). It resolves the name and checks every
-   * address itself, from the exit's side, and hands back the raw
-   * connection; TLS (with the URL's host as SNI and for the certificate)
-   * is laid over it here. Replaces the lookup and `addressCheck`.
+   * exit (lib/core/exits/dial.ts), which resolves the name and checks every
+   * address itself, from the exit's side; or a service's endpoint or MCP
+   * server through the SSH connection to the port it publishes on its SSH
+   * server (services.ts serviceDial). It hands back the raw connection;
+   * TLS (with the URL's host as SNI and for the certificate) is laid over
+   * it here. Replaces the lookup and `addressCheck`, with or without
+   * `publicOnly`.
    */
   dial?: (host: string, port: number, signal?: AbortSignal) => Promise<Duplex>
 }
@@ -58,7 +61,7 @@ export async function send(
   init: SendInit,
   options: SendOptions = {},
 ): Promise<Response> {
-  if (!options.publicOnly) {
+  if (!options.publicOnly && !options.dial) {
     return fetch(rawUrl, {
       method: init.method,
       headers: init.headers,
@@ -198,9 +201,7 @@ function sendPinned(
             }
           }
 
-          const body = NO_BODY.has(status)
-            ? null
-            : (Readable.toWeb(res) as unknown as ReadableStream<Uint8Array>)
+          const body = NO_BODY.has(status) ? null : webBody(res)
 
           if (body === null) {
             res.resume()
@@ -225,6 +226,62 @@ function sendPinned(
     request.on("error", reject)
     request.end(init.body)
   })
+}
+
+/**
+ * An answer's body as a web stream, read as the reader asks for it. Not
+ * Readable.toWeb: a body cancelled there (a redirect or an error answer
+ * let go of) can still be written to by data already on its way, which
+ * throws where nothing catches it.
+ */
+function webBody(res: http.IncomingMessage): ReadableStream<Uint8Array> {
+  let over = false
+
+  return new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        res.on("data", (chunk: Buffer) => {
+          if (over) {
+            return
+          }
+
+          controller.enqueue(chunk)
+
+          if ((controller.desiredSize ?? 0) <= 0) {
+            res.pause()
+          }
+        })
+        res.once("end", () => {
+          if (!over) {
+            over = true
+            controller.close()
+          }
+        })
+        res.on("error", (error) => {
+          if (!over) {
+            over = true
+            controller.error(error)
+          }
+        })
+        res.once("close", () => {
+          if (!over) {
+            over = true
+            controller.error(
+              new Error("the connection closed before the answer ended"),
+            )
+          }
+        })
+      },
+      pull() {
+        res.resume()
+      },
+      cancel() {
+        over = true
+        res.destroy()
+      },
+    },
+    { highWaterMark: 16 },
+  )
 }
 
 /** fetch's shape, as the MCP SDK takes it for its requests. */

@@ -13,6 +13,26 @@
 export const OWNER_LINK_RULE =
   "End your reply with the link as a markdown link with a short label naming the action, on a line of its own; never paste the bare address, and call no tool after it in this reply."
 
+/**
+ * When to check on what the owner was handed a link for: on their next
+ * message, whatever it says. Their words rarely say whether they answered
+ * (an "ok", a new question, nothing about it at all), and an assistant that
+ * waits to be told sends the link again for something already decided.
+ * `call` is the check with its argument (`check_permission with id "…"`),
+ * `open` what the assistant would otherwise assume.
+ */
+export function nextMessageCheck(
+  call: string,
+  open = "the request is still open",
+): string {
+  return `On the owner's next message, whatever it says, call ${call} before you send the link again or assume ${open}.`
+}
+
+/** nextMessageCheck for a permission request, in tool descriptions. */
+export const CHECK_PERMISSION_NEXT = nextMessageCheck(
+  "check_permission with its id",
+)
+
 /** The longest label, in characters. */
 export const MAX_LINK_LABEL = 60
 

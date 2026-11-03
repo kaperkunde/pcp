@@ -384,10 +384,8 @@ export function EndpointForm({
 
         <FormSection>{signIn}</FormSection>
 
-        <SwitchGroup>
-          {readOnlyRow}
-          {publicOnlyRow}
-        </SwitchGroup>
+        {/* "Public addresses only" is the page's own switch, in About. */}
+        <SwitchGroup>{readOnlyRow}</SwitchGroup>
 
         <FormFooter
           editing
