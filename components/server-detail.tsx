@@ -37,9 +37,11 @@ import {
   refreshToolsAction,
   setOAuthClientAction,
   setServerEnabledAction,
+  setServerPublicOnlyAction,
   setSignInParamsAction,
   type ServerActionResult,
 } from "@/lib/actions/servers"
+import { PUBLIC_ONLY_ANCHOR } from "@/lib/core/constants"
 import type { ItemAbout } from "@/lib/core/item-about"
 import type { AuthType, ServerKind, ServerStatus } from "@/lib/core/servers"
 import type { OAuthConnection } from "@/lib/core/upstream"
@@ -91,8 +93,9 @@ export type ServerDetailProps = {
 
 /**
  * One server's page: its state and main action at the top, what needs the
- * owner right under it, then About (description, sign-in, on/off), the
- * kind's own section, its tools, everything set once under Advanced, and
+ * owner right under it, then About (description, sign-in, on/off, and for
+ * an MCP server or an endpoint "Public addresses only"), the kind's own
+ * section, its tools, everything set once under Advanced, and
  * Remove last. DESIGN.md › What goes where.
  */
 export function ServerDetail({
@@ -116,6 +119,10 @@ export function ServerDetail({
   const [pending, startTransition] = useTransition()
   const [result, setResult] = useState<ServerActionResult>({ status: "idle" })
   const [enabled, setEnabled] = useOptimistic(server.enabled)
+  const [publicOnly, setPublicOnly] = useOptimistic(server.publicOnly)
+  // An MCP server's and an endpoint's address rule: on the page, where a
+  // refusal's link (#public-only) leads.
+  const addressRule = server.kind === "mcp" || endpoint
   // Kept here rather than in the form: saving moves the server on from
   // "needs a client", which removes the form, and the note should stay.
   const [clientState, saveClient] = useActionState<
@@ -128,6 +135,16 @@ export function ServerDetail({
       setResult(await action())
     })
   }
+
+  // A refusal's or an approval's link names the switch: it gets the focus.
+  useEffect(() => {
+    if (!addressRule || window.location.hash !== `#${PUBLIC_ONLY_ANCHOR}`) {
+      return
+    }
+    const target = document.getElementById(PUBLIC_ONLY_ANCHOR)
+    target?.scrollIntoView({ behavior: "smooth", block: "center" })
+    target?.focus({ preventScroll: true })
+  }, [addressRule])
 
   /** Unfolds Advanced, and puts the cursor in one of its fields. */
   function openAdvanced(field?: string) {
@@ -185,10 +202,6 @@ export function ServerDetail({
             ) : null}
             {wrapper && server.flow ? (
               <Badge variant="secondary">Browser flow</Badge>
-            ) : null}
-            {/* An endpoint says so under Advanced, with its other facts. */}
-            {server.kind === "mcp" && server.publicOnly ? (
-              <Badge variant="secondary">Public addresses only</Badge>
             ) : null}
           </span>
         }
@@ -333,6 +346,27 @@ export function ServerDetail({
               })
             }}
           />
+          {addressRule ? (
+            <SwitchRow
+              id={PUBLIC_ONLY_ANCHOR}
+              label="Public addresses only"
+              description={
+                endpoint
+                  ? "Refuse private, local and link-local addresses, for the schema and for every call. On for endpoints an assistant registers; turn it off only for an API on your own network that you trust this endpoint to reach, or when this machine can only reach the internet through a proxy."
+                  : "Refuse private, local and link-local addresses, and PCP's own, for every request to the server and its sign-in, redirects included. On for servers an assistant proposes; turn it off only for a server on your own network that you trust, or when this machine can only reach the internet through a proxy."
+              }
+              checked={publicOnly}
+              disabled={pending}
+              className="scroll-mt-24"
+              onChange={(event) => {
+                const next = event.target.checked
+                startTransition(async () => {
+                  setPublicOnly(next)
+                  setResult(await setServerPublicOnlyAction(server.id, next))
+                })
+              }}
+            />
+          ) : null}
         </List>
       </ListSection>
 
@@ -376,7 +410,7 @@ export function ServerDetail({
 function advancedSummary(kind: ServerKind): string {
   switch (kind) {
     case "openapi":
-      return "Schema, base URL, sign-in, edits to the schema, public addresses, name, pacing"
+      return "Schema, base URL, sign-in, edits to the schema, name, pacing"
     case "jmap":
     case "imap":
       return "Addresses, sign-in, sender, read-only, name, pacing"
@@ -391,7 +425,7 @@ function advancedSummary(kind: ServerKind): string {
     case "browser":
       return "Name and description, pacing"
     default:
-      return "Address, public addresses, sign-in, headers, sign-in app, short name, pacing"
+      return "Address, sign-in, headers, sign-in app, short name, pacing"
   }
 }
 
@@ -477,8 +511,9 @@ function SignInRow({
 
 /**
  * An endpoint's facts its form does not show as they are: where requests
- * go (the form's base URL is left empty, for the owner to type), where the
- * schema came from and when it was read, and which addresses it may reach.
+ * go (the form's base URL is left empty, for the owner to type), and where
+ * the schema came from and when it was read. Which addresses it may reach
+ * is the switch in About.
  * Every other kind's form shows its own settings whole.
  */
 function EndpointFacts({ server }: { server: ServerDetailProps["server"] }) {
@@ -497,12 +532,6 @@ function EndpointFacts({ server }: { server: ServerDetailProps["server"] }) {
         ),
     },
     { label: "Read", value: <LocalDate value={server.lastSyncedAt} /> },
-    {
-      label: "Addresses",
-      value: server.publicOnly
-        ? "Public addresses only"
-        : "Private addresses allowed",
-    },
   ]
 
   return (

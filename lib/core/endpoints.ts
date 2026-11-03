@@ -100,7 +100,11 @@ export type EndpointInput = {
   /** The schema URL came from an assistant (see the column's comment). */
   specUrlFromAssistant?: boolean
   readOnly: boolean
-  /** Refuse private, loopback and link-local addresses (see address.ts). */
+  /**
+   * Refuse private, loopback and link-local addresses (see address.ts). On
+   * an existing endpoint it is the page's own switch (setServerPublicOnly):
+   * an update that leaves it out keeps it as it is.
+   */
   publicOnly?: boolean
   /** Off until the owner enables it. Default on. */
   enabled?: boolean
@@ -1016,6 +1020,8 @@ export async function updateEndpoint(
   }
 
   const data = await normalizeEndpoint(ctx, input)
+  // The page's switch sets it (setServerPublicOnly); the form leaves it out.
+  const publicOnly = input.publicOnly ?? existing.publicOnly
   const stored = await storedSpec(id)
 
   let text: string
@@ -1039,7 +1045,7 @@ export async function updateEndpoint(
     text = stored.text
   } else {
     ;({ text, url: fetchedFrom } = await fetchSpec(data.specUrl!, {
-      publicOnly: data.publicOnly,
+      publicOnly,
     }))
   }
 
@@ -1077,7 +1083,7 @@ export async function updateEndpoint(
         specSource: data.specSource,
         specUrl: data.specUrl,
         readOnly: data.readOnly,
-        publicOnly: data.publicOnly,
+        publicOnly,
         specUrlFromAssistant,
         authType: data.authType,
         authUsername: data.authUsername,

@@ -139,6 +139,7 @@ export default async function TokenPage({
               request.kind === "memory_share" && request.memory
                 ? { asked: request.memory.always }
                 : null,
+            privateAddresses: request.offersPrivateAddresses,
           }))}
         />
       ) : null}

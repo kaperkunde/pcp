@@ -325,3 +325,10 @@ export const LETS_ENCRYPT_TERMS_URL = "https://letsencrypt.org/repository/"
 
 /** Where the owner signs in to pcp.gg, picks a name and copies a key. */
 export const PCPGG_URL = "https://pcp.gg/"
+
+/**
+ * The anchor of the "Public addresses only" switch on a server's page (an
+ * MCP server's or an API endpoint's): where a refusal of a private address,
+ * and the approval of a server at one, send the owner.
+ */
+export const PUBLIC_ONLY_ANCHOR = "public-only"

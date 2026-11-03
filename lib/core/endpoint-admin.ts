@@ -567,7 +567,7 @@ function privateAddressNote(baseUrl: string): string | null {
     : host === "localhost" || host.endsWith(".localhost")
 
   return isPrivate
-    ? `${host} is a private or local address. Calls will be refused until the owner allows private addresses for this endpoint in PCP.`
+    ? `${host} is a private or local address. Calls will be refused unless the owner allows private addresses for this endpoint as they agree, or later on its page in PCP.`
     : null
 }
 
@@ -809,9 +809,10 @@ export async function prepareInstanceRegistration(
 
 /**
  * Creates what the owner approved. The address is the one they were shown,
- * and an assistant's endpoint reaches public addresses only (the owner can
- * lift that on the endpoint's page); it starts on, because the owner just
- * said yes. With `definitionId` it is another endpoint of that definition,
+ * and an assistant's endpoint reaches public addresses only, unless the
+ * owner allowed private addresses as they agreed (`publicOnly` false, only
+ * from their tick on PCP's page), or does so later on the endpoint's page;
+ * it starts on, because the owner just said yes. With `definitionId` it is another endpoint of that definition,
  * whose schema, edits and description it takes.
  */
 export async function createApprovedEndpoint(
@@ -833,6 +834,8 @@ export async function createApprovedEndpoint(
     oauthScope?: string | null
     endpoint: EndpointRegistration
     definitionId?: string | null
+    /** False only when the owner ticked "Allow private addresses". */
+    publicOnly?: boolean
   },
 ): Promise<{ id: string; sync: SyncResult }> {
   await assertRoomForEndpoint(ctx)
@@ -859,7 +862,7 @@ export async function createApprovedEndpoint(
       : { specSource: "upload", specText: endpoint.spec }),
     patches: endpoint.patches ?? [],
     readOnly: endpoint.readOnly,
-    publicOnly: true,
+    publicOnly: asked.publicOnly !== false,
     authType: asked.authType,
     authHeaderName: asked.authHeaderName,
     authValueTemplate: asked.authValueTemplate,

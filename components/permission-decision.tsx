@@ -47,6 +47,10 @@ const QUIET: Decision[] = ["block", "discard"]
  * (`every`), on when the assistant asked for that; it holds whether the
  * owner shares the memory or keeps it for that assistant.
  *
+ * A proposed MCP server or endpoint at a private address offers a switch
+ * to allow private addresses (`privateAddresses`), off: left alone, it
+ * reaches public addresses only, as everything an assistant proposes.
+ *
  * "Allow for" comes with how long, chosen beside its button, unless the
  * kind has one length only (`allowForFixed`: a secret the browser types,
  * an hour), which its label says.
@@ -67,6 +71,7 @@ export function PermissionDecision({
   decisions,
   secret,
   every,
+  privateAddresses = false,
   advance = true,
   allowForFixed = false,
   revision,
@@ -89,6 +94,7 @@ export function PermissionDecision({
     origins?: string[]
   } | null
   every?: { asked: boolean } | null
+  privateAddresses?: boolean
 }) {
   const { submit, pending, error, setError, done } = useAnswer(
     { request: id },
@@ -97,6 +103,7 @@ export function PermissionDecision({
   const [chosen, setChosen] = useState<Decision | null>(null)
   const [secretValue, setSecretValue] = useState("")
   const [always, setAlways] = useState(every?.asked === true)
+  const [allowPrivate, setAllowPrivate] = useState(false)
   const [minutes, setMinutes] = useState<number>(DEFAULT_ALLOW_FOR_MINUTES)
   const [origins, setOrigins] = useState((secret?.origins ?? []).join("\n"))
 
@@ -136,6 +143,7 @@ export function PermissionDecision({
               .filter(Boolean)
           : undefined,
         revision,
+        privateAddresses && agrees ? allowPrivate : undefined,
       )
 
       return result.status === "ok"
@@ -251,6 +259,18 @@ export function PermissionDecision({
             }
             checked={always}
             onChange={(event) => setAlways(event.target.checked)}
+            disabled={pending}
+          />
+        </List>
+      ) : null}
+      {privateAddresses ? (
+        <List>
+          <SwitchRow
+            id={`permission-${id}-private`}
+            label="Allow private addresses"
+            description="Its address is on your own network, or this machine's. Off, it reaches public addresses only and its calls are refused; turn it on only for a server you trust. You can change it later on its page, under Public addresses only."
+            checked={allowPrivate}
+            onChange={(event) => setAllowPrivate(event.target.checked)}
             disabled={pending}
           />
         </List>

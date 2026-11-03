@@ -248,7 +248,7 @@ export class AddressBlockedError extends Error {
     // The address stays out of the message, which can reach an assistant:
     // for a name it would say what the owner's DNS holds.
     super(
-      `${host} is, or resolves to, a private or local address, and this ${noun} only reaches public ones. The owner can allow private addresses in its settings.`,
+      `${host} is, or resolves to, a private or local address, and this ${noun} only reaches public ones. The owner can allow private addresses on its page in PCP.`,
     )
     this.name = "AddressBlockedError"
   }
