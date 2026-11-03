@@ -25,6 +25,7 @@ import {
   type Renderer,
   type VirtualDisplay,
 } from "./display"
+import { watchLogs } from "./devtools"
 import { openDownloads, watchDownloads, type Downloads } from "./downloads"
 import { chromiumExecutable } from "./executable"
 import { watchFavicon } from "./favicon"
@@ -102,7 +103,24 @@ import type { TabControl, TabView } from "./types"
  * from none of the vault's sign-ins, is never saved, and its connections go
  * through a proxy of its own (proxy.ts with `connect`) that leaves from the
  * exit. The gate decides its pages like any tab's.
+ *
+ * While a tab runs an assistant's script (evaluate.ts, `script`), the gate
+ * lets its main frame and its popups open its own site only, a popup it
+ * opens is closed as it comes, and the proxies hold every new connection
+ * to another site until the script is done (admitConnection).
  */
+
+/**
+ * An assistant's script running in a tab (evaluate.ts): the site it may
+ * reach, the hosts it reached for elsewhere (refused once it is done), and
+ * when it is done.
+ */
+export type ScriptRun = {
+  site: string
+  hostname: string
+  refused: Set<string>
+  done: Promise<void>
+}
 
 /** The exit a tab goes out through. */
 export type TabExit = { id: string; name: string; label: string }
@@ -180,6 +198,8 @@ export type Tab = {
   reopening: Promise<Reopened> | null
   /** Tabs its page opened (popups), said in its next answer. */
   popups: string[]
+  /** The assistant's script running in it now, if one is (evaluate.ts). */
+  script: ScriptRun | null
   createdAt: number
   lastUsedAt: number
   /** The live view's state (screencast.ts) and the owner's input (input.ts). */
@@ -528,6 +548,7 @@ async function start(
   const proxy = await startBrowserProxy({
     check: (address, port, host) =>
       vault ? verdict(vault, address, port, host) : "private",
+    admit: (host) => (vault ? admitConnection(vault, host) : true),
   })
 
   const scratchDir = await makeScratchDir()
@@ -792,6 +813,7 @@ async function exitContextFor(
   let entry: ExitContext | null = null
   const proxy = await startBrowserProxy({
     check: () => "private",
+    admit: (host) => admitConnection(vault, host),
     connect: (host, port) => {
       if (!entry) return Promise.reject(new Error("closed"))
       return entry.dialer.dial(host, port, {
@@ -889,6 +911,11 @@ export function mayOpen(vault: VaultBrowser, tab: Tab, url: string): boolean {
 
   const host = siteKey(parsed)
 
+  // A script running in the tab keeps it, and its popups, at its own site.
+  if (tab.script && host !== tab.script.site) {
+    return false
+  }
+
   if (tab.control === "owner" || tab.rules === null) {
     return true
   }
@@ -896,6 +923,30 @@ export function mayOpen(vault: VaultBrowser, tab: Tab, url: string): boolean {
   return (
     tab.allowedHosts.has(host) ||
     resolveFetchAccess(tab.rules, host, "GET").access === "allowed"
+  )
+}
+
+/**
+ * Whether the proxies let a new connection to a host go: at once, unless a
+ * tab runs a script and the host is not that tab's site; then once every
+ * such script is done, unless one of them reached for the host (a
+ * WebSocket the tab's request interception does not see).
+ */
+export function admitConnection(
+  vault: VaultBrowser,
+  host: string,
+): boolean | Promise<boolean> {
+  const running = [...vault.tabs.values()].flatMap((tab) =>
+    tab.script ? [tab.script] : [],
+  )
+  const name = bareName(host)
+
+  if (running.every((run) => run.hostname === name)) {
+    return true
+  }
+
+  return Promise.all(running.map((run) => run.done)).then(
+    () => !running.some((run) => run.refused.has(name)),
   )
 }
 
@@ -1104,6 +1155,8 @@ async function listen(
       tab.favicon = favicon
     },
   }).catch(() => {})
+  // After the icon's: its own Network.enable makes room for bodies.
+  await watchLogs(tab, page, mine).catch(() => {})
 
   page.on("dialog", (dialog) => {
     if (!mine()) {
@@ -1166,6 +1219,7 @@ async function attach(
     unresponsive: false,
     reopening: null,
     popups: [],
+    script: null,
     createdAt: now,
     lastUsedAt: now,
     extra: new Map(),
@@ -1193,7 +1247,9 @@ async function adoptPopup(vault: VaultBrowser, page: Page): Promise<void> {
 
   const parent = [...vault.tabs.values()].find((tab) => tab.page === opener)
 
-  if (!parent || vault.tabs.size >= MAX_TABS) {
+  // A popup a running script opened is closed as it comes: the script
+  // reaches nothing but its own tab's site.
+  if (!parent || parent.script || vault.tabs.size >= MAX_TABS) {
     await page.close()
     return
   }

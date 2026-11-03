@@ -362,6 +362,14 @@ const DECISION_LABELS: Record<PermissionKind, Record<string, string>> = {
     always: "Always allow",
     decline: "Not now",
   },
+  // An assistant's script in a tab (evaluate), shown whole: Run it once runs
+  // this one; Allow and Block decide scripts at the site for the token.
+  script_use: {
+    allow_once: "Run it once",
+    always: "Allow scripts at this site",
+    block: "Block scripts at this site",
+    decline: "Not now",
+  },
   // A secret the owner types in for the browser, and how its uses go: the
   // next one only, every one for an hour, or every one.
   secret_request: {

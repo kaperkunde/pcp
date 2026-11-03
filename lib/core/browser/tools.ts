@@ -11,8 +11,12 @@ import {
   type InnerTool,
 } from "../tools/family"
 import {
+  DEFAULT_LOG_LIMIT,
   DEFAULT_READ_CHARS,
+  EVALUATE_TIMEOUT_MS,
   MAX_FIND_MATCHES,
+  MAX_LOG_LIMIT,
+  MAX_SCRIPT_CHARS,
   MAX_HANDOVER_MESSAGE,
   MAX_READ_CHARS,
   MAX_ROLE_CHARS,
@@ -36,7 +40,13 @@ import { REF_PATTERN } from "./snapshot"
  * assistant needs to open pages, read them and act on them, and to hand a
  * tab to the owner. Shaped after the tools browser agents share (Playwright
  * MCP, Claude in Chrome), without what would hand an assistant the owner's
- * sign-ins: no JavaScript, no cookies or storage. Files move in and out as
+ * sign-ins: no tool reads or sets cookies or storage. JavaScript runs only
+ * through evaluate, Destructive, which the owner allows per site with the
+ * script shown (evaluate.ts). The logs (console_log, network_log) read what
+ * the tab's DevTools session saw, credentials left out (devtools.ts). A
+ * point (x, y) is CSS pixels of the viewport, as a full-size screenshot
+ * shows it, and is clicked, scrolled or dragged with DevTools mouse events
+ * as the owner's live view sends them (input.ts). Files move in and out as
  * results PCP keeps for the token (tool-results.ts): upload_file puts kept
  * ones into a page, download keeps the one a page offers; no path on the
  * machine is ever named. Each is defined on PCP's one tool interface
@@ -57,6 +67,7 @@ export type BrowserToolName =
   | "read_page"
   | "find"
   | "click"
+  | "drag"
   | "type"
   | "press_key"
   | "select_option"
@@ -68,6 +79,9 @@ export type BrowserToolName =
   | "handle_dialog"
   | "hand_over"
   | "request_secret"
+  | "evaluate"
+  | "console_log"
+  | "network_log"
 
 type Annotations = ToolAnnotations
 
@@ -148,6 +162,45 @@ const url = z
   .min(1)
   .max(MAX_URL_LENGTH)
   .describe("The full address: https://example.com/page.")
+
+/**
+ * A point of the tab's viewport, in CSS pixels: what a screenshot at full
+ * size shows at that pixel (its answer says how to convert a smaller one).
+ */
+const pointX = z
+  .number()
+  .min(0)
+  .max(VIEWPORT.width)
+  .describe(
+    `Across, in CSS pixels from the viewport's left edge (0 to ${VIEWPORT.width}), as a full-size screenshot shows it.`,
+  )
+const pointY = z
+  .number()
+  .min(0)
+  .max(VIEWPORT.height)
+  .describe(
+    `Down, in CSS pixels from the viewport's top edge (0 to ${VIEWPORT.height}), as a full-size screenshot shows it.`,
+  )
+/** x and y go together. */
+const X_WITH_Y: ArgumentRule = {
+  says: "Give x and y together.",
+  schema: { dependentRequired: { x: ["y"], y: ["x"] } },
+}
+/** A time a log is read from. */
+const since = z.iso
+  .datetime({ offset: true })
+  .describe(
+    "Only entries from this time on, as an answer shows times: 2026-11-03T10:15:00.000Z.",
+  )
+const logLimit = z
+  .number()
+  .int()
+  .min(1)
+  .max(MAX_LOG_LIMIT)
+  .optional()
+  .describe(
+    `The most entries to give, the newest (${DEFAULT_LOG_LIMIT} by default).`,
+  )
 
 /** A file PCP kept for this token, as a handle names it. */
 const keptFile = z.strictObject({
@@ -369,20 +422,82 @@ const INPUTS: readonly BrowserToolInput[] = [
     name: "click",
     title: "Click",
     description:
-      "Clicks an element (ref, or target), scrolled into view first, and answers with the page's snapshot. double: true double-clicks. A click that cannot happen says why (another element covers it, with that element's ref when the snapshot shows it; it is hidden or disabled) with a short snapshot.",
+      "Clicks an element or a point and answers with the page's snapshot: an element by ref (or target), scrolled into view first, or a point of the viewport by x and y (CSS pixels, as a full-size screenshot shows them), sent as the mouse's own events. A point reaches what has no element to name: a canvas app (one Flutter draws shows only an \"Enable accessibility\" button until it is clicked), a map, a game. button: right or middle clicks with that button; double: true double-clicks. A click on an element that cannot happen says why (another element covers it, with that element's ref when the snapshot shows it; it is hidden or disabled) with a short snapshot.",
     input: z.strictObject({
       tab,
       ref: ref.optional(),
       target: target.optional(),
+      x: pointX.optional(),
+      y: pointY.optional(),
+      button: z
+        .enum(["left", "right", "middle"])
+        .optional()
+        .describe("The mouse button: left by default."),
       double: z.boolean().optional().describe("true: a double click."),
       force: z
         .boolean()
         .optional()
         .describe(
-          "Skip the checks that the element is visible, enabled and not covered.",
+          "For an element: skip the checks that it is visible, enabled and not covered.",
         ),
     }),
-    rules: [REF_OR_TARGET],
+    rules: [
+      exactlyOne(
+        ["ref", "target", "x"],
+        "Give a ref, a target or a point (x and y), one of them.",
+      ),
+      X_WITH_Y,
+      {
+        says: "force is for an element (a ref or a target), not a point.",
+        schema: { not: { required: ["x", "force"] } },
+      },
+    ],
+    annotations: ACTS,
+    changes: true,
+  },
+  {
+    name: "drag",
+    title: "Drag",
+    description:
+      "Drags with the mouse from one place to another, the button held down on the way, and answers with the page's snapshot: from an element (ref, or target) or a point (x and y), to an element (to_ref, or to_target) or a point (to_x and to_y). Points are CSS pixels of the viewport, as a full-size screenshot shows them; an element is taken at its middle, scrolled into view first. For a slider, a list sorted by dragging, a map, or a canvas app.",
+    input: z.strictObject({
+      tab,
+      ref: ref.optional().describe("The element to start from, by its ref."),
+      target: target
+        .optional()
+        .describe("The element to start from, by its role and name."),
+      x: pointX.optional(),
+      y: pointY.optional(),
+      to_ref: ref.optional().describe("The element to end on, by its ref."),
+      to_target: target
+        .optional()
+        .describe("The element to end on, by its role and name."),
+      to_x: pointX
+        .optional()
+        .describe("Where to end, across, in CSS pixels of the viewport."),
+      to_y: pointY
+        .optional()
+        .describe("Where to end, down, in CSS pixels of the viewport."),
+      button: z
+        .enum(["left", "right", "middle"])
+        .optional()
+        .describe("The mouse button held down: left by default."),
+    }),
+    rules: [
+      exactlyOne(
+        ["ref", "target", "x"],
+        "Start from a ref, a target or a point (x and y), one of them.",
+      ),
+      exactlyOne(
+        ["to_ref", "to_target", "to_x"],
+        "End on a to_ref, a to_target or a point (to_x and to_y), one of them.",
+      ),
+      X_WITH_Y,
+      {
+        says: "Give to_x and to_y together.",
+        schema: { dependentRequired: { to_x: ["to_y"], to_y: ["to_x"] } },
+      },
+    ],
     annotations: ACTS,
     changes: true,
   },
@@ -486,7 +601,7 @@ const INPUTS: readonly BrowserToolInput[] = [
     name: "scroll",
     title: "Scroll",
     description:
-      "Scrolls the page up, down, left or right (amount in pixels, 600 by default), or brings an element (ref, or target) into view.",
+      "Scrolls the page up, down, left or right (amount in pixels, 600 by default), or brings an element (ref, or target) into view. With x and y the wheel turns at that point of the viewport (CSS pixels, as a full-size screenshot shows them), so what is under it scrolls: a list, a map, a canvas app.",
     input: z.strictObject({
       tab,
       direction: z
@@ -495,6 +610,16 @@ const INPUTS: readonly BrowserToolInput[] = [
         .describe("Which way to scroll the page."),
       ref: ref.optional(),
       target: target.optional(),
+      x: pointX
+        .optional()
+        .describe(
+          "With a direction: turn the wheel at this point, across, in CSS pixels of the viewport.",
+        ),
+      y: pointY
+        .optional()
+        .describe(
+          "With a direction: turn the wheel at this point, down, in CSS pixels of the viewport.",
+        ),
       amount: z
         .number()
         .int()
@@ -508,6 +633,14 @@ const INPUTS: readonly BrowserToolInput[] = [
         ["direction", "ref", "target"],
         "Give a direction, a ref or a target, one of them.",
       ),
+      X_WITH_Y,
+      {
+        says: "A point (x and y) goes with a direction: the wheel turns there.",
+        schema: {
+          if: { required: ["x"] },
+          then: { required: ["direction"] },
+        },
+      },
     ],
     annotations: { ...READS, idempotentHint: false },
     changes: false,
@@ -539,7 +672,7 @@ const INPUTS: readonly BrowserToolInput[] = [
   {
     name: "screenshot",
     title: "Take a screenshot",
-    description: `A picture of what the tab shows now (its viewport, ${VIEWPORT.width} by ${VIEWPORT.height}), or of one element (ref, or target), as a JPEG. It is made smaller (its quality, then its size) until it can be passed on; max_width and quality ask for smaller from the start.`,
+    description: `A picture of what the tab shows now (its viewport, ${VIEWPORT.width} by ${VIEWPORT.height}), or of one element (ref, or target), as a JPEG. It is made smaller (its quality, then its size) until it can be passed on; max_width and quality ask for smaller from the start. The answer says how its pixels map to the viewport's CSS pixels, which click, scroll and drag take as x and y.`,
     input: z.strictObject({
       tab,
       ref: ref.optional(),
@@ -643,6 +776,93 @@ const INPUTS: readonly BrowserToolInput[] = [
         ),
     }),
     annotations: MOVES,
+    changes: false,
+  },
+  {
+    name: "evaluate",
+    title: "Run JavaScript in the page",
+    description: `Runs JavaScript in the tab's page and answers with its result as JSON: an expression, statements (the last one's value; await works), or a function's text, which is called with nothing. For what the other tools do not reach: a value the page keeps, a canvas app's state. The owner decides per site and is shown the whole script: unless they allowed scripts at the tab's site for this token, it answers "Not done yet" with a link. ${OWNER_LINK_RULE} While it runs the tab reaches its own site only: requests to any other are refused. It is refused while a field holds a secret PCP typed. At most ${EVALUATE_TIMEOUT_MS / 1000} seconds; a long result comes back as a handle to a result PCP keeps for this token.`,
+    input: z.strictObject({
+      tab,
+      script: z
+        .string()
+        .min(1)
+        .max(MAX_SCRIPT_CHARS)
+        .describe(
+          "The JavaScript: an expression (document.title), statements whose last value is the result (await works), or a function's text (() => …), which is called. Its result is answered as JSON; a promise is awaited.",
+        ),
+    }),
+    annotations: ACTS,
+    changes: true,
+  },
+  {
+    name: "console_log",
+    title: "Read the tab's console",
+    description:
+      "Reads the tab's console, oldest first: the browser's own messages (a load that failed, a request it blocked, a warning) and, from the first console_log on the tab, the page's console calls and uncaught errors, which a site can tell are listened to, as it can tell DevTools is open. text keeps the messages that mention it, level the ones at that level, since those from a time on; limit gives the newest that many. What PCP typed as a secret shows as [secret: name]. Cleared when the tab closes or is reset.",
+    input: z.strictObject({
+      tab,
+      text: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Only messages that mention this, case aside."),
+      level: z
+        .enum(["error", "warning", "info", "debug"])
+        .optional()
+        .describe(
+          "Only messages at this level (log counts as info, verbose as debug).",
+        ),
+      since: since.optional(),
+      limit: logLimit,
+    }),
+    annotations: READS,
+    changes: false,
+  },
+  {
+    name: "network_log",
+    title: "Read the tab's requests",
+    description:
+      "Lists the requests the tab made, oldest first: each one's id, method, address, status, type, size and timing, with its headers less every credential (Cookie, Set-Cookie, Authorization, Proxy-Authorization and any header named like a token, key, secret or auth are left out; values in an address that look like tokens are masked). url keeps the requests whose address has that part, since those from a time on; limit gives the newest that many. body: one entry's id keeps that request's body and its response's (as far as the browser kept them) as results PCP keeps for this token, answered as handles, never inline. Cleared when the tab closes or is reset.",
+    input: z.strictObject({
+      tab,
+      url: z
+        .string()
+        .min(1)
+        .max(500)
+        .optional()
+        .describe("Only requests whose address has this part, case aside."),
+      since: since.optional(),
+      limit: logLimit,
+      body: z
+        .string()
+        .regex(/^n\d{1,9}$/, {
+          message: "An entry's id looks like n12, from network_log.",
+        })
+        .optional()
+        .describe(
+          "An entry's id (n12): keep its request and response bodies and answer with their handles, instead of the list.",
+        ),
+    }),
+    rules: [
+      {
+        says: "body names one entry: leave url, since and limit out.",
+        schema: {
+          if: { required: ["body"] },
+          then: {
+            not: {
+              anyOf: [
+                { required: ["url"] },
+                { required: ["since"] },
+                { required: ["limit"] },
+              ],
+            },
+          },
+        },
+      },
+    ],
+    annotations: READS,
     changes: false,
   },
 ]

@@ -94,6 +94,8 @@ export const UNPACED_BROWSER_TOOLS: ReadonlySet<string> = new Set([
   "find",
   "read_page",
   "screenshot",
+  "console_log",
+  "network_log",
   "wait_for",
   "tabs",
   "hand_over",

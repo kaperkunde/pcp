@@ -11,12 +11,14 @@ import {
   TokenReachForm,
   TokenWaiting,
 } from "@/components/token-detail"
+import { TokenScriptSites } from "@/components/token-scripts"
 import { TokenSkillsForm } from "@/components/token-skills"
 import { TokenTools } from "@/components/token-tools"
 import { Badge } from "@/components/ui/badge"
 import { ButtonLink } from "@/components/ui/button"
 import { List, ListRow } from "@/components/ui/list"
 import { listTokenAllowances } from "@/lib/core/allowances"
+import { listScriptSites } from "@/lib/core/browser-scripts"
 import { listOpenPermissions } from "@/lib/core/permissions"
 import { listSharedSkills, tokenSkills } from "@/lib/core/skills"
 import { listTokenToolAccess } from "@/lib/core/tool-access"
@@ -46,7 +48,7 @@ export default async function TokenPage({
     id,
   )
   const publicUrl = await publicUrlFor(ctx)
-  const [access, waiting, allowances, fetchRules, skills, seen] =
+  const [access, waiting, allowances, fetchRules, skills, seen, scripts] =
     await Promise.all([
       listTokenToolAccess(ctx, id),
       listOpenPermissions(ctx, id, publicUrl),
@@ -54,6 +56,7 @@ export default async function TokenPage({
       token.webFetch || browser ? listFetchRules(ctx, id) : null,
       listSharedSkills(ctx),
       tokenSkills(ctx, id),
+      browser ? listScriptSites(ctx, id) : [],
     ])
   const advanced = `/tokens/${id}/advanced`
 
@@ -155,6 +158,10 @@ export default async function TokenPage({
               : { ...allowance, until: allowance.until.toISOString() },
           )}
         />
+      ) : null}
+
+      {scripts.length > 0 ? (
+        <TokenScriptSites tokenId={id} sites={scripts} />
       ) : null}
 
       <TokenReachForm

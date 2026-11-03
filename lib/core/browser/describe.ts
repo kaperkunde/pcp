@@ -1,7 +1,10 @@
 import { siteKey } from "../fetch/rules"
+import { visible, type ShownText } from "../permission-rules"
+import { EVALUATE_TIMEOUT_MS } from "./limits"
 import type {
   BrowseAsk,
   HandoverAsk,
+  ScriptUseAsk,
   SecretRequestAsk,
   SecretUseAsk,
 } from "./types"
@@ -120,5 +123,33 @@ export function describeSecretRequestAsk(ask: SecretRequestAsk): {
     ],
     warning:
       "Type the value here, on PCP's page, never in the conversation. The assistant gets the secret's name only, and PCP types it only at the sites you leave in.",
+  }
+}
+
+/**
+ * An assistant's script to run in a tab: the site, the page, and the whole
+ * script, shown open (`full`) for the owner to read before it runs.
+ */
+export function describeScriptUseAsk(ask: ScriptUseAsk): {
+  title: string
+  lines: string[]
+  warning: string | null
+  full: ShownText[]
+} {
+  const lines = ask.script.split("\n").length
+
+  return {
+    title: `Run an assistant's script at ${ask.site}?`,
+    lines: [
+      `Site: ${ask.site}`,
+      `Page: ${ask.title || "(no title)"}`,
+      `Address: ${ask.url}`,
+      `In tab ${ask.tabId}`,
+      `The script: ${ask.script.length.toLocaleString("en")} characters, ${lines} line${lines === 1 ? "" : "s"}, shown in full below`,
+      `While it runs the tab reaches this site only, and it stops after ${EVALUATE_TIMEOUT_MS / 1000} seconds.`,
+    ],
+    warning:
+      "A script runs as the page's own do: signed in as you where you signed in to this site in the browser, it can read what the page and its scripts see (its storage, cookies a script may read) and act on the site as you. Read it whole before you let it run.",
+    full: [{ label: "The script", text: visible(ask.script) }],
   }
 }

@@ -228,3 +228,40 @@ export const MAX_MASKED_FRAMES = 50
 export const MAX_SECRET_REQUEST_ORIGINS = 10
 /** How long request_secret's purpose may be. */
 export const MAX_SECRET_PURPOSE_CHARS = 500
+/**
+ * An assistant's mouse (input.ts clickAt, wheelAt, dragBetween): the moves
+ * a drag is made of between its two points, and the pause between them, so
+ * a page that follows the pointer sees it travel.
+ */
+export const DRAG_STEPS = 12
+export const DRAG_STEP_MS = 16
+/**
+ * evaluate (evaluate.ts): the script's text, how long it may run (its own
+ * work and any promise it returns), the most of its result as JSON that is
+ * kept at all, and what an answer carries inline before the rest becomes a
+ * kept result.
+ */
+export const MAX_SCRIPT_CHARS = 20_000
+export const EVALUATE_TIMEOUT_MS = 10_000
+export const MAX_EVALUATE_RESULT_CHARS = 1_000_000
+export const EVALUATE_INLINE_CHARS = 20_000
+/**
+ * The tab's logs (devtools.ts): what each keeps of its newest entries, an
+ * entry's text and an address as they are shown, and how many one call
+ * lists.
+ */
+export const MAX_CONSOLE_ENTRIES = 500
+export const MAX_NETWORK_ENTRIES = 1_000
+export const MAX_CONSOLE_TEXT_CHARS = 2_000
+export const MAX_LOG_URL_CHARS = 2_000
+export const MAX_HEADER_VALUE_CHARS = 1_000
+export const DEFAULT_LOG_LIMIT = 50
+export const MAX_LOG_LIMIT = 200
+/**
+ * What Chromium keeps of a tab's responses for network_log's bodies (and
+ * the icon, favicon.ts): a response over the first is not kept at all, and
+ * these at most together, the oldest going first. A request's body is
+ * read as Chromium kept it, up to the same size.
+ */
+export const MAX_NETWORK_BODY_BYTES = 1024 * 1024
+export const NETWORK_BUFFER_BYTES = 8 * 1024 * 1024

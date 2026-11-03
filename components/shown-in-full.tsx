@@ -6,11 +6,19 @@ import type { ShownText } from "@/lib/core/permission-rules"
  * whole, as it runs when the owner allows it. Runs of spaces take their room,
  * so nothing can sit out of sight at the end of a line.
  */
-export function ShownInFull({ parts }: { parts: ShownText[] }) {
+export function ShownInFull({
+  parts,
+  open = false,
+}: {
+  parts: ShownText[]
+  /** Unfolded from the start: what the owner must read to answer (a script). */
+  open?: boolean
+}) {
   return (
     <details
       className="rounded-xl bg-field px-4 py-3"
       data-testid="shown-in-full"
+      open={open}
     >
       <summary className="cursor-pointer text-[13px] text-primary">
         Show everything
