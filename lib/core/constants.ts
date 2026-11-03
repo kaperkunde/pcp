@@ -332,3 +332,82 @@ export const PCPGG_URL = "https://pcp.gg/"
  * and the approval of a server at one, send the owner.
  */
 export const PUBLIC_ONLY_ANCHOR = "public-only"
+
+/**
+ * Where search's embeddings come from (lib/core/embeddings/), as Settings
+ * offers them: Voyage AI, any OpenAI-compatible /v1/embeddings address, or
+ * an API endpoint a service registered (text-embeddings-inference from
+ * PCP's common items).
+ */
+export const EMBEDDING_PROVIDERS = ["voyage", "openai", "endpoint"] as const
+
+export type EmbeddingProvider = (typeof EMBEDDING_PROVIDERS)[number]
+
+/** What search may send a provider to embed. */
+export type EmbeddedKinds = {
+  /** Tools' names and descriptions, PCP's own included. */
+  tools: boolean
+  skills: boolean
+  memories: boolean
+}
+
+/** Voyage AI's embeddings address, and the model Settings starts with. */
+export const VOYAGE_EMBEDDINGS_URL = "https://api.voyageai.com/v1/embeddings"
+export const VOYAGE_DEFAULT_MODEL = "voyage-3.5-lite"
+export const OPENAI_DEFAULT_MODEL = "text-embedding-3-small"
+
+/**
+ * Whether an address reads as the owner's own machine or network: a name
+ * with no dot, localhost, .local, .lan, .internal, .home.arpa, or a private,
+ * loopback, shared (CGNAT, as Tailscale's) or link-local IP literal.
+ */
+export function looksSelfHosted(url: string): boolean {
+  let host: string
+
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "")
+  } catch {
+    return false
+  }
+
+  if (
+    !host.includes(".") ||
+    /(^|\.)(localhost|local|lan|internal|home\.arpa)$/.test(host)
+  ) {
+    return true
+  }
+
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host)
+
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])]
+
+    return (
+      a === 10 ||
+      a === 127 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254)
+    )
+  }
+
+  return host === "::1" || /^f[cd]/.test(host) || host.startsWith("fe80:")
+}
+
+/**
+ * What a provider embeds until the owner chooses: a service on the owner's
+ * own machine (an endpoint, or an OpenAI-compatible address on their
+ * network) everything; one elsewhere (Voyage AI, any other address) the
+ * tools' names and descriptions only, so no skill or memory leaves PCP
+ * unless the owner ticks it.
+ */
+export function defaultEmbedded(
+  provider: EmbeddingProvider,
+  url = "",
+): EmbeddedKinds {
+  const own =
+    provider === "endpoint" || (provider === "openai" && looksSelfHosted(url))
+
+  return { tools: true, skills: own, memories: own }
+}

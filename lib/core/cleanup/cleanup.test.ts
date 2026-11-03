@@ -289,6 +289,35 @@ describe("a run", () => {
     expect(describeRemoved(status.removed!)).toContain("2 expired app sign-ins")
   })
 
+  it("removes search vectors no search used for a month (#61)", async () => {
+    const now = new Date("2026-11-03T12:00:00Z")
+    const day = 24 * 60 * 60 * 1000
+
+    for (const [id, age] of [
+      ["old", 31],
+      ["recent", 2],
+    ] as const) {
+      await db().embeddingVector.create({
+        data: {
+          id,
+          vaultId: ctx.vaultId,
+          hash: id,
+          dimensions: 1,
+          ciphertext: new Uint8Array([1]),
+          usedAt: new Date(now.getTime() - age * day),
+        },
+      })
+    }
+
+    const status = await runCleanup("owner", now)
+
+    expect(status.removed?.vectors).toBe(1)
+    expect(
+      (await db().embeddingVector.findMany()).map((row) => row.id),
+    ).toEqual(["recent"])
+    expect(describeRemoved(status.removed!)).toContain("1 unused search vector")
+  })
+
   it("runs every part when one fails, and names the one that did", async () => {
     vi.mocked(pruneOAuthStates).mockRejectedValueOnce(new Error("disk"))
     logDay("2020-01-01")

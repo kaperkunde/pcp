@@ -46,7 +46,8 @@ export function CleanupCard({ overview }: { overview: CleanupOverview }) {
         <>
           PCP removes what it keeps only for a while: sign-ins that ended (yours
           and apps&apos;), results kept for a day, permission requests a week
-          after they expired, and days of the{" "}
+          after they expired, search vectors no search used for a month, and
+          days of the{" "}
           <Link
             href="/log"
             className="text-primary underline-offset-4 hover:underline"

@@ -222,11 +222,13 @@ import {
 } from "./tool-results"
 import { resultUri } from "./answers"
 import {
+  embeddingProvider,
   needsConnecting,
   serviceStateLine,
   syncServerTools,
   openExitForCall,
 } from "./upstream"
+import { searchSimilarities } from "./embeddings/index"
 import { PCP_VERSION } from "./version"
 import { decideFetch, runFetch } from "./web-fetch"
 import { MAX_EXIT_NAME_CHARS } from "./exits/limits"
@@ -1423,21 +1425,31 @@ export function buildGatewayServer(
         ? readableMemories(scope.ctx, scope.tokenId)
         : Promise.resolve([]),
     ])
-    const results = searchEverything(
-      {
-        tools: candidates(servers),
-        pcp: ownTools.map((tool) => ({
-          name: tool.name,
-          title: tool.title,
-          description: tool.description,
-          tier: tierFromAnnotations(tool.annotations),
-        })),
-        skills,
-        memories,
-      },
+    const items = {
+      tools: candidates(servers),
+      pcp: ownTools.map((tool) => ({
+        name: tool.name,
+        title: tool.title,
+        description: tool.description,
+        tier: tierFromAnnotations(tool.annotations),
+      })),
+      skills,
+      memories,
+    }
+    // The owner's embeddings provider, when they set one (Settings →
+    // Search): null, and keywords alone, without one or when it fails.
+    const similarities = await searchSimilarities(
+      scope.ctx,
+      items,
       args.query,
-      { limit: args.limit ?? 10, server: args.server, kind: args.kind },
+      embeddingProvider,
     )
+    const results = searchEverything(items, args.query, {
+      limit: args.limit ?? 10,
+      server: args.server,
+      kind: args.kind,
+      similarities,
+    })
 
     if (results.length === 0 && repoResults.length === 0) {
       return text(
@@ -2712,7 +2724,7 @@ export function buildGatewayServer(
       name: "share_result",
       title: "Download a kept file by link",
       description:
-        'Share a kept file to your computer: a download link your own computer (a sandbox or terminal you run commands in) fetches a file or text PCP keeps for you from, so its bytes never pass through you: a handle\'s {"$result": id} from any answer (a browser download, a mail attachment, a long answer). Answers with the link and a curl command to run. The link works for an hour, for a few downloads; anyone holding it can use it, so run it rather than passing it on.',
+        'Share a kept file to your computer, to store, move or download a file there: a download link your own computer (a sandbox or terminal you run commands in) fetches a file or text PCP keeps for you from, so its bytes never pass through you: a handle\'s {"$result": id} from any answer (a browser download, a mail attachment, a long answer). Answers with the link and a curl command to run. The link works for an hour, for a few downloads; anyone holding it can use it, so run it rather than passing it on.',
       input: z.object({
         id: z
           .string()
@@ -2772,7 +2784,7 @@ export function buildGatewayServer(
       name: "receive_file",
       title: "Send a file to PCP by link",
       description:
-        'Receive a file from your computer: an upload link your own computer (a sandbox or terminal you run commands in) sends one file to with curl, so its bytes never pass through you, and the handle {"$result": id} the file is kept under once it arrived: pass it to upload_file, as a send_email attachment, or to any tool that takes a file. Answers with the link, the handle and a curl command to run. The link takes one file within an hour; what arrived is kept for a day.',
+        'Receive a file from your computer, to upload, send, move or store a file in PCP: an upload link your own computer (a sandbox or terminal you run commands in) sends one file to with curl, so its bytes never pass through you, and the handle {"$result": id} the file is kept under once it arrived: pass it to upload_file, as a send_email attachment, or to any tool that takes a file. Answers with the link, the handle and a curl command to run. The link takes one file within an hour; what arrived is kept for a day.',
       input: z.object({
         name: z
           .string()
@@ -2831,7 +2843,7 @@ export function buildGatewayServer(
     register({
       name: "create_upload_link",
       title: "Ask the owner to upload files",
-      description: `Get files from the owner: an upload link to a page they open on their phone or computer to send you files they have there (photos, scans, documents) that you cannot reach otherwise, such as a file they dropped into the chat or one they mention in a voice conversation. Each file becomes a handle {"$result": id} to pass where a tool wants a file (send_email's attachments, upload_file). The page takes up to max_files files for up to an hour, and for a quarter of an hour once the first arrives, or until the owner taps Done; whoever has the link can upload to it, so give it to the owner only. ${OWNER_LINK_RULE} ${nextMessageCheck("check_upload with its id", "nothing has arrived")}`,
+      description: `Get files from the owner, to receive, store or move a file they have: an upload link to a page they open on their phone or computer to send you files they have there (photos, scans, documents) that you cannot reach otherwise, such as a file they dropped into the chat or one they mention in a voice conversation. Each file becomes a handle {"$result": id} to pass where a tool wants a file (send_email's attachments, upload_file). The page takes up to max_files files for up to an hour, and for a quarter of an hour once the first arrives, or until the owner taps Done; whoever has the link can upload to it, so give it to the owner only. ${OWNER_LINK_RULE} ${nextMessageCheck("check_upload with its id", "nothing has arrived")}`,
       input: z.object({
         purpose: z
           .string()
@@ -2992,7 +3004,7 @@ export function buildGatewayServer(
     name: "register_server",
     title: "Add a server, an API, a mail or a calendar account, or a service",
     description: [
-      "Propose a new server, API, email or calendar account, or service for PCP to reach; the owner must agree on PCP's page before it is added, and nothing exists until they do. kind says what it is: mcp (an MCP server, by url), api (a REST API, from its OpenAPI 3 document in openapi_schema or openapi_url), jmap or imap (a mail account), caldav (calendars and reminders), service (a container on the owner's SSH server). An SSH server cannot be proposed: the owner adds one on PCP's Servers page.",
+      "Propose a new server, API, email or calendar account, or service for PCP to reach (launch or run a container, start a service); the owner must agree on PCP's page before it is added, and nothing exists until they do. kind says what it is: mcp (an MCP server, by url), api (a REST API, from its OpenAPI 3 document in openapi_schema or openapi_url), jmap or imap (a mail account), caldav (calendars and reminders), service (a container on the owner's SSH server). An SSH server cannot be proposed: the owner adds one on PCP's Servers page.",
       "A mailbox is always a mail account (jmap or imap), never an API you write around its mail server: PCP signs in to a mail account itself, over an encrypted connection, and gives every account the same tools (list, search, read, move, flag, delete into the Trash, send). Calendars and reminders are always a calendar account (caldav), never an API: PCP finds the calendars itself and gives every account the same tools (events, free time, reminders).",
       `Authentication is auth_type: none, header (a secret in a header), basic (username and a password) or oauth (the owner signs in once they agree; PCP finds out itself whether the provider lets it register, so client_id is only for one that does not). Secrets are named by their NAME in secret (and extra_headers): one the owner stored is reused, a new name is typed in by the owner on PCP's page when they agree. ${scope.manageEndpoints ? "list_secrets gives the names of the secrets the owner stored and what already uses each: name one of its text secrets to reuse it rather than inventing a name. " : "A token that may read and change API endpoints can list the names of the owner's secrets with list_secrets. "}Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.`,
       "A service is a container on one of the owner's SSH servers (ssh_server): its definition in service, its variables' secrets by NAME in env_secrets. Nothing runs until the owner agrees.",

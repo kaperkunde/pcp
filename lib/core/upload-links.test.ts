@@ -466,7 +466,7 @@ describe("through the gateway", () => {
     const tools = (await mover.client.listTools()).tools
     const create = tools.find((tool) => tool.name === "create_upload_link")
     expect(create?.description).toMatch(
-      /^Get files from the owner: an upload link/,
+      /^Get files from the owner, to receive, store or move a file they have: an upload link/,
     )
     expect(create?.annotations).toMatchObject({
       readOnlyHint: false,
