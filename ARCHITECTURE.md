@@ -306,8 +306,8 @@ arguments.
 Private addresses are allowed, as they are for MCP servers the owner adds:
 only the owner sets a schema URL or base URL, and a self-hosted PCP often
 talks to services on its own network. What an assistant proposes, an
-endpoint or an MCP server, is public-only (below) until the owner allows
-private addresses on its page. A multi-tenant host must add an address policy
+endpoint or an MCP server, is public-only (below) unless the owner allows
+private addresses as they agree, or later on its page. A multi-tenant host must add an address policy
 before it lets anyone else set one: resolve the name, refuse loopback,
 private, link-local and metadata ranges, and connect to the address it
 checked.
@@ -423,13 +423,20 @@ change an endpoint decides where PCP sends requests:
   socket connects to (`openapi/transport.ts` resolves the name itself and
   checks every answer), so a name that resolves to a public address for a
   check and a private one for the connection cannot get through. The owner
-  turns it off per endpoint, for an API on their own network. It connects
+  turns it off per endpoint, for an API on their own network, with the
+  "Public addresses only" switch on its page (About, outside Advanced,
+  anchored `#public-only`, `setServerPublicOnly`); the form under Advanced
+  no longer carries it, and an update that leaves it out keeps it. A refused
+  call's error ends with a link to that switch (`public-only.ts
+withPublicOnlyLink`, added in `upstream.ts` where the server and PCP's
+  address are known), for the assistant to hand the owner. It connects
   directly, not through an outbound proxy (a proxy does its own name
   resolution, which PCP could not check): a host that must use one has to turn
   this off for those endpoints, and the proxy's own egress rules are then what
   protect it. What a name resolves to is neither looked up at registration nor
   told to the assistant, so the tools cannot be used to map the owner's DNS.
-  A literal private address is noted in the request the owner reads.
+  A literal private address is noted in the request the owner reads, and
+  that request offers "Allow private addresses" (below).
 - **Approved as downloaded.** A schema URL an assistant names is downloaded
   once, when it asks, from public addresses only and with no credential, and
   the copy is held (encrypted) on the request: the endpoint is made from the
@@ -3988,9 +3995,17 @@ over `openapi/transport.ts` with the address checked as the socket connects,
 refusing private, loopback, link-local and PCP's own addresses. It follows
 redirects as fetch does (`checkedFetch`), each hop a request of its own that
 is checked again, so a redirect cannot lead past the check. The owner clears
-it under "Public addresses only" on the server's form, for a server on their
-own network; a server the owner adds is not public-only unless they tick it.
+it with the "Public addresses only" switch on the server's page (outside
+Advanced, `#public-only`), for a server on their own network; a server the
+owner adds is not public-only unless they tick it on the add form.
 Before the owner is asked, the server's host is resolved and a private or
 local one is flagged on the approval page (an owner-only line, as for a mail
-account), saying it connects only once they allow private addresses.
+account). A request flagged so (an MCP server's resolved host, or an
+endpoint's literal private base URL; never a mail or calendar account) offers
+"Allow private addresses" on its page, off (`PermissionView
+offersPrivateAddresses`): ticked, `decidePermission`'s `allowPrivate` makes
+the server with `public_only` off; left alone, or on a request not flagged,
+it is public-only whatever the stored arguments say. register_server has no
+argument for it, so nothing an assistant sends sets it. Approved and left
+public-only, the outcome ends with the link to the switch.
 Requests are deleted at boot a week after they expire.

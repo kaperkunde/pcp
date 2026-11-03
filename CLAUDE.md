@@ -72,7 +72,11 @@ so in the summary; the bump itself waits for the request.
   token addresses), so `client_id` is only for one that does not. It changes a schema with edits (a JSON Patch, `openapi/patch.ts`)
   rather than resending it, and a changed document at a URL it proposed is not
   taken without the owner.
-  It never changes a credential and never clears `publicOnly`. On an
+  It never changes a credential and never clears `publicOnly`: only the
+  owner does, with the switch on the server's page (`#public-only`), or by
+  ticking "Allow private addresses" on a request for a server or endpoint
+  flagged as private (`allowPrivate`, offered only then, never an
+  argument). On an
   endpoint that is the owner's (it sends a secret or an OAuth token, or private
   addresses are allowed) it can turn read-only on, and anything else it may change there
   (name, description, edits, tool descriptions, a re-read of the schema URL)
