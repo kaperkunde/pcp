@@ -28,9 +28,10 @@ export const TITLE_TIMEOUT_MS = 2_000
  */
 export const MAX_FAVICON_BYTES = 16 * 1024
 /**
- * What Chromium keeps of the responses a tab's DevTools session sees, for
- * the icon to be read from: a response over MAX_FAVICON_BYTES is not kept
- * at all, and these at most together.
+ * What Chromium keeps of the responses a tab's DevTools session sees until
+ * the tab's logs start (devtools.ts, which then keeps more for
+ * network_log's bodies, MAX_NETWORK_BODY_BYTES): a response over
+ * MAX_FAVICON_BYTES is not kept at all, and these at most together.
  */
 export const FAVICON_BUFFER_BYTES = 512 * 1024
 /** The longest wait_for. */

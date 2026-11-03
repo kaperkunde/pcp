@@ -30,7 +30,7 @@ import { setFetchPrivate, setFetchSite } from "../web-fetch"
 import { callBrowserTool } from "./call"
 import { maskUrl, safeHeaders } from "./devtools"
 import { chromiumExecutable } from "./executable"
-import { holdSecret } from "./held"
+import { holdSecret, maskTyped, typedInto } from "./held"
 import { closeAllBrowsers, runningBrowser } from "./runtime"
 import { createBrowserServer } from "./server"
 import { isOwnerNeeded, type OwnerNeeded } from "./types"
@@ -217,6 +217,27 @@ async function open(path: string): Promise<string> {
 async function title(tab: string): Promise<string> {
   return runningBrowser(ctx.vaultId)!.tabs.get(tab)!.page.title()
 }
+
+describe("a secret PCP typed into a page, repeated later", () => {
+  it("is masked wherever a word of a log or a result is it", () => {
+    const page = {} as Parameters<typeof maskTyped>[0]
+    expect(typedInto(page)).toBe(false)
+    expect(maskTyped(page, "nothing typed")).toBe("nothing typed")
+
+    holdSecret(page, "Shop", "p@ss=w0rd&x")
+    expect(typedInto(page)).toBe(true)
+    expect(maskTyped(page, "login p@ss=w0rd&x ok")).toBe(
+      "login [secret: Shop] ok",
+    )
+    expect(maskTyped(page, "user=ada&password=p%40ss%3Dw0rd%26x")).toBe(
+      "user=ada&password=[secret: Shop]",
+    )
+    expect(maskTyped(page, '{"pw":"p@ss=w0rd&x"}')).toBe(
+      '{"pw":"[secret: Shop]"}',
+    )
+    expect(maskTyped(page, "p@ss")).toBe("p@ss")
+  })
+})
 
 describe("what the logs show of a request", () => {
   it("leaves out every header that carries a credential", () => {
