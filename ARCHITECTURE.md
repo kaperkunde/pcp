@@ -1999,7 +1999,8 @@ run_code cannot learn in time that nobody is waiting. It does not try to:
   `DUPLICATE_RUN_MS` (5 minutes) of its end, is answered with that run's
   id, state and calls instead of running again; `rerun: true` runs it all
   the same. A run that stopped for the owner is not held to this: its
-  answer says to run it again once they have answered.
+  answer says to check on the owner's next message and to run it again
+  once they allowed the call.
 
 A wrapper's run reports the same way but does not outlive its call: it
 stops when its request goes away, as before.
@@ -3815,7 +3816,7 @@ Sessions are kept in memory too (`clients/sessions.ts`), as /mcp is
 stateless and no request carries a session id: a session is a token and its
 client, begun again by an `initialize` and forgotten after half an hour
 without a request; two conversations at once share one, which is accepted.
-In it, PCP says two things once. `search` and `describe` add a line of
+In it, PCP says three things once. `search` and `describe` add a line of
 their own, after their answer, while `read_memory` `every` has not run
 ("Owner's rules: call read_memory with command "every" first."), for a token
 that keeps memories. For a profile that mirrors, the instructions' key
@@ -3823,8 +3824,21 @@ rules (how to find and call a tool, the owner's link, check_permission,
 read_result) follow `read_memory` `every`'s answer, or else the first
 `search` or `describe` answer, as a text of its own so a JSON answer stays
 JSON; with the owner's own instructions when the token keeps no memories,
-since `read_memory` `every` gives them otherwise. A scope without a client
-(the owner's pages, tests) says neither.
+since `read_memory` `every` gives them otherwise. And every answer of
+PCP's own tools (`call_tool_*` and `run_code_*` among them) starts with a
+text naming the token's requests the owner answered that the session has
+not heard of, each once (`answeredLead` in the gateway, through
+`ServeHooks.lead`, `withLeadText`): in front, so an answer that asks the
+owner still ends with its link, and with structuredContent as it was (the
+text also in `_meta["gg.pcp/notes"]`). The session keeps where to look
+from and the ids it told (`answeredCursor`, `lookedForAnswers`); its first
+look reaches back `ANSWERED_WINDOW_MS`, so a conversation begun after the
+owner answered still hears of it, and each later one starts
+`ANSWERED_SLACK_MS` before the last, skipping what it told by id. A request
+`check_permission` read or listed counts as told. One query per answer, on
+the token's rows by `decidedAt` (an index of its own); the rows it names
+are read in full only when there is something new. A scope without a
+client (the owner's pages, tests) says none of these.
 
 ## Tool access and the owner's permission
 
@@ -3854,7 +3868,7 @@ arguments encrypted under the vault's key with the row id as associated
 data, a hash of the call so the same call asked twice finds the same row,
 and a day to answer. The result is text for the assistant: what was asked,
 the link to `/permissions/<id>` to end its reply with, and to call
-`check_permission` once the owner says they have answered. The signed-in
+`check_permission` on the owner's next message, whatever it says. The signed-in
 owner answers on that page, and only there (the header's bell lists every
 request still waiting, `listPendingRequests`, and links to each); `decidePermission()` claims the row (pending to running, one winner)
 and runs the call once. "Always allow" and "Block" also write the tool's
@@ -3871,7 +3885,11 @@ browser tools (`finishHandover`). The bell drops it (it lists pending rows
 only), the request's page says "Withdrawn by the assistant", and the Log
 shows the call that asked as withdrawn. `check_permission` with no id lists
 the token's own requests still waiting (id, kind, title, age and link),
-and only reads.
+then those the owner answered in the last hour (`ANSWERED_WINDOW_MS`, at
+most `MAX_ANSWERED_LISTED`, newest first: id, kind, title, when, and the
+first line of what `check_permission` with its id says), and only reads.
+Answered means running, executed, failed or declined, with `decidedAt` as
+the time; a request withdrawn or closed is not an answer of the owner's.
 
 What waits for the owner is one queue, oldest first
 (`lib/core/owner-queue.ts`): the requests from live tokens
@@ -3921,8 +3939,11 @@ says to end the reply with the link (`owner-link.ts: linkLastText`, the link
 on its own last line as a markdown link whose label names the action, such
 as `[Allow gmail-imap/send_email?](…)`: an app that reads the reply aloud
 says the label rather than an address of ids, so the bare address is never
-to be pasted) and to call `check_permission` once the owner says they
-have answered. In case they are still on it, the check holds the call while
+to be pasted) and to call `check_permission` on the owner's next message,
+whatever it says, before sending the link again or assuming the request is
+still open (`owner-link.ts: nextMessageCheck`): the owner's words rarely say
+whether they answered, and an assistant that waited to be told sent links
+again for requests already decided. In case they are still on it, the check holds the call while
 the request is open (`lib/core/owner-wait.ts`: up to 45 seconds, under the
 minute at which clients and proxies give up, checking every second, and
 dropping out when the client goes away) and answers as soon as they have.
@@ -3940,8 +3961,10 @@ protocol version in its `_meta`, which that line carries, with the values of
 `x-anthropic-client` and `mcp-protocol-version`.
 An OAuth server that needs signing in (a call to it, or one the owner just
 agreed to add) answers with a link to its page in PCP, handed over the same
-way, where Connect starts the sign-in; `check_server` then says whether it
-is connected, waiting the same way, and its tools are read. A server that needs a client from the owner first (status
+way, where Connect starts the sign-in; `check_server`, called on the
+owner's next message the same way, says whether it is connected, waiting
+the same way, and its tools are read (`check_upload` for an upload link
+likewise). A server that needs a client from the owner first (status
 `client_required`) gets the same link; its page says what to create.
 
 The client's own prompts (form and URL elicitation, with `input_required`

@@ -87,8 +87,24 @@ async function parseResponse(response: Response): Promise<McpResponse> {
   }
 }
 
+/**
+ * How the note of the owner's answers a session has not heard of starts
+ * (permissions.ts answeredNote): put in front of any answer of PCP's own
+ * tools, so the helpers below read past it.
+ */
+const ANSWERED_NOTE = "Answered by the owner since PCP last told you"
+
+/** A result's blocks without that note. */
+function answerBlocks(
+  response: McpResponse,
+): Array<{ type: string; text?: string; uri?: string }> {
+  return (response.body.result?.content ?? []).filter(
+    (block) => !(block.text ?? "").startsWith(ANSWERED_NOTE),
+  )
+}
+
 export function toolText(response: McpResponse): string {
-  return response.body.result?.content?.[0]?.text ?? ""
+  return answerBlocks(response)[0]?.text ?? ""
 }
 
 /** Every text block of a result: a notice (a kept answer's) is a block of its own. */
@@ -101,7 +117,7 @@ export function allToolText(response: McpResponse): string {
 /** The last text block of a tool's answer: its JSON, after any notes. */
 export function lastToolText(response: McpResponse): string {
   return (
-    (response.body.result?.content ?? [])
+    answerBlocks(response)
       .filter((block) => block.type === "text")
       .at(-1)?.text ?? ""
   )

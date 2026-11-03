@@ -17,6 +17,7 @@ import {
   permissionLinkIn,
   registerTool,
   TOOL_REPORTED_ERROR,
+  withLeadText,
   type CallLine,
 } from "./serve"
 
@@ -377,5 +378,38 @@ describe("permissionLinkIn", () => {
         PUBLIC_URL,
       ),
     ).toBeNull()
+  })
+})
+
+describe("a lead in front of an answer (#59)", () => {
+  it("goes first as a text of its own, and leaves structuredContent as it is", () => {
+    const plain = withLeadText(
+      { content: [{ type: "text", text: "Done." }] },
+      "Answered since: …",
+    )
+    expect(plain).toEqual({
+      content: [
+        { type: "text", text: "Answered since: …" },
+        { type: "text", text: "Done." },
+      ],
+    })
+
+    const structured = withLeadText(
+      {
+        content: [{ type: "text", text: '{"a":1}' }],
+        structuredContent: { a: 1 },
+        _meta: { [NOTES_META_KEY]: ["renamed"] },
+      },
+      "Answered since: …",
+    )
+    expect(structured.structuredContent).toEqual({ a: 1 })
+    expect(structured._meta?.[NOTES_META_KEY]).toEqual([
+      "Answered since: …",
+      "renamed",
+    ])
+    expect(structured.content[0]).toEqual({
+      type: "text",
+      text: "Answered since: …",
+    })
   })
 })

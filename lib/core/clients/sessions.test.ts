@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  ANSWERED_SLACK_MS,
+  answeredCursor,
+  lookedForAnswers,
   MAX_SESSIONS,
+  noteAnswersTold,
   SESSION_IDLE_MS,
   noteMemoryRead,
   noteMirrored,
@@ -63,5 +67,46 @@ describe("sessions", () => {
 
     // Forgotten: a new session, which reminds again.
     expect(takeMemoryReminder(oldest)).toBe(true)
+  })
+
+  it("look for the owner's answers from a window back, and skip those told (#59)", () => {
+    const one = key()
+    const now = Date.now()
+    const hour = 60 * 60_000
+
+    // The first look reaches back the window it is given.
+    expect(answeredCursor(one, hour, now)).toEqual({
+      since: now - hour,
+      told: new Set(),
+    })
+
+    // An answer given just before the look, and one long before: both told.
+    lookedForAnswers(
+      one,
+      [
+        { id: "recent", at: now - 1_000 },
+        { id: "old", at: now - 30 * 60_000 },
+      ],
+      now,
+    )
+
+    // The next look starts a little before the last, and skips the one told
+    // in that while; the old one is let go, since no look finds it again.
+    const next = answeredCursor(one, hour, now + 5_000)
+    expect(next.since).toBe(now - ANSWERED_SLACK_MS)
+    expect(next.told).toEqual(new Set(["recent"]))
+
+    // One read through check_permission is skipped too.
+    noteAnswersTold(one, [{ id: "checked", at: now + 6_000 }], now + 6_000)
+    expect(answeredCursor(one, hour, now + 7_000).told).toEqual(
+      new Set(["recent", "checked"]),
+    )
+
+    // An initialize starts over: the window back again, nothing told.
+    startSession(one, now + 8_000)
+    expect(answeredCursor(one, hour, now + 9_000)).toEqual({
+      since: now + 9_000 - hour,
+      told: new Set(),
+    })
   })
 })

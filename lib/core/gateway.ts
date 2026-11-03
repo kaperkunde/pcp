@@ -2342,7 +2342,9 @@ export function buildGatewayServer(
         .min(1)
         .max(64)
         .optional()
-        .describe("The request's id. Leave it out to list your open requests."),
+        .describe(
+          "The request's id. Leave it out to list your open requests and those answered in the last hour.",
+        ),
     }),
     output: z.discriminatedUnion("kind", [
       NEEDS_OWNER,
@@ -2427,12 +2429,6 @@ export function buildGatewayServer(
         signal: ctx.signal,
       })
 
-      // Read here: the session's note does not tell it again.
-      if (scope.client) {
-        noteAnswersTold(scope.client.sessionKey, [
-          { id: args.id, at: Date.now() },
-        ])
-      }
       const structured = result.structuredContent as
         { kind?: unknown; server?: ServerState } | undefined
 
@@ -2444,6 +2440,13 @@ export function buildGatewayServer(
         permissionLinkIn(result, scope.publicUrl)
       ) {
         return passOn(result)
+      }
+
+      // Its outcome is read here: the session's note does not tell it again.
+      if (scope.client) {
+        noteAnswersTold(scope.client.sessionKey, [
+          { id: args.id, at: Date.now() },
+        ])
       }
 
       const view = await getPermissionView(scope.ctx, args.id, {

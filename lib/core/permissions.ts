@@ -3534,6 +3534,13 @@ export function answeredLine(
 }
 
 /**
+ * How the note below starts: e2e/lib/mcp.ts reads past a text that starts
+ * so, to the answer it is in front of.
+ */
+export const ANSWERED_NOTE_LEAD =
+  "Answered by the owner since PCP last told you"
+
+/**
  * What a session's next answer says of requests the owner answered since
  * it last heard (clients/sessions.ts), once each; null for none.
  */
@@ -3552,7 +3559,7 @@ export function answeredNote(
       ? [`- and ${more} more: check_permission with no id lists them.`]
       : []
 
-  return `Answered by the owner since PCP last told you (check_permission with an id gives the whole outcome; none of them needs its link sent again):\n${[...lines, ...rest].join("\n")}`
+  return `${ANSWERED_NOTE_LEAD} (check_permission with an id gives the whole outcome; none of them needs its link sent again):\n${[...lines, ...rest].join("\n")}`
 }
 
 /**

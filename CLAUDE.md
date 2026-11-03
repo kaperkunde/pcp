@@ -560,9 +560,12 @@ so in the summary; the bump itself waits for the request.
   Claude's apps fold it out of sight; a markdown link with a short label
   naming the action, never the bare address, so voice mode reads the label;
   `owner-link.ts` holds the label rules and the wording instructions and
-  descriptions use), and a check to call once the owner
-  says they answered (`check_permission`, `check_server`,
-  `lib/core/owner-wait.ts`). The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
+  descriptions use), and a check to call on the owner's next message,
+  whatever it says, before the link is sent again (`nextMessageCheck`;
+  `check_permission`, `check_server`, `check_upload`,
+  `lib/core/owner-wait.ts`). In a session, the next answer of any of PCP's
+  own tools names the token's requests answered since, once each, and
+  `check_permission` with no id lists the last hour's. The header's bell lists what is waiting. No client prompts (elicitation) and no MCP Apps
   panel: Claude's apps stalled on the one and rebuilt the other stale (see
   ARCHITECTURE.md). Anything new that needs the owner works the same way.
 - The single-user assumption lives in two places: `ownerVault()` and the
