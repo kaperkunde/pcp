@@ -507,8 +507,25 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   fetch does, and every page a tab's main frame opens passes the gate in
   `runtime.ts`: the driving token's web fetch site lines, a site the owner
   allowed for that tab, or the owner's own control; PCP's own site never. Service
-  workers are refused at that gate, not by a browser option. No
-  tool runs JavaScript or reads or sets cookies or storage. Files cross only
+  workers are refused at that gate, not by a browser option. No tool
+  reads or sets cookies or storage directly. JavaScript runs only through
+  `evaluate` (`browser/evaluate.ts`): Destructive, asked of the owner per
+  site with the whole script shown (`script_use`, with `noteOwnerAsked`;
+  Run it once, or a level for the site kept as a `web_fetch_rule` of kind
+  `script`, `browser-scripts.ts`), refused while a field holds a typed
+  secret, and while it runs the tab reaches its own site only (its
+  DevTools session fails every request elsewhere, the gate keeps its main
+  frame and popups there, and the proxies hold new connections elsewhere
+  until it is done, then refuse the ones it reached for); its result is
+  masked and a long one kept as a result. The logs (`console_log`,
+  `network_log`, `browser/devtools.ts`) are DevTools events only, never
+  page script; the page's own console calls only from the first
+  `console_log` on a tab (Runtime is a domain pages can detect); headers
+  that carry a credential are dropped, token-like values in addresses
+  masked, and bodies kept as results only when asked for, never a request
+  body from a page PCP typed a secret into. A point (`x`, `y` on `click`,
+  `scroll`, `drag`) is viewport CSS pixels, sent as DevTools mouse events
+  through `input.ts` as the owner's input is. Files cross only
   as the token's kept results, never a path on the machine: Chromium refuses
   every download but while `download` waits for one (`downloads.ts`, on a
   DevTools session of PCP's own), which takes the first from its tab or a
@@ -526,7 +543,7 @@ embeddingProvider`, which hands `embeddings/provider.ts` the header;
   process: there Chromium has a window of its own kept off the screen,
   its pages opened in the background (`launch.ts`). A
   tool that needs the owner throws `OwnerNeeded`, which `runCall` turns into
-  a permission request (`browse`, `browser_handover`); a site is asked
+  a permission request (`browse`, `browser_handover`, `script_use`); a site is asked
   about only for the address in the call's arguments, so a call the owner
   allowed opens it without a second ask. `navigate` waits for a check that
   passes on its own; one that does not is the owner's, through `hand_over`,

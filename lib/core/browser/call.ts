@@ -19,7 +19,12 @@ import { PERMISSION_TTL_MS } from "../permission-rules"
 import { checkRateLimit } from "../rate-limit"
 import { loadResourceLimits } from "../resources/state"
 import { missingResultMessage, resolveHandles } from "../result-handles"
-import { handleOf, type BytesKeeper, type ResultOpener } from "../tool-results"
+import {
+  handleOf,
+  type BytesKeeper,
+  type ResultKeeper,
+  type ResultOpener,
+} from "../tool-results"
 import type { BrowserExits } from "../exits/use"
 import {
   argumentsResult,
@@ -29,9 +34,12 @@ import {
 } from "../tools/family"
 import { decideSite, loadFetchRules } from "../web-fetch"
 import { parseSecretPlaceholder, scrubResult } from "../wrappers/placeholders"
+import { consoleLog, networkLog } from "./devtools"
 import { catchDownload, offeredName, tabOwnsFrame } from "./downloads"
+import { evaluateInTab } from "./evaluate"
 import { coveringElement, coveringLine, failureReason } from "./failures"
 import { heldSecret, heldValues, holdSecret } from "./held"
+import { clickAt, dragBetween, wheelAt, type MouseButton } from "./input"
 import {
   ACTION_TIMEOUT_MS,
   BROWSER_ACTIONS,
@@ -1140,6 +1148,7 @@ const NEEDS_THE_PAGE = new Set<BrowserToolName>([
   "read_page",
   "find",
   "click",
+  "drag",
   "type",
   "press_key",
   "select_option",
@@ -1147,6 +1156,7 @@ const NEEDS_THE_PAGE = new Set<BrowserToolName>([
   "scroll",
   "wait_for",
   "download",
+  "evaluate",
 ])
 
 async function onTab(
@@ -1698,6 +1708,75 @@ async function downloadFile(
   )
 }
 
+/**
+ * One end of a drag: a point (x, y; to_x, to_y), or the middle of an
+ * element (ref or target; to_ref or to_target), scrolled into view first.
+ */
+async function pointOf(
+  tab: Tab,
+  args: Record<string, unknown>,
+  prefix: "" | "to_",
+): Promise<{ x: number; y: number } | CallToolResult> {
+  if (args[`${prefix}x`] !== undefined) {
+    return { x: args[`${prefix}x`] as number, y: args[`${prefix}y`] as number }
+  }
+
+  const found = await element(tab, {
+    ref: args[`${prefix}ref`],
+    target: args[`${prefix}target`],
+  })
+
+  if (!isElement(found)) {
+    return found
+  }
+
+  await found.locator
+    .scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT_MS })
+    .catch(() => {})
+  const box = await found.locator.boundingBox({ timeout: ACTION_TIMEOUT_MS })
+
+  if (!box) {
+    return text(
+      `${found.label} shows nowhere on the page now, so there is nothing to drag ${prefix ? "to" : "from"}. Take a snapshot to see what the page has.`,
+      true,
+    )
+  }
+
+  return {
+    x: Math.round(box.x + box.width / 2),
+    y: Math.round(box.y + box.height / 2),
+  }
+}
+
+/**
+ * How a screenshot's pixels map to the viewport's CSS pixels, which click,
+ * scroll and drag take as x and y.
+ */
+function pictureScale(picture: {
+  scale: number
+  origin: { x: number; y: number }
+}): string {
+  const { scale, origin } = picture
+  const left = Math.round(origin.x)
+  const top = Math.round(origin.y)
+
+  if (scale === 1 && left === 0 && top === 0) {
+    return "Its pixels are the viewport's CSS pixels: a point at x, y in it is x, y for click, scroll and drag."
+  }
+
+  const factor = Math.round((1 / scale) * 1000) / 1000
+  const across = [
+    left !== 0 ? `${left} + ` : "",
+    scale === 1 ? "x" : `x × ${factor}`,
+  ].join("")
+  const down = [
+    top !== 0 ? `${top} + ` : "",
+    scale === 1 ? "y" : `y × ${factor}`,
+  ].join("")
+
+  return `Scale ${Math.round(scale * 1000) / 1000}${left || top ? `, its top left at x ${left}, y ${top} of the viewport` : ""}: a point at x, y in this picture is x ${across}, y ${down} in the viewport's CSS pixels, which click, scroll and drag take.`
+}
+
 /** Characters of a text that are not white space. */
 function visibleChars(value: string): number {
   return value.replace(/\s+/g, "").length
@@ -1931,6 +2010,7 @@ async function runBrowserTool(
     tokenId,
     publicUrl,
     open,
+    keep,
     keepBytes,
     signal,
     deadline,
@@ -1940,6 +2020,8 @@ async function runBrowserTool(
   }: {
     tokenId: string
     publicUrl: string
+    /** Keeps a long text for the token: evaluate's long result. */
+    keep?: ResultKeeper
     /** The exits a new tab may go out through (upstream.ts browserExitsFor). */
     exits?: BrowserExits
     /**
@@ -2021,6 +2103,7 @@ async function runBrowserTool(
   return withNotes(
     await runCheckedTool(scope, server, spec, checked.args, {
       open,
+      keep,
       keepBytes,
       secret,
     }),
@@ -2041,10 +2124,12 @@ async function runCheckedTool(
   args: Record<string, unknown>,
   {
     open,
+    keep,
     keepBytes,
     secret,
   }: {
     open: ResultOpener | undefined
+    keep?: ResultKeeper
     keepBytes: BytesKeeper | undefined
     secret: SecretTyper | undefined
   },
@@ -2095,6 +2180,22 @@ async function runCheckedTool(
       )
     case "click":
       return onTab(scope, tab, spec, async (current) => {
+        const button = (args.button as MouseButton | undefined) ?? "left"
+
+        if (args.x !== undefined) {
+          const at = await clickAt(
+            current,
+            { x: args.x as number, y: args.y as number },
+            { button, double: args.double === true },
+          )
+          await settle(current)
+          return report(scope, current, {
+            lead: [
+              `${args.double ? "Double-clicked" : "Clicked"}${button === "left" ? "" : ` with the ${button} button`} at x ${at.x}, y ${at.y} of the viewport.`,
+            ],
+          })
+        }
+
         const found = await element(current, args)
         if (!isElement(found)) return found
         const force = args.force === true
@@ -2109,6 +2210,7 @@ async function runCheckedTool(
           await found.locator.click({
             timeout: ACTION_TIMEOUT_MS,
             clickCount: args.double ? 2 : 1,
+            button,
             force,
           })
         } catch (error) {
@@ -2139,6 +2241,22 @@ async function runCheckedTool(
 
         await settle(current)
         return report(scope, current)
+      })
+    case "drag":
+      return onTab(scope, tab, spec, async (current) => {
+        const from = await pointOf(current, args, "")
+        if ("content" in from) return from
+        const to = await pointOf(current, args, "to_")
+        if ("content" in to) return to
+        const moved = await dragBetween(current, from, to, {
+          button: (args.button as MouseButton | undefined) ?? "left",
+        })
+        await settle(current)
+        return report(scope, current, {
+          lead: [
+            `Dragged from x ${moved.from.x}, y ${moved.from.y} to x ${moved.to.x}, y ${moved.to.y} of the viewport.`,
+          ],
+        })
       })
     case "type": {
       const named = parseSecretPlaceholder(args.text)
@@ -2219,10 +2337,20 @@ async function runCheckedTool(
         } else {
           const amount = (args.amount as number | undefined) ?? 600
           const direction = args.direction as string
-          await current.page.mouse.wheel(
-            direction === "left" ? -amount : direction === "right" ? amount : 0,
-            direction === "up" ? -amount : direction === "down" ? amount : 0,
-          )
+          const dx =
+            direction === "left" ? -amount : direction === "right" ? amount : 0
+          const dy =
+            direction === "up" ? -amount : direction === "down" ? amount : 0
+
+          if (args.x !== undefined) {
+            await wheelAt(
+              current,
+              { x: args.x as number, y: args.y as number },
+              { dx, dy },
+            )
+          } else {
+            await current.page.mouse.wheel(dx, dy)
+          }
         }
         return report(scope, current)
       })
@@ -2293,7 +2421,10 @@ async function runCheckedTool(
           content: [
             {
               type: "text",
-              text: `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab: ${markdownLink(`Watch tab ${current.id}`, tabLink(publicUrl, current.id))})`,
+              text: [
+                `Tab ${current.id}: ${current.page.url()} (${label ? `${label}, ` : ""}${picture.width} by ${picture.height}${picture.scale < 1 ? ", made smaller to pass on" : ""}, JPEG quality ${picture.quality}; the owner can watch the tab: ${markdownLink(`Watch tab ${current.id}`, tabLink(publicUrl, current.id))})`,
+                pictureScale(picture),
+              ].join("\n"),
             },
             {
               type: "image",
@@ -2341,6 +2472,29 @@ async function runCheckedTool(
 
       throw new OwnerNeeded({ kind: "secret_request", input })
     }
+    case "evaluate":
+      return onTab(scope, tab, spec, (current) =>
+        evaluateInTab(
+          {
+            vaultId: ctx.vaultId,
+            tokenId,
+            serverId: server.id,
+            ...(keep ? { keep } : {}),
+          },
+          current,
+          args.script as string,
+        ),
+      )
+    case "console_log":
+      return onTab(scope, tab, spec, (current) => consoleLog(current, args))
+    case "network_log":
+      return onTab(scope, tab, spec, (current) =>
+        networkLog(current, args, {
+          serverId: server.id,
+          ...(keep ? { keep } : {}),
+          ...(keepBytes ? { keepBytes } : {}),
+        }),
+      )
     case "hand_over":
       return onTab(scope, tab, spec, async (current) => {
         const message = withoutPresentation(args.message as string).trim()

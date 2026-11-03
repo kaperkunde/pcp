@@ -138,6 +138,7 @@ export type PermissionKind =
   | "secret_use"
   | "secret_request"
   | "exit_use"
+  | "script_use"
   | "wrapper_change"
   | "skill_change"
   | "repo_change"

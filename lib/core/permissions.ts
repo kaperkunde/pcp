@@ -145,6 +145,7 @@ import {
   describeHandoverAsk,
   describeSecretRequestAsk,
   describeSecretUseAsk,
+  describeScriptUseAsk,
 } from "./browser/describe"
 import type { fetchThroughBrowser } from "./browser/solve"
 import {
@@ -152,9 +153,16 @@ import {
   type BrowseAsk,
   type ExitUseAsk,
   type HandoverAsk,
+  type ScriptUseAsk,
   type SecretRequestAsk,
   type SecretUseAsk,
 } from "./browser/types"
+import {
+  allowScriptOnce,
+  dropScriptOnce,
+  scriptDigest,
+  writeScriptAccess,
+} from "./browser-scripts"
 import {
   applySecretRequest,
   checkSecretAnswer,
@@ -321,6 +329,7 @@ export type PermissionAsk =
   | { kind: "secret_use"; input: SecretUseAsk }
   | { kind: "secret_request"; input: SecretRequestAsk }
   | { kind: "exit_use"; input: ExitUseAsk }
+  | { kind: "script_use"; input: ScriptUseAsk }
 
 /** The requests about a secret the browser types (browser-secrets.ts). */
 function isSecretKind(kind: string): kind is "secret_use" | "secret_request" {
@@ -828,6 +837,11 @@ function describeAsk(ask: PermissionAsk): {
         target: `secret_request:${ask.input.name}`,
         args: ask.input as Record<string, unknown>,
       }
+    case "script_use":
+      return {
+        target: `script_use:${ask.input.site}\n${ask.input.tabId}\n${scriptDigest(ask.input.script)}`,
+        args: ask.input as Record<string, unknown>,
+      }
     case "exit_use":
       return {
         target: `exit_use:${ask.input.exitId}\n${ask.input.via} ${ask.input.fetch ? `${ask.input.fetch.method} ${ask.input.fetch.url}` : (ask.input.browse?.url ?? "")}`,
@@ -869,6 +883,8 @@ function toolNameOf(ask: PermissionAsk): string {
       return "request_secret"
     case "exit_use":
       return ask.input.via === "web_fetch" ? "web_fetch" : "tabs"
+    case "script_use":
+      return "evaluate"
     // A skill is changed through the memory tool, as a memory is.
     case "skill_change":
     default:
@@ -1096,6 +1112,12 @@ async function summarizeRow(
     const asked = describeSecretUseAsk(ask, {
       bound: secret ? await isBoundOrigin(secret.id, ask.origin) : false,
     })
+
+    return { ...asked, lines: [...asked.lines, asker] }
+  }
+
+  if (row.kind === "script_use") {
+    const asked = describeScriptUseAsk(args as ScriptUseAsk)
 
     return { ...asked, lines: [...asked.lines, asker] }
   }
@@ -1633,7 +1655,8 @@ function browserTabOf(
   if (
     row.kind !== "browse" &&
     row.kind !== "browser_handover" &&
-    row.kind !== "secret_use"
+    row.kind !== "secret_use" &&
+    row.kind !== "script_use"
   ) {
     return null
   }
@@ -1886,7 +1909,8 @@ export async function withPermission(
                 ask.kind === "browse" ||
                 ask.kind === "browser_handover" ||
                 ask.kind === "secret_use" ||
-                ask.kind === "secret_request"
+                ask.kind === "secret_request" ||
+                ask.kind === "script_use"
               ? ask.input.serverId
               : ask.kind === "exit_use"
                 ? (ask.input.browse?.serverId ?? null)
@@ -2243,6 +2267,7 @@ export async function decidePermission(
     kind === "fetch" ||
     kind === "browse" ||
     kind === "exit_use" ||
+    kind === "script_use" ||
     isSecretKind(kind)
   const choice: PermissionDecision = !settles
     ? decision === "always" || decision === "allow_for"
@@ -2316,6 +2341,19 @@ export async function decidePermission(
 
   if (exitId && choice === "always") {
     await writeExitAccess(ctx.vaultId, row.tokenId, exitId, "allowed")
+  }
+
+  // A script's answer is about scripts at its site: never the tool.
+  if (kind === "script_use" && choice === "block") {
+    const { site } = readArgs(ctx, row) as ScriptUseAsk
+    await writeScriptAccess(ctx.vaultId, row.tokenId, site, "blocked")
+
+    return finishUnrun(
+      ctx,
+      row,
+      publicUrl,
+      `The owner blocked scripts at ${site} for this token, so the script was not run.`,
+    )
   }
 
   if (choice === "block" || choice === "decline") {
@@ -2408,8 +2446,9 @@ export async function decidePermission(
 
   // A secret's answer is about the secret, never the browser tool's level;
   // an exit's was written above.
-  if (isSecretKind(kind) || kind === "exit_use") {
-    // Written by executeSecretUse and applySecretRequest below.
+  if (isSecretKind(kind) || kind === "exit_use" || kind === "script_use") {
+    // Written by executeSecretUse, executeScriptUse and applySecretRequest
+    // below.
   } else if (choice === "always" && host) {
     await writeSiteAccess(ctx.vaultId, row.tokenId, host, "allowed")
   } else if (choice === "always" && row.serverId) {
@@ -2509,35 +2548,43 @@ export async function decidePermission(
                                 publicUrl,
                                 executor,
                               )
-                            : kind === "exit_use"
-                              ? await executeExitUse(
+                            : kind === "script_use"
+                              ? await executeScriptUse(
                                   ctx,
                                   row,
+                                  choice,
                                   publicUrl,
                                   executor,
                                 )
-                              : kind === "secret_request"
-                                ? text(
-                                    await applySecretRequest(
-                                      ctx,
-                                      row.tokenId,
-                                      readArgs(ctx, row) as SecretRequestAsk,
-                                      {
-                                        value: secretValue,
-                                        origins,
-                                        level: secretLevel(choice),
-                                      },
-                                    ),
-                                  )
-                                : await executeRegister(
+                              : kind === "exit_use"
+                                ? await executeExitUse(
                                     ctx,
                                     row,
                                     publicUrl,
                                     executor,
-                                    secretValue,
-                                    allowPrivate === true,
-                                    chosenAccess,
                                   )
+                                : kind === "secret_request"
+                                  ? text(
+                                      await applySecretRequest(
+                                        ctx,
+                                        row.tokenId,
+                                        readArgs(ctx, row) as SecretRequestAsk,
+                                        {
+                                          value: secretValue,
+                                          origins,
+                                          level: secretLevel(choice),
+                                        },
+                                      ),
+                                    )
+                                  : await executeRegister(
+                                      ctx,
+                                      row,
+                                      publicUrl,
+                                      executor,
+                                      secretValue,
+                                      allowPrivate === true,
+                                      chosenAccess,
+                                    )
   } catch (error) {
     if (!isPcpError(error)) {
       console.error("[permissions] running an allowed request failed", {
@@ -2752,6 +2799,69 @@ async function executeSecretUse(
     if (level === "once") {
       await dropOnceAllowance(use)
     }
+  }
+}
+
+/**
+ * A script the owner let run: Allow scripts at this site is the token's
+ * level for the site (browser-scripts.ts); Run it once lets this very
+ * script run in this tab. Then the evaluate call is made again through
+ * upstream.ts, where the browser finds the answer. A once allowance the
+ * call did not take (the tab moved to another site) goes with it.
+ */
+async function executeScriptUse(
+  ctx: VaultContext,
+  row: Row,
+  choice: PermissionDecision,
+  publicUrl: string,
+  executor: PermissionExecutor,
+): Promise<CallToolResult> {
+  if (!row.server || row.server.kind !== "browser") {
+    return text("The browser was removed from PCP, so nothing ran.", true)
+  }
+
+  if (!row.server.enabled) {
+    return text("The browser is switched off in PCP, so nothing ran.", true)
+  }
+
+  // An answer about a site's scripts never lifts a block on the tool.
+  if (
+    effectiveAccess(
+      await loadToolAccess(ctx.vaultId, row.tokenId),
+      row.server.id,
+      "evaluate",
+    ) === "blocked"
+  ) {
+    return text(
+      `${row.server.slug}/evaluate is blocked for this token, so nothing ran.`,
+      true,
+    )
+  }
+
+  const asked = readArgs(ctx, row) as ScriptUseAsk
+  const once = {
+    tokenId: row.tokenId,
+    tabId: asked.tabId,
+    site: asked.site,
+    script: asked.script,
+  }
+
+  if (choice === "always") {
+    await writeScriptAccess(ctx.vaultId, row.tokenId, asked.site, "allowed")
+  } else {
+    allowScriptOnce(once)
+  }
+
+  try {
+    return await runCall(
+      ctx,
+      row.server,
+      "evaluate",
+      { tab: asked.tabId, script: asked.script },
+      { publicUrl, tokenId: row.tokenId, ownerAllowed: true, executor },
+    )
+  } finally {
+    dropScriptOnce(once)
   }
 }
 

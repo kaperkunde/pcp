@@ -7,6 +7,7 @@ import {
   ListChecks,
   Server,
   SlidersHorizontal,
+  SquareCode,
   StickyNote,
   TriangleAlert,
 } from "lucide-react"
@@ -198,7 +199,9 @@ export default async function PermissionPage({
           <PermissionLines lines={view.lines} />
         )}
         {view.skill ? <SkillReview skill={view.skill} /> : null}
-        {view.full ? <ShownInFull parts={view.full} /> : null}
+        {view.full ? (
+          <ShownInFull parts={view.full} open={view.kind === "script_use"} />
+        ) : null}
         {view.warning && view.memory ? (
           // The text is what to check; the warning says what to look for,
           // under it, without drawing the eye away from it.
@@ -346,6 +349,8 @@ function RequestTile({ view }: { view: PermissionView }) {
     case "secret_use":
     case "secret_request":
       return <IconTile size="lg" icon={KeyRound} className={tile} />
+    case "script_use":
+      return <IconTile size="lg" icon={SquareCode} className={tile} />
     default:
       return <IconTile size="lg" icon={Server} className={tile} />
   }
@@ -429,6 +434,18 @@ function PendingNote({ view }: { view: PermissionView }) {
           </Link>
           . While a field holds it, the assistant reads the field as [secret:{" "}
           name] and gets no screenshots of the tab.
+        </p>
+      )
+    case "script_use":
+      return (
+        <p className={note}>
+          Run it once runs this script, in this tab. Allow scripts at this site
+          and Block scripts at this site decide this token&apos;s later scripts
+          there without asking you; you can take either back on{" "}
+          <Link href={`/tokens/${view.tokenId}`} className="underline">
+            the token&apos;s page
+          </Link>
+          . A script is never run while a field holds a secret PCP typed.
         </p>
       )
     case "secret_request":

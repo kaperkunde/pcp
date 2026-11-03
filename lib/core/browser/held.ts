@@ -18,11 +18,18 @@ import { bounded } from "./queue"
  *
  * Kept by page, in memory only: a reopened tab has a new page and holds
  * nothing, and nothing of it is saved anywhere.
+ *
+ * Besides what the page holds now, it remembers every secret PCP typed into
+ * it for as long as the page lives (typed), by the same keyed hash: a page
+ * that moved on may still repeat the value (in its console, a response, an
+ * address), and the logs and evaluate's result mask any word of theirs
+ * whose hash is one of these (maskTyped).
  */
 
 type Held = { name: string; digest: string }
 
 const HELD = new WeakMap<Page, Held[]>()
+const TYPED = new WeakMap<Page, Held[]>()
 /** The hashes' key, this process's own: they mean nothing anywhere else. */
 const KEY = randomBytes(32)
 
@@ -40,6 +47,55 @@ export function holdSecret(page: Page, name: string, value: string): void {
   const list = (HELD.get(page) ?? []).filter((held) => held.digest !== digest)
   list.push({ name, digest })
   HELD.set(page, list)
+  const typed = (TYPED.get(page) ?? []).filter((held) => held.digest !== digest)
+  typed.push({ name, digest })
+  TYPED.set(page, typed)
+}
+
+/** Whether PCP has typed a secret into the page since it opened. */
+export function typedInto(page: Page): boolean {
+  return (TYPED.get(page)?.length ?? 0) > 0
+}
+
+/** The longest word maskTyped hashes: more than any secret PCP types. */
+const MAX_WORD_CHARS = 4_096
+
+/**
+ * The text with every word that is a secret PCP typed into the page shown
+ * as [secret: name]: words split at white space, quotes, brackets and the
+ * marks that join a form's or an address's fields, each also read as an
+ * address's encoding would have it.
+ */
+export function maskTyped(page: Page, text: string): string {
+  const typed = TYPED.get(page)
+
+  if (!typed || typed.length === 0 || text.length === 0) {
+    return text
+  }
+
+  const names = new Map(typed.map((held) => [held.digest, held.name]))
+  const mask = (word: string) => {
+    if (word.length > MAX_WORD_CHARS) {
+      return word
+    }
+
+    const name = names.get(digestOf(word)) ?? names.get(digestOf(decoded(word)))
+    return name === undefined ? word : `[secret: ${name}]`
+  }
+
+  // Whole words first (a secret may hold any mark but white space and
+  // quotes), then the parts of a form's fields or an address's query.
+  return text
+    .replace(/[^\s"'`<>]+/g, mask)
+    .replace(/[^\s"'`&=,;:{}[\]()<>?#|]+/g, mask)
+}
+
+function decoded(word: string): string {
+  try {
+    return decodeURIComponent(word.replace(/\+/g, " "))
+  } catch {
+    return word
+  }
 }
 
 /** Every field's value in the page's frames; null when one could not be read. */
