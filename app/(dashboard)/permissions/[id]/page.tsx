@@ -59,9 +59,11 @@ const STATUS: Record<string, string> = {
 
 /** The same, for tool levels an assistant proposed. */
 const ACCESS_STATUS: Record<string, string> = {
-  executed: "You saved these levels.",
+  // The same words the save itself shows (access-review.tsx): the page
+  // re-renders as answered right after, and the two must not differ.
+  executed: "You saved these levels and tiers.",
   running: "Saving now.",
-  failed: "You saved, but the levels were not written.",
+  failed: "You saved, but the levels and tiers were not written.",
   declined: "You said no, so no tool's level changed.",
   withdrawn: "Withdrawn by the assistant, so no tool's level changed.",
   expired: "This expired without an answer, so no tool's level changed.",
