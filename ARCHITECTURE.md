@@ -2405,9 +2405,10 @@ remembered for half a minute so an answer can say why a page did not open.
 Hosts are never logged.
 
 **What an assistant gets.** The tools are `tabs`, `navigate`, `back`,
-`snapshot`, `read_page`, `find`, `click`, `type`, `press_key`,
+`snapshot`, `read_page`, `find`, `click`, `drag`, `type`, `press_key`,
 `select_option`, `upload_file`, `scroll`, `wait_for`, `screenshot`,
-`download`, `handle_dialog`, `hand_over` and `request_secret`. Every one but
+`download`, `handle_dialog`, `hand_over`, `request_secret`, `evaluate`,
+`console_log` and `network_log`. Every one but
 `tabs`' open and list and `request_secret` names its tab (below). An assistant reads a snapshot (Playwright's
 accessibility tree, with PCP's refs, below), `find`'s elements of it as JSON (role, name,
 ref, states, and the landmark or region each is in, which tells two lines
@@ -2462,9 +2463,92 @@ an image's own budget, apart from the text's); one that never fits is kept
 and handed back as its handle. While the page shows a dialog (an alert),
 every tool that needs the page answers at once with it and how to answer
 it with `handle_dialog`, rather than waiting on a page that cannot answer.
-It never gets a cookie or storage and never runs JavaScript. A
+No tool reads or sets cookies or storage directly; JavaScript runs only
+through `evaluate` (below). A
 refusal that names a site or an address is a tool
 error, not a thrown `PcpError`, whose text the request log would keep.
+
+**Points** (`input.ts`). `click`, `scroll` and `drag` also take a point,
+`x` and `y` in CSS pixels of the viewport (what a full-size screenshot
+shows at that pixel), for what a page draws without elements to name: a
+canvas app (Flutter's shows only its "Enable accessibility" button until
+it is clicked), a map, a game. They are DevTools `Input.dispatchMouseEvent`
+events, the same `dispatch` the owner's live view replays, kept inside the
+viewport, each waited for: a click is a move, a press and a release (two
+for `double`, with `button` left, right or middle), the wheel turns at the
+point, and a drag presses at one end, moves in `DRAG_STEPS` steps with the
+button held and lets go at the other (an end can be an element's middle,
+scrolled into view). `screenshot`'s answer says how its pixels map to the
+viewport's: its scale, where an element's picture starts, and the sum to
+turn a point in it into `x` and `y`. A point is the tool's tier, as a
+click on an element is.
+
+**Scripts** (`evaluate.ts`, `browser-scripts.ts`). `evaluate` runs an
+assistant's JavaScript in the page's own world with DevTools'
+`Runtime.evaluate` (`replMode`: statements and top-level await; a
+function's text is called, a promise awaited), which needs no
+`Runtime.enable`, so nothing of it shows to the page but what the script
+does. It is the one way an assistant's script runs in a page, and so the
+one tool that can read what the page sees (storage, cookies scripts may
+read), which is why every part of it is narrow:
+
+- It is Destructive, and asked of the owner per site. Unless the token has
+  a level for scripts at the tab's site (a `web_fetch_rule` of kind
+  `script` keyed by the site, own or for all tokens, written only by the
+  owner's answer or the token's page), or the owner let this very script
+  run once in this tab (an allowance in memory, taken by the call the
+  answer makes), it throws `OwnerNeeded`: a `script_use` request showing
+  the site, the page and the whole script, unfolded. Its answers are Run it
+  once, Allow scripts at this site, Block scripts at this site and Not now;
+  none changes the tool's own level, and a blocked tool stays blocked.
+- It is refused while a field holds a secret PCP typed (`held.ts`), as
+  `screenshot` is.
+- While it runs the tab reaches its own site only. The tab's DevTools
+  session enables request interception (`Fetch`) for every request its
+  frames and dedicated workers make and fails the ones to another site;
+  the gate (`mayOpen`) keeps its main frame and its popups at the site, and
+  a popup it opens is closed; and since interception does not see
+  WebSockets, the proxies (`admitConnection`) hold every new connection to
+  another site until the script is done, and refuse the ones the script
+  reached for (`Network.webSocketCreated`) at once. A proxy cannot tell tabs
+  apart, so another tab's new connection elsewhere waits those few seconds
+  too. What the script leaves running (a timer) goes on as the page's own
+  scripts would.
+- It is bounded (`EVALUATE_TIMEOUT_MS`, its own work and any promise), its
+  result handed over by value (a node or a cycle in words), as JSON with
+  any secret PCP typed in the tab masked (`maskTyped`, below), and a long
+  one (`EVALUATE_INLINE_CHARS`) kept as a result of the token's, answered
+  as its handle.
+
+From a wrapper or a browser flow it is a call like the others, at the
+calling token's levels; a `{"$secret"}` in its arguments is refused, as in
+any browser tool but `type`.
+
+**Logs** (`devtools.ts`). Each tab keeps rings of its newest console
+messages and requests (`MAX_CONSOLE_ENTRIES`, `MAX_NETWORK_ENTRIES`), in
+memory with its page, so a reset or a close empties them. They are
+DevTools events on the tab's own session, never page script. The console
+has the browser's own messages (the `Log` domain, which pages cannot tell
+is on) from the start; the page's console calls and uncaught errors need
+the `Runtime` domain, which pages can detect (and which patchright keeps
+off), so it is enabled only by the first `console_log` on the tab, which
+says so (Chromium then hands over what it kept since the page loaded). A
+request's entry is its method, address, status, type, size and timing, and
+its headers less every one that carries a credential (`Cookie`,
+`Set-Cookie`, `Authorization`, `Proxy-Authorization`, and any whose name
+says token, key, secret, auth, session, password or credential); an
+address loses its user name and password, and query and fragment values
+that look like credentials (by name, or a long mix of letters and digits)
+are masked, in the entry and in `Referer`, `Location` and `Origin`.
+`network_log` with `body` keeps that entry's request and response bodies
+(as far as Chromium kept them: `MAX_NETWORK_BODY_BYTES` each,
+`NETWORK_BUFFER_BYTES` a tab) as results of the token's and answers with
+their handles, never inline. Every text there, and `evaluate`'s result,
+shows a secret PCP typed into the tab as `[secret: name]`: `held.ts`
+remembers the keyed hash of each for the page's life (`typedInto`), and
+`maskTyped` hashes each word (and its URL-decoded form) against them. A
+request a page sent after PCP typed a secret into it gives no body, since
+the body could carry the secret encoded.
 
 **Secrets in pages** (`lib/core/browser-secrets.ts`, `call.ts`, `held.ts`).
 A secret goes into a page only as `type`'s text, `{"$secret": name}`: in an

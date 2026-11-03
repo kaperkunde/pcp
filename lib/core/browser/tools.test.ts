@@ -33,6 +33,7 @@ describe("the browser's tools", () => {
       "read_page",
       "find",
       "click",
+      "drag",
       "type",
       "press_key",
       "select_option",
@@ -44,6 +45,9 @@ describe("the browser's tools", () => {
       "handle_dialog",
       "hand_over",
       "request_secret",
+      "evaluate",
+      "console_log",
+      "network_log",
     ])
 
     for (const tool of tools) {
@@ -63,6 +67,8 @@ describe("the browser's tools", () => {
       "scroll",
       "wait_for",
       "screenshot",
+      "console_log",
+      "network_log",
     ])
 
     // What the owner's permission page warns about: acting on a site, not
@@ -75,20 +81,125 @@ describe("the browser's tools", () => {
       .map((tool) => tool.name)
     expect(destructive).toEqual([
       "click",
+      "drag",
       "type",
       "press_key",
       "select_option",
       "upload_file",
       "download",
       "handle_dialog",
+      "evaluate",
     ])
   })
 
-  it("offer nothing that runs code or reads the sign-ins", () => {
-    const names = browserTools()
-      .map((tool) => tool.name)
-      .join(" ")
-    expect(names).not.toMatch(/evaluate|script|cookie|storage/)
+  it("run code only through evaluate, and read no cookies or storage", () => {
+    const names = browserTools().map((tool) => tool.name)
+    expect(names.filter((name) => /evaluate|script/.test(name))).toEqual([
+      "evaluate",
+    ])
+    expect(names.join(" ")).not.toMatch(/cookie|storage/)
+
+    const parse = (args: unknown) =>
+      parseBrowserArgs(browserToolSpec("evaluate")!, args)
+    expect(parse({ tab: "t1", script: "document.title" })).toEqual({
+      tab: "t1",
+      script: "document.title",
+    })
+    expect(() => parse({ tab: "t1", script: "" })).toThrow()
+    expect(() => parse({ tab: "t1", script: "x".repeat(20_001) })).toThrow()
+    // Never a secret: the script is text, and nothing else goes in.
+    expect(() => parse({ tab: "t1", script: { $secret: "Shop" } })).toThrow()
+    expect(() =>
+      parse({ tab: "t1", script: "1", args: { $secret: "Shop" } }),
+    ).toThrow()
+  })
+
+  it("click, scroll and drag at a point of the viewport", () => {
+    const parse = (name: string, args: unknown) =>
+      parseBrowserArgs(browserToolSpec(name)!, args)
+
+    expect(
+      parse("click", { tab: "t1", x: 10.5, y: 20, button: "right" }),
+    ).toEqual({ tab: "t1", x: 10.5, y: 20, button: "right" })
+    expect(parse("click", { tab: "t1", x: 0, y: 0, double: true })).toEqual({
+      tab: "t1",
+      x: 0,
+      y: 0,
+      double: true,
+    })
+    expect(() => parse("click", { tab: "t1", x: 10 })).toThrow(
+      /x and y together/,
+    )
+    expect(() => parse("click", { tab: "t1", y: 10 })).toThrow()
+    expect(() => parse("click", { tab: "t1", x: 1, y: 1, ref: "e2" })).toThrow(
+      /one of them/,
+    )
+    expect(() => parse("click", { tab: "t1", x: -1, y: 1 })).toThrow()
+    expect(() => parse("click", { tab: "t1", x: 1, y: 99_999 })).toThrow()
+    expect(() =>
+      parse("click", { tab: "t1", x: 1, y: 1, force: true }),
+    ).toThrow(/force is for an element/)
+    expect(() =>
+      parse("click", { tab: "t1", ref: "e1", button: "back" }),
+    ).toThrow()
+
+    expect(
+      parse("scroll", { tab: "t1", direction: "down", x: 100, y: 200 }),
+    ).toEqual({ tab: "t1", direction: "down", x: 100, y: 200 })
+    expect(() => parse("scroll", { tab: "t1", x: 100, y: 200 })).toThrow()
+    expect(() =>
+      parse("scroll", { tab: "t1", ref: "e1", x: 100, y: 200 }),
+    ).toThrow()
+
+    expect(
+      parse("drag", { tab: "t1", x: 1, y: 2, to_x: 300, to_y: 4 }),
+    ).toEqual({ tab: "t1", x: 1, y: 2, to_x: 300, to_y: 4 })
+    expect(parse("drag", { tab: "t1", ref: "e1", to_ref: "e2" })).toEqual({
+      tab: "t1",
+      ref: "e1",
+      to_ref: "e2",
+    })
+    expect(() => parse("drag", { tab: "t1", x: 1, y: 2 })).toThrow(
+      /End on a to_ref/,
+    )
+    expect(() => parse("drag", { tab: "t1", to_x: 1, to_y: 2 })).toThrow(
+      /Start from a ref/,
+    )
+    expect(() => parse("drag", { tab: "t1", x: 1, y: 2, to_x: 3 })).toThrow(
+      /to_x and to_y together/,
+    )
+  })
+
+  it("read the logs by filters, or one entry's bodies", () => {
+    const parse = (name: string, args: unknown) =>
+      parseBrowserArgs(browserToolSpec(name)!, args)
+
+    expect(
+      parse("console_log", {
+        tab: "t1",
+        level: "error",
+        since: "2026-11-03T10:15:00.000Z",
+        limit: 10,
+      }),
+    ).toMatchObject({ level: "error", limit: 10 })
+    expect(() =>
+      parse("console_log", { tab: "t1", since: "yesterday" }),
+    ).toThrow()
+    expect(() => parse("console_log", { tab: "t1", limit: 1000 })).toThrow()
+    expect(parse("network_log", { tab: "t1", url: "/api/" })).toEqual({
+      tab: "t1",
+      url: "/api/",
+    })
+    expect(parse("network_log", { tab: "t1", body: "n12" })).toEqual({
+      tab: "t1",
+      body: "n12",
+    })
+    expect(() =>
+      parse("network_log", { tab: "t1", body: "n12", url: "x" }),
+    ).toThrow(/body names one entry/)
+    expect(() => parse("network_log", { tab: "t1", body: "12" })).toThrow(
+      /pattern/,
+    )
   })
 
   it("take a secret only as type's text, by its name", () => {
@@ -300,6 +411,7 @@ describe("the browser's tools", () => {
 
     for (const name of [
       "click",
+      "drag",
       "type",
       "select_option",
       "upload_file",
@@ -314,7 +426,9 @@ describe("the browser's tools", () => {
             ? { values: ["a"] }
             : name === "upload_file"
               ? { files: [{ $result: "r1" }] }
-              : {}
+              : name === "drag"
+                ? { to_x: 1, to_y: 1 }
+                : {}
       expect(parse(name, { tab: "t1", target, ...extra }), name).toMatchObject({
         target,
       })

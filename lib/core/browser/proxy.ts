@@ -139,7 +139,17 @@ function refusalOf(error: unknown): Refused | null {
  * Whether a connection to a host may go: true at once for most, or a
  * promise held while a tab runs a script (runtime.ts admitConnection).
  */
-export type ConnectionAdmit = (host: string) => boolean | Promise<boolean>
+export type ConnectionAdmit = (
+  /** The site as siteKey writes it: the host, and a port but 80 and 443. */
+  site: string,
+) => boolean | Promise<boolean>
+
+/** A host and port the browser dials, as the site siteKey would name. */
+export function siteOfAuthority(host: string, port: number): string {
+  const name = bare(host).toLowerCase().replace(/\.$/, "")
+  const shown = name.includes(":") ? `[${name}]` : name
+  return port === 80 || port === 443 ? shown : `${shown}:${port}`
+}
 
 export async function startBrowserProxy({
   check,
@@ -186,11 +196,11 @@ export async function startBrowserProxy({
 
   /** Runs `go` once the host is admitted, `refuse` if it is not. */
   const whenAdmitted = (
-    host: string,
+    site: string,
     go: () => void,
     refuse: () => void,
   ): void => {
-    const verdict = admit ? admit(bare(host).toLowerCase()) : true
+    const verdict = admit ? admit(site) : true
 
     if (verdict === true) {
       go()
@@ -206,7 +216,8 @@ export async function startBrowserProxy({
     whenAdmitted(
       (() => {
         try {
-          return new URL(req.url ?? "").hostname
+          const url = new URL(req.url ?? "")
+          return siteOfAuthority(url.hostname, Number(url.port || 80))
         } catch {
           return ""
         }
@@ -320,7 +331,7 @@ export async function startBrowserProxy({
     }
 
     whenAdmitted(
-      authority.host,
+      siteOfAuthority(authority.host, authority.port),
       () => {
         // Gone while it was held (its page closed): nothing to open.
         if (!client.destroyed) tunnel(client, authority, head)

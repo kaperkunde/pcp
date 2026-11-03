@@ -19,6 +19,12 @@ import { scratchDatabase } from "../test-db"
 import { setupVault } from "../vault"
 import { resolveFetchAccess } from "../fetch/rules"
 import { listFetchRules, loadFetchRules } from "../web-fetch"
+import {
+  decideScript,
+  listScriptSites,
+  removeScriptSite,
+  takeScriptOnce,
+} from "../browser-scripts"
 import { createBrowserServer, findBrowserServer } from "./server"
 import { OwnerNeeded } from "./types"
 
@@ -97,7 +103,7 @@ describe("the browser in the registry and the instructions", () => {
       slug: "browser",
     })
     expect(await db().mcpTool.count({ where: { serverId: server.id } })).toBe(
-      18,
+      22,
     )
 
     const scope = { ...(await resolveApiTokenFor()), publicUrl: PUBLIC_URL }
@@ -459,5 +465,145 @@ describe("handing a tab over", () => {
       run,
     )
     expect(textOf(notNow)).toContain("said not now")
+  })
+})
+
+describe("an assistant's script the owner has not allowed at a site", () => {
+  const ask = {
+    serverId: "",
+    tabId: "t1",
+    site: "shop.example",
+    url: "https://shop.example/cart",
+    title: "Cart",
+    script: "document.querySelectorAll('.item').length\n// count them",
+  }
+
+  /** The browser, replaced: evaluate runs where the real one would. */
+  function scripts(): PermissionExecutor & { ran: string[] } {
+    const ran: string[] = []
+    const input = { ...ask, serverId: server.id }
+
+    return {
+      ran,
+      callTool: async (_ctx, _server, _tool, args) => {
+        const level = await decideScript(ctx.vaultId, tokenId, ask.site)
+        const once = takeScriptOnce({
+          tokenId,
+          tabId: ask.tabId,
+          site: ask.site,
+          script: String(args.script),
+        })
+
+        if (level !== "allowed" && !once) {
+          throw new OwnerNeeded({ kind: "script_use", input })
+        }
+
+        ran.push(String(args.script))
+        return { content: [{ type: "text", text: "ran: 3" }] }
+      },
+      syncTools: async () => ({ status: "ok", message: "", toolCount: 22 }),
+    }
+  }
+
+  async function asked(run: PermissionExecutor): Promise<string> {
+    return idOf(
+      await runCall(
+        ctx,
+        server,
+        "evaluate",
+        { tab: ask.tabId, script: ask.script },
+        { publicUrl: PUBLIC_URL, tokenId, executor: run },
+      ),
+    )
+  }
+
+  it("shows the site and the whole script, unfolded", async () => {
+    const run = scripts()
+    const id = await asked(run)
+    const view = await getPermissionView(ctx, id, { publicUrl: PUBLIC_URL })
+
+    expect(view).toMatchObject({
+      kind: "script_use",
+      tool: "evaluate",
+      serverId: server.id,
+      title: "Run an assistant's script at shop.example?",
+      browserTabId: "t1",
+    })
+    expect(view?.lines).toContain("Site: shop.example")
+    expect(view?.full).toEqual([{ label: "The script", text: ask.script }])
+    expect(view?.warning).toMatch(/signed in as you/)
+    expect(view?.decisions.map((decision) => decision.label)).toEqual([
+      "Run it once",
+      "Allow scripts at this site",
+      "Block scripts at this site",
+      "Not now",
+    ])
+    expect(run.ran).toEqual([])
+  })
+
+  it("Run it once runs this script once, and the next asks again", async () => {
+    const run = scripts()
+    const id = await asked(run)
+
+    const answer = await decidePermission(
+      ctx,
+      id,
+      "allow_once",
+      { publicUrl: PUBLIC_URL },
+      run,
+    )
+    expect(textOf(answer)).toContain("ran: 3")
+    expect(run.ran).toEqual([ask.script])
+    expect(await decideScript(ctx.vaultId, tokenId, ask.site)).toBeNull()
+    await asked(run)
+    expect(run.ran).toHaveLength(1)
+  })
+
+  it("Allow scripts at this site runs it and lets later ones run there, until taken back", async () => {
+    const run = scripts()
+    const id = await asked(run)
+
+    await decidePermission(ctx, id, "always", { publicUrl: PUBLIC_URL }, run)
+    expect(run.ran).toEqual([ask.script])
+    expect(await listScriptSites(ctx, tokenId)).toEqual([
+      { site: "shop.example", access: "allowed" },
+    ])
+    // The tool's own level is untouched.
+    expect(
+      await db().apiTokenToolAccess.count({ where: { toolName: "evaluate" } }),
+    ).toBe(0)
+
+    await runCall(
+      ctx,
+      server,
+      "evaluate",
+      { tab: "t1", script: "1 + 1" },
+      { publicUrl: PUBLIC_URL, tokenId, executor: run },
+    )
+    expect(run.ran).toEqual([ask.script, "1 + 1"])
+
+    await removeScriptSite(ctx, tokenId, "shop.example")
+    expect(await decideScript(ctx.vaultId, tokenId, ask.site)).toBeNull()
+  })
+
+  it("Block scripts at this site runs nothing and blocks scripts there, not the tool", async () => {
+    const run = scripts()
+    const id = await asked(run)
+
+    const answer = await decidePermission(
+      ctx,
+      id,
+      "block",
+      { publicUrl: PUBLIC_URL },
+      run,
+    )
+    expect(textOf(answer)).toBe(
+      "The owner blocked scripts at shop.example for this token, so the script was not run.",
+    )
+    expect(run.ran).toEqual([])
+    expect(await decideScript(ctx.vaultId, tokenId, ask.site)).toBe("blocked")
+    expect(
+      await db().apiTokenToolAccess.count({ where: { toolName: "evaluate" } }),
+    ).toBe(0)
   })
 })

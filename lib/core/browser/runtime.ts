@@ -116,9 +116,11 @@ import type { TabControl, TabView } from "./types"
  * when it is done.
  */
 export type ScriptRun = {
+  /** siteKey of the tab's page; refused holds sites in the same form. */
   site: string
-  hostname: string
   refused: Set<string>
+  /** Told when a site joins `refused`: a held connection there is refused at once. */
+  listeners: Set<() => void>
   done: Promise<void>
 }
 
@@ -548,7 +550,7 @@ async function start(
   const proxy = await startBrowserProxy({
     check: (address, port, host) =>
       vault ? verdict(vault, address, port, host) : "private",
-    admit: (host) => (vault ? admitConnection(vault, host) : true),
+    admit: (site) => (vault ? admitConnection(vault, site) : true),
   })
 
   const scratchDir = await makeScratchDir()
@@ -813,7 +815,7 @@ async function exitContextFor(
   let entry: ExitContext | null = null
   const proxy = await startBrowserProxy({
     check: () => "private",
-    admit: (host) => admitConnection(vault, host),
+    admit: (site) => admitConnection(vault, site),
     connect: (host, port) => {
       if (!entry) return Promise.reject(new Error("closed"))
       return entry.dialer.dial(host, port, {
@@ -934,20 +936,33 @@ export function mayOpen(vault: VaultBrowser, tab: Tab, url: string): boolean {
  */
 export function admitConnection(
   vault: VaultBrowser,
-  host: string,
+  site: string,
 ): boolean | Promise<boolean> {
   const running = [...vault.tabs.values()].flatMap((tab) =>
     tab.script ? [tab.script] : [],
   )
-  const name = bareName(host)
 
-  if (running.every((run) => run.hostname === name)) {
+  if (running.every((run) => run.site === site)) {
     return true
   }
 
-  return Promise.all(running.map((run) => run.done)).then(
-    () => !running.some((run) => run.refused.has(name)),
-  )
+  const refused = () => running.some((run) => run.refused.has(site))
+
+  if (refused()) {
+    return false
+  }
+
+  return new Promise<boolean>((resolve) => {
+    const check = () => {
+      if (refused()) resolve(false)
+    }
+
+    for (const run of running) run.listeners.add(check)
+    void Promise.all(running.map((run) => run.done)).then(() => {
+      for (const run of running) run.listeners.delete(check)
+      resolve(!refused())
+    })
+  })
 }
 
 /** What the gate is handed: a request, paused before it is sent. */

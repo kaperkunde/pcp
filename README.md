@@ -784,10 +784,12 @@ desktop apps do not add it; JavaScript works everywhere.
 **The browser.** On the **Browser** page, **Add the browser**: it becomes a
 server like any other, with tools to open a page (`navigate`, `back`, `tabs`),
 read it (`snapshot`, which names each element with a ref; `read_page`; `find`;
-`screenshot`), act on it (`click`, `type`, `select_option`, `press_key`,
-`scroll`, `wait_for`, `handle_dialog`), move files (`upload_file`,
-`download`), `hand_over` a tab to you and ask you for a secret to type
-(`request_secret`). It is Chromium on PCP's machine, kept out of sight (on a
+`screenshot`; `console_log` and `network_log`, the tab's console and requests
+without credentials), act on it (`click`, `drag`, `type`, `select_option`,
+`press_key`, `scroll`, `wait_for`, `handle_dialog`; `click`, `scroll` and
+`drag` also at a point of the page, for a canvas app), move files
+(`upload_file`, `download`), run a script in it (`evaluate`, below), `hand_over`
+a tab to you and ask you for a secret to type (`request_secret`). It is Chromium on PCP's machine, kept out of sight (on a
 virtual display in the Docker image, in a window off the screen in the desktop
 app), with up to eight tabs, started with the first page and closed after an
 hour idle (**Settings → Resources** sets
@@ -807,7 +809,12 @@ a page alone once its lines no longer let it open the site.
 
 The browser keeps its cookies, local storage and IndexedDB, encrypted in your
 vault, so a sign-in lasts between conversations; an assistant acts as you
-where you signed in, but no tool hands back a cookie or runs a script.
+where you signed in, but no tool hands back a cookie or local storage. The
+one way an assistant's JavaScript runs in a page is `evaluate`, and it asks you
+per site, showing the whole script: **Run it once**, or **Allow scripts at this
+site** for the token (the token's page lists those, and takes them back). It
+is refused while a field holds a secret PCP typed, and while it runs the tab
+reaches its own site only.
 Files go in and out as results PCP keeps for the token for a day, encrypted,
 never as files on the machine: `download` keeps the file a page offers (a
 download nobody asked for is refused) and `upload_file` puts kept ones, a

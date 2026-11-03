@@ -112,7 +112,18 @@ async function run(tab: Tab, script: string): Promise<Evaluated> {
     timeout: EVALUATE_TIMEOUT_MS,
   })) as Evaluated
 
-  if (first.exceptionDetails || first.result.type !== "function") {
+  if (first.exceptionDetails) {
+    return first
+  }
+
+  // A promise as the last value is not awaited in this mode: await it.
+  if (first.result.subtype === "promise") {
+    return (await tab.cdp.send("Runtime.awaitPromise", {
+      promiseObjectId: first.result.objectId!,
+    })) as Evaluated
+  }
+
+  if (first.result.type !== "function") {
     return first
   }
 
@@ -144,8 +155,8 @@ async function keptAtSite<T>(
   const reached = new Set<string>()
   const script: ScriptRun = {
     site,
-    hostname: new URL(`http://${site}`).hostname,
     refused: new Set(),
+    listeners: new Set(),
     done: new Promise<void>((resolve) => {
       finish = resolve
     }),
@@ -154,7 +165,8 @@ async function keptAtSite<T>(
     try {
       const url = new URL(address)
       if (!/^(https?|wss?):$/.test(url.protocol)) return null
-      return siteKey(url) === site ? null : url.hostname
+      const other = siteKey(url)
+      return other === site ? null : other
     } catch {
       return null
     }
@@ -176,6 +188,7 @@ async function keptAtSite<T>(
     if (!host) return
     reached.add(host)
     script.refused.add(host)
+    for (const listener of script.listeners) listener()
   }
   const popupsBefore = tab.popups.length
 
@@ -309,6 +322,7 @@ export async function evaluateInTab(
   }
 
   let outcome: { value: Evaluated; reached: string[] }
+  const started = Date.now()
 
   try {
     outcome = await keptAtSite(scope.vaultId, tab, site, () =>
@@ -316,19 +330,22 @@ export async function evaluateInTab(
     )
   } catch (error) {
     await tab.cdp.send("Runtime.terminateExecution").catch(() => {})
-    const timedOut = /Timeout \d+ms exceeded|terminated/i.test(
-      error instanceof Error ? error.message : String(error),
-    )
+    await tab.cdp
+      .send("Runtime.releaseObjectGroup", { objectGroup: GROUP })
+      .catch(() => {})
+    // Chromium answers a script its timeout stopped with an internal
+    // error, so the time it took says it.
+    const timedOut =
+      Date.now() - started >= EVALUATE_TIMEOUT_MS ||
+      /Timeout \d+ms exceeded|terminated/i.test(
+        error instanceof Error ? error.message : String(error),
+      )
 
     return refused(
       timedOut
         ? `The script did not finish within ${EVALUATE_TIMEOUT_MS / 1000} seconds, so it was stopped.`
         : `The script could not run: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]!.slice(0, 300)}`,
     )
-  } finally {
-    await tab.cdp
-      .send("Runtime.releaseObjectGroup", { objectGroup: GROUP })
-      .catch(() => {})
   }
 
   const lead = [
@@ -341,6 +358,10 @@ export async function evaluateInTab(
   ]
 
   if (outcome.value.exceptionDetails) {
+    await tab.cdp
+      .send("Runtime.releaseObjectGroup", { objectGroup: GROUP })
+      .catch(() => {})
+
     if (/terminated/i.test(thrown(outcome.value.exceptionDetails))) {
       return refused(
         `The script did not finish within ${EVALUATE_TIMEOUT_MS / 1000} seconds, so it was stopped.`,
@@ -355,9 +376,16 @@ export async function evaluateInTab(
     )
   }
 
-  const value = await valueOf(tab, outcome.value.result).catch(
-    () => `[${outcome.value.result.description ?? outcome.value.result.type}]`,
-  )
+  const value = await valueOf(tab, outcome.value.result)
+    .catch(
+      () =>
+        `[${outcome.value.result.description ?? outcome.value.result.type}]`,
+    )
+    .finally(() =>
+      tab.cdp
+        .send("Runtime.releaseObjectGroup", { objectGroup: GROUP })
+        .catch(() => {}),
+    )
   const result = shown(tab, value, (await heldValues(tab.page)).values)
   const cutNote = result.cut
     ? ` (the first ${MAX_EVALUATE_RESULT_CHARS.toLocaleString("en")} characters: the rest was dropped)`
