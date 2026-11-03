@@ -346,6 +346,9 @@ const McpServerRow = z.strictObject({
   // exports, whose servers each get a definition of their own on restore.
   definitionId: id.nullable().default(null),
   personalNote: bytesOrNull.default(null),
+  // Levels the owner saved with an approval, waiting for the server's first
+  // read of its tools: absent from older exports, which had none.
+  pendingAccess: str.nullable().default(null),
 })
 
 // Definitions, added with the owner's notes: absent from older exports.

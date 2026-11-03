@@ -231,8 +231,11 @@ import {
   proposeWrapperDelete,
   proposeWrapperDetach,
   proposeWrapperInstance,
+  withWrapperAccess,
   withWrapperNote,
 } from "./wrappers/admin"
+import { TOOL_ACCESS_ARG, type ToolAccessArg } from "./proposed-access"
+import { withRegisterAccess } from "./register-access"
 import { markedReadOnly } from "./read-only"
 import {
   describeRepoChange,
@@ -2916,6 +2919,7 @@ export function buildGatewayServer(
       `Authentication is auth_type: none, header (a secret in a header), basic (username and a password) or oauth (the owner signs in once they agree; PCP finds out itself whether the provider lets it register, so client_id is only for one that does not). Secrets are named by their NAME in secret (and extra_headers): one the owner stored is reused, a new name is typed in by the owner on PCP's page when they agree. ${scope.manageEndpoints ? "list_secrets gives the names of the secrets the owner stored and what already uses each: name one of its text secrets to reuse it rather than inventing a name. " : "A token that may read and change API endpoints can list the names of the owner's secrets with list_secrets. "}Never pass a secret's value, and never ask the owner for one in the conversation: PCP does not take one here.`,
       "A service is a container on one of the owner's SSH servers (ssh_server): its definition in service, its variables' secrets by NAME in env_secrets. Nothing runs until the owner agrees.",
       "Another server of one you see (the same API, MCP server or service elsewhere): pass its short name in definition. note proposes the owner's note on what is new.",
+      "tool_access proposes this token's levels and the tiers of its tools, which the owner sees filled in beside the approval and saves with it, as they leave them: by tool for an API or a mail or calendar account, by name or pattern for an MCP server or what a service registers, applied once to the tools PCP first reads from it.",
     ].join("\n\n"),
     input: z.object({
       name: z
@@ -3111,6 +3115,7 @@ export function buildGatewayServer(
           "For kind service: the secret each variable takes, by name, never a value.",
         ),
       note: noteArg,
+      tool_access: TOOL_ACCESS_ARG,
     }),
     output: NEEDS_OWNER,
     annotations: { ...PROPOSES, openWorldHint: true },
@@ -3144,6 +3149,7 @@ export function buildGatewayServer(
       publish_address?: string
       publish_ports?: Array<{ container: number; host: number }>
       env_secrets?: Array<{ name: string; secret: string }>
+      tool_access?: ToolAccessArg
     }) {
       // Another server of a definition the token sees: what it is comes
       // from there, and only what is this server's own comes from here.
@@ -3228,6 +3234,7 @@ export function buildGatewayServer(
           ...(args.publish_ports ? { publishPorts: args.publish_ports } : {}),
           ...(args.env_secrets ? { envSecrets: args.env_secrets } : {}),
           ...(note ? { note } : {}),
+          ...(args.tool_access ? { toolAccess: args.tool_access } : {}),
         })
 
         return asked({ kind: "service_change", input })
@@ -3439,17 +3446,20 @@ export function buildGatewayServer(
 
           return asked({
             kind: "register",
-            input: {
-              ...common,
-              name: normalizeNameAndDescription({
-                name: args.name,
-                description: "",
-              }).name,
-              url: prepared.url,
-              oauthScope:
-                prepared.registration.preview.oauth?.scope ?? oauthScope,
-              endpoint: prepared.registration,
-            },
+            input: withRegisterAccess(
+              {
+                ...common,
+                name: normalizeNameAndDescription({
+                  name: args.name,
+                  description: "",
+                }).name,
+                url: prepared.url,
+                oauthScope:
+                  prepared.registration.preview.oauth?.scope ?? oauthScope,
+                endpoint: prepared.registration,
+              },
+              args.tool_access,
+            ),
           })
         }
 
@@ -3589,7 +3599,10 @@ export function buildGatewayServer(
         }
       }
 
-      const ask = await asked({ kind: "register", input })
+      const ask = await asked({
+        kind: "register",
+        input: withRegisterAccess(input, args.tool_access),
+      })
 
       // The assistant hears about mistakes PCP found in the schema, with
       // the edits that fix them.
@@ -4180,6 +4193,7 @@ export function buildGatewayServer(
             "The short name of a wrapper you see to make another of: its programs, calls, secret places and descriptions come from there.",
           ),
         note: noteArg,
+        tool_access: TOOL_ACCESS_ARG,
       }),
       output: NEEDS_OWNER,
       aliases: wrapperAliases,
@@ -4192,12 +4206,19 @@ export function buildGatewayServer(
         call_levels?: "approved" | "token"
         definition?: string
         note?: string
+        tool_access?: ToolAccessArg
       }) {
         if (!allowed()) {
           return tooMany()
         }
 
-        const { definition, note, call_levels: callLevels, tools } = args
+        const {
+          definition,
+          note,
+          call_levels: callLevels,
+          tools,
+          tool_access: toolAccess,
+        } = args
         const input = {
           name: args.name,
           ...(args.description !== undefined
@@ -4228,9 +4249,12 @@ export function buildGatewayServer(
 
           return asked({
             kind: "wrapper_change",
-            input: withWrapperNote(
-              await proposeWrapperInstance(scope.ctx, bound, input),
-              note,
+            input: withWrapperAccess(
+              withWrapperNote(
+                await proposeWrapperInstance(scope.ctx, bound, input),
+                note,
+              ),
+              toolAccess,
             ),
           })
         }
@@ -4243,13 +4267,16 @@ export function buildGatewayServer(
 
         return asked({
           kind: "wrapper_change",
-          input: withWrapperNote(
-            await proposeWrapper(
-              scope.ctx,
-              { ...input, tools: tools.map(wrapperToolInput) },
-              servers,
+          input: withWrapperAccess(
+            withWrapperNote(
+              await proposeWrapper(
+                scope.ctx,
+                { ...input, tools: tools.map(wrapperToolInput) },
+                servers,
+              ),
+              note,
             ),
-            note,
+            toolAccess,
           ),
         })
       },
@@ -4298,6 +4325,7 @@ export function buildGatewayServer(
         call_levels: callLevelsArg,
         note: noteChangeArg,
         detach: detachArg,
+        tool_access: TOOL_ACCESS_ARG,
       }),
       output: NEEDS_OWNER,
       aliases: { ...wrapperAliases, removeTools: "remove_tools" },
@@ -4313,6 +4341,7 @@ export function buildGatewayServer(
         call_levels?: "approved" | "token"
         note?: string
         detach?: boolean
+        tool_access?: ToolAccessArg
       }) {
         if (!allowed()) {
           return tooMany()
@@ -4326,11 +4355,30 @@ export function buildGatewayServer(
           )
         }
 
-        const { wrapper, note, detach, ...asSent } = args
-        const alone = aloneRefusal(asSent, { note, detach })
+        const {
+          wrapper,
+          note,
+          detach,
+          tool_access: toolAccess,
+          ...asSent
+        } = args
+        const alone = aloneRefusal(
+          { ...asSent, tool_access: toolAccess },
+          { note, detach },
+        )
 
         if (alone) {
           return failure(alone)
+        }
+
+        // Levels and tiers alone are propose_tool_access's.
+        if (
+          toolAccess !== undefined &&
+          Object.values(asSent).every((value) => value === undefined)
+        ) {
+          return failure(
+            "tool_access goes with a change to the wrapper. To propose levels and tiers alone, use propose_tool_access.",
+          )
         }
 
         if (
@@ -4369,18 +4417,27 @@ export function buildGatewayServer(
 
         return asked({
           kind: "wrapper_change",
-          input: await proposeWrapperChange(
-            scope.ctx,
-            wrapper,
-            {
-              name: args.name,
-              description: args.description,
-              tools: args.tools?.map(wrapperToolInput),
-              removeTools: args.remove_tools,
-              secrets: args.secrets,
-              callLevels: args.call_levels,
-            },
-            servers,
+          input: withWrapperAccess(
+            await proposeWrapperChange(
+              scope.ctx,
+              wrapper,
+              {
+                name: args.name,
+                description: args.description,
+                tools: args.tools?.map(wrapperToolInput),
+                removeTools: args.remove_tools,
+                secrets: args.secrets,
+                callLevels: args.call_levels,
+              },
+              servers,
+            ),
+            toolAccess,
+            // Its tools this token has blocked: hidden from it, as ever.
+            new Set(
+              entry.tools
+                .filter((tool) => tool.access === "blocked")
+                .map((tool) => tool.name),
+            ),
           ),
         })
       },

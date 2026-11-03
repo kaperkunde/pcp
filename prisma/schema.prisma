@@ -725,6 +725,13 @@ model McpServer {
   /// associated data. Assistants read it as the owner's note beside the
   /// description; it is never synced or shared.
   personalNote   Bytes?            @map("personal_note")
+  /// Levels and tiers the owner saved with their approval of this server,
+  /// as name patterns, for the tools PCP has not read yet (an MCP server
+  /// by its address, an OAuth one not yet connected, a service's): JSON
+  /// {"tokenId", "rules": [{"pattern", "access"?, "tier"?}]}, applied once
+  /// to the tools its first read finds, then cleared
+  /// (lib/core/proposed-access.ts). Null when there are none.
+  pendingAccess  String?           @map("pending_access")
 
   tools              McpTool[]
   tokens             ApiTokenServer[]
