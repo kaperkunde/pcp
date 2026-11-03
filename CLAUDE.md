@@ -313,9 +313,9 @@ so in the summary; the bump itself waits for the request.
   algorithms in `client.ts`; no child process, no `ssh` binary. One tool,
   `run_command` (`ssh/tools.ts`), its arguments checked before anything
   connects: `exec` only, never a terminal, an agent or a file transfer.
-  Forwarding is open for exits only (`openChannel`, below): outbound
-  direct-tcpip, never remote forwarding (`tcpip-forward`), streamlocal,
-  the agent or X11. Only the owner adds or changes one; `register_server` has
+  Forwarding is open for exits and services only (`openChannel`, below):
+  outbound direct-tcpip, never remote forwarding (`tcpip-forward`),
+  streamlocal, the agent or X11. Only the owner adds or changes one; `register_server` has
   no kind for it. Its limits go in `ssh/limits.ts`, and a change to how a host
   is trusted, PCP signs in or a channel opens gets a test against the test
   server (`ssh/client.test.ts`).
@@ -363,7 +363,22 @@ so in the summary; the bump itself waits for the request.
   but an exit's, which may get NET_ADMIN and /dev/net/tun only (`cap_add`
   and `devices`, allow-lists in `definition.ts`, checked again in
   `engine.ts`); a variable marked `plain` takes a value the owner types per
-  instance (`service_spec.plain_values`, no secret). Only the owner
+  instance (`service_spec.plain_values`, no secret). A service is published
+  on the SSH server's 127.0.0.1 unless the owner opts into its network on
+  the launch form, and PCP reaches it, calls and health checks alike,
+  through the SSH connection (`reach` "tunnel": `services.ts serviceDial`,
+  a direct-tcpip channel to a port it publishes, at the address it is bound
+  to there, on a pinned host with the key a request handed in, built in
+  `upstream.ts serviceTunnel`); a server it registered is never reached from
+  PCP's machine instead. One launched before ("direct") moves over when it
+  is updated or made again. What the owner asked last is
+  `service_spec.intended_state`: `stop` (theirs or an assistant's) writes
+  "stopped", start, restart, launch and remake "running"; only while it is
+  "running" does a call to what it serves that finds its container stopped
+  start it in that request (bounded, `START_ON_DEMAND_WAIT_MS`), try once
+  more and say so, and does the reconcile pass (`reconcileServices`, only
+  through `after()` from `/mcp` and the owner's pages, throttled, never a
+  timer or a stored key) bring it back up. Only the owner
   launches, changes, updates or removes one; an assistant gets `status`, `logs`, `start`, `stop`, `restart` at the
   owner's levels, and proposes one only through `register_server` (kind
   `service`, `services/proposals.ts`): a `service_change` request that shows

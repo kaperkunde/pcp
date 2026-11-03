@@ -6,6 +6,21 @@ release, with a note in front of the answer ("addPatches was renamed to
 add_patches; use add_patches."); after that it is refused like any other
 unknown key.
 
+## Services: published on the SSH server's loopback, started on demand
+
+No tool or argument was renamed. `register_server` with kind `service`
+now publishes the ports on the SSH server's own `127.0.0.1` when
+`publish_address` is left out (it was `0.0.0.0`, every address): PCP
+reaches the service through the SSH connection, so nothing else on that
+network does. Name `0.0.0.0` or one of the SSH server's addresses when its
+network should reach the service too; the owner sees it on the request.
+
+A call to an API endpoint or MCP server a service serves, which finds the
+service's container stopped while the owner left it running, starts it,
+sends the call again and answers with one more text block after the
+answer: "PCP started the service …". The first block is the answer as
+before.
+
 ## Front-loaded descriptions, and lines search and describe add once
 
 No tool or argument was renamed. Every PCP tool's description now opens

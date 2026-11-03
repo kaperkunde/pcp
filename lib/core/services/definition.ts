@@ -42,6 +42,12 @@ import {
  *   (`devices`), what a VPN client needs for its tunnel. Its ports are
  *   published on the SSH server's loopback only (parsePublish), where PCP
  *   reaches its proxy through the SSH connection, never the network.
+ * - Every other service is published on the SSH server's 127.0.0.1 unless
+ *   the owner chooses an address of its network (or 0.0.0.0) on the launch
+ *   form, and PCP reaches it through the SSH connection either way
+ *   (tunnelAddress, `reach` "tunnel"): a direct-tcpip channel to the
+ *   address its ports are bound to on the SSH server, so it works when PCP
+ *   runs in a container on that same machine.
  */
 
 // ---- Patterns ---------------------------------------------------------------
@@ -597,6 +603,21 @@ export function checkEnvBindings(
   return checked
 }
 
+/**
+ * How PCP reaches what a service publishes: "tunnel", a direct-tcpip channel
+ * through the SSH connection to the address its ports are bound to on the
+ * SSH server; "direct", from PCP's machine to the published address (a
+ * service launched before tunnels, until it is updated or made again).
+ */
+export type ServiceReach = "tunnel" | "direct"
+
+export function readReach(value: string): ServiceReach {
+  return value === "tunnel" ? "tunnel" : "direct"
+}
+
+/** Where the service is published unless the owner chooses its network. */
+export const DEFAULT_PUBLISH_ADDRESS = "127.0.0.1"
+
 /** Loopback addresses: the SSH server's own machine only. */
 export function isLoopback(address: string): boolean {
   return address === "::1" || /^127\./.test(address) || address === "localhost"
@@ -610,7 +631,7 @@ function isWildcard(address: string): boolean {
  * The host name PCP reaches a published port at: the SSH server's address
  * when the port is bound to every address, the bound address otherwise.
  * Null when the port is on the SSH server's loopback and PCP is not on that
- * machine (until it can reach it through the SSH connection).
+ * machine: a service reached directly (`reach` "direct") cannot be.
  */
 export function reachHost(
   publish: ServicePublish,
@@ -625,6 +646,50 @@ export function reachHost(
   }
 
   return publish.address
+}
+
+/**
+ * The address the SSH server itself reaches its published ports at, which
+ * a tunnel's channel goes to: its loopback for a port bound to every
+ * address, the bound address otherwise.
+ */
+export function tunnelAddress(publish: ServicePublish): string {
+  if (publish.address === "0.0.0.0") {
+    return "127.0.0.1"
+  }
+
+  if (publish.address === "::") {
+    return "::1"
+  }
+
+  return publish.address
+}
+
+/**
+ * `http://host:port` for a container port, as PCP addresses it: through a
+ * tunnel, the address the SSH server reaches it at (the channel goes
+ * there); directly, where PCP's machine reaches it, or null when it cannot.
+ */
+export function serviceOrigin(
+  publish: ServicePublish,
+  sshHost: string,
+  containerPort: number,
+  reach: ServiceReach,
+): string | null {
+  if (reach === "direct") {
+    return reachUrl(publish, sshHost, containerPort)
+  }
+
+  const published = publish.ports.find(
+    (entry) => entry.container === containerPort,
+  )
+
+  if (!published) {
+    return null
+  }
+
+  const host = tunnelAddress(publish)
+  return `http://${host.includes(":") ? `[${host}]` : host}:${published.host}`
 }
 
 /** `http://host:port`, for a container port PCP can reach; null otherwise. */

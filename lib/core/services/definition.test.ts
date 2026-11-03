@@ -6,6 +6,8 @@ import {
   parsePublish,
   parseServiceDefinition,
   reachUrl,
+  serviceOrigin,
+  tunnelAddress,
   type ServiceDefinitionInput,
 } from "./definition"
 import { envFile, pickDigest, runScript, runWords } from "./engine"
@@ -156,6 +158,29 @@ describe("parsePublish", () => {
     expect(
       reachUrl({ ...publish, address: "127.0.0.1" }, "127.0.0.1", 5001),
     ).toBe("http://127.0.0.1:15001")
+  })
+
+  it("reaches it through the SSH connection at the address the SSH server reaches it at", () => {
+    const publish = {
+      address: "127.0.0.1",
+      ports: [{ container: 5001, host: 15001 }],
+    }
+
+    expect(tunnelAddress(publish)).toBe("127.0.0.1")
+    expect(tunnelAddress({ ...publish, address: "0.0.0.0" })).toBe("127.0.0.1")
+    expect(tunnelAddress({ ...publish, address: "::" })).toBe("::1")
+    expect(tunnelAddress({ ...publish, address: "192.168.1.5" })).toBe(
+      "192.168.1.5",
+    )
+    // On another machine's loopback: through the tunnel, never directly.
+    expect(serviceOrigin(publish, "box.lan", 5001, "tunnel")).toBe(
+      "http://127.0.0.1:15001",
+    )
+    expect(serviceOrigin(publish, "box.lan", 5001, "direct")).toBeNull()
+    expect(
+      serviceOrigin({ ...publish, address: "::" }, "box.lan", 5001, "tunnel"),
+    ).toBe("http://[::1]:15001")
+    expect(serviceOrigin(publish, "box.lan", 9, "tunnel")).toBeNull()
   })
 })
 

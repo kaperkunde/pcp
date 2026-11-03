@@ -23,6 +23,7 @@ import type { ServiceStatus, ServiceView } from "@/lib/core/services/services"
  * serves, how it is now (read on its SSH server when the page opens, and
  * again on Check), its recent lines, and starting, stopping, restarting and
  * updating it. Nothing here is secret: variables show the secret's name.
+ * A Podman service also says how to have it start again with its machine.
  */
 export function ServiceCard({ view }: { view: ServiceView }) {
   const [pending, startTransition] = useTransition()
@@ -129,7 +130,7 @@ export function ServiceCard({ view }: { view: ServiceView }) {
                     disabled={pending}
                     onClick={() =>
                       act(
-                        `Stop ${view.name}? The tools it serves answer that it is stopped until it is started again.`,
+                        `Stop ${view.name}? The tools it serves answer that it is stopped until it is started again: PCP does not start it by itself while you leave it stopped.`,
                         () => runServiceActionAction(view.id, "stop"),
                       )
                     }
@@ -153,7 +154,7 @@ export function ServiceCard({ view }: { view: ServiceView }) {
         />
         <ListRow
           title="Runs on"
-          description={`${view.containerName}, with ${view.engine === "podman" ? "Podman" : "Docker"}${view.engineVersion ? ` ${view.engineVersion}` : ""}${publish ? `; published on ${publish}` : ""}.`}
+          description={`${view.containerName}, with ${view.engine === "podman" ? "Podman" : "Docker"}${view.engineVersion ? ` ${view.engineVersion}` : ""}${publish ? `; published on ${publish}` : ""}. ${reachWords(view)}`}
           trailing={
             view.host ? (
               <a
@@ -192,6 +193,13 @@ export function ServiceCard({ view }: { view: ServiceView }) {
             </Button>
           }
         />
+        {view.engine === "podman" && view.host ? (
+          <ListRow
+            title="When the SSH server restarts"
+            description={<PodmanRestartHint view={view} />}
+            data-testid="podman-restart-hint"
+          />
+        ) : null}
         {view.definitionId ? (
           <ListRow
             href={`/servers/services/new?definition=${encodeURIComponent(view.definitionId)}`}
@@ -252,6 +260,55 @@ export function ServiceCard({ view }: { view: ServiceView }) {
         message={result.status === "ok" ? result.message : null}
       />
     </ListSection>
+  )
+}
+
+/** How PCP reaches it, and what it does when it finds it stopped. */
+function reachWords(view: ServiceView): string {
+  const how =
+    view.reach === "tunnel"
+      ? "PCP reaches it through the SSH connection."
+      : `PCP reaches it from its own machine at the published address, and through the SSH connection once you ${view.definition.source ? "update" : "recreate"} it.`
+  const stopped =
+    view.intent === "stopped"
+      ? " It was stopped through PCP, so PCP leaves it stopped until it is started again."
+      : " While you leave it running, PCP starts it again when a call finds it stopped, and when you or an assistant next use PCP."
+
+  return `${how}${stopped}`
+}
+
+/**
+ * Podman starts no container when its machine starts unless its restart
+ * unit is enabled (or the container has a Quadlet unit of its own): for the
+ * system's containers as root, or the login's own with lingering.
+ */
+function PodmanRestartHint({ view }: { view: ServiceView }) {
+  const user = view.host?.username ?? ""
+  const root = user === "root"
+  const code = "rounded bg-secondary px-1 py-0.5 font-mono text-xs"
+
+  return (
+    <span className="leading-relaxed">
+      Podman starts its containers again after a restart only when its restart
+      unit is enabled. On {view.host?.name}, as {user || "the login PCP uses"}:{" "}
+      {root ? (
+        <code className={code}>systemctl enable podman-restart.service</code>
+      ) : (
+        <>
+          <code className={code}>
+            systemctl --user enable podman-restart.service
+          </code>{" "}
+          and{" "}
+          <code className={code}>
+            loginctl enable-linger {user || "<login>"}
+          </code>
+          , so its user services run without a session
+        </>
+      )}
+      . A Quadlet unit for {view.containerName} does the same for this container
+      alone. Until then PCP starts it again when a call needs it, or when PCP is
+      next used.
+    </span>
   )
 }
 

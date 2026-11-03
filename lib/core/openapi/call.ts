@@ -73,6 +73,7 @@ export async function executeCall(
     redact = [],
     publicOnly = false,
     addressCheck,
+    dial,
   }: {
     timeoutMs?: number
     maxResponseBytes?: number
@@ -95,7 +96,7 @@ export async function executeCall(
         body: request.body,
         signal: AbortSignal.timeout(timeoutMs),
       },
-      { publicOnly, addressCheck },
+      { publicOnly, addressCheck, dial },
     )
   } catch (error) {
     // A refused address is the endpoint's rule at work, not an outage.

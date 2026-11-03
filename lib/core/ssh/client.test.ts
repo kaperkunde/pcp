@@ -1,3 +1,4 @@
+import http from "node:http"
 import net from "node:net"
 import type { Duplex } from "node:stream"
 
@@ -23,6 +24,7 @@ import {
   type FakeSsh,
   type FakeSshOptions,
 } from "./fake-server"
+import { send } from "../openapi/transport"
 import { generateOwnKey } from "./keys"
 
 const own = generateOwnKey("pcp-test")
@@ -381,6 +383,40 @@ describe("openChannel, for exits", () => {
     await expect(
       openChannel("srv", target, identity, "93.184.216.34", 81),
     ).rejects.toThrow(/could not connect to 93\.184\.216\.34:81/)
+  })
+})
+
+describe("openChannel, for services", () => {
+  it("carries a request to a port on the SSH server's own loopback", async () => {
+    const site = http.createServer((request, response) => {
+      response.writeHead(200, { "content-type": "text/plain" })
+      response.end(`served ${request.url}`)
+    })
+    await new Promise<void>((resolve) => site.listen(0, "127.0.0.1", resolve))
+    const { port } = site.address() as net.AddressInfo
+
+    try {
+      const { server, target } = await start({ allowForwarding: true }, "right")
+      // What a tunnelled service's calls and health checks go through
+      // (services.ts serviceDial): plain HTTP over the channel, without
+      // PCP's machine looking the address up or connecting to it.
+      const response = await send(
+        `http://127.0.0.1:${port}/health`,
+        {},
+        {
+          dial: (host, to, signal) =>
+            openChannel("srv", target, identity, host, to, { signal }),
+        },
+      )
+
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe("served /health")
+      expect(server.forwards).toEqual([`127.0.0.1:${port}`])
+      expect(server.requests).toEqual([])
+    } finally {
+      site.closeAllConnections()
+      await new Promise<void>((resolve) => site.close(() => resolve()))
+    }
   })
 })
 

@@ -14,6 +14,7 @@ import {
 import { PcpError, invalid } from "@/lib/core/errors"
 import { embeddingProvider } from "@/lib/core/upstream"
 import { type ActionState, field, guarded } from "@/lib/server/action-state"
+import { publicUrlFor } from "@/lib/server/public-url"
 import { requireContext } from "@/lib/server/session"
 
 /**
@@ -70,7 +71,11 @@ export async function saveEmbeddingsAction(
 
   const result = await guarded(async () => {
     const config = await checkEmbeddingsConfig(ctx, readConfig(formData))
-    const provider = await embeddingProvider(ctx, config)
+    const provider = await embeddingProvider(
+      ctx,
+      config,
+      await publicUrlFor(ctx),
+    )
 
     try {
       await provider.embed(

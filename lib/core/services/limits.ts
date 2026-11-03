@@ -47,3 +47,14 @@ export const HEALTH_WAIT_MS = 90_000
 export const HEALTH_INTERVAL_MS = 1_500
 /** One health check. */
 export const HEALTH_REQUEST_TIMEOUT_MS = 5_000
+/** What PCP reads of a health check's answer before it lets go of it. */
+export const HEALTH_BODY_BYTES = 64 * 1024
+/**
+ * How long a call to what a stopped service serves waits for it to start
+ * and be healthy before it gives up (services.ts startOnDemand).
+ */
+export const START_ON_DEMAND_WAIT_MS = 45_000
+/** The reconcile pass looks at a vault's services at most this often. */
+export const SERVICE_RECONCILE_INTERVAL_MS = 10 * 60_000
+/** And stops starting more once this long has gone. */
+export const SERVICE_RECONCILE_BUDGET_MS = 2 * 60_000

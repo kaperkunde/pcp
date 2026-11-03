@@ -888,7 +888,7 @@ An SSH server is a server row of kind `ssh` (`url` is `ssh://host:port`,
 `auth_username` the login) whose one tool, `run_command`, runs one command per
 call with `exec`: no shell session kept between calls, no terminal, no
 agent, no file transfer, and no forwarding but the outbound channels of an
-exit (below, and [Exits](#exits)). Only the owner adds one, on the
+exit or a service (below, [Exits](#exits) and [Services](#services)). Only the owner adds one, on the
 Servers page; `register_server` has no kind for it, because a shell on a
 machine is more than an assistant should be able to ask for in a sentence.
 `run_command` asks the owner first by default like every tool, and the
@@ -941,16 +941,19 @@ cannot be reached is an error. Limits are in `ssh/limits.ts`. The test server
 (`ssh/fake-server.ts`) is `ssh2`'s own server. The request log keeps the call
 by name like any other, never the command or its output.
 
-**Channels for exits** (`ssh/client.ts openChannel`) are the one forwarding
-PCP does: direct-tcpip channels from the SSH server to an address and port
-the exits module checked from the exit's side, or to the loopback port of an
-exit container PCP started itself, on one long-lived connection per server
+**Channels for exits and services** (`ssh/client.ts openChannel`) are the
+one forwarding PCP does: direct-tcpip channels from the SSH server to an
+address and port the exits module checked from the exit's side, to the
+loopback port of an exit container PCP started itself, or to a port a
+service PCP started publishes there, at the address it is bound to
+(`services.ts serviceDial`, below), on one long-lived connection per server
 (keepalive every 15 seconds, closed after 5 minutes without a channel, at
 most 128 channels and 32 connections; `ssh/limits.ts`). Never remote
 forwarding (`tcpip-forward`), never a Unix socket (streamlocal), never the
 agent or X11; a channel the server opens towards PCP is refused. A
 connection is made only on a host whose key the owner pinned and only with
-the key a request handed in (`upstream.ts openExit`); without one (the
+the key a request handed in (`upstream.ts openExit`, `serviceTunnel`,
+`serviceConnection`); without one (the
 browser's exit proxy, between requests) only an open connection is used, so
 nothing reconnects in the background. A server that refuses the channel
 ("administratively prohibited": `AllowTcpForwarding no`, or `restrict` /
@@ -996,8 +999,10 @@ specPath, basePath, auth?}` (an API endpoint from the schema it serves,
   vault's services on that host), `publish` (`{address, ports: [{container,
 host}]}`, the host's IP address the ports are bound to), `env` (`{NAME:
 secret id}`, never a value), `plain_values` (`{NAME: value}`, what the
-  owner typed for its plain variables) and `registered_id` (the endpoint
-  or MCP server it registered).
+  owner typed for its plain variables), `registered_id` (the endpoint
+  or MCP server it registered), `reach` (`tunnel` or `direct`: how PCP
+  reaches what it publishes, below) and `intended_state` (`running` or
+  `stopped`: what the owner asked of it last).
 
 **Commands.** Every command is words built from checked fields (image
 references, ports, names, volume names and paths, arguments, each against a
@@ -1031,16 +1036,41 @@ service that takes it again (`restartServicesUsingSecret`, through `after()`
 in that save's request: a restart alone would keep the old value), and a
 secret a service takes cannot be deleted under it.
 
+**Reaching it** (`services.ts serviceDial`, `upstream.ts serviceTunnel`). A
+service is published on the SSH server's 127.0.0.1 unless the owner ticks
+"Also reachable from the SSH server's network" on the launch form (and
+names 0.0.0.0 or one of its addresses; an assistant's proposal names it in
+`publish_address`, which the owner sees). Either way PCP reaches what it
+publishes through the SSH connection (`service_spec.reach` "tunnel"): a
+direct-tcpip channel on the pooled connection (`openChannel`, pinned host
+only, with PCP's key decrypted in `upstream.ts` for that request) to the
+address its ports are bound to on the SSH server (the loopback for 0.0.0.0).
+So it works when PCP runs in a container on that same machine, whose own
+127.0.0.1 is another. The dial is laid under the usual transports
+(`openapi/transport.ts send` with `dial`, which then neither looks the name
+up nor connects from PCP's machine): an API endpoint's calls and schema
+downloads (`callEndpointTool`, `syncEndpointTools`, `createEndpoint` at
+launch), an MCP server's requests (`openUpstream`, `checkedFetch` with the
+dial), and the health checks (`probeHealth`). It opens a channel only to a
+port the service publishes, whatever host the URL names (the loopback, the
+published address or the SSH server's own name), nothing else on that
+machine. A server a tunnelled service registered is never reached from
+PCP's machine instead: without its SSH server or a pinned host key the call
+or re-read fails, and `downloadSpec` refuses one without the dial (the
+schema is re-read on its page). A service launched before is "direct",
+reached from PCP's machine at the published address as it was, until the
+owner updates or recreates it (`recreateServiceOn`), which moves it to the
+tunnel once it is healthy that way; the service's page says which.
+
 **Launching** (`upstream.ts launchService`, `services.ts launchServiceOn`):
 everything is checked before anything connects (the SSH server, the
-definition, the publish address and ports, the secrets, and that PCP can
-reach what it registers: a port bound to the SSH server's loopback is
-reachable only when PCP runs on that machine, until it can forward through
-the SSH connection). Then PCP finds the engine, pulls the image, runs the
-container, waits up to 90 seconds for it to be healthy (its HTTP health
-check from PCP when it can reach it, else the image's own check, else
-running is enough; a container that exits fails at once), makes the
-service's own server and its tools, and registers what it serves: an API
+definition, the publish address and ports, the secrets). Then PCP finds the
+engine, pulls the image, runs the container, waits up to 90 seconds for it
+to be healthy (its HTTP health check through the SSH connection, else the
+image's own check, else running is enough; a container that exits fails at
+once, and so does an SSH server that refuses the channel, `AllowTcpForwarding
+no`), makes the service's own server and its tools, and registers what it
+serves at `http://127.0.0.1:<port>` (as the SSH server reaches it): an API
 endpoint (`createEndpoint` with the schema at `specPath`, the base URL at
 `basePath`, `publicOnly` off, since it is the owner's own machine, and the
 `auth` variable's secret as its header) or an MCP server (`createServer`,
@@ -1052,10 +1082,32 @@ become healthy.
 **Status** is read only inside a request: the service's page when it opens
 (and on Check), `check_server` (for the service and for the server it
 serves), the owner's Check, and a failing call. Nothing polls: there is no
-stored key. A call to the endpoint or MCP server a service registered that
-fails with "could not be reached" reads the service's state (`dispatchCall`
-in `upstream.ts`) and, when it is stopped, gone or unhealthy, says so, with
-the service's `start` tool and its page, instead of a bare failure.
+stored key.
+
+**Started on demand.** What the owner asked last is kept
+(`service_spec.intended_state`): `stop`, the owner's or an assistant's tool,
+writes "stopped"; start, restart, launch, update and recreate write
+"running". A call to the endpoint or MCP server a service registered that
+fails with "could not be reached" (`dispatchCall` in `upstream.ts`), for a
+service left "running" whose container is exited or created, starts it in
+the same request (`services.ts startOnDemand`: inspect, start, wait for
+health up to `START_ON_DEMAND_WAIT_MS`; one start per service at a time,
+a second call waits for the first's), sends the call once more (nothing went
+through the first time) and puts "PCP started the service …" in front of
+its answer; a start that fails says why. Otherwise, or for a service stopped
+through PCP, the call reads the service's state and, when it is stopped,
+gone or unhealthy, says so (and that it was stopped through PCP), with the
+service's `start` tool and its page, instead of a bare failure. A container
+that is gone is not made again by a call. **The reconcile pass**
+(`upstream.ts reconcileServices`, `services.ts reconcileServicesWith`)
+brings services left "running" back up the same way, after a request that
+brought the vault's key was answered (`after()` in `app/mcp/route.ts` and
+the dashboard layout, like `runDueSyncs`), at most once in
+`SERVICE_RECONCILE_INTERVAL_MS` per vault, within a budget; never a timer,
+never a stored key. Docker restarts a container itself (`--restart
+unless-stopped`); Podman only with `podman-restart.service` enabled (as root,
+or `systemctl --user` with lingering for the login PCP uses) or a Quadlet
+unit, which a Podman service's page says.
 
 **Tools** (`services/tools.ts`, on the service's own server): `status` and
 `logs` (read-only; `lines` 1 to 500, `since_minutes` up to a week), `start`
@@ -1079,11 +1131,13 @@ repositories), launched on the import page the same way.
 with kind `service` takes the definition (`service`), the owner's SSH
 server by short name (`ssh_server`: one the token sees, whose host key the
 owner pinned), where its ports listen (`publish_address`, default
-`0.0.0.0`, and `publish_ports`, default the same numbers) and the secret
-each variable takes, by name (`env_secrets`). `prepareServiceProposal`
-checks all of it before the owner is asked (the definition as a launch
-checks it, the publish address, that PCP can reach what it registers, that
-each required variable and the endpoint's `auth` variable has a secret);
+`127.0.0.1`, which the owner's page shows as the SSH server's own loopback
+and any other address as reaching the service from its network, and
+`publish_ports`, default the same numbers) and the secret each variable
+takes, by name (`env_secrets`). `prepareServiceProposal` checks all of it
+before the owner is asked (the definition as a launch checks it, the
+publish address, that each required variable and the endpoint's `auth`
+variable has a secret);
 a stored text secret is reused, and one new name at most is typed in by
 the owner on PCP's page. The request (`service_change`) shows the SSH
 server and its address, the image and its source, the ports and address,

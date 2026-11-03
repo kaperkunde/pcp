@@ -1407,7 +1407,7 @@ describe("proposing a service", () => {
         "Runs on your SSH server Build box (build.ada-home.net), with the Docker or Podman there",
         `Image: ${IMAGE}`,
         "Updates from: ghcr.io/docling-project/docling-serve-cpu:latest, when you update it on its page",
-        "Published on 0.0.0.0: 8001 → 5001 (every address of the SSH server)",
+        "Published on 127.0.0.1: 8001 → 5001 (the SSH server's own loopback: PCP reaches it through the SSH connection)",
         'Variable DOCLING_SERVE_API_KEY: a new secret, saved as "Docling key", which you enter here when you agree',
         "Variable DOCLING_SERVE_ENABLE_UI: its fixed value, false",
         "Named volumes (never a folder of the server): cache at /opt/cache",
@@ -1427,6 +1427,23 @@ describe("proposing a service", () => {
       "Not now",
     ])
     expect(await db().mcpServer.count({ where: { kind: "service" } })).toBe(0)
+  })
+
+  it("shows a publish address on the SSH server's network as reaching the service", async () => {
+    const host = await sshServer()
+    await connectSeeing()
+
+    await register({
+      name: "Docling",
+      service: DEFINITION,
+      ssh_server: host.slug,
+      publish_address: "0.0.0.0",
+      env_secrets: [{ name: "DOCLING_SERVE_API_KEY", secret: "Docling key" }],
+    })
+
+    expect((await shown()).lines).toContain(
+      "Published on 0.0.0.0: 5001 → 5001 (every address of the SSH server: anything on its network reaches it)",
+    )
   })
 
   it("launches exactly what was shown on approval, with the secret the owner typed", async () => {
@@ -1449,8 +1466,9 @@ describe("proposing a service", () => {
       expect.objectContaining({
         name: "Docling",
         hostId: host.id,
+        // The SSH server's own loopback unless the assistant names another.
         publish: {
-          address: "0.0.0.0",
+          address: "127.0.0.1",
           ports: [{ container: 5001, host: 5001 }],
         },
         env: { DOCLING_SERVE_API_KEY: secret.id },
@@ -1504,8 +1522,8 @@ describe("proposing a service", () => {
     expect((await propose({ ssh_server: unpinned.slug })).text).toMatch(
       /has not pinned Spare box's host key/,
     )
-    expect((await propose({ publish_address: "127.0.0.1" })).text).toMatch(
-      /own loopback/,
+    expect((await propose({ publish_address: "box; id" })).text).toMatch(
+      /IP address/,
     )
     expect((await propose({ env_secrets: [] })).text).toMatch(
       /needs DOCLING_SERVE_API_KEY/,
