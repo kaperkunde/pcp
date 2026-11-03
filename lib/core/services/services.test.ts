@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { exportVault, readExport, restoreExport } from "../backup"
 import type { VaultContext } from "../context"
 import { db } from "../db"
+import { downloadSpec } from "../endpoints"
 import { createSecret, deleteSecret, updateSecret } from "../secrets"
 import { secretUses } from "../secret-uses"
 import { deleteServer, getServer } from "../servers"
@@ -690,8 +691,11 @@ describe("a running service", { timeout: 30_000 }, () => {
     )
 
     expect(result.isError).toBeFalsy()
-    expect(textOf(result)).toMatch(
-      /^PCP started the service Docs service \(docs-service\), which was stopped, for this call\./,
+    // The answer first, as ever; what PCP did after it.
+    const parts = result.content as Array<{ text: string }>
+    expect(parts[0]!.text).toBe("[]")
+    expect(parts.at(-1)!.text).toBe(
+      "PCP started the service Docs service (docs-service), which was stopped, for this call.",
     )
     expect(docker.state().calls).toContainEqual(["start", "pcp-docs"])
     expect(docker.state().containers["pcp-docs"]!.state).toBe("running")
@@ -792,6 +796,9 @@ describe("a running service", { timeout: 30_000 }, () => {
     await expect(
       callServerTool(ctx, endpoint, "list_things", {}, PUBLIC),
     ).rejects.toThrow(/not pinned/)
+    await expect(downloadSpec(endpoint)).rejects.toThrow(
+      /re-read its schema on its page/,
+    )
     const sync = await syncServerTools(ctx, endpoint, PUBLIC)
     expect(sync.status).toBe("error")
     expect(sync.message).toMatch(/not pinned/)

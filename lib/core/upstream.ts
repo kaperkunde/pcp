@@ -126,7 +126,7 @@ import { noteExitUsed, noteSecretTyped } from "./request-log"
 import { resolveHandles } from "./result-handles"
 import type { BytesKeeper, ResultKeeper, ResultOpener } from "./tool-results"
 import { isToolName } from "./tools/define"
-import { familyError, withNotes } from "./tools/family"
+import { familyError } from "./tools/family"
 import {
   MAX_ICON_SRC_CHARS,
   MAX_OUTPUT_SCHEMA_CHARS,
@@ -2047,7 +2047,12 @@ async function dispatchCall(
           options,
           placed,
         )
-        return withNotes(again, [woken.note])
+        // After the answer, so a client that reads its first block still
+        // gets the answer there.
+        return {
+          ...again,
+          content: [...again.content, { type: "text", text: woken.note }],
+        }
       } catch (retried) {
         if (!isPcpError(retried) || retried.code !== "upstream") {
           throw retried

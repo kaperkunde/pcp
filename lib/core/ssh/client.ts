@@ -17,8 +17,9 @@ import {
 /**
  * PCP's SSH connections, through ssh2: one connection per call, signed in
  * with PCP's own key and nothing else, to a host whose key is the one PCP
- * pinned; and, for an exit (lib/core/exits/), one long-lived connection per
- * SSH server that carries direct-tcpip channels.
+ * pinned; and, for exits (lib/core/exits/) and services
+ * (lib/core/services/), one long-lived connection per SSH server that
+ * carries direct-tcpip channels.
  *
  * - The host key is checked against the pin when there is one. Without
  *   one, the key the server shows is taken, but reported as seen only after
@@ -28,10 +29,12 @@ import {
  * - Only publickey: no password, no keyboard-interactive, no agent.
  * - One session channel, one command with `exec`: no terminal, no file
  *   transfer.
- * - Forwarding for exits only, and only outbound: `openChannel` opens a
- *   direct-tcpip channel to an address and port the exits module checked
- *   from the exit's side (lib/core/exits/check.ts), or to the loopback port
- *   of an exit container PCP started itself. Never remote forwarding
+ * - Forwarding for exits and services only, and only outbound:
+ *   `openChannel` opens a direct-tcpip channel to an address and port the
+ *   exits module checked from the exit's side (lib/core/exits/check.ts),
+ *   to the loopback port of an exit container PCP started itself, or to a
+ *   port a service PCP started publishes on the SSH server, at the address
+ *   it is bound to there (services.ts serviceDial). Never remote forwarding
  *   (tcpip-forward), never a Unix socket (streamlocal), never the agent or
  *   X11: a channel the server opens towards PCP is refused (ssh2 refuses
  *   every one PCP did not ask for, and PCP asks for none). A channel opens
