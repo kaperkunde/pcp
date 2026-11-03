@@ -2,13 +2,16 @@ import { describe, expect, it } from "vitest"
 
 import {
   clientPrefixed,
+  descriptionLead,
   describeOwnTool,
   listTools,
   normalName,
   PCP_TOOL_NOTE,
   searchEverything,
   searchTools,
+  stem,
   summarize,
+  synonymsOf,
   tokenize,
   type ListedTool,
   type PcpToolCandidate,
@@ -86,6 +89,34 @@ describe("searchTools", () => {
     expect(searchTools(tools, "", { limit: 2 })).toHaveLength(2)
   })
 
+  it("finds a tool by a synonym, below one that says the word", () => {
+    const docs: ToolCandidate[] = [
+      {
+        server: "drive",
+        serverName: "Drive",
+        serverDescription: "",
+        name: "upload_document",
+        title: null,
+        description: "Upload a document.",
+      },
+      {
+        server: "drive",
+        serverName: "Drive",
+        serverDescription: "",
+        name: "upload_file",
+        title: null,
+        description: "Upload a file.",
+      },
+    ]
+
+    expect(searchTools(docs, "upload a file").map((m) => m.name)).toEqual([
+      "upload_file",
+      "upload_document",
+    ])
+    expect(searchTools(docs, "documents")[0]?.name).toBe("upload_document")
+    expect(searchTools(docs, "documents")).toHaveLength(2)
+  })
+
   it("drops tools that match nothing", () => {
     expect(searchTools(tools, "kubernetes")).toEqual([])
   })
@@ -95,6 +126,45 @@ describe("helpers", () => {
   it("tokenizes names the way people type them", () => {
     expect(tokenize("listPullRequests")).toEqual(["list", "pull", "requests"])
     expect(tokenize("create_issue v2")).toEqual(["create", "issue", "v2"])
+  })
+
+  it("stems a word's forms to one (#61)", () => {
+    const same = (...words: string[]) =>
+      expect(new Set(words.map(stem)).size, words.join(" ")).toBe(1)
+
+    same("store", "stores", "stored", "storing", "storage")
+    same("launch", "launches", "launched", "launching")
+    same("run", "runs", "running", "ran")
+    same("create", "creates", "created", "creating")
+    same("issue", "issues")
+    same("file", "files")
+    same("deploy", "deployed", "deployment", "deployments")
+    same("keep", "keeps", "kept")
+    same("embed", "embedded", "embedding", "embeddings")
+    // Words that only look like a form keep their meaning.
+    expect(stem("string")).toBe("string")
+    expect(stem("status")).toBe("status")
+    expect(stem("access")).toBe("access")
+    expect(stem("file")).not.toBe(stem("filter"))
+  })
+
+  it("knows a few words people use for the same task", () => {
+    expect(synonymsOf(stem("container"))).toContain(stem("docker"))
+    expect(synonymsOf(stem("launch"))).toEqual(
+      expect.arrayContaining([stem("start"), stem("run"), stem("deploy")]),
+    )
+    expect(synonymsOf(stem("document"))).toContain(stem("file"))
+    expect(synonymsOf(stem("kubernetes"))).toEqual([])
+  })
+
+  it("reads a description's lead up to its first clause", () => {
+    expect(
+      descriptionLead("Share a kept file, to store it: a link. More."),
+    ).toBe("Share a kept file, to store it")
+    expect(descriptionLead("Fetch https://x.example; then more")).toBe(
+      "Fetch https://x.example",
+    )
+    expect(descriptionLead("One line\nanother")).toBe("One line")
   })
 
   it("summarizes to one sentence within the limit", () => {
@@ -366,6 +436,44 @@ describe("PCP's own tools in search (#41)", () => {
     // delete_wrapper's description names check_permission; its name does not.
     expect(refs("owner answered")).not.toContain("pcp delete_wrapper")
     expect(refs("check_permission PCP")).not.toContain("pcp delete_wrapper")
+  })
+
+  it("finds one of PCP's tools by what its description's lead says it is for (#61)", () => {
+    const own: PcpToolCandidate[] = [
+      ...pcp,
+      {
+        name: "share_result",
+        title: "Download a kept file by link",
+        description:
+          "Share a kept file to your computer, to store, move or download a file there: a download link. Anyone holding it can use it; the owner sees it.",
+      },
+    ]
+    const found = (query: string) =>
+      searchEverything({ tools: upstream, pcp: own }, query).map(
+        (result) => result.ref,
+      )
+
+    expect(found("store a file")[0]).toBe("share_result")
+    expect(found("move documents")).toContain("share_result")
+    // Not by a word further on, which says how it works.
+    expect(found("anyone holding")).not.toContain("share_result")
+  })
+
+  it("does not find PCP's tools by the words most of them share", () => {
+    const own: PcpToolCandidate[] = Array.from({ length: 6 }, (_, index) => ({
+      name: `tool_${index}`,
+      title: `Tool ${index}`,
+      description: `Gather thing ${index} for the owner: more.`,
+    }))
+
+    expect(
+      searchEverything({ tools: [], pcp: own }, "owner").map((r) => r.ref),
+    ).toEqual([])
+    expect(
+      searchEverything({ tools: [], pcp: own }, "gather")
+        .map((r) => r.ref)
+        .includes("tool_1"),
+    ).toBe(false)
   })
 
   it("keeps to kind pcp, and leaves PCP's tools out of kind tool and of a server", () => {
