@@ -137,9 +137,11 @@ export default async function PermissionPage({
     access && pending
       ? await getAccessProposal(ctx, id, await listOwnToolTiers(ctx))
       : null
-  // A long list of levels, a wrapper's programs or a skill want room.
+  // A long list of levels (an access request's, or a new server's beside
+  // its approval), a wrapper's programs or a skill want room.
   const roomy = Boolean(
     (access && pending) ||
+    view.proposedAccess !== null ||
     view.wrapper !== null ||
     view.skill !== null ||
     view.repo !== null,
