@@ -121,7 +121,7 @@ assistant to find one and propose it.
   browser, wrappers, services, tokens and permissions in detail
 - [How it is secured](docs/security-model.md), plus [ARCHITECTURE.md](ARCHITECTURE.md)
   and [SECURITY.md](SECURITY.md)
-- [Development](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md) for development, and [CLAUDE.md](CLAUDE.md) for AI agents working on the code
 
 ## Licence
 
