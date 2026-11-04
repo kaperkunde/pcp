@@ -166,6 +166,21 @@ easier, but it would put your keys back in someone else's cloud.
      --header "Authorization: Bearer pcp_…"
    ```
 
+5. **Make it reachable for a hosted assistant.** Claude on the web, the
+   desktop and phone apps, and other hosted assistants connect from the
+   provider's cloud, not from your computer, so they can't reach
+   `localhost` or a PCP behind your home router. Pick one:
+   - **A pcp.gg address (easiest).** Get a free subdomain
+     (`you.pcp.gg`) that forwards to your PCP without opening any ports.
+     TLS ends on your own machine, so the forwarding service can't read
+     the traffic.
+   - **Your own way in.** A public server or VPS, a port forward on your
+     router with your own domain and HTTPS, or a tunnel you already run.
+
+   Then add `https://<your address>/mcp` to your assistant as a custom
+   connector. An assistant on the same computer (Claude Code, for example)
+   can skip this step.
+
 Then add the servers, APIs, mail and calendar accounts you use under **Servers**, or
 ask the assistant to find one and propose it to you. The sections below have
 the details, and how to reach PCP from outside your home.
