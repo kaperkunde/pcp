@@ -5,13 +5,13 @@
 <h1 align="center">PCP - Primary Control Provider</h1>
 
 <p align="center">
-  <strong>One endpoint for every MCP server you use.</strong><br>
-  Self-hosted, with your secrets kept encrypted on your side.
+  <strong>All the capabilities, with control.</strong><br>
+  A self-hosted gateway between your AI assistant and everything it works with.<br>Your keys, your rules, your machine.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-5ed3c3?style=flat-square&labelColor=131720"></a>
-  <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-docker%20compose-5ed3c3?style=flat-square&labelColor=131720">
+  <img alt="Self-hosted" src="https://img.shields.io/badge/self--hosted-mac%20%C2%B7%20windows%20%C2%B7%20linux-5ed3c3?style=flat-square&labelColor=131720">
   <img alt="Single user" src="https://img.shields.io/badge/vault-single%20user-5ed3c3?style=flat-square&labelColor=131720">
 </p>
 
@@ -33,6 +33,34 @@ three tools — `search`, `describe` and `call_tool` — so an
 assistant can reach dozens of servers without carrying every tool definition
 in its context. You decide, per token and per tool, what an assistant may run
 on its own, what it has to ask you about first, and what it cannot touch.
+
+Hosted assistants are powerful, but giving one the keys to your mail, servers
+and accounts means trusting a vendor's cloud with all of them. PCP sits in the
+middle: the assistant gets the capabilities, and PCP keeps the credentials, the
+permissions and the final say. Because everything lives in PCP rather than in
+one provider's features, you can point a different assistant at it tomorrow.
+
+And PCP is built to grow without you sitting down at a computer. From your
+phone, an assistant can propose a new API endpoint, write a wrapper that turns
+a web task into a tool, or launch a service, and it all waits for your tap
+before it goes live.
+
+<table>
+  <tr>
+    <td><img src="docs/screens/approval.svg" width="200" alt="An approval request on a phone: Claude asks to move an email to the Trash, with Allow once, Always allow, Not now and Allow for 1 hour"></td>
+    <td><img src="docs/screens/permissions.svg" width="200" alt="Per-tool Allow, Ask or Block switches for a Facebook wrapper"></td>
+    <td><img src="docs/screens/secrets.svg" width="200" alt="The Secrets page: credentials encrypted at rest that never reach an assistant"></td>
+    <td><img src="docs/screens/servers.svg" width="200" alt="The Servers page listing MCP servers, APIs, mail, calendars, SSH hosts, services, wrappers and the browser"></td>
+    <td><img src="docs/screens/memories.svg" width="200" alt="The Memories page: notes assistants keep and share between conversations"></td>
+  </tr>
+  <tr>
+    <td align="center">Approve risky actions from your phone</td>
+    <td align="center">Allow, ask or block, per tool</td>
+    <td align="center">Secrets never reach the AI</td>
+    <td align="center">Everything in one place</td>
+    <td align="center">Memories that move with you</td>
+  </tr>
+</table>
 
 - **One endpoint for every server.** Add servers in the web UI; an assistant
   connects once, with an API token, and finds tools by describing what it
@@ -71,6 +99,23 @@ on its own, what it has to ask you about first, and what it cannot touch.
   there, each one shown to you first unless you allow it. No passwords; PCP
   pins the server's host key the first time it connects and refuses any
   other.
+- **Services it runs for you.** Point PCP at a container image and it runs
+  it on one of your SSH hosts as a managed service, with its own secrets and
+  volumes, and connects the MCP server inside it. Start, stop, restart and
+  read its logs from PCP or from the assistant.
+- **Wrappers: tools your assistant writes.** A wrapper is a new server made
+  of task-shaped tools built on the ones you already have, such as a browser
+  flow, a few API calls or a run_code program. An assistant can draft one,
+  and it goes live only once you agree, so PCP gains abilities without you
+  writing code.
+- **Approvals wherever you are.** Anything set to ask lands on PCP's page
+  and your phone: allow it once, always, or for an hour, or block it. An
+  assistant can also propose new servers, endpoints, wrappers and permission
+  levels, which you approve the same way.
+- **Files in and out.** Upload links let you hand an assistant photos, scans
+  or documents from your phone, and tools pass files to each other as handles
+  (an attachment, a download, a scan, a saved document), so the bytes never
+  go through the model.
 - **Secrets stay on your side.** API keys and OAuth tokens are encrypted at
   rest with a key the server does not hold. They are added to upstream calls
   by PCP; the assistant never sees them.
@@ -78,10 +123,21 @@ on its own, what it has to ask you about first, and what it cannot touch.
   a Linux server and open the site; choose a password. No environment
   variables. Dynamic DNS and HTTPS with Let's Encrypt are built in for a home
   server, and off for anyone with a proxy.
+- **Reachable from anywhere, still yours.** An optional free pcp.gg subdomain
+  forwards traffic to the PCP in your home without opening ports, and TLS
+  ends on your machine, so the forwarding service can't read it.
 - **Take it with you.** Export everything to one encrypted file and restore it
   on another PCP; your password, recovery key and API tokens keep working, so
   assistants carry on.
 - **Single user, by design.** PCP is yours: one owner, one encrypted vault.
+
+## The hard part
+
+Self-hosting is still harder than signing up for a SaaS, and making PCP
+approachable for everyone is the main problem it works on: desktop apps, a
+one-line Linux install, nothing to configure, and pcp.gg for reaching home
+without a networking degree. The trade is deliberate. A hosted gateway would be
+easier, but it would put your keys back in someone else's cloud.
 
 ## Run it
 
