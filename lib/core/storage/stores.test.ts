@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createApiToken } from "../api-tokens"
 import type { VaultContext } from "../context"
 import { db } from "../db"
-import { getServer } from "../servers"
+import { deleteServer, getServer } from "../servers"
 import { closeAllSshConnections } from "../ssh/client"
 import { startFakeSsh, type FakeSsh } from "../ssh/fake-server"
 import { createSshServer } from "../ssh/hosts"
@@ -34,6 +34,7 @@ import {
   listStores,
   loadStorageRoot,
   storeKeyOf,
+  updateStorageRoot,
 } from "./roots"
 
 // Stores: PCP's own, encrypted in its data folder, and a folder on an SSH
@@ -129,6 +130,18 @@ describe("PCP's own store", () => {
       byOwner: true,
     })
     expect(sync.status).toBe("ok")
+  })
+
+  it("stays: the owner cannot remove it or point it elsewhere", async () => {
+    const id = await ensureOwnStore(ctx)
+    await expect(deleteServer(ctx, id)).rejects.toThrow(/own store stays/)
+    await expect(
+      updateStorageRoot(ctx, id, {
+        name: "x",
+        path: "/srv",
+        readOnly: false,
+      }),
+    ).rejects.toThrow(/data folder/)
   })
 
   it("keeps names and content out of the data folder, and reads them back", async () => {
@@ -421,6 +434,16 @@ describe("converting a folder on an SSH server", () => {
       expect(after.get(name)!.equals(bytes), name).toBe(true)
     }
     expect(await db().storageEntry.count()).toBe(0)
+  })
+
+  it("keeps an encrypted store with files from being removed, and lets a plain one go", async () => {
+    const id = await addFolder()
+    expect((await convertStore(ctx, id, "encrypted", PUBLIC)).done).toBe(true)
+    await expect(deleteServer(ctx, id)).rejects.toThrow(/make it plain first/)
+
+    expect((await convertStore(ctx, id, "plain", PUBLIC)).done).toBe(true)
+    await deleteServer(ctx, id)
+    expect(fs.readFileSync(path.join(top, "readme.txt"), "utf8")).toBe("hello")
   })
 
   it("picks up a file a batch put in the index but did not remove", async () => {
